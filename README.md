@@ -23,6 +23,21 @@ cp .env.example .env   # fill in the Supabase URL + anon/publishable key
 npm run dev
 ```
 
+## Docker
+
+The app is a static bundle (all state lives in Supabase), so the container is
+just a build + nginx with an SPA fallback:
+
+```bash
+cp .env.example .env          # fill in the Supabase URL + anon/publishable key
+docker compose up --build     # → http://localhost:5173
+```
+
+Hot-reload dev container instead: `docker compose --profile dev up dev`.
+To reach it from an iPad on the same network, open `http://<machine-ip>:5173` —
+share links and guest joining work as-is; add that origin to the Supabase Auth
+redirect allowlist if teachers will sign in via magic link from it.
+
 Test on a real iPad via a tunnel: `npm run dev -- --host` then `ngrok http 5173`
 (ngrok domains are pre-allowed in `vite.config.ts`).
 

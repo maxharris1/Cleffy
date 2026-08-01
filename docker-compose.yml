@@ -1,0 +1,32 @@
+# Production-style: build the static bundle, serve on http://localhost:5173
+#   docker compose up --build
+#
+# Dev mode with hot reload instead:
+#   docker compose --profile dev up dev
+#
+# Both read VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY from ./.env
+# (compose substitutes them into build args; the dev server reads .env itself).
+
+services:
+    app:
+        build:
+            context: .
+            args:
+                VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+                VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+        ports:
+            - '5173:80'
+
+    dev:
+        profiles: ['dev']
+        image: node:22-alpine
+        working_dir: /app
+        volumes:
+            - .:/app
+            - dev_node_modules:/app/node_modules
+        command: sh -c "npm ci && npm run dev -- --host --port 5173"
+        ports:
+            - '5173:5173'
+
+volumes:
+    dev_node_modules:

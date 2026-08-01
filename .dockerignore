@@ -1,0 +1,13 @@
+# NEVER let secrets into the image or build context.
+.env
+.env.*
+
+node_modules
+dist
+dev-dist
+coverage
+.git
+supabase/.temp
+e2e-fixtures
+live-*.png
+*.md
