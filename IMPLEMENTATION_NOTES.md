@@ -32,14 +32,20 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
 7. **iPad specifics**: pinch zoom, two-finger pan, Pencil pressure, palm on screen
    while writing, install to home screen.
 
-## Verification status (this environment)
+## Verification status
 
 - 63 unit/integration tests, ESLint, strict tsc, production build: all green (CI runs the same).
 - Browser-verified in Chromium: viewing, all tools, undo/redo, persistence,
   role-gated UI, export round-trip (including rotated-page mapping fixtures), phone layout.
-- **Not yet live-verified here**: real Supabase round-trips (this sandbox's network
-  policy blocks `*.supabase.co`) — the two-device realtime and magic-link flows need
-  either that policy loosened or a local `npm run dev` run after SETUP_SUPABASE.md.
+- **Live-verified against the real Supabase project (2026-08-01)** via
+  `node --env-file=.env live-e2e.mjs` — all 13 checks pass: teacher auth,
+  upload, stroke sync, share link, anonymous student join, persistence pull,
+  mid-stroke live ink streaming, broadcast-from-database fan-out, presence,
+  cross-user erase convergence, zero page errors. (The harness bridges browser
+  traffic through Node because the sandbox egress gateway TLS-fingerprints
+  browsers — see `.claude/skills/supabase-ops/SKILL.md`.)
+- Magic-link email round-trip remains untested (headless email); password-grant
+  sessions exercise the same authenticated paths.
 
 ## Deploy
 

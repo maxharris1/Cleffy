@@ -132,8 +132,14 @@ $$;
 grant execute on function public.document_role (uuid) to authenticated;
 
 -- documents ---------------------------------------------------------------
+-- Owner is visible WITHOUT the membership join: during INSERT … RETURNING
+-- (PostgREST return=representation) the AFTER-trigger membership row does not
+-- exist yet, so a membership-only SELECT policy rejects the returned row.
 create policy documents_select on public.documents for select to authenticated
-using (public.document_role (id) is not null);
+using (
+    owner_id = auth.uid()
+    or public.document_role (id) is not null
+);
 
 create policy documents_insert on public.documents for insert to authenticated
 with check (
@@ -190,6 +196,9 @@ with check (public.document_role (document_id) in ('owner', 'editor'));
 -- ever downgrading an existing owner/editor role.
 create or replace function public.redeem_share_link (p_token text) returns table (document_id uuid, granted_role text) language plpgsql security definer
 set search_path = public as $$
+-- OUT params (document_id) collide with column names inside the body (e.g.
+-- the ON CONFLICT target) — let columns win; the OUTs are only set positionally.
+#variable_conflict use_column
 declare
     link record;
 begin

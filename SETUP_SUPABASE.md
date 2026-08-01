@@ -2,10 +2,11 @@
 
 Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe
 
-The app code, migrations, and RLS policies are all in this repo. Because the Claude
-environment's network policy currently **blocks \*.supabase.co**, these few one-time
-steps need to happen either from your machine or after allowing that domain in the
-environment's network settings.
+> **STATUS: ALL DONE (2026-08-01).** Migrations 0001–0003 applied, `scores` bucket
+> created, anonymous sign-ins enabled, redirect URLs set, live E2E green. The steps
+> below are kept for reference / future projects. Remaining recommendation: custom
+> SMTP for faster magic-link testing (§3), and add `SUPABASE_ACCESS_TOKEN` to the
+> Claude environment's env vars so future sessions can run ops without re-pasting.
 
 ## 1. Apply the database migrations (pick ONE)
 

@@ -16,3 +16,7 @@ supabase/.branches/
 # editor / os
 .DS_Store
 *.local
+
+# E2E artifacts
+live-*.png
+e2e-shots/

@@ -35,6 +35,18 @@ export default tseslint.config(
                 console: 'readonly',
                 process: 'readonly',
                 URL: 'readonly',
+                crypto: 'readonly',
+                setTimeout: 'readonly',
+                clearTimeout: 'readonly',
+                // Browser globals: E2E scripts embed page-context closures
+                // (addInitScript / evaluate) that run inside Chromium.
+                window: 'readonly',
+                document: 'readonly',
+                localStorage: 'readonly',
+                Blob: 'readonly',
+                WebSocket: 'readonly',
+                navigator: 'readonly',
+                performance: 'readonly',
             },
         },
     },
