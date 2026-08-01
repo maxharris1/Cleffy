@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 
 import { displayNameOf, useSession } from '@/features/auth/session';
+import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
+import { exportAnnotatedPdf } from '@/features/export/exportPdf';
 import {
     fetchDocument,
     fetchMyRole,
@@ -42,6 +44,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
     const [shareOpen, setShareOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
+    const [exporting, setExporting] = useState(false);
 
     const userId = session?.user.id;
 
@@ -124,6 +127,17 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 {readOnly ? (
                     <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">view only</span>
                 ) : null}
+                <ExportButton
+                    exporting={exporting}
+                    onExport={async () => {
+                        setExporting(true);
+                        try {
+                            await exportAnnotatedPdf(docId, state.bytes, state.doc.title);
+                        } finally {
+                            setExporting(false);
+                        }
+                    }}
+                />
                 {state.role === 'owner' ? (
                     <button
                         type="button"
@@ -134,6 +148,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </button>
                 ) : null}
             </header>
+            {session?.user.is_anonymous ? <UpgradeBanner /> : null}
             <div className="min-h-0 flex-1">
                 <PdfProvider data={state.bytes}>
                     <PdfViewport
@@ -176,6 +191,7 @@ const SyncDot = ({ status }: { status: SyncStatus }) => {
 
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
+    const [exporting, setExporting] = useState(false);
     const bytes = getLocalDoc(docId);
 
     const reopenFile = useCallback(
@@ -231,8 +247,19 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                 >
                     ←
                 </Link>
-                <span className="truncate text-sm font-medium text-stone-700">Local score</span>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">Local score</span>
                 <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">this device only</span>
+                <ExportButton
+                    exporting={exporting}
+                    onExport={async () => {
+                        setExporting(true);
+                        try {
+                            await exportAnnotatedPdf(docId, bytes, 'Score');
+                        } finally {
+                            setExporting(false);
+                        }
+                    }}
+                />
             </header>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
@@ -240,5 +267,19 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                 </PdfProvider>
             </div>
         </div>
+    );
+};
+
+const ExportButton = ({ exporting, onExport }: { exporting: boolean; onExport: () => Promise<void> }) => {
+    return (
+        <button
+            type="button"
+            disabled={exporting}
+            title="Export annotated PDF"
+            onClick={() => void onExport().catch((err: unknown) => console.warn('Export failed', err))}
+            className="rounded-lg px-3 py-1.5 text-sm font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+        >
+            {exporting ? 'Exporting…' : 'Export'}
+        </button>
     );
 };

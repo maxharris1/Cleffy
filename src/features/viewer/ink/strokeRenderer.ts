@@ -13,29 +13,28 @@ export const FREEHAND_OPTIONS = {
 
 /**
  * Outline polygon → smooth SVG path string (quadratic midpoint curves).
- * Vendored from the perfect-freehand README — the library does not export it.
- * Shared verbatim by the canvas renderer (via Path2D) and the PDF export
- * worker so screen ink and exported ink are geometrically identical.
+ * Adapted from the perfect-freehand README — the library does not export it.
+ * Emits EXPLICIT `Q` segments only (no `T` shorthand): pdf-lib's SVG path
+ * parser mangles smooth-continuation commands, and the same string feeds both
+ * the canvas renderer (Path2D) and the PDF export worker, so screen ink and
+ * exported ink stay geometrically identical.
  */
 export const getSvgPathFromStroke = (points: number[][]): string => {
     const len = points.length;
     if (len < 4) {
         return '';
     }
-    let a = points[0] as number[];
-    let b = points[1] as number[];
-    const c = points[2] as number[];
+    const px = (i: number): number => points[i % len]?.[0] ?? 0;
+    const py = (i: number): number => points[i % len]?.[1] ?? 0;
+    const mid = (i: number): [number, number] => [(px(i) + px(i + 1)) / 2, (py(i) + py(i + 1)) / 2];
 
-    let result = `M${(a[0] ?? 0).toFixed(2)},${(a[1] ?? 0).toFixed(2)} Q${(b[0] ?? 0).toFixed(2)},${(b[1] ?? 0).toFixed(
-        2,
-    )} ${(((b[0] ?? 0) + (c[0] ?? 0)) / 2).toFixed(2)},${(((b[1] ?? 0) + (c[1] ?? 0)) / 2).toFixed(2)} T`;
-
-    for (let i = 2, max = len - 1; i < max; i++) {
-        a = points[i] as number[];
-        b = points[i + 1] as number[];
-        result += `${(((a[0] ?? 0) + (b[0] ?? 0)) / 2).toFixed(2)},${(((a[1] ?? 0) + (b[1] ?? 0)) / 2).toFixed(2)} `;
+    const [m0x, m0y] = mid(0);
+    let result = `M${m0x.toFixed(2)},${m0y.toFixed(2)}`;
+    for (let i = 1; i <= len; i++) {
+        const [mx, my] = mid(i);
+        result += ` Q${px(i).toFixed(2)},${py(i).toFixed(2)} ${mx.toFixed(2)},${my.toFixed(2)}`;
     }
-    result += 'Z';
+    result += ' Z';
     return result;
 };
 

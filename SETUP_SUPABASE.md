@@ -50,9 +50,9 @@ npx supabase db push
 
 - Site URL: `http://localhost:5173` (change to the ngrok / Vercel URL when you deploy)
 - Additional redirect URLs — add every origin you'll open the app from, e.g.:
-  - `http://localhost:5173`
-  - `https://YOUR-SUBDOMAIN.ngrok-free.app`
-  - `https://YOUR-APP.vercel.app`
+    - `http://localhost:5173`
+    - `https://YOUR-SUBDOMAIN.ngrok-free.app`
+    - `https://YOUR-APP.vercel.app`
 
 **Recommended:** the built-in email service allows only ~2–4 auth emails/hour — fine
 for real use, painful for testing. For test iteration either configure custom SMTP

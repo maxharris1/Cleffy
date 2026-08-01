@@ -1,0 +1,49 @@
+# Sheet Music Scribbler — implementation notes
+
+Real-time collaborative sheet music annotation ("Google Docs for sheet music").
+Built across six milestones, one commit each (M0–M6 in `git log`).
+
+## What was built
+
+| Area        | Summary                                                                                                                                                                                                                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| PDF viewing | pdf.js v5 (broad browser support + upsert polyfill), virtualized pages (visible ±1), 4096px bitmap caps for iOS canvas limits, pan/pinch/wheel zoom with crisp settle re-render                                                                                                                  |
+| Ink         | Pointer Events pipeline: Apple Pencil pressure, coalesced + predicted events, palm rejection (touch never inks). perfect-freehand rendering; pen / highlighter (0.35 alpha, multiply) / stroke-eraser / text notes; 7 colors × 3 widths; batched undo/redo (Cmd/Ctrl+Z)                          |
+| Data model  | The PDF is immutable; annotations are vector rows normalized to the rotated page viewport (all scalars / page width). Soft-delete tombstones only                                                                                                                                                |
+| Sync        | Local-first: in-memory Map → Dexie mirror + outbox → Supabase. Server-stamped `seq` gives deterministic LWW immune to device clocks. Watermark pulls with 50-seq overlap; offline queue with exponential backoff; RLS rejections repair from server truth                                        |
+| Realtime    | One private channel per doc: broadcast-from-database for committed strokes, 50ms-batched `ink:progress` streaming for live pen movement (the live strokeId _is_ the annotation id — commit atomically replaces preview), presence with per-user colors + page hints. All wire data zod-validated |
+| Sharing     | Owner creates edit/view links (server-generated tokens); students join via anonymous auth + display name; SECURITY DEFINER redemption never downgrades roles; viewers get read-only UI backstopped by RLS + realtime send policies                                                               |
+| Offline     | PDFs cached as Dexie blobs (survives Safari cache eviction better than SW cache), cached opens with last-known role, offline library fallback, `storage.persist()`, offline→queue→flush→converge covered by integration tests                                                                    |
+| Export      | pdf-lib in a Web Worker; rotation-aware coordinate mapping (0/90/180/270 fixture-tested); identical perfect-freehand geometry as on screen (explicit-Q SVG paths — pdf-lib mangles `T` commands); WinAnsi-sanitized text; share sheet on mobile                                                  |
+| PWA         | Installable, app-shell precache, iOS safe-areas, responsive layout (bottom toolbar on phones)                                                                                                                                                                                                    |
+
+## How to test (once Supabase setup from SETUP_SUPABASE.md is done)
+
+1. **Local-only** (works with zero backend): `npm run dev` → "Open a PDF" → draw with
+   mouse/pen, switch tools, undo, reload + reopen the same file → annotations restore.
+2. **Teacher flow**: sign in via magic link → Upload a score → annotate → Share →
+   "Can edit" link → copy.
+3. **Student flow**: open the link in an incognito window / iPad → enter a name → both
+   sides draw; watch live pen movement and presence chips; erase each other's strokes.
+4. **View-only**: create a "View only" link → that session shows no toolbar and can't ink.
+5. **Offline**: airplane-mode a device mid-session → keep annotating → reconnect →
+   both sides converge (status dot: amber → gray → green).
+6. **Export**: Export button → open the downloaded PDF anywhere → ink is baked in.
+7. **iPad specifics**: pinch zoom, two-finger pan, Pencil pressure, palm on screen
+   while writing, install to home screen.
+
+## Verification status (this environment)
+
+- 63 unit/integration tests, ESLint, strict tsc, production build: all green (CI runs the same).
+- Browser-verified in Chromium: viewing, all tools, undo/redo, persistence,
+  role-gated UI, export round-trip (including rotated-page mapping fixtures), phone layout.
+- **Not yet live-verified here**: real Supabase round-trips (this sandbox's network
+  policy blocks `*.supabase.co`) — the two-device realtime and magic-link flows need
+  either that policy loosened or a local `npm run dev` run after SETUP_SUPABASE.md.
+
+## Deploy
+
+- **Now**: `npm run dev -- --host` + `ngrok http 5173` (ngrok hosts pre-allowed in
+  `vite.config.ts`; add the URL to Supabase Auth redirect URLs).
+- **Later**: Vercel — static build (`npm run build` → `dist/`), SPA rewrite to
+  `/index.html`, `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` env vars.
