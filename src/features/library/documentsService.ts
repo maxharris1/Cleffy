@@ -34,7 +34,56 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
     if (error) {
         throw new Error(`Could not load membership: ${error.message}`);
     }
-    return data?.role ?? null;
+    const role = data?.role ?? null;
+    if (role) {
+        // Remember the role so an offline open gets the right editing mode.
+        const cached = await getDb().pdfCache.get(docId);
+        if (cached && cached.myRole !== role) {
+            await getDb().pdfCache.put({ ...cached, myRole: role });
+        }
+    }
+    return role;
+};
+
+export interface OfflineDocFallback {
+    doc: DocumentRow;
+    role: MemberRole;
+    bytes: ArrayBuffer;
+}
+
+/**
+ * Open a previously-cached document without the network: synthesizes the
+ * document row from the cache and uses the last-known role (defaulting to
+ * editor — worst case an offline viewer's edits are rejected and repaired at
+ * flush time by RLS).
+ */
+export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFallback | null> => {
+    const cached = await getDb().pdfCache.get(docId);
+    if (!cached) {
+        return null;
+    }
+    return {
+        doc: {
+            id: docId,
+            owner_id: '',
+            title: cached.title,
+            storage_path: `${docId}/original.pdf`,
+            page_count: null,
+            created_at: cached.cachedAt,
+            updated_at: cached.cachedAt,
+        },
+        role: cached.myRole ?? 'editor',
+        bytes: await cached.bytes.arrayBuffer(),
+    };
+};
+
+/** Cached scores for the offline library view. */
+export const listCachedDocuments = async (): Promise<Array<{ id: string; title: string; cachedAt: string }>> => {
+    const rows = await getDb().pdfCache.toArray();
+    return rows
+        .filter((row) => isCloudDocId(row.docId))
+        .map((row) => ({ id: row.docId, title: row.title, cachedAt: row.cachedAt }))
+        .sort((a, b) => (a.cachedAt < b.cachedAt ? 1 : -1));
 };
 
 /** Count pages client-side (pdf.js) so the library can show it up front. */

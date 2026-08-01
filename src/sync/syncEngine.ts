@@ -60,6 +60,7 @@ export class SyncEngine {
     private backoffMs = 1000;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
     private onlineListener = () => this.onOnline();
+    private offlineListener = () => this.setStatus('offline');
     private status: SyncStatus = 'syncing';
 
     constructor(
@@ -76,6 +77,10 @@ export class SyncEngine {
     start(): void {
         this.deps.store.setDirtyHook(() => this.requestFlush());
         window.addEventListener('online', this.onlineListener);
+        window.addEventListener('offline', this.offlineListener);
+        if (navigator.onLine === false) {
+            this.setStatus('offline');
+        }
         void this.sync();
     }
 
@@ -83,6 +88,7 @@ export class SyncEngine {
         this.stopped = true;
         this.deps.store.setDirtyHook(null);
         window.removeEventListener('online', this.onlineListener);
+        window.removeEventListener('offline', this.offlineListener);
         if (this.retryTimer) {
             clearTimeout(this.retryTimer);
         }

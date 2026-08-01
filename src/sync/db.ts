@@ -33,6 +33,8 @@ export interface CachedPdf {
     bytes: Blob;
     title: string;
     cachedAt: string;
+    /** Last-known membership role — lets the viewer open offline with the right mode. */
+    myRole?: 'owner' | 'editor' | 'viewer';
 }
 
 export class ScribblerDb extends Dexie {

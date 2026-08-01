@@ -2,7 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 
 import { displayNameOf, useSession } from '@/features/auth/session';
-import { fetchDocument, fetchMyRole, isCloudDocId, loadDocumentBytes } from '@/features/library/documentsService';
+import {
+    fetchDocument,
+    fetchMyRole,
+    isCloudDocId,
+    loadDocumentBytes,
+    loadDocumentOffline,
+} from '@/features/library/documentsService';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
@@ -55,11 +61,22 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     setState({ doc, role, bytes });
                 }
             } catch (err) {
+                // No network? A previously-cached score still opens (plan §offline).
+                const fallback = await loadDocumentOffline(docId).catch(() => null);
                 if (!cancelled) {
-                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                    if (fallback) {
+                        setState({ doc: fallback.doc, role: fallback.role, bytes: fallback.bytes });
+                    } else {
+                        setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                    }
                 }
             }
         })();
+
+        // Resist storage eviction — annotations and cached scores must survive
+        // Safari's cleanup between rehearsals (plan §offline).
+        void navigator.storage?.persist?.().catch(() => undefined);
+
         return () => {
             cancelled = true;
         };

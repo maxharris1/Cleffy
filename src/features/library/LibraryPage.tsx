@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
 import { displayNameOf, signInWithMagicLink, signOut, useSession } from '@/features/auth/session';
-import { listDocuments, uploadDocument } from '@/features/library/documentsService';
+import { listCachedDocuments, listDocuments, uploadDocument } from '@/features/library/documentsService';
 import { localDocId, putLocalDoc } from '@/lib/localDocs';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow } from '@/types/database';
@@ -126,8 +126,26 @@ const DocumentGrid = ({ userId, userLabel }: { userId: string; userLabel: string
                     setError(null);
                 }
             })
-            .catch((err: unknown) => {
-                if (!cancelled) {
+            .catch(async (err: unknown) => {
+                // Offline: fall back to the cached copies on this device.
+                const cached = await listCachedDocuments().catch(() => []);
+                if (cancelled) {
+                    return;
+                }
+                if (cached.length > 0) {
+                    setDocuments(
+                        cached.map((c) => ({
+                            id: c.id,
+                            owner_id: '',
+                            title: c.title,
+                            storage_path: `${c.id}/original.pdf`,
+                            page_count: null,
+                            created_at: c.cachedAt,
+                            updated_at: c.cachedAt,
+                        })),
+                    );
+                    setError('Offline — showing scores cached on this device.');
+                } else {
                     setError(err instanceof Error ? err.message : 'Could not load your scores.');
                 }
             });
