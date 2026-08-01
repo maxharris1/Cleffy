@@ -16,9 +16,12 @@ import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
 import { getSupabase } from '@/lib/supabase';
+import { peerColor } from '@/lib/colors';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
+import { DocRealtimeChannel } from '@/sync/realtimeChannel';
 import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
+import type { PresencePeer } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
 
@@ -37,10 +40,14 @@ export interface PdfViewportProps {
     docId: string;
     /** View-only role: hides editing UI and blocks the ink delegate. */
     readOnly?: boolean;
-    /** Present for cloud documents: enables the sync engine. */
+    /** Present for cloud documents: enables the sync engine + realtime channel. */
     sync?: {
         userId: string;
+        name: string;
+        isAnonymous: boolean;
+        canWrite: boolean;
         onStatus?: (status: SyncStatus) => void;
+        onPeers?: (peers: PresencePeer[]) => void;
     };
 }
 
@@ -79,25 +86,13 @@ export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps)
         void annotationStore.load();
     }, [annotationStore]);
 
-    // Cloud sync: pull-by-watermark + outbox flush (plan §sync). Local-only
-    // documents never construct an engine.
     const syncUserId = sync?.userId;
+    const syncName = sync?.name;
+    const syncIsAnonymous = sync?.isAnonymous ?? false;
+    const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
-    useEffect(() => {
-        if (!syncUserId) {
-            return;
-        }
-        const engine = new SyncEngine({
-            db: getDb(),
-            store: annotationStore,
-            api: createSupabaseAnnotationsApi(getSupabase()),
-            docId,
-            getUserId: () => syncUserId,
-            onStatus: syncOnStatus,
-        });
-        engine.start();
-        return () => engine.stop();
-    }, [annotationStore, docId, syncUserId, syncOnStatus]);
+    const syncOnPeers = sync?.onPeers;
+    const channelRef = useRef<DocRealtimeChannel | null>(null);
 
     // Track viewport size.
     useEffect(() => {
@@ -179,11 +174,76 @@ export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps)
             },
         });
         controller.setInkDelegate(ink.delegate);
+
+        // Cloud documents additionally get the sync engine + realtime channel,
+        // wired to the same store and ink controller (plan §realtime).
+        let engine: SyncEngine | null = null;
+        let channel: DocRealtimeChannel | null = null;
+        if (syncUserId && syncName !== undefined) {
+            engine = new SyncEngine({
+                db: getDb(),
+                store: annotationStore,
+                api: createSupabaseAnnotationsApi(getSupabase()),
+                docId,
+                getUserId: () => syncUserId,
+                onStatus: syncOnStatus,
+            });
+            channel = new DocRealtimeChannel({
+                supabase: getSupabase(),
+                docId,
+                self: {
+                    userId: syncUserId,
+                    name: syncName,
+                    color: peerColor(syncUserId),
+                    page: 0,
+                    isAnonymous: syncIsAnonymous,
+                },
+                onRemoteInk: (msg) => ink.applyRemoteInk(msg),
+                onDbChange: (row) => {
+                    void engine?.applyServerRow(row);
+                    ink.remoteInkCommitted(row.id);
+                },
+                onPeers: (peers) => syncOnPeers?.(peers),
+                onReconnect: () => {
+                    ink.clearRemoteInk();
+                    void engine?.sync();
+                },
+            });
+            if (syncCanWrite) {
+                ink.setLivePublisher(channel.publisher);
+            }
+            engine.start();
+            channel.start();
+            channelRef.current = channel;
+        }
+
         return () => {
+            channelRef.current = null;
+            channel?.stop();
+            engine?.stop();
             controller.destroy();
             ink.destroy();
         };
-    }, [annotationStore, registry]);
+    }, [
+        annotationStore,
+        registry,
+        docId,
+        syncUserId,
+        syncName,
+        syncIsAnonymous,
+        syncCanWrite,
+        syncOnStatus,
+        syncOnPeers,
+    ]);
+
+    // Presence: report the top visible page (debounced against scroll churn).
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            const range = visiblePageRange(view, viewportSize.height, layout.layouts, 0);
+            channelRef.current?.setPage(Math.max(0, range.start));
+        }, 400);
+        return () => clearTimeout(timer);
+    }, [view, viewportSize.height, layout]);
 
     // Undo/redo keyboard shortcuts.
     useEffect(() => {

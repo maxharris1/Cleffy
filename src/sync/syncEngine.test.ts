@@ -213,6 +213,59 @@ describe('SyncEngine.pullSince', () => {
     });
 });
 
+describe('SyncEngine.applyServerRow (broadcast path)', () => {
+    it('applies rows and advances the watermark monotonically', async () => {
+        await engine.applyServerRow({
+            id: 'b1',
+            document_id: DOC,
+            page: 4,
+            kind: 'stroke',
+            color: '#123',
+            payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+            created_by: 'other',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            deleted_at: null,
+            seq: 9,
+        });
+        expect(store.getPage(4).has('b1')).toBe(true);
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
+
+        // Lower-seq stragglers never move the watermark backwards.
+        await engine.applyServerRow({
+            id: 'b2',
+            document_id: DOC,
+            page: 4,
+            kind: 'stroke',
+            color: '#123',
+            payload: { pts: [0.2, 0.2, 0.5], w: 0.005 },
+            created_by: 'other',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            deleted_at: null,
+            seq: 5,
+        });
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
+    });
+
+    it('ignores rows for other documents', async () => {
+        await engine.applyServerRow({
+            id: 'x1',
+            document_id: 'someone-elses-doc',
+            page: 0,
+            kind: 'stroke',
+            color: '#123',
+            payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+            created_by: 'other',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            deleted_at: null,
+            seq: 99,
+        });
+        expect(store.get('x1')).toBeUndefined();
+    });
+});
+
 describe('offline → queue → flush → converge (integration)', () => {
     it('converges both directions after reconnect', async () => {
         // Local draws while offline.

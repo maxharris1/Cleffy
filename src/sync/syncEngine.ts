@@ -217,6 +217,20 @@ export class SyncEngine {
         }
     }
 
+    /** Apply one row fanned out via broadcast-from-database (M4). */
+    async applyServerRow(row: AnnotationRow): Promise<void> {
+        const { db, store, docId } = this.deps;
+        if (row.document_id !== docId || this.stopped) {
+            return;
+        }
+        const pendingIds = new Set((await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId));
+        await store.applyRemoteBatch([fromServerRow(row)], pendingIds);
+        const state = await db.syncState.get(docId);
+        if (!state || row.seq > state.watermarkSeq) {
+            await db.syncState.put({ docId, watermarkSeq: row.seq });
+        }
+    }
+
     async pullSince(): Promise<void> {
         if (this.pulling || this.stopped) {
             return;

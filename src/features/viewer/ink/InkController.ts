@@ -14,6 +14,9 @@ import {
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import type { InkDelegate } from '@/features/viewer/ink/GestureController';
 import type { AnnotationStore } from '@/sync/annotationStore';
+import type { LiveInkPublisher } from '@/sync/realtimeChannel';
+import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
+import type { InkProgressMsg } from '@/sync/wire';
 import { HIGHLIGHT_WIDTH_FACTOR, STROKE_WIDTHS, useViewerStore } from '@/state/store';
 import type { Annotation, StrokePayload, ViewState } from '@/types/models';
 
@@ -25,6 +28,7 @@ export interface TextIntent {
 }
 
 interface LiveStroke {
+    strokeId: string;
     pageIndex: number;
     kind: 'stroke' | 'highlight';
     color: string;
@@ -58,6 +62,9 @@ export class InkController {
     private rafPending = false;
     private pathCache = new StrokePathCache();
     private unsubscribes: Array<() => void> = [];
+    private publisher: LiveInkPublisher | null = null;
+    private remote = new RemoteInkBuffers();
+    private remoteGcTimer: ReturnType<typeof setInterval> | null = null;
 
     constructor(
         private opts: {
@@ -81,7 +88,51 @@ export class InkController {
         for (const unsubscribe of this.unsubscribes) {
             unsubscribe();
         }
+        if (this.remoteGcTimer) {
+            clearInterval(this.remoteGcTimer);
+            this.remoteGcTimer = null;
+        }
         this.live = null;
+        this.publisher = null;
+    }
+
+    /** Wire the realtime live-ink publisher (cloud documents only). */
+    setLivePublisher(publisher: LiveInkPublisher | null): void {
+        this.publisher = publisher;
+    }
+
+    /** A collaborator's live ink batch arrived — buffer and repaint its page. */
+    applyRemoteInk(msg: InkProgressMsg): void {
+        const page = this.remote.apply(msg);
+        if (page !== null) {
+            this.renderPageLive(page);
+        }
+        if (!this.remoteGcTimer && this.remote.size > 0) {
+            this.remoteGcTimer = setInterval(() => {
+                for (const affected of this.remote.expire()) {
+                    this.renderPageLive(affected);
+                }
+                if (this.remote.size === 0 && this.remoteGcTimer) {
+                    clearInterval(this.remoteGcTimer);
+                    this.remoteGcTimer = null;
+                }
+            }, 5000);
+        }
+    }
+
+    /** The committed row for a live stroke landed — drop the preview. */
+    remoteInkCommitted(strokeId: string): void {
+        const page = this.remote.removeByStrokeId(strokeId);
+        if (page !== null) {
+            this.renderPageLive(page);
+        }
+    }
+
+    /** Reconnect: stale previews would linger forever — clear them all. */
+    clearRemoteInk(): void {
+        for (const page of this.remote.clear()) {
+            this.renderPageLive(page);
+        }
     }
 
     /** Redraw every committed stroke of a page onto its committed canvas. */
@@ -151,6 +202,7 @@ export class InkController {
         const isHighlight = tool === 'highlighter';
         const baseWidth = STROKE_WIDTHS[widthKey] * (isHighlight ? HIGHLIGHT_WIDTH_FACTOR : 1);
         this.live = {
+            strokeId: crypto.randomUUID(),
             pageIndex: point.pageIndex,
             kind: isHighlight ? 'highlight' : 'stroke',
             color,
@@ -159,6 +211,14 @@ export class InkController {
             predicted: [],
             simulatePressure: e.pointerType !== 'pen',
         };
+        this.publisher?.start({
+            strokeId: this.live.strokeId,
+            page: point.pageIndex,
+            kind: this.live.kind,
+            color,
+            w: baseWidth,
+        });
+        this.publisher?.append(this.live.pts);
         this.scheduleLiveRender();
     }
 
@@ -188,12 +248,17 @@ export class InkController {
 
         // Full-fidelity input: coalesced events where supported.
         const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [e];
+        const appended: number[] = [];
         for (const ev of events.length > 0 ? events : [e]) {
             const local = this.opts.toLocal(ev);
             const p = viewportToPageClamped(view, layout, local.x, local.y);
             if (p) {
-                this.live.pts.push(p.nx, p.ny, this.pressureOf(ev));
+                appended.push(p.nx, p.ny, this.pressureOf(ev));
             }
+        }
+        if (appended.length > 0) {
+            this.live.pts.push(...appended);
+            this.publisher?.append(appended);
         }
 
         // Predicted tail — drawn this frame, discarded from the committed stroke.
@@ -238,7 +303,8 @@ export class InkController {
         if (!live) {
             return;
         }
-        this.clearLiveCanvas(live.pageIndex);
+        this.publisher?.end();
+        this.renderPageLive(live.pageIndex);
 
         const layout = this.opts.getLayout().layouts[live.pageIndex];
         const view = this.opts.getView();
@@ -257,8 +323,10 @@ export class InkController {
         if (live.simulatePressure) {
             payload.sp = 1;
         }
+        // The live strokeId becomes the annotation id, so collaborators can
+        // atomically swap the streamed preview for the committed stroke.
         void this.opts.store.create({
-            id: crypto.randomUUID(),
+            id: live.strokeId,
             docId: this.opts.store.docId,
             page: live.pageIndex,
             kind: live.kind,
@@ -274,8 +342,10 @@ export class InkController {
 
     private onCancel(): void {
         if (this.live) {
-            this.clearLiveCanvas(this.live.pageIndex);
+            const page = this.live.pageIndex;
             this.live = null;
+            this.publisher?.cancel();
+            this.renderPageLive(page);
         }
         if (useViewerStore.getState().tool === 'eraser') {
             this.opts.store.endBatch();
@@ -335,11 +405,14 @@ export class InkController {
     }
 
     private renderLive(): void {
-        const live = this.live;
-        if (!live) {
-            return;
+        if (this.live) {
+            this.renderPageLive(this.live.pageIndex);
         }
-        const canvases = this.opts.registry.get(live.pageIndex);
+    }
+
+    /** Repaint a page's live canvas: local in-flight stroke + remote previews. */
+    renderPageLive(pageIndex: number): void {
+        const canvases = this.opts.registry.get(pageIndex);
         if (!canvases || canvases.live.width === 0) {
             return;
         }
@@ -350,29 +423,40 @@ export class InkController {
         const { width, height } = canvases.live;
         ctx.clearRect(0, 0, width, height);
 
-        const payload: StrokePayload = {
-            pts: live.predicted.length > 0 ? [...live.pts, ...live.predicted] : live.pts,
-            w: live.w,
+        const drawInk = (
+            pts: number[],
+            w: number,
+            color: string,
+            kind: 'stroke' | 'highlight',
+            simulatePressure: boolean,
+        ) => {
+            if (pts.length < 3) {
+                return;
+            }
+            const payload: StrokePayload = { pts, w };
+            if (simulatePressure) {
+                payload.sp = 1;
+            }
+            const path = buildStrokePath(payload, width, height);
+            ctx.save();
+            if (kind === 'highlight') {
+                ctx.globalAlpha = HIGHLIGHT_ALPHA;
+                ctx.globalCompositeOperation = 'multiply';
+            }
+            ctx.fillStyle = color;
+            ctx.fill(path);
+            ctx.restore();
         };
-        if (live.simulatePressure) {
-            payload.sp = 1;
-        }
-        const path = buildStrokePath(payload, width, height);
-        ctx.save();
-        if (live.kind === 'highlight') {
-            ctx.globalAlpha = HIGHLIGHT_ALPHA;
-            ctx.globalCompositeOperation = 'multiply';
-        }
-        ctx.fillStyle = live.color;
-        ctx.fill(path);
-        ctx.restore();
-    }
 
-    private clearLiveCanvas(pageIndex: number): void {
-        const canvases = this.opts.registry.get(pageIndex);
-        const ctx = canvases?.live.getContext('2d');
-        if (canvases && ctx) {
-            ctx.clearRect(0, 0, canvases.live.width, canvases.live.height);
+        for (const remote of this.remote.forPage(pageIndex)) {
+            // Remote pressure fidelity is already baked into the points.
+            drawInk(remote.pts, remote.w, remote.color, remote.kind, false);
+        }
+
+        const live = this.live;
+        if (live && live.pageIndex === pageIndex) {
+            const pts = live.predicted.length > 0 ? [...live.pts, ...live.predicted] : live.pts;
+            drawInk(pts, live.w, live.color, live.kind, live.simulatePressure);
         }
     }
 }

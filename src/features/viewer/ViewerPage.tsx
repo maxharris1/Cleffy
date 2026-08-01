@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 
-import { useSession } from '@/features/auth/session';
+import { displayNameOf, useSession } from '@/features/auth/session';
 import { fetchDocument, fetchMyRole, isCloudDocId, loadDocumentBytes } from '@/features/library/documentsService';
 import { ShareDialog } from '@/features/share/ShareDialog';
+import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import type { SyncStatus } from '@/sync/syncEngine';
+import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow, MemberRole } from '@/types/database';
 
 export const ViewerPage = () => {
@@ -33,6 +35,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
     const [shareOpen, setShareOpen] = useState(false);
+    const [peers, setPeers] = useState<PresencePeer[]>([]);
 
     const userId = session?.user.id;
 
@@ -63,6 +66,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [docId, userId]);
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
+    const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
 
     if (!loading && !session) {
         return <Navigate to="/" replace />;
@@ -98,6 +102,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     ←
                 </Link>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">{state.doc.title}</span>
+                <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
                 {readOnly ? (
                     <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">view only</span>
@@ -114,7 +119,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             </header>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={state.bytes}>
-                    <PdfViewport key={docId} docId={docId} readOnly={readOnly} sync={{ userId, onStatus }} />
+                    <PdfViewport
+                        key={docId}
+                        docId={docId}
+                        readOnly={readOnly}
+                        sync={{
+                            userId,
+                            name: displayNameOf(session),
+                            isAnonymous: Boolean(session?.user.is_anonymous),
+                            canWrite: !readOnly,
+                            onStatus,
+                            onPeers,
+                        }}
+                    />
                 </PdfProvider>
             </div>
             {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
