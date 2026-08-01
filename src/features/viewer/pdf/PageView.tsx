@@ -1,27 +1,32 @@
 import { RenderingCancelledException, type PDFDocumentProxy, type RenderTask } from 'pdfjs-dist';
 import { memo, useEffect, useRef } from 'react';
 
-import { MAX_BITMAP_SIDE, type PageLayout } from '@/features/viewer/geometry';
+import { bitmapDims, type PageLayout } from '@/features/viewer/geometry';
+import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 
 export interface PageViewProps {
     doc: PDFDocumentProxy;
     pageIndex: number;
     layout: PageLayout;
     scale: number;
+    registry: CanvasRegistry;
 }
 
 /**
- * Renders one PDF page to a canvas at the committed scale.
+ * One page of the score: a three-canvas stack (plan §canvas/input) —
+ * 1. pdf canvas: pdf.js raster, redrawn only when the settled scale changes;
+ * 2. committed canvas: all committed annotations, repainted by InkController;
+ * 3. live canvas: the in-flight stroke (local or remote), cleared per frame.
  * Positioned absolutely by the parent in scaled CSS px.
  */
-export const PageView = memo(({ doc, pageIndex, layout, scale }: PageViewProps) => {
-    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageViewProps) => {
+    const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-    const cssWidth = layout.width * scale;
-    const cssHeight = layout.height * scale;
-
+    // pdf.js raster.
     useEffect(() => {
-        const canvas = canvasRef.current;
+        const canvas = pdfCanvasRef.current;
         if (!canvas) {
             return;
         }
@@ -35,12 +40,8 @@ export const PageView = memo(({ doc, pageIndex, layout, scale }: PageViewProps) 
                     return;
                 }
                 const dpr = Math.min(window.devicePixelRatio || 1, 3);
-                const targetWidth = layout.width * scale * dpr;
-                const targetHeight = layout.height * scale * dpr;
-                const cap = MAX_BITMAP_SIDE / Math.max(targetWidth, targetHeight);
-                const bitmapScale = scale * dpr * Math.min(1, cap);
-
-                const viewport = page.getViewport({ scale: bitmapScale });
+                const dims = bitmapDims(layout, scale, dpr);
+                const viewport = page.getViewport({ scale: dims.pxPerBase });
                 canvas.width = Math.floor(viewport.width);
                 canvas.height = Math.floor(viewport.height);
                 const ctx = canvas.getContext('2d');
@@ -69,17 +70,44 @@ export const PageView = memo(({ doc, pageIndex, layout, scale }: PageViewProps) 
         };
     }, [doc, pageIndex, layout, scale]);
 
+    // Annotation canvases: size to the same bitmap dims, then register — the
+    // ink controller listens on the registry and paints committed strokes.
+    useEffect(() => {
+        const committed = committedCanvasRef.current;
+        const live = liveCanvasRef.current;
+        if (!committed || !live) {
+            return;
+        }
+        const dpr = Math.min(window.devicePixelRatio || 1, 3);
+        const dims = bitmapDims(layout, scale, dpr);
+        committed.width = dims.width;
+        committed.height = dims.height;
+        live.width = dims.width;
+        live.height = dims.height;
+        registry.register(pageIndex, { committed, live });
+
+        return () => {
+            registry.unregister(pageIndex);
+            committed.width = 0;
+            committed.height = 0;
+            live.width = 0;
+            live.height = 0;
+        };
+    }, [registry, pageIndex, layout, scale]);
+
     return (
         <div
             className="absolute bg-white shadow-md"
             style={{
                 top: layout.top * scale,
                 left: layout.left * scale,
-                width: cssWidth,
-                height: cssHeight,
+                width: layout.width * scale,
+                height: layout.height * scale,
             }}
         >
-            <canvas ref={canvasRef} className="h-full w-full" data-page-index={pageIndex} />
+            <canvas ref={pdfCanvasRef} className="absolute inset-0 h-full w-full" data-page-index={pageIndex} />
+            <canvas ref={committedCanvasRef} className="absolute inset-0 h-full w-full" data-ink-layer="committed" />
+            <canvas ref={liveCanvasRef} className="absolute inset-0 h-full w-full" data-ink-layer="live" />
         </div>
     );
 });

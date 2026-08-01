@@ -99,6 +99,11 @@ export class GestureController {
     };
 
     private onPointerDown = (e: PointerEvent): void => {
+        // Never claim pointers that start on UI overlays (toolbar, zoom buttons,
+        // text editor) — capturing them would swallow their click events.
+        if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
+            return;
+        }
         this.el.setPointerCapture(e.pointerId);
 
         if (e.pointerType === 'pen') {

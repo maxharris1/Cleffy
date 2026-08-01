@@ -71,7 +71,7 @@ export const ViewerPage = () => {
             </header>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
-                    <PdfViewport />
+                    <PdfViewport key={documentId} docId={documentId} />
                 </PdfProvider>
             </div>
         </div>

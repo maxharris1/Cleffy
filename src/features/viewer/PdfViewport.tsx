@@ -8,32 +8,65 @@ import {
     zoomAt,
     type DocumentLayout,
 } from '@/features/viewer/geometry';
+import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
+import { InkController, type TextIntent } from '@/features/viewer/ink/InkController';
+import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
+import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
+import { getDb } from '@/sync/db';
+import { AnnotationStore } from '@/sync/annotationStore';
 import { useViewerStore } from '@/state/store';
+import { isTextPayload } from '@/types/models';
 
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
+
+/** Default text-note size as a fraction of page width. */
+const DEFAULT_TEXT_SIZE = 0.018;
 
 interface ViewportSize {
     width: number;
     height: number;
 }
 
+export interface PdfViewportProps {
+    docId: string;
+}
+
 /**
- * The scrollable, zoomable stack of PDF pages. Owns the gesture wiring and
- * page virtualization; assumes a ready PdfProvider above it.
+ * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
+ * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = () => {
+export const PdfViewport = ({ docId }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
+    const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
+    const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
 
     const layout: DocumentLayout = useMemo(() => computeDocumentLayout(pageSizes), [pageSizes]);
+
+    // Live refs so the imperative controllers always see current geometry.
+    const layoutRef = useRef(layout);
+    const viewportSizeRef = useRef(viewportSize);
+    useEffect(() => {
+        layoutRef.current = layout;
+        viewportSizeRef.current = viewportSize;
+    }, [layout, viewportSize]);
+
+    // Annotation store + canvas registry — stable per mounted document, safe to
+    // create during render (neither touches refs).
+    const [annotationStore] = useState(() => new AnnotationStore(getDb(), docId));
+    const [registry] = useState(() => new CanvasRegistry());
+
+    useEffect(() => {
+        void annotationStore.load();
+    }, [annotationStore]);
 
     // Track viewport size.
     useEffect(() => {
@@ -70,19 +103,29 @@ export const PdfViewport = () => {
         return () => clearTimeout(timer);
     }, [view.scale, renderScale]);
 
-    // Gesture wiring. Layout/viewport live in refs so the controller attaches once.
-    const layoutRef = useRef(layout);
-    const viewportSizeRef = useRef(viewportSize);
-    useEffect(() => {
-        layoutRef.current = layout;
-        viewportSizeRef.current = viewportSize;
-    }, [layout, viewportSize]);
-
+    // Gesture + ink controllers — imperative, constructed in effect scope where
+    // reading refs is legal. Attach once: the container renders in every state.
     useEffect(() => {
         const el = containerRef.current;
         if (!el) {
             return;
         }
+        const toLocal = (e: { clientX: number; clientY: number }) => {
+            const rect = el.getBoundingClientRect();
+            return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        };
+        const ink = new InkController({
+            store: annotationStore,
+            registry,
+            getView: () => useViewerStore.getState().view,
+            getLayout: () => layoutRef.current,
+            toLocal,
+            onTextIntent: (intent) => {
+                textIntentHandled.current = false;
+                setTextIntent(intent);
+            },
+        });
+
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
             clampScroll(v, layoutRef.current, viewportSizeRef.current.width, viewportSizeRef.current.height);
 
@@ -103,8 +146,69 @@ export const PdfViewport = () => {
                 // Bitmap refresh is handled by the settle timer on scale change.
             },
         });
-        return () => controller.destroy();
-    }, []);
+        controller.setInkDelegate(ink.delegate);
+        return () => {
+            controller.destroy();
+            ink.destroy();
+        };
+    }, [annotationStore, registry]);
+
+    // Undo/redo keyboard shortcuts.
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (!(e.metaKey || e.ctrlKey)) {
+                return;
+            }
+            const key = e.key.toLowerCase();
+            if (key === 'z' && !e.shiftKey) {
+                e.preventDefault();
+                void annotationStore.undoLast();
+            } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+                e.preventDefault();
+                void annotationStore.redoLast();
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [annotationStore]);
+
+    const commitText = (text: string) => {
+        if (!textIntent || textIntentHandled.current) {
+            return;
+        }
+        textIntentHandled.current = true;
+        setTextIntent(null);
+        const trimmed = text.trim();
+        const { existing } = textIntent;
+        if (existing) {
+            if (!isTextPayload(existing.payload)) {
+                return;
+            }
+            if (trimmed === '') {
+                void annotationStore.delete(existing.id);
+            } else if (trimmed !== existing.payload.text) {
+                void annotationStore.update(existing.id, { payload: { ...existing.payload, text: trimmed } });
+            }
+            return;
+        }
+        if (trimmed === '') {
+            return;
+        }
+        const now = new Date().toISOString();
+        void annotationStore.create({
+            id: crypto.randomUUID(),
+            docId,
+            page: textIntent.pageIndex,
+            kind: 'text',
+            color: useViewerStore.getState().color,
+            payload: { x: textIntent.nx, y: textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
+            createdBy: null,
+            createdAt: now,
+            updatedAt: now,
+            deletedAt: null,
+            seq: 0,
+        });
+    };
 
     const pages = [];
     if (doc) {
@@ -112,7 +216,16 @@ export const PdfViewport = () => {
         for (let i = range.start; i <= range.end; i++) {
             const pageLayout = layout.layouts[i];
             if (pageLayout) {
-                pages.push(<PageView key={i} doc={doc} pageIndex={i} layout={pageLayout} scale={renderScale} />);
+                pages.push(
+                    <PageView
+                        key={i}
+                        doc={doc}
+                        pageIndex={i}
+                        layout={pageLayout}
+                        scale={renderScale}
+                        registry={registry}
+                    />,
+                );
             }
         }
     }
@@ -120,6 +233,7 @@ export const PdfViewport = () => {
     // Positions use the live scale; bitmaps use the settled renderScale. While they
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
     const previewFactor = view.scale / renderScale;
+    const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
 
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
@@ -146,6 +260,19 @@ export const PdfViewport = () => {
                     >
                         {pages}
                     </div>
+                    <Toolbar store={annotationStore} />
+                    {textIntent && textIntentLayout ? (
+                        <TextEditorOverlay
+                            intent={textIntent}
+                            layout={textIntentLayout}
+                            view={view}
+                            onCommit={commitText}
+                            onCancel={() => {
+                                textIntentHandled.current = true;
+                                setTextIntent(null);
+                            }}
+                        />
+                    ) : null}
                     <ZoomControls
                         onZoomBy={(factor) => {
                             const { view: v, setView } = useViewerStore.getState();
@@ -160,14 +287,15 @@ export const PdfViewport = () => {
 };
 
 const ZoomControls = ({ onZoomBy }: { onZoomBy: (factor: number) => void }) => {
-    const zoomBy = onZoomBy;
-
     return (
-        <div className="absolute bottom-[calc(1rem+var(--safe-bottom))] right-4 flex flex-col gap-2">
+        <div
+            data-ui-overlay
+            className="absolute bottom-[calc(4.5rem+var(--safe-bottom))] right-4 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))]"
+        >
             <button
                 type="button"
                 aria-label="Zoom in"
-                onClick={() => zoomBy(1.25)}
+                onClick={() => onZoomBy(1.25)}
                 className="h-11 w-11 rounded-full bg-white text-xl font-bold text-stone-700 shadow-md active:bg-stone-100"
             >
                 +
@@ -175,7 +303,7 @@ const ZoomControls = ({ onZoomBy }: { onZoomBy: (factor: number) => void }) => {
             <button
                 type="button"
                 aria-label="Zoom out"
-                onClick={() => zoomBy(0.8)}
+                onClick={() => onZoomBy(0.8)}
                 className="h-11 w-11 rounded-full bg-white text-xl font-bold text-stone-700 shadow-md active:bg-stone-100"
             >
                 −
