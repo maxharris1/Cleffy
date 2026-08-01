@@ -7,7 +7,7 @@ import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
-const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev'];
+const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
 
 export default defineConfig({
     plugins: [
