@@ -15,8 +15,10 @@ import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
-import { getDb } from '@/sync/db';
+import { getSupabase } from '@/lib/supabase';
 import { AnnotationStore } from '@/sync/annotationStore';
+import { getDb } from '@/sync/db';
+import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
 
@@ -33,13 +35,20 @@ interface ViewportSize {
 
 export interface PdfViewportProps {
     docId: string;
+    /** View-only role: hides editing UI and blocks the ink delegate. */
+    readOnly?: boolean;
+    /** Present for cloud documents: enables the sync engine. */
+    sync?: {
+        userId: string;
+        onStatus?: (status: SyncStatus) => void;
+    };
 }
 
 /**
  * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
  * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = ({ docId }: PdfViewportProps) => {
+export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -54,10 +63,12 @@ export const PdfViewport = ({ docId }: PdfViewportProps) => {
     // Live refs so the imperative controllers always see current geometry.
     const layoutRef = useRef(layout);
     const viewportSizeRef = useRef(viewportSize);
+    const readOnlyRef = useRef(readOnly);
     useEffect(() => {
         layoutRef.current = layout;
         viewportSizeRef.current = viewportSize;
-    }, [layout, viewportSize]);
+        readOnlyRef.current = readOnly;
+    }, [layout, viewportSize, readOnly]);
 
     // Annotation store + canvas registry — stable per mounted document, safe to
     // create during render (neither touches refs).
@@ -67,6 +78,26 @@ export const PdfViewport = ({ docId }: PdfViewportProps) => {
     useEffect(() => {
         void annotationStore.load();
     }, [annotationStore]);
+
+    // Cloud sync: pull-by-watermark + outbox flush (plan §sync). Local-only
+    // documents never construct an engine.
+    const syncUserId = sync?.userId;
+    const syncOnStatus = sync?.onStatus;
+    useEffect(() => {
+        if (!syncUserId) {
+            return;
+        }
+        const engine = new SyncEngine({
+            db: getDb(),
+            store: annotationStore,
+            api: createSupabaseAnnotationsApi(getSupabase()),
+            docId,
+            getUserId: () => syncUserId,
+            onStatus: syncOnStatus,
+        });
+        engine.start();
+        return () => engine.stop();
+    }, [annotationStore, docId, syncUserId, syncOnStatus]);
 
     // Track viewport size.
     useEffect(() => {
@@ -117,6 +148,7 @@ export const PdfViewport = ({ docId }: PdfViewportProps) => {
         const ink = new InkController({
             store: annotationStore,
             registry,
+            isReadOnly: () => readOnlyRef.current,
             getView: () => useViewerStore.getState().view,
             getLayout: () => layoutRef.current,
             toLocal,
@@ -156,7 +188,7 @@ export const PdfViewport = ({ docId }: PdfViewportProps) => {
     // Undo/redo keyboard shortcuts.
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (!(e.metaKey || e.ctrlKey)) {
+            if (readOnlyRef.current || !(e.metaKey || e.ctrlKey)) {
                 return;
             }
             const key = e.key.toLowerCase();
@@ -260,8 +292,8 @@ export const PdfViewport = ({ docId }: PdfViewportProps) => {
                     >
                         {pages}
                     </div>
-                    <Toolbar store={annotationStore} />
-                    {textIntent && textIntentLayout ? (
+                    {readOnly ? null : <Toolbar store={annotationStore} />}
+                    {!readOnly && textIntent && textIntentLayout ? (
                         <TextEditorOverlay
                             intent={textIntent}
                             layout={textIntentLayout}

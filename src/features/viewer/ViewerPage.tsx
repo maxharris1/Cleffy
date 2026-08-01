@@ -1,40 +1,170 @@
-import { useCallback, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useCallback, useEffect, useState } from 'react';
+import { Link, Navigate, useParams } from 'react-router';
 
+import { useSession } from '@/features/auth/session';
+import { fetchDocument, fetchMyRole, isCloudDocId, loadDocumentBytes } from '@/features/library/documentsService';
+import { ShareDialog } from '@/features/share/ShareDialog';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
+import type { SyncStatus } from '@/sync/syncEngine';
+import type { DocumentRow, MemberRole } from '@/types/database';
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
-    const [, forceRender] = useState(0);
+    if (!documentId) {
+        return null;
+    }
+    return isCloudDocId(documentId) ? <CloudViewer docId={documentId} /> : <LocalViewer docId={documentId} />;
+};
 
-    const bytes = documentId ? getLocalDoc(documentId) : undefined;
+// ---------------------------------------------------------------------------
+// Cloud documents: auth-gated, role-aware, synced.
+
+interface CloudDocState {
+    doc: DocumentRow;
+    role: MemberRole | null;
+    bytes: ArrayBuffer;
+}
+
+const CloudViewer = ({ docId }: { docId: string }) => {
+    const { session, loading } = useSession();
+    const [state, setState] = useState<CloudDocState | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
+    const [shareOpen, setShareOpen] = useState(false);
+
+    const userId = session?.user.id;
+
+    useEffect(() => {
+        if (!userId) {
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const doc = await fetchDocument(docId);
+                if (!doc) {
+                    throw new Error('Score not found — it may have been deleted, or your access was revoked.');
+                }
+                const [role, bytes] = await Promise.all([fetchMyRole(docId, userId), loadDocumentBytes(doc)]);
+                if (!cancelled) {
+                    setState({ doc, role, bytes });
+                }
+            } catch (err) {
+                if (!cancelled) {
+                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [docId, userId]);
+
+    const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
+
+    if (!loading && !session) {
+        return <Navigate to="/" replace />;
+    }
+    if (loadError) {
+        return (
+            <main className="flex min-h-full flex-col items-center justify-center gap-3 p-8">
+                <p className="max-w-md text-center text-red-600">{loadError}</p>
+                <Link to="/" className="text-sm text-indigo-600 underline">
+                    Back to library
+                </Link>
+            </main>
+        );
+    }
+    if (!state || !userId) {
+        return (
+            <main className="flex min-h-full items-center justify-center p-8">
+                <p className="animate-pulse text-stone-500">Opening score…</p>
+            </main>
+        );
+    }
+
+    const readOnly = state.role !== 'owner' && state.role !== 'editor';
+
+    return (
+        <div className="fixed inset-0 flex flex-col">
+            <header className="flex items-center gap-3 border-b border-stone-200 bg-white px-3 py-2 shadow-sm">
+                <Link
+                    to="/"
+                    aria-label="Back to library"
+                    className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100"
+                >
+                    ←
+                </Link>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">{state.doc.title}</span>
+                <SyncDot status={syncStatus} />
+                {readOnly ? (
+                    <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">view only</span>
+                ) : null}
+                {state.role === 'owner' ? (
+                    <button
+                        type="button"
+                        onClick={() => setShareOpen(true)}
+                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white shadow hover:bg-indigo-500"
+                    >
+                        Share
+                    </button>
+                ) : null}
+            </header>
+            <div className="min-h-0 flex-1">
+                <PdfProvider data={state.bytes}>
+                    <PdfViewport key={docId} docId={docId} readOnly={readOnly} sync={{ userId, onStatus }} />
+                </PdfProvider>
+            </div>
+            {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
+        </div>
+    );
+};
+
+const SyncDot = ({ status }: { status: SyncStatus }) => {
+    const styles: Record<SyncStatus, { dot: string; label: string }> = {
+        synced: { dot: 'bg-emerald-500', label: 'Synced' },
+        syncing: { dot: 'bg-amber-400 animate-pulse', label: 'Syncing…' },
+        offline: { dot: 'bg-stone-400', label: 'Offline — changes saved on this device' },
+        error: { dot: 'bg-red-500', label: 'Sync error — retrying' },
+    };
+    const { dot, label } = styles[status];
+    return (
+        <span title={label} aria-label={label} className="flex items-center">
+            <span className={`h-2.5 w-2.5 rounded-full ${dot}`} />
+        </span>
+    );
+};
+
+// ---------------------------------------------------------------------------
+// Local documents: opened from disk, annotations on-device only.
+
+const LocalViewer = ({ docId }: { docId: string }) => {
+    const [, forceRender] = useState(0);
+    const bytes = getLocalDoc(docId);
 
     const reopenFile = useCallback(
         async (file: File) => {
             const buffer = await file.arrayBuffer();
             const id = await localDocId(buffer);
             putLocalDoc(id, buffer);
-            if (id === documentId) {
+            if (id === docId) {
                 forceRender((n) => n + 1);
             } else {
                 // Different file than the one this URL refers to — open it under its own id.
                 window.location.assign(`/doc/${id}`);
             }
         },
-        [documentId],
+        [docId],
     );
-
-    if (!documentId) {
-        return null;
-    }
 
     if (!bytes) {
         return (
             <main className="flex min-h-full flex-col items-center justify-center gap-4 p-8">
                 <p className="max-w-md text-center text-stone-600">
-                    This score isn&apos;t loaded in this session. Re-open the PDF file to continue.
+                    This score isn&apos;t loaded in this session. Re-open the PDF file to continue — your annotations
+                    are saved on this device.
                 </p>
                 <label className="cursor-pointer rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white shadow hover:bg-indigo-500">
                     Re-open PDF
@@ -67,11 +197,12 @@ export const ViewerPage = () => {
                 >
                     ←
                 </Link>
-                <span className="truncate text-sm font-medium text-stone-700">Score {documentId.slice(0, 12)}</span>
+                <span className="truncate text-sm font-medium text-stone-700">Local score</span>
+                <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">this device only</span>
             </header>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
-                    <PdfViewport key={documentId} docId={documentId} />
+                    <PdfViewport key={docId} docId={docId} />
                 </PdfProvider>
             </div>
         </div>

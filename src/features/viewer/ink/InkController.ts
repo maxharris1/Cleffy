@@ -63,6 +63,7 @@ export class InkController {
         private opts: {
             store: AnnotationStore;
             registry: CanvasRegistry;
+            isReadOnly: () => boolean;
             getView: () => ViewState;
             getLayout: () => DocumentLayout;
             /** Viewport-local coords for a pointer event. */
@@ -111,6 +112,9 @@ export class InkController {
     };
 
     private shouldInk(e: PointerEvent): boolean {
+        if (this.opts.isReadOnly()) {
+            return false;
+        }
         const { tool, fingerDraws } = useViewerStore.getState();
         if (tool === 'pan') {
             return false;

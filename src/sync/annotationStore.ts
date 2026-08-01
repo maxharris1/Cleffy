@@ -116,6 +116,51 @@ export class AnnotationStore {
         );
     }
 
+    /**
+     * Merge remote rows (pull or broadcast) under server-seq LWW.
+     * Rows with a pending local op are skipped — local intent wins until the
+     * flush acks, at which point the server re-broadcasts a newer seq.
+     */
+    async applyRemoteBatch(remotes: Annotation[], pendingIds: ReadonlySet<string>): Promise<void> {
+        const touchedPages = new Set<number>();
+        const rows: LocalAnnotation[] = [];
+        for (const remote of remotes) {
+            if (pendingIds.has(remote.id)) {
+                continue;
+            }
+            const local = this.byId.get(remote.id);
+            if (local && local.seq >= remote.seq) {
+                continue;
+            }
+            this.byId.set(remote.id, remote);
+            if (remote.deletedAt) {
+                this.pageMap(remote.page).delete(remote.id);
+            } else {
+                this.pageMap(remote.page).set(remote.id, remote);
+            }
+            touchedPages.add(remote.page);
+            rows.push({ ...remote, pending: 0 });
+        }
+        if (rows.length > 0) {
+            await this.db.annotations.bulkPut(rows);
+        }
+        for (const page of touchedPages) {
+            this.notifyPage(page);
+        }
+    }
+
+    /** Remove an annotation the server rejected/never had (sync repair path). */
+    async discardLocal(id: string): Promise<void> {
+        const existing = this.byId.get(id);
+        if (!existing) {
+            return;
+        }
+        this.byId.delete(id);
+        this.pageMap(existing.page).delete(id);
+        await this.db.annotations.delete(id);
+        this.notifyPage(existing.page);
+    }
+
     /** Group several ops (e.g. an eraser drag) into one undo entry. */
     beginBatch(): void {
         this.undo.beginBatch();

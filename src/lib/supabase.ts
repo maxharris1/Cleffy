@@ -1,6 +1,15 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-let client: SupabaseClient | null = null;
+import type { Database } from '@/types/database';
+
+export type TypedSupabaseClient = SupabaseClient<Database>;
+
+let client: TypedSupabaseClient | null = null;
+
+/** True when Supabase env config is present (cloud features available). */
+export const isSupabaseConfigured = (): boolean => {
+    return Boolean(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
+};
 
 /**
  * Lazily-initialized Supabase client singleton.
@@ -8,7 +17,7 @@ let client: SupabaseClient | null = null;
  * Lazy so the app shell (and tests) can run without Supabase env configured;
  * only code paths that actually need the backend will throw.
  */
-export const getSupabase = (): SupabaseClient => {
+export const getSupabase = (): TypedSupabaseClient => {
     if (client) {
         return client;
     }
@@ -21,7 +30,7 @@ export const getSupabase = (): SupabaseClient => {
         );
     }
 
-    client = createClient(url, anonKey, {
+    client = createClient<Database>(url, anonKey, {
         realtime: {
             // Live ink streams at up to ~20 events/s per writer; the realtime-js
             // default client-side throttle (10/s) would silently degrade it.
