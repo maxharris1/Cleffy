@@ -36,6 +36,7 @@ export default tseslint.config(
                 process: 'readonly',
                 URL: 'readonly',
                 crypto: 'readonly',
+                fetch: 'readonly',
                 setTimeout: 'readonly',
                 clearTimeout: 'readonly',
                 // Browser globals: E2E scripts embed page-context closures

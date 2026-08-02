@@ -1,0 +1,542 @@
+import { loadPianoBuffers, nearestAnchor, playbackRateFor } from '@/features/playback/pianoSampler';
+import type { PianoBuffers } from '@/features/playback/pianoSampler';
+import { beatsForMeasure, countInSpec, firstNoteIndexAtOrAfter, measureIndexAtTick, secondsPerTick } from '@/features/playback/scoreTime';
+import type { PlaybackStatus } from '@/state/store';
+import { HAND_LH, HAND_RH } from '@/types/scoreData';
+import type { ScoreData } from '@/types/scoreData';
+
+/**
+ * Web Audio playback of a ScoreData: classic lookahead scheduler (25 ms tick,
+ * 120 ms horizon) feeding sampled piano notes into per-hand gain buses, plus
+ * a synthesized click bus for metronome and count-in, and an anchor-swap
+ * mechanism that makes BPM changes, seeks, count-in, and seamless A-B loop
+ * wraps all the same operation. DOM/React-free; the caller owns AudioContext
+ * creation timing (iOS requires it inside the user's tap).
+ */
+
+const SCHEDULER_INTERVAL_MS = 25;
+const HORIZON_S = 0.12;
+const START_DELAY_S = 0.08;
+const RELEASE_TAU_S = 0.06;
+const RELEASE_STOP_S = 0.35;
+const MAX_ACTIVE_SOURCES = 64;
+
+/** Structural subset of AudioContext used by the engine — mockable in tests. */
+export interface AudioContextLike {
+    readonly currentTime: number;
+    readonly state: string;
+    readonly destination: unknown;
+    createGain(): GainNodeLike;
+    createBufferSource(): AudioBufferSourceLike;
+    createOscillator(): OscillatorLike;
+    decodeAudioData(data: ArrayBuffer): Promise<AudioBuffer>;
+    resume(): Promise<void>;
+    close(): Promise<void>;
+    onstatechange?: (() => void) | null;
+}
+
+export interface AudioParamLike {
+    value: number;
+    setValueAtTime(value: number, time: number): unknown;
+    setTargetAtTime(target: number, time: number, timeConstant: number): unknown;
+}
+
+export interface GainNodeLike {
+    gain: AudioParamLike;
+    connect(target: unknown): unknown;
+    disconnect(): void;
+}
+
+export interface AudioBufferSourceLike {
+    buffer: AudioBuffer | null;
+    playbackRate: AudioParamLike;
+    connect(target: unknown): unknown;
+    start(when?: number): void;
+    stop(when?: number): void;
+    onended: (() => void) | null;
+}
+
+export interface OscillatorLike {
+    frequency: AudioParamLike;
+    connect(target: unknown): unknown;
+    start(when?: number): void;
+    stop(when?: number): void;
+}
+
+export interface LoopRegion {
+    startTick: number;
+    endTick: number;
+}
+
+export interface PlaybackEngineOptions {
+    score: ScoreData;
+    bpm: number;
+    onStatus: (status: PlaybackStatus) => void;
+    /** Fired after seeks/stops so the playhead can redraw while paused. */
+    onPositionJump?: () => void;
+    onWarning?: (code: string) => void;
+    /** Test seams. */
+    createContext?: () => AudioContextLike;
+    loadBuffers?: (ctx: AudioContextLike) => Promise<PianoBuffers>;
+}
+
+interface Anchor {
+    tick: number;
+    ctxTime: number;
+}
+
+interface ActiveNote {
+    source: AudioBufferSourceLike;
+    gain: GainNodeLike;
+}
+
+export class PlaybackEngine {
+    private readonly score: ScoreData;
+    private readonly onStatus: (status: PlaybackStatus) => void;
+    private readonly onPositionJump: (() => void) | undefined;
+    private readonly onWarning: ((code: string) => void) | undefined;
+    private readonly createContext: () => AudioContextLike;
+    private readonly loadBuffers: (ctx: AudioContextLike) => Promise<PianoBuffers>;
+
+    private ctx: AudioContextLike | null = null;
+    private buffers: PianoBuffers | null = null;
+    private master: GainNodeLike | null = null;
+    private handBuses: [GainNodeLike, GainNodeLike] | null = null;
+    private clickBus: GainNodeLike | null = null;
+
+    private status: PlaybackStatus = 'idle';
+    private spt: number;
+    private bpmValue: number;
+    private anchor: Anchor = { tick: 0, ctxTime: 0 };
+    private pendingAnchor: Anchor | null = null;
+    private pausedTick = 0;
+    private nextNoteIndex = 0;
+    private nextBeatTick: number | null = null;
+    private loop: LoopRegion | null = null;
+    private muted: [boolean, boolean] = [false, false];
+    private volumes: [number, number] = [1, 1];
+    private metronome = false;
+    private timer: ReturnType<typeof setInterval> | null = null;
+    private readonly active = new Set<ActiveNote>();
+    private warnedSourceCap = false;
+    private destroyed = false;
+
+    constructor(options: PlaybackEngineOptions) {
+        this.score = options.score;
+        this.bpmValue = options.bpm;
+        this.spt = secondsPerTick(options.bpm);
+        this.onStatus = options.onStatus;
+        this.onPositionJump = options.onPositionJump;
+        this.onWarning = options.onWarning;
+        this.createContext = options.createContext ?? (() => new AudioContext() as unknown as AudioContextLike);
+        this.loadBuffers = options.loadBuffers ?? ((ctx) => loadPianoBuffers(ctx));
+    }
+
+    getStatus(): PlaybackStatus {
+        return this.status;
+    }
+
+    getBpm(): number {
+        return this.bpmValue;
+    }
+
+    /** Current musical position in ticks (drives the playhead each frame). */
+    getPositionTicks(): number {
+        if (!this.ctx || this.status === 'idle' || this.status === 'paused' || this.status === 'ended' || this.status === 'loading') {
+            return this.pausedTick;
+        }
+        this.promotePendingAnchor(this.ctx.currentTime);
+        const raw = this.anchor.tick + (this.ctx.currentTime - this.anchor.ctxTime) / this.spt;
+        // Never regress below the anchor (count-in and the 50 ms seek ramp sit
+        // "before" it) and never overshoot the final barline.
+        return Math.min(this.score.totalTicks, Math.max(this.anchor.tick, raw));
+    }
+
+    async play(options?: { countIn?: boolean }): Promise<void> {
+        if (this.destroyed || this.status === 'playing' || this.status === 'counting' || this.status === 'loading') {
+            return;
+        }
+        if (!this.ctx) {
+            this.ctx = this.createContext();
+            this.buildGraph(this.ctx);
+            this.watchStateChanges(this.ctx);
+        }
+        await this.ctx.resume().catch(() => undefined);
+        if (!this.buffers) {
+            this.setStatus('loading');
+            try {
+                this.buffers = await this.loadBuffers(this.ctx);
+            } catch {
+                this.setStatus('idle');
+                this.onWarning?.('samples_unavailable');
+                return;
+            }
+            if (this.destroyed) {
+                return;
+            }
+        }
+
+        const startTick = this.status === 'ended' ? (this.loop ? this.loop.startTick : 0) : this.pausedTick;
+        const now = this.ctx.currentTime;
+        const startAt = now + START_DELAY_S;
+
+        if (options?.countIn) {
+            const spec = countInSpec(this.score, startTick);
+            const beatSec = spec.beatTicks * this.spt;
+            for (let k = 0; k < spec.beats; k++) {
+                this.scheduleClick(startAt + k * beatSec, k === 0);
+            }
+            this.anchor = { tick: startTick, ctxTime: startAt + spec.beats * beatSec };
+            this.setStatus('counting');
+        } else {
+            this.anchor = { tick: startTick, ctxTime: startAt };
+            this.setStatus('playing');
+        }
+        this.pendingAnchor = null;
+        this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, startTick);
+        this.nextBeatTick = null;
+        this.startScheduler();
+    }
+
+    pause(): void {
+        if (this.status !== 'playing' && this.status !== 'counting') {
+            return;
+        }
+        this.pausedTick = this.getPositionTicks();
+        this.stopScheduler();
+        this.cancelActiveNotes();
+        this.setStatus('paused');
+    }
+
+    /** Stop = rewind to the start (of the loop when one is active) and hold. */
+    stop(): void {
+        const target = this.loop ? this.loop.startTick : 0;
+        this.seek(target);
+        if (this.status === 'playing' || this.status === 'counting') {
+            this.pause();
+            this.pausedTick = target;
+        } else {
+            this.setStatus(this.status === 'idle' ? 'idle' : 'paused');
+        }
+        this.onPositionJump?.();
+    }
+
+    seek(tick: number): void {
+        const clamped = Math.max(0, Math.min(this.score.totalTicks, Math.round(tick)));
+        if (this.ctx && (this.status === 'playing' || this.status === 'counting')) {
+            this.cancelActiveNotes();
+            this.anchor = { tick: clamped, ctxTime: this.ctx.currentTime + 0.05 };
+            this.pendingAnchor = null;
+            this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, clamped);
+            this.nextBeatTick = null;
+            if (this.status === 'counting') {
+                this.setStatus('playing');
+            }
+        } else {
+            this.pausedTick = clamped;
+            if (this.status === 'ended') {
+                this.setStatus('paused');
+            }
+        }
+        this.onPositionJump?.();
+    }
+
+    setBpm(bpm: number): void {
+        this.bpmValue = bpm;
+        const wasPlaying = this.ctx && (this.status === 'playing' || this.status === 'counting');
+        if (wasPlaying && this.ctx) {
+            const positionNow = this.getPositionTicks();
+            this.spt = secondsPerTick(bpm);
+            this.anchor = { tick: positionNow, ctxTime: this.ctx.currentTime };
+            this.pendingAnchor = null;
+            this.nextBeatTick = null;
+        } else {
+            this.spt = secondsPerTick(bpm);
+        }
+    }
+
+    setHandMuted(hand: 0 | 1, muted: boolean): void {
+        this.muted[hand] = muted;
+        this.applyBusGain(hand);
+    }
+
+    setHandVolume(hand: 0 | 1, volume: number): void {
+        this.volumes[hand] = Math.min(1, Math.max(0, volume));
+        this.applyBusGain(hand);
+    }
+
+    setMetronome(on: boolean): void {
+        this.metronome = on;
+        this.nextBeatTick = null;
+    }
+
+    setLoop(loop: LoopRegion | null): void {
+        this.loop = loop && loop.endTick > loop.startTick ? loop : null;
+        this.pendingAnchor = null;
+        if (this.loop && this.status !== 'playing' && this.status !== 'counting') {
+            // Snap a paused transport into the loop so Play starts inside it.
+            if (this.pausedTick < this.loop.startTick || this.pausedTick >= this.loop.endTick) {
+                this.seek(this.loop.startTick);
+            }
+        }
+    }
+
+    getLoop(): LoopRegion | null {
+        return this.loop;
+    }
+
+    destroy(): void {
+        this.destroyed = true;
+        this.stopScheduler();
+        this.cancelActiveNotes();
+        void this.ctx?.close().catch(() => undefined);
+        this.ctx = null;
+        this.setStatus('idle');
+    }
+
+    // ----- internals -------------------------------------------------------
+
+    private setStatus(status: PlaybackStatus): void {
+        if (this.status !== status) {
+            this.status = status;
+            this.onStatus(status);
+        }
+    }
+
+    private buildGraph(ctx: AudioContextLike): void {
+        this.master = ctx.createGain();
+        this.master.gain.value = 0.9;
+        this.master.connect(ctx.destination);
+        const rh = ctx.createGain();
+        const lh = ctx.createGain();
+        rh.connect(this.master);
+        lh.connect(this.master);
+        this.handBuses = [rh, lh];
+        this.clickBus = ctx.createGain();
+        this.clickBus.gain.value = 0.5;
+        this.clickBus.connect(this.master);
+        this.applyBusGain(HAND_RH);
+        this.applyBusGain(HAND_LH);
+    }
+
+    private watchStateChanges(ctx: AudioContextLike): void {
+        if ('onstatechange' in ctx) {
+            ctx.onstatechange = () => {
+                // iOS suspends the context on interruptions (calls, Siri,
+                // backgrounding) — degrade to a clean pause, never a hang.
+                if (ctx.state !== 'running' && (this.status === 'playing' || this.status === 'counting')) {
+                    this.pause();
+                }
+            };
+        }
+    }
+
+    private applyBusGain(hand: 0 | 1): void {
+        const bus = this.handBuses?.[hand];
+        if (!bus || !this.ctx) {
+            return;
+        }
+        const target = this.muted[hand] ? 0 : this.volumes[hand];
+        bus.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02);
+    }
+
+    private startScheduler(): void {
+        this.stopScheduler();
+        this.timer = setInterval(() => this.schedulerTick(), SCHEDULER_INTERVAL_MS);
+        this.schedulerTick();
+    }
+
+    private stopScheduler(): void {
+        if (this.timer !== null) {
+            clearInterval(this.timer);
+            this.timer = null;
+        }
+    }
+
+    private promotePendingAnchor(now: number): void {
+        if (this.pendingAnchor && now >= this.pendingAnchor.ctxTime) {
+            this.anchor = this.pendingAnchor;
+            this.pendingAnchor = null;
+        }
+    }
+
+    /** Time a tick will sound, against the anchor scheduling currently targets. */
+    private timeOfTick(tick: number): number {
+        const anchor = this.pendingAnchor ?? this.anchor;
+        return anchor.ctxTime + (tick - anchor.tick) * this.spt;
+    }
+
+    private schedulerTick(): void {
+        const ctx = this.ctx;
+        if (!ctx || (this.status !== 'playing' && this.status !== 'counting')) {
+            return;
+        }
+        const now = ctx.currentTime;
+        this.promotePendingAnchor(now);
+        if (this.status === 'counting' && now >= this.anchor.ctxTime) {
+            this.setStatus('playing');
+        }
+        const horizon = now + HORIZON_S;
+
+        for (let wraps = 0; wraps < 4; wraps++) {
+            const regionEnd = this.loop ? this.loop.endTick : this.score.totalTicks;
+
+            this.scheduleNotesUpTo(regionEnd, horizon);
+            if (this.metronome) {
+                this.scheduleBeatsUpTo(regionEnd, horizon);
+            }
+
+            if (this.loop && this.timeOfTick(this.loop.endTick) < horizon && !this.pendingAnchor) {
+                // Seamless wrap: future content re-anchors at the loop start.
+                this.pendingAnchor = { tick: this.loop.startTick, ctxTime: this.timeOfTick(this.loop.endTick) };
+                this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, this.loop.startTick);
+                this.nextBeatTick = null;
+                continue;
+            }
+            break;
+        }
+
+        // The final barline is the end — the last notes' release tails keep
+        // ringing on their own after the scheduler stops.
+        if (!this.loop && this.getPositionTicks() >= this.score.totalTicks) {
+            this.stopScheduler();
+            this.pausedTick = this.score.totalTicks;
+            this.setStatus('ended');
+        }
+    }
+
+    private scheduleNotesUpTo(regionEnd: number, horizon: number): void {
+        const notes = this.score.notes;
+        while (this.nextNoteIndex < notes.length) {
+            const note = notes[this.nextNoteIndex];
+            if (!note || note.t >= regionEnd) {
+                break;
+            }
+            const startAt = this.timeOfTick(note.t);
+            if (startAt >= horizon) {
+                break;
+            }
+            this.nextNoteIndex += 1;
+            this.scheduleNote(note.p, note.h, startAt, Math.min(note.d, regionEnd - note.t) * this.spt, note.v ?? 0.75);
+        }
+    }
+
+    private scheduleBeatsUpTo(regionEnd: number, horizon: number): void {
+        for (let guard = 0; guard < 128; guard++) {
+            if (this.nextBeatTick === null) {
+                this.nextBeatTick = this.firstBeatAtOrAfter(Math.max(this.schedulingPositionFloor(), 0));
+            }
+            if (this.nextBeatTick === null || this.nextBeatTick >= regionEnd) {
+                return;
+            }
+            const at = this.timeOfTick(this.nextBeatTick);
+            if (at >= horizon) {
+                return;
+            }
+            const measureIndex = measureIndexAtTick(this.score.measures, this.nextBeatTick);
+            const measure = this.score.measures[measureIndex];
+            this.scheduleClick(at, measure ? this.nextBeatTick === measure.tick : false);
+            this.nextBeatTick = this.beatAfter(this.nextBeatTick);
+        }
+    }
+
+    /** Where beat scheduling should begin: the scheduling anchor's tick. */
+    private schedulingPositionFloor(): number {
+        return (this.pendingAnchor ?? this.anchor).tick;
+    }
+
+    private firstBeatAtOrAfter(tick: number): number | null {
+        const index = measureIndexAtTick(this.score.measures, tick);
+        if (index < 0) {
+            return null;
+        }
+        for (let i = index; i < this.score.measures.length; i++) {
+            const measure = this.score.measures[i];
+            if (!measure) {
+                return null;
+            }
+            for (const beat of beatsForMeasure(measure, this.score.timeSignatures)) {
+                if (beat >= tick) {
+                    return beat;
+                }
+            }
+        }
+        return null;
+    }
+
+    private beatAfter(tick: number): number | null {
+        return this.firstBeatAtOrAfter(tick + 1);
+    }
+
+    private scheduleNote(midi: number, hand: 0 | 1, startAt: number, durationSec: number, velocity: number): void {
+        const ctx = this.ctx;
+        const buffers = this.buffers;
+        const bus = this.handBuses?.[hand];
+        if (!ctx || !buffers || !bus) {
+            return;
+        }
+        if (this.active.size >= MAX_ACTIVE_SOURCES) {
+            if (!this.warnedSourceCap) {
+                this.warnedSourceCap = true;
+                this.onWarning?.('too_many_voices');
+            }
+            return;
+        }
+        const anchor = nearestAnchor(midi);
+        const buffer = buffers.get(anchor);
+        if (!buffer) {
+            return;
+        }
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.playbackRate.value = playbackRateFor(midi, anchor);
+        const gain = ctx.createGain();
+        gain.gain.value = velocity;
+        source.connect(gain);
+        gain.connect(bus);
+
+        const endAt = startAt + Math.max(0.05, durationSec);
+        gain.gain.setValueAtTime(velocity, endAt);
+        gain.gain.setTargetAtTime(0, endAt, RELEASE_TAU_S);
+        source.start(startAt);
+        source.stop(endAt + RELEASE_STOP_S);
+
+        const entry: ActiveNote = { source, gain };
+        this.active.add(entry);
+        source.onended = () => {
+            this.active.delete(entry);
+            gain.disconnect();
+        };
+    }
+
+    private scheduleClick(at: number, accent: boolean): void {
+        const ctx = this.ctx;
+        const clickBus = this.clickBus;
+        if (!ctx || !clickBus) {
+            return;
+        }
+        const osc = ctx.createOscillator();
+        osc.frequency.value = accent ? 1800 : 1300;
+        const gain = ctx.createGain();
+        gain.gain.value = 0;
+        gain.gain.setValueAtTime(accent ? 0.9 : 0.6, at);
+        gain.gain.setTargetAtTime(0, at + 0.012, 0.015);
+        osc.connect(gain);
+        gain.connect(clickBus);
+        osc.start(at);
+        osc.stop(at + 0.09);
+    }
+
+    private cancelActiveNotes(): void {
+        const now = this.ctx?.currentTime ?? 0;
+        for (const { source, gain } of this.active) {
+            gain.gain.setTargetAtTime(0, now, 0.02); // declick
+            try {
+                source.stop(now + 0.08);
+            } catch {
+                // never started / already stopped
+            }
+        }
+        this.active.clear();
+    }
+}
