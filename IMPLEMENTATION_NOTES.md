@@ -1,4 +1,4 @@
-# Sheet Music Scribbler — implementation notes
+# Cleffy — implementation notes
 
 Real-time collaborative sheet music annotation ("Google Docs for sheet music").
 Built across six milestones, one commit each (M0–M6 in `git log`).

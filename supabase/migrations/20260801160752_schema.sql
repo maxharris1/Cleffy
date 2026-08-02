@@ -1,4 +1,4 @@
--- Sheet Music Scribbler — core schema.
+-- Cleffy — core schema.
 -- The PDF is immutable; annotations are vector rows keyed to
 -- (document, page, normalized coords). Soft deletes only (tombstones) so
 -- offline clients converge; `seq` is the server-authoritative sync watermark.

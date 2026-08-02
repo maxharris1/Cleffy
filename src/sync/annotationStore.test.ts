@@ -131,4 +131,40 @@ describe('AnnotationStore', () => {
         await store.delete('a1');
         expect(pokes).toBe(2);
     });
+
+    it('captures a day starting-point snapshot before the first edit', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+
+        const snaps = await db.annotationSnapshots.where('docId').equals(DOC).toArray();
+        expect(snaps).toHaveLength(1);
+        // Pre-first-edit set was empty.
+        expect(snaps[0]?.payload).toEqual([]);
+    });
+
+    it('does not overwrite the day snapshot on later edits', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+        const first = await db.annotationSnapshots.where('docId').equals(DOC).first();
+        expect(first?.payload).toEqual([]);
+
+        await store.create(makeStroke('a3'));
+        const snaps = await db.annotationSnapshots.where('docId').equals(DOC).toArray();
+        expect(snaps).toHaveLength(1);
+        expect(snaps[0]?.id).toBe(first?.id);
+    });
+
+    it('history overlay shows snapshot marks read-only without mutating live state', async () => {
+        await store.create(makeStroke('a1'));
+        const snapMarks = [makeStroke('old')];
+        store.setHistoryOverlay(snapMarks);
+        expect(store.isHistoryMode).toBe(true);
+        expect(store.getPage(0).has('old')).toBe(true);
+        expect(store.getPage(0).has('a1')).toBe(false);
+        expect(store.liveAnnotations().map((a) => a.id)).toEqual(['a1']);
+
+        store.setHistoryOverlay(null);
+        expect(store.isHistoryMode).toBe(false);
+        expect(store.getPage(0).has('a1')).toBe(true);
+    });
 });

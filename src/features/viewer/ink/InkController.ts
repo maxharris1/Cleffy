@@ -17,7 +17,7 @@ import type { AnnotationStore } from '@/sync/annotationStore';
 import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
 import type { InkProgressMsg } from '@/sync/wire';
-import { HIGHLIGHT_WIDTH_FACTOR, STROKE_WIDTHS, useViewerStore } from '@/state/store';
+import { ERASER_RADIUS_CSS, HIGHLIGHT_WIDTH_FACTOR, STROKE_WIDTHS, useViewerStore } from '@/state/store';
 import type { Annotation, StrokePayload, ViewState } from '@/types/models';
 
 export interface TextIntent {
@@ -41,8 +41,6 @@ interface LiveStroke {
     simulatePressure: boolean;
 }
 
-/** Eraser pick radius in CSS px at current zoom. */
-const ERASER_RADIUS_CSS = 12;
 /** Pen-up movement under this many CSS px counts as a tap (text tool). */
 const TAP_SLOP_CSS = 6;
 /** Decimation threshold in CSS px. */
@@ -378,8 +376,9 @@ export class InkController {
         if (!layout) {
             return;
         }
-        // Pick radius: CSS px → bitmap px.
-        const radiusPx = (ERASER_RADIUS_CSS / (layout.width * view.scale)) * canvases.committed.width;
+        // Pick radius: CSS px (from Size control) → bitmap px.
+        const eraserCss = ERASER_RADIUS_CSS[useViewerStore.getState().widthKey];
+        const radiusPx = (eraserCss / (layout.width * view.scale)) * canvases.committed.width;
         const hits = hitTestPage(
             this.opts.store.getPage(pageIndex).values(),
             nx,

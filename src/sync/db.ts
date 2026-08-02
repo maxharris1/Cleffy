@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 
+import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import type { Annotation } from '@/types/models';
 
 /** Server-mirror row: an Annotation plus a dirty flag for the op queue. */
@@ -42,6 +43,7 @@ export class ScribblerDb extends Dexie {
     ops!: Table<PendingOp, number>;
     syncState!: Table<SyncState, string>;
     pdfCache!: Table<CachedPdf, string>;
+    annotationSnapshots!: Table<LocalAnnotationSnapshot, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -50,6 +52,13 @@ export class ScribblerDb extends Dexie {
             ops: '++opId, docId',
             syncState: 'docId',
             pdfCache: 'docId',
+        });
+        this.version(2).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
         });
     }
 }

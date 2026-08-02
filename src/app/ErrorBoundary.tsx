@@ -1,5 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
+import { BrandShell, brandPrimaryButtonClassName } from '@/ui/BrandShell';
+
 interface ErrorBoundaryProps {
     children: ReactNode;
 }
@@ -23,19 +25,18 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     render(): ReactNode {
         if (this.state.error) {
             return (
-                <main className="flex min-h-full flex-col items-center justify-center gap-4 p-8">
-                    <h1 className="text-xl font-semibold text-stone-800">Something went wrong</h1>
-                    <p className="max-w-md text-center text-sm text-stone-500">
-                        Your annotations are saved on this device. Reload to continue where you left off.
-                    </p>
+                <BrandShell
+                    title="Something went wrong"
+                    subtitle="Your annotations are saved on this device. Reload to continue where you left off."
+                >
                     <button
                         type="button"
                         onClick={() => window.location.reload()}
-                        className="rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white shadow hover:bg-indigo-500"
+                        className={brandPrimaryButtonClassName}
                     >
                         Reload
                     </button>
-                </main>
+                </BrandShell>
             );
         }
         return this.props.children;

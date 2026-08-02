@@ -3,7 +3,7 @@ name: supabase-ops
 description: Operate this project's Supabase backend (project jibgwgosihadbjgxdsfe) — where credentials live, how to apply migrations from the Claude sandbox, auth/bucket configuration, and how to run the live two-browser E2E test despite the sandbox's TLS-fingerprinting egress gateway. Use when changing the database schema, RLS, auth settings, storage, or verifying against the live backend.
 ---
 
-# Supabase operations — Sheet Music Scribbler
+# Supabase operations — Cleffy
 
 Project ref: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe
 Current state: migrations 0001–0003 applied, `scores` bucket created (private, 50 MB,

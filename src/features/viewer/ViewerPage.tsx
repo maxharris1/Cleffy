@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 
-import { displayNameOf, useSession } from '@/features/auth/session';
+import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
-import { exportAnnotatedPdf } from '@/features/export/exportPdf';
+import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import {
     fetchDocument,
     fetchMyRole,
@@ -12,10 +12,12 @@ import {
     loadDocumentOffline,
 } from '@/features/library/documentsService';
 import { ShareDialog } from '@/features/share/ShareDialog';
+import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
+import type { AnnotationStore } from '@/sync/annotationStore';
 import type { SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow, MemberRole } from '@/types/database';
@@ -44,9 +46,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
     const [shareOpen, setShareOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
-    const [exporting, setExporting] = useState(false);
+    const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
 
     const userId = session?.user.id;
+
+    const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
 
     useEffect(() => {
         if (!userId) {
@@ -92,11 +96,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         return <Navigate to="/" replace />;
     }
     if (loadError) {
+        const escapeTo = isRegisteredSession(session) ? '/library' : '/';
+        const escapeLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
         return (
             <main className="flex min-h-full flex-col items-center justify-center gap-3 p-8">
                 <p className="max-w-md text-center text-red-600">{loadError}</p>
-                <Link to="/" className="text-sm text-indigo-600 underline">
-                    Back to library
+                <Link to={escapeTo} className="text-sm text-indigo-600 underline">
+                    {escapeLabel}
                 </Link>
             </main>
         );
@@ -110,13 +116,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }
 
     const readOnly = state.role !== 'owner' && state.role !== 'editor';
+    const backTo = isRegisteredSession(session) ? '/library' : '/';
+    const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
 
     return (
         <div className="fixed inset-0 flex flex-col">
             <header className="flex items-center gap-3 border-b border-stone-200 bg-white px-3 py-2 shadow-sm">
                 <Link
-                    to="/"
-                    aria-label="Back to library"
+                    to={backTo}
+                    aria-label={backLabel}
                     className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100"
                 >
                     ←
@@ -127,24 +135,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 {readOnly ? (
                     <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">view only</span>
                 ) : null}
-                <ExportButton
-                    exporting={exporting}
-                    onExport={async () => {
-                        setExporting(true);
-                        try {
-                            await exportAnnotatedPdf(docId, state.bytes, state.doc.title);
-                        } finally {
-                            setExporting(false);
-                        }
-                    }}
-                />
+                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
+                <ShareExportMenu docId={docId} bytes={state.bytes} title={state.doc.title} />
                 {state.role === 'owner' ? (
                     <button
                         type="button"
                         onClick={() => setShareOpen(true)}
                         className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white shadow hover:bg-indigo-500"
                     >
-                        Share
+                        Invite
                     </button>
                 ) : null}
             </header>
@@ -155,6 +154,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         key={docId}
                         docId={docId}
                         readOnly={readOnly}
+                        onStoreReady={onStoreReady}
                         sync={{
                             userId,
                             name: displayNameOf(session),
@@ -191,8 +191,10 @@ const SyncDot = ({ status }: { status: SyncStatus }) => {
 
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
-    const [exporting, setExporting] = useState(false);
+    const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     const bytes = getLocalDoc(docId);
+
+    const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
 
     const reopenFile = useCallback(
         async (file: File) => {
@@ -231,7 +233,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                     />
                 </label>
                 <Link to="/" className="text-sm text-indigo-600 underline">
-                    Back to library
+                    Back to home
                 </Link>
             </main>
         );
@@ -242,44 +244,21 @@ const LocalViewer = ({ docId }: { docId: string }) => {
             <header className="flex items-center gap-3 border-b border-stone-200 bg-white px-3 py-2 shadow-sm">
                 <Link
                     to="/"
-                    aria-label="Back to library"
+                    aria-label="Back to home"
                     className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100"
                 >
                     ←
                 </Link>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">Local score</span>
                 <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">this device only</span>
-                <ExportButton
-                    exporting={exporting}
-                    onExport={async () => {
-                        setExporting(true);
-                        try {
-                            await exportAnnotatedPdf(docId, bytes, 'Score');
-                        } finally {
-                            setExporting(false);
-                        }
-                    }}
-                />
+                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
+                <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
             </header>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
-                    <PdfViewport key={docId} docId={docId} />
+                    <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
                 </PdfProvider>
             </div>
         </div>
-    );
-};
-
-const ExportButton = ({ exporting, onExport }: { exporting: boolean; onExport: () => Promise<void> }) => {
-    return (
-        <button
-            type="button"
-            disabled={exporting}
-            title="Export annotated PDF"
-            onClick={() => void onExport().catch((err: unknown) => console.warn('Export failed', err))}
-            className="rounded-lg px-3 py-1.5 text-sm font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-50"
-        >
-            {exporting ? 'Exporting…' : 'Export'}
-        </button>
     );
 };

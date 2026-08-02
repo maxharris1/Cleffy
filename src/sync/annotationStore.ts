@@ -1,3 +1,4 @@
+import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
 import { UndoStack, type UndoableOp } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, PendingOpType, ScribblerDb } from '@/sync/db';
 import type { Annotation, AnnotationPayload } from '@/types/models';
@@ -24,6 +25,8 @@ export class AnnotationStore {
     private pages = new Map<number, Map<string, Annotation>>();
     /** All rows incl. tombstones, by id — needed for undo-restore + LWW merge. */
     private byId = new Map<string, Annotation>();
+    /** When set, getPage returns this instead of live state (lesson history view). */
+    private historyOverlay: Map<number, Map<string, Annotation>> | null = null;
     private listeners = new Set<PageListener>();
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
@@ -54,11 +57,133 @@ export class AnnotationStore {
 
     /** Live (non-deleted) annotations on a page. Do not mutate. */
     getPage(pageIndex: number): ReadonlyMap<string, Annotation> {
+        if (this.historyOverlay) {
+            return this.historyOverlay.get(pageIndex) ?? EMPTY_PAGE;
+        }
         return this.pages.get(pageIndex) ?? EMPTY_PAGE;
     }
 
     get(id: string): Annotation | undefined {
+        if (this.historyOverlay) {
+            for (const page of this.historyOverlay.values()) {
+                const hit = page.get(id);
+                if (hit) {
+                    return hit;
+                }
+            }
+            return undefined;
+        }
         return this.byId.get(id);
+    }
+
+    get isHistoryMode(): boolean {
+        return this.historyOverlay !== null;
+    }
+
+    /** Show a day's starting annotations read-only (null clears). */
+    setHistoryOverlay(annotations: Annotation[] | null): void {
+        const touched = new Set<number>([...this.pages.keys()]);
+        if (this.historyOverlay) {
+            for (const page of this.historyOverlay.keys()) {
+                touched.add(page);
+            }
+        }
+        if (!annotations) {
+            this.historyOverlay = null;
+        } else {
+            const overlay = new Map<number, Map<string, Annotation>>();
+            for (const annotation of annotations) {
+                if (annotation.deletedAt) {
+                    continue;
+                }
+                let map = overlay.get(annotation.page);
+                if (!map) {
+                    map = new Map();
+                    overlay.set(annotation.page, map);
+                }
+                map.set(annotation.id, annotation);
+                touched.add(annotation.page);
+            }
+            this.historyOverlay = overlay;
+        }
+        for (const page of touched) {
+            this.notifyPage(page);
+        }
+        this.notifyMeta();
+    }
+
+    /** All currently live annotations (ignores history overlay). */
+    liveAnnotations(): Annotation[] {
+        const out: Annotation[] = [];
+        for (const annotation of this.byId.values()) {
+            if (!annotation.deletedAt) {
+                out.push(annotation);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Replace live annotations with a day's starting point (editors only).
+     * Soft-deletes anything not in the snapshot; creates/updates/restores the rest.
+     */
+    async restoreFromSnapshot(snapshot: Annotation[]): Promise<void> {
+        if (this.historyOverlay) {
+            this.setHistoryOverlay(null);
+        }
+        const snapById = new Map(snapshot.filter((a) => !a.deletedAt).map((a) => [a.id, a]));
+        this.beginBatch();
+        try {
+            for (const live of this.liveAnnotations()) {
+                if (!snapById.has(live.id)) {
+                    await this.delete(live.id);
+                }
+            }
+            const now = nowIso();
+            for (const snap of snapById.values()) {
+                const existing = this.byId.get(snap.id);
+                const next: Annotation = {
+                    ...snap,
+                    docId: this.docId,
+                    updatedAt: now,
+                    deletedAt: null,
+                };
+                if (!existing) {
+                    await this.create({ ...next, createdAt: snap.createdAt || now, seq: 0 });
+                } else if (existing.deletedAt) {
+                    await this.commit(
+                        { type: 'restore', annotation: { ...next, seq: existing.seq } },
+                        { recordUndo: true },
+                    );
+                    // After restore, payload/color may still differ — update if needed.
+                    const restored = this.byId.get(snap.id);
+                    if (
+                        restored &&
+                        (restored.color !== next.color ||
+                            JSON.stringify(restored.payload) !== JSON.stringify(next.payload) ||
+                            restored.page !== next.page ||
+                            restored.kind !== next.kind)
+                    ) {
+                        await this.update(snap.id, { color: next.color, payload: next.payload });
+                    }
+                } else if (
+                    existing.color !== next.color ||
+                    JSON.stringify(existing.payload) !== JSON.stringify(next.payload) ||
+                    existing.page !== next.page ||
+                    existing.kind !== next.kind
+                ) {
+                    // Page/kind changes aren't in AnnotationPatch — delete+create if page/kind differ.
+                    if (existing.page !== next.page || existing.kind !== next.kind) {
+                        await this.delete(existing.id);
+                        await this.create({ ...next, seq: 0 });
+                    } else {
+                        await this.update(snap.id, { color: next.color, payload: next.payload });
+                    }
+                }
+            }
+        } finally {
+            this.endBatch();
+        }
     }
 
     /** Pages that currently have live annotations. */
@@ -256,6 +381,15 @@ export class AnnotationStore {
             | { type: 'restore'; annotation: Annotation },
         options: { recordUndo?: boolean },
     ): Promise<void> {
+        if (this.historyOverlay) {
+            return;
+        }
+
+        // Capture today's starting point before the first user edit of the day.
+        if (options.recordUndo) {
+            await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
+        }
+
         const { annotation } = op;
 
         // 1. In-memory map (render source) — synchronous, so the UI never waits on IndexedDB.

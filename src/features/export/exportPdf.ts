@@ -1,15 +1,29 @@
 import type { ExportRequest, ExportResponse } from '@/features/export/exportWorker';
+import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
 import { getDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';
+
+export interface ExportAnnotatedPdfOptions {
+    /** When set, export only this 0-based page (single-page annotated PDF). */
+    pageIndex?: number;
+}
 
 /**
  * Export the score with annotations baked in (plan §export). Runs pdf-lib in
  * a worker; offers the share sheet on capable devices (AirDrop/Files on iPad),
  * else a plain download.
  */
-export const exportAnnotatedPdf = async (docId: string, sourceBytes: ArrayBuffer, title: string): Promise<void> => {
+export const exportAnnotatedPdf = async (
+    docId: string,
+    sourceBytes: ArrayBuffer,
+    title: string,
+    options: ExportAnnotatedPdfOptions = {},
+): Promise<void> => {
     const rows = await getDb().annotations.where('docId').equals(docId).toArray();
-    const annotations: Annotation[] = rows.filter((row) => !row.deletedAt).map(({ pending: _pending, ...a }) => a);
+    let annotations: Annotation[] = rows.filter((row) => !row.deletedAt).map(({ pending: _pending, ...a }) => a);
+    if (options.pageIndex !== undefined) {
+        annotations = annotations.filter((a) => a.page === options.pageIndex);
+    }
 
     const worker = new Worker(new URL('./exportWorker.ts', import.meta.url), { type: 'module' });
     const outBytes = await new Promise<Uint8Array>((resolve, reject) => {
@@ -21,30 +35,17 @@ export const exportAnnotatedPdf = async (docId: string, sourceBytes: ArrayBuffer
             }
         };
         worker.onerror = () => reject(new Error('Export failed'));
-        const request: ExportRequest = { bytes: sourceBytes.slice(0), annotations };
+        const request: ExportRequest = {
+            bytes: sourceBytes.slice(0),
+            annotations,
+            pageIndex: options.pageIndex,
+        };
         worker.postMessage(request, [request.bytes]);
     }).finally(() => worker.terminate());
 
     const blob = new Blob([outBytes as BlobPart], { type: 'application/pdf' });
-    const fileName = `${title.replace(/[/\\:]/g, '-')} (annotated).pdf`;
+    const pageSuffix = options.pageIndex !== undefined ? ` p${options.pageIndex + 1}` : ' (annotated)';
+    const fileName = `${safeFileBase(title)}${pageSuffix}.pdf`;
     const file = new File([blob], fileName, { type: 'application/pdf' });
-
-    if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
-        try {
-            await navigator.share({ files: [file], title: fileName });
-            return;
-        } catch (err) {
-            if (err instanceof Error && err.name === 'AbortError') {
-                return; // user closed the share sheet
-            }
-            // Fall through to download on share failures.
-        }
-    }
-
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    await shareOrDownloadFile(file, fileName);
 };

@@ -15,9 +15,10 @@ describe('App', () => {
         vi.unstubAllEnvs();
     });
 
-    it('renders the library page on /', () => {
+    it('renders the landing page on /', () => {
         render(<App />);
-        expect(screen.getByText('Sheet Music Scribbler')).toBeInTheDocument();
+        expect(screen.getByText('Cleffy')).toBeInTheDocument();
+        expect(screen.getByText('Annotate scores on this device')).toBeInTheDocument();
         expect(screen.getByText('Open a PDF')).toBeInTheDocument();
     });
 });

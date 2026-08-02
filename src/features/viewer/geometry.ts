@@ -86,6 +86,36 @@ export const visiblePageRange = (
     };
 };
 
+/**
+ * Page whose vertical span contains (or is nearest to) the viewport center.
+ * Used for "share this page" actions.
+ */
+export const focusedPageIndex = (
+    view: ViewState,
+    viewportHeight: number,
+    layouts: readonly PageLayout[],
+): number => {
+    if (layouts.length === 0) {
+        return 0;
+    }
+    const centerY = (view.scrollY + viewportHeight / 2) / view.scale;
+    let best = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < layouts.length; i++) {
+        const layout = layouts[i];
+        if (!layout) {
+            continue;
+        }
+        const mid = layout.top + layout.height / 2;
+        const dist = Math.abs(mid - centerY);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = i;
+        }
+    }
+    return best;
+};
+
 /** Clamp scroll offsets so content cannot be dragged fully out of view. */
 export const clampScroll = (
     view: ViewState,

@@ -8,7 +8,7 @@
  * schema constraint, silently collapsing every query type to `never`.
  */
 
-import type { AnnotationKind, AnnotationPayload } from '@/types/models';
+import type { Annotation, AnnotationKind, AnnotationPayload } from '@/types/models';
 
 export type MemberRole = 'owner' | 'editor' | 'viewer';
 export type ShareRole = 'editor' | 'viewer';
@@ -87,6 +87,25 @@ export type AnnotationUpdate = {
     deleted_at?: string | null;
 };
 
+export type AnnotationSnapshotRow = {
+    id: string;
+    document_id: string;
+    captured_on: string;
+    label: string | null;
+    payload: Annotation[];
+    created_at: string;
+    created_by: string | null;
+};
+
+export type AnnotationSnapshotInsert = {
+    id: string;
+    document_id: string;
+    captured_on: string;
+    label?: string | null;
+    payload: Annotation[];
+    created_by?: string | null;
+};
+
 export type Database = {
     public: {
         Tables: {
@@ -114,6 +133,12 @@ export type Database = {
                 Row: AnnotationRow;
                 Insert: AnnotationInsert;
                 Update: AnnotationUpdate;
+                Relationships: [];
+            };
+            annotation_snapshots: {
+                Row: AnnotationSnapshotRow;
+                Insert: AnnotationSnapshotInsert;
+                Update: never;
                 Relationships: [];
             };
         };

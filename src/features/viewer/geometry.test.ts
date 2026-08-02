@@ -4,6 +4,7 @@ import {
     clampScroll,
     computeDocumentLayout,
     fitPageWidthScale,
+    focusedPageIndex,
     MAX_SCALE,
     MIN_SCALE,
     PAGE_GAP,
@@ -56,6 +57,21 @@ describe('visiblePageRange', () => {
 
     it('handles empty layouts', () => {
         expect(visiblePageRange({ scale: 1, scrollX: 0, scrollY: 0 }, 400, [])).toEqual({ start: 0, end: -1 });
+    });
+});
+
+describe('focusedPageIndex', () => {
+    const { layouts } = computeDocumentLayout(pages);
+
+    it('returns the page nearest the viewport center', () => {
+        expect(focusedPageIndex({ scale: 1, scrollX: 0, scrollY: 0 }, 400, layouts)).toBe(0);
+        // Scroll so viewport center sits on page 1.
+        const page1Top = layouts[1]?.top ?? 0;
+        expect(focusedPageIndex({ scale: 1, scrollX: 0, scrollY: page1Top }, 400, layouts)).toBe(1);
+    });
+
+    it('returns 0 for empty layouts', () => {
+        expect(focusedPageIndex({ scale: 1, scrollX: 0, scrollY: 0 }, 400, [])).toBe(0);
     });
 });
 

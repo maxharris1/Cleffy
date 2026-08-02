@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'icons');
 
-const BG = [79, 70, 229]; // indigo-600 #4f46e5
+const BG = [67, 56, 202]; // landing accent #4338ca
 const FG = [255, 255, 255];
 
 const crcTable = new Int32Array(256).map((_, n) => {

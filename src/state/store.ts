@@ -12,6 +12,13 @@ export const STROKE_WIDTHS: Record<StrokeWidthKey, number> = {
     thick: 0.01,
 };
 
+/** Eraser hit radius in CSS px at current zoom (wired to Size control). */
+export const ERASER_RADIUS_CSS: Record<StrokeWidthKey, number> = {
+    thin: 8,
+    medium: 14,
+    thick: 24,
+};
+
 /** Highlighter is a fat translucent pen. */
 export const HIGHLIGHT_WIDTH_FACTOR = 3.5;
 
@@ -21,6 +28,8 @@ interface ViewerStore {
     tool: Tool;
     color: string;
     widthKey: StrokeWidthKey;
+    /** 0-based page most centered in the viewport (for page share/export). */
+    focusedPageIndex: number;
     /** Accessibility: let a finger draw (no Apple Pencil / stylus available). */
     fingerDraws: boolean;
     setView: (view: ViewState) => void;
@@ -29,6 +38,7 @@ interface ViewerStore {
     setTool: (tool: Tool) => void;
     setColor: (color: string) => void;
     setWidthKey: (widthKey: StrokeWidthKey) => void;
+    setFocusedPageIndex: (focusedPageIndex: number) => void;
     setFingerDraws: (fingerDraws: boolean) => void;
 }
 
@@ -46,12 +56,14 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     tool: 'pen',
     color: STROKE_COLORS[0],
     widthKey: 'medium',
+    focusedPageIndex: 0,
     fingerDraws: false,
     setView: (view) => set({ view }),
     setPinch: (pinch) => set({ pinch }),
-    resetView: (view) => set({ view: { ...INITIAL_VIEW, ...view }, pinch: null }),
+    resetView: (view) => set({ view: { ...INITIAL_VIEW, ...view }, pinch: null, focusedPageIndex: 0 }),
     setTool: (tool) => set({ tool }),
     setColor: (color) => set({ color }),
     setWidthKey: (widthKey) => set({ widthKey }),
+    setFocusedPageIndex: (focusedPageIndex) => set({ focusedPageIndex }),
     setFingerDraws: (fingerDraws) => set({ fingerDraws }),
 }));

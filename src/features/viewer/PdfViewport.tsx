@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import {
     clampScroll,
     computeDocumentLayout,
     fitPageWidthScale,
+    focusedPageIndex,
     visiblePageRange,
     zoomAt,
     type DocumentLayout,
@@ -40,6 +41,8 @@ export interface PdfViewportProps {
     docId: string;
     /** View-only role: hides editing UI and blocks the ink delegate. */
     readOnly?: boolean;
+    /** Expose the live AnnotationStore to the parent (share/history chrome). */
+    onStoreReady?: (store: AnnotationStore) => void;
     /** Present for cloud documents: enables the sync engine + realtime channel. */
     sync?: {
         userId: string;
@@ -55,7 +58,7 @@ export interface PdfViewportProps {
  * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
  * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps) => {
+export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -67,24 +70,33 @@ export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps)
 
     const layout: DocumentLayout = useMemo(() => computeDocumentLayout(pageSizes), [pageSizes]);
 
-    // Live refs so the imperative controllers always see current geometry.
-    const layoutRef = useRef(layout);
-    const viewportSizeRef = useRef(viewportSize);
-    const readOnlyRef = useRef(readOnly);
-    useEffect(() => {
-        layoutRef.current = layout;
-        viewportSizeRef.current = viewportSize;
-        readOnlyRef.current = readOnly;
-    }, [layout, viewportSize, readOnly]);
-
     // Annotation store + canvas registry — stable per mounted document, safe to
     // create during render (neither touches refs).
     const [annotationStore] = useState(() => new AnnotationStore(getDb(), docId));
     const [registry] = useState(() => new CanvasRegistry());
+    const historyMode = useSyncExternalStore(
+        (cb) => annotationStore.subscribeMeta(cb),
+        () => annotationStore.isHistoryMode,
+    );
+    const effectiveReadOnly = readOnly || historyMode;
+
+    // Live refs so the imperative controllers always see current geometry.
+    const layoutRef = useRef(layout);
+    const viewportSizeRef = useRef(viewportSize);
+    const readOnlyRef = useRef(effectiveReadOnly);
+    useEffect(() => {
+        layoutRef.current = layout;
+        viewportSizeRef.current = viewportSize;
+        readOnlyRef.current = effectiveReadOnly;
+    }, [layout, viewportSize, effectiveReadOnly]);
 
     useEffect(() => {
         void annotationStore.load();
     }, [annotationStore]);
+
+    useEffect(() => {
+        onStoreReady?.(annotationStore);
+    }, [annotationStore, onStoreReady]);
 
     const syncUserId = sync?.userId;
     const syncName = sync?.name;
@@ -241,6 +253,7 @@ export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps)
         const timer = setTimeout(() => {
             const range = visiblePageRange(view, viewportSize.height, layout.layouts, 0);
             channelRef.current?.setPage(Math.max(0, range.start));
+            useViewerStore.getState().setFocusedPageIndex(focusedPageIndex(view, viewportSize.height, layout.layouts));
         }, 400);
         return () => clearTimeout(timer);
     }, [view, viewportSize.height, layout]);
@@ -352,8 +365,25 @@ export const PdfViewport = ({ docId, readOnly = false, sync }: PdfViewportProps)
                     >
                         {pages}
                     </div>
-                    {readOnly ? null : <Toolbar store={annotationStore} />}
-                    {!readOnly && textIntent && textIntentLayout ? (
+                    {historyMode ? (
+                        <div
+                            data-ui-overlay
+                            className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
+                        >
+                            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
+                                <span>Viewing day starting point</span>
+                                <button
+                                    type="button"
+                                    onClick={() => annotationStore.setHistoryOverlay(null)}
+                                    className="rounded-full bg-amber-800 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-amber-700"
+                                >
+                                    Back to current
+                                </button>
+                            </div>
+                        </div>
+                    ) : null}
+                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} />}
+                    {!effectiveReadOnly && textIntent && textIntentLayout ? (
                         <TextEditorOverlay
                             intent={textIntent}
                             layout={textIntentLayout}

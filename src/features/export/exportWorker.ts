@@ -19,21 +19,44 @@ import { isTextPayload, type Annotation } from '@/types/models';
 export interface ExportRequest {
     bytes: ArrayBuffer;
     annotations: Annotation[];
+    /** When set, keep only this 0-based page in the output PDF. */
+    pageIndex?: number;
 }
 
 export type ExportResponse = { ok: true; bytes: Uint8Array } | { ok: false; error: string };
 
-const flatten = async ({ bytes, annotations }: ExportRequest): Promise<Uint8Array> => {
+const flatten = async ({ bytes, annotations, pageIndex }: ExportRequest): Promise<Uint8Array> => {
     // Some IMSLP scans are owner-password encrypted; loading still works.
-    const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const source = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const doc =
+        pageIndex === undefined
+            ? source
+            : await (async () => {
+                  const single = await PDFDocument.create();
+                  const [copied] = await single.copyPages(source, [pageIndex]);
+                  if (!copied) {
+                      throw new Error(`Page ${pageIndex + 1} not found`);
+                  }
+                  single.addPage(copied);
+                  return single;
+              })();
     const font = await doc.embedFont(StandardFonts.Helvetica);
     const pages = doc.getPages();
+
+    // When exporting a single page, annotation.page still refers to the source
+    // index — remap onto the sole output page.
+    const pageOf = (annotationPage: number) => {
+        if (pageIndex === undefined) {
+            return pages[annotationPage];
+        }
+        return annotationPage === pageIndex ? pages[0] : undefined;
+    };
 
     for (const annotation of annotations) {
         if (annotation.deletedAt) {
             continue;
         }
-        const page = pages[annotation.page];
+        const page = pageOf(annotation.page);
         if (!page) {
             continue;
         }

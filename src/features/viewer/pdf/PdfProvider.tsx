@@ -1,6 +1,7 @@
 import { getDocument } from 'pdfjs-dist';
 import { useEffect, useState, type ReactNode } from 'react';
 
+import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
 import { LOADING_VALUE, PdfContext, type PdfContextValue } from '@/features/viewer/pdf/pdfContext';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { PageSize } from '@/types/models';
@@ -22,7 +23,7 @@ export const PdfProvider = ({ data, children }: PdfProviderProps) => {
 
         // Copy: getDocument transfers the underlying buffer to the worker, and the
         // caller still owns `data` (export, offline cache).
-        const loadingTask = getDocument({ data: data.slice(0), worker });
+        const loadingTask = getDocument({ data: data.slice(0), worker, ...pdfDocumentOptions });
 
         (async () => {
             try {

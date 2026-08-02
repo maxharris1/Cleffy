@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 
-import { signInAnonymouslyWithName, useSession } from '@/features/auth/session';
+import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
 import { redeemShareLink } from '@/features/share/shareService';
+import {
+    BrandShell,
+    BrandTextField,
+    brandLinkClassName,
+    brandPrimaryButtonClassName,
+} from '@/ui/BrandShell';
 
 /**
  * Share-link landing. If a session already exists (teacher clicking their own
@@ -19,8 +25,6 @@ export const JoinPage = () => {
     const [error, setError] = useState<string | null>(null);
     const redeemedRef = useRef(false);
 
-    // Auto-redeem as soon as a session exists. All setState happens inside
-    // promise callbacks (async), never synchronously in the effect.
     useEffect(() => {
         if (loading || !token || !session || redeemedRef.current) {
             return;
@@ -49,7 +53,6 @@ export const JoinPage = () => {
         setSubmitting(true);
         try {
             await signInAnonymouslyWithName(trimmed);
-            // The session change re-runs the effect above, which redeems.
         } catch (err) {
             setSubmitting(false);
             setError(err instanceof Error ? err.message : 'Could not join.');
@@ -61,27 +64,28 @@ export const JoinPage = () => {
     }
 
     const busy = loading || submitting || (session !== null && error === null);
+    const escapeTo = isRegisteredSession(session) ? '/library' : '/';
+    const escapeLabel = isRegisteredSession(session) ? 'Go to the library' : 'Back to home';
 
     return (
-        <main className="flex min-h-full flex-col items-center justify-center gap-6 p-6">
-            <h1 className="text-2xl font-bold text-indigo-700">Join a shared score</h1>
-
+        <BrandShell
+            title="Join a shared score"
+            subtitle={error || busy ? undefined : 'Enter your name so collaborators know who you are.'}
+        >
             {error ? (
                 <div className="text-center">
                     <p className="text-red-600">{error}</p>
-                    <Link to="/" className="mt-3 inline-block text-sm text-indigo-600 underline">
-                        Go to the library
+                    <Link to={escapeTo} className={`mt-3 inline-block ${brandLinkClassName}`}>
+                        {escapeLabel}
                     </Link>
                 </div>
             ) : busy ? (
-                <p className="animate-pulse text-stone-500">Joining…</p>
+                <p className="animate-pulse text-center text-stone-500">Joining…</p>
             ) : (
-                <div className="w-full max-w-sm rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
-                    <label htmlFor="name" className="block text-sm font-medium text-stone-700">
-                        Your name
-                    </label>
-                    <input
+                <>
+                    <BrandTextField
                         id="name"
+                        label="Your name"
                         value={name}
                         autoFocus
                         onChange={(e) => setName(e.target.value)}
@@ -91,20 +95,19 @@ export const JoinPage = () => {
                             }
                         }}
                         placeholder="e.g. Sharon"
-                        className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200"
                     />
                     <button
                         type="button"
                         onClick={() => void joinAsGuest()}
-                        className="mt-3 w-full rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white shadow hover:bg-indigo-500"
+                        className={brandPrimaryButtonClassName}
                     >
                         Join
                     </button>
-                    <p className="mt-2 text-xs text-stone-400">
+                    <p className="mt-3 text-xs text-stone-500">
                         No account needed — you can add an email later to keep your work across devices.
                     </p>
-                </div>
+                </>
             )}
-        </main>
+        </BrandShell>
     );
 };
