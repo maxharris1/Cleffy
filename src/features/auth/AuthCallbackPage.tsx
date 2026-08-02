@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
+import { mapAuthError } from '@/features/auth/authErrors';
 import { isRegisteredSession, useSession } from '@/features/auth/session';
 import { BrandShell } from '@/ui/BrandShell';
 import { LoadingText } from '@/ui/Loading';
@@ -29,7 +30,11 @@ const readAuthErrorFromUrl = (): string | null => {
         hashParams.get('error_description') ??
         params.get('error') ??
         hashParams.get('error');
-    return description ? description.replace(/\+/g, ' ') : null;
+    if (!description) {
+        return null;
+    }
+    // Redirect fragments are plain strings (no Auth API code).
+    return mapAuthError(description.replace(/\+/g, ' '));
 };
 
 /**
