@@ -1,8 +1,13 @@
+/* Self-hosted fonts (precached by the PWA — no CDN, works offline). */
+@import '@fontsource-variable/bodoni-moda/opsz.css';
+@import '@fontsource-variable/bodoni-moda/opsz-italic.css';
+@import '@fontsource-variable/instrument-sans/wght.css';
 @import 'tailwindcss';
 
 @theme {
-    --font-display: 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+    --font-display: 'Bodoni Moda Variable', ui-serif, Georgia, 'Times New Roman', serif;
     --font-sans:
+        'Instrument Sans Variable',
         system-ui,
         -apple-system,
         'Segoe UI',
@@ -107,7 +112,8 @@ body {
 
 .landing-brand {
     color: var(--color-ink);
-    letter-spacing: -0.03em;
+    /* Didone displays want near-neutral tracking; the old serif ran -0.03em. */
+    letter-spacing: -0.01em;
 }
 
 .landing-rule {
