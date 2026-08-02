@@ -223,6 +223,72 @@ export const importDocumentFromImslp = async (
     }
 };
 
+/** Ids of the caller's favorited documents (favorites are per-user, RLS-scoped). */
+export const listFavoriteDocumentIds = async (): Promise<Set<string>> => {
+    const { data, error } = await getSupabase().from('document_favorites').select('document_id');
+    if (error) {
+        throw new Error(`Could not load favorites: ${error.message}`);
+    }
+    return new Set(data.map((row) => row.document_id));
+};
+
+export const setDocumentFavorite = async (docId: string, userId: string, favorite: boolean): Promise<void> => {
+    const supabase = getSupabase();
+    if (favorite) {
+        const { error } = await supabase
+            .from('document_favorites')
+            .upsert(
+                { document_id: docId, user_id: userId },
+                { onConflict: 'document_id,user_id', ignoreDuplicates: true },
+            );
+        if (error) {
+            throw new Error(`Could not add favorite: ${error.message}`);
+        }
+        return;
+    }
+    const { error } = await supabase.from('document_favorites').delete().eq('document_id', docId).eq('user_id', userId);
+    if (error) {
+        throw new Error(`Could not remove favorite: ${error.message}`);
+    }
+};
+
+export const renameDocument = async (docId: string, title: string): Promise<void> => {
+    const { error } = await getSupabase().from('documents').update({ title }).eq('id', docId);
+    if (error) {
+        throw new Error(`Could not rename: ${error.message}`);
+    }
+    const db = getDb();
+    const cached = await db.pdfCache.get(docId);
+    if (cached) {
+        await db.pdfCache.put({ ...cached, title });
+    }
+};
+
+/**
+ * Delete a score everywhere. Storage object FIRST — its RLS needs the owner
+ * membership that dies with the documents row (FK cascade) — then the row
+ * (members/links/annotations/snapshots cascade), then every local cache.
+ */
+export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
+    const supabase = getSupabase();
+    const { error: storageError } = await supabase.storage.from('scores').remove([doc.storage_path]);
+    if (storageError) {
+        throw new Error(`Could not delete the PDF: ${storageError.message}`);
+    }
+    const { error } = await supabase.from('documents').delete().eq('id', doc.id);
+    if (error) {
+        throw new Error(`Could not delete: ${error.message}`);
+    }
+    const db = getDb();
+    await Promise.all([
+        db.pdfCache.delete(doc.id),
+        db.syncState.delete(doc.id),
+        db.annotations.where('docId').equals(doc.id).delete(),
+        db.ops.where('docId').equals(doc.id).delete(),
+        db.annotationSnapshots.where('docId').equals(doc.id).delete(),
+    ]);
+};
+
 /** PDF bytes for a cloud doc: Dexie cache first, else storage download (then cache). */
 export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> => {
     const db = getDb();

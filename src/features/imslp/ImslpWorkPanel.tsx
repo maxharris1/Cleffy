@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import { displayEditionName, displayWorkTitle, formatBytes, recommendEdition } from '@/features/imslp/imslpDisplay';
@@ -16,13 +16,11 @@ export type DownloadStatus =
 interface ImslpWorkPanelProps {
     work: ImslpWorkDetail;
     selected: ImslpEdition | null;
-    accepted: boolean;
     download: DownloadStatus;
     /** Library is uploading the handed-off PDF. */
     busy: boolean;
     importing: boolean;
     onSelect: (edition: ImslpEdition) => void;
-    onAcceptedChange: (accepted: boolean) => void;
     onImportSelected: () => void;
     onImportLocalPdf: (file: File) => void;
 }
@@ -30,16 +28,13 @@ interface ImslpWorkPanelProps {
 export const ImslpWorkPanel = ({
     work,
     selected,
-    accepted,
     download,
     busy,
     importing,
     onSelect,
-    onAcceptedChange,
     onImportSelected,
     onImportLocalPdf,
 }: ImslpWorkPanelProps) => {
-    const disclaimerId = useId();
     const parsed = displayWorkTitle(work.title);
     const composer = work.composer ?? parsed.composer;
     const [showAllEditions, setShowAllEditions] = useState(false);
@@ -147,26 +142,11 @@ export const ImslpWorkPanel = ({
                 </fieldset>
             )}
 
-            <div className="mt-4 rounded-lg border border-stone-200/80 bg-stone-50/80 p-3">
-                <p className="text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
-                <label htmlFor={disclaimerId} className="mt-3 flex items-start gap-2 text-sm text-stone-800">
-                    <input
-                        id={disclaimerId}
-                        type="checkbox"
-                        className="mt-0.5 h-4 w-4 accent-accent"
-                        checked={accepted}
-                        onChange={(e) => onAcceptedChange(e.target.checked)}
-                        disabled={importing}
-                    />
-                    <span>I understand and want Cleffy to download this file.</span>
-                </label>
-            </div>
-
             <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
                     type="button"
                     onClick={onImportSelected}
-                    disabled={!selected || !accepted || importing || work.editions.length === 0}
+                    disabled={!selected || importing || work.editions.length === 0}
                     className={buttonClassName('primary', 'sm')}
                 >
                     {buttonLabel}
@@ -182,6 +162,8 @@ export const ImslpWorkPanel = ({
                     </a>
                 ) : null}
             </div>
+
+            <p className="mt-3 max-w-prose text-xs leading-relaxed text-stone-500">{DISCLAIMER}</p>
 
             {download.kind === 'fallback' ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">

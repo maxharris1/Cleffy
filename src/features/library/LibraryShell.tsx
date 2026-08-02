@@ -92,7 +92,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     };
 
     return (
-        <main className="landing-page min-h-full">
+        <main className="paper-page min-h-full">
             <div className="library-layout mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10 md:flex-row md:gap-8 lg:gap-10 lg:py-12">
                 <aside className="shrink-0 md:sticky md:top-8 md:w-44 md:self-start lg:w-48">
                     <div className="flex items-start justify-between gap-4 md:block">

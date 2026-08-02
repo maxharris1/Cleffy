@@ -234,6 +234,11 @@ export const ImslpSearchPanel = ({
                     {composer ? (
                         <span className="text-xs text-stone-500">{highlightMatches(composer, tokens)}</span>
                     ) : null}
+                    {hit.snippet ? (
+                        <span className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-stone-500/90">
+                            {hit.snippet}
+                        </span>
+                    ) : null}
                 </button>
             </li>
         );
