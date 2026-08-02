@@ -1,4 +1,5 @@
 import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/imslp/imslpApi';
+import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { getDb } from '@/sync/db';
@@ -128,12 +129,16 @@ export interface UploadResult {
  * of the path's leading folder — then upload bytes, then patch page_count.
  * On upload failure the row is rolled back so the library never shows a
  * bytes-less score.
+ *
+ * Accepts PDFs and images: images are normalized into single-page PDFs
+ * before anything touches the network (the bucket is PDF-only).
  */
 export const uploadDocument = async (
-    file: File,
+    pickedFile: File,
     ownerId: string,
     onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadResult> => {
+    const { file } = await prepareUploadFile(pickedFile);
     const supabase = getSupabase();
     const id = crypto.randomUUID();
     const storagePath = `${id}/original.pdf`;
