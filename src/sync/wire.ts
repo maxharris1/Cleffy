@@ -30,6 +30,20 @@ export type InkProgressMsg = z.infer<typeof inkProgressSchema>;
 
 export const INK_PROGRESS_EVENT = 'ink:progress';
 
+/**
+ * documents-row change fanned out by the documents_broadcast trigger
+ * (fires only when content_rev changes — i.e. the PDF bytes were replaced).
+ */
+const documentChangeSchema = z.object({
+    table: z.literal('documents'),
+    record: z.object({ id: z.string().min(1), content_rev: z.number().int().nonnegative() }),
+});
+
+export const parseDocumentChange = (payload: unknown): { id: string; content_rev: number } | null => {
+    const parsed = documentChangeSchema.safeParse(payload);
+    return parsed.success ? parsed.data.record : null;
+};
+
 const strokePayloadSchema = z.object({
     pts: z.array(z.number()),
     w: z.number().positive(),

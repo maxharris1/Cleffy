@@ -16,6 +16,7 @@ const doc = (id: string, title: string, updated_at: string): DocumentRow => ({
     title,
     storage_path: `${id}/original.pdf`,
     page_count: null,
+    content_rev: 0,
     created_at: updated_at,
     updated_at,
 });

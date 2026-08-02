@@ -54,6 +54,8 @@ export interface PdfViewportProps {
         canWrite: boolean;
         onStatus?: (status: SyncStatus) => void;
         onPeers?: (peers: PresencePeer[]) => void;
+        /** Another member replaced the PDF bytes (smart-import cleanup). */
+        onDocReplaced?: (contentRev: number) => void;
     };
 }
 
@@ -107,6 +109,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
     const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
+    const syncOnDocReplaced = sync?.onDocReplaced;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
     // Track viewport size.
@@ -223,6 +226,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
                     ink.clearRemoteInk();
                     void engine?.sync();
                 },
+                onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);
@@ -249,6 +253,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
         syncCanWrite,
         syncOnStatus,
         syncOnPeers,
+        syncOnDocReplaced,
     ]);
 
     // Presence: report the top visible page (debounced against scroll churn).

@@ -43,8 +43,7 @@ export const rgbToOklab = (r8: number, g8: number, b8: number): Oklab => {
     };
 };
 
-export const oklabDeltaE = (x: Oklab, y: Oklab): number =>
-    Math.hypot(x.L - y.L, x.a - y.a, x.b - y.b);
+export const oklabDeltaE = (x: Oklab, y: Oklab): number => Math.hypot(x.L - y.L, x.a - y.a, x.b - y.b);
 
 const PALETTE: { hex: string; lab: Oklab }[] = STROKE_COLORS.map((hex) => ({
     hex,

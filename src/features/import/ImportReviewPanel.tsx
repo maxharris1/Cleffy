@@ -97,10 +97,7 @@ export const ImportReviewPanel = ({
             return;
         }
         if (previewOn) {
-            store.setHistoryOverlay([
-                ...store.liveAnnotations(),
-                ...enabledItems.flatMap((item) => item.annotations),
-            ]);
+            store.setHistoryOverlay([...store.liveAnnotations(), ...enabledItems.flatMap((item) => item.annotations)]);
         } else {
             store.setHistoryOverlay(null);
         }
@@ -217,8 +214,8 @@ export const ImportReviewPanel = ({
                     {proposal.aiDegraded ? (
                         <div className="mb-3 rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-2.5">
                             <p className="text-sm text-amber-900">
-                                Text recognition is unavailable right now — everything will import as ink you can
-                                erase, not as editable text.
+                                Text recognition is unavailable right now — everything will import as ink you can erase,
+                                not as editable text.
                             </p>
                             <button
                                 type="button"
@@ -232,8 +229,8 @@ export const ImportReviewPanel = ({
 
                     <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm text-stone-700">
-                            Found <span className="font-medium">{annotationCount}</span> marks on {proposal.pages.length}{' '}
-                            page(s). Unchecked marks stay untouched on the page.
+                            Found <span className="font-medium">{annotationCount}</span> marks on{' '}
+                            {proposal.pages.length} page(s). Unchecked marks stay untouched on the page.
                         </p>
                         <label className="flex items-center gap-1.5 text-sm text-stone-600">
                             <input
@@ -254,7 +251,9 @@ export const ImportReviewPanel = ({
                                         <p className="text-sm font-medium text-stone-800">Page {page.pageIndex + 1}</p>
                                         <button
                                             type="button"
-                                            onClick={() => setPage(page.items, pageEnabled.length !== page.items.length)}
+                                            onClick={() =>
+                                                setPage(page.items, pageEnabled.length !== page.items.length)
+                                            }
                                             className="text-xs text-accent underline-offset-2 hover:underline"
                                         >
                                             {pageEnabled.length === page.items.length ? 'Uncheck page' : 'Check page'}
@@ -278,7 +277,9 @@ export const ImportReviewPanel = ({
                                                         {item.label}
                                                         {item.isText ? '' : ' (ink)'}
                                                     </span>
-                                                    {item.confidence === 'low' ? <Badge tone="warn">unsure</Badge> : null}
+                                                    {item.confidence === 'low' ? (
+                                                        <Badge tone="warn">unsure</Badge>
+                                                    ) : null}
                                                 </label>
                                             </li>
                                         ))}
@@ -297,8 +298,8 @@ export const ImportReviewPanel = ({
                                 onChange={(e) => setCleanChecked(e.target.checked)}
                             />
                             <span>
-                                Also lift the original ink off the page (the file is replaced; the untouched original
-                                is kept for recovery)
+                                Also lift the original ink off the page (the file is replaced; the untouched original is
+                                kept for recovery)
                             </span>
                         </label>
                     ) : null}

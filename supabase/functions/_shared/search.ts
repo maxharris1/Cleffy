@@ -4,8 +4,7 @@
  * so we fan out variants and re-rank client-side (in the edge function).
  */
 
-export const foldAccents = (s: string): string =>
-    s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+export const foldAccents = (s: string): string => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 
 /** Nickname / common misspellings → exact IMSLP work titles (boosted to top). */
 export const SEARCH_ALIASES: Array<{ keys: string[]; title: string }> = [

@@ -36,6 +36,12 @@ export interface CachedPdf {
     cachedAt: string;
     /** Last-known membership role — lets the viewer open offline with the right mode. */
     myRole?: 'owner' | 'editor' | 'viewer';
+    /**
+     * documents.content_rev these bytes correspond to. A smaller value than
+     * the fetched row means the file was replaced (smart-import cleanup) —
+     * re-download. Plain field, not indexed — no Dexie version bump needed.
+     */
+    contentRev?: number;
 }
 
 export class ScribblerDb extends Dexie {

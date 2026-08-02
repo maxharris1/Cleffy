@@ -3,8 +3,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, tryDownloadPdf } from '../_shared/imslp.ts';
 
-const uuidRe =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
@@ -101,12 +100,10 @@ Deno.serve(async (req) => {
             );
         }
 
-        const { error: uploadError } = await userClient.storage
-            .from('scores')
-            .upload(doc.storage_path, result.bytes, {
-                contentType: 'application/pdf',
-                upsert: true,
-            });
+        const { error: uploadError } = await userClient.storage.from('scores').upload(doc.storage_path, result.bytes, {
+            contentType: 'application/pdf',
+            upsert: true,
+        });
         if (uploadError) {
             return jsonResponse({ error: `Storage upload failed: ${uploadError.message}` }, 502);
         }
@@ -121,9 +118,6 @@ Deno.serve(async (req) => {
             byteLength: result.bytes.byteLength,
         });
     } catch (err) {
-        return jsonResponse(
-            { error: err instanceof Error ? err.message : 'IMSLP download failed' },
-            502,
-        );
+        return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP download failed' }, 502);
     }
 });

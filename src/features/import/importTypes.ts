@@ -117,6 +117,12 @@ export interface ProposedItem {
     label: string;
     isText: boolean;
     confidence: 'high' | 'medium' | 'low' | null;
+    /**
+     * Born-digital source: the exact PDF annotation this item replaces
+     * (subtype + PDF-space rect). Stripped from the rebuilt file ONLY when
+     * the item is accepted — an unchecked item's original must survive.
+     */
+    sourceAnnot?: { subtype: string; rect: [number, number, number, number] };
 }
 
 export interface PageProposal {

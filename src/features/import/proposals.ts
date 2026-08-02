@@ -105,11 +105,7 @@ const isTextLabel = (label: ClusterLabel): boolean =>
     label.text.trim().length > 0;
 
 /** Build review items for one page. `labels: null` → strokes-only degradation. */
-export const buildProposals = (
-    docId: string,
-    seg: PageSegmentation,
-    labels: ClassifyResult | null,
-): ProposedItem[] => {
+export const buildProposals = (docId: string, seg: PageSegmentation, labels: ClassifyResult | null): ProposedItem[] => {
     if (!labels) {
         return seg.clusters
             .map((c) => strokesItem(docId, seg, c))

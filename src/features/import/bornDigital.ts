@@ -152,11 +152,16 @@ export const extractBornDigital = async (
                 label: `“${text.length > 24 ? `${text.slice(0, 24)}…` : text}”`,
                 isText: true,
                 confidence: 'high',
+                sourceAnnot: {
+                    subtype: 'FreeText',
+                    rect: [rect[0] ?? 0, rect[1] ?? 0, rect[2] ?? 0, rect[3] ?? 0],
+                },
             });
             stripSubtypes.add('FreeText');
             continue;
         }
         if (raw.subtype === 'Ink') {
+            const rect = raw.rect;
             const lists = Array.isArray(raw.inkLists) ? raw.inkLists : [];
             const strokes: StrokePayload[] = [];
             const wPt = raw.borderStyle?.width;
@@ -185,6 +190,10 @@ export const extractBornDigital = async (
                 label: 'drawn mark',
                 isText: false,
                 confidence: 'high',
+                sourceAnnot:
+                    rect && rect.length >= 4
+                        ? { subtype: 'Ink', rect: [rect[0] ?? 0, rect[1] ?? 0, rect[2] ?? 0, rect[3] ?? 0] }
+                        : undefined,
             });
             stripSubtypes.add('Ink');
         }

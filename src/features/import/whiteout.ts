@@ -76,8 +76,8 @@ export interface WhiteoutPatch {
     pageIndex: number;
     /** Patch placement in normalized page coordinates (rotated viewport space). */
     bboxNorm: { x: number; y: number; w: number; h: number };
-    /** RGBA pixels, patch-local. */
-    rgba: Uint8ClampedArray;
+    /** RGBA pixels, patch-local (concrete ArrayBuffer so ImageData accepts it). */
+    rgba: Uint8ClampedArray<ArrayBuffer>;
     width: number;
     height: number;
 }

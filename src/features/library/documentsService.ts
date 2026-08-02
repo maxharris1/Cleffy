@@ -15,7 +15,7 @@ export const LIBRARY_PAGE_SIZE = 100;
 export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
     const { data, error } = await getSupabase()
         .from('documents')
-        .select('id, owner_id, title, storage_path, page_count, created_at, updated_at')
+        .select('id, owner_id, title, storage_path, page_count, content_rev, created_at, updated_at')
         .order('updated_at', { ascending: false })
         .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
@@ -60,12 +60,18 @@ export interface OfflineDocFallback {
     bytes: ArrayBuffer;
 }
 
-export const documentRowFromCache = (cached: { id: string; title: string; cachedAt: string }): DocumentRow => ({
+export const documentRowFromCache = (cached: {
+    id: string;
+    title: string;
+    cachedAt: string;
+    contentRev?: number;
+}): DocumentRow => ({
     id: cached.id,
     owner_id: '',
     title: cached.title,
     storage_path: `${cached.id}/original.pdf`,
     page_count: null,
+    content_rev: cached.contentRev ?? 0,
     created_at: cached.cachedAt,
     updated_at: cached.cachedAt,
 });
@@ -270,13 +276,18 @@ export const renameDocument = async (docId: string, title: string): Promise<void
 };
 
 /**
- * Delete a score everywhere. Storage object FIRST — its RLS needs the owner
- * membership that dies with the documents row (FK cascade) — then the row
- * (members/links/annotations/snapshots cascade), then every local cache.
+ * Delete a score everywhere. Storage objects FIRST — their RLS needs the
+ * owner membership that dies with the documents row (FK cascade) — then the
+ * row (members/links/annotations/snapshots cascade), then every local cache.
+ * The whole `{id}/` folder is listed so import backups don't leak.
  */
 export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     const supabase = getSupabase();
-    const { error: storageError } = await supabase.storage.from('scores').remove([doc.storage_path]);
+    const { data: objects } = await supabase.storage.from('scores').list(doc.id);
+    const paths = (objects ?? []).map((o) => `${doc.id}/${o.name}`);
+    const { error: storageError } = await supabase.storage
+        .from('scores')
+        .remove(paths.length > 0 ? paths : [doc.storage_path]);
     if (storageError) {
         throw new Error(`Could not delete the PDF: ${storageError.message}`);
     }
@@ -294,17 +305,104 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     ]);
 };
 
-/** PDF bytes for a cloud doc: Dexie cache first, else storage download (then cache). */
+/**
+ * PDF bytes for a cloud doc: Dexie cache first, else storage download (then
+ * cache). A cache holding an older content_rev than the fetched row means the
+ * file was replaced (smart-import cleanup) — re-download.
+ */
 export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> => {
     const db = getDb();
     const cached = await db.pdfCache.get(doc.id);
-    if (cached) {
+    const wantRev = doc.content_rev ?? 0;
+    if (cached && (cached.contentRev ?? 0) >= wantRev) {
         return cached.bytes.arrayBuffer();
     }
     const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
     if (error || !data) {
+        if (cached) {
+            // Offline with a stale cache beats no score at all.
+            return cached.bytes.arrayBuffer();
+        }
         throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
     }
-    await db.pdfCache.put({ docId: doc.id, bytes: data, title: doc.title, cachedAt: new Date().toISOString() });
+    await db.pdfCache.put({
+        docId: doc.id,
+        bytes: data,
+        title: doc.title,
+        cachedAt: new Date().toISOString(),
+        myRole: cached?.myRole,
+        contentRev: wantRev,
+    });
     return data.arrayBuffer();
+};
+
+/** Object name (within `{docId}/`) that preserves the pre-import original. */
+export const BACKUP_OBJECT_NAME = 'pre-import-original.pdf';
+
+/**
+ * Replace a document's stored PDF with a cleaned copy (owner-only via storage
+ * RLS). The very first replacement stashes the untouched original next to it
+ * (`upsert: false` — a later import can't clobber the true original), then
+ * content_rev is bumped so every client re-downloads, and the local cache is
+ * refreshed in place.
+ */
+export const replaceDocumentPdf = async (
+    doc: DocumentRow,
+    originalBytes: ArrayBuffer,
+    newBytes: Uint8Array,
+    onProgress?: (progress: UploadProgress) => void,
+): Promise<DocumentRow> => {
+    const supabase = getSupabase();
+    const backupPath = `${doc.id}/${BACKUP_OBJECT_NAME}`;
+    const { error: backupError } = await supabase.storage
+        .from('scores')
+        .upload(backupPath, new Blob([originalBytes], { type: 'application/pdf' }), {
+            contentType: 'application/pdf',
+            upsert: false,
+        });
+    if (backupError && !/exist|duplicate/i.test(backupError.message)) {
+        throw new Error(`Could not keep a backup of the original: ${backupError.message}`);
+    }
+
+    await uploadPdfToStorage(
+        doc.storage_path,
+        new Blob([newBytes as unknown as BlobPart], { type: 'application/pdf' }),
+        onProgress,
+    );
+
+    const { data: updated, error: updateError } = await supabase
+        .from('documents')
+        .update({ content_rev: (doc.content_rev ?? 0) + 1 })
+        .eq('id', doc.id)
+        .select()
+        .single();
+    if (updateError) {
+        throw new Error(`The cleaned file was saved but the document could not be updated: ${updateError.message}`);
+    }
+
+    const db = getDb();
+    const cached = await db.pdfCache.get(doc.id);
+    await db.pdfCache.put({
+        docId: doc.id,
+        bytes: new Blob([newBytes as unknown as BlobPart], { type: 'application/pdf' }),
+        title: updated.title,
+        cachedAt: new Date().toISOString(),
+        myRole: cached?.myRole ?? 'owner',
+        contentRev: updated.content_rev,
+    });
+
+    // Best-effort audit row + backup pointer (never blocks the replacement).
+    const { error: auditError } = await supabase.from('document_imports').upsert(
+        {
+            document_id: doc.id,
+            status: 'imported',
+            backup_path: backupPath,
+        },
+        { onConflict: 'document_id' },
+    );
+    if (auditError) {
+        console.warn('Import audit row failed', auditError.message);
+    }
+
+    return updated;
 };

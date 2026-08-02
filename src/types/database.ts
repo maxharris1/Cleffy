@@ -19,6 +19,8 @@ export type DocumentRow = {
     title: string;
     storage_path: string;
     page_count: number | null;
+    /** Bumped when the stored PDF bytes are replaced (smart import cleanup). */
+    content_rev: number;
     created_at: string;
     updated_at: string;
 };
@@ -29,6 +31,34 @@ export type DocumentInsert = {
     title: string;
     storage_path: string;
     page_count?: number | null;
+    content_rev?: number;
+};
+
+export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
+
+export type DocumentImportRow = {
+    document_id: string;
+    status: ImportStatusValue;
+    backup_path: string | null;
+    pages_cleaned: number[];
+    created_by: string | null;
+    created_at: string;
+    updated_at: string;
+};
+
+export type DocumentImportInsert = {
+    document_id: string;
+    status: ImportStatusValue;
+    backup_path?: string | null;
+    pages_cleaned?: number[];
+    created_by?: string | null;
+};
+
+export type DocumentImportUpdate = {
+    status?: ImportStatusValue;
+    backup_path?: string | null;
+    pages_cleaned?: number[];
+    updated_at?: string;
 };
 
 export type DocumentMemberRow = {
@@ -175,6 +205,13 @@ export type Database = {
                 Row: DocumentTagRow;
                 Insert: DocumentTagInsert;
                 Update: never;
+                Relationships: [];
+            };
+            document_imports: {
+                // Smart-import offer/decision + backup pointer, one row per doc.
+                Row: DocumentImportRow;
+                Insert: DocumentImportInsert;
+                Update: DocumentImportUpdate;
                 Relationships: [];
             };
             share_links: {

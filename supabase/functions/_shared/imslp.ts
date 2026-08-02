@@ -12,8 +12,7 @@ export const USER_AGENT =
 export const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
 /** Cookies that skip IMSLP's JS redirect interstitial + disclaimer confirm. */
-const IMSLP_SESSION_COOKIES =
-    'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
+const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -131,8 +130,7 @@ export const parseComposerFromTitle = (title: string): string | null => {
 
 export const stripFilePrefix = (title: string): string => title.replace(/^File:/i, '');
 
-export const isPdfFileTitle = (title: string): boolean =>
-    stripFilePrefix(title).toLowerCase().endsWith('.pdf');
+export const isPdfFileTitle = (title: string): boolean => stripFilePrefix(title).toLowerCase().endsWith('.pdf');
 
 export const looksLikePdf = (bytes: Uint8Array): boolean => {
     if (bytes.length < 5) {

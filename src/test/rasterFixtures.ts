@@ -17,14 +17,7 @@ export const makeRaster = (width: number, height: number, bg: Rgb = [255, 255, 2
     return { data, width, height };
 };
 
-export const paintRect = (
-    raster: DetectionRaster,
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-    color: Rgb,
-): void => {
+export const paintRect = (raster: DetectionRaster, x: number, y: number, w: number, h: number, color: Rgb): void => {
     for (let py = y; py < y + h; py++) {
         for (let px = x; px < x + w; px++) {
             const i = (py * raster.width + px) * 4;

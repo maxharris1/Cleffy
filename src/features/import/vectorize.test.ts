@@ -60,15 +60,7 @@ describe('traceSkeletonPaths', () => {
     });
 
     it('closes cycles back onto their start', () => {
-        const ring = [
-            '########',
-            '########',
-            '##....##',
-            '##....##',
-            '##....##',
-            '########',
-            '########',
-        ];
+        const ring = ['########', '########', '##....##', '##....##', '##....##', '########', '########'];
         const { mask } = maskFromAscii(ring);
         const grid = thinGrid(gridOf(mask), mask.w, mask.h);
         const paths = traceSkeletonPaths(grid, mask.w, mask.h);

@@ -4,6 +4,7 @@ import type { TypedSupabaseClient } from '@/lib/supabase';
 import {
     INK_PROGRESS_EVENT,
     parseDbChange,
+    parseDocumentChange,
     parseInkProgress,
     presenceSchema,
     type InkProgressMsg,
@@ -50,6 +51,8 @@ export interface DocRealtimeChannelOptions {
     onPeers: (peers: PresencePeer[]) => void;
     /** Fired on re-join after a drop: clear live buffers + gap-fill pull. */
     onReconnect: () => void;
+    /** Another member replaced the document's PDF bytes (smart-import cleanup). */
+    onDocReplaced?: (contentRev: number) => void;
 }
 
 /**
@@ -93,6 +96,12 @@ export class DocRealtimeChannel {
             }
         });
         const onDb = ({ payload }: { payload: unknown }) => {
+            // The topic multiplexes two tables: documents (bytes replaced) and annotations.
+            const docChange = parseDocumentChange(payload);
+            if (docChange) {
+                this.opts.onDocReplaced?.(docChange.content_rev);
+                return;
+            }
             const row = parseDbChange(payload);
             if (row) {
                 this.opts.onDbChange(row);

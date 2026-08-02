@@ -61,13 +61,7 @@ export const hasActiveFilters = (filters: SearchFilters | undefined): boolean =>
     if (!filters) {
         return false;
     }
-    return Boolean(
-        filters.composerCategory ||
-            filters.instrument ||
-            filters.form ||
-            filters.key ||
-            filters.era,
-    );
+    return Boolean(filters.composerCategory || filters.instrument || filters.form || filters.key || filters.era);
 };
 
 /** Best category for empty-query browse: composer > instrument > form. */
@@ -141,9 +135,7 @@ export const titleMatchesFilters = (title: string, filters: SearchFilters): bool
     }
 
     if (filters.key && KEY_TOKENS[filters.key]) {
-        const keys = KEY_TOKENS[filters.key].map((t) =>
-            t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase(),
-        );
+        const keys = KEY_TOKENS[filters.key].map((t) => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase());
         if (!keys.some((t) => folded.includes(t))) {
             return false;
         }

@@ -4,6 +4,7 @@ import { Link, Navigate, useParams } from 'react-router';
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { buildCleanFn } from '@/features/import/cleanReplace';
 import { ImportScanButton } from '@/features/import/ImportScanButton';
 import {
     fetchDocument,
@@ -55,10 +56,31 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [shareOpen, setShareOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    const [staleBytes, setStaleBytes] = useState(false);
 
     const userId = session?.user.id;
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
+
+    /** Another member replaced the PDF (import cleanup) — offer a refresh. */
+    const onDocReplaced = useCallback((contentRev: number) => {
+        setState((prev) => {
+            if (prev && contentRev > (prev.doc.content_rev ?? 0)) {
+                setStaleBytes(true);
+            }
+            return prev;
+        });
+    }, []);
+
+    const refreshBytes = useCallback(async () => {
+        const doc = await fetchDocument(docId);
+        if (!doc) {
+            return;
+        }
+        const bytes = await loadDocumentBytes(doc);
+        setState((prev) => (prev ? { ...prev, doc, bytes } : prev));
+        setStaleBytes(false);
+    }, [docId]);
 
     useEffect(() => {
         if (!userId) {
@@ -140,7 +162,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         bytes={state.bytes}
                         classify={null}
                         includeBornDigital
-                        clean={null}
+                        clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
+                            setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));
+                        })}
                     />
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
@@ -153,6 +177,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : null}
             </ViewerHeader>
             {session?.user.is_anonymous ? <UpgradeBanner /> : null}
+            {staleBytes ? (
+                <div
+                    className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
+                    role="status"
+                >
+                    <p className="text-sm text-amber-900">
+                        The score file was updated (existing marks were made editable).
+                    </p>
+                    <Button size="sm" variant="secondary" onClick={() => void refreshBytes()}>
+                        Show the cleaned pages
+                    </Button>
+                </div>
+            ) : null}
             <div className="min-h-0 flex-1">
                 <PdfProvider data={state.bytes}>
                     <PdfViewport
@@ -167,6 +204,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                             canWrite: !readOnly,
                             onStatus,
                             onPeers,
+                            onDocReplaced,
                         }}
                     />
                 </PdfProvider>

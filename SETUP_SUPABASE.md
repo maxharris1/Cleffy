@@ -66,10 +66,10 @@ npx supabase db push
 
 App routes that use these redirects:
 
-| Flow | Redirect |
-| ---- | -------- |
+| Flow                      | Redirect                      |
+| ------------------------- | ----------------------------- |
 | Email signup confirmation | `/auth/callback` → `/library` |
-| Password reset | `/update-password` |
+| Password reset            | `/update-password`            |
 
 **Recommended:** the built-in email service allows only ~2–4 auth emails/hour — fine
 for real use, painful for testing. For test iteration either configure custom SMTP
