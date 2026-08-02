@@ -1,7 +1,7 @@
 /** Shared IMSLP MediaWiki helpers for Edge Functions. */
 
-// Rate limiting moved to _shared/rateLimit.ts; re-exported so existing
-// function imports keep working unchanged.
+// Rate limiting moved to rateLimit.ts (shared with non-IMSLP functions);
+// re-exported so the IMSLP functions keep their import paths.
 export { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
 
 export const IMSLP_ORIGIN = 'https://imslp.org';

@@ -9,6 +9,7 @@
  */
 
 import type { Annotation, AnnotationKind, AnnotationPayload } from '@/types/models';
+import type { ScoreData } from '@/types/scoreData';
 
 export type MemberRole = 'owner' | 'editor' | 'viewer';
 export type ShareRole = 'editor' | 'viewer';
@@ -171,6 +172,36 @@ export type AnnotationSnapshotInsert = {
     created_by?: string | null;
 };
 
+export type ScoreAnalysisStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+export type ScoreAnalysisRow = {
+    document_id: string;
+    status: ScoreAnalysisStatus;
+    /** Machine error code (services/omr-service/src/errors.ts taxonomy). */
+    error: string | null;
+    /** Pages processed so far (OMR service heartbeat). */
+    progress: number | null;
+    engine_version: string | null;
+    bpm_default: number | null;
+    score: ScoreData | null;
+    created_by: string | null;
+    created_at: string;
+    updated_at: string;
+};
+
+export type ScoreAnalysisInsert = {
+    document_id: string;
+    status: ScoreAnalysisStatus;
+    error?: string | null;
+    progress?: number | null;
+    engine_version?: string | null;
+    bpm_default?: number | null;
+    score?: ScoreData | null;
+    created_by?: string | null;
+};
+
+export type ScoreAnalysisUpdate = Partial<Omit<ScoreAnalysisInsert, 'document_id'>>;
+
 export type Database = {
     public: {
         Tables: {
@@ -230,6 +261,12 @@ export type Database = {
                 Row: AnnotationSnapshotRow;
                 Insert: AnnotationSnapshotInsert;
                 Update: never;
+                Relationships: [];
+            };
+            score_analyses: {
+                Row: ScoreAnalysisRow;
+                Insert: ScoreAnalysisInsert;
+                Update: ScoreAnalysisUpdate;
                 Relationships: [];
             };
         };

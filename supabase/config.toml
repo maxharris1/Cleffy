@@ -400,6 +400,9 @@ verify_jwt = true
 [functions.imslp-download]
 verify_jwt = true
 
+[functions.score-analyze]
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327

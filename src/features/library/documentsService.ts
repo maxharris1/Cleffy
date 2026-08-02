@@ -302,6 +302,7 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
         db.annotations.where('docId').equals(doc.id).delete(),
         db.ops.where('docId').equals(doc.id).delete(),
         db.annotationSnapshots.where('docId').equals(doc.id).delete(),
+        db.scoreCache.delete(doc.id),
     ]);
 };
 
