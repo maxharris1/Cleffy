@@ -69,7 +69,11 @@ body {
     -webkit-touch-callout: none;
 }
 
-/* Paper wash + engraved five-line staves. */
+/*
+ * Paper wash + engraved five-line staves — for sparse surfaces only
+ * (marketing, auth, join, 404). Dense app surfaces use .paper-page, where
+ * the staves would fight the content.
+ */
 .landing-page {
     background-color: var(--color-paper);
     background-image:
@@ -77,31 +81,39 @@ body {
         linear-gradient(180deg, transparent 0%, var(--color-paper-deep) 100%),
         repeating-linear-gradient(
             180deg,
-            var(--color-line) 0,
-            var(--color-line) 1px,
+            rgb(28 25 23 / 0.055) 0,
+            rgb(28 25 23 / 0.055) 1px,
             transparent 1px,
             transparent 10px,
-            var(--color-line) 10px,
-            var(--color-line) 11px,
+            rgb(28 25 23 / 0.055) 10px,
+            rgb(28 25 23 / 0.055) 11px,
             transparent 11px,
             transparent 20px,
-            var(--color-line) 20px,
-            var(--color-line) 21px,
+            rgb(28 25 23 / 0.055) 20px,
+            rgb(28 25 23 / 0.055) 21px,
             transparent 21px,
             transparent 30px,
-            var(--color-line) 30px,
-            var(--color-line) 31px,
+            rgb(28 25 23 / 0.055) 30px,
+            rgb(28 25 23 / 0.055) 31px,
             transparent 31px,
             transparent 40px,
-            var(--color-line) 40px,
-            var(--color-line) 41px,
+            rgb(28 25 23 / 0.055) 40px,
+            rgb(28 25 23 / 0.055) 41px,
             transparent 41px,
-            transparent 148px
+            transparent 176px
         );
 }
 
+/* Quiet paper for dense app surfaces: the wash without the staves. */
+.paper-page {
+    background-color: var(--color-paper);
+    background-image:
+        radial-gradient(ellipse 90% 55% at 50% -10%, rgb(255 255 255 / 0.75), transparent 60%),
+        linear-gradient(180deg, transparent 0%, var(--color-paper-deep) 100%);
+}
+
 .landing-hero {
-    animation: landing-fade-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: landing-fade-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 .landing-brand {
@@ -115,11 +127,11 @@ body {
     height: 1px;
     margin: 1.25rem auto 0;
     background: color-mix(in srgb, var(--color-accent) 55%, transparent);
-    animation: landing-rule-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+    animation: landing-rule-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s backwards;
 }
 
 .landing-demo-frame {
-    animation: landing-fade-in 0.75s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both;
+    animation: landing-fade-in 0.75s cubic-bezier(0.22, 1, 0.36, 1) 0.12s backwards;
     box-shadow:
         0 1px 0 rgb(28 25 23 / 0.04),
         0 18px 40px -20px rgb(28 25 23 / 0.28);
@@ -199,19 +211,19 @@ body {
 
 /* Library: list entrance + empty-state presence. */
 .library-layout {
-    animation: landing-fade-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: landing-fade-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 .library-shell {
-    animation: landing-fade-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.04s both;
+    animation: landing-fade-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.04s backwards;
 }
 
 .library-list-item {
-    animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 .library-empty {
-    animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s both;
+    animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
 }
 
 @keyframes library-row-in {
@@ -236,7 +248,7 @@ body {
 }
 
 .imslp-panel-view {
-    animation: imslp-view-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: imslp-view-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 @keyframes imslp-view-in {
