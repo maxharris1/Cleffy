@@ -19,4 +19,5 @@ supabase/.branches/
 
 # E2E artifacts
 live-*.png
+verify-*.png
 e2e-shots/
