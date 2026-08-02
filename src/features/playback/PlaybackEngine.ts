@@ -195,6 +195,7 @@ export class PlaybackEngine {
         this.pendingAnchor = null;
         this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, startTick);
         this.nextBeatTick = null;
+        this.scheduleSustainingNotesAt(startTick);
         this.startScheduler();
     }
 
@@ -229,6 +230,7 @@ export class PlaybackEngine {
             this.pendingAnchor = null;
             this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, clamped);
             this.nextBeatTick = null;
+            this.scheduleSustainingNotesAt(clamped);
             if (this.status === 'counting') {
                 this.setStatus('playing');
             }
@@ -391,6 +393,8 @@ export class PlaybackEngine {
                 this.pendingAnchor = { tick: this.loop.startTick, ctxTime: this.timeOfTick(this.loop.endTick) };
                 this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, this.loop.startTick);
                 this.nextBeatTick = null;
+                // Do not scheduleSustainingNotesAt here — notes that began before the
+                // loop start would ghost-retrigger on every wrap.
                 continue;
             }
             break;
@@ -418,6 +422,31 @@ export class PlaybackEngine {
             }
             this.nextNoteIndex += 1;
             this.scheduleNote(note.p, note.h, startAt, Math.min(note.d, regionEnd - note.t) * this.spt, note.v ?? 0.75);
+        }
+    }
+
+    /**
+     * After seek/play into the middle of a sustained note, schedule the
+     * remaining ring so chords don't go silent until the next attack.
+     * When a loop is active, ignore notes that began before the loop start
+     * so play/seek at A does not revive pre-loop tails.
+     */
+    private scheduleSustainingNotesAt(tick: number): void {
+        const regionStart = this.loop ? this.loop.startTick : 0;
+        const regionEnd = this.loop ? this.loop.endTick : this.score.totalTicks;
+        const startAt = this.timeOfTick(tick);
+        for (const note of this.score.notes) {
+            if (note.t >= tick) {
+                break;
+            }
+            if (note.t < regionStart) {
+                continue;
+            }
+            const noteEnd = Math.min(note.t + note.d, regionEnd);
+            if (noteEnd <= tick) {
+                continue;
+            }
+            this.scheduleNote(note.p, note.h, startAt, (noteEnd - tick) * this.spt, note.v ?? 0.75);
         }
     }
 

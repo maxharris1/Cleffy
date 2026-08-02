@@ -38,6 +38,7 @@ export interface TransportBarProps {
 
 const ERROR_COPY: Record<string, string> = {
     too_large: 'This score is too long to analyze (60-page limit).',
+    page_count_unknown: 'Page count is missing — reopen the score so we can measure it, then try Generate again.',
     no_staves_found: "Couldn't find readable music in this PDF.",
     omr_timeout: 'Analysis took too long and was stopped.',
     omr_crash: 'The music-recognition engine crashed on this score.',

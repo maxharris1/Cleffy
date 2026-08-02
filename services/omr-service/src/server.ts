@@ -23,9 +23,9 @@ const secretMatches = (header: string | undefined): boolean => {
 };
 
 /**
- * Validate an incoming job request body. SSRF guard: when SUPABASE_URL is
- * configured, the PDF URL must be one of our own storage signed URLs — this
- * service fetches nothing else.
+ * Validate an incoming job request body. SSRF guard: SUPABASE_URL is required;
+ * the PDF URL must share that origin, live under the scores signed-object path,
+ * and include this job's documentId folder. Fail closed when misconfigured.
  */
 export const validateJobRequest = (raw: unknown, supabaseUrl: string | undefined): JobRequest | null => {
     if (typeof raw !== 'object' || raw === null) {
@@ -39,6 +39,15 @@ export const validateJobRequest = (raw: unknown, supabaseUrl: string | undefined
     if (!uuidRe.test(documentId)) {
         return null;
     }
+    if (!supabaseUrl) {
+        return null;
+    }
+    let allowedOrigin: string;
+    try {
+        allowedOrigin = new URL(supabaseUrl).origin;
+    } catch {
+        return null;
+    }
     let url: URL;
     try {
         url = new URL(pdfSignedUrl);
@@ -48,7 +57,11 @@ export const validateJobRequest = (raw: unknown, supabaseUrl: string | undefined
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
         return null;
     }
-    if (supabaseUrl && !pdfSignedUrl.startsWith(`${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/sign/`)) {
+    if (url.origin !== allowedOrigin) {
+        return null;
+    }
+    const expectedPath = `/storage/v1/object/sign/scores/${documentId}/`;
+    if (!url.pathname.startsWith(expectedPath)) {
         return null;
     }
     return { documentId, pdfSignedUrl, pageCount };
@@ -81,7 +94,7 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
 export const server = createServer((req, res) => {
     void (async () => {
         if (req.method === 'GET' && req.url === '/healthz') {
-            json(res, 200, { ok: true, depth: queue.depth });
+            json(res, 200, { ok: true });
             return;
         }
         if (req.method !== 'POST' || req.url !== '/jobs') {

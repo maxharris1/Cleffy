@@ -26,13 +26,34 @@ describe('validateJobRequest', () => {
         expect(validateJobRequest(null, SUPA)).toBeNull();
     });
 
-    it('SSRF guard: only our own storage signed URLs when SUPABASE_URL is set', () => {
+    it('SSRF guard: requires SUPABASE_URL and matching origin + document path', () => {
         expect(
             validateJobRequest({ documentId: DOC, pdfSignedUrl: 'https://evil.example.com/x.pdf' }, SUPA),
         ).toBeNull();
-        // Without SUPABASE_URL configured (local dev), any https URL is allowed.
+        // Fail closed when SUPABASE_URL is unset.
         expect(
             validateJobRequest({ documentId: DOC, pdfSignedUrl: 'https://example.com/x.pdf' }, undefined),
-        ).not.toBeNull();
+        ).toBeNull();
+        // Prefix-on-string bypass (lookalike host) must fail origin check.
+        expect(
+            validateJobRequest(
+                {
+                    documentId: DOC,
+                    pdfSignedUrl: `https://project.supabase.co.evil.com/storage/v1/object/sign/scores/${DOC}/original.pdf`,
+                },
+                SUPA,
+            ),
+        ).toBeNull();
+        // Signed URL for a different document must fail.
+        const other = '11111111-1111-1111-1111-111111111111';
+        expect(
+            validateJobRequest(
+                {
+                    documentId: DOC,
+                    pdfSignedUrl: `${SUPA}/storage/v1/object/sign/scores/${other}/original.pdf?token=abc`,
+                },
+                SUPA,
+            ),
+        ).toBeNull();
     });
 });

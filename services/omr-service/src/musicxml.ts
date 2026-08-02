@@ -65,10 +65,18 @@ const midiFromPitch = (pitch: Elem): number | null => {
 };
 
 /** Extract the (first) score XML from a compressed .mxl container. */
+const MAX_MXL_ENTRY_BYTES = 8 * 1024 * 1024;
+
 export const extractMxl = (mxlBytes: Buffer): string => {
+    if (mxlBytes.byteLength > MAX_MXL_ENTRY_BYTES * 2) {
+        throw new JobError(ERROR_CODES.musicXmlParseFailed, 'MusicXML archive too large');
+    }
     const zip = new AdmZip(mxlBytes);
     const container = zip.getEntry('META-INF/container.xml');
     if (container) {
+        if (container.header.size > MAX_MXL_ENTRY_BYTES) {
+            throw new JobError(ERROR_CODES.musicXmlParseFailed, 'MusicXML entry too large');
+        }
         const doc = new DOMParser().parseFromString(container.getData().toString('utf8'), 'text/xml');
         const rootfiles = doc.getElementsByTagName('rootfile');
         const first = rootfiles.item(0);
@@ -76,6 +84,9 @@ export const extractMxl = (mxlBytes: Buffer): string => {
         if (path) {
             const entry = zip.getEntry(path);
             if (entry) {
+                if (entry.header.size > MAX_MXL_ENTRY_BYTES) {
+                    throw new JobError(ERROR_CODES.musicXmlParseFailed, 'MusicXML entry too large');
+                }
                 return entry.getData().toString('utf8');
             }
         }
@@ -85,6 +96,9 @@ export const extractMxl = (mxlBytes: Buffer): string => {
         .find((entry) => entry.entryName.toLowerCase().endsWith('.xml') && !entry.entryName.startsWith('META-INF'));
     if (!fallback) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No score XML inside .mxl');
+    }
+    if (fallback.header.size > MAX_MXL_ENTRY_BYTES) {
+        throw new JobError(ERROR_CODES.musicXmlParseFailed, 'MusicXML entry too large');
     }
     return fallback.getData().toString('utf8');
 };
@@ -241,16 +255,20 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                     const sound = firstChild(child, 'sound');
                     const tempo = sound?.getAttribute('tempo');
                     if (defaultBpm === null && tempo) {
+                        // MusicXML <sound tempo> is always quarter-notes-per-minute.
                         const parsed = Number.parseFloat(tempo);
                         if (Number.isFinite(parsed) && parsed > 0) {
                             defaultBpm = Math.round(parsed);
                         }
                     }
                     if (defaultBpm === null) {
-                        const perMinute = child.getElementsByTagName('per-minute').item(0);
-                        const parsed = perMinute ? Number.parseFloat(perMinute.textContent ?? '') : NaN;
+                        const metronome = child.getElementsByTagName('metronome').item(0) as Elem | null;
+                        const perMinute = metronome ? childText(metronome, 'per-minute') : null;
+                        const parsed = perMinute ? Number.parseFloat(perMinute) : NaN;
                         if (Number.isFinite(parsed) && parsed > 0) {
-                            defaultBpm = Math.round(parsed);
+                            // Convert beat-unit (and dots) to quarter-note BPM.
+                            const quartersPerBeat = beatUnitToQuarters(metronome);
+                            defaultBpm = Math.round(parsed * quartersPerBeat);
                         }
                     }
                     break;
@@ -321,18 +339,45 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
             }
         }
 
-        let length = maxCursor - measureStart;
-        if (ctx.timeline) {
-            length = ctx.timeline[index]?.dTicks ?? length;
-        } else if (length <= 0) {
-            // Empty/unreadable measure: assume a full measure of the active signature.
-            length = Math.max(1, Math.round(currentSig.num * ((TICKS_PER_QUARTER * 4) / currentSig.den)));
-        }
-
         const numberAttr = measure.getAttribute('number');
         const parsedNumber = numberAttr ? Number.parseInt(numberAttr, 10) : NaN;
         const displayNumber: number = Number.isFinite(parsedNumber) ? parsedNumber : (runningNumber ?? 0) + 1;
         runningNumber = displayNumber;
+
+        const expected = Math.max(
+            1,
+            Math.round(currentSig.num * ((TICKS_PER_QUARTER * 4) / currentSig.den)),
+        );
+        // Pickups stay content-length (MusicXML implicit / measure 0); other bars
+        // snap underfull content up to the active signature so later ticks don't skew.
+        const isPickup = measure.getAttribute('implicit') === 'yes' || displayNumber === 0;
+        let length = maxCursor - measureStart;
+        const contentLen = length;
+        if (ctx.timeline) {
+            length = ctx.timeline[index]?.dTicks ?? length;
+            // Lead timeline may be longer after underfull padding — extend open
+            // ties so secondary-part cross-bar ties still sound past the pad.
+            if (length > contentLen) {
+                const pad = length - contentLen;
+                for (const open of openTies.values()) {
+                    open.d += pad;
+                }
+            }
+        } else if (length <= 0) {
+            length = expected;
+        } else if (!isPickup && length < expected) {
+            const pad = expected - length;
+            ctx.warnings.add('measure_underfull');
+            // Extend open ties across the inserted gap so a tie-stop in the next
+            // bar still lands after the real sounding content, not in the pad.
+            for (const open of openTies.values()) {
+                open.d += pad;
+            }
+            length = expected;
+        } else if (!isPickup && length > expected) {
+            ctx.warnings.add('measure_overfull');
+            // Keep content length so note onsets stay consistent with the timeline.
+        }
 
         measures.push({ n: displayNumber, tick: measureStart, dTicks: length });
         measureStart += length;
@@ -347,6 +392,32 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
 
 const ticksOf = (duration: number, divisions: number): number =>
     Math.max(0, Math.round((duration * TICKS_PER_QUARTER) / Math.max(1, divisions)));
+
+/** Quarters spanned by a MusicXML <beat-unit> (+ optional <beat-unit-dot>s). */
+const BEAT_UNIT_QUARTERS: Record<string, number> = {
+    whole: 4,
+    half: 2,
+    quarter: 1,
+    eighth: 0.5,
+    '16th': 0.25,
+    '32nd': 0.125,
+    '64th': 0.0625,
+    '128th': 0.03125,
+};
+
+const beatUnitToQuarters = (metronome: Elem | null): number => {
+    if (!metronome) {
+        return 1;
+    }
+    const unit = (childText(metronome, 'beat-unit') ?? 'quarter').toLowerCase();
+    let factor = BEAT_UNIT_QUARTERS[unit] ?? 1;
+    let add = factor / 2;
+    for (let i = 0; i < childElements(metronome, 'beat-unit-dot').length; i++) {
+        factor += add;
+        add /= 2;
+    }
+    return factor;
+};
 
 /**
  * Parse one or more exported .mxl files (Audiveris writes one per detected

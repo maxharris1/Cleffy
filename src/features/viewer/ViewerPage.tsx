@@ -9,6 +9,7 @@ import { buildCleanFn } from '@/features/import/cleanReplace';
 import { ImportScanButton } from '@/features/import/ImportScanButton';
 import { UPLOAD_ACCEPT, prepareUploadFile } from '@/features/import/prepareUpload';
 import {
+    ensureDocumentPageCount,
     fetchDocument,
     fetchMyRole,
     isCloudDocId,
@@ -103,8 +104,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     throw new Error('Score not found — it may have been deleted, or your access was revoked.');
                 }
                 const [role, bytes] = await Promise.all([fetchMyRole(docId, userId), loadDocumentBytes(doc)]);
+                const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
                 if (!cancelled) {
-                    setState({ doc, role, bytes });
+                    setState({ doc: withPages, role, bytes });
                 }
             } catch (err) {
                 // No network? A previously-cached score still opens (plan §offline).

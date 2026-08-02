@@ -91,12 +91,22 @@ Deno.serve(async (req) => {
                 created_by: userId,
                 progress: null,
                 error: null,
+                score: null,
                 ...patch,
             },
             { onConflict: 'document_id' },
         );
 
-    if (typeof doc.page_count === 'number' && doc.page_count > MAX_ANALYZABLE_PAGES) {
+    if (doc.storage_path !== `${documentId}/original.pdf`) {
+        return jsonResponse({ error: 'Document storage path is invalid' }, 400);
+    }
+
+    if (typeof doc.page_count !== 'number' || !Number.isFinite(doc.page_count) || doc.page_count < 1) {
+        await upsertRow({ status: 'failed', error: 'page_count_unknown' });
+        return jsonResponse({ ok: false, code: 'page_count_unknown' }, 400);
+    }
+
+    if (doc.page_count > MAX_ANALYZABLE_PAGES) {
         await upsertRow({ status: 'failed', error: 'too_large' });
         return jsonResponse({ ok: false, code: 'too_large', maxPages: MAX_ANALYZABLE_PAGES }, 400);
     }
@@ -118,12 +128,12 @@ Deno.serve(async (req) => {
         .from('scores')
         .createSignedUrl(doc.storage_path, SIGNED_URL_TTL_SEC);
     if (signError || !signed?.signedUrl) {
-        return jsonResponse({ error: `Could not sign PDF URL: ${signError?.message ?? 'unknown'}` }, 502);
+        return jsonResponse({ error: 'Could not sign PDF URL' }, 502);
     }
 
     const { error: pendingError } = await upsertRow({ status: 'pending' });
     if (pendingError) {
-        return jsonResponse({ error: `Could not record analysis: ${pendingError.message}` }, 500);
+        return jsonResponse({ error: 'Could not record analysis' }, 500);
     }
 
     const serviceUrl = Deno.env.get('OMR_SERVICE_URL');
@@ -140,7 +150,7 @@ Deno.serve(async (req) => {
             body: JSON.stringify({
                 documentId,
                 pdfSignedUrl: signed.signedUrl,
-                pageCount: doc.page_count ?? null,
+                pageCount: doc.page_count,
             }),
             signal: AbortSignal.timeout(10_000),
         });

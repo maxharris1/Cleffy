@@ -104,7 +104,7 @@ export const listCachedDocuments = async (): Promise<DocumentRow[]> => {
 };
 
 /** Count pages client-side (pdf.js) so the library can show it up front. */
-const countPdfPages = async (bytes: ArrayBuffer): Promise<number | null> => {
+export const countPdfPages = async (bytes: ArrayBuffer): Promise<number | null> => {
     try {
         const [{ getDocument }, { createPdfWorker }, { pdfDocumentOptions }] = await Promise.all([
             import('pdfjs-dist'),
@@ -123,6 +123,25 @@ const countPdfPages = async (bytes: ArrayBuffer): Promise<number | null> => {
     } catch {
         return null;
     }
+};
+
+/** Backfill documents.page_count when missing (needed before play-along analyze). */
+export const ensureDocumentPageCount = async (doc: DocumentRow, bytes: ArrayBuffer): Promise<DocumentRow> => {
+    if (typeof doc.page_count === 'number' && doc.page_count > 0) {
+        return doc;
+    }
+    const pageCount = await countPdfPages(bytes);
+    if (pageCount === null || pageCount < 1) {
+        return doc;
+    }
+    // Owners and editors may backfill via security-definer RPC (direct UPDATE
+    // is owner-only under documents_update RLS).
+    const { error } = await getSupabase().rpc('set_document_page_count', { doc: doc.id, pages: pageCount });
+    if (error) {
+        console.warn('Could not persist page_count', error.message);
+        return doc;
+    }
+    return { ...doc, page_count: pageCount };
 };
 
 export interface UploadResult {

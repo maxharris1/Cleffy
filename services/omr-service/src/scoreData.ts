@@ -46,12 +46,12 @@ export const scoreDataSchema = z.object({
     version: z.number().int(),
     ticksPerQuarter: z.literal(TICKS_PER_QUARTER),
     defaultBpm: z.number().positive().nullable(),
-    timeSignatures: z.array(scoreTimeSigSchema),
+    timeSignatures: z.array(scoreTimeSigSchema).max(64),
     totalTicks: z.number().int().positive(),
-    notes: z.array(scoreNoteSchema),
-    measures: z.array(scoreMeasureSchema),
-    systems: z.array(scoreSystemSchema),
-    warnings: z.array(z.string()),
+    notes: z.array(scoreNoteSchema).max(50_000),
+    measures: z.array(scoreMeasureSchema).max(2_000),
+    systems: z.array(scoreSystemSchema).max(500),
+    warnings: z.array(z.string().max(64)).max(32),
 });
 
 export type ScoreNote = z.infer<typeof scoreNoteSchema>;

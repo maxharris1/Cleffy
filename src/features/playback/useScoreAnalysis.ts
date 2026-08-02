@@ -25,9 +25,15 @@ const POLL_MS = 5000;
  * ScoreData, with the Dexie cache covering offline opens. `generate()`
  * requests/retries analysis (owner/editor only — RLS backstops the UI).
  */
+/** How long to keep polling after open while status is still `none` — covers the
+ * race where LibraryShell fires requestScoreAnalysis then navigates before the
+ * score_analyses row exists. */
+const BOOTSTRAP_POLL_MS = 30_000;
+
 export const useScoreAnalysis = (docId: string, enabled: boolean) => {
     const [state, setState] = useState<ScoreAnalysisState>({ kind: enabled ? 'none' : 'unavailable' });
     const aliveRef = useRef(true);
+    const [bootstrapUntil, setBootstrapUntil] = useState(() => Date.now() + BOOTSTRAP_POLL_MS);
 
     // Reset synchronously when the document (or availability) changes —
     // during render, per the React "adjusting state" pattern, so the old
@@ -37,6 +43,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
     if (resetKey !== key) {
         setResetKey(key);
         setState({ kind: enabled ? 'none' : 'unavailable' });
+        setBootstrapUntil(Date.now() + BOOTSTRAP_POLL_MS);
     }
 
     const applyStatus = useCallback(
@@ -116,8 +123,10 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         };
     }, [docId, enabled, applyStatus]);
 
-    // Poll while a job is in flight — but not from hidden tabs.
-    const inFlight = state.kind === 'pending' || state.kind === 'processing';
+    // Poll while a job is in flight, and briefly while `none` after open so we
+    // catch analyses started from the library before the row was visible.
+    const awaitingBootstrap = state.kind === 'none' && Date.now() < bootstrapUntil;
+    const inFlight = state.kind === 'pending' || state.kind === 'processing' || awaitingBootstrap;
     useEffect(() => {
         if (!inFlight || !enabled) {
             return;
@@ -127,8 +136,19 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                 void applyStatus(docId);
             }
         }, POLL_MS);
-        return () => clearInterval(timer);
-    }, [inFlight, enabled, docId, applyStatus]);
+        // Drop the bootstrap window once it expires so we don't poll forever
+        // for documents that truly have no analysis.
+        const stopBootstrap =
+            awaitingBootstrap
+                ? setTimeout(() => setBootstrapUntil(0), Math.max(0, bootstrapUntil - Date.now()))
+                : undefined;
+        return () => {
+            clearInterval(timer);
+            if (stopBootstrap !== undefined) {
+                clearTimeout(stopBootstrap);
+            }
+        };
+    }, [inFlight, awaitingBootstrap, bootstrapUntil, enabled, docId, applyStatus]);
 
     const generate = useCallback(async () => {
         setState({ kind: 'pending' });

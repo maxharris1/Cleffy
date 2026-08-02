@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import type { ErrorCode } from './errors.js';
-import type { ScoreData } from './scoreData.js';
+import { scoreDataSchema, type ScoreData } from './scoreData.js';
 
 /**
  * Result write-back to Supabase. The service holds the service-role key
@@ -50,14 +50,24 @@ const upsert = async (documentId: string, patch: Record<string, unknown>): Promi
 /** Heartbeats also refresh updated_at, which the app's staleness rule watches. */
 export const supabaseWriteback: Writeback = {
     processing: (documentId, progress) => upsert(documentId, { status: 'processing', progress, error: null }),
-    ready: (documentId, score, engineVersion) =>
-        upsert(documentId, {
+    ready: async (documentId, score, engineVersion) => {
+        const checked = scoreDataSchema.safeParse(score);
+        if (!checked.success) {
+            console.warn(
+                `[writeback] ${documentId}: ScoreData failed size/schema check`,
+                checked.error.issues[0]?.message,
+            );
+            await upsert(documentId, { status: 'failed', error: 'internal', progress: null });
+            return;
+        }
+        await upsert(documentId, {
             status: 'ready',
-            score,
-            bpm_default: score.defaultBpm,
+            score: checked.data,
+            bpm_default: checked.data.defaultBpm,
             engine_version: engineVersion,
             progress: null,
             error: null,
-        }),
+        });
+    },
     failed: (documentId, code) => upsert(documentId, { status: 'failed', error: code, progress: null }),
 };

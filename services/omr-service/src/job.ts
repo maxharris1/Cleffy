@@ -2,7 +2,7 @@ import { createWriteStream } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
@@ -33,7 +33,11 @@ export interface JobRequest {
  * Audiveris, parse both artifacts, write the result back.
  */
 export const runJob = async (job: JobRequest, writeback: Writeback): Promise<void> => {
-    if (job.pageCount !== null && job.pageCount > MAX_PAGES) {
+    if (job.pageCount === null || job.pageCount < 1) {
+        await writeback.failed(job.documentId, ERROR_CODES.pageCountUnknown);
+        return;
+    }
+    if (job.pageCount > MAX_PAGES) {
         await writeback.failed(job.documentId, ERROR_CODES.tooLarge);
         return;
     }
@@ -46,9 +50,18 @@ export const runJob = async (job: JobRequest, writeback: Writeback): Promise<voi
         const pdfPath = join(workDir, 'original.pdf');
         await downloadPdf(job.pdfSignedUrl, pdfPath);
 
+        // Re-check page count from the bytes so an under-reported DB value
+        // cannot stretch Audiveris beyond the shared-worker budget.
+        const pdfBytes = await readFile(pdfPath);
+        const observedPages = countPdfPagesHeuristic(pdfBytes);
+        if (observedPages !== null && observedPages > MAX_PAGES) {
+            await writeback.failed(job.documentId, ERROR_CODES.tooLarge);
+            return;
+        }
+
         const outDir = join(workDir, 'out');
         const { mxlPaths, omrPath } = await runAudiveris(pdfPath, outDir, {
-            timeoutMs: timeoutForPages(job.pageCount),
+            timeoutMs: timeoutForPages(Math.max(job.pageCount, observedPages ?? 0)),
             onSheetProgress: (sheet) => {
                 const now = Date.now();
                 if (now - lastBeat >= HEARTBEAT_MIN_INTERVAL_MS) {
@@ -83,7 +96,7 @@ export const runJob = async (job: JobRequest, writeback: Writeback): Promise<voi
 const downloadPdf = async (url: string, destination: string): Promise<void> => {
     let res: Response;
     try {
-        res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+        res = await fetch(url, { signal: AbortSignal.timeout(120_000), redirect: 'error' });
     } catch (err) {
         throw new JobError(ERROR_CODES.downloadFailed, err instanceof Error ? err.message : 'fetch failed');
     }
@@ -94,5 +107,38 @@ const downloadPdf = async (url: string, destination: string): Promise<void> => {
     if (Number.isFinite(length) && length > MAX_PDF_BYTES) {
         throw new JobError(ERROR_CODES.tooLarge, `PDF is ${length} bytes`);
     }
-    await pipeline(Readable.fromWeb(res.body as WebReadableStream), createWriteStream(destination));
+    let written = 0;
+    const limiter = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+            written += chunk.length;
+            if (written > MAX_PDF_BYTES) {
+                cb(new JobError(ERROR_CODES.tooLarge, `PDF exceeded ${MAX_PDF_BYTES} bytes`));
+                return;
+            }
+            cb(null, chunk);
+        },
+    });
+    try {
+        await pipeline(Readable.fromWeb(res.body as WebReadableStream), limiter, createWriteStream(destination));
+    } catch (err) {
+        await rm(destination, { force: true }).catch(() => undefined);
+        if (err instanceof JobError) {
+            throw err;
+        }
+        // pipeline wraps the transform error; surface too_large when present.
+        const cause = err instanceof Error ? err : null;
+        if (cause?.message?.includes('exceeded') || cause?.message === ERROR_CODES.tooLarge) {
+            throw new JobError(ERROR_CODES.tooLarge, cause.message);
+        }
+        throw new JobError(ERROR_CODES.downloadFailed, cause?.message ?? 'stream failed');
+    }
+};
+
+/**
+ * Cheap page-object count from PDF bytes. Not a full parser — used only to
+ * reject clearly oversized scores when the DB page_count was under-reported.
+ */
+const countPdfPagesHeuristic = (bytes: Buffer): number | null => {
+    const matches = bytes.toString('latin1').match(/\/Type\s*\/Page(?![sA-Za-z])/g);
+    return matches && matches.length > 0 ? matches.length : null;
 };

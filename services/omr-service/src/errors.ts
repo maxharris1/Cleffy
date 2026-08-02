@@ -5,6 +5,7 @@
 export const ERROR_CODES = {
     downloadFailed: 'download_failed',
     tooLarge: 'too_large',
+    pageCountUnknown: 'page_count_unknown',
     noStavesFound: 'no_staves_found',
     omrTimeout: 'omr_timeout',
     omrCrash: 'omr_crash',

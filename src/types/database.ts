@@ -292,6 +292,10 @@ export type Database = {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
             };
+            set_document_page_count: {
+                Args: { doc: string; pages: number };
+                Returns: undefined;
+            };
         };
         Enums: Record<string, never>;
         CompositeTypes: Record<string, never>;
