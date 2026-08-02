@@ -4,6 +4,7 @@ import { Link, Navigate, useParams } from 'react-router';
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { ImportScanButton } from '@/features/import/ImportScanButton';
 import {
     fetchDocument,
     fetchMyRole,
@@ -132,6 +133,16 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
                 {readOnly ? <Badge>view only</Badge> : null}
+                {annotationStore && state.role === 'owner' ? (
+                    <ImportScanButton
+                        store={annotationStore}
+                        docId={docId}
+                        bytes={state.bytes}
+                        classify={null}
+                        includeBornDigital
+                        clean={null}
+                    />
+                ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 <ShareExportMenu docId={docId} title={state.doc.title} />
@@ -239,6 +250,16 @@ const LocalViewer = ({ docId }: { docId: string }) => {
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
                 <Badge>this device only</Badge>
+                {annotationStore ? (
+                    <ImportScanButton
+                        store={annotationStore}
+                        docId={docId}
+                        bytes={bytes}
+                        classify={null}
+                        includeBornDigital={false}
+                        clean={null}
+                    />
+                ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
                 <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
             </ViewerHeader>

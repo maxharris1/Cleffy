@@ -1,3 +1,5 @@
+import type { Annotation } from '@/types/models';
+
 /**
  * Shared types for the "smart import" pipeline: detecting handwritten
  * annotations already present in an uploaded score and adopting them as
@@ -47,6 +49,8 @@ export interface InkCluster {
     thicknessPx: number;
     /** Run-grouping hint: clusters sharing a runId sit on one horizontal line (e.g. "34323"). */
     runId: string | null;
+    /** Local paper color behind the ink (sampled while the raster is in hand; used for cleanup patches). */
+    bgColorHex?: string;
 }
 
 export interface PageSegmentationFlags {
@@ -66,3 +70,89 @@ export interface PageSegmentation {
     clusters: InkCluster[];
     flags: PageSegmentationFlags;
 }
+
+// ---------------------------------------------------------------------------
+// Classification (AI or degraded strokes-only mode).
+
+export interface ClusterLabel {
+    id: string;
+    kind: 'digit' | 'text' | 'articulation' | 'mark' | 'noise';
+    /** Recognized characters for digit/text/articulation (e.g. "3", "34323", "tr"). */
+    text?: string;
+    confidence: 'high' | 'medium' | 'low';
+}
+
+export interface RunLabel {
+    id: string;
+    /** True: the whole run is one text annotation ("34323" over a trill). */
+    treatAsOneText: boolean;
+    text?: string;
+}
+
+export interface ClassifyResult {
+    clusters: ClusterLabel[];
+    runs: RunLabel[];
+}
+
+/** Page-level classifier; resolves null when the AI is unavailable (degrade to strokes-only). */
+export type ClassifyFn = (
+    segmentation: PageSegmentation,
+    raster: DetectionRaster,
+    signal?: AbortSignal,
+) => Promise<ClassifyResult | null>;
+
+// ---------------------------------------------------------------------------
+// Proposals (review units) and the whole-document scan result.
+
+/** One reviewable unit: a glyph, a text run, or a vectorized mark (1..n annotations). */
+export interface ProposedItem {
+    /** Stable review id (cluster id or run id). */
+    id: string;
+    pageIndex: number;
+    /** Source clusters (empty for born-digital PDF annotations). */
+    clusterIds: string[];
+    /** Ready-to-create native annotations (fresh UUIDs, docId set, seq 0). */
+    annotations: Annotation[];
+    /** Short human label for the review list, e.g. '“3”' or 'ink mark'. */
+    label: string;
+    isText: boolean;
+    confidence: 'high' | 'medium' | 'low' | null;
+}
+
+export interface PageProposal {
+    pageIndex: number;
+    rasterWidth: number;
+    rasterHeight: number;
+    items: ProposedItem[];
+    /** Kept for the cleanup pass (masks + background colors); rasters are NOT retained. */
+    segmentation: PageSegmentation;
+    /** PDF annotation subtypes converted on this page — stripped from the rebuilt file. */
+    stripSubtypes: string[];
+}
+
+export interface ImportProposal {
+    docId: string;
+    pages: PageProposal[];
+    /** True when classification was skipped/failed → marks imported as ink only. */
+    aiDegraded: boolean;
+    /** Pages that rasterized ≥99.5% white (undecodable scan or genuinely blank). */
+    unreadablePages: number[];
+    tooColorfulPages: number[];
+}
+
+/** Clean-and-replace step (M5): lift accepted ink off the page and swap the stored file. */
+export type CleanFn = (
+    proposal: ImportProposal,
+    acceptedItems: ProposedItem[],
+    onStep: (step: 'rebuild' | 'upload') => void,
+) => Promise<void>;
+
+export type ImportStatus =
+    | { kind: 'idle' }
+    | { kind: 'scanning'; page: number; pageCount: number }
+    | { kind: 'classifying'; page: number; pageCount: number }
+    | { kind: 'review'; proposal: ImportProposal }
+    | { kind: 'applying'; step: 'annotations' | 'rebuild' | 'upload' }
+    | { kind: 'done'; created: number; cleaned: boolean }
+    | { kind: 'nothing-found'; unreadablePages: number[]; tooColorfulPages: number[] }
+    | { kind: 'error'; message: string };

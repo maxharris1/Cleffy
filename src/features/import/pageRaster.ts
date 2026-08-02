@@ -1,3 +1,5 @@
+import type { PDFPageProxy } from 'pdfjs-dist';
+
 import type { DetectionRaster } from '@/features/import/importTypes';
 
 /** Longest raster side for the full detection pass (matches export quality). */
@@ -10,9 +12,13 @@ export interface DetectionDoc {
     /**
      * Render one page (0-based) to RGBA pixels at `maxSide` longest side.
      * The raster is in the ROTATED viewport space — raster px ÷ dims are the
-     * app's normalized annotation coordinates.
+     * app's normalized annotation coordinates. PDF annotation appearances
+     * (FreeText/Ink…) are NOT rendered — the born-digital pass extracts those
+     * as vectors, and rendering them too would double-detect them as ink.
      */
     renderPage: (pageIndex: number, maxSide?: number) => Promise<DetectionRaster>;
+    /** Raw pdf.js page proxy (born-digital annotation extraction). */
+    getPageProxy: (pageIndex: number) => Promise<PDFPageProxy>;
     destroy: () => Promise<void>;
 }
 
@@ -48,8 +54,13 @@ export const openDetectionDoc = async (bytes: ArrayBuffer): Promise<DetectionDoc
                 if (!ctx) {
                     throw new Error('Could not create a canvas to scan the page.');
                 }
-                await page.render({ canvasContext: ctx, viewport, canvas, background: 'rgba(255,255,255,1)' })
-                    .promise;
+                await page.render({
+                    canvasContext: ctx,
+                    viewport,
+                    canvas,
+                    background: 'rgba(255,255,255,1)',
+                    annotationMode: 0, // AnnotationMode.DISABLE
+                }).promise;
                 const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
                 // Free the page's decoded resources before the next page renders.
                 canvas.width = 0;
@@ -57,6 +68,7 @@ export const openDetectionDoc = async (bytes: ArrayBuffer): Promise<DetectionDoc
                 page.cleanup();
                 return { data: image.data, width: image.width, height: image.height };
             },
+            getPageProxy: (pageIndex) => pdf.getPage(pageIndex + 1),
             destroy: async () => {
                 if (canvas) {
                     canvas.width = 0;
