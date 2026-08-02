@@ -34,7 +34,13 @@ export const GLYPH_MERGE_GAP_PX = 6;
 export const RUN_VOVERLAP = 0.5;
 /** Run grouping: max horizontal gap as a multiple of the median member width. */
 export const RUN_GAP_FACTOR = 1.2;
-export const MAX_CLUSTERS_PER_PAGE = 120;
+/**
+ * Per-page cluster cap — a UI/memory bound, not an expectation. A real
+ * teacher-fingered page (KV 330 NMA scans) carries 300–450 digit glyphs, so
+ * this must sit well above that; pathological colored-texture pages are
+ * already rejected earlier by MAX_INK_FRAC / MIN_COMPONENT_AREA_PX.
+ */
+export const MAX_CLUSTERS_PER_PAGE = 500;
 
 const BUCKETS: readonly ColorBucket[] = ['red', 'yellow', 'green', 'blue', 'purple'];
 

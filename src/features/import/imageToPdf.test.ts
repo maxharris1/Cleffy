@@ -28,4 +28,10 @@ describe('buildSingleImagePdf', () => {
     it('throws on corrupt image bytes', async () => {
         await expect(buildSingleImagePdf(new Uint8Array([1, 2, 3, 4]), 'png')).rejects.toThrow();
     });
+
+    it('is byte-deterministic — local doc ids hash the converted bytes', async () => {
+        const first = await buildSingleImagePdf(bytesFromBase64(TINY_PNG_B64), 'png');
+        const second = await buildSingleImagePdf(bytesFromBase64(TINY_PNG_B64), 'png');
+        expect(Buffer.from(second).equals(Buffer.from(first))).toBe(true);
+    });
 });

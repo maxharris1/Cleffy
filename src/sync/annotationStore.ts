@@ -27,6 +27,7 @@ export class AnnotationStore {
     private byId = new Map<string, Annotation>();
     /** When set, getPage returns this instead of live state (lesson history view). */
     private historyOverlay: Map<number, Map<string, Annotation>> | null = null;
+    private overlayKind: 'history' | 'preview' = 'history';
     private listeners = new Set<PageListener>();
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
@@ -80,8 +81,14 @@ export class AnnotationStore {
         return this.historyOverlay !== null;
     }
 
-    /** Show a day's starting annotations read-only (null clears). */
-    setHistoryOverlay(annotations: Annotation[] | null): void {
+    /** Which UI owns the overlay — 'history' (day snapshot) or 'preview' (import review); null when live. */
+    get overlayMode(): 'history' | 'preview' | null {
+        return this.historyOverlay ? this.overlayKind : null;
+    }
+
+    /** Show a set of annotations read-only in place of the live ones (null clears). */
+    setHistoryOverlay(annotations: Annotation[] | null, kind: 'history' | 'preview' = 'history'): void {
+        this.overlayKind = kind;
         const touched = new Set<number>([...this.pages.keys()]);
         if (this.historyOverlay) {
             for (const page of this.historyOverlay.keys()) {

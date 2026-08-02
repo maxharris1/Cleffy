@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router';
 
+import { UPLOAD_ACCEPT, prepareUploadFile } from '@/features/import/prepareUpload';
 import { localDocId, putLocalDoc } from '@/lib/localDocs';
 import { ErrorText } from '@/ui/ErrorText';
 import { buttonClassName } from '@/ui/classNames';
@@ -10,16 +11,18 @@ export const LocalOpenControl = ({ label, subtle = false }: { label: string; sub
     const [openError, setOpenError] = useState<string | null>(null);
 
     const openFile = useCallback(
-        async (file: File) => {
+        async (picked: File) => {
             setOpenError(null);
-            if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
-                setOpenError('Please choose a PDF file.');
-                return;
+            try {
+                // Same normalization as cloud uploads: images become one-page PDFs.
+                const { file } = await prepareUploadFile(picked);
+                const buffer = await file.arrayBuffer();
+                const id = await localDocId(buffer);
+                putLocalDoc(id, buffer);
+                navigate(`/doc/${id}`);
+            } catch (err) {
+                setOpenError(err instanceof Error ? err.message : 'Could not open that file.');
             }
-            const buffer = await file.arrayBuffer();
-            const id = await localDocId(buffer);
-            putLocalDoc(id, buffer);
-            navigate(`/doc/${id}`);
         },
         [navigate],
     );
@@ -36,7 +39,7 @@ export const LocalOpenControl = ({ label, subtle = false }: { label: string; sub
                 {label}
                 <input
                     type="file"
-                    accept="application/pdf,.pdf"
+                    accept={UPLOAD_ACCEPT}
                     className="hidden"
                     onChange={(e) => {
                         const file = e.target.files?.[0];

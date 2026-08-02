@@ -7,6 +7,7 @@ import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
 import { buildCleanFn } from '@/features/import/cleanReplace';
 import { ImportScanButton } from '@/features/import/ImportScanButton';
+import { UPLOAD_ACCEPT, prepareUploadFile } from '@/features/import/prepareUpload';
 import {
     fetchDocument,
     fetchMyRole,
@@ -252,20 +253,29 @@ const SyncDot = ({ status }: { status: SyncStatus }) => {
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
 
     const reopenFile = useCallback(
-        async (file: File) => {
-            const buffer = await file.arrayBuffer();
-            const id = await localDocId(buffer);
-            putLocalDoc(id, buffer);
-            if (id === docId) {
-                forceRender((n) => n + 1);
-            } else {
-                // Different file than the one this URL refers to — open it under its own id.
-                window.location.assign(`/doc/${id}`);
+        async (picked: File) => {
+            setReopenError(null);
+            try {
+                // Image conversion is byte-deterministic, so re-opening the
+                // same image file reproduces the same content-hash id.
+                const { file } = await prepareUploadFile(picked);
+                const buffer = await file.arrayBuffer();
+                const id = await localDocId(buffer);
+                putLocalDoc(id, buffer);
+                if (id === docId) {
+                    forceRender((n) => n + 1);
+                } else {
+                    // Different file than the one this URL refers to — open it under its own id.
+                    window.location.assign(`/doc/${id}`);
+                }
+            } catch (err) {
+                setReopenError(err instanceof Error ? err.message : 'Could not open that file.');
             }
         },
         [docId],
@@ -276,13 +286,13 @@ const LocalViewer = ({ docId }: { docId: string }) => {
             <main className="landing-page flex min-h-full flex-col items-center justify-center p-8">
                 <EmptyState
                     title="Re-open this score"
-                    body="This score isn't loaded in this session. Re-open the PDF file to continue — your annotations are saved on this device."
+                    body="This score isn't loaded in this session. Re-open the same file to continue — your annotations are saved on this device."
                 >
                     <label className={buttonClassName('primary', 'md')}>
-                        Re-open PDF
+                        Re-open file
                         <input
                             type="file"
-                            accept="application/pdf,.pdf"
+                            accept={UPLOAD_ACCEPT}
                             className="hidden"
                             onChange={(e) => {
                                 const file = e.target.files?.[0];
@@ -292,6 +302,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                             }}
                         />
                     </label>
+                    {reopenError ? <ErrorText>{reopenError}</ErrorText> : null}
                     <Link to="/" className={linkClassName}>
                         Back to home
                     </Link>

@@ -70,6 +70,13 @@ const bitmapToJpeg = async (bitmap: ImageBitmap): Promise<Blob> => {
 export const buildSingleImagePdf = async (bytes: Uint8Array, format: 'png' | 'jpeg'): Promise<Uint8Array> => {
     const { PDFDocument } = await import('pdf-lib');
     const doc = await PDFDocument.create();
+    // Pin the metadata pdf-lib would otherwise stamp with the current time:
+    // local doc ids are content hashes, so converting the same image twice
+    // must yield byte-identical PDFs or re-opening it would mint a new id.
+    doc.setCreationDate(new Date(0));
+    doc.setModificationDate(new Date(0));
+    doc.setProducer('cleffy');
+    doc.setCreator('cleffy');
     const image = format === 'png' ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
     const page = doc.addPage([image.width, image.height]);
     page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });

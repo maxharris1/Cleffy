@@ -167,4 +167,15 @@ describe('AnnotationStore', () => {
         expect(store.isHistoryMode).toBe(false);
         expect(store.getPage(0).has('a1')).toBe(true);
     });
+
+    it('tracks which UI owns the overlay (history pill vs import preview)', () => {
+        expect(store.overlayMode).toBe(null);
+        store.setHistoryOverlay([makeStroke('p1')], 'preview');
+        expect(store.overlayMode).toBe('preview');
+        expect(store.isHistoryMode).toBe(true);
+        store.setHistoryOverlay([makeStroke('h1')]);
+        expect(store.overlayMode).toBe('history');
+        store.setHistoryOverlay(null);
+        expect(store.overlayMode).toBe(null);
+    });
 });

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { applyProposals } from '@/features/import/applyImport';
 import { scanDocument } from '@/features/import/importPipeline';
 import { recordImportStatus } from '@/features/import/importPromptService';
+import { MAX_CLUSTERS_PER_PAGE } from '@/features/import/segmentation';
 import { isCloudDocId } from '@/features/library/documentsService';
 import type { ClassifyFn, CleanFn, ImportProposal, ImportStatus, ProposedItem } from '@/features/import/importTypes';
 import type { AnnotationStore } from '@/sync/annotationStore';
@@ -102,7 +103,10 @@ export const ImportReviewPanel = ({
             return;
         }
         if (previewOn) {
-            store.setHistoryOverlay([...store.liveAnnotations(), ...enabledItems.flatMap((item) => item.annotations)]);
+            store.setHistoryOverlay(
+                [...store.liveAnnotations(), ...enabledItems.flatMap((item) => item.annotations)],
+                'preview',
+            );
         } else {
             store.setHistoryOverlay(null);
         }
@@ -151,7 +155,8 @@ export const ImportReviewPanel = ({
         setStatus({ kind: 'applying', step: 'annotations' });
         try {
             store.setHistoryOverlay(null);
-            const created = await applyProposals(store, enabledItems);
+            await applyProposals(store, enabledItems);
+            const created = enabledItems.length;
             let cleaned = false;
             if (wantClean && clean) {
                 setStatus({ kind: 'applying', step: 'rebuild' });
@@ -170,7 +175,9 @@ export const ImportReviewPanel = ({
         }
     };
 
-    const annotationCount = enabledItems.reduce((sum, item) => sum + item.annotations.length, 0);
+    // Count reviewable marks (glyphs/runs), not the stroke paths inside them —
+    // "Found 312" when the user sees ~120 digits reads as a bug.
+    const foundCount = proposal ? proposal.pages.reduce((sum, page) => sum + page.items.length, 0) : 0;
 
     return (
         <Dialog label="Import existing marks" onClose={onClose} sheet>
@@ -237,8 +244,8 @@ export const ImportReviewPanel = ({
 
                     <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm text-stone-700">
-                            Found <span className="font-medium">{annotationCount}</span> marks on{' '}
-                            {proposal.pages.length} page(s). Unchecked marks stay untouched on the page.
+                            Found <span className="font-medium">{foundCount}</span> marks on {proposal.pages.length}{' '}
+                            page(s). Unchecked marks stay untouched on the page.
                         </p>
                         <label className="flex items-center gap-1.5 text-sm text-stone-600">
                             <input
@@ -267,6 +274,12 @@ export const ImportReviewPanel = ({
                                             {pageEnabled.length === page.items.length ? 'Uncheck page' : 'Check page'}
                                         </button>
                                     </div>
+                                    {page.segmentation.flags.dense ? (
+                                        <p className="mt-1 text-xs text-amber-800" role="status">
+                                            This page is packed with ink — only the {MAX_CLUSTERS_PER_PAGE} most
+                                            prominent marks were kept.
+                                        </p>
+                                    ) : null}
                                     <ul className="mt-1.5 flex flex-col gap-1">
                                         {page.items.map((item) => (
                                             <li key={item.id}>
@@ -317,7 +330,7 @@ export const ImportReviewPanel = ({
                             Cancel
                         </Button>
                         <Button size="sm" disabled={enabledItems.length === 0} onClick={() => void accept()}>
-                            Import {annotationCount} marks
+                            Import {enabledItems.length} marks
                         </Button>
                     </div>
                 </div>

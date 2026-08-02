@@ -79,11 +79,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
     // create during render (neither touches refs).
     const [annotationStore] = useState(() => new AnnotationStore(getDb(), docId));
     const [registry] = useState(() => new CanvasRegistry());
-    const historyMode = useSyncExternalStore(
+    const overlayMode = useSyncExternalStore(
         (cb) => annotationStore.subscribeMeta(cb),
-        () => annotationStore.isHistoryMode,
+        () => annotationStore.overlayMode,
     );
-    const effectiveReadOnly = readOnly || historyMode;
+    const effectiveReadOnly = readOnly || overlayMode !== null;
 
     // Live refs so the imperative controllers always see current geometry.
     const layoutRef = useRef(layout);
@@ -373,7 +373,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
                     >
                         {pages}
                     </div>
-                    {historyMode ? (
+                    {overlayMode === 'history' ? (
                         <div
                             data-ui-overlay
                             className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
