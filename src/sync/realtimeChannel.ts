@@ -147,7 +147,7 @@ export class DocRealtimeChannel {
     /**
      * Presence: report which page the user is looking at.
      * PdfViewport already debounces scroll at 400ms; this adds a 1s min gap
-     * so rapid setPage / reconnects do not trip ClientPresenceRateLimitReached.
+     * (including SUBSCRIBED reconnects) so we do not trip ClientPresenceRateLimitReached.
      */
     setPage(page: number): void {
         this.opts.self.page = page;
@@ -173,10 +173,11 @@ export class DocRealtimeChannel {
         if (!force && this.lastTrackedPage === page) {
             return;
         }
+        // Min-gap applies to reconnect storms too; first join (lastPresenceTrackAt=0) is immediate.
         const elapsed = Date.now() - this.lastPresenceTrackAt;
-        if (!force && elapsed < PRESENCE_TRACK_MIN_MS) {
+        if (elapsed < PRESENCE_TRACK_MIN_MS) {
             this.presenceTrackTimer = setTimeout(
-                () => this.trackPresence(),
+                () => this.trackPresence(force ? { force: true } : undefined),
                 PRESENCE_TRACK_MIN_MS - elapsed,
             );
             return;

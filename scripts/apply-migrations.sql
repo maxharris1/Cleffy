@@ -578,7 +578,7 @@ with check (
 create policy favorites_delete on public.document_favorites for delete to authenticated
 using (user_id = auth.uid());
 
--- ===== supabase/migrations/20260802172000_edge_rate_rls_and_revoke_execute.sql =====
+-- ===== supabase/migrations/20260802172249_edge_rate_rls_and_revoke_execute.sql =====
 -- Log-hardening: RLS on edge_rate_buckets + revoke EXECUTE on trigger-only /
 -- service-only defs; harden client RPCs like batch_rpc_revoke_public.
 
