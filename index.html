@@ -6,6 +6,7 @@
             name="viewport"
             content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
         />
+        <!-- Keep in sync with --color-accent in src/index.css @theme and the PWA manifest in vite.config.ts -->
         <meta name="theme-color" content="#4338ca" />
         <meta
             name="description"
@@ -14,12 +15,26 @@
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="Cleffy" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-        <link
-            href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap"
-            rel="stylesheet"
+        <!-- Social cards need absolute URLs; swap the dev-tunnel origin for the production domain at deploy. -->
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="Cleffy" />
+        <meta property="og:title" content="Cleffy — annotate scores together, in real time" />
+        <meta
+            property="og:description"
+            content="Upload a score, share one link, and mark it up live with your students or ensemble. No accounts needed to join."
         />
+        <meta property="og:url" content="https://cleffy.ngrok.app/" />
+        <meta property="og:image" content="https://cleffy.ngrok.app/marketing/og.jpg" />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="Cleffy — annotate scores together, in real time" />
+        <meta
+            name="twitter:description"
+            content="Upload a score, share one link, and mark it up live with your students or ensemble. No accounts needed to join."
+        />
+        <meta name="twitter:image" content="https://cleffy.ngrok.app/marketing/og.jpg" />
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <link rel="icon" href="/icons/icon-192.png" />
         <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
         <title>Cleffy</title>

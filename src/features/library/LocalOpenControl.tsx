@@ -2,6 +2,8 @@ import { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router';
 
 import { localDocId, putLocalDoc } from '@/lib/localDocs';
+import { ErrorText } from '@/ui/ErrorText';
+import { buttonClassName } from '@/ui/classNames';
 
 export const LocalOpenControl = ({ label, subtle = false }: { label: string; subtle?: boolean }) => {
     const navigate = useNavigate();
@@ -27,8 +29,8 @@ export const LocalOpenControl = ({ label, subtle = false }: { label: string; sub
             <label
                 className={
                     subtle
-                        ? 'cursor-pointer text-sm text-stone-500 underline decoration-stone-300 underline-offset-2 transition hover:text-indigo-700 hover:decoration-indigo-300'
-                        : 'cursor-pointer rounded-xl bg-stone-800 px-5 py-2.5 font-medium text-white transition hover:bg-stone-700'
+                        ? 'cursor-pointer text-sm text-stone-500 underline decoration-stone-300 underline-offset-2 transition hover:text-accent hover:decoration-accent/40'
+                        : buttonClassName('primary', 'md')
                 }
             >
                 {label}
@@ -45,7 +47,7 @@ export const LocalOpenControl = ({ label, subtle = false }: { label: string; sub
                     }}
                 />
             </label>
-            {openError ? <p className="text-sm text-red-600">{openError}</p> : null}
+            {openError ? <ErrorText>{openError}</ErrorText> : null}
         </div>
     );
 };

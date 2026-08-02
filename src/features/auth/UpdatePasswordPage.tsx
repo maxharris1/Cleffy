@@ -3,7 +3,8 @@ import { Link, useNavigate } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { updatePassword } from '@/features/auth/session';
-import { BrandShell, brandLinkClassName } from '@/ui/BrandShell';
+import { BrandShell } from '@/ui/BrandShell';
+import { linkClassName } from '@/ui/classNames';
 
 /**
  * Recovery links land here with hash tokens. useSession hydrates the recovery
@@ -29,7 +30,7 @@ const UpdatePasswordForm = () => {
                 fallbackError="Could not update password."
                 footer={
                     <p className="mt-6 text-center text-sm text-stone-600">
-                        <Link to="/library" className={brandLinkClassName}>
+                        <Link to="/library" className={linkClassName}>
                             Skip to library
                         </Link>
                     </p>

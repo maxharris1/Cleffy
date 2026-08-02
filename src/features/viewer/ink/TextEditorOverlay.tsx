@@ -41,7 +41,7 @@ export const TextEditorOverlay = ({ intent, layout, view, onCommit, onCancel }: 
             defaultValue={existingPayload?.text ?? ''}
             aria-label="Text note"
             rows={2}
-            className="absolute z-30 min-w-32 resize rounded border border-indigo-400 bg-white/95 p-1 shadow-md outline-none"
+            className="absolute z-30 min-w-32 resize rounded border border-accent bg-white/95 p-1 shadow-md outline-none"
             style={{ left, top, fontSize: Math.max(10, fontPx), lineHeight: 1.25 }}
             onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {

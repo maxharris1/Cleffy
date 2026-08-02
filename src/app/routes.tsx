@@ -10,14 +10,16 @@ import { LibraryPage } from '@/features/library/LibraryPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
 import { SearchPage } from '@/features/library/SearchPage';
 import { LandingPage } from '@/features/marketing/LandingPage';
+import { NotFoundPage } from '@/features/marketing/NotFoundPage';
 import { JoinPage } from '@/features/share/JoinPage';
+import { LoadingText } from '@/ui/Loading';
 
 // Lazy: keeps pdf.js (large, browser-only) out of the app-shell bundle.
 const ViewerPage = lazy(() => import('@/features/viewer/ViewerPage').then((m) => ({ default: m.ViewerPage })));
 
 const ViewerFallback = () => (
     <main className="flex min-h-full items-center justify-center p-8">
-        <p className="animate-pulse text-stone-500">Loading viewer…</p>
+        <LoadingText>Loading viewer…</LoadingText>
     </main>
 );
 
@@ -43,6 +45,7 @@ export const AppRoutes = () => {
             />
             <Route path="/join/:token" element={<JoinPage />} />
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
+            <Route path="*" element={<NotFoundPage />} />
         </Routes>
     );
 };

@@ -88,23 +88,17 @@ const parseDownloadFallback = (body: unknown): ImslpDownloadFallback | null => {
     return { ok: false, code: code as FallbackCode, message, openUrl, filename };
 };
 
-export const searchImslp = async (
-    q: string,
-    options: ImslpSearchOptions | number = 100,
-): Promise<ImslpSearchHit[]> => {
+export const searchImslp = async (q: string, options: ImslpSearchOptions | number = 100): Promise<ImslpSearchHit[]> => {
     const opts: ImslpSearchOptions = typeof options === 'number' ? { limit: options } : options;
     const limit = opts.limit ?? 100;
-    const { data, error } = await getSupabase().functions.invoke<{ results: ImslpSearchHit[] }>(
-        'imslp-search',
-        {
-            body: {
-                q,
-                limit,
-                filters: opts.filters,
-                sort: opts.sort,
-            },
+    const { data, error } = await getSupabase().functions.invoke<{ results: ImslpSearchHit[] }>('imslp-search', {
+        body: {
+            q,
+            limit,
+            filters: opts.filters,
+            sort: opts.sort,
         },
-    );
+    });
     if (error) {
         throw new Error(await functionErrorMessage(error));
     }

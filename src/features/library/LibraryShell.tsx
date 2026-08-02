@@ -5,6 +5,7 @@ import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { importDocumentFromImslp, uploadDocument } from '@/features/library/documentsService';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import { buttonClassName } from '@/ui/classNames';
 
 export type LibraryOutletContext = {
     userId: string;
@@ -91,29 +92,29 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     };
 
     return (
-        <main className="landing-page min-h-full">
-            <div className="library-layout mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10 lg:flex-row lg:gap-10 lg:py-12">
-                <aside className="library-aside shrink-0 lg:sticky lg:top-8 lg:w-48 lg:self-start">
-                    <div className="flex items-start justify-between gap-4 lg:block">
+        <main className="paper-page min-h-full">
+            <div className="library-layout mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10 md:flex-row md:gap-8 lg:gap-10 lg:py-12">
+                <aside className="shrink-0 md:sticky md:top-8 md:w-44 md:self-start lg:w-48">
+                    <div className="flex items-start justify-between gap-4 md:block">
                         <div>
                             <p className="landing-brand font-display text-2xl font-semibold sm:text-3xl">Cleffy</p>
-                            <p className="mt-1 text-sm text-stone-500 lg:mt-1.5">Your scores</p>
+                            <p className="mt-1 text-sm text-stone-500 md:mt-1.5">Your scores</p>
                         </div>
-                        <div className="flex shrink-0 items-center gap-2 pt-1 lg:hidden">
+                        <div className="flex shrink-0 items-center gap-2 pt-1 md:hidden">
                             <span className="hidden max-w-[8rem] truncate text-sm text-stone-500 sm:inline">
                                 {userLabel}
                             </span>
                             <button
                                 type="button"
                                 onClick={() => void signOut()}
-                                className="rounded-lg px-3 py-1.5 text-sm text-stone-600 transition hover:bg-black/5"
+                                className={buttonClassName('ghost', 'sm')}
                             >
                                 Sign out
                             </button>
                         </div>
                     </div>
 
-                    <nav className="library-nav mt-5 flex gap-1 lg:mt-8 lg:flex-col lg:gap-0.5" aria-label="Library">
+                    <nav className="mt-5 flex gap-1 md:mt-8 md:flex-col md:gap-0.5" aria-label="Library">
                         {NAV_ITEMS.map((item) => (
                             <NavLink
                                 key={item.to}
@@ -124,7 +125,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                                         'rounded-lg px-3 py-2 text-sm transition',
                                         isActive
                                             ? 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50'
-                                            : 'text-stone-600 hover:bg-black/5 hover:text-stone-900',
+                                            : 'text-stone-600 hover:bg-ink/5 hover:text-stone-900',
                                     ].join(' ')
                                 }
                             >
@@ -133,12 +134,12 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                         ))}
                     </nav>
 
-                    <div className="mt-8 hidden border-t border-stone-300/50 pt-5 lg:block">
+                    <div className="mt-8 hidden border-t border-stone-300/50 pt-5 md:block">
                         <p className="truncate text-sm text-stone-500">{userLabel}</p>
                         <button
                             type="button"
                             onClick={() => void signOut()}
-                            className="mt-2 rounded-lg px-2 py-1.5 text-sm text-stone-600 transition hover:bg-black/5"
+                            className={buttonClassName('ghost', 'sm', 'mt-2')}
                         >
                             Sign out
                         </button>

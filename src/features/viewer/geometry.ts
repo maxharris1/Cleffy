@@ -90,11 +90,7 @@ export const visiblePageRange = (
  * Page whose vertical span contains (or is nearest to) the viewport center.
  * Used for "share this page" actions.
  */
-export const focusedPageIndex = (
-    view: ViewState,
-    viewportHeight: number,
-    layouts: readonly PageLayout[],
-): number => {
+export const focusedPageIndex = (view: ViewState, viewportHeight: number, layouts: readonly PageLayout[]): number => {
     if (layouts.length === 0) {
         return 0;
     }

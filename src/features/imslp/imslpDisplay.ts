@@ -30,7 +30,10 @@ export const displayWorkTitle = (title: string): { work: string; composer: strin
 /** Drop noisy PMLP prefixes from edition filenames for the picker. */
 export const displayEditionName = (filename: string): string => {
     const withoutExt = filename.replace(/\.pdf$/i, '');
-    const cleaned = withoutExt.replace(/^PMLP\d+-?/i, '').replace(/_/g, ' ').trim();
+    const cleaned = withoutExt
+        .replace(/^PMLP\d+-?/i, '')
+        .replace(/_/g, ' ')
+        .trim();
     return cleaned || filename;
 };
 
@@ -38,9 +41,7 @@ export const displayEditionName = (filename: string): string => {
  * Pick a sensible default edition: prefer mid-size PDFs (often cleaner typesets)
  * over tiny stubs and huge multi-volume scans. Falls back to first edition.
  */
-export const recommendEdition = <T extends { filename: string; size: number | null }>(
-    editions: T[],
-): T | null => {
+export const recommendEdition = <T extends { filename: string; size: number | null }>(editions: T[]): T | null => {
     if (editions.length === 0) {
         return null;
     }

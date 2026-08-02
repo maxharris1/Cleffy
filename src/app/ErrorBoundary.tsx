@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
-import { BrandShell, brandPrimaryButtonClassName } from '@/ui/BrandShell';
+import { BrandShell } from '@/ui/BrandShell';
+import { Button } from '@/ui/Button';
 
 interface ErrorBoundaryProps {
     children: ReactNode;
@@ -29,13 +30,9 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
                     title="Something went wrong"
                     subtitle="Your annotations are saved on this device. Reload to continue where you left off."
                 >
-                    <button
-                        type="button"
-                        onClick={() => window.location.reload()}
-                        className={brandPrimaryButtonClassName}
-                    >
+                    <Button onClick={() => window.location.reload()} className="mt-4 w-full">
                         Reload
-                    </button>
+                    </Button>
                 </BrandShell>
             );
         }

@@ -17,7 +17,7 @@ describe('App', () => {
 
     it('renders the landing page on /', () => {
         render(<App />);
-        expect(screen.getByText('Cleffy')).toBeInTheDocument();
+        expect(screen.getAllByText('Cleffy').length).toBeGreaterThan(0);
         expect(screen.getByText('Annotate scores on this device')).toBeInTheDocument();
         expect(screen.getByText('Open a PDF')).toBeInTheDocument();
     });

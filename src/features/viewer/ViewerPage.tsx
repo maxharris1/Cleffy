@@ -16,11 +16,18 @@ import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButt
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
+import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow, MemberRole } from '@/types/database';
+import { Badge } from '@/ui/Badge';
+import { Button } from '@/ui/Button';
+import { EmptyState } from '@/ui/EmptyState';
+import { ErrorText } from '@/ui/ErrorText';
+import { LoadingText } from '@/ui/Loading';
+import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
@@ -99,9 +106,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         const escapeTo = isRegisteredSession(session) ? '/library' : '/';
         const escapeLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
         return (
-            <main className="flex min-h-full flex-col items-center justify-center gap-3 p-8">
-                <p className="max-w-md text-center text-red-600">{loadError}</p>
-                <Link to={escapeTo} className="text-sm text-indigo-600 underline">
+            <main className="landing-page flex min-h-full flex-col items-center justify-center gap-3 p-8">
+                <ErrorText className="max-w-md text-center">{loadError}</ErrorText>
+                <Link to={escapeTo} className={linkClassName}>
                     {escapeLabel}
                 </Link>
             </main>
@@ -110,7 +117,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     if (!state || !userId) {
         return (
             <main className="flex min-h-full items-center justify-center p-8">
-                <p className="animate-pulse text-stone-500">Opening score…</p>
+                <LoadingText>Opening score…</LoadingText>
             </main>
         );
     }
@@ -121,33 +128,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
     return (
         <div className="fixed inset-0 flex flex-col">
-            <header className="flex items-center gap-3 border-b border-stone-200 bg-white px-3 py-2 shadow-sm">
-                <Link
-                    to={backTo}
-                    aria-label={backLabel}
-                    className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100"
-                >
-                    ←
-                </Link>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">{state.doc.title}</span>
+            <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
                 <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
-                {readOnly ? (
-                    <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">view only</span>
-                ) : null}
+                {readOnly ? <Badge>view only</Badge> : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 <ShareExportMenu docId={docId} title={state.doc.title} />
                 {state.role === 'owner' ? (
-                    <button
-                        type="button"
-                        onClick={() => setShareOpen(true)}
-                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white shadow hover:bg-indigo-500"
-                    >
+                    <Button size="sm" onClick={() => setShareOpen(true)}>
                         Invite
-                    </button>
+                    </Button>
                 ) : null}
-            </header>
+            </ViewerHeader>
             {session?.user.is_anonymous ? <UpgradeBanner /> : null}
             <div className="min-h-0 flex-1">
                 <PdfProvider data={state.bytes}>
@@ -173,16 +166,17 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 };
 
 const SyncDot = ({ status }: { status: SyncStatus }) => {
-    const styles: Record<SyncStatus, { dot: string; label: string }> = {
-        synced: { dot: 'bg-emerald-500', label: 'Synced' },
-        syncing: { dot: 'bg-amber-400 animate-pulse', label: 'Syncing…' },
-        offline: { dot: 'bg-stone-400', label: 'Offline — changes saved on this device' },
-        error: { dot: 'bg-red-500', label: 'Sync error — retrying' },
+    const styles: Record<SyncStatus, { dot: string; short: string; label: string }> = {
+        synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
+        syncing: { dot: 'bg-amber-400 animate-pulse', short: 'Syncing…', label: 'Syncing…' },
+        offline: { dot: 'bg-stone-400', short: 'Offline', label: 'Offline — changes saved on this device' },
+        error: { dot: 'bg-red-500', short: 'Sync error', label: 'Sync error — retrying' },
     };
-    const { dot, label } = styles[status];
+    const { dot, short, label } = styles[status];
     return (
-        <span title={label} aria-label={label} className="flex items-center">
-            <span className={`h-2.5 w-2.5 rounded-full ${dot}`} />
+        <span title={label} className="flex items-center gap-1.5">
+            <span aria-hidden="true" className={`h-2.5 w-2.5 rounded-full ${dot}`} />
+            <span className="sr-only whitespace-nowrap text-xs text-stone-500 md:not-sr-only">{short}</span>
         </span>
     );
 };
@@ -214,47 +208,40 @@ const LocalViewer = ({ docId }: { docId: string }) => {
 
     if (!bytes) {
         return (
-            <main className="flex min-h-full flex-col items-center justify-center gap-4 p-8">
-                <p className="max-w-md text-center text-stone-600">
-                    This score isn&apos;t loaded in this session. Re-open the PDF file to continue — your annotations
-                    are saved on this device.
-                </p>
-                <label className="cursor-pointer rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white shadow hover:bg-indigo-500">
-                    Re-open PDF
-                    <input
-                        type="file"
-                        accept="application/pdf,.pdf"
-                        className="hidden"
-                        onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            if (file) {
-                                void reopenFile(file);
-                            }
-                        }}
-                    />
-                </label>
-                <Link to="/" className="text-sm text-indigo-600 underline">
-                    Back to home
-                </Link>
+            <main className="landing-page flex min-h-full flex-col items-center justify-center p-8">
+                <EmptyState
+                    title="Re-open this score"
+                    body="This score isn't loaded in this session. Re-open the PDF file to continue — your annotations are saved on this device."
+                >
+                    <label className={buttonClassName('primary', 'md')}>
+                        Re-open PDF
+                        <input
+                            type="file"
+                            accept="application/pdf,.pdf"
+                            className="hidden"
+                            onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                    void reopenFile(file);
+                                }
+                            }}
+                        />
+                    </label>
+                    <Link to="/" className={linkClassName}>
+                        Back to home
+                    </Link>
+                </EmptyState>
             </main>
         );
     }
 
     return (
         <div className="fixed inset-0 flex flex-col">
-            <header className="flex items-center gap-3 border-b border-stone-200 bg-white px-3 py-2 shadow-sm">
-                <Link
-                    to="/"
-                    aria-label="Back to home"
-                    className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100"
-                >
-                    ←
-                </Link>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">Local score</span>
-                <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">this device only</span>
+            <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
+                <Badge>this device only</Badge>
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
                 <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
-            </header>
+            </ViewerHeader>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
                     <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />

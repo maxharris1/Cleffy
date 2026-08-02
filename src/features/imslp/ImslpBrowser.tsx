@@ -1,13 +1,12 @@
 import { useReducer, useState } from 'react';
 
-import {
-    fetchImslpWork,
-    type ImslpEdition,
-    type ImslpWorkDetail,
-} from '@/features/imslp/imslpApi';
+import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import { recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
+import { ErrorText } from '@/ui/ErrorText';
+import { LoadingText } from '@/ui/Loading';
+import { buttonClassName } from '@/ui/classNames';
 
 export interface ImslpBrowserProps {
     /** Local PDF hand-off (manual file pick / hybrid fallback upload). */
@@ -35,7 +34,6 @@ type Flow =
           phase: 'work';
           work: ImslpWorkDetail;
           selected: ImslpEdition | null;
-          accepted: boolean;
           download: DownloadStatus;
       };
 
@@ -44,7 +42,6 @@ type Action =
     | { type: 'loadingWork' }
     | { type: 'workLoaded'; work: ImslpWorkDetail }
     | { type: 'select'; edition: ImslpEdition }
-    | { type: 'accept'; accepted: boolean }
     | { type: 'download'; download: DownloadStatus };
 
 const initial: Flow = { phase: 'search' };
@@ -61,7 +58,6 @@ const reduce = (state: Flow, action: Action): Flow => {
                 phase: 'work',
                 work: action.work,
                 selected: recommended,
-                accepted: false,
                 download: { kind: 'idle' },
             };
         }
@@ -70,11 +66,6 @@ const reduce = (state: Flow, action: Action): Flow => {
                 return state;
             }
             return { ...state, selected: action.edition, download: { kind: 'idle' } };
-        case 'accept':
-            if (state.phase !== 'work') {
-                return state;
-            }
-            return { ...state, accepted: action.accepted };
         case 'download':
             if (state.phase !== 'work') {
                 return state;
@@ -93,7 +84,7 @@ export const ImslpBrowser = ({
     busy = false,
     autoFocus = true,
     showHeading = true,
-    className = 'imslp-browser mt-6 rounded-xl border border-stone-300/60 bg-white/50 p-4 sm:p-5',
+    className = 'mt-6 rounded-xl border border-stone-300/60 bg-white/50 p-4 sm:p-5',
 }: ImslpBrowserProps) => {
     const [flow, dispatch] = useReducer(reduce, initial);
     const [error, setError] = useState<string | null>(null);
@@ -110,7 +101,7 @@ export const ImslpBrowser = ({
     };
 
     const importEdition = async () => {
-        if (flow.phase !== 'work' || !flow.selected || !flow.accepted) {
+        if (flow.phase !== 'work' || !flow.selected) {
             return;
         }
         const { work, selected } = flow;
@@ -138,7 +129,9 @@ export const ImslpBrowser = ({
         }
         setError(null);
         try {
-            await onImportFile(new File([file], suggestedPdfName(flow.work.title, file.name), { type: 'application/pdf' }));
+            await onImportFile(
+                new File([file], suggestedPdfName(flow.work.title, file.name), { type: 'application/pdf' }),
+            );
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Upload failed');
         }
@@ -150,9 +143,7 @@ export const ImslpBrowser = ({
     return (
         <section className={className}>
             {showHeading || flow.phase === 'work' ? (
-                <div
-                    className={`flex items-start gap-3 ${showHeading ? 'justify-between' : 'justify-end'}`}
-                >
+                <div className={`flex items-start gap-3 ${showHeading ? 'justify-between' : 'justify-end'}`}>
                     {showHeading ? (
                         <div>
                             <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
@@ -168,7 +159,7 @@ export const ImslpBrowser = ({
                                 setError(null);
                                 dispatch({ type: 'search' });
                             }}
-                            className="shrink-0 rounded-lg px-2.5 py-1 text-xs text-stone-600 transition hover:bg-black/5"
+                            className={buttonClassName('ghost', 'sm', 'shrink-0')}
                         >
                             Back
                         </button>
@@ -177,7 +168,7 @@ export const ImslpBrowser = ({
             ) : null}
 
             {flow.phase === 'loadingWork' ? (
-                <p className="mt-4 animate-pulse text-xs text-stone-500">Loading editions…</p>
+                <LoadingText className="mt-4 text-xs">Loading editions…</LoadingText>
             ) : null}
 
             {flow.phase === 'search' ? (
@@ -194,22 +185,16 @@ export const ImslpBrowser = ({
                     key={flow.work.title}
                     work={flow.work}
                     selected={flow.selected}
-                    accepted={flow.accepted}
                     download={flow.download}
                     busy={busy}
                     importing={blocked}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
-                    onAcceptedChange={(accepted) => dispatch({ type: 'accept', accepted })}
                     onImportSelected={() => void importEdition()}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
             ) : null}
 
-            {error ? (
-                <p className="mt-3 text-sm text-red-600" role="status">
-                    {error}
-                </p>
-            ) : null}
+            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
         </section>
     );
 };

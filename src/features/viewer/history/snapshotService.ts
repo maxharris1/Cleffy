@@ -1,8 +1,5 @@
 import { isCloudDocId } from '@/features/library/documentsService';
-import {
-    localDateString,
-    type LocalAnnotationSnapshot,
-} from '@/features/viewer/history/snapshotTypes';
+import { localDateString, type LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import { getSupabase } from '@/lib/supabase';
 import { getDb, type ScribblerDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';

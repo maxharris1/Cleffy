@@ -1,12 +1,8 @@
-import { useId, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
-import {
-    displayEditionName,
-    displayWorkTitle,
-    formatBytes,
-    recommendEdition,
-} from '@/features/imslp/imslpDisplay';
+import { displayEditionName, displayWorkTitle, formatBytes, recommendEdition } from '@/features/imslp/imslpDisplay';
+import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 const DISCLAIMER =
     'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
@@ -15,20 +11,16 @@ const DISCLAIMER =
 const EDITION_PREVIEW = 6;
 
 export type DownloadStatus =
-    | { kind: 'idle' }
-    | { kind: 'downloading' }
-    | { kind: 'fallback'; openUrl: string; message: string };
+    { kind: 'idle' } | { kind: 'downloading' } | { kind: 'fallback'; openUrl: string; message: string };
 
 interface ImslpWorkPanelProps {
     work: ImslpWorkDetail;
     selected: ImslpEdition | null;
-    accepted: boolean;
     download: DownloadStatus;
     /** Library is uploading the handed-off PDF. */
     busy: boolean;
     importing: boolean;
     onSelect: (edition: ImslpEdition) => void;
-    onAcceptedChange: (accepted: boolean) => void;
     onImportSelected: () => void;
     onImportLocalPdf: (file: File) => void;
 }
@@ -36,16 +28,13 @@ interface ImslpWorkPanelProps {
 export const ImslpWorkPanel = ({
     work,
     selected,
-    accepted,
     download,
     busy,
     importing,
     onSelect,
-    onAcceptedChange,
     onImportSelected,
     onImportLocalPdf,
 }: ImslpWorkPanelProps) => {
-    const disclaimerId = useId();
     const parsed = displayWorkTitle(work.title);
     const composer = work.composer ?? parsed.composer;
     const [showAllEditions, setShowAllEditions] = useState(false);
@@ -68,11 +57,7 @@ export const ImslpWorkPanel = ({
     const hiddenCount = Math.max(0, orderedEditions.length - visibleEditions.length);
 
     const buttonLabel =
-        download.kind === 'downloading'
-            ? 'Downloading from IMSLP…'
-            : busy
-              ? 'Adding to library…'
-              : 'Add to my library';
+        download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
 
     return (
         <div className="imslp-panel-view mt-4">
@@ -82,7 +67,7 @@ export const ImslpWorkPanel = ({
                 href={work.imslpUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="mt-1 inline-block text-xs text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900"
+                className="mt-1 inline-block text-xs text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60"
             >
                 View on IMSLP
             </a>
@@ -107,13 +92,13 @@ export const ImslpWorkPanel = ({
                                 <li key={edition.filename}>
                                     <label
                                         className={`flex cursor-pointer items-start gap-2.5 border-b border-stone-200/80 py-2.5 ${
-                                            checked ? 'bg-indigo-50/60' : ''
+                                            checked ? 'bg-accent-soft' : ''
                                         }`}
                                     >
                                         <input
                                             type="radio"
                                             name="imslp-edition"
-                                            className="mt-1"
+                                            className="mt-1 h-4 w-4 accent-accent"
                                             checked={checked}
                                             onChange={() => onSelect(edition)}
                                             disabled={importing}
@@ -121,7 +106,7 @@ export const ImslpWorkPanel = ({
                                         <span className="min-w-0 flex-1">
                                             <span className="block text-sm text-stone-800">
                                                 {isRecommended && index === 0 ? (
-                                                    <span className="mr-1.5 text-xs font-medium text-indigo-700">
+                                                    <span className="mr-1.5 text-xs font-medium text-accent">
                                                         Recommended
                                                     </span>
                                                 ) : null}
@@ -140,7 +125,7 @@ export const ImslpWorkPanel = ({
                         <button
                             type="button"
                             onClick={() => setShowAllEditions(true)}
-                            className="mt-2 text-sm text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900"
+                            className={`mt-2 ${linkClassName}`}
                         >
                             Show all {orderedEditions.length} editions
                         </button>
@@ -149,7 +134,7 @@ export const ImslpWorkPanel = ({
                         <button
                             type="button"
                             onClick={() => setShowAllEditions(false)}
-                            className="mt-2 block text-sm text-stone-600 underline decoration-stone-300 underline-offset-2 hover:text-indigo-700"
+                            className="mt-2 block text-sm text-stone-600 underline decoration-stone-300 underline-offset-2 transition hover:text-accent"
                         >
                             Show fewer
                         </button>
@@ -157,27 +142,12 @@ export const ImslpWorkPanel = ({
                 </fieldset>
             )}
 
-            <div className="mt-4 rounded-lg border border-stone-200/80 bg-stone-50/80 p-3">
-                <p className="text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
-                <label htmlFor={disclaimerId} className="mt-3 flex items-start gap-2 text-sm text-stone-800">
-                    <input
-                        id={disclaimerId}
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={accepted}
-                        onChange={(e) => onAcceptedChange(e.target.checked)}
-                        disabled={importing}
-                    />
-                    <span>I understand and want Cleffy to download this file.</span>
-                </label>
-            </div>
-
             <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
                     type="button"
                     onClick={onImportSelected}
-                    disabled={!selected || !accepted || importing || work.editions.length === 0}
-                    className="landing-cta rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    disabled={!selected || importing || work.editions.length === 0}
+                    className={buttonClassName('primary', 'sm')}
                 >
                     {buttonLabel}
                 </button>
@@ -186,12 +156,14 @@ export const ImslpWorkPanel = ({
                         href={selected.openUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="text-sm text-stone-600 underline decoration-stone-300 underline-offset-2 hover:text-indigo-700"
+                        className="text-sm text-stone-600 underline decoration-stone-300 underline-offset-2 transition hover:text-accent"
                     >
                         Open on IMSLP
                     </a>
                 ) : null}
             </div>
+
+            <p className="mt-3 max-w-prose text-xs leading-relaxed text-stone-500">{DISCLAIMER}</p>
 
             {download.kind === 'fallback' ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
@@ -204,11 +176,11 @@ export const ImslpWorkPanel = ({
                             href={download.openUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="landing-cta inline-flex rounded-lg px-3 py-1.5 text-sm font-medium text-white"
+                            className={buttonClassName('primary', 'sm')}
                         >
                             Open on IMSLP
                         </a>
-                        <label className="cursor-pointer text-sm text-stone-700 underline decoration-stone-300 underline-offset-2 hover:text-indigo-700">
+                        <label className="cursor-pointer text-sm text-stone-700 underline decoration-stone-300 underline-offset-2 transition hover:text-accent">
                             Choose downloaded PDF
                             <input
                                 type="file"

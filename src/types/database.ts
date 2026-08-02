@@ -38,6 +38,17 @@ export type DocumentMemberRow = {
     created_at: string;
 };
 
+export type DocumentFavoriteRow = {
+    document_id: string;
+    user_id: string;
+    created_at: string;
+};
+
+export type DocumentFavoriteInsert = {
+    document_id: string;
+    user_id: string;
+};
+
 export type ShareLinkRow = {
     token: string;
     document_id: string;
@@ -121,6 +132,13 @@ export type Database = {
                 Row: DocumentMemberRow;
                 Insert: DocumentMemberRow;
                 Update: Partial<DocumentMemberRow>;
+                Relationships: [];
+            };
+            document_favorites: {
+                // Per-user favorites (a flag on documents would be shared state).
+                Row: DocumentFavoriteRow;
+                Insert: DocumentFavoriteInsert;
+                Update: never;
                 Relationships: [];
             };
             share_links: {

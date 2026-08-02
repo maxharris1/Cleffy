@@ -1,16 +1,8 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 
-import {
-    displayWorkTitle,
-    searchTokens,
-    splitSearchResults,
-} from '@/features/imslp/imslpDisplay';
+import { displayWorkTitle, searchTokens, splitSearchResults } from '@/features/imslp/imslpDisplay';
 import { searchImslp, type ImslpSearchHit } from '@/features/imslp/imslpApi';
-import {
-    filterPopularWorks,
-    POPULAR_WORKS,
-    type PopularWork,
-} from '@/features/imslp/popularWorks';
+import { filterPopularWorks, POPULAR_WORKS, type PopularWork } from '@/features/imslp/popularWorks';
 import {
     buildSearchFilters,
     categoryBackedFilters,
@@ -23,6 +15,7 @@ import {
     type FacetDimension,
     type SearchSort,
 } from '@/features/imslp/searchFacets';
+import { fieldClassName } from '@/ui/classNames';
 
 interface ImslpSearchPanelProps {
     disabled?: boolean;
@@ -52,8 +45,7 @@ const highlightMatches = (text: string, tokens: string[]): ReactNode => {
     );
 };
 
-const tagClass = (active: boolean) =>
-    `imslp-facet-tag${active ? ' imslp-facet-tag--active' : ''}`;
+const tagClass = (active: boolean) => `imslp-facet-tag${active ? ' imslp-facet-tag--active' : ''}`;
 
 export const ImslpSearchPanel = ({
     disabled = false,
@@ -236,13 +228,16 @@ export const ImslpSearchPanel = ({
                     type="button"
                     onClick={() => selectHit(hit)}
                     disabled={disabled}
-                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-indigo-300/60 disabled:opacity-60"
+                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 disabled:opacity-60"
                 >
-                    <span className="text-sm font-medium text-stone-800">
-                        {highlightMatches(parsed.work, tokens)}
-                    </span>
+                    <span className="text-sm font-medium text-stone-800">{highlightMatches(parsed.work, tokens)}</span>
                     {composer ? (
                         <span className="text-xs text-stone-500">{highlightMatches(composer, tokens)}</span>
+                    ) : null}
+                    {hit.snippet ? (
+                        <span className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-stone-500/90">
+                            {hit.snippet}
+                        </span>
                     ) : null}
                 </button>
             </li>
@@ -264,7 +259,7 @@ export const ImslpSearchPanel = ({
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder="Beethoven moonlight, bolero, Chopin nocturne…"
-                    className="landing-input w-full rounded-lg border border-stone-300/80 bg-white/70 px-3 py-2.5 text-sm text-stone-800 outline-none placeholder:text-stone-400"
+                    className={fieldClassName('sm')}
                     autoComplete="off"
                     enterKeyHint="search"
                 />
@@ -300,11 +295,7 @@ export const ImslpSearchPanel = ({
                     ) : null}
                 </div>
 
-                <div
-                    className="imslp-facet-row mt-1.5"
-                    role="listbox"
-                    aria-label={`${dimension} values`}
-                >
+                <div className="imslp-facet-row mt-1.5" role="listbox" aria-label={`${dimension} values`}>
                     {valueFacets.map((value) => (
                         <button
                             key={value.id}
@@ -354,9 +345,7 @@ export const ImslpSearchPanel = ({
 
             {showCurated ? (
                 <div key="popular" className="imslp-panel-view mt-4">
-                    <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">
-                        Popular
-                    </h3>
+                    <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Popular</h3>
                     <ul className="mt-1 max-h-[28rem] overflow-y-auto">
                         {curatedWorks.map((item) => (
                             <li key={`${item.label}-${item.title}`}>
@@ -364,11 +353,9 @@ export const ImslpSearchPanel = ({
                                     type="button"
                                     onClick={() => selectPopular(item)}
                                     disabled={disabled}
-                                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-indigo-300/60 disabled:opacity-60"
+                                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 disabled:opacity-60"
                                 >
-                                    <span className="text-sm font-medium text-stone-800">
-                                        {item.label}
-                                    </span>
+                                    <span className="text-sm font-medium text-stone-800">{item.label}</span>
                                     <span className="text-xs text-stone-500">
                                         {item.composer}
                                         {item.note ? ` · ${item.note}` : ''}
@@ -392,9 +379,7 @@ export const ImslpSearchPanel = ({
                     key={`results-${q}-${composerId}-${instrumentId}-${formId}-${keyId}-${eraId}`}
                     className="imslp-panel-view mt-3 max-h-[28rem] overflow-y-auto"
                 >
-                    <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">
-                        Best matches
-                    </h3>
+                    <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Best matches</h3>
                     <ul className="mt-1">{best.map(renderHit)}</ul>
                     {more.length > 0 ? (
                         <>

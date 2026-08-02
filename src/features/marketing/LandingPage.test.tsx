@@ -14,14 +14,21 @@ vi.mock('@/features/auth/session', () => ({
 }));
 
 describe('LandingPage (cloud)', () => {
-    it('links to register and login', () => {
+    it('renders the hero with register and login links', () => {
         render(
             <MemoryRouter>
                 <LandingPage />
             </MemoryRouter>,
         );
-        expect(screen.getByText('Cleffy')).toBeInTheDocument();
-        expect(screen.getByRole('link', { name: 'Create account' })).toHaveAttribute('href', '/register');
+        expect(screen.getAllByText('Cleffy').length).toBeGreaterThan(0);
+        expect(
+            screen.getByRole('heading', { level: 1, name: 'Annotate scores together, in real time' }),
+        ).toBeInTheDocument();
+        const registerLinks = screen.getAllByRole('link', { name: 'Create account' });
+        expect(registerLinks.length).toBeGreaterThan(0);
+        for (const link of registerLinks) {
+            expect(link).toHaveAttribute('href', '/register');
+        }
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
     });
 });

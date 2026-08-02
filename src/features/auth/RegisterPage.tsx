@@ -4,7 +4,8 @@ import { Link, useNavigate } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { signUpWithPassword } from '@/features/auth/session';
-import { BrandShell, brandLinkClassName } from '@/ui/BrandShell';
+import { BrandShell } from '@/ui/BrandShell';
+import { linkClassName } from '@/ui/classNames';
 
 export const RegisterPage = () => (
     <RequireGuest>
@@ -22,7 +23,7 @@ const RegisterForm = () => {
             <BrandShell title="Check your email" subtitle={`We sent a confirmation link to ${email}.`}>
                 <p className="text-center text-sm text-stone-600">
                     After confirming, you can{' '}
-                    <Link to="/login" className={brandLinkClassName}>
+                    <Link to="/login" className={linkClassName}>
                         log in
                     </Link>
                     .
@@ -46,7 +47,7 @@ const RegisterForm = () => {
                 footer={
                     <p className="mt-6 text-center text-sm text-stone-600">
                         Already have an account?{' '}
-                        <Link to="/login" className={brandLinkClassName}>
+                        <Link to="/login" className={linkClassName}>
                             Log in
                         </Link>
                     </p>
