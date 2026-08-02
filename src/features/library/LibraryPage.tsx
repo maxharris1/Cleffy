@@ -166,7 +166,7 @@ const EmptyLibrary = ({
     onUpload: (file: File) => Promise<void>;
 }) => (
     <EmptyState
-        className="library-empty mt-8 lg:mt-16"
+        className="library-empty mt-8 md:mt-16"
         title="No scores yet"
         body="Find a score on IMSLP or upload a PDF to start annotating."
     >
