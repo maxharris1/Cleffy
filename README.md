@@ -13,11 +13,22 @@ or real PDF annotations) can be scanned on upload — the marks are detected, cl
 background-matched patches, and adopted as native Cleffy annotations. Uploads accept photos and
 screenshots (PNG/JPEG/WebP) too; they're wrapped into single-page PDFs client-side.
 
+**Play-along**: uploaded charts are analyzed (optical music recognition) into right-hand /
+left-hand piano parts. A transport bar under the score plays them back with a live playhead
+sweeping the actual PDF, auto-follow scrolling, tempo control, count-in, metronome, A-B looping,
+tap-a-measure-to-seek, and per-hand mute/volume — so a student can practice one hand while
+Cleffy plays the other.
+
 ## Stack
 
 - **Frontend**: Vite + React 19 + TypeScript (strict), Tailwind CSS 4, PWA (installable, offline-capable)
 - **PDF rendering**: pdf.js (`pdfjs-dist`), annotations drawn on overlay canvases (`perfect-freehand`)
-- **Backend**: Supabase — Auth, Storage, Postgres, Realtime. No custom server.
+- **Backend**: Supabase — Auth, Storage, Postgres, Realtime. No custom server for the app itself.
+- **Play-along analysis**: a small self-hosted [Audiveris](https://github.com/Audiveris/audiveris)
+  OMR container (`services/omr-service/`) invoked via the `score-analyze` Edge Function; results
+  land in the `score_analyses` table as ScoreData (notes by hand + measure geometry)
+- **Playback**: hand-rolled Web Audio engine; bundled Salamander Grand piano samples
+  (~0.85 MB, lazy-loaded, offline-cached)
 - **Offline**: Dexie (IndexedDB) local mirror + op queue; per-stroke last-write-wins sync
 - **Export**: `pdf-lib` flattens annotations into a downloadable PDF, client-side
 
@@ -61,3 +72,30 @@ Test on a real iPad via a tunnel: `npm run dev -- --host` then `ngrok http 5173`
 
 Database migrations live in `supabase/migrations/` and are applied with the Supabase CLI
 (`npx supabase link --project-ref <ref>` once, then `npx supabase db push`).
+
+## Play-along (OMR) service
+
+The one piece that can't run in the browser or an Edge Function is optical music recognition.
+`services/omr-service/` wraps Audiveris in a small container:
+
+```bash
+# local, next to the app:
+OMR_SERVICE_SECRET=$(openssl rand -hex 32) docker compose --profile omr up --build omr
+# or deploy the same image to Cloud Run / Fly (4 GB RAM; scale-to-zero is fine):
+gcloud run deploy cleffy-omr --source services/omr-service --memory 4Gi --cpu 2 \
+  --timeout 3600 --concurrency 1 --max-instances 1 --no-cpu-throttling
+```
+
+Then point the Edge Function at it (see `SETUP_SUPABASE.md` §4) with the
+`OMR_SERVICE_URL` / `OMR_SERVICE_SECRET` secrets. Uploads and IMSLP imports trigger analysis
+automatically; older scores get a "Generate play-along" button in the viewer. Without the
+service configured, everything else works — the transport bar just reports analysis as
+unavailable with a retry.
+
+Full service details (env vars, error codes, fixture regeneration): `services/omr-service/README.md`.
+
+## Credits
+
+Piano samples: [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html)
+by Alexander Holm, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) — bundled as a
+slimmed 29-anchor set in `public/audio/piano/` (regenerate with `scripts/fetch-piano-samples.mjs`).

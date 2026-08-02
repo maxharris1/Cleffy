@@ -54,3 +54,38 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
   `vite.config.ts`; add the URL to Supabase Auth redirect URLs).
 - **Later**: Vercel — static build (`npm run build` → `dist/`), SPA rewrite to
   `/index.html`, `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` env vars.
+
+## Play-along (M-playback)
+
+| Piece         | Summary                                                                                                                                                                                                                                                                                    |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Analysis      | `services/omr-service/` (Audiveris 5.6.1 in Docker + Node wrapper) turns the PDF into **ScoreData**: notes split RH/LH by staff, ties merged, plus measure x-ranges and system y-bands parsed from the `.omr` project file, normalized to the same 0–1 page coords annotations use          |
+| Orchestration | Upload/IMSLP import fire the `score-analyze` Edge Function (role check, page cap, stale-run guard, signed PDF URL) → OMR service queue → service-role write-back into `score_analyses` (status/progress/error lifecycle). Client polls lifecycle columns only; ScoreData travels once       |
+| Playback      | Hand-rolled Web Audio engine: 25ms/120ms lookahead scheduler, 29 bundled Salamander anchors (nearest-anchor playbackRate pitch shift), per-hand gain buses (mute keeps scheduling → instant unmute), synthesized click bus, anchor-swap timebase for bpm/seek/count-in/gapless A-B loops |
+| Playhead      | Imperative rAF controller inside the viewer's transformed wrapper: sweeping line + measure highlight, auto-follow with glide + suspend-on-gesture, tap-a-measure-to-seek (pan tool / read-only), loop-range tint. Measure number is the only per-frame state that touches React            |
+| Transport     | Docked bar for every role (playback is per-device); Generate/Retry owner-editor-gated to match RLS. BPM persisted per score (Dexie), count-in + metronome toggles, per-hand volume, offline replay from the scoreCache + CacheFirst-cached samples                                          |
+
+**Known v1 limitations** (all surfaced as ScoreData `warnings` where applicable): repeats /
+D.C. / D.S. are ignored (linear playthrough); grace notes are skipped; one global tempo (score
+tempo marks beyond the first are not followed); OMR accuracy depends on scan quality — clean
+typeset PDFs work best, and wrong notes are a per-measure OMR limitation, not a playback bug.
+Geometry failures degrade gracefully: audio still plays with the playhead hidden.
+
+### Play-along test script
+
+1. Run the OMR service (`docker compose --profile omr up`), set the Edge Function secrets,
+   apply the `score_analyses` migration, deploy `score-analyze`.
+2. Upload a clean typeset piano PDF → transport shows "Analyzing… n/N pages" → ready.
+3. Play on an iPad: first tap unlocks audio + loads samples; playhead sweeps measures,
+   auto-follow crosses systems and pages.
+4. Pan mid-playback → follow suspends (amber Re-follow pill) → tap it → view glides back.
+5. Mute LH and play the left hand yourself; drag LH volume instead for "quiet guide" mode.
+6. Change BPM 60→160 mid-playback → no position jump; count-in gives one bar of clicks;
+   metronome accents downbeats (3/4 vs 4/4 fixture measures click correctly).
+7. Loop: tap Loop at m.5, again at m.8 → tinted range, seamless wrap; Stop rewinds to A.
+8. Tap a measure (pan tool) → seek; steppers land on barlines (‹ returns to measure start
+   when >20% in).
+9. Title-page-first PDF → playhead starts on the first musical page; single-staff score →
+   LH controls disabled with an explanatory tooltip.
+10. Airplane mode after one playback → cached ScoreData + samples still play offline.
+11. Viewer-role invitee: full transport, no Generate/Retry.
