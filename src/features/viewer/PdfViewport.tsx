@@ -25,6 +25,9 @@ import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/syn
 import type { PresencePeer } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
+import { ErrorText } from '@/ui/ErrorText';
+import { LoadingText } from '@/ui/Loading';
+import { ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
 
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
@@ -346,11 +349,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
         <div ref={containerRef} className="ink-surface relative h-full overflow-hidden bg-stone-200">
             {status === 'loading' ? (
                 <div className="flex h-full items-center justify-center">
-                    <p className="animate-pulse text-stone-500">Loading score…</p>
+                    <LoadingText>Loading score…</LoadingText>
                 </div>
             ) : status === 'error' || !doc ? (
                 <div className="flex h-full items-center justify-center p-8">
-                    <p className="text-red-600">Could not open this PDF{error ? `: ${error}` : '.'}</p>
+                    <ErrorText>Could not open this PDF{error ? `: ${error}` : '.'}</ErrorText>
                 </div>
             ) : (
                 <>
@@ -402,8 +405,24 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
                             setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height));
                         }}
                     />
+                    {layout.layouts.length > 1 ? <PageChip pageCount={layout.layouts.length} /> : null}
                 </>
             )}
+        </div>
+    );
+};
+
+/** Floating "p. 3 / 12" position chip — reads the debounced focused page. */
+const PageChip = ({ pageCount }: { pageCount: number }) => {
+    const pageIndex = useViewerStore((s) => s.focusedPageIndex);
+    return (
+        <div
+            data-ui-overlay
+            className="pointer-events-none absolute left-2 top-2 z-10 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-4 sm:top-auto"
+        >
+            <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-stone-600 shadow-sm">
+                p. {Math.min(pageIndex + 1, pageCount)} / {pageCount}
+            </span>
         </div>
     );
 };
@@ -418,17 +437,17 @@ const ZoomControls = ({ onZoomBy }: { onZoomBy: (factor: number) => void }) => {
                 type="button"
                 aria-label="Zoom in"
                 onClick={() => onZoomBy(1.25)}
-                className="h-11 w-11 rounded-full bg-white text-xl font-bold text-stone-700 shadow-md active:bg-stone-100"
+                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100"
             >
-                +
+                <ZoomInIcon size={20} />
             </button>
             <button
                 type="button"
                 aria-label="Zoom out"
                 onClick={() => onZoomBy(0.8)}
-                className="h-11 w-11 rounded-full bg-white text-xl font-bold text-stone-700 shadow-md active:bg-stone-100"
+                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100"
             >
-                −
+                <ZoomOutIcon size={20} />
             </button>
         </div>
     );

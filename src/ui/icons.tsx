@@ -1,4 +1,4 @@
-import { ArrowLeft, Minus, Plus, Redo2, Undo2, X } from 'lucide-react';
+import { ArrowLeft, Minus, Plus, Pointer, Redo2, Undo2, X } from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
 
 /**
@@ -17,3 +17,4 @@ export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
+export const PointerIcon = withBrandStroke(Pointer);
