@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { composerOf, displayTitleOf, groupByComposer, sortDocuments } from '@/features/library/libraryView';
-import type { DocumentRow } from '@/types/database';
+import {
+    composerOf,
+    displayTitleOf,
+    filterByTag,
+    groupByComposer,
+    groupByTag,
+    sortDocuments,
+} from '@/features/library/libraryView';
+import type { DocumentRow, LibraryTagRow } from '@/types/database';
 
 const doc = (id: string, title: string, updated_at: string): DocumentRow => ({
     id,
@@ -11,6 +18,13 @@ const doc = (id: string, title: string, updated_at: string): DocumentRow => ({
     page_count: null,
     created_at: updated_at,
     updated_at,
+});
+
+const tag = (id: string, name: string): LibraryTagRow => ({
+    id,
+    user_id: 'u1',
+    name,
+    created_at: '2026-08-01T00:00:00Z',
 });
 
 describe('libraryView', () => {
@@ -49,6 +63,39 @@ describe('libraryView', () => {
             'Other scores',
         ]);
         expect(groups[0]?.documents.map((d) => d.id)).toEqual(['1', '4']);
+        expect(groups[2]?.documents.map((d) => d.id)).toEqual(['2']);
+    });
+
+    it('filters by tag assignment', () => {
+        const docs = [
+            doc('1', 'A', '2026-08-01T00:00:00Z'),
+            doc('2', 'B', '2026-08-01T00:00:00Z'),
+            doc('3', 'C', '2026-08-01T00:00:00Z'),
+        ];
+        const assignments = new Map([
+            ['1', ['t-concert']],
+            ['3', ['t-lesson', 't-concert']],
+        ]);
+        expect(filterByTag(docs, 't-concert', assignments).map((d) => d.id)).toEqual(['1', '3']);
+        expect(filterByTag(docs, 't-lesson', assignments).map((d) => d.id)).toEqual(['3']);
+        expect(filterByTag(docs, 'missing', assignments)).toEqual([]);
+    });
+
+    it('groups by tag with multi-tag docs in each section and untagged last', () => {
+        const docs = [
+            doc('1', 'Concert piece', '2026-08-01T00:00:00Z'),
+            doc('2', 'Untagged scan', '2026-08-01T00:00:00Z'),
+            doc('3', 'Lesson and concert', '2026-08-01T00:00:00Z'),
+        ];
+        const tags = [tag('t-concert', 'Concert'), tag('t-lesson', 'Lesson'), tag('t-empty', 'Empty')];
+        const assignments = new Map([
+            ['1', ['t-concert']],
+            ['3', ['t-lesson', 't-concert']],
+        ]);
+        const groups = groupByTag(docs, tags, assignments);
+        expect(groups.map((g) => g.label)).toEqual(['Concert', 'Lesson', 'Untagged']);
+        expect(groups[0]?.documents.map((d) => d.id)).toEqual(['1', '3']);
+        expect(groups[1]?.documents.map((d) => d.id)).toEqual(['3']);
         expect(groups[2]?.documents.map((d) => d.id)).toEqual(['2']);
     });
 });

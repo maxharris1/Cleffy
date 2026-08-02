@@ -1,4 +1,4 @@
-import type { DocumentRow } from '@/types/database';
+import type { DocumentRow, LibraryTagRow } from '@/types/database';
 
 export type LibrarySort = 'recent' | 'title';
 
@@ -50,6 +50,53 @@ export const groupByComposer = (documents: DocumentRow[]): LibraryGroup[] => {
         .map(([label, docs]) => ({ label, documents: docs }));
     if (other.length > 0) {
         groups.push({ label: 'Other scores', documents: other });
+    }
+    return groups;
+};
+
+/** Keep documents that have the given tag assigned. */
+export const filterByTag = (
+    documents: DocumentRow[],
+    tagId: string,
+    assignments: Map<string, string[]>,
+): DocumentRow[] => {
+    return documents.filter((doc) => assignments.get(doc.id)?.includes(tagId) ?? false);
+};
+
+/**
+ * Group by user tags. Multi-tagged docs appear under each matching tag.
+ * Untagged docs go last as "Untagged". Empty tags (no docs in the filtered set) are omitted.
+ */
+export const groupByTag = (
+    documents: DocumentRow[],
+    tags: LibraryTagRow[],
+    assignments: Map<string, string[]>,
+): LibraryGroup[] => {
+    const byTagId = new Map<string, DocumentRow[]>();
+    const untagged: DocumentRow[] = [];
+
+    for (const doc of documents) {
+        const tagIds = assignments.get(doc.id) ?? [];
+        if (tagIds.length === 0) {
+            untagged.push(doc);
+            continue;
+        }
+        for (const tagId of tagIds) {
+            const list = byTagId.get(tagId) ?? [];
+            list.push(doc);
+            byTagId.set(tagId, list);
+        }
+    }
+
+    const groups: LibraryGroup[] = [];
+    for (const tag of tags) {
+        const docs = byTagId.get(tag.id);
+        if (docs && docs.length > 0) {
+            groups.push({ label: tag.name, documents: docs });
+        }
+    }
+    if (untagged.length > 0) {
+        groups.push({ label: 'Untagged', documents: untagged });
     }
     return groups;
 };

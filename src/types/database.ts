@@ -49,6 +49,30 @@ export type DocumentFavoriteInsert = {
     user_id: string;
 };
 
+export type LibraryTagRow = {
+    id: string;
+    user_id: string;
+    name: string;
+    created_at: string;
+};
+
+export type LibraryTagInsert = {
+    id: string;
+    user_id: string;
+    name: string;
+};
+
+export type DocumentTagRow = {
+    document_id: string;
+    tag_id: string;
+    created_at: string;
+};
+
+export type DocumentTagInsert = {
+    document_id: string;
+    tag_id: string;
+};
+
 export type ShareLinkRow = {
     token: string;
     document_id: string;
@@ -138,6 +162,18 @@ export type Database = {
                 // Per-user favorites (a flag on documents would be shared state).
                 Row: DocumentFavoriteRow;
                 Insert: DocumentFavoriteInsert;
+                Update: never;
+                Relationships: [];
+            };
+            library_tags: {
+                Row: LibraryTagRow;
+                Insert: LibraryTagInsert;
+                Update: Partial<Pick<LibraryTagRow, 'name'>>;
+                Relationships: [];
+            };
+            document_tags: {
+                Row: DocumentTagRow;
+                Insert: DocumentTagInsert;
                 Update: never;
                 Relationships: [];
             };

@@ -11,15 +11,27 @@ import {
 } from '@/features/library/documentsService';
 import {
     displayTitleOf,
+    filterByTag,
     groupByComposer,
+    groupByTag,
     sortDocuments,
     type LibraryGroup,
     type LibrarySort,
 } from '@/features/library/libraryView';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
+import { TagAssignDialog } from '@/features/library/TagAssignDialog';
+import { TagManageDialog } from '@/features/library/TagManageDialog';
+import {
+    createLibraryTag,
+    deleteLibraryTag,
+    listDocumentTagMap,
+    listLibraryTags,
+    renameLibraryTag,
+    setDocumentTag,
+} from '@/features/library/tagsService';
 import { ShareDialog } from '@/features/share/ShareDialog';
-import type { DocumentRow } from '@/types/database';
+import type { DocumentRow, LibraryTagRow } from '@/types/database';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
@@ -29,22 +41,33 @@ import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { TextField } from '@/ui/TextField';
 import { buttonClassName, fieldClassName } from '@/ui/classNames';
-import { MoreVerticalIcon, StarIcon } from '@/ui/icons';
+import { MoreVerticalIcon, StarIcon, TagIcon } from '@/ui/icons';
+
+/** Above this count, tag filters switch from chips to a select. */
+const TAG_CHIP_LIMIT = 8;
+/** Max assigned tag names shown under a score title before “+N”. */
+const INLINE_TAG_LIMIT = 3;
 
 export const LibraryPage = () => {
     const { userId, uploading, uploadPct, onUpload, uploadError } = useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
     const [favorites, setFavorites] = useState<Set<string>>(new Set());
+    const [tags, setTags] = useState<LibraryTagRow[]>([]);
+    const [assignments, setAssignments] = useState<Map<string, string[]>>(new Map());
     const [hasMore, setHasMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     const [sort, setSort] = useState<LibrarySort>('recent');
     const [groupComposer, setGroupComposer] = useState(false);
+    const [groupTag, setGroupTag] = useState(false);
     const [favoritesOnly, setFavoritesOnly] = useState(false);
+    const [activeTagId, setActiveTagId] = useState<string | null>(null);
     const [renameTarget, setRenameTarget] = useState<DocumentRow | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<DocumentRow | null>(null);
     const [shareTarget, setShareTarget] = useState<DocumentRow | null>(null);
+    const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
+    const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
 
     useEffect(() => {
@@ -71,11 +94,25 @@ export const LibraryPage = () => {
                     setError(err instanceof Error ? err.message : 'Could not load your scores.');
                 }
             });
-        // Favorites are best-effort — an offline library still renders without them.
+        // Favorites and tags are best-effort — an offline library still renders without them.
         listFavoriteDocumentIds()
             .then((ids) => {
                 if (!cancelled) {
                     setFavorites(ids);
+                }
+            })
+            .catch(() => undefined);
+        listLibraryTags()
+            .then((rows) => {
+                if (!cancelled) {
+                    setTags(rows);
+                }
+            })
+            .catch(() => undefined);
+        listDocumentTagMap()
+            .then((map) => {
+                if (!cancelled) {
+                    setAssignments(map);
                 }
             })
             .catch(() => undefined);
@@ -84,22 +121,34 @@ export const LibraryPage = () => {
         };
     }, []);
 
+    const tagsById = new Map(tags.map((t) => [t.id, t]));
+
     const q = query.trim().toLowerCase();
     const visible =
         documents === null
             ? null
-            : documents
-                  .filter((doc) => !q || doc.title.toLowerCase().includes(q))
-                  .filter((doc) => !favoritesOnly || favorites.has(doc.id));
-    const groups: LibraryGroup[] | null = visible
-        ? groupComposer
-            ? groupByComposer(sortDocuments(visible, sort))
-            : [{ label: null, documents: sortDocuments(visible, sort) }]
+            : (() => {
+                  let list = documents
+                      .filter((doc) => !q || doc.title.toLowerCase().includes(q))
+                      .filter((doc) => !favoritesOnly || favorites.has(doc.id));
+                  if (activeTagId) {
+                      list = filterByTag(list, activeTagId, assignments);
+                  }
+                  return list;
+              })();
+    const sorted = visible ? sortDocuments(visible, sort) : null;
+    const groups: LibraryGroup[] | null = sorted
+        ? groupTag
+            ? groupByTag(sorted, tags, assignments)
+            : groupComposer
+              ? groupByComposer(sorted)
+              : [{ label: null, documents: sorted }]
         : null;
 
     const hasScores = documents !== null && documents.length > 0;
     const isOfflineNotice = error?.startsWith('Offline') ?? false;
     const statusError = uploadError ?? actionError ?? error;
+    const useTagSelect = tags.length > TAG_CHIP_LIMIT;
 
     const toggleFavorite = (doc: DocumentRow) => {
         const next = !favorites.has(doc.id);
@@ -127,6 +176,91 @@ export const LibraryPage = () => {
         });
     };
 
+    const patchAssignment = (documentId: string, tagId: string, assigned: boolean) => {
+        setAssignments((prev) => {
+            const next = new Map(prev);
+            const current = next.get(documentId) ?? [];
+            if (assigned) {
+                if (!current.includes(tagId)) {
+                    next.set(documentId, [...current, tagId]);
+                }
+            } else {
+                const filtered = current.filter((id) => id !== tagId);
+                if (filtered.length === 0) {
+                    next.delete(documentId);
+                } else {
+                    next.set(documentId, filtered);
+                }
+            }
+            return next;
+        });
+    };
+
+    const handleToggleTag = async (tagId: string, assigned: boolean) => {
+        if (!tagTarget) {
+            return;
+        }
+        const docId = tagTarget.id;
+        patchAssignment(docId, tagId, assigned);
+        try {
+            await setDocumentTag(docId, tagId, assigned);
+        } catch (err) {
+            patchAssignment(docId, tagId, !assigned);
+            throw err;
+        }
+    };
+
+    /** Create from assign dialog — also assigns to the open score. */
+    const handleCreateAndAssignTag = async (name: string) => {
+        if (!tagTarget) {
+            return;
+        }
+        const created = await createLibraryTag(userId, name);
+        setTags((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+        patchAssignment(tagTarget.id, created.id, true);
+        try {
+            await setDocumentTag(tagTarget.id, created.id, true);
+        } catch (err) {
+            patchAssignment(tagTarget.id, created.id, false);
+            throw err;
+        }
+    };
+
+    /** Create from manage dialog — no score context, no auto-assign. */
+    const handleCreateTagOnly = async (name: string) => {
+        const created = await createLibraryTag(userId, name);
+        setTags((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+    };
+
+    const handleRenameTag = async (tagId: string, name: string) => {
+        await renameLibraryTag(tagId, name);
+        setTags((prev) =>
+            prev
+                .map((t) => (t.id === tagId ? { ...t, name: name.trim().replace(/\s+/g, ' ') } : t))
+                .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+    };
+
+    const handleDeleteTag = async (tagId: string) => {
+        await deleteLibraryTag(tagId);
+        setTags((prev) => prev.filter((t) => t.id !== tagId));
+        setAssignments((prev) => {
+            const next = new Map(prev);
+            for (const [docId, tagIds] of next) {
+                const filtered = tagIds.filter((id) => id !== tagId);
+                if (filtered.length === 0) {
+                    next.delete(docId);
+                } else {
+                    next.set(docId, filtered);
+                }
+            }
+            return next;
+        });
+        if (activeTagId === tagId) {
+            setActiveTagId(null);
+        }
+    };
+
     const saveRename = async (title: string) => {
         if (!renameTarget) {
             return;
@@ -152,12 +286,22 @@ export const LibraryPage = () => {
         try {
             await deleteDocument(target);
             setDocuments((docs) => docs?.filter((d) => d.id !== target.id) ?? docs);
+            setAssignments((prev) => {
+                const next = new Map(prev);
+                next.delete(target.id);
+                return next;
+            });
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {
             setBusyAction(false);
             setDeleteTarget(null);
         }
+    };
+
+    const docTags = (docId: string): LibraryTagRow[] => {
+        const ids = assignments.get(docId) ?? [];
+        return ids.map((id) => tagsById.get(id)).filter((t): t is LibraryTagRow => t !== undefined);
     };
 
     let rowIndex = 0;
@@ -205,10 +349,10 @@ export const LibraryPage = () => {
                             className={fieldClassName('sm', 'sm:max-w-xs')}
                         />
                         <p className="text-xs text-stone-600">
-                            {query.trim()
+                            {query.trim() || favoritesOnly || activeTagId
                                 ? `${visible?.length ?? 0} of ${documents.length}`
                                 : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                            {hasMore && !query.trim() ? ' · showing latest 100' : null}
+                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId ? ' · showing latest 100' : null}
                         </p>
                     </div>
 
@@ -221,20 +365,77 @@ export const LibraryPage = () => {
                             A–Z
                         </FilterTag>
                         <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
-                        <FilterTag active={groupComposer} onClick={() => setGroupComposer((v) => !v)}>
+                        <FilterTag
+                            active={groupComposer}
+                            onClick={() => {
+                                setGroupComposer((v) => !v);
+                                setGroupTag(false);
+                            }}
+                        >
                             Group by composer
                         </FilterTag>
+                        {tags.length > 0 ? (
+                            <FilterTag
+                                active={groupTag}
+                                onClick={() => {
+                                    setGroupTag((v) => !v);
+                                    setGroupComposer(false);
+                                }}
+                            >
+                                Group by tag
+                            </FilterTag>
+                        ) : null}
                         <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
                         <FilterTag active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
                             Favorites
                         </FilterTag>
+                        <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
+                        <span className="text-stone-500">Tags</span>
+                        {tags.length === 0 ? (
+                            <FilterTag active={false} onClick={() => setManageTagsOpen(true)}>
+                                Add a tag…
+                            </FilterTag>
+                        ) : (
+                            <>
+                                {useTagSelect ? (
+                                    <select
+                                        aria-label="Filter by tag"
+                                        value={activeTagId ?? ''}
+                                        onChange={(e) => setActiveTagId(e.target.value || null)}
+                                        className={fieldClassName('sm', 'max-w-[10rem] py-0.5 text-xs')}
+                                    >
+                                        <option value="">All tags</option>
+                                        {tags.map((tag) => (
+                                            <option key={tag.id} value={tag.id}>
+                                                {tag.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                ) : (
+                                    tags.map((tag) => (
+                                        <FilterTag
+                                            key={tag.id}
+                                            active={activeTagId === tag.id}
+                                            onClick={() => setActiveTagId((id) => (id === tag.id ? null : tag.id))}
+                                        >
+                                            {tag.name}
+                                        </FilterTag>
+                                    ))
+                                )}
+                                <FilterTag active={false} onClick={() => setManageTagsOpen(true)}>
+                                    Manage
+                                </FilterTag>
+                            </>
+                        )}
                     </div>
 
                     {visible && visible.length === 0 ? (
                         <p className="mt-8 text-sm text-stone-500">
-                            {favoritesOnly && !query.trim()
-                                ? 'No favorites yet — tap the star on a score to keep it handy.'
-                                : `No scores match “${query.trim()}”.`}
+                            {activeTagId && !query.trim() && !favoritesOnly
+                                ? 'No scores with this tag yet.'
+                                : favoritesOnly && !query.trim()
+                                  ? 'No favorites yet — tap the star on a score to keep it handy.'
+                                  : `No scores match “${query.trim()}”.`}
                         </p>
                     ) : (
                         groups?.map((group) => (
@@ -247,13 +448,18 @@ export const LibraryPage = () => {
                                 <ul className={group.label ? '' : 'mt-4'}>
                                     {group.documents.map((doc) => (
                                         <ScoreRow
-                                            key={doc.id}
+                                            key={`${group.label ?? 'all'}-${doc.id}`}
                                             doc={doc}
                                             index={rowIndex++}
-                                            stripComposer={group.label !== null}
+                                            stripComposer={groupComposer && group.label !== null}
+                                            assignedTags={docTags(doc.id)}
                                             isFavorite={favorites.has(doc.id)}
                                             isOwner={doc.owner_id === userId}
                                             onToggleFavorite={() => toggleFavorite(doc)}
+                                            onTags={() => setTagTarget(doc)}
+                                            onFilterTag={(tagId) =>
+                                                setActiveTagId((id) => (id === tagId ? null : tagId))
+                                            }
                                             onRename={() => setRenameTarget(doc)}
                                             onShare={() => setShareTarget(doc)}
                                             onDelete={() => setDeleteTarget(doc)}
@@ -288,6 +494,27 @@ export const LibraryPage = () => {
             {shareTarget ? (
                 <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
             ) : null}
+            {tagTarget ? (
+                <TagAssignDialog
+                    scoreTitle={tagTarget.title}
+                    tags={tags}
+                    assignedTagIds={new Set(assignments.get(tagTarget.id) ?? [])}
+                    busy={busyAction}
+                    onClose={() => setTagTarget(null)}
+                    onToggleTag={handleToggleTag}
+                    onCreateTag={handleCreateAndAssignTag}
+                />
+            ) : null}
+            {manageTagsOpen ? (
+                <TagManageDialog
+                    tags={tags}
+                    busy={busyAction}
+                    onClose={() => setManageTagsOpen(false)}
+                    onCreateTag={handleCreateTagOnly}
+                    onRenameTag={handleRenameTag}
+                    onDeleteTag={handleDeleteTag}
+                />
+            ) : null}
         </div>
     );
 };
@@ -309,9 +536,12 @@ const ScoreRow = ({
     doc,
     index,
     stripComposer,
+    assignedTags,
     isFavorite,
     isOwner,
     onToggleFavorite,
+    onTags,
+    onFilterTag,
     onRename,
     onShare,
     onDelete,
@@ -319,40 +549,94 @@ const ScoreRow = ({
     doc: DocumentRow;
     index: number;
     stripComposer: boolean;
+    assignedTags: LibraryTagRow[];
     isFavorite: boolean;
     isOwner: boolean;
     onToggleFavorite: () => void;
+    onTags: () => void;
+    onFilterTag: (tagId: string) => void;
     onRename: () => void;
     onShare: () => void;
     onDelete: () => void;
-}) => (
-    <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-        <div className="group flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40">
-            <Link to={`/doc/${doc.id}`} className="flex min-w-0 flex-1 items-baseline justify-between gap-4 py-3.5">
-                <span className="min-w-0 truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
-                    {stripComposer ? displayTitleOf(doc.title) : doc.title}
-                </span>
-                <span className="shrink-0 text-xs text-stone-500">
-                    {doc.page_count ? `${doc.page_count} pages · ` : ''}
-                    {formatUpdated(doc.updated_at)}
-                </span>
-            </Link>
-            <button
-                type="button"
-                aria-pressed={isFavorite}
-                aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                onClick={onToggleFavorite}
-                className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
-                    isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
-                }`}
-            >
-                <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
-            </button>
-            {isOwner ? <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} /> : null}
-        </div>
-    </li>
-);
+}) => {
+    const hasTags = assignedTags.length > 0;
+    const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
+    const overflow = assignedTags.length - visibleTags.length;
+
+    return (
+        <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
+            <div className="group flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40">
+                <div className="flex min-w-0 flex-1 items-center gap-4 py-3.5">
+                    <div className="min-w-0 flex-1">
+                        <Link
+                            to={`/doc/${doc.id}`}
+                            className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
+                        >
+                            {stripComposer ? displayTitleOf(doc.title) : doc.title}
+                        </Link>
+                        {hasTags ? (
+                            <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                {visibleTags.map((tag, i) => (
+                                    <span key={tag.id} className="inline-flex items-center gap-1.5">
+                                        {i > 0 ? <span className="text-stone-300" aria-hidden="true">·</span> : null}
+                                        <button
+                                            type="button"
+                                            onClick={() => onFilterTag(tag.id)}
+                                            className="max-w-[8rem] truncate text-xs text-stone-500 transition hover:text-stone-700 hover:underline"
+                                            title={`Filter by ${tag.name}`}
+                                        >
+                                            {tag.name}
+                                        </button>
+                                    </span>
+                                ))}
+                                {overflow > 0 ? (
+                                    <button
+                                        type="button"
+                                        onClick={onTags}
+                                        className="text-xs text-stone-400 transition hover:text-stone-600"
+                                        aria-label={`Edit tags, ${overflow} more`}
+                                    >
+                                        +{overflow}
+                                    </button>
+                                ) : null}
+                            </div>
+                        ) : null}
+                    </div>
+                    <span className="shrink-0 text-xs text-stone-500">
+                        {doc.page_count ? `${doc.page_count} pages · ` : ''}
+                        {formatUpdated(doc.updated_at)}
+                    </span>
+                </div>
+                <button
+                    type="button"
+                    aria-pressed={isFavorite}
+                    aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                    title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                    onClick={onToggleFavorite}
+                    className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
+                        isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
+                    }`}
+                >
+                    <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
+                </button>
+                <button
+                    type="button"
+                    aria-label={hasTags ? 'Edit tags' : 'Add tags'}
+                    title={hasTags ? 'Edit tags' : 'Add tags'}
+                    onClick={onTags}
+                    className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
+                        hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
+                    }`}
+                >
+                    <TagIcon size={16} />
+                </button>
+                {isOwner ? (
+                    <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} />
+                ) : null}
+            </div>
+        </li>
+    );
+};
 
 const RowMenu = ({
     onRename,

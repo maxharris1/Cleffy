@@ -1,4 +1,4 @@
-import { ArrowLeft, EllipsisVertical, Minus, Plus, Pointer, Redo2, Star, Undo2, X } from 'lucide-react';
+import { ArrowLeft, EllipsisVertical, Minus, Plus, Pointer, Redo2, Star, Tags, Undo2, X } from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
 
 /**
@@ -19,4 +19,5 @@ export const ZoomInIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
 export const PointerIcon = withBrandStroke(Pointer);
 export const StarIcon = withBrandStroke(Star);
+export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);

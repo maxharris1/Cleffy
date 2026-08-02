@@ -1,11 +1,11 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
-import type { DocumentRow } from '@/types/database';
+import type { DocumentRow, LibraryTagRow } from '@/types/database';
 
 const listDocuments = vi.fn();
 const listCachedDocuments = vi.fn();
@@ -13,6 +13,12 @@ const listFavoriteDocumentIds = vi.fn();
 const setDocumentFavorite = vi.fn();
 const renameDocument = vi.fn();
 const deleteDocument = vi.fn();
+const listLibraryTags = vi.fn();
+const listDocumentTagMap = vi.fn();
+const createLibraryTag = vi.fn();
+const renameLibraryTag = vi.fn();
+const deleteLibraryTag = vi.fn();
+const setDocumentTag = vi.fn();
 
 vi.mock('@/features/library/documentsService', () => ({
     listDocuments: (...args: unknown[]) => listDocuments(...args),
@@ -21,6 +27,15 @@ vi.mock('@/features/library/documentsService', () => ({
     setDocumentFavorite: (...args: unknown[]) => setDocumentFavorite(...args),
     renameDocument: (...args: unknown[]) => renameDocument(...args),
     deleteDocument: (...args: unknown[]) => deleteDocument(...args),
+}));
+
+vi.mock('@/features/library/tagsService', () => ({
+    listLibraryTags: (...args: unknown[]) => listLibraryTags(...args),
+    listDocumentTagMap: (...args: unknown[]) => listDocumentTagMap(...args),
+    createLibraryTag: (...args: unknown[]) => createLibraryTag(...args),
+    renameLibraryTag: (...args: unknown[]) => renameLibraryTag(...args),
+    deleteLibraryTag: (...args: unknown[]) => deleteLibraryTag(...args),
+    setDocumentTag: (...args: unknown[]) => setDocumentTag(...args),
 }));
 
 vi.mock('@/features/share/ShareDialog', () => ({
@@ -35,6 +50,13 @@ const doc = (id: string, title: string): DocumentRow => ({
     page_count: 3,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+});
+
+const tag = (id: string, name: string): LibraryTagRow => ({
+    id,
+    user_id: 'teacher-1',
+    name,
+    created_at: '2026-08-01T00:00:00Z',
 });
 
 const outletContext: LibraryOutletContext = {
@@ -71,6 +93,9 @@ beforeEach(() => {
     });
     listFavoriteDocumentIds.mockResolvedValue(new Set());
     setDocumentFavorite.mockResolvedValue(undefined);
+    listLibraryTags.mockResolvedValue([]);
+    listDocumentTagMap.mockResolvedValue(new Map());
+    setDocumentTag.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -78,11 +103,13 @@ afterEach(() => {
 });
 
 describe('LibraryPage', () => {
-    it('renders rows with favorite stars and action menus', async () => {
+    it('renders rows with favorite stars, tag buttons, and action menus', async () => {
         renderLibrary();
         expect(await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)')).toBeInTheDocument();
         expect(screen.getAllByRole('button', { name: 'Add to favorites' })).toHaveLength(2);
+        expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
+        expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
     });
 
     it('toggles a favorite through the service', async () => {
@@ -141,5 +168,78 @@ describe('LibraryPage', () => {
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
         await user.click(screen.getByRole('menuitem', { name: 'Share…' }));
         expect(screen.getByTestId('share-dialog')).toHaveTextContent('d1');
+    });
+
+    it('opens manage tags from Add a tag… bootstrap', async () => {
+        const user = userEvent.setup();
+        createLibraryTag.mockResolvedValue(tag('t-concert', 'Concert'));
+        renderLibrary();
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await user.click(screen.getByRole('button', { name: 'Add a tag…' }));
+        expect(screen.getByRole('dialog', { name: 'Manage tags' })).toBeInTheDocument();
+        await user.type(screen.getByLabelText('New tag name'), 'Concert');
+        await user.click(screen.getByRole('button', { name: 'Create' }));
+        await waitFor(() => expect(createLibraryTag).toHaveBeenCalledWith('teacher-1', 'Concert'));
+        expect(setDocumentTag).not.toHaveBeenCalled();
+    });
+
+    it('creates a tag from the row tag button, assigns it, and filters the library', async () => {
+        const user = userEvent.setup();
+        const concert = tag('t-concert', 'Concert');
+        createLibraryTag.mockResolvedValue(concert);
+        renderLibrary();
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+
+        await user.click(screen.getAllByRole('button', { name: 'Add tags' })[0] as HTMLElement);
+        expect(screen.getByRole('dialog', { name: 'Tags' })).toBeInTheDocument();
+
+        await user.type(screen.getByLabelText('New tag name'), 'Concert');
+        await user.click(screen.getByRole('button', { name: 'Create' }));
+
+        await waitFor(() => expect(createLibraryTag).toHaveBeenCalledWith('teacher-1', 'Concert'));
+        await waitFor(() => expect(setDocumentTag).toHaveBeenCalledWith('d1', 't-concert', true));
+
+        await user.click(screen.getByRole('button', { name: 'Done' }));
+
+        // Filter-bar chip has aria-pressed; inline row label does not.
+        const filterChip = await screen.findByRole('button', { name: 'Concert', pressed: false });
+        await user.click(filterChip);
+
+        expect(screen.getByText('Prelude and Fugue (Bach, Johann Sebastian)')).toBeInTheDocument();
+        expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument();
+    });
+
+    it('assigns an existing tag from the row dialog and filters via the inline label', async () => {
+        const user = userEvent.setup();
+        listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
+        listDocumentTagMap.mockResolvedValue(new Map());
+        renderLibrary();
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        expect(await screen.findByRole('button', { name: 'Lesson', pressed: false })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
+
+        await user.click(screen.getAllByRole('button', { name: 'Add tags' })[1] as HTMLElement);
+        await user.click(screen.getByRole('checkbox', { name: 'Lesson' }));
+        await waitFor(() => expect(setDocumentTag).toHaveBeenCalledWith('d2', 't-lesson', true));
+        await user.click(screen.getByRole('button', { name: 'Done' }));
+
+        // Inline label on the Mozart row (list item containing the title).
+        const mozartRow = screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)').closest('li');
+        expect(mozartRow).not.toBeNull();
+        await user.click(within(mozartRow as HTMLElement).getByRole('button', { name: 'Lesson' }));
+
+        expect(screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)')).toBeInTheDocument();
+        expect(screen.queryByText('Prelude and Fugue (Bach, Johann Sebastian)')).not.toBeInTheDocument();
+    });
+
+    it('groups by tag when toggled', async () => {
+        const user = userEvent.setup();
+        listLibraryTags.mockResolvedValue([tag('t-concert', 'Concert')]);
+        listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-concert']]]));
+        renderLibrary();
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await user.click(await screen.findByRole('button', { name: 'Group by tag' }));
+        expect(screen.getByRole('heading', { name: 'Concert' })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Untagged' })).toBeInTheDocument();
     });
 });
