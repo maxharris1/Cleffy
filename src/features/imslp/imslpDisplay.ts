@@ -47,7 +47,7 @@ export const recommendEdition = <T extends { filename: string; size: number | nu
     const scored = editions.map((edition, index) => {
         const size = edition.size ?? 0;
         // Prefer 0.4–8 MB when size is known; penalize tiny and huge files.
-        let score = 0;
+        let score: number;
         if (size <= 0) {
             score = 10 - index * 0.01;
         } else if (size >= 400_000 && size <= 8_000_000) {

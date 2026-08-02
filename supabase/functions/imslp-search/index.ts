@@ -324,7 +324,7 @@ Deno.serve(async (req) => {
             }
         }
 
-        let ranked = [...merged.values()];
+        const ranked = [...merged.values()];
         if (sort === 'title') {
             ranked.sort((a, b) => a.title.localeCompare(b.title));
         } else if (sort === 'recent') {

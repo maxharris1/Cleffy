@@ -1,9 +1,23 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
-import { hasPendingAuthParams } from '@/features/auth/AuthGates';
 import { isRegisteredSession, useSession } from '@/features/auth/session';
 import { BrandShell, brandLinkClassName } from '@/ui/BrandShell';
+
+/** True when the URL still carries tokens / PKCE that Supabase must exchange. */
+const hasPendingAuthParams = (): boolean => {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const query = new URLSearchParams(window.location.search);
+    const type = hash.get('type') ?? query.get('type');
+    return Boolean(
+        hash.get('access_token') ||
+            hash.get('refresh_token') ||
+            query.get('code') ||
+            type === 'signup' ||
+            type === 'email' ||
+            type === 'recovery',
+    );
+};
 
 const readAuthErrorFromUrl = (): string | null => {
     const params = new URLSearchParams(window.location.search);

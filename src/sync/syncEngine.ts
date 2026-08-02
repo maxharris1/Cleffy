@@ -150,7 +150,7 @@ export class SyncEngine {
                 this.setStatus('syncing');
 
                 const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
-                let error = await this.pushBatch(batch);
+                const error = await this.pushBatch(batch);
 
                 // Non-transient batch reject: RPC is transactional (nothing applied).
                 // Peel one-by-one so an innocent head is not discarded for a sibling fault.

@@ -1,6 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
-import { corsHeaders, jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, tryDownloadPdf } from '../_shared/imslp.ts';
 
 const uuidRe =
