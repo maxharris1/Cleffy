@@ -168,6 +168,49 @@ describe('AnnotationStore', () => {
         expect(store.getPage(0).has('a1')).toBe(true);
     });
 
+    it('createMany bulk-writes mirror + outbox and undoes as recorded', async () => {
+        const many = Array.from({ length: 25 }, (_, i) => makeStroke(`m${i}`, i % 3));
+        store.beginBatch();
+        await store.createMany(many);
+        store.endBatch();
+
+        expect(store.getPage(0).size + store.getPage(1).size + store.getPage(2).size).toBe(25);
+        expect(await db.annotations.count()).toBe(25);
+        const ops = await db.ops.toArray();
+        expect(ops).toHaveLength(25);
+        expect(ops.every((op) => op.type === 'create')).toBe(true);
+
+        // The whole bulk create is ONE undo step → 25 tombstones.
+        await store.undoLast();
+        expect(store.liveAnnotations()).toHaveLength(0);
+        expect((await db.annotations.toArray()).every((row) => row.deletedAt !== null)).toBe(true);
+        expect(await db.ops.count()).toBe(50);
+
+        // Redo restores every mark.
+        await store.redoLast();
+        expect(store.liveAnnotations()).toHaveLength(25);
+        expect(store.canUndo).toBe(true);
+    });
+
+    it('createMany is a no-op while an overlay is shown', async () => {
+        store.setHistoryOverlay([makeStroke('ov')], 'preview');
+        await store.createMany([makeStroke('m1')]);
+        store.setHistoryOverlay(null);
+        expect(store.liveAnnotations()).toHaveLength(0);
+        expect(await db.annotations.count()).toBe(0);
+    });
+
+    it('undo/redo do not consume entries while an overlay is shown', async () => {
+        await store.create(makeStroke('a1'));
+        store.setHistoryOverlay([makeStroke('ov')]);
+        await store.undoLast();
+        store.setHistoryOverlay(null);
+        expect(store.canUndo).toBe(true);
+        expect(store.liveAnnotations()).toHaveLength(1);
+        await store.undoLast();
+        expect(store.liveAnnotations()).toHaveLength(0);
+    });
+
     it('tracks which UI owns the overlay (history pill vs import preview)', () => {
         expect(store.overlayMode).toBe(null);
         store.setHistoryOverlay([makeStroke('p1')], 'preview');

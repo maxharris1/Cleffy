@@ -8,7 +8,7 @@ import type {
     PageSegmentation,
     ProposedItem,
 } from '@/features/import/importTypes';
-import type { Annotation } from '@/types/models';
+import type { Annotation, StrokePayload } from '@/types/models';
 
 /**
  * Merge deterministic clusters with (optional) AI labels into reviewable
@@ -58,8 +58,14 @@ const unionBbox = (clusters: InkCluster[]): { x: number; y: number; w: number; h
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 };
 
-const strokesItem = (docId: string, seg: PageSegmentation, cluster: InkCluster): ProposedItem | null => {
-    const payloads = vectorizeMask(cluster.mask, cluster.area, cluster.thicknessPx, seg.width, seg.height);
+const strokesItem = (
+    docId: string,
+    seg: PageSegmentation,
+    cluster: InkCluster,
+    vectors?: ReadonlyMap<string, StrokePayload[]>,
+): ProposedItem | null => {
+    const payloads =
+        vectors?.get(cluster.id) ?? vectorizeMask(cluster.mask, cluster.area, cluster.thicknessPx, seg.width, seg.height);
     if (payloads.length === 0) {
         return null;
     }
@@ -104,11 +110,19 @@ const isTextLabel = (label: ClusterLabel): boolean =>
     typeof label.text === 'string' &&
     label.text.trim().length > 0;
 
-/** Build review items for one page. `labels: null` → strokes-only degradation. */
-export const buildProposals = (docId: string, seg: PageSegmentation, labels: ClassifyResult | null): ProposedItem[] => {
+/**
+ * Build review items for one page. `labels: null` → strokes-only degradation.
+ * `vectors` (from the detection worker) skips re-vectorizing on this thread.
+ */
+export const buildProposals = (
+    docId: string,
+    seg: PageSegmentation,
+    labels: ClassifyResult | null,
+    vectors?: ReadonlyMap<string, StrokePayload[]>,
+): ProposedItem[] => {
     if (!labels) {
         return seg.clusters
-            .map((c) => strokesItem(docId, seg, c))
+            .map((c) => strokesItem(docId, seg, c, vectors))
             .filter((item): item is ProposedItem => item !== null);
     }
 
@@ -163,7 +177,7 @@ export const buildProposals = (docId: string, seg: PageSegmentation, labels: Cla
             continue;
         }
         // 'mark', unknown id, or unusable text → ink strokes.
-        const item = strokesItem(docId, seg, cluster);
+        const item = strokesItem(docId, seg, cluster, vectors);
         if (item) {
             items.push({ ...item, confidence: label?.confidence ?? null });
         }

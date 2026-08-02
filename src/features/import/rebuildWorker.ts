@@ -7,12 +7,21 @@ import { degrees, PDFArray, PDFDict, PDFDocument, PDFName, PDFRef } from 'pdf-li
 import { normalizeRotation } from '@/features/export/pdfMapping';
 import { computePatchPlacement } from '@/features/import/rebuildPlacement';
 
-export interface RebuildPatchMsg {
-    page: number;
-    bboxNorm: { x: number; y: number; w: number; h: number };
-    /** PNG bytes (alpha-masked paper-color patch). */
-    png: Uint8Array;
-}
+export type RebuildPatchMsg =
+    | {
+          page: number;
+          bboxNorm: { x: number; y: number; w: number; h: number };
+          /** Pre-encoded PNG bytes (fallback when OffscreenCanvas is unavailable). */
+          png: Uint8Array;
+      }
+    | {
+          page: number;
+          bboxNorm: { x: number; y: number; w: number; h: number };
+          /** Raw RGBA pixels, transferred — PNG-encoded here, off the main thread. */
+          rgba: ArrayBuffer;
+          width: number;
+          height: number;
+      };
 
 export interface StripAnnotMsg {
     page: number;
@@ -30,6 +39,18 @@ export interface RebuildRequest {
 export type RebuildResponse = { ok: true; bytes: Uint8Array } | { ok: false; error: string };
 
 const RECT_EPSILON = 0.5;
+
+/** PNG-encode a raw RGBA patch with OffscreenCanvas (never sent unless the main thread has it too). */
+const encodePatchPng = async (patch: { rgba: ArrayBuffer; width: number; height: number }): Promise<Uint8Array> => {
+    const canvas = new OffscreenCanvas(patch.width, patch.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+        throw new Error('Could not create a canvas for the cleanup patch.');
+    }
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(patch.rgba), patch.width, patch.height), 0, 0);
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    return new Uint8Array(await blob.arrayBuffer());
+};
 
 const rectOfDict = (dict: PDFDict): [number, number, number, number] | null => {
     const rect = dict.lookup(PDFName.of('Rect'));
@@ -102,7 +123,7 @@ const rebuild = async ({ bytes, patches, stripAnnots }: RebuildRequest): Promise
         if (!page) {
             continue;
         }
-        const image = await doc.embedPng(patch.png);
+        const image = await doc.embedPng('png' in patch ? patch.png : await encodePatchPng(patch));
         const rot = normalizeRotation(page.getRotation().angle);
         const { width: pw, height: ph } = page.getSize();
         const placement = computePatchPlacement(rot, pw, ph, patch.bboxNorm);

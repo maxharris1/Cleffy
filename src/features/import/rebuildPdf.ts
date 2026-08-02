@@ -141,7 +141,19 @@ export const rebuildCleanedPdf = async (
         }
         if (pagePatches.length > 0) {
             const merged = mergePagePatches(pagePatches, page.rasterWidth, page.rasterHeight);
-            patches.push({ page: page.pageIndex, bboxNorm: merged.bboxNorm, png: await patchToPng(merged) });
+            // Encode in the worker when it can (OffscreenCanvas in window scope
+            // implies worker support — same browser); else encode here.
+            if (typeof OffscreenCanvas !== 'undefined') {
+                patches.push({
+                    page: page.pageIndex,
+                    bboxNorm: merged.bboxNorm,
+                    rgba: merged.rgba.buffer,
+                    width: merged.width,
+                    height: merged.height,
+                });
+            } else {
+                patches.push({ page: page.pageIndex, bboxNorm: merged.bboxNorm, png: await patchToPng(merged) });
+            }
         }
         for (const item of pageItems) {
             if (item.sourceAnnot) {
@@ -169,7 +181,10 @@ export const rebuildCleanedPdf = async (
         };
         worker.onerror = () => reject(new Error('Rebuild failed'));
         const request: RebuildRequest = { bytes: sourceBytes.slice(0), patches, stripAnnots };
-        worker.postMessage(request, [request.bytes, ...patches.map((p) => p.png.buffer as ArrayBuffer)]);
+        worker.postMessage(request, [
+            request.bytes,
+            ...patches.map((p) => ('png' in p ? (p.png.buffer as ArrayBuffer) : p.rgba)),
+        ]);
     }).finally(() => worker.terminate());
 
     if (

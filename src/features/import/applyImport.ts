@@ -7,6 +7,9 @@ import type { AnnotationStore } from '@/sync/annotationStore';
  * The review overlay must be cleared first: commit() is a no-op in history
  * mode (annotationStore.ts), so creating while overlaid would silently drop.
  */
+/** Items per bulk chunk — small enough for smooth progress, big enough to amortize transactions. */
+const APPLY_CHUNK_ITEMS = 150;
+
 export const applyProposals = async (
     store: AnnotationStore,
     items: ProposedItem[],
@@ -17,15 +20,13 @@ export const applyProposals = async (
     }
     store.beginBatch();
     let created = 0;
-    let doneItems = 0;
     try {
-        for (const item of items) {
-            for (const annotation of item.annotations) {
-                await store.create(annotation);
-                created++;
-            }
-            doneItems++;
-            onProgress?.(doneItems, items.length);
+        for (let start = 0; start < items.length; start += APPLY_CHUNK_ITEMS) {
+            const slice = items.slice(start, start + APPLY_CHUNK_ITEMS);
+            const annotations = slice.flatMap((item) => item.annotations);
+            await store.createMany(annotations);
+            created += annotations.length;
+            onProgress?.(Math.min(start + slice.length, items.length), items.length);
         }
     } finally {
         store.endBatch();
