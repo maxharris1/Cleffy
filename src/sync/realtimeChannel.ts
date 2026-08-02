@@ -20,6 +20,9 @@ const FLUSH_MS = 100;
 const FLUSH_MS_DEGRADED = 175;
 const FLUSH_MAX_POINTS = 45;
 
+/** Min gap between presence `track` calls — avoids ClientPresenceRateLimitReached. */
+const PRESENCE_TRACK_MIN_MS = 1000;
+
 export interface StrokeMeta {
     strokeId: string;
     page: number;
@@ -66,6 +69,11 @@ export class DocRealtimeChannel {
     /** True when at least one other member is on the channel (solo → no live ink). */
     private hasRemoteAudience = false;
 
+    // Presence track coalescing (page-only payload).
+    private lastTrackedPage: number | null = null;
+    private lastPresenceTrackAt = 0;
+    private presenceTrackTimer: ReturnType<typeof setTimeout> | null = null;
+
     constructor(private opts: DocRealtimeChannelOptions) {}
 
     start(): void {
@@ -107,16 +115,17 @@ export class DocRealtimeChannel {
             this.opts.onPeers(peers);
         });
 
+        this.channel = channel;
         channel.subscribe((status) => {
             if (status === 'SUBSCRIBED') {
-                void channel.track({ ...this.opts.self });
+                // Only write path for track() — force so join/reconnect always announce.
+                this.trackPresence({ force: true });
                 if (this.everSubscribed) {
                     this.opts.onReconnect();
                 }
                 this.everSubscribed = true;
             }
         });
-        this.channel = channel;
     }
 
     stop(): void {
@@ -125,18 +134,56 @@ export class DocRealtimeChannel {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
+        if (this.presenceTrackTimer) {
+            clearTimeout(this.presenceTrackTimer);
+            this.presenceTrackTimer = null;
+        }
         if (this.channel) {
             void this.opts.supabase.removeChannel(this.channel);
             this.channel = null;
         }
     }
 
-    /** Presence: report which page the user is looking at. */
+    /**
+     * Presence: report which page the user is looking at.
+     * PdfViewport already debounces scroll at 400ms; this adds a 1s min gap
+     * so rapid setPage / reconnects do not trip ClientPresenceRateLimitReached.
+     */
     setPage(page: number): void {
         this.opts.self.page = page;
-        if (this.channel?.state === 'joined') {
-            void this.channel.track({ ...this.opts.self });
+        this.trackPresence();
+    }
+
+    /** Sole writer for `channel.track` presence state. */
+    private trackPresence(opts?: { force?: boolean }): void {
+        if (this.presenceTrackTimer) {
+            clearTimeout(this.presenceTrackTimer);
+            this.presenceTrackTimer = null;
         }
+        const channel = this.channel;
+        if (this.stopped || !channel) {
+            return;
+        }
+        const force = opts?.force === true;
+        // SUBSCRIBED callback can fire before state flips to 'joined'; allow force.
+        if (!force && channel.state !== 'joined') {
+            return;
+        }
+        const page = this.opts.self.page;
+        if (!force && this.lastTrackedPage === page) {
+            return;
+        }
+        const elapsed = Date.now() - this.lastPresenceTrackAt;
+        if (!force && elapsed < PRESENCE_TRACK_MIN_MS) {
+            this.presenceTrackTimer = setTimeout(
+                () => this.trackPresence(),
+                PRESENCE_TRACK_MIN_MS - elapsed,
+            );
+            return;
+        }
+        this.lastTrackedPage = page;
+        this.lastPresenceTrackAt = Date.now();
+        void channel.track({ ...this.opts.self });
     }
 
     // ---- Live ink publishing (called by InkController) -------------------

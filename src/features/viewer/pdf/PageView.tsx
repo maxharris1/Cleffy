@@ -1,5 +1,5 @@
 import { RenderingCancelledException, type PDFDocumentProxy, type RenderTask } from 'pdfjs-dist';
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 
 import { bitmapDims, type PageLayout } from '@/features/viewer/geometry';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
@@ -23,6 +23,7 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
     const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [renderFailed, setRenderFailed] = useState(false);
 
     // pdf.js raster.
     useEffect(() => {
@@ -32,6 +33,7 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
         }
         let renderTask: RenderTask | null = null;
         let cancelled = false;
+        setRenderFailed(false);
 
         (async () => {
             try {
@@ -54,9 +56,9 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
                 await renderTask.promise;
             } catch (err) {
                 if (!(err instanceof RenderingCancelledException) && !cancelled) {
-                    // A single failed page shouldn't crash the viewer — leave the
-                    // canvas blank but make the failure observable.
+                    // Leave the canvas blank but surface a product-level failure.
                     console.warn(`PDF page ${pageIndex + 1} failed to render`, err);
+                    setRenderFailed(true);
                 }
             }
         })();
@@ -108,6 +110,14 @@ export const PageView = memo(({ doc, pageIndex, layout, scale, registry }: PageV
             <canvas ref={pdfCanvasRef} className="absolute inset-0 h-full w-full" data-page-index={pageIndex} />
             <canvas ref={committedCanvasRef} className="absolute inset-0 h-full w-full" data-ink-layer="committed" />
             <canvas ref={liveCanvasRef} className="absolute inset-0 h-full w-full" data-ink-layer="live" />
+            {renderFailed ? (
+                <div
+                    className="absolute inset-0 z-10 flex items-center justify-center bg-white/90 p-4 text-center"
+                    role="alert"
+                >
+                    <p className="text-sm text-red-700">Page {pageIndex + 1} couldn&apos;t render</p>
+                </div>
+            ) : null}
         </div>
     );
 });

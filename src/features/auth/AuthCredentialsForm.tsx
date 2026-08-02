@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 
+import { mapAuthError } from '@/features/auth/authErrors';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
@@ -81,7 +82,7 @@ export const AuthCredentialsForm = ({
         try {
             await onSubmit({ email: emailValue.trim(), password: passwordValue });
         } catch (err) {
-            setError(err instanceof Error ? err.message : fallbackError);
+            setError(mapAuthError(err, fallbackError));
             setBusy(false);
         }
     };
