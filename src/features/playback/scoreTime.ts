@@ -145,3 +145,24 @@ export const measureEndTick = (measures: readonly ScoreMeasure[], index: number)
     const measure = measures[Math.min(measures.length - 1, Math.max(0, index))];
     return measure ? measure.tick + measure.dTicks : 0;
 };
+
+/**
+ * Measure under a normalized point on a page (tap-to-seek). Matches the
+ * system whose y-band contains the point, then the measure whose x-range
+ * contains it. Returns the measure index, or -1.
+ */
+export const measureIndexAtPagePoint = (score: ScoreData, pageIndex: number, nx: number, ny: number): number => {
+    for (let sysIndex = 0; sysIndex < score.systems.length; sysIndex++) {
+        const system = score.systems[sysIndex];
+        if (!system || system.page !== pageIndex || ny < system.y0 || ny > system.y1) {
+            continue;
+        }
+        for (let i = 0; i < score.measures.length; i++) {
+            const measure = score.measures[i];
+            if (measure && measure.sys === sysIndex && nx >= measure.x0 && nx <= measure.x1) {
+                return i;
+            }
+        }
+    }
+    return -1;
+};
