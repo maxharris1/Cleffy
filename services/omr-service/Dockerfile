@@ -18,7 +18,7 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates tesseract-ocr-eng fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends curl ca-certificates fontconfig tesseract-ocr-eng fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 ARG AUDIVERIS_VERSION=5.6.1
