@@ -215,13 +215,7 @@ export const facetValuesFor = (dimension: FacetDimension): FacetValue[] => {
 };
 
 export const hasActiveFilters = (filters: SearchFilters): boolean =>
-    Boolean(
-        filters.composerCategory ||
-            filters.instrument ||
-            filters.form ||
-            filters.key ||
-            filters.era,
-    );
+    Boolean(filters.composerCategory || filters.instrument || filters.form || filters.key || filters.era);
 
 /** Whether category browse / A–Z / New sort are meaningful. */
 export const categoryBackedFilters = (filters: SearchFilters): boolean =>

@@ -15,6 +15,6 @@ export const EmptyState = ({ icon, title, body, children, className = '' }: Empt
         {icon ? <div className="mb-4 flex justify-center text-stone-400">{icon}</div> : null}
         <h2 className="font-display text-2xl font-semibold text-stone-800">{title}</h2>
         {body ? <p className="mt-2 text-sm leading-relaxed text-stone-600">{body}</p> : null}
-        {children ? <div className="mt-6 flex flex-wrap items-center justify-center gap-3">{children}</div> : null}
+        {children ? <div className="mt-6 flex flex-col items-center gap-4">{children}</div> : null}
     </div>
 );

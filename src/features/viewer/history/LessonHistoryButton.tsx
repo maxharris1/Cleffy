@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import {
-    getSnapshot,
-    listSnapshots,
-    SNAPSHOT_PULL_LIMIT,
-} from '@/features/viewer/history/snapshotService';
+import { getSnapshot, listSnapshots, SNAPSHOT_PULL_LIMIT } from '@/features/viewer/history/snapshotService';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import type { AnnotationStore } from '@/sync/annotationStore';
 
@@ -26,9 +22,7 @@ export const LessonHistoryButton = ({ store, canRestore }: LessonHistoryButtonPr
             >
                 History
             </button>
-            {open ? (
-                <LessonHistoryDialog store={store} canRestore={canRestore} onClose={() => setOpen(false)} />
-            ) : null}
+            {open ? <LessonHistoryDialog store={store} canRestore={canRestore} onClose={() => setOpen(false)} /> : null}
         </>
     );
 };
@@ -166,39 +160,41 @@ const LessonHistoryDialog = ({
                                     Showing the latest {SNAPSHOT_PULL_LIMIT} starting points.
                                 </p>
                             ) : null}
-                        <ul className="flex flex-col gap-2">
-                            {rows.map((row) => (
-                                <li
-                                    key={row.id}
-                                    className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-100 px-3 py-2"
-                                >
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-sm font-medium text-stone-800">{formatDay(row.capturedOn)}</p>
-                                        <p className="text-xs text-stone-500">
-                                            {row.payload.filter((a) => !a.deletedAt).length} marks
-                                        </p>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        disabled={busy}
-                                        onClick={() => void viewDay(row.id)}
-                                        className="rounded-lg px-2.5 py-1 text-sm text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                            <ul className="flex flex-col gap-2">
+                                {rows.map((row) => (
+                                    <li
+                                        key={row.id}
+                                        className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-100 px-3 py-2"
                                     >
-                                        View
-                                    </button>
-                                    {canRestore ? (
+                                        <div className="min-w-0 flex-1">
+                                            <p className="text-sm font-medium text-stone-800">
+                                                {formatDay(row.capturedOn)}
+                                            </p>
+                                            <p className="text-xs text-stone-500">
+                                                {row.payload.filter((a) => !a.deletedAt).length} marks
+                                            </p>
+                                        </div>
                                         <button
                                             type="button"
                                             disabled={busy}
-                                            onClick={() => void restoreDay(row.id)}
-                                            className="rounded-lg px-2.5 py-1 text-sm text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+                                            onClick={() => void viewDay(row.id)}
+                                            className="rounded-lg px-2.5 py-1 text-sm text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
                                         >
-                                            Restore
+                                            View
                                         </button>
-                                    ) : null}
-                                </li>
-                            ))}
-                        </ul>
+                                        {canRestore ? (
+                                            <button
+                                                type="button"
+                                                disabled={busy}
+                                                onClick={() => void restoreDay(row.id)}
+                                                className="rounded-lg px-2.5 py-1 text-sm text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+                                            >
+                                                Restore
+                                            </button>
+                                        ) : null}
+                                    </li>
+                                ))}
+                            </ul>
                         </>
                     )}
                 </div>

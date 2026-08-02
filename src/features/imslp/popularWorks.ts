@@ -20,9 +20,7 @@ export interface PopularWork {
     note?: string;
 }
 
-const w = (
-    partial: PopularWork,
-): PopularWork => partial;
+const w = (partial: PopularWork): PopularWork => partial;
 
 export const POPULAR_WORKS: PopularWork[] = [
     // ——— Beethoven (~12) ———

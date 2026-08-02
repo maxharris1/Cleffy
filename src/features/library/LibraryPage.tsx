@@ -5,6 +5,11 @@ import { listCachedDocuments, listDocuments } from '@/features/library/documents
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import type { DocumentRow } from '@/types/database';
+import { EmptyState } from '@/ui/EmptyState';
+import { ErrorText } from '@/ui/ErrorText';
+import { LoadingText } from '@/ui/Loading';
+import { ProgressBar } from '@/ui/ProgressBar';
+import { buttonClassName, fieldClassName } from '@/ui/classNames';
 
 export const LibraryPage = () => {
     const { uploading, uploadPct, onUpload, uploadError } = useOutletContext<LibraryOutletContext>();
@@ -44,11 +49,7 @@ export const LibraryPage = () => {
 
     const q = query.trim().toLowerCase();
     const filtered =
-        documents === null
-            ? null
-            : q
-              ? documents.filter((doc) => doc.title.toLowerCase().includes(q))
-              : documents;
+        documents === null ? null : q ? documents.filter((doc) => doc.title.toLowerCase().includes(q)) : documents;
 
     const hasScores = documents !== null && documents.length > 0;
     const isOfflineNotice = error?.startsWith('Offline') ?? false;
@@ -57,25 +58,31 @@ export const LibraryPage = () => {
     return (
         <div>
             {hasScores ? (
-                <div className="flex flex-wrap items-center gap-3">
-                    <UploadButton uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
-                    <LocalOpenControl label="Open locally without uploading" subtle />
-                </div>
+                <>
+                    <div className="flex flex-wrap items-center gap-3">
+                        <UploadButton uploading={uploading} onUpload={onUpload} />
+                        <LocalOpenControl label="Open locally without uploading" subtle />
+                    </div>
+                    {uploading && uploadPct !== null ? (
+                        <ProgressBar value={uploadPct} label="Uploading PDF" className="mt-4 max-w-xs" />
+                    ) : null}
+                </>
             ) : documents !== null ? (
                 <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
             ) : null}
 
             {statusError ? (
-                <p
-                    className={`mt-5 text-sm ${isOfflineNotice && !uploadError ? 'text-amber-800' : 'text-red-600'}`}
-                    role="status"
-                >
-                    {statusError}
-                </p>
+                isOfflineNotice && !uploadError ? (
+                    <p className="mt-5 text-sm text-amber-800" role="status">
+                        {statusError}
+                    </p>
+                ) : (
+                    <ErrorText className="mt-5">{statusError}</ErrorText>
+                )
             ) : null}
 
             {documents === null ? (
-                <p className="mt-10 animate-pulse text-stone-500">Loading scores…</p>
+                <LoadingText className="mt-10">Loading scores…</LoadingText>
             ) : hasScores ? (
                 <section className="mt-8">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -88,9 +95,9 @@ export const LibraryPage = () => {
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
                             placeholder="Search by title…"
-                            className="landing-input w-full rounded-lg border border-stone-300/80 bg-white/70 px-3 py-2 text-sm text-stone-800 outline-none placeholder:text-stone-400 sm:max-w-xs"
+                            className={fieldClassName('sm', 'sm:max-w-xs')}
                         />
-                        <p className="text-xs text-stone-500">
+                        <p className="text-xs text-stone-600">
                             {query.trim()
                                 ? `${filtered?.length ?? 0} of ${documents.length}`
                                 : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
@@ -110,9 +117,9 @@ export const LibraryPage = () => {
                                 >
                                     <Link
                                         to={`/doc/${doc.id}`}
-                                        className="group flex items-baseline justify-between gap-4 border-b border-stone-300/50 py-3.5 transition hover:border-indigo-300/60"
+                                        className="group flex items-baseline justify-between gap-4 border-b border-stone-300/50 py-3.5 transition hover:border-accent/40"
                                     >
-                                        <span className="min-w-0 truncate font-medium text-stone-800 transition group-hover:text-indigo-800">
+                                        <span className="min-w-0 truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
                                             {doc.title}
                                         </span>
                                         <span className="shrink-0 text-xs text-stone-500">
@@ -130,21 +137,9 @@ export const LibraryPage = () => {
     );
 };
 
-const UploadButton = ({
-    uploading,
-    uploadPct,
-    onUpload,
-}: {
-    uploading: boolean;
-    uploadPct: number | null;
-    onUpload: (file: File) => Promise<void>;
-}) => (
-    <label
-        className={`landing-cta inline-flex cursor-pointer items-center rounded-lg px-4 py-2 text-sm font-medium text-white ${
-            uploading ? 'pointer-events-none opacity-80' : ''
-        }`}
-    >
-        {uploading ? `Uploading… ${uploadPct}%` : 'Upload PDF'}
+const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
+    <label className={buttonClassName('primary', 'sm', uploading ? 'pointer-events-none opacity-80' : '')}>
+        {uploading ? 'Uploading…' : 'Upload PDF'}
         <input
             type="file"
             accept="application/pdf,.pdf"
@@ -170,21 +165,22 @@ const EmptyLibrary = ({
     uploadPct: number | null;
     onUpload: (file: File) => Promise<void>;
 }) => (
-    <div className="library-empty mt-8 text-center lg:mt-16">
-        <h2 className="text-lg font-medium tracking-tight text-stone-800">No scores yet</h2>
-        <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-stone-500">
-            Find a score on IMSLP or upload a PDF to start annotating.
-        </p>
-        <div className="mt-8 flex flex-col items-center gap-4">
-            <div className="flex flex-wrap items-center justify-center gap-3">
-                <Link to="/search" className="landing-cta rounded-lg px-4 py-2 text-sm font-medium text-white">
-                    Find on IMSLP
-                </Link>
-                <UploadButton uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
-            </div>
-            <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
+    <EmptyState
+        className="library-empty mt-8 lg:mt-16"
+        title="No scores yet"
+        body="Find a score on IMSLP or upload a PDF to start annotating."
+    >
+        <div className="flex flex-wrap items-center justify-center gap-3">
+            <Link to="/search" className={buttonClassName('primary', 'sm')}>
+                Find on IMSLP
+            </Link>
+            <UploadButton uploading={uploading} onUpload={onUpload} />
         </div>
-    </div>
+        {uploading && uploadPct !== null ? (
+            <ProgressBar value={uploadPct} label="Uploading PDF" className="w-full max-w-xs" />
+        ) : null}
+        <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
+    </EmptyState>
 );
 
 const formatUpdated = (iso: string): string => {

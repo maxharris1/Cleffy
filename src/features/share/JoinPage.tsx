@@ -3,12 +3,12 @@ import { Link, useNavigate, useParams } from 'react-router';
 
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
 import { redeemShareLink } from '@/features/share/shareService';
-import {
-    BrandShell,
-    BrandTextField,
-    brandLinkClassName,
-    brandPrimaryButtonClassName,
-} from '@/ui/BrandShell';
+import { BrandShell } from '@/ui/BrandShell';
+import { Button } from '@/ui/Button';
+import { ErrorText } from '@/ui/ErrorText';
+import { LoadingText } from '@/ui/Loading';
+import { TextField } from '@/ui/TextField';
+import { linkClassName } from '@/ui/classNames';
 
 /**
  * Share-link landing. If a session already exists (teacher clicking their own
@@ -74,16 +74,16 @@ export const JoinPage = () => {
         >
             {error ? (
                 <div className="text-center">
-                    <p className="text-red-600">{error}</p>
-                    <Link to={escapeTo} className={`mt-3 inline-block ${brandLinkClassName}`}>
+                    <ErrorText>{error}</ErrorText>
+                    <Link to={escapeTo} className={`mt-3 inline-block ${linkClassName}`}>
                         {escapeLabel}
                     </Link>
                 </div>
             ) : busy ? (
-                <p className="animate-pulse text-center text-stone-500">Joining…</p>
+                <LoadingText className="text-center">Joining…</LoadingText>
             ) : (
                 <>
-                    <BrandTextField
+                    <TextField
                         id="name"
                         label="Your name"
                         value={name}
@@ -96,14 +96,10 @@ export const JoinPage = () => {
                         }}
                         placeholder="e.g. Sharon"
                     />
-                    <button
-                        type="button"
-                        onClick={() => void joinAsGuest()}
-                        className={brandPrimaryButtonClassName}
-                    >
+                    <Button onClick={() => void joinAsGuest()} className="mt-4 w-full">
                         Join
-                    </button>
-                    <p className="mt-3 text-xs text-stone-500">
+                    </Button>
+                    <p className="mt-3 text-xs text-stone-600">
                         No account needed — you can add an email later to keep your work across devices.
                     </p>
                 </>

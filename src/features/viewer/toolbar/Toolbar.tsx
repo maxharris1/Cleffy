@@ -151,7 +151,11 @@ export const Toolbar = ({ store }: ToolbarProps) => {
 function PanIcon() {
     return (
         <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 11V6a1.5 1.5 0 0 1 3 0v5M12 11V4.5a1.5 1.5 0 0 1 3 0V11M15 11V6.5a1.5 1.5 0 0 1 3 0V14a5 5 0 0 1-5 5h-1.5a5 5 0 0 1-5-5v-2.5a1.5 1.5 0 0 1 3 0V11" />
+            <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M9 11V6a1.5 1.5 0 0 1 3 0v5M12 11V4.5a1.5 1.5 0 0 1 3 0V11M15 11V6.5a1.5 1.5 0 0 1 3 0V14a5 5 0 0 1-5 5h-1.5a5 5 0 0 1-5-5v-2.5a1.5 1.5 0 0 1 3 0V11"
+            />
         </svg>
     );
 }
@@ -167,7 +171,11 @@ function PenIcon() {
 function HighlighterIcon() {
     return (
         <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 19h14M8 15l-2 2v2h4l7-7-4-4-5 5zM15 8l2-2 3 3-2 2" />
+            <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M5 19h14M8 15l-2 2v2h4l7-7-4-4-5 5zM15 8l2-2 3 3-2 2"
+            />
             <path strokeLinecap="round" d="M7 17h6" className="opacity-50" />
         </svg>
     );

@@ -59,11 +59,7 @@ export interface OfflineDocFallback {
     bytes: ArrayBuffer;
 }
 
-export const documentRowFromCache = (cached: {
-    id: string;
-    title: string;
-    cachedAt: string;
-}): DocumentRow => ({
+export const documentRowFromCache = (cached: { id: string; title: string; cachedAt: string }): DocumentRow => ({
     id: cached.id,
     owner_id: '',
     title: cached.title,
@@ -200,7 +196,10 @@ export const importDocumentFromImslp = async (
     }
 
     const rollback = async () => {
-        await supabase.storage.from('scores').remove([storagePath]).catch(() => undefined);
+        await supabase.storage
+            .from('scores')
+            .remove([storagePath])
+            .catch(() => undefined);
         await supabase.from('documents').delete().eq('id', id);
     };
 

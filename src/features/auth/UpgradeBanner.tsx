@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { getSupabase } from '@/lib/supabase';
+import { CloseIcon } from '@/ui/icons';
 
 type BannerState = 'collapsed' | 'editing' | 'sent' | 'dismissed';
 
@@ -67,7 +68,11 @@ export const UpgradeBanner = () => {
                     <button type="button" onClick={() => setState('collapsed')} className="text-amber-700 underline">
                         Cancel
                     </button>
-                    {error ? <span className="text-red-600">{error}</span> : null}
+                    {error ? (
+                        <span role="status" className="text-danger">
+                            {error}
+                        </span>
+                    ) : null}
                 </div>
             ) : (
                 <div className="flex items-center justify-between gap-2">
@@ -81,9 +86,9 @@ export const UpgradeBanner = () => {
                         type="button"
                         aria-label="Dismiss"
                         onClick={() => setState('dismissed')}
-                        className="px-1 text-amber-700 hover:text-amber-900"
+                        className="rounded p-1 text-amber-700 transition hover:text-amber-900"
                     >
-                        ✕
+                        <CloseIcon size={16} />
                     </button>
                 </div>
             )}

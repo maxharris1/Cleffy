@@ -3,7 +3,8 @@ import { Link } from 'react-router';
 
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { requestPasswordReset } from '@/features/auth/session';
-import { BrandShell, brandLinkClassName } from '@/ui/BrandShell';
+import { BrandShell } from '@/ui/BrandShell';
+import { linkClassName } from '@/ui/classNames';
 
 export const ForgotPasswordPage = () => {
     const [sentTo, setSentTo] = useState<string | null>(null);
@@ -12,7 +13,7 @@ export const ForgotPasswordPage = () => {
         return (
             <BrandShell title="Check your email" subtitle={`We sent a password reset link to ${sentTo}.`}>
                 <p className="text-center text-sm text-stone-600">
-                    <Link to="/login" className={brandLinkClassName}>
+                    <Link to="/login" className={linkClassName}>
                         Back to log in
                     </Link>
                 </p>
@@ -30,7 +31,7 @@ export const ForgotPasswordPage = () => {
                 fallbackError="Could not send reset email."
                 footer={
                     <p className="mt-6 text-center text-sm text-stone-600">
-                        <Link to="/login" className={brandLinkClassName}>
+                        <Link to="/login" className={linkClassName}>
                             Back to log in
                         </Link>
                     </p>

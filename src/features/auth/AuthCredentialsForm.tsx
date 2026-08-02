@@ -1,6 +1,8 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 
-import { BrandTextField, brandPrimaryButtonClassName } from '@/ui/BrandShell';
+import { Button } from '@/ui/Button';
+import { ErrorText } from '@/ui/ErrorText';
+import { TextField } from '@/ui/TextField';
 
 export interface AuthCredentials {
     email: string;
@@ -88,7 +90,7 @@ export const AuthCredentialsForm = ({
         <>
             <form onSubmit={(e) => void handleSubmit(e)}>
                 {email ? (
-                    <BrandTextField
+                    <TextField
                         id={emailId}
                         label="Email"
                         type="email"
@@ -99,7 +101,7 @@ export const AuthCredentialsForm = ({
                     />
                 ) : null}
                 {password || confirm ? (
-                    <BrandTextField
+                    <TextField
                         id={passwordId}
                         label={passwordLabel}
                         type="password"
@@ -111,7 +113,7 @@ export const AuthCredentialsForm = ({
                 ) : null}
                 {afterPassword}
                 {confirm ? (
-                    <BrandTextField
+                    <TextField
                         id={confirmId}
                         label="Confirm password"
                         type="password"
@@ -121,10 +123,10 @@ export const AuthCredentialsForm = ({
                         spaced
                     />
                 ) : null}
-                <button type="submit" disabled={busy} className={brandPrimaryButtonClassName}>
+                <Button type="submit" disabled={busy} className="mt-4 w-full">
                     {busy ? busyLabel : submitLabel}
-                </button>
-                {error ? <p className="mt-2.5 text-sm text-red-600">{error}</p> : null}
+                </Button>
+                {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}
             </form>
             {footer}
         </>

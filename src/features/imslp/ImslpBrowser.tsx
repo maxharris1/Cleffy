@@ -1,13 +1,12 @@
 import { useReducer, useState } from 'react';
 
-import {
-    fetchImslpWork,
-    type ImslpEdition,
-    type ImslpWorkDetail,
-} from '@/features/imslp/imslpApi';
+import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import { recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
+import { ErrorText } from '@/ui/ErrorText';
+import { LoadingText } from '@/ui/Loading';
+import { buttonClassName } from '@/ui/classNames';
 
 export interface ImslpBrowserProps {
     /** Local PDF hand-off (manual file pick / hybrid fallback upload). */
@@ -138,7 +137,9 @@ export const ImslpBrowser = ({
         }
         setError(null);
         try {
-            await onImportFile(new File([file], suggestedPdfName(flow.work.title, file.name), { type: 'application/pdf' }));
+            await onImportFile(
+                new File([file], suggestedPdfName(flow.work.title, file.name), { type: 'application/pdf' }),
+            );
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Upload failed');
         }
@@ -150,9 +151,7 @@ export const ImslpBrowser = ({
     return (
         <section className={className}>
             {showHeading || flow.phase === 'work' ? (
-                <div
-                    className={`flex items-start gap-3 ${showHeading ? 'justify-between' : 'justify-end'}`}
-                >
+                <div className={`flex items-start gap-3 ${showHeading ? 'justify-between' : 'justify-end'}`}>
                     {showHeading ? (
                         <div>
                             <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
@@ -168,7 +167,7 @@ export const ImslpBrowser = ({
                                 setError(null);
                                 dispatch({ type: 'search' });
                             }}
-                            className="shrink-0 rounded-lg px-2.5 py-1 text-xs text-stone-600 transition hover:bg-black/5"
+                            className={buttonClassName('ghost', 'sm', 'shrink-0')}
                         >
                             Back
                         </button>
@@ -177,7 +176,7 @@ export const ImslpBrowser = ({
             ) : null}
 
             {flow.phase === 'loadingWork' ? (
-                <p className="mt-4 animate-pulse text-xs text-stone-500">Loading editions…</p>
+                <LoadingText className="mt-4 text-xs">Loading editions…</LoadingText>
             ) : null}
 
             {flow.phase === 'search' ? (
@@ -205,11 +204,7 @@ export const ImslpBrowser = ({
                 />
             ) : null}
 
-            {error ? (
-                <p className="mt-3 text-sm text-red-600" role="status">
-                    {error}
-                </p>
-            ) : null}
+            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
         </section>
     );
 };

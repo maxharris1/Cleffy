@@ -5,6 +5,7 @@ import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { importDocumentFromImslp, uploadDocument } from '@/features/library/documentsService';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import { buttonClassName } from '@/ui/classNames';
 
 export type LibraryOutletContext = {
     userId: string;
@@ -106,7 +107,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                             <button
                                 type="button"
                                 onClick={() => void signOut()}
-                                className="rounded-lg px-3 py-1.5 text-sm text-stone-600 transition hover:bg-black/5"
+                                className={buttonClassName('ghost', 'sm')}
                             >
                                 Sign out
                             </button>
@@ -124,7 +125,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                                         'rounded-lg px-3 py-2 text-sm transition',
                                         isActive
                                             ? 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50'
-                                            : 'text-stone-600 hover:bg-black/5 hover:text-stone-900',
+                                            : 'text-stone-600 hover:bg-ink/5 hover:text-stone-900',
                                     ].join(' ')
                                 }
                             >
@@ -138,7 +139,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                         <button
                             type="button"
                             onClick={() => void signOut()}
-                            className="mt-2 rounded-lg px-2 py-1.5 text-sm text-stone-600 transition hover:bg-black/5"
+                            className={buttonClassName('ghost', 'sm', 'mt-2')}
                         >
                             Sign out
                         </button>

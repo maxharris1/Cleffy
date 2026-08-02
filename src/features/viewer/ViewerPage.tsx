@@ -243,11 +243,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
     return (
         <div className="fixed inset-0 flex flex-col">
             <header className="flex items-center gap-3 border-b border-stone-200 bg-white px-3 py-2 shadow-sm">
-                <Link
-                    to="/"
-                    aria-label="Back to home"
-                    className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100"
-                >
+                <Link to="/" aria-label="Back to home" className="rounded px-2 py-1 text-stone-600 hover:bg-stone-100">
                     ←
                 </Link>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-stone-700">Local score</span>

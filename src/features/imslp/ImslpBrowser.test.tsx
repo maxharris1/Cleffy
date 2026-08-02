@@ -10,11 +10,7 @@ import {
     suggestedPdfName,
 } from '@/features/imslp/imslpDisplay';
 import { groupPopularByComposer, POPULAR_WORKS } from '@/features/imslp/popularWorks';
-import {
-    buildSearchFilters,
-    filterSearchTokens,
-    hasActiveFilters,
-} from '@/features/imslp/searchFacets';
+import { buildSearchFilters, filterSearchTokens, hasActiveFilters } from '@/features/imslp/searchFacets';
 
 describe('imslp display helpers', () => {
     it('formats byte sizes', () => {
@@ -92,9 +88,7 @@ describe('search facets', () => {
         expect(filters.instrument).toBe('piano');
         expect(filters.form).toBe('sonata');
         expect(hasActiveFilters(filters)).toBe(true);
-        expect(filterSearchTokens(filters)).toEqual(
-            expect.arrayContaining(['Beethoven', 'piano', 'sonata']),
-        );
+        expect(filterSearchTokens(filters)).toEqual(expect.arrayContaining(['Beethoven', 'piano', 'sonata']));
     });
 });
 
@@ -152,9 +146,7 @@ describe('ImslpBrowser', () => {
         });
         expect(await screen.findByText('Best matches')).toBeInTheDocument();
         expect(screen.getByText('More from IMSLP')).toBeInTheDocument();
-        expect(
-            screen.getByText((_, el) => el?.textContent === 'Piano Sonata No.14, Op.27 No.2'),
-        ).toBeInTheDocument();
+        expect(screen.getByText((_, el) => el?.textContent === 'Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
     });
 
     it('sends facet filters when a tag is selected', async () => {

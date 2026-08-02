@@ -4,6 +4,7 @@ import { Link } from 'react-router';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import { buttonClassName } from '@/ui/classNames';
 
 const CollabDemo = () => (
     <picture className="landing-demo block w-full">
@@ -68,16 +69,10 @@ export const LandingPage = () => {
                 actions={
                     <>
                         <div className="mx-auto mt-8 flex w-full max-w-sm flex-col gap-3 sm:flex-row sm:justify-center lg:mx-0 lg:justify-start">
-                            <Link
-                                to="/register"
-                                className="landing-cta inline-flex items-center justify-center rounded-xl px-5 py-3 text-center font-medium text-white"
-                            >
+                            <Link to="/register" className={buttonClassName('primary')}>
                                 Create account
                             </Link>
-                            <Link
-                                to="/login"
-                                className="inline-flex items-center justify-center rounded-xl border border-stone-300/90 bg-white/70 px-5 py-3 text-center font-medium text-stone-800 transition hover:bg-white"
-                            >
+                            <Link to="/login" className={buttonClassName('secondary')}>
                                 Log in
                             </Link>
                         </div>

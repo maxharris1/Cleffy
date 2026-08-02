@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
 import { isRegisteredSession, useSession } from '@/features/auth/session';
-import { BrandShell, brandLinkClassName } from '@/ui/BrandShell';
+import { BrandShell } from '@/ui/BrandShell';
+import { LoadingText } from '@/ui/Loading';
+import { linkClassName } from '@/ui/classNames';
 
 /** True when the URL still carries tokens / PKCE that Supabase must exchange. */
 const hasPendingAuthParams = (): boolean => {
@@ -11,11 +13,11 @@ const hasPendingAuthParams = (): boolean => {
     const type = hash.get('type') ?? query.get('type');
     return Boolean(
         hash.get('access_token') ||
-            hash.get('refresh_token') ||
-            query.get('code') ||
-            type === 'signup' ||
-            type === 'email' ||
-            type === 'recovery',
+        hash.get('refresh_token') ||
+        query.get('code') ||
+        type === 'signup' ||
+        type === 'email' ||
+        type === 'recovery',
     );
 };
 
@@ -71,7 +73,7 @@ export const AuthCallbackPage = () => {
         return (
             <BrandShell title="Sign-in failed" subtitle={urlError}>
                 <p className="text-center text-sm text-stone-600">
-                    <Link to="/login" className={brandLinkClassName}>
+                    <Link to="/login" className={linkClassName}>
                         Back to log in
                     </Link>
                 </p>
@@ -79,14 +81,17 @@ export const AuthCallbackPage = () => {
         );
     }
 
-    if (timedOut && !(pendingAuth ? lastEvent === 'SIGNED_IN' && isRegisteredSession(session) : isRegisteredSession(session))) {
+    if (
+        timedOut &&
+        !(pendingAuth ? lastEvent === 'SIGNED_IN' && isRegisteredSession(session) : isRegisteredSession(session))
+    ) {
         return (
             <BrandShell
                 title="Sign-in didn't complete"
                 subtitle="The link may have expired. Request a new one and try again."
             >
                 <p className="text-center text-sm text-stone-600">
-                    <Link to="/login" className={brandLinkClassName}>
+                    <Link to="/login" className={linkClassName}>
                         Back to log in
                     </Link>
                 </p>
@@ -96,7 +101,7 @@ export const AuthCallbackPage = () => {
 
     return (
         <BrandShell title="Signing you in…">
-            <p className="animate-pulse text-center text-sm text-stone-500">Please wait a moment.</p>
+            <LoadingText className="text-center text-sm">Please wait a moment.</LoadingText>
         </BrandShell>
     );
 };

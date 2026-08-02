@@ -18,7 +18,7 @@ const BUTTON_SIZE_CLASSES: Record<ButtonSize, string> = {
 const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
     primary: 'landing-cta text-white',
     secondary: 'border border-stone-300/90 bg-white/70 text-stone-800 hover:bg-white',
-    ghost: 'text-stone-600 hover:bg-stone-100',
+    ghost: 'text-stone-600 hover:bg-ink/5',
     danger: 'bg-danger text-white hover:bg-red-500',
     dangerGhost: 'text-danger hover:bg-red-50',
 };
@@ -41,3 +41,6 @@ export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
     `landing-input w-full border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
 
 export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking-[0.08em] text-stone-600';
+
+export const linkClassName =
+    'text-sm text-accent underline decoration-accent/30 underline-offset-2 transition hover:text-accent-hover hover:decoration-accent/60';

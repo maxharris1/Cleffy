@@ -48,7 +48,10 @@ export const isRegisteredSession = (session: Session | null): session is Session
 };
 
 /** Email/password registration. */
-export const signUpWithPassword = async (email: string, password: string): Promise<{ needsEmailConfirmation: boolean }> => {
+export const signUpWithPassword = async (
+    email: string,
+    password: string,
+): Promise<{ needsEmailConfirmation: boolean }> => {
     const { data, error } = await getSupabase().auth.signUp({
         email,
         password,
