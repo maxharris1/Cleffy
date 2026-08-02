@@ -6,6 +6,9 @@ import { CloseIcon } from '@/ui/icons';
 const FOCUSABLE_SELECTOR =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/** Open dialogs, oldest first — Escape and the focus trap act on the top one only. */
+const dialogStack: symbol[] = [];
+
 export interface DialogProps {
     /** Accessible name; also the visible title when withHeader is set. */
     label: string;
@@ -25,16 +28,25 @@ export interface DialogProps {
 export const Dialog = ({ label, onClose, children, withHeader = true, sheet = false }: DialogProps) => {
     const panelRef = useRef<HTMLDivElement | null>(null);
     const onCloseRef = useRef(onClose);
+    const idRef = useRef<symbol | null>(null);
+    if (idRef.current === null) {
+        idRef.current = Symbol('dialog');
+    }
 
     useEffect(() => {
         onCloseRef.current = onClose;
     }, [onClose]);
 
     useEffect(() => {
+        const id = idRef.current as symbol;
+        dialogStack.push(id);
         const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         panelRef.current?.focus();
 
         const onKeyDown = (event: KeyboardEvent) => {
+            if (dialogStack[dialogStack.length - 1] !== id) {
+                return;
+            }
             if (event.key === 'Escape') {
                 event.stopPropagation();
                 onCloseRef.current();
@@ -70,6 +82,10 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
         document.addEventListener('keydown', onKeyDown);
         return () => {
             document.removeEventListener('keydown', onKeyDown);
+            const index = dialogStack.indexOf(id);
+            if (index !== -1) {
+                dialogStack.splice(index, 1);
+            }
             previouslyFocused?.focus();
         };
     }, []);

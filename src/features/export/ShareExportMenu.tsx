@@ -4,6 +4,7 @@ import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { exportAnnotatedPdf } from '@/features/export/exportPdf';
 import { getDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
+import { buttonClassName } from '@/ui/classNames';
 
 interface ShareExportMenuProps {
     docId: string;
@@ -79,7 +80,7 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                 aria-haspopup="menu"
                 title="Share or save annotated page"
                 onClick={() => setOpen((v) => !v)}
-                className="rounded-lg px-3 py-1.5 text-sm font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+                className={buttonClassName('ghost', 'sm')}
             >
                 {busy ?? 'Share'}
             </button>
@@ -121,7 +122,7 @@ const MenuItem = ({ label, hint, onClick }: { label: string; hint?: string; onCl
         type="button"
         role="menuitem"
         onClick={onClick}
-        className="flex w-full flex-col items-start px-3 py-2 text-left hover:bg-stone-50"
+        className="flex w-full flex-col items-start px-3 py-2 text-left transition hover:bg-ink/5"
     >
         <span className="text-sm text-stone-800">{label}</span>
         {hint ? <span className="text-xs text-stone-500">{hint}</span> : null}
