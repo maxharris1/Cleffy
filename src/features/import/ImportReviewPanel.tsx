@@ -5,7 +5,14 @@ import { scanDocument } from '@/features/import/importPipeline';
 import { recordImportStatus } from '@/features/import/importPromptService';
 import { MAX_CLUSTERS_PER_PAGE } from '@/features/import/segmentation';
 import { isCloudDocId } from '@/features/library/documentsService';
-import type { ClassifyFn, CleanFn, ImportProposal, ImportStatus, ProposedItem } from '@/features/import/importTypes';
+import type {
+    ClassifyFn,
+    CleanFn,
+    ImportProposal,
+    ImportStatus,
+    PageProposal,
+    ProposedItem,
+} from '@/features/import/importTypes';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -152,10 +159,15 @@ export const ImportReviewPanel = ({
             return;
         }
         const wantClean = clean !== null && cleanChecked;
-        setStatus({ kind: 'applying', step: 'annotations' });
+        setStatus({ kind: 'applying', step: 'annotations', done: 0, total: enabledItems.length });
         try {
             store.setHistoryOverlay(null);
-            await applyProposals(store, enabledItems);
+            await applyProposals(store, enabledItems, (done, total) => {
+                // Cheap render, but no need for one per mark on huge scores.
+                if (done === total || done % 20 === 0) {
+                    setStatus({ kind: 'applying', step: 'annotations', done, total });
+                }
+            });
             const created = enabledItems.length;
             let cleaned = false;
             if (wantClean && clean) {
@@ -258,56 +270,15 @@ export const ImportReviewPanel = ({
                     </div>
 
                     <ul className="mt-3 flex max-h-72 flex-col gap-3 overflow-y-auto pr-1">
-                        {proposal.pages.map((page) => {
-                            const pageEnabled = page.items.filter((item) => !disabled.has(item.id));
-                            return (
-                                <li key={page.pageIndex}>
-                                    <div className="flex items-center justify-between gap-2">
-                                        <p className="text-sm font-medium text-stone-800">Page {page.pageIndex + 1}</p>
-                                        <button
-                                            type="button"
-                                            onClick={() =>
-                                                setPage(page.items, pageEnabled.length !== page.items.length)
-                                            }
-                                            className="text-xs text-accent underline-offset-2 hover:underline"
-                                        >
-                                            {pageEnabled.length === page.items.length ? 'Uncheck page' : 'Check page'}
-                                        </button>
-                                    </div>
-                                    {page.segmentation.flags.dense ? (
-                                        <p className="mt-1 text-xs text-amber-800" role="status">
-                                            This page is packed with ink — only the {MAX_CLUSTERS_PER_PAGE} most
-                                            prominent marks were kept.
-                                        </p>
-                                    ) : null}
-                                    <ul className="mt-1.5 flex flex-col gap-1">
-                                        {page.items.map((item) => (
-                                            <li key={item.id}>
-                                                <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm text-stone-700 hover:bg-ink/5">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={!disabled.has(item.id)}
-                                                        onChange={() => toggleItem(item.id)}
-                                                    />
-                                                    <span
-                                                        aria-hidden="true"
-                                                        className="h-2.5 w-2.5 shrink-0 rounded-full border border-stone-300"
-                                                        style={{ backgroundColor: item.annotations[0]?.color }}
-                                                    />
-                                                    <span className="min-w-0 flex-1 truncate">
-                                                        {item.label}
-                                                        {item.isText ? '' : ' (ink)'}
-                                                    </span>
-                                                    {item.confidence === 'low' ? (
-                                                        <Badge tone="warn">unsure</Badge>
-                                                    ) : null}
-                                                </label>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </li>
-                            );
-                        })}
+                        {proposal.pages.map((page) => (
+                            <PageSection
+                                key={page.pageIndex}
+                                page={page}
+                                disabled={disabled}
+                                onToggleItem={toggleItem}
+                                onSetPage={setPage}
+                            />
+                        ))}
                     </ul>
 
                     {clean !== null ? (
@@ -337,13 +308,22 @@ export const ImportReviewPanel = ({
             ) : null}
 
             {status.kind === 'applying' ? (
-                <p className="mt-2 text-sm text-stone-700" role="status">
-                    {status.step === 'annotations'
-                        ? 'Adding marks…'
-                        : status.step === 'rebuild'
-                          ? 'Lifting original ink off the page…'
-                          : 'Saving the cleaned score…'}
-                </p>
+                <div className="mt-2">
+                    <p className="text-sm text-stone-700" role="status">
+                        {status.step === 'annotations'
+                            ? `Adding marks…${status.total ? ` ${status.done ?? 0} of ${status.total}` : ''}`
+                            : status.step === 'rebuild'
+                              ? 'Lifting original ink off the page…'
+                              : 'Saving the cleaned score…'}
+                    </p>
+                    {status.step === 'annotations' && status.total ? (
+                        <ProgressBar
+                            value={Math.round(((status.done ?? 0) / status.total) * 100)}
+                            label="Adding marks"
+                            className="mt-2"
+                        />
+                    ) : null}
+                </div>
             ) : null}
 
             {status.kind === 'done' ? (
@@ -361,6 +341,82 @@ export const ImportReviewPanel = ({
                 </div>
             ) : null}
         </Dialog>
+    );
+};
+
+/** Pages with more marks than this start collapsed — a 30-page score can carry 10k+ rows. */
+const PAGE_COLLAPSE_THRESHOLD = 40;
+
+const PageSection = ({
+    page,
+    disabled,
+    onToggleItem,
+    onSetPage,
+}: {
+    page: PageProposal;
+    disabled: ReadonlySet<string>;
+    onToggleItem: (id: string) => void;
+    onSetPage: (items: ProposedItem[], enabled: boolean) => void;
+}) => {
+    const [open, setOpen] = useState(page.items.length <= PAGE_COLLAPSE_THRESHOLD);
+    const enabledCount = page.items.reduce((sum, item) => sum + (disabled.has(item.id) ? 0 : 1), 0);
+    return (
+        <li>
+            <div className="flex items-center justify-between gap-2">
+                <button
+                    type="button"
+                    aria-expanded={open}
+                    onClick={() => setOpen((o) => !o)}
+                    className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-stone-800"
+                >
+                    <span aria-hidden="true" className="text-[10px] text-stone-400">
+                        {open ? '▼' : '▶'}
+                    </span>
+                    Page {page.pageIndex + 1}
+                    <span className="truncate font-normal text-stone-500">
+                        · {enabledCount === page.items.length ? page.items.length : `${enabledCount}/${page.items.length}`}{' '}
+                        marks
+                    </span>
+                </button>
+                <button
+                    type="button"
+                    onClick={() => onSetPage(page.items, enabledCount !== page.items.length)}
+                    className="shrink-0 text-xs text-accent underline-offset-2 hover:underline"
+                >
+                    {enabledCount === page.items.length ? 'Uncheck page' : 'Check page'}
+                </button>
+            </div>
+            {page.segmentation.flags.dense ? (
+                <p className="mt-1 text-xs text-amber-800" role="status">
+                    This page is packed with ink — only the {MAX_CLUSTERS_PER_PAGE} most prominent marks were kept.
+                </p>
+            ) : null}
+            {open ? (
+                <ul className="mt-1.5 flex flex-col gap-1">
+                    {page.items.map((item) => (
+                        <li key={item.id}>
+                            <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm text-stone-700 hover:bg-ink/5">
+                                <input
+                                    type="checkbox"
+                                    checked={!disabled.has(item.id)}
+                                    onChange={() => onToggleItem(item.id)}
+                                />
+                                <span
+                                    aria-hidden="true"
+                                    className="h-2.5 w-2.5 shrink-0 rounded-full border border-stone-300"
+                                    style={{ backgroundColor: item.annotations[0]?.color }}
+                                />
+                                <span className="min-w-0 flex-1 truncate">
+                                    {item.label}
+                                    {item.isText ? '' : ' (ink)'}
+                                </span>
+                                {item.confidence === 'low' ? <Badge tone="warn">unsure</Badge> : null}
+                            </label>
+                        </li>
+                    ))}
+                </ul>
+            ) : null}
+        </li>
     );
 };
 

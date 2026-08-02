@@ -158,7 +158,7 @@ export type ImportStatus =
     | { kind: 'scanning'; page: number; pageCount: number }
     | { kind: 'classifying'; page: number; pageCount: number }
     | { kind: 'review'; proposal: ImportProposal }
-    | { kind: 'applying'; step: 'annotations' | 'rebuild' | 'upload' }
+    | { kind: 'applying'; step: 'annotations' | 'rebuild' | 'upload'; done?: number; total?: number }
     | { kind: 'done'; created: number; cleaned: boolean }
     | { kind: 'nothing-found'; unreadablePages: number[]; tooColorfulPages: number[] }
     | { kind: 'error'; message: string };
