@@ -1,0 +1,26 @@
+{
+    "name": "cleffy-omr-service",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "Audiveris OMR wrapper: PDF chart -> ScoreData (notes by hand + measure geometry) written back to Supabase.",
+    "scripts": {
+        "build": "tsc -p tsconfig.build.json",
+        "start": "node dist/server.js",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "@supabase/supabase-js": "^2.111.0",
+        "@xmldom/xmldom": "^0.9.8",
+        "adm-zip": "^0.5.16",
+        "zod": "^4.4.3"
+    },
+    "devDependencies": {
+        "@types/adm-zip": "^0.5.7",
+        "@types/node": "^22.10.0",
+        "typescript": "^6.0.3",
+        "vitest": "^4.1.10"
+    }
+}

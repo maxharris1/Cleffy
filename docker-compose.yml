@@ -28,5 +28,19 @@ services:
         ports:
             - '5173:5173'
 
+    # Play-along OMR service (Audiveris). Start with:
+    #   docker compose --profile omr up --build omr
+    # Point the score-analyze Edge Function at it via the OMR_SERVICE_URL secret
+    # (e.g. a tunnel to localhost:8090 for local testing).
+    omr:
+        profiles: ['omr']
+        build: services/omr-service
+        environment:
+            OMR_SERVICE_SECRET: ${OMR_SERVICE_SECRET}
+            SUPABASE_URL: ${VITE_SUPABASE_URL}
+            SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+        ports:
+            - '8090:8080'
+
 volumes:
     dev_node_modules:
