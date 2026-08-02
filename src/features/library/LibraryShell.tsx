@@ -6,6 +6,7 @@ import { displayNameOf, signOut } from '@/features/auth/session';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
+import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -55,6 +56,9 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                 const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
                 setUploadPct(pct);
             });
+            // Kick off play-along analysis in the background; the viewer's
+            // transport bar reports progress and offers a retry on failure.
+            void requestScoreAnalysis(document.id).catch(() => undefined);
             // Free, local prescan: does this score already carry colored-ink
             // markings? If so (and the user never declined), offer the import.
             try {
@@ -97,6 +101,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                     message: result.fallback.message,
                 };
             }
+            void requestScoreAnalysis(result.document.id).catch(() => undefined);
             navigate(`/doc/${result.document.id}`);
             return { ok: true as const };
         } catch (err) {
