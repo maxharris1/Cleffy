@@ -34,7 +34,6 @@ type Flow =
           phase: 'work';
           work: ImslpWorkDetail;
           selected: ImslpEdition | null;
-          accepted: boolean;
           download: DownloadStatus;
       };
 
@@ -43,7 +42,6 @@ type Action =
     | { type: 'loadingWork' }
     | { type: 'workLoaded'; work: ImslpWorkDetail }
     | { type: 'select'; edition: ImslpEdition }
-    | { type: 'accept'; accepted: boolean }
     | { type: 'download'; download: DownloadStatus };
 
 const initial: Flow = { phase: 'search' };
@@ -60,7 +58,6 @@ const reduce = (state: Flow, action: Action): Flow => {
                 phase: 'work',
                 work: action.work,
                 selected: recommended,
-                accepted: false,
                 download: { kind: 'idle' },
             };
         }
@@ -69,11 +66,6 @@ const reduce = (state: Flow, action: Action): Flow => {
                 return state;
             }
             return { ...state, selected: action.edition, download: { kind: 'idle' } };
-        case 'accept':
-            if (state.phase !== 'work') {
-                return state;
-            }
-            return { ...state, accepted: action.accepted };
         case 'download':
             if (state.phase !== 'work') {
                 return state;
@@ -109,7 +101,7 @@ export const ImslpBrowser = ({
     };
 
     const importEdition = async () => {
-        if (flow.phase !== 'work' || !flow.selected || !flow.accepted) {
+        if (flow.phase !== 'work' || !flow.selected) {
             return;
         }
         const { work, selected } = flow;
@@ -193,12 +185,10 @@ export const ImslpBrowser = ({
                     key={flow.work.title}
                     work={flow.work}
                     selected={flow.selected}
-                    accepted={flow.accepted}
                     download={flow.download}
                     busy={busy}
                     importing={blocked}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
-                    onAcceptedChange={(accepted) => dispatch({ type: 'accept', accepted })}
                     onImportSelected={() => void importEdition()}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
