@@ -56,8 +56,10 @@ export default defineConfig({
                 name: 'Cleffy',
                 short_name: 'Cleffy',
                 description: 'Real-time collaborative sheet music annotation',
+                // Keep in sync with the @theme palette in src/index.css (accent / paper)
+                // and the theme-color meta in index.html.
                 theme_color: '#4338ca',
-                background_color: '#f3efe6',
+                background_color: '#f7f5ef',
                 display: 'standalone',
                 orientation: 'any',
                 icons: [

@@ -2,6 +2,33 @@
 
 @theme {
     --font-display: 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+    --font-sans:
+        system-ui,
+        -apple-system,
+        'Segoe UI',
+        Roboto,
+        sans-serif;
+
+    /* Brand palette — pristine engraving, living markings.
+       Chrome belongs to the printed page; the one accent belongs to the marking hand.
+       Keep paper/accent in sync with the PWA manifest colors in vite.config.ts
+       and the theme-color meta in index.html. */
+    --color-paper: #f7f5ef;
+    --color-paper-deep: #edeae0;
+    --color-ink: #1c1917;
+    --color-ink-muted: #57534e;
+    --color-line: rgb(28 25 23 / 0.07);
+    --color-accent: #4338ca;
+    --color-accent-hover: #3730a3;
+    --color-accent-soft: rgb(67 56 202 / 0.1);
+    --color-scrim: rgb(28 25 23 / 0.45);
+}
+
+@theme inline {
+    /* Semantic status colors — aliases of the stock scales. */
+    --color-danger: var(--color-red-600);
+    --color-warn: var(--color-amber-600);
+    --color-ok: var(--color-emerald-600);
 }
 
 :root {
@@ -10,15 +37,6 @@
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --safe-left: env(safe-area-inset-left, 0px);
     --safe-right: env(safe-area-inset-right, 0px);
-
-    /* Landing palette — ink on paper, indigo accent shared with the app. */
-    --landing-paper: #f3efe6;
-    --landing-paper-deep: #ebe4d6;
-    --landing-ink: #1c1917;
-    --landing-ink-muted: #57534e;
-    --landing-line: rgba(28, 25, 23, 0.06);
-    --landing-accent: #4338ca;
-    --landing-accent-hover: #3730a3;
 }
 
 html,
@@ -29,16 +47,19 @@ body,
 
 body {
     margin: 0;
-    font-family:
-        system-ui,
-        -apple-system,
-        'Segoe UI',
-        Roboto,
-        sans-serif;
-    background-color: theme('colors.stone.100');
-    color: theme('colors.stone.900');
+    font-family: var(--font-sans);
+    background-color: var(--color-paper);
+    color: var(--color-ink);
     /* Prevent iOS rubber-band scrolling the whole app shell; the page stack scrolls itself. */
     overscroll-behavior: none;
+}
+
+@layer base {
+    /* Visible keyboard focus everywhere by default; utilities may still override. */
+    :where(:focus-visible) {
+        outline: 2px solid var(--color-accent);
+        outline-offset: 2px;
+    }
 }
 
 /* Annotation surfaces manage their own gestures. */
@@ -49,32 +70,34 @@ body {
     -webkit-touch-callout: none;
 }
 
-/* Landing: warm paper wash + grouped staff lines. */
+/* Paper wash + engraved five-line staves. */
 .landing-page {
-    background-color: var(--landing-paper);
+    background-color: var(--color-paper);
     background-image:
-        radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255, 255, 255, 0.7), transparent 60%),
-        linear-gradient(180deg, transparent 0%, var(--landing-paper-deep) 100%),
+        radial-gradient(ellipse 90% 55% at 50% -10%, rgb(255 255 255 / 0.75), transparent 60%),
+        linear-gradient(180deg, transparent 0%, var(--color-paper-deep) 100%),
         repeating-linear-gradient(
             180deg,
-            transparent 0,
-            transparent 22px,
-            var(--landing-line) 22px,
-            var(--landing-line) 23px,
-            transparent 23px,
-            transparent 45px,
-            var(--landing-line) 45px,
-            var(--landing-line) 46px,
-            transparent 46px,
-            transparent 68px,
-            var(--landing-line) 68px,
-            var(--landing-line) 69px,
-            transparent 69px,
-            transparent 91px,
-            var(--landing-line) 91px,
-            var(--landing-line) 92px,
-            transparent 92px,
-            transparent 130px
+            var(--color-line) 0,
+            var(--color-line) 1px,
+            transparent 1px,
+            transparent 10px,
+            var(--color-line) 10px,
+            var(--color-line) 11px,
+            transparent 11px,
+            transparent 20px,
+            var(--color-line) 20px,
+            var(--color-line) 21px,
+            transparent 21px,
+            transparent 30px,
+            var(--color-line) 30px,
+            var(--color-line) 31px,
+            transparent 31px,
+            transparent 40px,
+            var(--color-line) 40px,
+            var(--color-line) 41px,
+            transparent 41px,
+            transparent 148px
         );
 }
 
@@ -83,7 +106,7 @@ body {
 }
 
 .landing-brand {
-    color: var(--landing-ink);
+    color: var(--color-ink);
     letter-spacing: -0.03em;
 }
 
@@ -91,15 +114,15 @@ body {
     width: 3rem;
     height: 1px;
     margin: 1.25rem auto 0;
-    background: color-mix(in srgb, var(--landing-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
     animation: landing-rule-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
 }
 
 .landing-demo-frame {
     animation: landing-fade-in 0.75s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both;
     box-shadow:
-        0 1px 0 rgba(28, 25, 23, 0.04),
-        0 18px 40px -20px rgba(28, 25, 23, 0.28);
+        0 1px 0 rgb(28 25 23 / 0.04),
+        0 18px 40px -20px rgb(28 25 23 / 0.28);
 }
 
 .landing-demo img {
@@ -107,7 +130,7 @@ body {
 }
 
 .landing-cta {
-    background-color: var(--landing-accent);
+    background-color: var(--color-accent);
     transition:
         background-color 0.15s ease,
         transform 0.15s ease,
@@ -115,9 +138,9 @@ body {
 }
 
 .landing-cta:hover:not(:disabled) {
-    background-color: var(--landing-accent-hover);
+    background-color: var(--color-accent-hover);
     transform: translateY(-1px);
-    box-shadow: 0 6px 18px rgba(67, 56, 202, 0.2);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--color-accent) 20%, transparent);
 }
 
 .landing-cta:active:not(:disabled) {
@@ -126,8 +149,8 @@ body {
 }
 
 .landing-input:focus {
-    border-color: var(--landing-accent);
-    box-shadow: 0 0 0 3px rgba(67, 56, 202, 0.12);
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
 @keyframes landing-fade-in {
@@ -210,7 +233,7 @@ body {
 }
 
 .imslp-hit-mark {
-    background: color-mix(in srgb, var(--landing-accent) 18%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
     color: inherit;
     padding: 0 0.1em;
     border-radius: 0.15em;
@@ -229,17 +252,17 @@ body {
     padding: 0;
     font-size: 0.75rem;
     line-height: 1.25;
-    color: #78716c;
+    color: var(--color-stone-500);
     cursor: pointer;
     text-underline-offset: 0.2em;
 }
 
 .imslp-facet-tag:hover:not(:disabled) {
-    color: #44403c;
+    color: var(--color-stone-700);
 }
 
 .imslp-facet-tag--active {
-    color: #1c1917;
+    color: var(--color-ink);
     font-weight: 600;
     text-decoration: underline;
 }

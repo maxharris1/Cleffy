@@ -132,9 +132,9 @@ export const ShareDialog = ({ docId, userId, onClose }: ShareDialogProps) => {
                 <div className="mt-4">
                     <h3 className="text-sm font-medium text-stone-600">Active links</h3>
                     {links === null ? (
-                        <p className="mt-2 animate-pulse text-sm text-stone-400">Loading…</p>
+                        <p className="mt-2 animate-pulse text-sm text-stone-500">Loading…</p>
                     ) : links.length === 0 ? (
-                        <p className="mt-2 text-sm text-stone-400">No links yet.</p>
+                        <p className="mt-2 text-sm text-stone-500">No links yet.</p>
                     ) : (
                         <ul className="mt-2 space-y-2">
                             {links.map((link) => (
