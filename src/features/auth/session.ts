@@ -1,4 +1,4 @@
-import type { Session } from '@supabase/supabase-js';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
 import { getSupabase } from '@/lib/supabase';
@@ -7,11 +7,15 @@ export interface SessionState {
     session: Session | null;
     /** True until the initial getSession() resolves. */
     loading: boolean;
+    /** Latest auth event from onAuthStateChange (null until the first event). */
+    lastEvent: AuthChangeEvent | null;
 }
+
+const authCallbackUrl = (): string => `${window.location.origin}/auth/callback`;
 
 /** Reactive Supabase session. */
 export const useSession = (): SessionState => {
-    const [state, setState] = useState<SessionState>({ session: null, loading: true });
+    const [state, setState] = useState<SessionState>({ session: null, loading: true, lastEvent: null });
 
     useEffect(() => {
         const supabase = getSupabase();
@@ -19,14 +23,14 @@ export const useSession = (): SessionState => {
 
         void supabase.auth.getSession().then(({ data }) => {
             if (mounted) {
-                setState({ session: data.session, loading: false });
+                setState((prev) => ({ ...prev, session: data.session, loading: false }));
             }
         });
         const {
             data: { subscription },
-        } = supabase.auth.onAuthStateChange((_event, session) => {
+        } = supabase.auth.onAuthStateChange((event, session) => {
             if (mounted) {
-                setState({ session, loading: false });
+                setState({ session, loading: false, lastEvent: event });
             }
         });
         return () => {
@@ -38,12 +42,46 @@ export const useSession = (): SessionState => {
     return state;
 };
 
-/** Teacher sign-in: email magic link, landing on /auth/callback. */
-export const signInWithMagicLink = async (email: string): Promise<void> => {
-    const { error } = await getSupabase().auth.signInWithOtp({
+/** True when the session belongs to a registered (non-anonymous) account. */
+export const isRegisteredSession = (session: Session | null): session is Session => {
+    return Boolean(session && !session.user.is_anonymous);
+};
+
+/** Email/password registration. */
+export const signUpWithPassword = async (email: string, password: string): Promise<{ needsEmailConfirmation: boolean }> => {
+    const { data, error } = await getSupabase().auth.signUp({
         email,
-        options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+        password,
+        options: { emailRedirectTo: authCallbackUrl() },
     });
+    if (error) {
+        throw error;
+    }
+    // When confirmations are enabled, session is null until the user clicks the email link.
+    return { needsEmailConfirmation: !data.session };
+};
+
+/** Email/password sign-in. */
+export const signInWithPassword = async (email: string, password: string): Promise<void> => {
+    const { error } = await getSupabase().auth.signInWithPassword({ email, password });
+    if (error) {
+        throw error;
+    }
+};
+
+/** Send password-reset email (link lands on /update-password with recovery session). */
+export const requestPasswordReset = async (email: string): Promise<void> => {
+    const { error } = await getSupabase().auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/update-password`,
+    });
+    if (error) {
+        throw error;
+    }
+};
+
+/** Set a new password after PASSWORD_RECOVERY. */
+export const updatePassword = async (password: string): Promise<void> => {
+    const { error } = await getSupabase().auth.updateUser({ password });
     if (error) {
         throw error;
     }

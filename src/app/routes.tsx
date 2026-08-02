@@ -2,7 +2,14 @@ import { lazy, Suspense } from 'react';
 import { Route, Routes } from 'react-router';
 
 import { AuthCallbackPage } from '@/features/auth/AuthCallbackPage';
+import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage';
+import { LoginPage } from '@/features/auth/LoginPage';
+import { RegisterPage } from '@/features/auth/RegisterPage';
+import { UpdatePasswordPage } from '@/features/auth/UpdatePasswordPage';
 import { LibraryPage } from '@/features/library/LibraryPage';
+import { LibraryShell } from '@/features/library/LibraryShell';
+import { SearchPage } from '@/features/library/SearchPage';
+import { LandingPage } from '@/features/marketing/LandingPage';
 import { JoinPage } from '@/features/share/JoinPage';
 
 // Lazy: keeps pdf.js (large, browser-only) out of the app-shell bundle.
@@ -17,7 +24,15 @@ const ViewerFallback = () => (
 export const AppRoutes = () => {
     return (
         <Routes>
-            <Route path="/" element={<LibraryPage />} />
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/update-password" element={<UpdatePasswordPage />} />
+            <Route element={<LibraryShell />}>
+                <Route path="/library" element={<LibraryPage />} />
+                <Route path="/search" element={<SearchPage />} />
+            </Route>
             <Route
                 path="/doc/:documentId"
                 element={

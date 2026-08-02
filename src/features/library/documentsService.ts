@@ -51,6 +51,20 @@ export interface OfflineDocFallback {
     bytes: ArrayBuffer;
 }
 
+export const documentRowFromCache = (cached: {
+    id: string;
+    title: string;
+    cachedAt: string;
+}): DocumentRow => ({
+    id: cached.id,
+    owner_id: '',
+    title: cached.title,
+    storage_path: `${cached.id}/original.pdf`,
+    page_count: null,
+    created_at: cached.cachedAt,
+    updated_at: cached.cachedAt,
+});
+
 /**
  * Open a previously-cached document without the network: synthesizes the
  * document row from the cache and uses the last-known role (defaulting to
@@ -63,38 +77,31 @@ export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFall
         return null;
     }
     return {
-        doc: {
-            id: docId,
-            owner_id: '',
-            title: cached.title,
-            storage_path: `${docId}/original.pdf`,
-            page_count: null,
-            created_at: cached.cachedAt,
-            updated_at: cached.cachedAt,
-        },
+        doc: documentRowFromCache({ id: docId, title: cached.title, cachedAt: cached.cachedAt }),
         role: cached.myRole ?? 'editor',
         bytes: await cached.bytes.arrayBuffer(),
     };
 };
 
 /** Cached scores for the offline library view. */
-export const listCachedDocuments = async (): Promise<Array<{ id: string; title: string; cachedAt: string }>> => {
+export const listCachedDocuments = async (): Promise<DocumentRow[]> => {
     const rows = await getDb().pdfCache.toArray();
     return rows
         .filter((row) => isCloudDocId(row.docId))
-        .map((row) => ({ id: row.docId, title: row.title, cachedAt: row.cachedAt }))
-        .sort((a, b) => (a.cachedAt < b.cachedAt ? 1 : -1));
+        .map((row) => documentRowFromCache({ id: row.docId, title: row.title, cachedAt: row.cachedAt }))
+        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 };
 
 /** Count pages client-side (pdf.js) so the library can show it up front. */
 const countPdfPages = async (bytes: ArrayBuffer): Promise<number | null> => {
     try {
-        const [{ getDocument }, { createPdfWorker }] = await Promise.all([
+        const [{ getDocument }, { createPdfWorker }, { pdfDocumentOptions }] = await Promise.all([
             import('pdfjs-dist'),
             import('@/features/viewer/pdf/pdfWorker'),
+            import('@/features/viewer/pdf/pdfDocumentOptions'),
         ]);
         const worker = createPdfWorker();
-        const task = getDocument({ data: bytes.slice(0), worker });
+        const task = getDocument({ data: bytes.slice(0), worker, ...pdfDocumentOptions });
         try {
             const doc = await task.promise;
             return doc.numPages;

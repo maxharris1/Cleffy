@@ -1,37 +1,88 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
-import { useSession } from '@/features/auth/session';
+import { hasPendingAuthParams } from '@/features/auth/AuthGates';
+import { isRegisteredSession, useSession } from '@/features/auth/session';
+import { BrandShell, brandLinkClassName } from '@/ui/BrandShell';
 
-/** Magic-link landing: supabase-js exchanges the URL token; we wait and go home. */
+const readAuthErrorFromUrl = (): string | null => {
+    const params = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const description =
+        params.get('error_description') ??
+        hashParams.get('error_description') ??
+        params.get('error') ??
+        hashParams.get('error');
+    return description ? description.replace(/\+/g, ' ') : null;
+};
+
+/**
+ * OAuth / email-confirm landing. Password recovery redirects to `/update-password`.
+ *
+ * When the URL still carries tokens/PKCE, only SIGNED_IN (token exchange) finishes —
+ * never INITIAL_SESSION, which may be a stale guest session that would wipe the link.
+ */
 export const AuthCallbackPage = () => {
-    const { session, loading } = useSession();
     const navigate = useNavigate();
+    const urlError = readAuthErrorFromUrl();
+    const [pendingAuth] = useState(hasPendingAuthParams);
+    const { session, loading, lastEvent } = useSession();
     const [timedOut, setTimedOut] = useState(false);
 
     useEffect(() => {
-        if (session) {
-            navigate('/', { replace: true });
+        if (urlError) {
+            return;
         }
-    }, [session, navigate]);
+        const timeout = window.setTimeout(() => setTimedOut(true), 8000);
+        return () => window.clearTimeout(timeout);
+    }, [urlError]);
 
     useEffect(() => {
-        const timer = setTimeout(() => setTimedOut(true), 8000);
-        return () => clearTimeout(timer);
-    }, []);
+        if (urlError || timedOut) {
+            return;
+        }
+        if (pendingAuth) {
+            // Token exchange only — ignore INITIAL_SESSION with a pre-existing guest.
+            if (lastEvent === 'SIGNED_IN' && isRegisteredSession(session)) {
+                navigate('/library', { replace: true });
+            }
+            return;
+        }
+        if (!loading && isRegisteredSession(session)) {
+            navigate('/library', { replace: true });
+        }
+    }, [urlError, timedOut, pendingAuth, lastEvent, session, loading, navigate]);
+
+    if (urlError) {
+        return (
+            <BrandShell title="Sign-in failed" subtitle={urlError}>
+                <p className="text-center text-sm text-stone-600">
+                    <Link to="/login" className={brandLinkClassName}>
+                        Back to log in
+                    </Link>
+                </p>
+            </BrandShell>
+        );
+    }
+
+    if (timedOut && !(pendingAuth ? lastEvent === 'SIGNED_IN' && isRegisteredSession(session) : isRegisteredSession(session))) {
+        return (
+            <BrandShell
+                title="Sign-in didn't complete"
+                subtitle="The link may have expired. Request a new one and try again."
+            >
+                <p className="text-center text-sm text-stone-600">
+                    <Link to="/login" className={brandLinkClassName}>
+                        Back to log in
+                    </Link>
+                </p>
+            </BrandShell>
+        );
+    }
 
     return (
-        <main className="flex min-h-full flex-col items-center justify-center gap-3 p-8">
-            {!timedOut || loading ? (
-                <p className="animate-pulse text-stone-500">Signing you in…</p>
-            ) : (
-                <>
-                    <p className="text-red-600">Sign-in didn&apos;t complete — the link may have expired.</p>
-                    <Link to="/" className="text-sm text-indigo-600 underline">
-                        Request a new link
-                    </Link>
-                </>
-            )}
-        </main>
+        <BrandShell title="Signing you in…">
+            <p className="animate-pulse text-center text-sm text-stone-500">Please wait a moment.</p>
+        </BrandShell>
     );
 };
