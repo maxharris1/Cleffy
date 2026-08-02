@@ -11,10 +11,14 @@ import {
 } from '@/sync/wire';
 import type { AnnotationRow } from '@/types/database';
 
-/** Live-ink flush cadence; degrades on backpressure (plan §realtime). */
-const FLUSH_MS = 50;
-const FLUSH_MS_DEGRADED = 100;
-const FLUSH_MAX_POINTS = 25;
+/**
+ * Live-ink flush cadence. Slower than pen sampling on purpose: Free-plan
+ * Realtime messages are billed with fan-out, so we coalesce aggressively and
+ * degrade further under client-side backpressure (plan §realtime).
+ */
+const FLUSH_MS = 100;
+const FLUSH_MS_DEGRADED = 175;
+const FLUSH_MAX_POINTS = 45;
 
 export interface StrokeMeta {
     strokeId: string;
@@ -59,6 +63,8 @@ export class DocRealtimeChannel {
     private pending: number[] = [];
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
     private flushInterval = FLUSH_MS;
+    /** True when at least one other member is on the channel (solo → no live ink). */
+    private hasRemoteAudience = false;
 
     constructor(private opts: DocRealtimeChannelOptions) {}
 
@@ -97,6 +103,7 @@ export class DocRealtimeChannel {
                     peers.push(parsed.data);
                 }
             }
+            this.hasRemoteAudience = peers.some((p) => p.userId !== self.userId);
             this.opts.onPeers(peers);
         });
 
@@ -140,7 +147,7 @@ export class DocRealtimeChannel {
             this.pending = [];
         },
         append: (pts) => {
-            if (!this.meta) {
+            if (!this.meta || !this.hasRemoteAudience) {
                 return;
             }
             this.pending.push(...pts);
@@ -158,7 +165,7 @@ export class DocRealtimeChannel {
             const meta = this.meta;
             this.meta = null;
             this.pending = [];
-            if (meta) {
+            if (meta && this.hasRemoteAudience) {
                 this.send({ ...metaToMsg(meta, this.opts.self.userId), pts: [], cancel: true });
             }
         },
@@ -173,13 +180,19 @@ export class DocRealtimeChannel {
         if (!meta || (this.pending.length === 0 && !extra)) {
             return;
         }
+        // Solo on the channel: drop the batch. Committed strokes still fan out
+        // via the DB trigger — live ink is only useful with a remote audience.
+        if (!this.hasRemoteAudience) {
+            this.pending = [];
+            return;
+        }
         const pts = this.pending;
         this.pending = [];
         this.send({ ...metaToMsg(meta, this.opts.self.userId), pts, ...(extra ?? {}) });
     }
 
     private send(payload: InkProgressMsg): void {
-        if (!this.channel || this.stopped) {
+        if (!this.channel || this.stopped || !this.hasRemoteAudience) {
             return;
         }
         void this.channel

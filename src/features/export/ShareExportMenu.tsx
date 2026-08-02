@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 
 import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { exportAnnotatedPdf } from '@/features/export/exportPdf';
+import { getDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
 
 interface ShareExportMenuProps {
     docId: string;
-    bytes: ArrayBuffer;
+    /** When omitted, bytes are loaded from the Dexie PDF cache (preferred after parse). */
+    bytes?: ArrayBuffer;
     title: string;
 }
 
@@ -42,10 +44,22 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
         };
     }, [open]);
 
-    const run = async (label: string, action: () => Promise<void>) => {
+    const resolveBytes = async (): Promise<ArrayBuffer> => {
+        if (bytes && bytes.byteLength > 0) {
+            return bytes;
+        }
+        const cached = await getDb().pdfCache.get(docId);
+        if (!cached) {
+            throw new Error('PDF is not cached on this device yet');
+        }
+        return cached.bytes.arrayBuffer();
+    };
+
+    const run = async (label: string, action: (source: ArrayBuffer) => Promise<void>) => {
         setBusy(label);
         try {
-            await action();
+            const source = await resolveBytes();
+            await action(source);
             setOpen(false);
         } catch (err) {
             console.warn('Share/export failed', err);
@@ -78,21 +92,23 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                         label={`Share page ${pageLabel} as photo`}
                         hint="PNG — send via Messages"
                         onClick={() =>
-                            void run('Sharing…', () => exportAnnotatedPageImage(docId, bytes, focusedPageIndex, title))
+                            void run('Sharing…', (source) =>
+                                exportAnnotatedPageImage(docId, source, focusedPageIndex, title),
+                            )
                         }
                     />
                     <MenuItem
                         label={`Share page ${pageLabel} as PDF`}
                         onClick={() =>
-                            void run('Sharing…', () =>
-                                exportAnnotatedPdf(docId, bytes, title, { pageIndex: focusedPageIndex }),
+                            void run('Sharing…', (source) =>
+                                exportAnnotatedPdf(docId, source, title, { pageIndex: focusedPageIndex }),
                             )
                         }
                     />
                     <div className="my-1 border-t border-stone-100" />
                     <MenuItem
                         label="Export whole score as PDF"
-                        onClick={() => void run('Exporting…', () => exportAnnotatedPdf(docId, bytes, title))}
+                        onClick={() => void run('Exporting…', (source) => exportAnnotatedPdf(docId, source, title))}
                     />
                 </div>
             ) : null}

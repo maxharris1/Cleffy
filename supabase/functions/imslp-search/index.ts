@@ -168,7 +168,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
-    const rate = checkRateLimit(`search:${clientKey(req)}`, 40, 60_000);
+    const rate = await checkRateLimit(`search:${clientKey(req)}`, 40, 60_000);
     if (!rate.ok) {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
@@ -324,7 +324,7 @@ Deno.serve(async (req) => {
             }
         }
 
-        let ranked = [...merged.values()];
+        const ranked = [...merged.values()];
         if (sort === 'title') {
             ranked.sort((a, b) => a.title.localeCompare(b.title));
         } else if (sort === 'recent') {

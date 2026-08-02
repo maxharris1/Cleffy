@@ -115,7 +115,7 @@ describe('ImslpBrowser', () => {
         const { render, screen } = await import('@testing-library/react');
         const { ImslpBrowser } = await import('@/features/imslp/ImslpBrowser');
 
-        render(<ImslpBrowser onImportFile={vi.fn()} autoFocus={false} />);
+        render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
         expect(screen.getByRole('heading', { name: 'Popular' })).toBeInTheDocument();
         expect(screen.getByText('Moonlight Sonata')).toBeInTheDocument();
         expect(screen.getByText('Für Elise')).toBeInTheDocument();
@@ -140,7 +140,7 @@ describe('ImslpBrowser', () => {
             })),
         );
 
-        render(<ImslpBrowser onImportFile={vi.fn()} autoFocus={false} />);
+        render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
 
         await userEvent.type(
             screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'),
@@ -173,7 +173,7 @@ describe('ImslpBrowser', () => {
             },
         ]);
 
-        render(<ImslpBrowser onImportFile={vi.fn()} autoFocus={false} />);
+        render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
 
         await userEvent.click(screen.getByRole('tab', { name: 'Instrument' }));
         await userEvent.click(screen.getByRole('option', { name: 'Piano' }));

@@ -122,11 +122,11 @@ export const ImslpSearchPanel = ({
 
     useEffect(() => {
         const q = query.trim();
-        if (q.length < 2 && !filtersActive) {
-            setResults(null);
-            return;
-        }
         const handle = window.setTimeout(() => {
+            if (q.length < 2 && !filtersActive) {
+                setResults(null);
+                return;
+            }
             void runSearch(q, filters, sort);
         }, 280);
         return () => window.clearTimeout(handle);

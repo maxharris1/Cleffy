@@ -9,15 +9,17 @@ import type { DocumentRow } from '@/types/database';
 export const LibraryPage = () => {
     const { uploading, uploadPct, onUpload, uploadError } = useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
+    const [hasMore, setHasMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
 
     useEffect(() => {
         let cancelled = false;
         listDocuments()
-            .then((docs) => {
+            .then(({ documents: docs, hasMore: more }) => {
                 if (!cancelled) {
                     setDocuments(docs);
+                    setHasMore(more);
                     setError(null);
                 }
             })
@@ -26,6 +28,7 @@ export const LibraryPage = () => {
                 if (cancelled) {
                     return;
                 }
+                setHasMore(false);
                 if (cached.length > 0) {
                     setDocuments(cached);
                     setError('Offline — showing scores cached on this device.');
@@ -91,6 +94,7 @@ export const LibraryPage = () => {
                             {query.trim()
                                 ? `${filtered?.length ?? 0} of ${documents.length}`
                                 : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
+                            {hasMore && !query.trim() ? ' · showing latest 100' : null}
                         </p>
                     </div>
 

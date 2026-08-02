@@ -1,7 +1,6 @@
 import { useReducer, useState } from 'react';
 
 import {
-    downloadImslpPdf,
     fetchImslpWork,
     type ImslpEdition,
     type ImslpWorkDetail,
@@ -11,9 +10,17 @@ import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
 
 export interface ImslpBrowserProps {
-    /** Called with a PDF File ready for uploadDocument. Library owns upload progress. */
+    /** Local PDF hand-off (manual file pick / hybrid fallback upload). */
     onImportFile: (file: File) => Promise<void>;
-    /** True while the library is uploading the handed-off file. */
+    /**
+     * Automated IMSLP import: Edge writes Storage; returns fallback info when
+     * the proxy cannot fetch (bot check / disclaimer).
+     */
+    onImportImslp: (
+        filename: string,
+        workTitle: string,
+    ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
+    /** True while the library is uploading / importing. */
     busy?: boolean;
     autoFocus?: boolean;
     /** When false, omit the panel title (e.g. page already has a heading). */
@@ -82,6 +89,7 @@ const reduce = (state: Flow, action: Action): Flow => {
 
 export const ImslpBrowser = ({
     onImportFile,
+    onImportImslp,
     busy = false,
     autoFocus = true,
     showHeading = true,
@@ -109,7 +117,7 @@ export const ImslpBrowser = ({
         setError(null);
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await downloadImslpPdf(selected.filename, true);
+            const result = await onImportImslp(selected.filename, work.title);
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -117,12 +125,7 @@ export const ImslpBrowser = ({
                 });
                 return;
             }
-            const file = new File([result.bytes], suggestedPdfName(work.title, result.filename), {
-                type: 'application/pdf',
-            });
-            // Hand off — library owns upload progress via `busy`.
             dispatch({ type: 'download', download: { kind: 'idle' } });
-            await onImportFile(file);
         } catch (err) {
             dispatch({ type: 'download', download: { kind: 'idle' } });
             setError(err instanceof Error ? err.message : 'Import failed');

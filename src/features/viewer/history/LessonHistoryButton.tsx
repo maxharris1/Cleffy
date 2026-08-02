@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import {
     getSnapshot,
     listSnapshots,
+    SNAPSHOT_PULL_LIMIT,
 } from '@/features/viewer/history/snapshotService';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import type { AnnotationStore } from '@/sync/annotationStore';
@@ -159,6 +160,12 @@ const LessonHistoryDialog = ({
                             state automatically.
                         </p>
                     ) : (
+                        <>
+                            {rows.length >= SNAPSHOT_PULL_LIMIT ? (
+                                <p className="mb-2 text-xs text-stone-500">
+                                    Showing the latest {SNAPSHOT_PULL_LIMIT} starting points.
+                                </p>
+                            ) : null}
                         <ul className="flex flex-col gap-2">
                             {rows.map((row) => (
                                 <li
@@ -192,6 +199,7 @@ const LessonHistoryDialog = ({
                                 </li>
                             ))}
                         </ul>
+                        </>
                     )}
                 </div>
             </div>
