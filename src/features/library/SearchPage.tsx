@@ -18,13 +18,7 @@ export const SearchPage = () => {
 
             {uploadError ? <ErrorText className="mt-4">{uploadError}</ErrorText> : null}
 
-            <ImslpBrowser
-                busy={uploading}
-                onImportFile={onUpload}
-                onImportImslp={onImportImslp}
-                showHeading={false}
-                className="imslp-browser mt-5 rounded-xl border border-stone-300/60 bg-white/50 p-4 sm:p-5"
-            />
+            <ImslpBrowser busy={uploading} onImportFile={onUpload} onImportImslp={onImportImslp} showHeading={false} />
         </div>
     );
 };

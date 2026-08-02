@@ -125,10 +125,6 @@ body {
         0 18px 40px -20px rgb(28 25 23 / 0.28);
 }
 
-.landing-demo img {
-    display: block;
-}
-
 .landing-cta {
     background-color: var(--color-accent);
     transition:

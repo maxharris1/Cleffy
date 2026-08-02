@@ -108,7 +108,7 @@ export const LibraryPage = () => {
                     {filtered && filtered.length === 0 ? (
                         <p className="mt-8 text-sm text-stone-500">No scores match “{query.trim()}”.</p>
                     ) : (
-                        <ul className="library-list mt-4">
+                        <ul className="mt-4">
                             {filtered?.map((doc, index) => (
                                 <li
                                     key={doc.id}

@@ -94,7 +94,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     return (
         <main className="landing-page min-h-full">
             <div className="library-layout mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10 md:flex-row md:gap-8 lg:gap-10 lg:py-12">
-                <aside className="library-aside shrink-0 md:sticky md:top-8 md:w-44 md:self-start lg:w-48">
+                <aside className="shrink-0 md:sticky md:top-8 md:w-44 md:self-start lg:w-48">
                     <div className="flex items-start justify-between gap-4 md:block">
                         <div>
                             <p className="landing-brand font-display text-2xl font-semibold sm:text-3xl">Cleffy</p>
@@ -114,7 +114,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                         </div>
                     </div>
 
-                    <nav className="library-nav mt-5 flex gap-1 md:mt-8 md:flex-col md:gap-0.5" aria-label="Library">
+                    <nav className="mt-5 flex gap-1 md:mt-8 md:flex-col md:gap-0.5" aria-label="Library">
                         {NAV_ITEMS.map((item) => (
                             <NavLink
                                 key={item.to}
