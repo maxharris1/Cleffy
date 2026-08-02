@@ -4,7 +4,7 @@ import { ImslpBrowser } from '@/features/imslp/ImslpBrowser';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 
 export const SearchPage = () => {
-    const { uploading, onUpload, uploadError } = useOutletContext<LibraryOutletContext>();
+    const { uploading, onUpload, onImportImslp, uploadError } = useOutletContext<LibraryOutletContext>();
 
     return (
         <div>
@@ -24,6 +24,7 @@ export const SearchPage = () => {
             <ImslpBrowser
                 busy={uploading}
                 onImportFile={onUpload}
+                onImportImslp={onImportImslp}
                 showHeading={false}
                 className="imslp-browser mt-5 rounded-xl border border-stone-300/60 bg-white/50 p-4 sm:p-5"
             />

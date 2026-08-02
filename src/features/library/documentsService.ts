@@ -1,3 +1,4 @@
+import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/imslp/imslpApi';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { getDb } from '@/sync/db';
@@ -8,12 +9,19 @@ export const isCloudDocId = (docId: string): boolean => {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(docId);
 };
 
-export const listDocuments = async (): Promise<DocumentRow[]> => {
-    const { data, error } = await getSupabase().from('documents').select('*').order('updated_at', { ascending: false });
+export const LIBRARY_PAGE_SIZE = 100;
+
+export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
+    const { data, error } = await getSupabase()
+        .from('documents')
+        .select('id, owner_id, title, storage_path, page_count, created_at, updated_at')
+        .order('updated_at', { ascending: false })
+        .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
         throw new Error(`Could not load documents: ${error.message}`);
     }
-    return data;
+    const hasMore = data.length > LIBRARY_PAGE_SIZE;
+    return { documents: hasMore ? data.slice(0, LIBRARY_PAGE_SIZE) : data, hasMore };
 };
 
 export const fetchDocument = async (docId: string): Promise<DocumentRow | null> => {
@@ -166,6 +174,54 @@ export const uploadDocument = async (
     });
 
     return { document: { ...document, page_count: pageCount } };
+};
+
+/**
+ * IMSLP import: create the documents row, let Edge fetch+store the PDF, then
+ * hydrate Dexie from Storage (one download leg — no Edge→browser PDF proxy).
+ */
+export const importDocumentFromImslp = async (
+    imslpFilename: string,
+    workTitle: string,
+    ownerId: string,
+): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
+    const supabase = getSupabase();
+    const id = crypto.randomUUID();
+    const storagePath = `${id}/original.pdf`;
+    const title = workTitle.replace(/\.pdf$/i, '').trim() || imslpFilename.replace(/\.pdf$/i, '');
+
+    const { data: document, error: insertError } = await supabase
+        .from('documents')
+        .insert({ id, owner_id: ownerId, title, storage_path: storagePath })
+        .select()
+        .single();
+    if (insertError) {
+        throw new Error(`Could not create document: ${insertError.message}`);
+    }
+
+    const rollback = async () => {
+        await supabase.storage.from('scores').remove([storagePath]).catch(() => undefined);
+        await supabase.from('documents').delete().eq('id', id);
+    };
+
+    try {
+        const result = await importImslpPdfToStorage(imslpFilename, id, true);
+        if (!result.ok) {
+            await rollback();
+            return { ok: false, fallback: result };
+        }
+
+        const bytes = await loadDocumentBytes({ ...document, page_count: null });
+        const pageCount = await countPdfPages(bytes);
+        if (pageCount !== null) {
+            await supabase.from('documents').update({ page_count: pageCount }).eq('id', id);
+        }
+
+        return { ok: true, document: { ...document, page_count: pageCount } };
+    } catch (err) {
+        await rollback();
+        throw err;
+    }
 };
 
 /** PDF bytes for a cloud doc: Dexie cache first, else storage download (then cache). */

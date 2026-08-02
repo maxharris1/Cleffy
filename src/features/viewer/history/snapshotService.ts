@@ -80,12 +80,16 @@ const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotationSnap
     await db.annotationSnapshots.update(snapshot.id, { pending: 0 });
 };
 
+/** Cap remote snapshot pull — lesson history UI is recent-first. */
+export const SNAPSHOT_PULL_LIMIT = 30;
+
 const pullSnapshotsRemote = async (db: ScribblerDb, docId: string): Promise<void> => {
     const { data, error } = await getSupabase()
         .from('annotation_snapshots')
         .select('*')
         .eq('document_id', docId)
-        .order('captured_on', { ascending: false });
+        .order('captured_on', { ascending: false })
+        .limit(SNAPSHOT_PULL_LIMIT);
     if (error) {
         throw new Error(error.message);
     }

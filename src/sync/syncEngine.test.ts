@@ -45,10 +45,19 @@ class FakeApi implements AnnotationsApi {
                 ...row,
                 created_at: row.created_at ?? new Date().toISOString(),
                 deleted_at: row.deleted_at ?? null,
-                page_countIgnored: undefined,
                 updated_at: new Date().toISOString(),
                 seq: this.nextSeq++,
-            } as unknown as AnnotationRow);
+            } as AnnotationRow);
+        }
+        return { error: null };
+    }
+
+    async insertMany(rows: AnnotationInsert[]) {
+        for (const row of rows) {
+            const result = await this.insertIgnoreDuplicates(row);
+            if (result.error) {
+                return result;
+            }
         }
         return { error: null };
     }
@@ -61,6 +70,20 @@ class FakeApi implements AnnotationsApi {
         const existing = this.rows.get(id);
         if (existing) {
             this.rows.set(id, { ...existing, ...patch, updated_at: new Date().toISOString(), seq: this.nextSeq++ });
+        }
+        return { error: null };
+    }
+
+    async updateMany(patches: Array<{ id: string; document_id: string } & AnnotationUpdate>) {
+        for (const p of patches) {
+            const result = await this.update(p.id, p.document_id, {
+                color: p.color,
+                payload: p.payload,
+                deleted_at: p.deleted_at,
+            });
+            if (result.error) {
+                return result;
+            }
         }
         return { error: null };
     }
@@ -155,6 +178,29 @@ describe('SyncEngine.flush', () => {
 
         expect(store.get('a1')).toBeUndefined();
         expect(await db.annotations.get('a1')).toBeUndefined();
+    });
+
+    it('on batch reject, peels one-by-one so an innocent head is not discarded', async () => {
+        const goodInsertMany = api.insertMany.bind(api);
+        api.insertMany = async (rows) => {
+            if (rows.length > 1) {
+                return { error: { message: 'batch rejected', transient: false } };
+            }
+            if (rows[0]?.id === 'a2') {
+                return { error: { message: 'rls rejection', transient: false } };
+            }
+            return goodInsertMany(rows);
+        };
+
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+        await store.create(makeStroke('a3'));
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(store.get('a1')).toBeDefined();
+        expect(store.get('a2')).toBeUndefined();
+        expect(store.get('a3')).toBeDefined();
     });
 });
 

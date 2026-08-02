@@ -125,13 +125,15 @@ export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> =>
 };
 
 /**
- * Proxy download. Uses authenticated fetch (not functions.invoke) because the
- * edge returns raw application/pdf bytes on success and JSON only on 409 fallback.
+ * Ask the Edge Function to fetch an IMSLP PDF and write it into the private
+ * `scores` bucket for an already-created document. Returns JSON only — never
+ * proxies PDF bytes through the browser (Free-plan egress).
  */
-export const downloadImslpPdf = async (
+export const importImslpPdfToStorage = async (
     filename: string,
+    documentId: string,
     acceptedDisclaimer: boolean,
-): Promise<{ ok: true; bytes: ArrayBuffer; filename: string } | ImslpDownloadFallback> => {
+): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
     const accessToken = sessionData.session?.access_token;
@@ -148,13 +150,8 @@ export const downloadImslpPdf = async (
             apikey: anonKey,
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ filename, acceptedDisclaimer }),
+        body: JSON.stringify({ filename, documentId, acceptedDisclaimer }),
     });
-
-    const contentType = response.headers.get('Content-Type') ?? '';
-    if (response.ok && contentType.includes('application/pdf')) {
-        return { ok: true, bytes: await response.arrayBuffer(), filename };
-    }
 
     if (response.status === 409) {
         const body = await response.json().catch(() => null);
@@ -170,5 +167,28 @@ export const downloadImslpPdf = async (
         throw new Error(message);
     }
 
-    throw new Error(await messageFromJsonBody(response));
+    if (!response.ok) {
+        throw new Error(await messageFromJsonBody(response));
+    }
+
+    const body = (await response.json()) as {
+        ok?: boolean;
+        filename?: string;
+        byteLength?: number;
+        storagePath?: string;
+    };
+    if (
+        body.ok !== true ||
+        typeof body.filename !== 'string' ||
+        typeof body.byteLength !== 'number' ||
+        typeof body.storagePath !== 'string'
+    ) {
+        throw new Error('Unexpected response from IMSLP import');
+    }
+    return {
+        ok: true,
+        filename: body.filename,
+        byteLength: body.byteLength,
+        storagePath: body.storagePath,
+    };
 };

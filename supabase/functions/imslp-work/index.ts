@@ -25,7 +25,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
-    const rate = checkRateLimit(`work:${clientKey(req)}`, 20, 60_000);
+    const rate = await checkRateLimit(`work:${clientKey(req)}`, 20, 60_000);
     if (!rate.ok) {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }

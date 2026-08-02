@@ -3,7 +3,7 @@ import { NavLink, Navigate, Outlet, useNavigate } from 'react-router';
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
-import { uploadDocument } from '@/features/library/documentsService';
+import { importDocumentFromImslp, uploadDocument } from '@/features/library/documentsService';
 import { isSupabaseConfigured } from '@/lib/supabase';
 
 export type LibraryOutletContext = {
@@ -11,6 +11,10 @@ export type LibraryOutletContext = {
     uploadPct: number | null;
     uploading: boolean;
     onUpload: (file: File) => Promise<void>;
+    onImportImslp: (
+        filename: string,
+        workTitle: string,
+    ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
 };
@@ -54,11 +58,34 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
         }
     };
 
+    const onImportImslp = async (filename: string, workTitle: string) => {
+        setUploadError(null);
+        setUploadPct(0);
+        try {
+            const result = await importDocumentFromImslp(filename, workTitle, userId);
+            if (!result.ok) {
+                return {
+                    ok: false as const,
+                    openUrl: result.fallback.openUrl,
+                    message: result.fallback.message,
+                };
+            }
+            navigate(`/doc/${result.document.id}`);
+            return { ok: true as const };
+        } catch (err) {
+            setUploadError(err instanceof Error ? err.message : 'Import failed.');
+            throw err;
+        } finally {
+            setUploadPct(null);
+        }
+    };
+
     const outlet: LibraryOutletContext = {
         userId,
         uploadPct,
         uploading: uploadPct !== null,
         onUpload,
+        onImportImslp,
         uploadError,
         clearUploadError: () => setUploadError(null),
     };

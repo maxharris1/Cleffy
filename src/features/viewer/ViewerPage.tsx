@@ -136,7 +136,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     <span className="rounded-full bg-stone-100 px-2 py-0.5 text-xs text-stone-500">view only</span>
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
-                <ShareExportMenu docId={docId} bytes={state.bytes} title={state.doc.title} />
+                {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
+                <ShareExportMenu docId={docId} title={state.doc.title} />
                 {state.role === 'owner' ? (
                     <button
                         type="button"

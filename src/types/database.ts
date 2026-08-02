@@ -152,6 +152,18 @@ export type Database = {
                 Args: { p_token: string };
                 Returns: Array<{ document_id: string; granted_role: MemberRole }>;
             };
+            insert_annotations_batch: {
+                Args: { p_rows: AnnotationInsert[] };
+                Returns: undefined;
+            };
+            patch_annotations_batch: {
+                Args: { p_patches: Array<{ id: string; document_id: string } & AnnotationUpdate> };
+                Returns: undefined;
+            };
+            check_edge_rate_limit: {
+                Args: { p_key: string; p_limit: number; p_window_ms: number };
+                Returns: { ok: boolean; retryAfterSec?: number };
+            };
         };
         Enums: Record<string, never>;
         CompositeTypes: Record<string, never>;

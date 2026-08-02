@@ -11,6 +11,8 @@ export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'error';
 const PULL_OVERLAP = 50;
 const PULL_PAGE_SIZE = 500;
 const MAX_BACKOFF_MS = 60_000;
+/** Outbox ops drained per round-trip (creates / patches). */
+const FLUSH_BATCH_SIZE = 40;
 
 /**
  * The slice of the Supabase client the engine needs — injected so tests can
@@ -18,7 +20,13 @@ const MAX_BACKOFF_MS = 60_000;
  */
 export interface AnnotationsApi {
     insertIgnoreDuplicates(row: AnnotationInsert): Promise<{ error: ApiError | null }>;
+    /** Multi-row create; same semantics as insertIgnoreDuplicates per row. */
+    insertMany(rows: AnnotationInsert[]): Promise<{ error: ApiError | null }>;
     update(id: string, docId: string, patch: AnnotationUpdate): Promise<{ error: ApiError | null }>;
+    /** Multi-row patch; each entry is { id, document_id, ...AnnotationUpdate }. */
+    updateMany(
+        patches: Array<{ id: string; document_id: string } & AnnotationUpdate>,
+    ): Promise<{ error: ApiError | null }>;
     fetchOne(id: string): Promise<{ data: AnnotationRow | null; error: ApiError | null }>;
     fetchSince(
         docId: string,
@@ -136,35 +144,50 @@ export class SyncEngine {
             const { db, docId } = this.deps;
             for (;;) {
                 const ops = await db.ops.where('docId').equals(docId).sortBy('opId');
-                const op = ops[0];
-                if (!op) {
+                if (ops.length === 0) {
                     break;
                 }
                 this.setStatus('syncing');
-                const error = await this.pushOp(op);
+
+                const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
+                let error = await this.pushBatch(batch);
+
+                // Non-transient batch reject: RPC is transactional (nothing applied).
+                // Peel one-by-one so an innocent head is not discarded for a sibling fault.
+                if (error && !error.transient && batch.length > 1) {
+                    for (const op of batch) {
+                        const single = await this.pushBatch([op]);
+                        if (single?.transient) {
+                            this.setStatus(navigator.onLine === false ? 'offline' : 'error');
+                            this.scheduleRetry();
+                            return;
+                        }
+                        if (single) {
+                            console.warn(`Sync op ${op.type} rejected for ${op.annotationId}: ${single.message}`);
+                            await db.ops.delete(op.opId as number);
+                            await this.repair(op.annotationId);
+                            continue;
+                        }
+                        await this.ackOp(op);
+                    }
+                    continue;
+                }
+
                 if (error?.transient) {
                     this.setStatus(navigator.onLine === false ? 'offline' : 'error');
                     this.scheduleRetry();
                     return;
                 }
                 if (error) {
-                    // Rejected (RLS/validation). Drop the op and repair from server truth.
-                    console.warn(`Sync op ${op.type} rejected for ${op.annotationId}: ${error.message}`);
-                    await db.ops.delete(op.opId as number);
-                    await this.repair(op.annotationId);
+                    const head = batch[0]!;
+                    console.warn(`Sync op ${head.type} rejected for ${head.annotationId}: ${error.message}`);
+                    await db.ops.delete(head.opId as number);
+                    await this.repair(head.annotationId);
                     continue;
                 }
-                await db.ops.delete(op.opId as number);
-                const remaining = await db.ops
-                    .where('docId')
-                    .equals(docId)
-                    .filter((o) => o.annotationId === op.annotationId)
-                    .count();
-                if (remaining === 0) {
-                    const mirror = await db.annotations.get(op.annotationId);
-                    if (mirror) {
-                        await db.annotations.put({ ...mirror, pending: 0 });
-                    }
+
+                for (const op of batch) {
+                    await this.ackOp(op);
                 }
             }
             this.backoffMs = 1000;
@@ -174,16 +197,35 @@ export class SyncEngine {
         }
     }
 
-    private async pushOp(op: PendingOp): Promise<ApiError | null> {
-        const { api } = this.deps;
-        const a = op.annotation;
-        switch (op.type) {
-            case 'create': {
-                const userId = this.deps.getUserId();
-                if (!userId) {
-                    return { message: 'not signed in', transient: true };
-                }
-                const { error } = await api.insertIgnoreDuplicates({
+    private async ackOp(op: PendingOp): Promise<void> {
+        const { db, docId } = this.deps;
+        await db.ops.delete(op.opId as number);
+        const remaining = await db.ops
+            .where('docId')
+            .equals(docId)
+            .filter((o) => o.annotationId === op.annotationId)
+            .count();
+        if (remaining === 0) {
+            const mirror = await db.annotations.get(op.annotationId);
+            if (mirror) {
+                await db.annotations.put({ ...mirror, pending: 0 });
+            }
+        }
+    }
+
+    private async pushBatch(ops: PendingOp[]): Promise<ApiError | null> {
+        const head = ops[0];
+        if (!head) {
+            return null;
+        }
+        if (head.type === 'create') {
+            const userId = this.deps.getUserId();
+            if (!userId) {
+                return { message: 'not signed in', transient: true };
+            }
+            const rows: AnnotationInsert[] = ops.map((op) => {
+                const a = op.annotation;
+                return {
                     id: a.id,
                     document_id: a.docId,
                     page: a.page,
@@ -193,20 +235,45 @@ export class SyncEngine {
                     created_by: userId,
                     created_at: a.createdAt,
                     deleted_at: a.deletedAt,
-                });
-                return error;
-            }
-            case 'update':
-                return (
-                    await api.update(a.id, op.docId, { color: a.color, payload: a.payload, deleted_at: a.deletedAt })
-                ).error;
-            case 'delete':
-                return (await api.update(a.id, op.docId, { deleted_at: a.deletedAt ?? new Date().toISOString() }))
-                    .error;
-            case 'restore':
-                return (await api.update(a.id, op.docId, { color: a.color, payload: a.payload, deleted_at: null }))
-                    .error;
+                };
+            });
+            return (await this.deps.api.insertMany(rows)).error;
         }
+
+        const patches = ops.map((op) => {
+            const a = op.annotation;
+            switch (op.type) {
+                case 'update':
+                    return {
+                        id: a.id,
+                        document_id: op.docId,
+                        color: a.color,
+                        payload: a.payload,
+                        deleted_at: a.deletedAt,
+                    };
+                case 'delete':
+                    return {
+                        id: a.id,
+                        document_id: op.docId,
+                        deleted_at: a.deletedAt ?? new Date().toISOString(),
+                    };
+                case 'restore':
+                    return {
+                        id: a.id,
+                        document_id: op.docId,
+                        color: a.color,
+                        payload: a.payload,
+                        deleted_at: null,
+                    };
+                case 'create':
+                    throw new Error('unreachable create in patch batch');
+                default: {
+                    const _exhaustive: never = op.type;
+                    return _exhaustive;
+                }
+            }
+        });
+        return (await this.deps.api.updateMany(patches)).error;
     }
 
     /** After a rejected op: adopt server truth for the annotation (or discard it). */
@@ -295,12 +362,37 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
                 .upsert(row, { onConflict: 'id', ignoreDuplicates: true });
             return { error: error ? classify(error.message, status) : null };
         },
+        async insertMany(rows) {
+            if (rows.length === 0) {
+                return { error: null };
+            }
+            if (rows.length === 1) {
+                return this.insertIgnoreDuplicates(rows[0]!);
+            }
+            const { error, status } = await supabase.rpc('insert_annotations_batch', { p_rows: rows });
+            return { error: error ? classify(error.message, status) : null };
+        },
         async update(id, docId, patch) {
             const { error, status } = await supabase
                 .from('annotations')
                 .update(patch)
                 .eq('id', id)
                 .eq('document_id', docId);
+            return { error: error ? classify(error.message, status) : null };
+        },
+        async updateMany(patches) {
+            if (patches.length === 0) {
+                return { error: null };
+            }
+            if (patches.length === 1) {
+                const p = patches[0]!;
+                return this.update(p.id, p.document_id, {
+                    color: p.color,
+                    payload: p.payload,
+                    deleted_at: p.deleted_at,
+                });
+            }
+            const { error, status } = await supabase.rpc('patch_annotations_batch', { p_patches: patches });
             return { error: error ? classify(error.message, status) : null };
         },
         async fetchOne(id) {
@@ -318,4 +410,25 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
             return { data, error: error ? classify(error.message, status) : null };
         },
     };
+};
+
+/** Leading run of same op family (create vs mutate), capped at `limit`. */
+const takeHomogeneousBatch = (ops: PendingOp[], limit: number): PendingOp[] => {
+    const first = ops[0];
+    if (!first) {
+        return [];
+    }
+    const wantCreate = first.type === 'create';
+    const batch: PendingOp[] = [];
+    for (const op of ops) {
+        if (batch.length >= limit) {
+            break;
+        }
+        const isCreate = op.type === 'create';
+        if (isCreate !== wantCreate) {
+            break;
+        }
+        batch.push(op);
+    }
+    return batch;
 };
