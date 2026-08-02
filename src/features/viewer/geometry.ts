@@ -186,6 +186,37 @@ export const viewportToPagePoint = (
     return null;
 };
 
+/** Map a normalized point on a page to viewport-local CSS coords (inverse of viewportToPagePoint). */
+export const pagePointToViewport = (
+    view: ViewState,
+    layout: PageLayout,
+    nx: number,
+    ny: number,
+): { x: number; y: number } => ({
+    x: (layout.left + nx * layout.width) * view.scale - view.scrollX,
+    y: (layout.top + ny * layout.height) * view.scale - view.scrollY,
+});
+
+/**
+ * A view scrolled so the given page point sits at (anchorFracX, anchorFracY)
+ * of the viewport — e.g. 0.15 pins it near the top, for playback auto-follow.
+ * Scale is preserved. Unclamped: pass the result through clampScroll.
+ */
+export const scrollForPagePoint = (
+    view: ViewState,
+    layout: PageLayout,
+    nx: number,
+    ny: number,
+    viewportWidth: number,
+    viewportHeight: number,
+    anchorFracX = 0.5,
+    anchorFracY = 0.15,
+): ViewState => ({
+    scale: view.scale,
+    scrollX: (layout.left + nx * layout.width) * view.scale - viewportWidth * anchorFracX,
+    scrollY: (layout.top + ny * layout.height) * view.scale - viewportHeight * anchorFracY,
+});
+
 /**
  * Map viewport-local CSS coords onto a KNOWN page, clamped to its bounds —
  * used while a stroke is in flight so it stays on its anchor page.
