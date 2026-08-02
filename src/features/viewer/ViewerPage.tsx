@@ -15,6 +15,9 @@ import {
     loadDocumentBytes,
     loadDocumentOffline,
 } from '@/features/library/documentsService';
+import { TransportBar } from '@/features/playback/TransportBar';
+import { usePlayback } from '@/features/playback/usePlayback';
+import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
@@ -83,6 +86,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         setState((prev) => (prev ? { ...prev, doc, bytes } : prev));
         setStaleBytes(false);
     }, [docId]);
+
+    // Play-along: analysis lifecycle + the audio engine for this document.
+    const { state: analysisState, generate } = useScoreAnalysis(docId, true);
+    const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
 
     useEffect(() => {
         if (!userId) {
@@ -214,6 +221,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         docId={docId}
                         readOnly={readOnly}
                         onStoreReady={onStoreReady}
+                        playback={playbackFeature}
                         sync={{
                             userId,
                             name: displayNameOf(session),
@@ -226,6 +234,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     />
                 </PdfProvider>
             </div>
+            <TransportBar
+                state={analysisState}
+                role={state.role}
+                onGenerate={() => void generate()}
+                getEngine={getEngine}
+                pageCount={state.doc.page_count}
+                warning={warning}
+                onDismissWarning={dismissWarning}
+            />
             {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
         </div>
     );

@@ -1,4 +1,30 @@
-import { ArrowLeft, EllipsisVertical, Minus, Plus, Pointer, Redo2, Star, Tags, Undo2, X } from 'lucide-react';
+import {
+    ArrowLeft,
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    ChevronUp,
+    EllipsisVertical,
+    LocateFixed,
+    Minus,
+    Music,
+    Pause,
+    Play,
+    Plus,
+    Pointer,
+    Redo2,
+    RefreshCw,
+    Repeat,
+    SkipBack,
+    Square,
+    Star,
+    Tags,
+    Timer,
+    Undo2,
+    Volume2,
+    VolumeX,
+    X,
+} from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
 
 /**
@@ -21,3 +47,20 @@ export const PointerIcon = withBrandStroke(Pointer);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);
+
+// Play-along transport.
+export const PlayIcon = withBrandStroke(Play);
+export const PauseIcon = withBrandStroke(Pause);
+export const StopIcon = withBrandStroke(Square);
+export const SkipBackIcon = withBrandStroke(SkipBack);
+export const ChevronLeftIcon = withBrandStroke(ChevronLeft);
+export const ChevronRightIcon = withBrandStroke(ChevronRight);
+export const ChevronDownIcon = withBrandStroke(ChevronDown);
+export const ChevronUpIcon = withBrandStroke(ChevronUp);
+export const Volume2Icon = withBrandStroke(Volume2);
+export const VolumeXIcon = withBrandStroke(VolumeX);
+export const RepeatIcon = withBrandStroke(Repeat);
+export const MetronomeIcon = withBrandStroke(Timer);
+export const FollowIcon = withBrandStroke(LocateFixed);
+export const MusicIcon = withBrandStroke(Music);
+export const RetryIcon = withBrandStroke(RefreshCw);
