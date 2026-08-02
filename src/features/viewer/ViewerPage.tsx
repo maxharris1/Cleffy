@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
 import { buildCleanFn } from '@/features/import/cleanReplace';
 import { ImportScanButton } from '@/features/import/ImportScanButton';
 import {
@@ -121,6 +122,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
     const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
+    // Referentially stable — the review panel's scan effect depends on it.
+    const classify = useMemo(() => makeCloudClassifyFn(docId), [docId]);
 
     if (!loading && !session) {
         return <Navigate to="/" replace />;
@@ -160,7 +163,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         store={annotationStore}
                         docId={docId}
                         bytes={state.bytes}
-                        classify={null}
+                        classify={classify}
                         includeBornDigital
                         clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
                             setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));

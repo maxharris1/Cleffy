@@ -86,6 +86,96 @@ export const openDetectionDoc = async (bytes: ArrayBuffer): Promise<DetectionDoc
     }
 };
 
+// ---------------------------------------------------------------------------
+// JPEG encoding for the AI classification call (budgets mirror the edge fn).
+
+/** Longest side of the context page image sent to the model (≈1.6K image tokens). */
+export const AI_PAGE_MAX_SIDE = 1568;
+export const AI_CROP_MAX_SIDE = 200;
+/** Context margin around a cluster crop. */
+export const AI_CROP_MARGIN_PX = 6;
+export const AI_JPEG_QUALITY = 0.8;
+
+export interface EncodedImage {
+    mediaType: 'image/jpeg';
+    dataBase64: string;
+}
+
+const base64FromBytes = (bytes: Uint8Array): string => {
+    let bin = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(bin);
+};
+
+const encodeRegionJpeg = async (
+    raster: DetectionRaster,
+    sx: number,
+    sy: number,
+    sw: number,
+    sh: number,
+    maxSide: number,
+): Promise<EncodedImage> => {
+    const source = document.createElement('canvas');
+    source.width = sw;
+    source.height = sh;
+    const sctx = source.getContext('2d');
+    if (!sctx) {
+        throw new Error('Could not create a canvas to encode the page.');
+    }
+    // ImageData constructor wants a concrete ArrayBuffer-backed view.
+    const region = sctx.createImageData(sw, sh);
+    for (let y = 0; y < sh; y++) {
+        const src = ((sy + y) * raster.width + sx) * 4;
+        region.data.set(raster.data.subarray(src, src + sw * 4), y * sw * 4);
+    }
+    sctx.putImageData(region, 0, 0);
+
+    const scale = Math.min(1, maxSide / Math.max(sw, sh));
+    const outW = Math.max(1, Math.round(sw * scale));
+    const outH = Math.max(1, Math.round(sh * scale));
+    const target = document.createElement('canvas');
+    target.width = outW;
+    target.height = outH;
+    const tctx = target.getContext('2d');
+    if (!tctx) {
+        throw new Error('Could not create a canvas to encode the page.');
+    }
+    tctx.fillStyle = '#ffffff';
+    tctx.fillRect(0, 0, outW, outH);
+    tctx.drawImage(source, 0, 0, outW, outH);
+    source.width = 0;
+    source.height = 0;
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+        target.toBlob(resolve, 'image/jpeg', AI_JPEG_QUALITY),
+    );
+    target.width = 0;
+    target.height = 0;
+    if (!blob) {
+        throw new Error('JPEG encoding failed.');
+    }
+    return { mediaType: 'image/jpeg', dataBase64: base64FromBytes(new Uint8Array(await blob.arrayBuffer())) };
+};
+
+/** Whole page, downscaled for model context. */
+export const encodePageJpeg = (raster: DetectionRaster): Promise<EncodedImage> =>
+    encodeRegionJpeg(raster, 0, 0, raster.width, raster.height, AI_PAGE_MAX_SIDE);
+
+/** One cluster crop with a small context margin. */
+export const encodeCropJpeg = (
+    raster: DetectionRaster,
+    bboxPx: { x: number; y: number; w: number; h: number },
+): Promise<EncodedImage> => {
+    const sx = Math.max(0, bboxPx.x - AI_CROP_MARGIN_PX);
+    const sy = Math.max(0, bboxPx.y - AI_CROP_MARGIN_PX);
+    const ex = Math.min(raster.width, bboxPx.x + bboxPx.w + AI_CROP_MARGIN_PX);
+    const ey = Math.min(raster.height, bboxPx.y + bboxPx.h + AI_CROP_MARGIN_PX);
+    return encodeRegionJpeg(raster, sx, sy, Math.max(1, ex - sx), Math.max(1, ey - sy), AI_CROP_MAX_SIDE);
+};
+
 /**
  * Fraction of raster pixels that are near-white. A "blank" page from a JBIG2
  * scan that failed to decode reads ≥ 99.5% white — callers should say

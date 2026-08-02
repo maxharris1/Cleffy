@@ -42,12 +42,15 @@ export const ImportReviewPanel = ({
     const [previewOn, setPreviewOn] = useState(true);
     const [cleanChecked, setCleanChecked] = useState(true);
     const [scanRun, setScanRun] = useState(0);
+    // Scan the bytes the panel was OPENED with — accepting with cleaning swaps
+    // the viewer's bytes, and that must not restart the scan over the 'done' view.
+    const [scanBytes] = useState(bytes);
 
     useEffect(() => {
         const controller = new AbortController();
         scanDocument({
             docId,
-            bytes,
+            bytes: scanBytes,
             classify,
             includeBornDigital,
             signal: controller.signal,
@@ -81,7 +84,7 @@ export const ImportReviewPanel = ({
                 });
             });
         return () => controller.abort();
-    }, [docId, bytes, classify, includeBornDigital, scanRun]);
+    }, [docId, scanBytes, classify, includeBornDigital, scanRun]);
 
     const proposal: ImportProposal | null = status.kind === 'review' ? status.proposal : null;
     const enabledItems: ProposedItem[] = useMemo(() => {

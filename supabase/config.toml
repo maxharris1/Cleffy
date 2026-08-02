@@ -389,6 +389,11 @@ deno_version = 2
 [functions.imslp-search]
 verify_jwt = true
 
+# Smart-import classification — JWT required; owner-only enforced in-function.
+# Needs ANTHROPIC_API_KEY set via `supabase secrets set` (see SETUP_SUPABASE.md).
+[functions.analyze-annotations]
+verify_jwt = true
+
 [functions.imslp-work]
 verify_jwt = true
 
