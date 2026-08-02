@@ -149,9 +149,7 @@ const encodeRegionJpeg = async (
     source.width = 0;
     source.height = 0;
 
-    const blob = await new Promise<Blob | null>((resolve) =>
-        target.toBlob(resolve, 'image/jpeg', AI_JPEG_QUALITY),
-    );
+    const blob = await new Promise<Blob | null>((resolve) => target.toBlob(resolve, 'image/jpeg', AI_JPEG_QUALITY));
     target.width = 0;
     target.height = 0;
     if (!blob) {

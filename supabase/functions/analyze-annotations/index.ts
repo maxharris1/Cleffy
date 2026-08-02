@@ -275,9 +275,7 @@ Deno.serve(async (req) => {
         if (response.stop_reason === 'refusal') {
             return jsonResponse({ error: 'Recognition declined', code: 'ai_unavailable' }, 502);
         }
-        const toolUse = response.content.find(
-            (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-        );
+        const toolUse = response.content.find((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
         if (!toolUse) {
             return jsonResponse({ error: 'No classification produced', code: 'ai_unavailable' }, 502);
         }

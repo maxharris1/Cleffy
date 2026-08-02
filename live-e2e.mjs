@@ -19,8 +19,13 @@ if (!URL_ || !ANON || !SECRET) {
 }
 const APP = process.env.E2E_APP_URL ?? 'http://localhost:5199';
 const PDF = process.env.E2E_PDF ?? 'e2e-fixtures/test-score.pdf';
+const ANNOTATED_PDF = process.env.E2E_ANNOTATED_PDF ?? 'e2e-fixtures/test-score-annotated.pdf';
 const SHOT_DIR = process.env.E2E_SHOT_DIR ?? '.';
 const SHOT = (n) => `${SHOT_DIR}/${n}.png`;
+
+// The storage bridge substitutes upload bodies (CDP drops binary bodies);
+// which file it substitutes follows whichever upload the script is doing.
+let uploadSubstituteFile = PDF;
 
 const dispatcher = new EnvHttpProxyAgent();
 // supabase-js may resolve its bundled node-fetch (proxy-unaware) — force undici.
@@ -63,7 +68,7 @@ const bridgeSupabase = async (context) => {
                         'cache-control': '3600',
                         'x-upsert': h['x-upsert'] ?? 'true',
                     },
-                    body: fs.readFileSync(PDF),
+                    body: fs.readFileSync(uploadSubstituteFile),
                     dispatcher,
                 });
                 const buf = Buffer.from(await res.arrayBuffer());
@@ -301,6 +306,49 @@ check("student erased teacher's stroke; teacher converged", true, `${teacherInkB
 
 await teacher.screenshot({ path: SHOT('live-teacher') });
 await student.screenshot({ path: SHOT('live-student') });
+
+// ---- 12. Smart import: upload a pre-annotated score, adopt its marks
+// (annotations-only accept — the storage bridge substitutes upload bodies, so
+// the clean-and-replace upload leg can't be exercised faithfully here).
+if (!fs.existsSync(ANNOTATED_PDF)) {
+    const { execSync } = await import('node:child_process');
+    execSync('node scripts/generate-annotated-fixture.mjs', { stdio: 'inherit' });
+}
+uploadSubstituteFile = ANNOTATED_PDF;
+await teacher.goto(`${APP}/library`);
+await teacher.waitForSelector('text=Your scores', { timeout: 20000 });
+await teacher.locator('input[type=file]').first().setInputFiles(ANNOTATED_PDF);
+try {
+    await teacher.waitForSelector('text=Existing marks found', { timeout: 45000 });
+    check('prescan offers the import after upload', true);
+} catch (err) {
+    await teacher.screenshot({ path: SHOT('import-prompt-stuck') });
+    check('prescan offers the import after upload', false, String(err).slice(0, 100));
+    throw err;
+}
+await teacher.getByRole('button', { name: 'Review marks' }).click();
+await teacher.waitForURL(/\/doc\/[0-9a-f-]{36}/, { timeout: 30000 });
+try {
+    await teacher.waitForSelector('text=/Found/', { timeout: 60000 });
+    check('scan reaches review', true);
+} catch (err) {
+    await teacher.screenshot({ path: SHOT('import-review-stuck') });
+    check('scan reaches review', false, String(err).slice(0, 100));
+    throw err;
+}
+// Annotations-only: skip the file replacement (see note above).
+const cleanToggle = teacher.locator('label:has-text("Also lift the original ink") input');
+if (await cleanToggle.count()) {
+    await cleanToggle.uncheck();
+}
+await teacher.getByRole('button', { name: /Import \d+ marks/ }).click();
+await teacher.waitForSelector('text=/Imported \\d+ marks/', { timeout: 30000 });
+check('import commits marks', true);
+await teacher.getByRole('button', { name: 'Done', exact: true }).click();
+await teacher.waitForSelector('[aria-label=Synced]', { timeout: 30000 });
+const importedInk = await inkPixels(teacher);
+check('imported marks render on the committed layer', importedInk > 100, `${importedInk} px`);
+await teacher.screenshot({ path: SHOT('live-import') });
 
 check('no teacher page errors', teacherErrors.length === 0, teacherErrors.join('; '));
 check('no student page errors', studentErrors.length === 0, studentErrors.join('; '));

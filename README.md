@@ -7,6 +7,12 @@ Apple Pencil (or mouse/finger), and share a link with a student or teacher. Ever
 annotations appear live, and any annotation can be erased or edited by any editor — the PDF itself
 is never modified.
 
+**Smart import**: scores that already carry handwritten marks (a teacher's colored-ink fingerings,
+or real PDF annotations) can be scanned on upload — the marks are detected, classified with Claude
+(digits become editable text, brackets become erasable ink), lifted off the page with
+background-matched patches, and adopted as native Cleffy annotations. Uploads accept photos and
+screenshots (PNG/JPEG/WebP) too; they're wrapped into single-page PDFs client-side.
+
 ## Stack
 
 - **Frontend**: Vite + React 19 + TypeScript (strict), Tailwind CSS 4, PWA (installable, offline-capable)

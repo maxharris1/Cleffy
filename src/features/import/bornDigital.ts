@@ -57,7 +57,7 @@ const makeAnnotation = (
     page: pageIndex,
     kind,
     color,
-    payload,
+    payload: { ...payload, src: 1 },
     createdBy: null,
     createdAt: nowIso(),
     updatedAt: nowIso(),

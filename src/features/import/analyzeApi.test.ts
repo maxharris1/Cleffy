@@ -6,8 +6,7 @@ import { INK_BLUE, makeRaster, paintRect } from '@/test/rasterFixtures';
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
         auth: {
-            getSession: () =>
-                Promise.resolve({ data: { session: { access_token: 'test-token' } } }),
+            getSession: () => Promise.resolve({ data: { session: { access_token: 'test-token' } } }),
         },
     }),
 }));

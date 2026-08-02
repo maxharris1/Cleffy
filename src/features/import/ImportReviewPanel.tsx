@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { applyProposals } from '@/features/import/applyImport';
 import { scanDocument } from '@/features/import/importPipeline';
+import { recordImportStatus } from '@/features/import/importPromptService';
+import { isCloudDocId } from '@/features/library/documentsService';
 import type { ClassifyFn, CleanFn, ImportProposal, ImportStatus, ProposedItem } from '@/features/import/importTypes';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { Badge } from '@/ui/Badge';
@@ -155,6 +157,9 @@ export const ImportReviewPanel = ({
                 setStatus({ kind: 'applying', step: 'rebuild' });
                 await clean(proposal, enabledItems, (step) => setStatus({ kind: 'applying', step }));
                 cleaned = true;
+            } else if (isCloudDocId(docId)) {
+                // Cleaning records 'imported' itself (with the backup path).
+                void recordImportStatus(docId, 'imported');
             }
             setStatus({ kind: 'done', created, cleaned });
         } catch (err) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useParams } from 'react-router';
+import { Link, Navigate, useParams, useSearchParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
@@ -125,6 +125,18 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // Referentially stable — the review panel's scan effect depends on it.
     const classify = useMemo(() => makeCloudClassifyFn(docId), [docId]);
 
+    // ?import=1 (post-upload prompt) auto-opens the import panel once; the
+    // param is consumed so a refresh doesn't rescan (the AI pass costs money).
+    const [searchParams, setSearchParams] = useSearchParams();
+    const [autoOpenImport] = useState(() => searchParams.get('import') === '1');
+    useEffect(() => {
+        if (searchParams.get('import') === '1') {
+            const next = new URLSearchParams(searchParams);
+            next.delete('import');
+            setSearchParams(next, { replace: true });
+        }
+    }, [searchParams, setSearchParams]);
+
     if (!loading && !session) {
         return <Navigate to="/" replace />;
     }
@@ -168,6 +180,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
                             setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));
                         })}
+                        autoOpen={autoOpenImport}
                     />
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
