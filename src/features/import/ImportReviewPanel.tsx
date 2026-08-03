@@ -294,7 +294,16 @@ export const ImportReviewPanel = ({
                                 kept for recovery)
                             </span>
                         </label>
-                    ) : null}
+                    ) : (
+                        <p className="mt-3 text-xs text-amber-800" role="note">
+                            {isCloudDocId(docId)
+                                ? 'The original ink stays printed on the page here — imported marks sit on top of it.'
+                                : 'Heads-up: for scores opened without an account, the original handwriting stays ' +
+                                  'printed on the page — imported marks sit on top of it, so erasing one reveals the ' +
+                                  'ink underneath. Sign in and upload the score to also lift the original ink off ' +
+                                  'the page.'}
+                        </p>
+                    )}
 
                     <div className="mt-4 flex justify-end gap-2">
                         <Button variant="ghost" size="sm" onClick={onClose}>

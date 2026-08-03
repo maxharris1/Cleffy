@@ -122,6 +122,31 @@ describe('ImportReviewPanel', () => {
         expect(store.liveAnnotations()).toHaveLength(1);
     });
 
+    it('warns local docs that original ink stays on the page', async () => {
+        vi.mocked(scanDocument).mockResolvedValue(proposalOf([makeItem('c1', '“3”')]));
+        renderPanel();
+        await screen.findByText(/Found/);
+        expect(screen.getByText(/original handwriting stays/)).toBeInTheDocument();
+    });
+
+    it('offers the clean checkbox instead when cleaning is available', async () => {
+        vi.mocked(scanDocument).mockResolvedValue(proposalOf([makeItem('c1', '“3”')]));
+        render(
+            <ImportReviewPanel
+                store={store}
+                docId={DOC}
+                bytes={new ArrayBuffer(8)}
+                classify={null}
+                includeBornDigital={false}
+                clean={async () => undefined}
+                onClose={() => undefined}
+            />,
+        );
+        await screen.findByText(/Found/);
+        expect(screen.getByText(/lift the original ink off the page/)).toBeInTheDocument();
+        expect(screen.queryByText(/original handwriting stays/)).toBeNull();
+    });
+
     it('shows the nothing-found explanation', async () => {
         vi.mocked(scanDocument).mockResolvedValue(proposalOf([]));
         renderPanel();
