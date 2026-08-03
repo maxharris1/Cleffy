@@ -53,9 +53,33 @@ const resample = (input, fromRate, toRate) => {
     return out;
 };
 
-const trimAndFade = (input, rate) => {
-    const max = Math.min(input.length, Math.floor(rate * MAX_SECONDS));
-    const out = input.subarray(0, max);
+// Musicality: the note attack must sit at t=0. The source mp3s carry encoder
+// pre-roll, and our own lamejs encode adds ~26 ms more (no gapless tag, so
+// browsers can't strip it) — untrimmed, every piano note lands audibly late
+// against the metronome click and playhead.
+const ONSET_PRE_ROLL_S = 0.002;
+const FADE_IN_S = 0.002;
+
+const onsetIndex = (input, rate) => {
+    let peak = 0;
+    for (let i = 0; i < input.length; i++) peak = Math.max(peak, Math.abs(input[i]));
+    const threshold = Math.max(0.004, peak * 0.01);
+    for (let i = 0; i < input.length; i++) {
+        if (Math.abs(input[i]) > threshold) {
+            return Math.max(0, i - Math.floor(rate * ONSET_PRE_ROLL_S));
+        }
+    }
+    return 0;
+};
+
+const trimAndFade = (input, rate, extraLeadTrim = 0) => {
+    const start = Math.min(input.length, onsetIndex(input, rate) + extraLeadTrim);
+    const max = Math.min(input.length, start + Math.floor(rate * MAX_SECONDS));
+    const out = input.slice(start, max);
+    const fadeIn = Math.min(out.length, Math.floor(rate * FADE_IN_S));
+    for (let i = 0; i < fadeIn; i++) {
+        out[i] *= i / fadeIn;
+    }
     const fadeSamples = Math.min(out.length, Math.floor(rate * FADE_SECONDS));
     for (let i = 0; i < fadeSamples; i++) {
         const k = out.length - fadeSamples + i;
@@ -84,6 +108,13 @@ await mkdir(OUT_DIR, { recursive: true });
 const decoder = new MPEGDecoder();
 await decoder.ready;
 
+// NOTE on residual latency: mp3 always decodes with codec padding at the
+// front (lamejs writes no gapless header, so browsers cannot strip it).
+// Source-silence is trimmed here, and the app measures each decoded buffer's
+// true onset at load time and plays from that offset
+// (src/features/playback/pianoSampler.ts) — that pairing is what keeps note
+// attacks sample-accurate against the metronome and playhead.
+
 let total = 0;
 for (const name of ANCHORS) {
     const res = await fetch(`${SOURCE}/${name}.mp3`);
@@ -91,8 +122,8 @@ for (const name of ANCHORS) {
     const bytes = new Uint8Array(await res.arrayBuffer());
     const { channelData, sampleRate } = decoder.decode(bytes);
     decoder.reset();
-    const mono = trimAndFade(resample(toMono(channelData), sampleRate, OUT_RATE), OUT_RATE);
-    const mp3 = encodeMp3(mono, OUT_RATE);
+    const source = resample(toMono(channelData), sampleRate, OUT_RATE);
+    const mp3 = encodeMp3(trimAndFade(source, OUT_RATE), OUT_RATE);
     await writeFile(new URL(`${name}.mp3`, OUT_DIR), mp3);
     total += mp3.length;
     console.log(`${name}.mp3  ${(mp3.length / 1024).toFixed(0)} KiB`);

@@ -252,6 +252,7 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                     break;
                 }
                 case 'direction': {
+                    // <sound tempo> is quarter-BPM by definition — prefer it.
                     const sound = firstChild(child, 'sound');
                     const tempo = sound?.getAttribute('tempo');
                     if (defaultBpm === null && tempo) {
@@ -261,6 +262,7 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                             defaultBpm = Math.round(parsed);
                         }
                     }
+                    // A printed metronome mark is per BEAT UNIT: convert to quarter-BPM.
                     if (defaultBpm === null) {
                         const metronome = child.getElementsByTagName('metronome').item(0) as Elem | null;
                         const perMinute = metronome ? childText(metronome, 'per-minute') : null;
@@ -310,12 +312,38 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
                             const tieKey = `${staffNum}:${voice}:${midi}`;
 
-                            if (tieTypes.includes('stop') && openTies.has(tieKey)) {
-                                const open = openTies.get(tieKey);
+                            // A tie-stop must continue a note of the same pitch
+                            // that ends exactly where this one starts. Match by
+                            // key first, but fall back on that musical adjacency
+                            // — Audiveris renumbers voices across system breaks,
+                            // and a missed merge re-attacks a held note.
+                            const resolveOpenTie = (): string | null => {
+                                if (openTies.has(tieKey)) {
+                                    return tieKey;
+                                }
+                                let crossStaff: string | null = null;
+                                for (const [key, open] of openTies) {
+                                    const parts = key.split(':');
+                                    if (parts[2] !== String(midi) || Math.abs(open.t + open.d - start) > 2) {
+                                        continue;
+                                    }
+                                    if (parts[0] === String(staffNum)) {
+                                        return key;
+                                    }
+                                    crossStaff = crossStaff ?? key;
+                                }
+                                return crossStaff;
+                            };
+
+                            const openKey = tieTypes.includes('stop') ? resolveOpenTie() : null;
+                            if (openKey) {
+                                const open = openTies.get(openKey);
                                 if (open) {
                                     open.d += durTicks;
-                                    if (!tieTypes.includes('start')) {
-                                        openTies.delete(tieKey);
+                                    openTies.delete(openKey);
+                                    if (tieTypes.includes('start')) {
+                                        // Chain continues under this note's identity.
+                                        openTies.set(tieKey, open);
                                     }
                                 }
                             } else {

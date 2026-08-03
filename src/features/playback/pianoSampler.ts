@@ -48,7 +48,39 @@ export interface SampleDecoder {
     decodeAudioData(data: ArrayBuffer): Promise<AudioBuffer>;
 }
 
-export type PianoBuffers = Map<number, AudioBuffer>;
+export interface PianoVoice {
+    buffer: AudioBuffer;
+    /** Seconds into the buffer where the attack actually begins (see below). */
+    onsetSec: number;
+}
+
+export type PianoBuffers = Map<number, PianoVoice>;
+
+/**
+ * Where the note's attack truly starts inside a decoded sample. mp3 decoding
+ * always prepends codec padding (and our encoder writes no gapless header,
+ * so the browser cannot strip it) — playing from 0 would put every piano
+ * note tens of milliseconds behind the metronome click and the playhead.
+ * The engine passes this as the `offset` argument of source.start().
+ */
+export const detectOnsetSec = (buffer: AudioBuffer): number => {
+    const data = buffer.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) {
+        const magnitude = Math.abs(data[i] ?? 0);
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+    }
+    const threshold = Math.max(0.004, peak * 0.01);
+    for (let i = 0; i < data.length; i++) {
+        if (Math.abs(data[i] ?? 0) > threshold) {
+            // Keep ~2 ms of pre-roll so the transient isn't clipped.
+            return Math.max(0, i / buffer.sampleRate - 0.002);
+        }
+    }
+    return 0;
+};
 
 let cache: Promise<PianoBuffers> | null = null;
 
@@ -61,13 +93,13 @@ export const loadPianoBuffers = (decoder: SampleDecoder, fetchImpl: typeof fetch
     if (!cache) {
         cache = (async () => {
             const entries = await Promise.all(
-                PIANO_ANCHORS.map(async (midi): Promise<[number, AudioBuffer]> => {
+                PIANO_ANCHORS.map(async (midi): Promise<[number, PianoVoice]> => {
                     const res = await fetchImpl(anchorUrl(midi));
                     if (!res.ok) {
                         throw new Error(`Piano sample ${anchorFileName(midi)}: HTTP ${res.status}`);
                     }
                     const buffer = await decoder.decodeAudioData(await res.arrayBuffer());
-                    return [midi, buffer];
+                    return [midi, { buffer, onsetSec: detectOnsetSec(buffer) }];
                 }),
             );
             return new Map(entries);

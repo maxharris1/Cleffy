@@ -78,7 +78,7 @@ class MockContext implements AudioContextLike {
     async close(): Promise<void> {}
 }
 
-const fakeBuffers = () => new Map(PIANO_ANCHORS.map((midi) => [midi, {} as AudioBuffer]));
+const fakeBuffers = () => new Map(PIANO_ANCHORS.map((midi) => [midi, { buffer: {} as AudioBuffer, onsetSec: 0 }]));
 
 // Graph construction order in buildGraph(): master, RH bus, LH bus, click bus.
 const BUS_RH = 1;
@@ -134,18 +134,20 @@ describe('PlaybackEngine', () => {
         expect(engine.getStatus()).toBe('ended');
     });
 
-    it('count-in clicks one full measure before the first note', async () => {
+    it('count-in covers a full bar plus the pickup lead-in, with two downbeat accents', async () => {
         const { ctx, engine, statuses } = makeEngine();
         await engine.play({ countIn: true });
         expect(engine.getStatus()).toBe('counting');
-        await advance(ctx, 3);
-        // 4/4 at 120 bpm → 4 clicks spaced 0.5 s from 0.08.
-        expect(ctx.oscillators).toHaveLength(4);
+        await advance(ctx, 4.5);
+        // tinyScore opens with a 1-beat pickup in 4/4: "ONE two three four,
+        // ONE two three" = 7 clicks spanning 3360 ticks (3.5 s at 120 bpm).
+        expect(ctx.oscillators).toHaveLength(7);
         expect(ctx.oscillators[0]?.startedAt).toBeCloseTo(0.08, 3);
-        expect(ctx.oscillators[3]?.startedAt).toBeCloseTo(0.08 + 3 * 0.5, 3);
-        // First note lands after the count-in measure.
+        expect(ctx.oscillators[6]?.startedAt).toBeCloseTo(0.08 + 6 * 0.5, 3);
+        expect(ctx.oscillators.filter((o) => o.frequency.value === 1800)).toHaveLength(2);
+        // The pickup note enters exactly where beat 4 of the second bar falls.
         const firstNote = Math.min(...ctx.sources.map((s) => s.startedAt ?? Infinity));
-        expect(firstNote).toBeCloseTo(0.08 + 4 * 0.5, 3);
+        expect(firstNote).toBeCloseTo(0.08 + 7 * 0.5, 3);
         expect(statuses).toContain('playing');
         expect(engine.getPositionTicks()).toBeGreaterThan(0);
     });
@@ -217,15 +219,16 @@ describe('PlaybackEngine', () => {
         expect(engine.getPositionTicks()).toBeLessThan(500);
     });
 
-    it('metronome clicks follow the printed measures (accent on the barline)', async () => {
+    it('metronome accents real downbeats — never the pickup', async () => {
         const { ctx, engine } = makeEngine();
         engine.setMetronome(true);
         await engine.play();
         await advance(ctx, 2.6);
-        // m0 (pickup, 480 ticks) has 1 beat; m1 adds 4 more: ≥4 clicks in 2.6 s.
-        expect(ctx.oscillators.length).toBeGreaterThanOrEqual(4);
-        const accent = ctx.oscillators[0];
-        expect(accent?.frequency.value).toBe(1800); // downbeat of the pickup
+        // m0 (pickup) clicks unaccented; m1's barline is the first accent.
+        expect(ctx.oscillators.length).toBeGreaterThanOrEqual(6);
+        expect(ctx.oscillators[0]?.frequency.value).toBe(1300);
+        expect(ctx.oscillators[1]?.frequency.value).toBe(1800);
+        expect(ctx.oscillators.some((o) => o.frequency.value === 1800)).toBe(true);
     });
 
     it('pauses cleanly when the context is suspended (iOS interruption)', async () => {

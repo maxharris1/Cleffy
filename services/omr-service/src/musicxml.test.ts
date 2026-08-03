@@ -92,6 +92,15 @@ describe('parseMusicXmlString', () => {
         expect(score.warnings).not.toContain('measure_underfull');
     });
 
+    it('converts dotted-quarter and eighth beat units too', () => {
+        const mark = (unit: string, dots: number, perMinute: number) =>
+            wrap(
+                `<measure number="1">${ATTRS_44}<direction><direction-type><metronome><beat-unit>${unit}</beat-unit>${'<beat-unit-dot/>'.repeat(dots)}<per-minute>${perMinute}</per-minute></metronome></direction-type></direction>${note('C', 4, 16)}</measure>`,
+            );
+        expect(parseMusicXmlString(mark('quarter', 1, 60)).defaultBpm).toBe(90); // dotted-quarter = 60 (6/8 feel)
+        expect(parseMusicXmlString(mark('eighth', 0, 120)).defaultBpm).toBe(60); // eighth = 120
+    });
+
     it('maps a second single-staff part to the left hand', () => {
         const xml = wrap(
             `<measure number="1">${ATTRS_44}${note('C', 5, 16)}</measure>`,
@@ -123,6 +132,36 @@ describe('parseMusicXmlString', () => {
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([{ t: 0, d: 1920, p: 66, h: 0 }]);
         expect(score.warnings).toContain('grace_notes_skipped');
+    });
+
+    it('merges a tie whose stop was renumbered into another voice (system break)', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><tie type="start"/></note>
+            </measure>
+            <measure number="2">
+                <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>3</voice><tie type="stop"/></note>
+            </measure>`,
+        );
+        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: 3840, p: 72, h: 0 }]);
+    });
+
+    it('refuses to merge a "tie" whose halves are not rhythmically adjacent', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><tie type="start"/></note>
+                <note><rest/><duration>8</duration><voice>1</voice></note>
+            </measure>
+            <measure number="2">
+                <note><pitch><step>C</step><octave>5</octave></pitch><duration>8</duration><voice>2</voice><tie type="stop"/></note>
+                <note><rest/><duration>8</duration><voice>2</voice></note>
+            </measure>`,
+        );
+        // The open half ends at 960 but the "stop" starts at 1920 — two notes.
+        expect(parseMusicXmlString(xml).notes).toEqual([
+            { t: 0, d: 960, p: 72, h: 0 },
+            { t: 1920, d: 960, p: 72, h: 0 },
+        ]);
     });
 
     it('warns on repeat barlines but keeps a linear timeline', () => {

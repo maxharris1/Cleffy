@@ -78,3 +78,33 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
         expect(score.defaultBpm).toBeNull();
     });
 });
+
+describe('key-signature fixture (G major, real Audiveris 5.6.1 artifact)', () => {
+    // Pitch-accuracy proof for the classic OMR trap: notes altered by the key
+    // signature carry NO printed accidental. keysig.musicxml (source) engraves
+    // G major; Audiveris must emit alter=1 on every F for the sounding pitch.
+    const keysig = readFileSync(new URL('./fixtures/keysig.mxl', import.meta.url));
+    const musical = parseMxlFiles([keysig]);
+
+    it('applies the key signature (F→F♯), honors accidentals, keeps naturals', () => {
+        expect(musical.notes).toEqual([
+            { t: 0, d: 480, p: 78, h: 0 }, // F♯5 purely from the key signature
+            { t: 0, d: 960, p: 50, h: 1 }, // D3 stays natural
+            { t: 480, d: 480, p: 79, h: 0 }, // G5
+            { t: 960, d: 480, p: 81, h: 0 }, // A5
+            { t: 960, d: 960, p: 38, h: 1 }, // D2
+            { t: 1440, d: 480, p: 85, h: 0 }, // C♯6 from an explicit accidental
+            { t: 1920, d: 1920, p: 74, h: 0 }, // D5 (chord)
+            { t: 1920, d: 1920, p: 78, h: 0 }, // F♯5 inside the chord — key sig again
+            { t: 1920, d: 1920, p: 43, h: 1 }, // G2
+        ]);
+    });
+
+    it('keeps the two-bar timeline intact', () => {
+        expect(musical.measures.map((m) => ({ tick: m.tick, dTicks: m.dTicks }))).toEqual([
+            { tick: 0, dTicks: 1920 },
+            { tick: 1920, dTicks: 1920 },
+        ]);
+        expect(musical.totalTicks).toBe(3840);
+    });
+});

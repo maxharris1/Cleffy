@@ -104,34 +104,77 @@ export const firstNoteIndexAtOrAfter = (notes: readonly ScoreNote[], tick: numbe
 const MAX_BEATS_PER_MEASURE = 64;
 
 /**
- * Absolute beat ticks within a measure, anchored to its barline (so pickups
- * and irregular measures click correctly). First entry is the accented
- * downbeat.
+ * The FELT pulse of a signature: compound meters (6/8, 9/8, 12/8) click in
+ * dotted-quarter beats, not a hail of eighths.
  */
-export const beatsForMeasure = (measure: ScoreMeasure, timeSignatures: readonly ScoreTimeSig[]): number[] => {
-    const beatTicks = ticksPerBeat(timeSigAt(timeSignatures, measure.tick).den);
-    const beats: number[] = [];
+export const clickBeatTicks = (sig: ScoreTimeSig): number => {
+    const base = ticksPerBeat(sig.den);
+    return sig.den >= 8 && sig.num >= 6 && sig.num % 3 === 0 ? base * 3 : base;
+};
+
+/** Full notated bar length of a signature, in ticks. */
+export const barTicks = (sig: ScoreTimeSig): number => sig.num * ticksPerBeat(sig.den);
+
+export interface BeatTick {
+    tick: number;
+    /** True on real downbeats — never on pickups or truncated bars. */
+    accent: boolean;
+}
+
+/**
+ * Metronome beats within a measure, anchored to its barline. Pickups and
+ * short/irregular bars get beats but no downbeat accent (a pickup is not
+ * beat one).
+ */
+export const beatsForMeasure = (measure: ScoreMeasure, timeSignatures: readonly ScoreTimeSig[]): BeatTick[] => {
+    const sig = timeSigAt(timeSignatures, measure.tick);
+    const beat = clickBeatTicks(sig);
+    const isFullBar = measure.dTicks >= barTicks(sig);
+    const beats: BeatTick[] = [];
     for (let k = 0; k < MAX_BEATS_PER_MEASURE; k++) {
-        const tick = measure.tick + k * beatTicks;
+        const tick = measure.tick + k * beat;
         if (tick >= measure.tick + measure.dTicks) {
             break;
         }
-        beats.push(tick);
+        beats.push({ tick, accent: k === 0 && isFullBar });
     }
     return beats;
 };
 
-export interface CountInSpec {
-    /** Number of count-in clicks (one full measure of the active time signature). */
-    beats: number;
-    /** Spacing between clicks, in ticks. */
-    beatTicks: number;
+export interface CountInClick {
+    /** Ticks BEFORE the start position (clicks are scheduled at start − offset). */
+    offsetTicks: number;
+    accent: boolean;
 }
 
-/** One full measure of count-in clicks in the time signature active at `startTick`. */
-export const countInSpec = (score: ScoreData, startTick: number): CountInSpec => {
+/**
+ * Count-in clicks for entering at `startTick`: one full bar, plus the beats
+ * of the entry bar that precede the entry point. Starting on a downbeat
+ * gives the classic single bar; starting on a pickup (which occupies the END
+ * of its notated bar) counts "ONE two three four, ONE two three…" so the
+ * player comes in on the right beat.
+ */
+export const countInClicks = (score: ScoreData, startTick: number): CountInClick[] => {
     const sig = timeSigAt(score.timeSignatures, startTick);
-    return { beats: sig.num, beatTicks: ticksPerBeat(sig.den) };
+    const beat = clickBeatTicks(sig);
+    const fullBar = barTicks(sig);
+
+    let posInBar = 0;
+    const measure = score.measures[measureIndexAtTick(score.measures, startTick)];
+    if (measure) {
+        const shortfall = Math.max(0, fullBar - measure.dTicks);
+        posInBar = Math.max(0, Math.min(fullBar - 1, shortfall + (startTick - measure.tick)));
+    }
+    // Snap odd entry points down onto the beat grid.
+    posInBar = Math.floor(posInBar / beat) * beat;
+
+    const entryBarStart = posInBar;
+    const preBarStart = posInBar + fullBar;
+    const clicks: CountInClick[] = [];
+    for (let offset = preBarStart; offset > 0; offset -= beat) {
+        clicks.push({ offsetTicks: offset, accent: offset === preBarStart || offset === entryBarStart });
+    }
+    return clicks;
 };
 
 /** Start tick of a measure by index, clamped to the score. */

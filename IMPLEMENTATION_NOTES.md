@@ -80,8 +80,10 @@ Geometry failures degrade gracefully: audio still plays with the playhead hidden
    auto-follow crosses systems and pages.
 4. Pan mid-playback → follow suspends (amber Re-follow pill) → tap it → view glides back.
 5. Mute LH and play the left hand yourself; drag LH volume instead for "quiet guide" mode.
-6. Change BPM 60→160 mid-playback → no position jump; count-in gives one bar of clicks;
-   metronome accents downbeats (3/4 vs 4/4 fixture measures click correctly).
+6. Change BPM 60→160 mid-playback → no position jump; count-in gives one bar of clicks —
+   plus the lead-in beats when the piece opens with a pickup ("ONE two three four, ONE two
+   three…" → you enter on 4); metronome accents real downbeats only (never the pickup) and
+   feels 6/8 in dotted-quarter beats.
 7. Loop: tap Loop at m.5, again at m.8 → tinted range, seamless wrap; Stop rewinds to A.
 8. Tap a measure (pan tool) → seek; steppers land on barlines (‹ returns to measure start
    when >20% in).

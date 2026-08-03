@@ -1,6 +1,13 @@
 import { loadPianoBuffers, nearestAnchor, playbackRateFor } from '@/features/playback/pianoSampler';
 import type { PianoBuffers } from '@/features/playback/pianoSampler';
-import { beatsForMeasure, countInSpec, firstNoteIndexAtOrAfter, measureIndexAtTick, secondsPerTick } from '@/features/playback/scoreTime';
+import {
+    beatsForMeasure,
+    countInClicks,
+    firstNoteIndexAtOrAfter,
+    measureIndexAtTick,
+    secondsPerTick,
+} from '@/features/playback/scoreTime';
+import type { BeatTick } from '@/features/playback/scoreTime';
 import type { PlaybackStatus } from '@/state/store';
 import { HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData } from '@/types/scoreData';
@@ -51,7 +58,7 @@ export interface AudioBufferSourceLike {
     buffer: AudioBuffer | null;
     playbackRate: AudioParamLike;
     connect(target: unknown): unknown;
-    start(when?: number): void;
+    start(when?: number, offset?: number): void;
     stop(when?: number): void;
     onended: (() => void) | null;
 }
@@ -111,7 +118,7 @@ export class PlaybackEngine {
     private pendingAnchor: Anchor | null = null;
     private pausedTick = 0;
     private nextNoteIndex = 0;
-    private nextBeatTick: number | null = null;
+    private nextBeat: BeatTick | null = null;
     private loop: LoopRegion | null = null;
     private muted: [boolean, boolean] = [false, false];
     private volumes: [number, number] = [1, 1];
@@ -181,20 +188,22 @@ export class PlaybackEngine {
         const startAt = now + START_DELAY_S;
 
         if (options?.countIn) {
-            const spec = countInSpec(this.score, startTick);
-            const beatSec = spec.beatTicks * this.spt;
-            for (let k = 0; k < spec.beats; k++) {
-                this.scheduleClick(startAt + k * beatSec, k === 0);
+            // One full bar plus the entry bar's lead-in beats, so pickups and
+            // mid-bar entries land on the right count (see countInClicks).
+            const clicks = countInClicks(this.score, startTick);
+            const lead = clicks[0]?.offsetTicks ?? 0;
+            for (const click of clicks) {
+                this.scheduleClick(startAt + (lead - click.offsetTicks) * this.spt, click.accent);
             }
-            this.anchor = { tick: startTick, ctxTime: startAt + spec.beats * beatSec };
-            this.setStatus('counting');
+            this.anchor = { tick: startTick, ctxTime: startAt + lead * this.spt };
+            this.setStatus(lead > 0 ? 'counting' : 'playing');
         } else {
             this.anchor = { tick: startTick, ctxTime: startAt };
             this.setStatus('playing');
         }
         this.pendingAnchor = null;
         this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, startTick);
-        this.nextBeatTick = null;
+        this.nextBeat = null;
         this.scheduleSustainingNotesAt(startTick);
         this.startScheduler();
     }
@@ -229,7 +238,7 @@ export class PlaybackEngine {
             this.anchor = { tick: clamped, ctxTime: this.ctx.currentTime + 0.05 };
             this.pendingAnchor = null;
             this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, clamped);
-            this.nextBeatTick = null;
+            this.nextBeat = null;
             this.scheduleSustainingNotesAt(clamped);
             if (this.status === 'counting') {
                 this.setStatus('playing');
@@ -251,7 +260,7 @@ export class PlaybackEngine {
             this.spt = secondsPerTick(bpm);
             this.anchor = { tick: positionNow, ctxTime: this.ctx.currentTime };
             this.pendingAnchor = null;
-            this.nextBeatTick = null;
+            this.nextBeat = null;
         } else {
             this.spt = secondsPerTick(bpm);
         }
@@ -269,7 +278,7 @@ export class PlaybackEngine {
 
     setMetronome(on: boolean): void {
         this.metronome = on;
-        this.nextBeatTick = null;
+        this.nextBeat = null;
     }
 
     setLoop(loop: LoopRegion | null): void {
@@ -392,7 +401,7 @@ export class PlaybackEngine {
                 // Seamless wrap: future content re-anchors at the loop start.
                 this.pendingAnchor = { tick: this.loop.startTick, ctxTime: this.timeOfTick(this.loop.endTick) };
                 this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, this.loop.startTick);
-                this.nextBeatTick = null;
+                this.nextBeat = null;
                 // Do not scheduleSustainingNotesAt here — notes that began before the
                 // loop start would ghost-retrigger on every wrap.
                 continue;
@@ -452,20 +461,18 @@ export class PlaybackEngine {
 
     private scheduleBeatsUpTo(regionEnd: number, horizon: number): void {
         for (let guard = 0; guard < 128; guard++) {
-            if (this.nextBeatTick === null) {
-                this.nextBeatTick = this.firstBeatAtOrAfter(Math.max(this.schedulingPositionFloor(), 0));
+            if (this.nextBeat === null) {
+                this.nextBeat = this.firstBeatAtOrAfter(Math.max(this.schedulingPositionFloor(), 0));
             }
-            if (this.nextBeatTick === null || this.nextBeatTick >= regionEnd) {
+            if (this.nextBeat === null || this.nextBeat.tick >= regionEnd) {
                 return;
             }
-            const at = this.timeOfTick(this.nextBeatTick);
+            const at = this.timeOfTick(this.nextBeat.tick);
             if (at >= horizon) {
                 return;
             }
-            const measureIndex = measureIndexAtTick(this.score.measures, this.nextBeatTick);
-            const measure = this.score.measures[measureIndex];
-            this.scheduleClick(at, measure ? this.nextBeatTick === measure.tick : false);
-            this.nextBeatTick = this.beatAfter(this.nextBeatTick);
+            this.scheduleClick(at, this.nextBeat.accent);
+            this.nextBeat = this.firstBeatAtOrAfter(this.nextBeat.tick + 1);
         }
     }
 
@@ -474,7 +481,7 @@ export class PlaybackEngine {
         return (this.pendingAnchor ?? this.anchor).tick;
     }
 
-    private firstBeatAtOrAfter(tick: number): number | null {
+    private firstBeatAtOrAfter(tick: number): BeatTick | null {
         const index = measureIndexAtTick(this.score.measures, tick);
         if (index < 0) {
             return null;
@@ -485,16 +492,12 @@ export class PlaybackEngine {
                 return null;
             }
             for (const beat of beatsForMeasure(measure, this.score.timeSignatures)) {
-                if (beat >= tick) {
+                if (beat.tick >= tick) {
                     return beat;
                 }
             }
         }
         return null;
-    }
-
-    private beatAfter(tick: number): number | null {
-        return this.firstBeatAtOrAfter(tick + 1);
     }
 
     private scheduleNote(midi: number, hand: 0 | 1, startAt: number, durationSec: number, velocity: number): void {
@@ -512,12 +515,12 @@ export class PlaybackEngine {
             return;
         }
         const anchor = nearestAnchor(midi);
-        const buffer = buffers.get(anchor);
-        if (!buffer) {
+        const voice = buffers.get(anchor);
+        if (!voice) {
             return;
         }
         const source = ctx.createBufferSource();
-        source.buffer = buffer;
+        source.buffer = voice.buffer;
         source.playbackRate.value = playbackRateFor(midi, anchor);
         const gain = ctx.createGain();
         gain.gain.value = velocity;
@@ -527,7 +530,9 @@ export class PlaybackEngine {
         const endAt = startAt + Math.max(0.05, durationSec);
         gain.gain.setValueAtTime(velocity, endAt);
         gain.gain.setTargetAtTime(0, endAt, RELEASE_TAU_S);
-        source.start(startAt);
+        // Start from the measured onset so the attack lands exactly on the
+        // beat — decoded mp3s carry codec padding at the front.
+        source.start(startAt, voice.onsetSec);
         source.stop(endAt + RELEASE_STOP_S);
 
         const entry: ActiveNote = { source, gain };

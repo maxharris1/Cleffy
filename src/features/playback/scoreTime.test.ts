@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import {
     beatsForMeasure,
-    countInSpec,
+    clickBeatTicks,
+    countInClicks,
     firstNoteIndexAtOrAfter,
     fractionWithinMeasure,
     measureEndTick,
@@ -117,36 +118,69 @@ describe('firstNoteIndexAtOrAfter', () => {
 });
 
 describe('beatsForMeasure', () => {
-    it('produces 4 quarter beats in a 4/4 measure', () => {
+    it('produces 4 quarter beats in a 4/4 measure, downbeat accented', () => {
         const m1 = measures[1];
         if (!m1) {
             throw new Error('fixture missing measure');
         }
-        expect(beatsForMeasure(m1, timeSignatures)).toEqual([480, 960, 1440, 1920]);
+        expect(beatsForMeasure(m1, timeSignatures)).toEqual([
+            { tick: 480, accent: true },
+            { tick: 960, accent: false },
+            { tick: 1440, accent: false },
+            { tick: 1920, accent: false },
+        ]);
     });
 
-    it('produces 6 eighth beats in a 6/8 measure', () => {
+    it('feels 6/8 in two dotted-quarter beats, not six eighths', () => {
         const m5 = measures[5];
         if (!m5) {
             throw new Error('fixture missing measure');
         }
-        expect(beatsForMeasure(m5, timeSignatures)).toHaveLength(6);
-        expect(beatsForMeasure(m5, timeSignatures)[0]).toBe(8160);
+        expect(clickBeatTicks({ tick: 0, num: 6, den: 8 })).toBe(720);
+        expect(beatsForMeasure(m5, timeSignatures)).toEqual([
+            { tick: 8160, accent: true },
+            { tick: 8880, accent: false },
+        ]);
     });
 
-    it('truncates beats to a short pickup measure', () => {
+    it('gives a pickup its beat but never a downbeat accent', () => {
         const pickup = measures[0];
         if (!pickup) {
             throw new Error('fixture missing measure');
         }
-        expect(beatsForMeasure(pickup, timeSignatures)).toEqual([0]);
+        expect(beatsForMeasure(pickup, timeSignatures)).toEqual([{ tick: 0, accent: false }]);
     });
 });
 
-describe('countInSpec', () => {
-    it('is one full measure of the active time signature', () => {
-        expect(countInSpec(tinyScore, 0)).toEqual({ beats: 4, beatTicks: 480 });
-        expect(countInSpec(tinyScore, 8160)).toEqual({ beats: 6, beatTicks: 240 });
+describe('countInClicks', () => {
+    it('is one plain bar when entering on a downbeat', () => {
+        expect(countInClicks(tinyScore, 480)).toEqual([
+            { offsetTicks: 1920, accent: true },
+            { offsetTicks: 1440, accent: false },
+            { offsetTicks: 960, accent: false },
+            { offsetTicks: 480, accent: false },
+        ]);
+    });
+
+    it('counts a full bar plus the lead-in beats for a pickup entry', () => {
+        // 1-beat pickup in 4/4: "ONE two three four, ONE two three" → enter on 4.
+        const clicks = countInClicks(tinyScore, 0);
+        expect(clicks.map((c) => c.offsetTicks)).toEqual([3360, 2880, 2400, 1920, 1440, 960, 480]);
+        expect(clicks.filter((c) => c.accent).map((c) => c.offsetTicks)).toEqual([3360, 1440]);
+    });
+
+    it('counts compound meter in dotted-quarter clicks', () => {
+        expect(countInClicks(tinyScore, 8160)).toEqual([
+            { offsetTicks: 1440, accent: true },
+            { offsetTicks: 720, accent: false },
+        ]);
+    });
+
+    it('leads into a mid-measure entry on the beat grid', () => {
+        // Entering on beat 3 of m1: one bar + beats 1-2 of the entry bar.
+        const clicks = countInClicks(tinyScore, 480 + 960);
+        expect(clicks.map((c) => c.offsetTicks)).toEqual([2880, 2400, 1920, 1440, 960, 480]);
+        expect(clicks.filter((c) => c.accent).map((c) => c.offsetTicks)).toEqual([2880, 960]);
     });
 });
 
