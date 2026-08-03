@@ -62,14 +62,17 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
 | Analysis      | `services/omr-service/` (Audiveris 5.6.1 in Docker + Node wrapper) turns the PDF into **ScoreData**: notes split RH/LH by staff, ties merged, plus measure x-ranges and system y-bands parsed from the `.omr` project file, normalized to the same 0–1 page coords annotations use          |
 | Orchestration | Upload/IMSLP import fire the `score-analyze` Edge Function (role check, page cap, stale-run guard, signed PDF URL) → OMR service queue → service-role write-back into `score_analyses` (status/progress/error lifecycle). Client polls lifecycle columns only; ScoreData travels once       |
 | Playback      | Hand-rolled Web Audio engine: 25ms/120ms lookahead scheduler, 29 bundled Salamander anchors (nearest-anchor playbackRate pitch shift), per-hand gain buses (mute keeps scheduling → instant unmute), synthesized click bus, anchor-swap timebase for bpm/seek/count-in/gapless A-B loops |
-| Playhead      | Imperative rAF controller inside the viewer's transformed wrapper: sweeping line + measure highlight, auto-follow with glide + suspend-on-gesture, tap-a-measure-to-seek (pan tool / read-only), loop-range tint. Measure number is the only per-frame state that touches React            |
-| Transport     | Docked bar for every role (playback is per-device); Generate/Retry owner-editor-gated to match RLS. BPM persisted per score (Dexie), count-in + metronome toggles, per-hand volume, offline replay from the scoreCache + CacheFirst-cached samples                                          |
+| Playhead      | Imperative rAF controller inside the viewer's transformed wrapper: sweeping line + measure highlight, auto-follow with glide + suspend-on-gesture, tap-a-measure-to-seek (pan tool / read-only), loop-range tint. Rides the engraved chord columns (Audiveris slot data in `measures[].sl`) so the line sits on each chord as it sounds; linear fallback without slots. Measure number is the only per-frame state that touches React |
+| Transport     | Docked bar for every role (playback is per-device); Generate/Retry owner-editor-gated to match RLS. BPM persisted per score (Dexie), count-in + metronome toggles, per-hand volume, offline replay from the scoreCache + CacheFirst-cached samples; compound meters also show the dotted-quarter tempo                                          |
+| Musicality    | Printed dynamics (pp…fff, sfz accents, `<sound dynamics>`) drive velocities through a perceptual v^1.6 gain curve; grace notes play as crushed acciaccaturas; metronome marks convert beat-unit → quarter-BPM; sample onsets are measured at decode time so attacks land exactly on the click                                                  |
 
 **Known v1 limitations** (all surfaced as ScoreData `warnings` where applicable): repeats /
-D.C. / D.S. are ignored (linear playthrough); grace notes are skipped; one global tempo (score
-tempo marks beyond the first are not followed); OMR accuracy depends on scan quality — clean
-typeset PDFs work best, and wrong notes are a per-measure OMR limitation, not a playback bug.
-Geometry failures degrade gracefully: audio still plays with the playhead hidden.
+D.C. / D.S. are ignored (linear playthrough); one global tempo (score tempo marks beyond the
+first are not followed); hairpin crescendos are not interpolated (stepwise dynamics only);
+OMR accuracy depends on scan quality — clean typeset PDFs work best, and wrong notes are a
+per-measure OMR limitation, not a playback bug. Geometry failures degrade gracefully: audio
+still plays with the playhead hidden. Re-run "Generate play-along" on older scores to pick up
+slot/dynamics data produced by the updated OMR service.
 
 ### Play-along test script
 
