@@ -10,19 +10,8 @@ import {
     type SearchFilters,
     type SearchSort,
 } from '../_shared/facets.ts';
-import {
-    checkRateLimit,
-    clientKey,
-    mwFetch,
-    parseComposerFromTitle,
-    workPageUrl,
-} from '../_shared/imslp.ts';
-import {
-    aliasTitlesForQuery,
-    buildSearchVariants,
-    scoreTitleMatch,
-    tokenizeQuery,
-} from '../_shared/search.ts';
+import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, workPageUrl } from '../_shared/imslp.ts';
+import { aliasTitlesForQuery, buildSearchVariants, scoreTitleMatch, tokenizeQuery } from '../_shared/search.ts';
 
 interface SearchHit {
     title: string;
@@ -126,11 +115,7 @@ const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     imslpUrl: workPageUrl(title),
 });
 
-const browseByFilters = async (
-    filters: SearchFilters,
-    limit: number,
-    sort: SearchSort,
-): Promise<SearchHit[]> => {
+const browseByFilters = async (filters: SearchFilters, limit: number, sort: SearchSort): Promise<SearchHit[]> => {
     const category = primaryBrowseCategory(filters);
     if (category) {
         const members = await mwCategoryMembers(category, Math.max(limit * 2, 100), sort);
@@ -140,9 +125,7 @@ const browseByFilters = async (
             .map((m) => toHit(m.title, m.pageid));
         if (sort === 'relevance') {
             // Mild preference for shorter / more specific titles when browsing.
-            return [...filtered].sort(
-                (a, b) => a.title.length - b.title.length || a.title.localeCompare(b.title),
-            );
+            return [...filtered].sort((a, b) => a.title.length - b.title.length || a.title.localeCompare(b.title));
         }
         return filtered;
     }
@@ -338,13 +321,9 @@ Deno.serve(async (req) => {
 
         return jsonResponse({ results, total: results.length, mode: 'search' });
     } catch (err) {
-        return jsonResponse(
-            { error: err instanceof Error ? err.message : 'IMSLP search failed' },
-            502,
-        );
+        return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP search failed' }, 502);
     }
 });
 
 const foldEquals = (a: string, b: string): boolean =>
-    a.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase() ===
-    b.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+    a.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase() === b.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();

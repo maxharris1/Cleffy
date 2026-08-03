@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, Navigate, useParams } from 'react-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link, Navigate, useParams, useSearchParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
+import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
+import { buildCleanFn } from '@/features/import/cleanReplace';
+import { ImportScanButton } from '@/features/import/ImportScanButton';
+import { UPLOAD_ACCEPT, prepareUploadFile } from '@/features/import/prepareUpload';
 import {
     fetchDocument,
     fetchMyRole,
@@ -54,10 +58,31 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [shareOpen, setShareOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    const [staleBytes, setStaleBytes] = useState(false);
 
     const userId = session?.user.id;
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
+
+    /** Another member replaced the PDF (import cleanup) — offer a refresh. */
+    const onDocReplaced = useCallback((contentRev: number) => {
+        setState((prev) => {
+            if (prev && contentRev > (prev.doc.content_rev ?? 0)) {
+                setStaleBytes(true);
+            }
+            return prev;
+        });
+    }, []);
+
+    const refreshBytes = useCallback(async () => {
+        const doc = await fetchDocument(docId);
+        if (!doc) {
+            return;
+        }
+        const bytes = await loadDocumentBytes(doc);
+        setState((prev) => (prev ? { ...prev, doc, bytes } : prev));
+        setStaleBytes(false);
+    }, [docId]);
 
     useEffect(() => {
         if (!userId) {
@@ -98,6 +123,20 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
     const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
+    // Referentially stable — the review panel's scan effect depends on it.
+    const classify = useMemo(() => makeCloudClassifyFn(docId), [docId]);
+
+    // ?import=1 (post-upload prompt) auto-opens the import panel once; the
+    // param is consumed so a refresh doesn't rescan (the AI pass costs money).
+    const [searchParams, setSearchParams] = useSearchParams();
+    const [autoOpenImport] = useState(() => searchParams.get('import') === '1');
+    useEffect(() => {
+        if (searchParams.get('import') === '1') {
+            const next = new URLSearchParams(searchParams);
+            next.delete('import');
+            setSearchParams(next, { replace: true });
+        }
+    }, [searchParams, setSearchParams]);
 
     if (!loading && !session) {
         return <Navigate to="/" replace />;
@@ -132,6 +171,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
                 {readOnly ? <Badge>view only</Badge> : null}
+                {annotationStore && state.role === 'owner' ? (
+                    <ImportScanButton
+                        store={annotationStore}
+                        docId={docId}
+                        bytes={state.bytes}
+                        classify={classify}
+                        includeBornDigital
+                        clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
+                            setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));
+                        })}
+                        autoOpen={autoOpenImport}
+                    />
+                ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 <ShareExportMenu docId={docId} title={state.doc.title} />
@@ -142,6 +194,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : null}
             </ViewerHeader>
             {session?.user.is_anonymous ? <UpgradeBanner /> : null}
+            {staleBytes ? (
+                <div
+                    className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
+                    role="status"
+                >
+                    <p className="text-sm text-amber-900">
+                        The score file was updated (existing marks were made editable).
+                    </p>
+                    <Button size="sm" variant="secondary" onClick={() => void refreshBytes()}>
+                        Show the cleaned pages
+                    </Button>
+                </div>
+            ) : null}
             <div className="min-h-0 flex-1">
                 <PdfProvider data={state.bytes}>
                     <PdfViewport
@@ -156,6 +221,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                             canWrite: !readOnly,
                             onStatus,
                             onPeers,
+                            onDocReplaced,
                         }}
                     />
                 </PdfProvider>
@@ -187,20 +253,29 @@ const SyncDot = ({ status }: { status: SyncStatus }) => {
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
+    const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
 
     const reopenFile = useCallback(
-        async (file: File) => {
-            const buffer = await file.arrayBuffer();
-            const id = await localDocId(buffer);
-            putLocalDoc(id, buffer);
-            if (id === docId) {
-                forceRender((n) => n + 1);
-            } else {
-                // Different file than the one this URL refers to — open it under its own id.
-                window.location.assign(`/doc/${id}`);
+        async (picked: File) => {
+            setReopenError(null);
+            try {
+                // Image conversion is byte-deterministic, so re-opening the
+                // same image file reproduces the same content-hash id.
+                const { file } = await prepareUploadFile(picked);
+                const buffer = await file.arrayBuffer();
+                const id = await localDocId(buffer);
+                putLocalDoc(id, buffer);
+                if (id === docId) {
+                    forceRender((n) => n + 1);
+                } else {
+                    // Different file than the one this URL refers to — open it under its own id.
+                    window.location.assign(`/doc/${id}`);
+                }
+            } catch (err) {
+                setReopenError(err instanceof Error ? err.message : 'Could not open that file.');
             }
         },
         [docId],
@@ -211,13 +286,13 @@ const LocalViewer = ({ docId }: { docId: string }) => {
             <main className="landing-page flex min-h-full flex-col items-center justify-center p-8">
                 <EmptyState
                     title="Re-open this score"
-                    body="This score isn't loaded in this session. Re-open the PDF file to continue — your annotations are saved on this device."
+                    body="This score isn't loaded in this session. Re-open the same file to continue — your annotations are saved on this device."
                 >
                     <label className={buttonClassName('primary', 'md')}>
-                        Re-open PDF
+                        Re-open file
                         <input
                             type="file"
-                            accept="application/pdf,.pdf"
+                            accept={UPLOAD_ACCEPT}
                             className="hidden"
                             onChange={(e) => {
                                 const file = e.target.files?.[0];
@@ -227,6 +302,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                             }}
                         />
                     </label>
+                    {reopenError ? <ErrorText>{reopenError}</ErrorText> : null}
                     <Link to="/" className={linkClassName}>
                         Back to home
                     </Link>
@@ -239,6 +315,16 @@ const LocalViewer = ({ docId }: { docId: string }) => {
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
                 <Badge>this device only</Badge>
+                {annotationStore ? (
+                    <ImportScanButton
+                        store={annotationStore}
+                        docId={docId}
+                        bytes={bytes}
+                        classify={null}
+                        includeBornDigital={false}
+                        clean={null}
+                    />
+                ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
                 <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
             </ViewerHeader>

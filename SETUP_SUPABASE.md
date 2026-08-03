@@ -66,17 +66,45 @@ npx supabase db push
 
 App routes that use these redirects:
 
-| Flow | Redirect |
-| ---- | -------- |
+| Flow                      | Redirect                      |
+| ------------------------- | ----------------------------- |
 | Email signup confirmation | `/auth/callback` → `/library` |
-| Password reset | `/update-password` |
+| Password reset            | `/update-password`            |
 
 **Recommended:** the built-in email service allows only ~2–4 auth emails/hour — fine
 for real use, painful for testing. For test iteration either configure custom SMTP
 (Auth → SMTP, e.g. a free Resend account), or create a password test user under
 Auth → Users.
 
-## 4. (Optional) Let the Claude environment reach Supabase
+## 4. Smart import (adopt pre-existing annotations)
+
+The "Import marks" feature detects handwriting already on uploaded scores and
+turns it into editable Cleffy annotations. Its parts:
+
+- **Migration** `supabase/migrations/20260802180000_smart_import.sql`
+  (`documents.content_rev`, `document_imports`, the documents broadcast
+  trigger) — included in `scripts/apply-migrations.sql`.
+- **Edge function** `analyze-annotations` — classifies detected ink with
+  Claude. Deploy it like the IMSLP functions:
+
+    ```bash
+    npx supabase functions deploy analyze-annotations --project-ref jibgwgosihadbjgxdsfe
+    ```
+
+- **Secret** — the function needs an Anthropic API key
+  (https://console.anthropic.com → API keys):
+
+    ```bash
+    npx supabase secrets set ANTHROPIC_API_KEY=sk-ant-... --project-ref jibgwgosihadbjgxdsfe
+    ```
+
+    Without the key everything still works — detected marks import as erasable
+    ink strokes instead of editable text (the function answers
+    `code: "ai_unavailable"` and the app degrades gracefully). Cost is roughly
+    $0.03–0.08 per scanned page (claude-sonnet-5, one call per page that has
+    colored ink).
+
+## 5. (Optional) Let the Claude environment reach Supabase
 
 To let Claude verify against the real backend (and run `db push` itself), allow
 `*.supabase.co` in this environment's **network policy** (Claude Code on the web →
@@ -88,6 +116,10 @@ environment settings). Without it, everything still works from your machine —
 1. `npm run dev`, open http://localhost:5173 → **Create account** or **Log in**.
 2. Register with email/password.
 3. Upload a PDF — it appears in the library, and in Storage under `scores/{id}/`.
+   Uploading a photo/screenshot (PNG/JPEG) works too — it becomes a one-page PDF.
+   A score that already carries colored-ink marks triggers the "Existing marks
+   found" offer; accepting opens the review panel (`node scripts/generate-annotated-fixture.mjs`
+   produces `e2e-fixtures/test-score-annotated.pdf` for trying this).
 4. Open it, draw — rows appear in the `annotations` table (Data → annotations).
 5. Share → create an **edit** link, open it in a private/incognito window, enter a
    name → the same score opens and both windows can annotate.

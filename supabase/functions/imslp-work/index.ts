@@ -51,10 +51,7 @@ Deno.serve(async (req) => {
             redirects: '1',
         })) as {
             query?: {
-                pages?: Record<
-                    string,
-                    { missing?: boolean; title?: string; images?: Array<{ title: string }> }
-                >;
+                pages?: Record<string, { missing?: boolean; title?: string; images?: Array<{ title: string }> }>;
             };
         };
 
@@ -123,9 +120,6 @@ Deno.serve(async (req) => {
             editions,
         });
     } catch (err) {
-        return jsonResponse(
-            { error: err instanceof Error ? err.message : 'IMSLP work lookup failed' },
-            502,
-        );
+        return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP work lookup failed' }, 502);
     }
 });

@@ -18,6 +18,7 @@ import {
     type LibraryGroup,
     type LibrarySort,
 } from '@/features/library/libraryView';
+import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
@@ -315,7 +316,7 @@ export const LibraryPage = () => {
                         <LocalOpenControl label="Open locally without uploading" subtle />
                     </div>
                     {uploading && uploadPct !== null ? (
-                        <ProgressBar value={uploadPct} label="Uploading PDF" className="mt-4 max-w-xs" />
+                        <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
                     ) : null}
                 </>
             ) : documents !== null ? (
@@ -772,10 +773,10 @@ const RenameDialog = ({
 
 const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
     <label className={buttonClassName('primary', 'sm', uploading ? 'pointer-events-none opacity-80' : '')}>
-        {uploading ? 'Uploading…' : 'Upload PDF'}
+        {uploading ? 'Uploading…' : 'Upload score'}
         <input
             type="file"
-            accept="application/pdf,.pdf"
+            accept={UPLOAD_ACCEPT}
             className="hidden"
             disabled={uploading}
             onChange={(e) => {
@@ -801,7 +802,7 @@ const EmptyLibrary = ({
     <EmptyState
         className="library-empty mt-8 md:mt-16"
         title="No scores yet"
-        body="Find a score on IMSLP or upload a PDF to start annotating."
+        body="Find a score on IMSLP or upload a PDF or photo to start annotating."
     >
         <div className="flex flex-wrap items-center justify-center gap-3">
             <Link to="/search" className={buttonClassName('primary', 'sm')}>
@@ -810,7 +811,7 @@ const EmptyLibrary = ({
             <UploadButton uploading={uploading} onUpload={onUpload} />
         </div>
         {uploading && uploadPct !== null ? (
-            <ProgressBar value={uploadPct} label="Uploading PDF" className="w-full max-w-xs" />
+            <ProgressBar value={uploadPct} label="Uploading score" className="w-full max-w-xs" />
         ) : null}
         <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
     </EmptyState>

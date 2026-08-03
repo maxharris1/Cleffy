@@ -18,6 +18,8 @@ export interface StrokePayload {
     w: number;
     /** 1 when pressure was simulated (mouse/finger input without real pressure). */
     sp?: 1;
+    /** 1 when adopted from a document's pre-existing markings (smart import). */
+    src?: 1;
 }
 
 export interface TextPayload {
@@ -26,6 +28,8 @@ export interface TextPayload {
     text: string;
     /** Font size / page width. */
     size: number;
+    /** 1 when adopted from a document's pre-existing markings (smart import). */
+    src?: 1;
 }
 
 export type AnnotationPayload = StrokePayload | TextPayload;

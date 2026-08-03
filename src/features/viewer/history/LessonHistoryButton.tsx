@@ -46,7 +46,8 @@ const LessonHistoryDialog = ({
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
-    const viewing = store.isHistoryMode;
+    // Only true history viewing counts — an import-preview overlay is not ours.
+    const viewing = store.overlayMode === 'history';
 
     useEffect(() => {
         let cancelled = false;

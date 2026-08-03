@@ -10,6 +10,12 @@ export interface AnnotationPatch {
     payload?: AnnotationPayload;
 }
 
+type CommitOp =
+    | { type: 'create'; annotation: Annotation }
+    | { type: 'update'; annotation: Annotation; prev: Annotation }
+    | { type: 'delete'; annotation: Annotation }
+    | { type: 'restore'; annotation: Annotation };
+
 /**
  * THE single write path for annotations (plan §sync).
  *
@@ -27,6 +33,7 @@ export class AnnotationStore {
     private byId = new Map<string, Annotation>();
     /** When set, getPage returns this instead of live state (lesson history view). */
     private historyOverlay: Map<number, Map<string, Annotation>> | null = null;
+    private overlayKind: 'history' | 'preview' = 'history';
     private listeners = new Set<PageListener>();
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
@@ -80,8 +87,14 @@ export class AnnotationStore {
         return this.historyOverlay !== null;
     }
 
-    /** Show a day's starting annotations read-only (null clears). */
-    setHistoryOverlay(annotations: Annotation[] | null): void {
+    /** Which UI owns the overlay — 'history' (day snapshot) or 'preview' (import review); null when live. */
+    get overlayMode(): 'history' | 'preview' | null {
+        return this.historyOverlay ? this.overlayKind : null;
+    }
+
+    /** Show a set of annotations read-only in place of the live ones (null clears). */
+    setHistoryOverlay(annotations: Annotation[] | null, kind: 'history' | 'preview' = 'history'): void {
+        this.overlayKind = kind;
         const touched = new Set<number>([...this.pages.keys()]);
         if (this.historyOverlay) {
             for (const page of this.historyOverlay.keys()) {
@@ -219,6 +232,34 @@ export class AnnotationStore {
         await this.commit({ type: 'create', annotation }, { recordUndo: true });
     }
 
+    /**
+     * Bulk create — one Dexie transaction per chunk instead of one per row.
+     * Semantically identical to awaiting create() in a loop (same undo ops,
+     * same outbox rows, same LWW fields) but ~10× faster for imports: the
+     * per-row cost is dominated by IndexedDB transaction overhead and the
+     * day-snapshot existence check, both of which happen once here.
+     */
+    async createMany(annotations: Annotation[]): Promise<void> {
+        if (annotations.length === 0 || this.historyOverlay) {
+            return;
+        }
+        await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
+        const touched = new Set<number>();
+        const ops: CommitOp[] = [];
+        for (const annotation of annotations) {
+            this.applyMemory(annotation);
+            this.undo.pushInverse({ type: 'delete', id: annotation.id });
+            ops.push({ type: 'create', annotation });
+            touched.add(annotation.page);
+        }
+        await this.persistMany(ops);
+        for (const page of touched) {
+            this.notifyPage(page);
+        }
+        this.notifyMeta();
+        this.onDirty?.();
+    }
+
     async update(id: string, patch: AnnotationPatch): Promise<void> {
         const prev = this.byId.get(id);
         if (!prev || prev.deletedAt) {
@@ -297,90 +338,108 @@ export class AnnotationStore {
     }
 
     async undoLast(): Promise<void> {
-        const ops = this.undo.popUndo();
-        if (!ops) {
-            return;
+        if (this.historyOverlay) {
+            return; // read-only while an overlay is shown — don't consume the entry
         }
-        const redoOps: UndoableOp[] = [];
-        // Replay inverses in reverse order; collect redo counterparts.
-        for (const op of [...ops].reverse()) {
-            const redo = await this.applyUndoable(op);
-            if (redo) {
-                redoOps.push(redo);
-            }
-        }
-        if (redoOps.length > 0) {
-            this.undo.pushRedoEntry(redoOps);
+        const inverses = await this.replayEntry(this.undo.popUndo());
+        if (inverses) {
+            this.undo.pushRedoEntry(inverses);
         }
         this.notifyMeta();
     }
 
     async redoLast(): Promise<void> {
-        const ops = this.undo.popRedo();
-        if (!ops) {
+        if (this.historyOverlay) {
             return;
         }
-        const undoOps: UndoableOp[] = [];
-        for (const op of [...ops].reverse()) {
-            const inverse = await this.applyUndoable(op);
-            if (inverse) {
-                undoOps.push(inverse);
-            }
-        }
-        if (undoOps.length > 0) {
-            this.undo.pushUndoEntryRaw(undoOps);
+        const inverses = await this.replayEntry(this.undo.popRedo());
+        if (inverses) {
+            this.undo.pushUndoEntryRaw(inverses);
         }
         this.notifyMeta();
     }
 
-    /** Apply an undo/redo op through commit (no new undo recording); return its inverse. */
-    private async applyUndoable(op: UndoableOp): Promise<UndoableOp | null> {
+    /**
+     * Replay one undo/redo entry: inverses in reverse order, chunked so a
+     * 30k-op import undoes with visible progress (memory + persist + repaint
+     * per chunk) instead of one silent multi-second write. Memory state
+     * updates op by op — later ops may read earlier ops' effects.
+     */
+    private async replayEntry(ops: UndoableOp[] | null): Promise<UndoableOp[] | null> {
+        if (!ops) {
+            return null;
+        }
+        const CHUNK = 4000;
+        const reversed = [...ops].reverse();
+        const inverses: UndoableOp[] = [];
+        let wrote = false;
+        for (let start = 0; start < reversed.length; start += CHUNK) {
+            const commits: CommitOp[] = [];
+            const touched = new Set<number>();
+            for (const op of reversed.slice(start, start + CHUNK)) {
+                const planned = this.applyUndoableInMemory(op);
+                if (planned) {
+                    commits.push(planned.commit);
+                    inverses.push(planned.inverse);
+                    touched.add(planned.commit.annotation.page);
+                }
+            }
+            if (commits.length > 0) {
+                await this.persistMany(commits);
+                for (const page of touched) {
+                    this.notifyPage(page);
+                }
+                wrote = true;
+            }
+        }
+        if (wrote) {
+            this.onDirty?.();
+        }
+        return inverses.length > 0 ? inverses : null;
+    }
+
+    /** Apply an undo/redo op to memory and plan its durable write; return the write + its inverse. */
+    private applyUndoableInMemory(op: UndoableOp): { commit: CommitOp; inverse: UndoableOp } | null {
         switch (op.type) {
             case 'create': {
-                await this.commit({ type: 'create', annotation: { ...op.annotation, updatedAt: nowIso() } }, {});
-                return { type: 'delete', id: op.annotation.id };
+                const annotation = { ...op.annotation, updatedAt: nowIso() };
+                this.applyMemory(annotation);
+                return { commit: { type: 'create', annotation }, inverse: { type: 'delete', id: annotation.id } };
             }
             case 'delete': {
                 const prev = this.byId.get(op.id);
                 if (!prev || prev.deletedAt) {
                     return null;
                 }
-                await this.commit(
-                    { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() } },
-                    {},
-                );
-                return { type: 'restore', id: op.id };
+                const annotation = { ...prev, deletedAt: nowIso(), updatedAt: nowIso() };
+                this.applyMemory(annotation);
+                return { commit: { type: 'delete', annotation }, inverse: { type: 'restore', id: op.id } };
             }
             case 'restore': {
                 const prev = this.byId.get(op.id);
                 if (!prev || !prev.deletedAt) {
                     return null;
                 }
-                await this.commit(
-                    { type: 'restore', annotation: { ...prev, deletedAt: null, updatedAt: nowIso() } },
-                    {},
-                );
-                return { type: 'delete', id: op.id };
+                const annotation = { ...prev, deletedAt: null, updatedAt: nowIso() };
+                this.applyMemory(annotation);
+                return { commit: { type: 'restore', annotation }, inverse: { type: 'delete', id: op.id } };
             }
             case 'update': {
                 const prev = this.byId.get(op.id);
                 if (!prev) {
                     return null;
                 }
-                await this.commit({ type: 'update', annotation: { ...op.annotation, updatedAt: nowIso() }, prev }, {});
-                return { type: 'update', id: op.id, annotation: prev };
+                const annotation = { ...op.annotation, updatedAt: nowIso() };
+                this.applyMemory(annotation);
+                return {
+                    commit: { type: 'update', annotation, prev },
+                    inverse: { type: 'update', id: op.id, annotation: prev },
+                };
             }
         }
     }
 
-    private async commit(
-        op:
-            | { type: 'create'; annotation: Annotation }
-            | { type: 'update'; annotation: Annotation; prev: Annotation }
-            | { type: 'delete'; annotation: Annotation }
-            | { type: 'restore'; annotation: Annotation },
-        options: { recordUndo?: boolean },
-    ): Promise<void> {
+    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<void> {
         if (this.historyOverlay) {
             return;
         }
@@ -393,12 +452,7 @@ export class AnnotationStore {
         const { annotation } = op;
 
         // 1. In-memory map (render source) — synchronous, so the UI never waits on IndexedDB.
-        this.byId.set(annotation.id, annotation);
-        if (annotation.deletedAt) {
-            this.pageMap(annotation.page).delete(annotation.id);
-        } else {
-            this.pageMap(annotation.page).set(annotation.id, annotation);
-        }
+        this.applyMemory(annotation);
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
@@ -419,23 +473,48 @@ export class AnnotationStore {
         }
 
         // 3. Durable mirror + outbox, atomically.
-        const row: LocalAnnotation = { ...annotation, pending: 1 };
-        const opType: PendingOpType = op.type;
-        await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
-            await this.db.annotations.put(row);
-            await this.db.ops.add({
-                docId: this.docId,
-                type: opType,
-                annotationId: annotation.id,
-                annotation,
-                queuedAt: nowIso(),
-            });
-        });
+        await this.persistMany([op]);
 
         // 4. Repaint + wake the sync engine.
         this.notifyPage(annotation.page);
         this.notifyMeta();
         this.onDirty?.();
+    }
+
+    /** In-memory map updates (render source) — synchronous, UI never waits on IndexedDB. */
+    private applyMemory(annotation: Annotation): void {
+        this.byId.set(annotation.id, annotation);
+        if (annotation.deletedAt) {
+            this.pageMap(annotation.page).delete(annotation.id);
+        } else {
+            this.pageMap(annotation.page).set(annotation.id, annotation);
+        }
+    }
+
+    /**
+     * Durable mirror + outbox for a set of ops, atomically per chunk. Bulk
+     * writes amortize the IndexedDB transaction overhead that dominates
+     * per-row puts; chunks keep a 30k-op import from building one giant
+     * transaction that starves concurrent readers.
+     */
+    private async persistMany(ops: CommitOp[]): Promise<void> {
+        const CHUNK = 4000;
+        for (let start = 0; start < ops.length; start += CHUNK) {
+            const slice = ops.slice(start, start + CHUNK);
+            const rows: LocalAnnotation[] = slice.map((op) => ({ ...op.annotation, pending: 1 }));
+            const queuedAt = nowIso();
+            const opRows = slice.map((op) => ({
+                docId: this.docId,
+                type: op.type as PendingOpType,
+                annotationId: op.annotation.id,
+                annotation: op.annotation,
+                queuedAt,
+            }));
+            await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
+                await this.db.annotations.bulkPut(rows);
+                await this.db.ops.bulkAdd(opRows);
+            });
+        }
     }
 
     private pageMap(pageIndex: number): Map<string, Annotation> {

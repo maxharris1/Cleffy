@@ -43,7 +43,7 @@ const Footer = () => (
                 <Wordmark className="text-lg" />
                 <span className="text-xs text-stone-500">Real-time collaborative sheet music annotation</span>
             </p>
-            <LocalOpenControl label="Open a PDF locally" subtle />
+            <LocalOpenControl label="Open a score locally" subtle />
         </div>
     </footer>
 );
@@ -152,7 +152,7 @@ const LocalLanding = () => (
                         Cloud sync is not configured. You can still open and annotate PDFs locally.
                     </p>
                     <div className="mt-8 flex justify-center lg:justify-start">
-                        <LocalOpenControl label="Open a PDF" />
+                        <LocalOpenControl label="Open a score" />
                     </div>
                 </div>
                 <HeroDemo />

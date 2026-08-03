@@ -3,8 +3,12 @@ import { NavLink, Navigate, Outlet, useNavigate } from 'react-router';
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
-import { importDocumentFromImslp, uploadDocument } from '@/features/library/documentsService';
+import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
+import { prescanDocument } from '@/features/import/prescan';
+import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import { isSupabaseConfigured } from '@/lib/supabase';
+import type { DocumentRow } from '@/types/database';
+import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { buttonClassName } from '@/ui/classNames';
 
 export type LibraryOutletContext = {
@@ -40,6 +44,7 @@ export const LibraryShell = () => {
 const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string }) => {
     const [uploadPct, setUploadPct] = useState<number | null>(null);
     const [uploadError, setUploadError] = useState<string | null>(null);
+    const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
     const navigate = useNavigate();
 
     const onUpload = async (file: File) => {
@@ -50,6 +55,17 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                 const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
                 setUploadPct(pct);
             });
+            // Free, local prescan: does this score already carry colored-ink
+            // markings? If so (and the user never declined), offer the import.
+            try {
+                const bytes = await loadDocumentBytes(document);
+                if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
+                    setImportOffer(document);
+                    return; // the dialog decides where to navigate
+                }
+            } catch {
+                // Best-effort — never block the upload flow.
+            }
             navigate(`/doc/${document.id}`);
         } catch (err) {
             setUploadError(err instanceof Error ? err.message : 'Upload failed.');
@@ -57,6 +73,16 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
         } finally {
             setUploadPct(null);
         }
+    };
+
+    const resolveImportOffer = (accepted: boolean) => {
+        const doc = importOffer;
+        if (!doc) {
+            return;
+        }
+        setImportOffer(null);
+        void recordImportStatus(doc.id, accepted ? 'prompted' : 'declined');
+        navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
     const onImportImslp = async (filename: string, workTitle: string) => {
@@ -150,6 +176,16 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                     <Outlet context={outlet} />
                 </div>
             </div>
+            {importOffer ? (
+                <ConfirmDialog
+                    title="Existing marks found"
+                    body="This score already carries handwritten marks (colored ink). Cleffy can lift them off the page and turn them into marks you can edit and erase — you review everything before anything changes."
+                    confirmLabel="Review marks"
+                    cancelLabel="Not now"
+                    onConfirm={() => resolveImportOffer(true)}
+                    onCancel={() => resolveImportOffer(false)}
+                />
+            ) : null}
         </main>
     );
 };

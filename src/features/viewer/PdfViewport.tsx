@@ -54,6 +54,8 @@ export interface PdfViewportProps {
         canWrite: boolean;
         onStatus?: (status: SyncStatus) => void;
         onPeers?: (peers: PresencePeer[]) => void;
+        /** Another member replaced the PDF bytes (smart-import cleanup). */
+        onDocReplaced?: (contentRev: number) => void;
     };
 }
 
@@ -77,11 +79,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
     // create during render (neither touches refs).
     const [annotationStore] = useState(() => new AnnotationStore(getDb(), docId));
     const [registry] = useState(() => new CanvasRegistry());
-    const historyMode = useSyncExternalStore(
+    const overlayMode = useSyncExternalStore(
         (cb) => annotationStore.subscribeMeta(cb),
-        () => annotationStore.isHistoryMode,
+        () => annotationStore.overlayMode,
     );
-    const effectiveReadOnly = readOnly || historyMode;
+    const effectiveReadOnly = readOnly || overlayMode !== null;
 
     // Live refs so the imperative controllers always see current geometry.
     const layoutRef = useRef(layout);
@@ -107,6 +109,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
     const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
+    const syncOnDocReplaced = sync?.onDocReplaced;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
     // Track viewport size.
@@ -223,6 +226,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
                     ink.clearRemoteInk();
                     void engine?.sync();
                 },
+                onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);
@@ -249,6 +253,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
         syncCanWrite,
         syncOnStatus,
         syncOnPeers,
+        syncOnDocReplaced,
     ]);
 
     // Presence: report the top visible page (debounced against scroll churn).
@@ -368,7 +373,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
                     >
                         {pages}
                     </div>
-                    {historyMode ? (
+                    {overlayMode === 'history' ? (
                         <div
                             data-ui-overlay
                             className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
