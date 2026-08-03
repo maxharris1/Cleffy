@@ -50,6 +50,17 @@ const scoreMeasureSchema = z.object({
     /** Horizontal span on the page, normalized 0–1. */
     x0: z.number().min(0).max(1),
     x1: z.number().min(0).max(1),
+    /** Engraved chord columns ({x: page-normalized, t: ticks from measure start},
+     * ascending) — lets the playhead sweep note-accurately instead of linearly. */
+    sl: z
+        .array(
+            z.object({
+                x: z.number().min(0).max(1),
+                t: z.number().int().nonnegative(),
+            }),
+        )
+        .max(64)
+        .optional(),
 });
 
 const scoreSystemSchema = z.object({

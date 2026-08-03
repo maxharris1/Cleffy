@@ -20,6 +20,12 @@ const scoreNoteSchema = z.object({
     v: z.number().min(0).max(1).optional(),
 });
 
+/** An engraved chord column: x normalized on the page, t ticks from the measure start. */
+const scoreSlotSchema = z.object({
+    x: z.number().min(0).max(1),
+    t: z.number().int().nonnegative(),
+});
+
 const scoreMeasureSchema = z.object({
     n: z.number().int(),
     tick: z.number().int().nonnegative(),
@@ -28,6 +34,8 @@ const scoreMeasureSchema = z.object({
     sys: z.number().int().min(-1),
     x0: z.number().min(0).max(1),
     x1: z.number().min(0).max(1),
+    /** Chord columns from the engraving — lets the playhead sweep note-accurately. */
+    sl: z.array(scoreSlotSchema).max(64).optional(),
 });
 
 const scoreSystemSchema = z.object({

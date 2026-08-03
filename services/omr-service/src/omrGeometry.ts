@@ -1,6 +1,8 @@
 import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
+import { TICKS_PER_QUARTER } from './scoreData.js';
+
 /**
  * Measure/system pixel geometry from an Audiveris .omr project file.
  *
@@ -18,9 +20,18 @@ import { DOMParser } from '@xmldom/xmldom';
  * numbers line up with the app's 0–1 page coordinates with no DPI math.
  */
 
+export interface OmrSlot {
+    /** Page-normalized x of the chord column. */
+    x: number;
+    /** Ticks from the measure start (Audiveris time-offset is a fraction of a whole note). */
+    t: number;
+}
+
 export interface OmrStack {
     x0: number;
     x1: number;
+    /** Engraved chord columns, ascending in time — the playhead's anchors. */
+    slots: OmrSlot[];
 }
 
 export interface OmrSystem {
@@ -92,7 +103,11 @@ const parseSheetXml = (xml: string, pageIndex: number): OmrSheet | null => {
                 if (left === null || right === null || right <= left) {
                     continue;
                 }
-                stacks.push({ x0: clamp01(left / width), x1: clamp01(right / width) });
+                stacks.push({
+                    x0: clamp01(left / width),
+                    x1: clamp01(right / width),
+                    slots: parseStackSlots(stack, left, right, width),
+                });
             }
 
             const staffSpans: Array<{ top: number; bottom: number }> = [];
@@ -131,6 +146,55 @@ const parseSheetXml = (xml: string, pageIndex: number): OmrSheet | null => {
     }
 
     return { pageIndex, widthPx: width, heightPx: height, systems };
+};
+
+/** Audiveris time-offset is a rational fraction of a WHOLE note ("3/8", "0"). */
+const rationalToTicks = (raw: string | null): number | null => {
+    if (raw === null || raw === '') {
+        return null;
+    }
+    const [numText, denText] = raw.split('/');
+    const num = Number.parseInt(numText ?? '', 10);
+    const den = denText === undefined ? 1 : Number.parseInt(denText, 10);
+    if (!Number.isFinite(num) || !Number.isFinite(den) || den <= 0 || num < 0) {
+        return null;
+    }
+    return Math.round((num / den) * 4 * TICKS_PER_QUARTER);
+};
+
+/**
+ * The stack's <slot> children are the engraved chord columns: x-offset px
+ * from the stack's left edge, time-offset as a fraction of a whole note.
+ * Only a strictly-increasing, in-bounds sequence is trusted — a garbled slot
+ * list degrades that measure back to linear playhead interpolation.
+ */
+const MAX_SLOTS_PER_MEASURE = 64;
+
+const parseStackSlots = (stack: Elem, leftPx: number, rightPx: number, widthPx: number): OmrSlot[] => {
+    const slots: OmrSlot[] = [];
+    for (const slot of childElements(stack, 'slot')) {
+        const xOffset = intAttr(slot, 'x-offset');
+        const ticks = rationalToTicks(slot.getAttribute('time-offset'));
+        if (xOffset === null || ticks === null) {
+            continue;
+        }
+        const xPx = leftPx + xOffset;
+        if (xPx < leftPx || xPx > rightPx) {
+            continue;
+        }
+        slots.push({ x: clamp01(xPx / widthPx), t: ticks });
+        if (slots.length >= MAX_SLOTS_PER_MEASURE) {
+            break;
+        }
+    }
+    for (let i = 1; i < slots.length; i++) {
+        const prev = slots[i - 1];
+        const cur = slots[i];
+        if (!prev || !cur || cur.t <= prev.t || cur.x < prev.x) {
+            return []; // out of order — don't trust any of it
+        }
+    }
+    return slots;
 };
 
 /** Systems can nest under intermediate elements; collect them in document order. */

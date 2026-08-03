@@ -523,12 +523,15 @@ export class PlaybackEngine {
         source.buffer = voice.buffer;
         source.playbackRate.value = playbackRateFor(midi, anchor);
         const gain = ctx.createGain();
-        gain.gain.value = velocity;
+        // Perceptual curve: linear gain flattens dynamics — squaring-ish the
+        // velocity makes pp genuinely whisper and ff genuinely ring.
+        const gainValue = Math.pow(velocity, 1.6);
+        gain.gain.value = gainValue;
         source.connect(gain);
         gain.connect(bus);
 
         const endAt = startAt + Math.max(0.05, durationSec);
-        gain.gain.setValueAtTime(velocity, endAt);
+        gain.gain.setValueAtTime(gainValue, endAt);
         gain.gain.setTargetAtTime(0, endAt, RELEASE_TAU_S);
         // Start from the measured onset so the attack lands exactly on the
         // beat — decoded mp3s carry codec padding at the front.

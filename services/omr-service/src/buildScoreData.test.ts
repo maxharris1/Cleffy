@@ -31,8 +31,8 @@ const geometry: OmrGeometry = {
                     y0: 0.1,
                     y1: 0.3,
                     stacks: [
-                        { x0: 0.1, x1: 0.5 },
-                        { x0: 0.5, x1: 0.9 },
+                        { x0: 0.1, x1: 0.5, slots: [] },
+                        { x0: 0.5, x1: 0.9, slots: [] },
                     ],
                 },
             ],
@@ -63,7 +63,7 @@ describe('buildScoreData', () => {
                     pageIndex: 0,
                     widthPx: 1000,
                     heightPx: 1000,
-                    systems: [{ y0: 0.1, y1: 0.3, stacks: [{ x0: 0.1, x1: 0.5 }] }],
+                    systems: [{ y0: 0.1, y1: 0.3, stacks: [{ x0: 0.1, x1: 0.5, slots: [] }] }],
                 },
             ],
         };

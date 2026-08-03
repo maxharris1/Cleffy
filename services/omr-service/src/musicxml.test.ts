@@ -122,16 +122,62 @@ describe('parseMusicXmlString', () => {
         expect(parseMusicXmlString(xml).warnings).toContain('single_staff_all_rh');
     });
 
-    it('applies alter to pitches and skips grace notes with a warning', () => {
+    it('applies alter to pitches', () => {
         const xml = wrap(
             `<measure number="1">${ATTRS_44}
-                <note><grace/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>
                 <note><pitch><step>F</step><octave>4</octave><alter>1</alter></pitch><duration>16</duration><voice>1</voice></note>
             </measure>`,
         );
+        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: 1920, p: 66, h: 0 }]);
+    });
+
+    it('plays grace notes as crushed attacks stealing time before their principal', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <note><rest/><duration>4</duration><voice>1</voice></note>
+                <note><grace/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>
+                <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+                <note><rest/><duration>8</duration><voice>1</voice></note>
+            </measure>`,
+        );
         const score = parseMusicXmlString(xml);
-        expect(score.notes).toEqual([{ t: 0, d: 1920, p: 66, h: 0 }]);
-        expect(score.warnings).toContain('grace_notes_skipped');
+        expect(score.notes).toEqual([
+            { t: 370, d: 110, p: 62, h: 0, v: 0.58 }, // acciaccatura, just before the beat
+            { t: 480, d: 480, p: 64, h: 0 },
+        ]);
+        expect(score.warnings).not.toContain('grace_notes_skipped');
+    });
+
+    it('shapes velocities from printed dynamics', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <direction><direction-type><dynamics><p/></dynamics></direction-type></direction>
+                ${note('C', 4, 4)}
+                <direction><direction-type><dynamics><f/></dynamics></direction-type></direction>
+                ${note('D', 4, 4)}
+                <note><rest/><duration>8</duration><voice>1</voice></note>
+            </measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.notes).toEqual([
+            { t: 0, d: 480, p: 60, h: 0, v: 0.46 },
+            { t: 480, d: 480, p: 62, h: 0, v: 0.82 },
+        ]);
+    });
+
+    it('sforzando punches a single attack — shared by its whole chord', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <direction><direction-type><dynamics><mf/></dynamics></direction-type></direction>
+                ${note('C', 4, 4)}
+                <direction><direction-type><dynamics><sfz/></dynamics></direction-type></direction>
+                <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+                <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+                ${note('F', 4, 8)}
+            </measure>`,
+        );
+        const velocities = parseMusicXmlString(xml).notes.map((n) => n.v);
+        expect(velocities).toEqual([0.7, 0.9, 0.9, 0.7]); // mf, sfz chord (both), back to mf
     });
 
     it('merges a tie whose stop was renumbered into another voice (system break)', () => {

@@ -1,5 +1,5 @@
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
-import { fractionWithinMeasure, measureIndexAtTick } from '@/features/playback/scoreTime';
+import { measureIndexAtTick, xAtTickInMeasure } from '@/features/playback/scoreTime';
 import { clampScroll, scrollForPagePoint } from '@/features/viewer/geometry';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { useViewerStore } from '@/state/store';
@@ -43,11 +43,11 @@ export const playheadRect = (score: ScoreData, tick: number): PlayheadRect | nul
     if (!system) {
         return null;
     }
-    const frac = fractionWithinMeasure(measure, tick);
     return {
         measureIndex,
         pageIndex: measure.page,
-        x: measure.x0 + frac * (measure.x1 - measure.x0),
+        // Rides the engraved chord columns when the analysis provides them.
+        x: xAtTickInMeasure(measure, tick),
         x0: measure.x0,
         x1: measure.x1,
         y0: system.y0,

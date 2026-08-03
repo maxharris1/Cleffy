@@ -124,6 +124,8 @@ describe('PlaybackEngine', () => {
         await engine.play();
         await advance(ctx, 16);
         expect(ctx.sources).toHaveLength(tinyScore.notes.length);
+        // Default velocity 0.75 through the perceptual curve (v^1.6).
+        expect(ctx.gains[4]?.gain.value).toBeCloseTo(Math.pow(0.75, 1.6), 4);
         // Note k starts at anchor(0.08) + t·spt.
         const expected = tinyScore.notes.map((n) => 0.08 + n.t * SPT_120);
         const actual = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);

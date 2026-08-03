@@ -18,7 +18,8 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
 
     const warnings = new Set(musical.warnings);
     const systems: ScoreSystem[] = [];
-    const slots: Array<{ page: number; sys: number; x0: number; x1: number }> = [];
+    const stacks: Array<{ page: number; sys: number; x0: number; x1: number; slots: Array<{ x: number; t: number }> }> =
+        [];
 
     if (geometry) {
         for (const sheet of geometry.sheets) {
@@ -26,7 +27,7 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
                 const sysIndex = systems.length;
                 systems.push({ page: sheet.pageIndex, y0: system.y0, y1: system.y1 });
                 for (const stack of system.stacks) {
-                    slots.push({ page: sheet.pageIndex, sys: sysIndex, x0: stack.x0, x1: stack.x1 });
+                    stacks.push({ page: sheet.pageIndex, sys: sysIndex, x0: stack.x0, x1: stack.x1, slots: stack.slots });
                 }
             }
         }
@@ -34,20 +35,24 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         warnings.add('no_geometry');
     }
 
-    if (geometry && slots.length !== musical.measures.length) {
+    if (geometry && stacks.length !== musical.measures.length) {
         warnings.add('measure_geometry_mismatch');
     }
 
     const measures: ScoreMeasure[] = musical.measures.map((measure, index) => {
-        const slot = slots[index];
+        const stack = stacks[index];
+        // Chord columns must fit inside the measure's own timeline — an OMR
+        // rhythm misread otherwise drags the playhead outside the bar.
+        const slots = stack ? stack.slots.filter((slot) => slot.t < measure.dTicks) : [];
         return {
             n: measure.n,
             tick: measure.tick,
             dTicks: measure.dTicks,
-            page: slot ? slot.page : -1,
-            sys: slot ? slot.sys : -1,
-            x0: slot ? slot.x0 : 0,
-            x1: slot ? slot.x1 : 0,
+            page: stack ? stack.page : -1,
+            sys: stack ? stack.sys : -1,
+            x0: stack ? stack.x0 : 0,
+            x1: stack ? stack.x1 : 0,
+            ...(slots.length > 0 ? { sl: slots } : {}),
         };
     });
 

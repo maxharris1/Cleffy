@@ -18,6 +18,32 @@ export interface MusicalScore {
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
 
+/** The engine's default when a note carries no velocity — roughly mezzo-forte. */
+const DEFAULT_VELOCITY = 0.72;
+
+/** Sustained dynamic marks → velocity levels (perceptual spread pp…fff). */
+const DYNAMIC_LEVELS: Record<string, number> = {
+    pppp: 0.2,
+    ppp: 0.26,
+    pp: 0.34,
+    p: 0.46,
+    mp: 0.58,
+    mf: 0.7,
+    f: 0.82,
+    ff: 0.92,
+    fff: 1,
+    ffff: 1,
+};
+
+/** One-note accents: sforzando family punches the next attack only. */
+const ACCENT_DYNAMICS = new Set(['sf', 'sfz', 'sffz', 'fz', 'rf', 'rfz', 'fp', 'sfp']);
+
+/** Crushed grace-note length (≈55 ms at 120 bpm) — acciaccatura feel. */
+const GRACE_TICKS = 110;
+
+const clampVelocity = (v: number): number => Math.min(1, Math.max(0.1, v));
+const roundVelocity = (v: number): number => Math.round(v * 100) / 100;
+
 type Elem = NonNullable<ReturnType<DOMParser['parseFromString']>['documentElement']>;
 
 const childElements = (parent: Elem, name?: string): Elem[] => {
@@ -209,6 +235,14 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
     let currentSig = { num: 4, den: 4 };
     let measureStart = ctx.tickOffset;
     let runningNumber: number | null = null;
+    /** Sustained dynamic level in force (undefined → engine default). */
+    let currentVelocity: number | undefined;
+    /** A sforzando-family mark punches only the next attack. */
+    let pendingAccent = false;
+    /** Velocity given to the current chord's base note — chord members share it. */
+    let slotVelocity: number | undefined;
+    /** Grace notes buffered until their principal note arrives. */
+    let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
     const openTies = new Map<string, ScoreNote>();
 
@@ -273,6 +307,31 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                             defaultBpm = Math.round(parsed * quartersPerBeat);
                         }
                     }
+                    // Dynamics shape every following attack; sf-family accents one.
+                    const dynamics = child.getElementsByTagName('dynamics').item(0) as Elem | null;
+                    if (dynamics) {
+                        for (const mark of childElements(dynamics)) {
+                            const level = DYNAMIC_LEVELS[mark.nodeName];
+                            if (level !== undefined) {
+                                currentVelocity = level;
+                                break;
+                            }
+                            if (ACCENT_DYNAMICS.has(mark.nodeName)) {
+                                pendingAccent = true;
+                                if (mark.nodeName === 'fp' || mark.nodeName === 'sfp') {
+                                    currentVelocity = DYNAMIC_LEVELS['p'];
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        // <sound dynamics> is a percentage of a standard forte.
+                        const soundDynamics = sound?.getAttribute('dynamics');
+                        const pct = soundDynamics ? Number.parseFloat(soundDynamics) : NaN;
+                        if (Number.isFinite(pct) && pct > 0) {
+                            currentVelocity = roundVelocity(clampVelocity((pct / 100) * 0.82));
+                        }
+                    }
                     break;
                 }
                 case 'backup': {
@@ -294,7 +353,13 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                 }
                 case 'note': {
                     if (firstChild(child, 'grace')) {
-                        ctx.warnings.add('grace_notes_skipped');
+                        // Buffer graces; they crush in just before their principal.
+                        const gracePitch = firstChild(child, 'pitch');
+                        const graceMidi = gracePitch ? midiFromPitch(gracePitch) : null;
+                        if (graceMidi !== null && pendingGraces.length < 8) {
+                            const graceStaff = childInt(child, 'staff') ?? 1;
+                            pendingGraces.push({ midi: graceMidi, hand: graceStaff >= 2 ? 1 : ctx.fallbackHand });
+                        }
                         break;
                     }
                     const isChord = firstChild(child, 'chord') !== null;
@@ -347,7 +412,46 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                                     }
                                 }
                             } else {
-                                const note: ScoreNote = { t: start, d: durTicks, p: midi, h: hand };
+                                if (!isChord && pendingGraces.length > 0) {
+                                    // Crush buffered graces just before this attack,
+                                    // stealing time from what came before (they may
+                                    // reach back across the barline — that's correct).
+                                    const count = pendingGraces.length;
+                                    pendingGraces.forEach((grace, i) => {
+                                        notes.push({
+                                            t: Math.max(ctx.tickOffset, start - GRACE_TICKS * (count - i)),
+                                            d: GRACE_TICKS,
+                                            p: grace.midi,
+                                            h: grace.hand,
+                                            v: roundVelocity(
+                                                clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) * 0.8),
+                                            ),
+                                        });
+                                    });
+                                    pendingGraces = [];
+                                }
+                                // Chord members share their base note's velocity so an
+                                // accent lands on the whole chord, not just one voice.
+                                let velocity: number | undefined;
+                                if (isChord) {
+                                    velocity = slotVelocity;
+                                } else if (pendingAccent) {
+                                    pendingAccent = false;
+                                    velocity = roundVelocity(
+                                        clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) + 0.2),
+                                    );
+                                    slotVelocity = velocity;
+                                } else {
+                                    velocity = currentVelocity;
+                                    slotVelocity = velocity;
+                                }
+                                const note: ScoreNote = {
+                                    t: start,
+                                    d: durTicks,
+                                    p: midi,
+                                    h: hand,
+                                    ...(velocity !== undefined ? { v: velocity } : {}),
+                                };
                                 notes.push(note);
                                 if (tieTypes.includes('start')) {
                                     openTies.set(tieKey, note);
@@ -409,6 +513,11 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
 
         measures.push({ n: displayNumber, tick: measureStart, dTicks: length });
         measureStart += length;
+    }
+
+    if (pendingGraces.length > 0) {
+        // Graces with no principal note to attach to (OMR tail damage).
+        ctx.warnings.add('grace_notes_skipped');
     }
 
     if (timeSignatures.length === 0 && !ctx.timeline) {

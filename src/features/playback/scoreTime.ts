@@ -61,6 +61,43 @@ export const fractionWithinMeasure = (measure: ScoreMeasure, tick: number): numb
 };
 
 /**
+ * Horizontal playhead position within a measure, riding the engraved chord
+ * columns when the analysis provides them (measure.sl): the line sits exactly
+ * on each chord as it sounds and moves proportionally between columns — slow
+ * through long values, quick through runs — instead of pretending time is
+ * spaced evenly across the bar. Falls back to linear interpolation.
+ */
+export const xAtTickInMeasure = (measure: ScoreMeasure, tick: number): number => {
+    const slots = measure.sl;
+    if (!slots || slots.length === 0) {
+        return measure.x0 + fractionWithinMeasure(measure, tick) * (measure.x1 - measure.x0);
+    }
+    const rel = Math.min(measure.dTicks, Math.max(0, tick - measure.tick));
+    const first = slots[0];
+    if (!first || rel <= first.t) {
+        // The pre-slot zone is the measure header (clef/key/time) — no music
+        // time lives there, so the line waits on the first chord column.
+        return first ? first.x : measure.x0;
+    }
+    for (let i = 0; i + 1 < slots.length; i++) {
+        const a = slots[i];
+        const b = slots[i + 1];
+        if (a && b && rel < b.t) {
+            return a.x + ((rel - a.t) / (b.t - a.t)) * (b.x - a.x);
+        }
+    }
+    const last = slots[slots.length - 1];
+    if (!last) {
+        return measure.x0;
+    }
+    const span = measure.dTicks - last.t;
+    if (span <= 0) {
+        return last.x;
+    }
+    return last.x + Math.min(1, (rel - last.t) / span) * (measure.x1 - last.x);
+};
+
+/**
  * Prev/next-measure stepping, with the standard transport nuance: stepping
  * back from >20% into a measure returns to that measure's own start first.
  * Returns the target start tick.

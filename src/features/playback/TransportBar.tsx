@@ -264,8 +264,11 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                         >
                             −
                         </button>
-                        <span className="min-w-[4.25rem] text-center text-sm tabular-nums text-stone-700">
+                        <span className="min-w-[4.25rem] whitespace-nowrap text-center text-sm tabular-nums text-stone-700">
                             ♩= {bpm}
+                            {isCompoundMeter(score) ? (
+                                <span className="ml-1 text-xs text-stone-400">(♩· = {Math.round(bpm / 1.5)})</span>
+                            ) : null}
                         </span>
                         <button
                             type="button"
@@ -418,6 +421,12 @@ const HandControl = ({
         />
     </div>
 );
+
+/** 6/8, 9/8, 12/8… — musicians read those tempos in dotted-quarter beats. */
+const isCompoundMeter = (score: ScoreData): boolean => {
+    const sig = score.timeSignatures[0];
+    return Boolean(sig && sig.den >= 8 && sig.num >= 6 && sig.num % 3 === 0);
+};
 
 const pillButton = (active: boolean, attention = false): string =>
     [

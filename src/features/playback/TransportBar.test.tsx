@@ -139,6 +139,17 @@ describe('TransportBar ready controls', () => {
         expect(useViewerStore.getState().loopRange).toBeNull();
     });
 
+    it('shows the dotted-quarter equivalent for compound meters', () => {
+        setStore(() => useViewerStore.getState().setBpm(90));
+        const compound = { ...tinyScore, timeSignatures: [{ tick: 0, num: 6, den: 8 }] };
+        renderBar({ state: { kind: 'ready', score: compound, bpmDefault: null, bpmOverride: null } });
+        expect(screen.getByText(/♩· = 60/)).toBeInTheDocument();
+
+        cleanup();
+        renderBar(); // 4/4 score — quarter display only
+        expect(screen.queryByText(/♩· =/)).not.toBeInTheDocument();
+    });
+
     it('surfaces the resume-follow affordance when following is suspended', async () => {
         setStore(() => useViewerStore.getState().setFollowMode('suspended'));
         renderBar();

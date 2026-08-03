@@ -77,6 +77,23 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
     it('found no tempo mark (metronome text needs OCR) → defaultBpm null', () => {
         expect(score.defaultBpm).toBeNull();
     });
+
+    it('carries the engraved chord columns for a note-accurate playhead', () => {
+        // Every fixture measure has slot data (1–4 chord columns).
+        expect(score.measures.every((m) => (m.sl?.length ?? 0) >= 1)).toBe(true);
+        // m1: two half-note columns at ticks 0 and 960.
+        expect(score.measures[1]?.sl?.map((s) => s.t)).toEqual([0, 960]);
+        // m5 (the eighth-note run): quarter, two eighths, quarter → 0, 480, 720, 960 —
+        // with the UNEVEN engraved x spacing a linear playhead would get wrong.
+        expect(score.measures[5]?.sl?.map((s) => s.t)).toEqual([0, 480, 720, 960]);
+        for (const measure of score.measures) {
+            for (const slot of measure.sl ?? []) {
+                expect(slot.x).toBeGreaterThanOrEqual(measure.x0);
+                expect(slot.x).toBeLessThanOrEqual(measure.x1);
+                expect(slot.t).toBeLessThan(measure.dTicks);
+            }
+        }
+    });
 });
 
 describe('key-signature fixture (G major, real Audiveris 5.6.1 artifact)', () => {

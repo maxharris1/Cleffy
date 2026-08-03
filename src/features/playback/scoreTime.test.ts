@@ -14,6 +14,7 @@ import {
     stepMeasure,
     ticksPerBeat,
     timeSigAt,
+    xAtTickInMeasure,
 } from '@/features/playback/scoreTime';
 import { parseScoreData } from '@/types/scoreData';
 
@@ -84,6 +85,41 @@ describe('fractionWithinMeasure', () => {
         expect(fractionWithinMeasure(m1, 480 + 960)).toBeCloseTo(0.5);
         expect(fractionWithinMeasure(m1, 99999)).toBe(1);
         expect(fractionWithinMeasure(m1, 0)).toBe(0);
+    });
+});
+
+describe('xAtTickInMeasure', () => {
+    const withSlots = {
+        n: 1,
+        tick: 1000,
+        dTicks: 1920,
+        page: 0,
+        sys: 0,
+        x0: 0.2,
+        x1: 0.4,
+        sl: [
+            { x: 0.22, t: 0 },
+            { x: 0.3, t: 1440 },
+        ],
+    };
+
+    it('rides the engraved chord columns, not linear time', () => {
+        expect(xAtTickInMeasure(withSlots, 1000)).toBe(0.22); // on the first chord
+        expect(xAtTickInMeasure(withSlots, 1000 + 720)).toBeCloseTo(0.26, 6); // halfway to the 2nd column
+        expect(xAtTickInMeasure(withSlots, 1000 + 1440)).toBe(0.3);
+        // Linear interpolation would put tick 720/1920 at x = 0.275 — the dotted
+        // rhythm's engraving says 0.26. That difference is the whole point.
+        expect(xAtTickInMeasure(withSlots, 1000 + 720)).not.toBeCloseTo(0.275, 3);
+    });
+
+    it('sweeps from the last column to the barline', () => {
+        expect(xAtTickInMeasure(withSlots, 1000 + 1680)).toBeCloseTo(0.35, 6); // halfway of the tail
+        expect(xAtTickInMeasure(withSlots, 1000 + 1920)).toBeCloseTo(0.4, 6);
+    });
+
+    it('falls back to linear interpolation without slot data', () => {
+        const plain = { ...withSlots, sl: undefined };
+        expect(xAtTickInMeasure(plain, 1000 + 960)).toBeCloseTo(0.3, 6);
     });
 });
 
