@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 
+import { pagePointToViewport } from '@/features/viewer/geometry';
 import type { PageLayout } from '@/features/viewer/geometry';
 import type { TextIntent } from '@/features/viewer/ink/InkController';
 import { isTextPayload } from '@/types/models';
@@ -22,8 +23,7 @@ export const TextEditorOverlay = ({ intent, layout, view, onCommit, onCancel }: 
     const nx = existingPayload ? existingPayload.x : intent.nx;
     const ny = existingPayload ? existingPayload.y : intent.ny;
 
-    const left = (layout.left + nx * layout.width) * view.scale - view.scrollX;
-    const top = (layout.top + ny * layout.height) * view.scale - view.scrollY;
+    const { x: left, y: top } = pagePointToViewport(view, layout, nx, ny);
     const fontPx = (existingPayload ? existingPayload.size : 0.018) * layout.width * view.scale;
 
     useEffect(() => {

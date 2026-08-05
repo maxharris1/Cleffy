@@ -1,6 +1,9 @@
 import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
-/** Cross-isolate rate limiting shared by all Edge Functions. */
+/**
+ * Shared Edge Function rate limiting (extracted from imslp.ts so non-IMSLP
+ * functions can use it without pulling MediaWiki helpers).
+ */
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 

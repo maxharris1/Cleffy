@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
+import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
+import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
+import { PlayheadController } from '@/features/playback/PlayheadController';
+import { measureIndexAtPagePoint, measureStartTick } from '@/features/playback/scoreTime';
 import {
     clampScroll,
     computeDocumentLayout,
     fitPageWidthScale,
     focusedPageIndex,
+    viewportToPagePoint,
     visiblePageRange,
     zoomAt,
     type DocumentLayout,
@@ -25,6 +30,7 @@ import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/syn
 import type { PresencePeer } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
+import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
@@ -40,12 +46,20 @@ interface ViewportSize {
     height: number;
 }
 
+/** Play-along wiring: ScoreData + a handle to the (lazily created) engine. */
+export interface PlaybackFeature {
+    score: ScoreData | null;
+    getEngine: () => PlaybackEngine | null;
+}
+
 export interface PdfViewportProps {
     docId: string;
     /** View-only role: hides editing UI and blocks the ink delegate. */
     readOnly?: boolean;
     /** Expose the live AnnotationStore to the parent (share/history chrome). */
     onStoreReady?: (store: AnnotationStore) => void;
+    /** Present when play-along is available: playhead + tap-to-seek + loop tint. */
+    playback?: PlaybackFeature;
     /** Present for cloud documents: enables the sync engine + realtime channel. */
     sync?: {
         userId: string;
@@ -63,7 +77,7 @@ export interface PdfViewportProps {
  * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
  * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: PdfViewportProps) => {
+export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -89,11 +103,26 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
     const layoutRef = useRef(layout);
     const viewportSizeRef = useRef(viewportSize);
     const readOnlyRef = useRef(effectiveReadOnly);
+    const renderScaleRef = useRef(renderScale);
+    const playbackRef = useRef(playback);
     useEffect(() => {
         layoutRef.current = layout;
         viewportSizeRef.current = viewportSize;
         readOnlyRef.current = effectiveReadOnly;
-    }, [layout, viewportSize, effectiveReadOnly]);
+        renderScaleRef.current = renderScale;
+        playbackRef.current = playback;
+    }, [layout, viewportSize, effectiveReadOnly, renderScale, playback]);
+
+    // Playhead overlay elements (inside the transformed wrapper) + controller.
+    // These live in state, not refs: the overlay divs only exist once the PDF
+    // has rendered, which can happen AFTER the score analysis arrives (a warm
+    // Dexie cache serves ScoreData almost immediately on reopen). A ref would
+    // still be null when the controller effect first ran, and nothing would
+    // re-run it — the playhead then never appeared for the rest of the
+    // session. Callback refs re-fire the effect the moment the divs mount.
+    const [playheadLineEl, setPlayheadLineEl] = useState<HTMLDivElement | null>(null);
+    const [measureHighlightEl, setMeasureHighlightEl] = useState<HTMLDivElement | null>(null);
+    const playheadControllerRef = useRef<PlayheadController | null>(null);
 
     useEffect(() => {
         void annotationStore.load();
@@ -176,19 +205,43 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
 
         const controller = new GestureController(el, {
             onPan: (dx, dy) => {
+                playheadControllerRef.current?.notifyUserGesture();
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp({ ...v, scrollX: v.scrollX - dx, scrollY: v.scrollY - dy }));
             },
             onZoomBy: (factor, cx, cy) => {
+                playheadControllerRef.current?.notifyUserGesture();
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp(zoomAt(v, v.scale * factor, cx, cy)));
             },
             onWheelScroll: (dx, dy) => {
+                playheadControllerRef.current?.notifyUserGesture();
                 const { view: v, setView } = useViewerStore.getState();
                 setView(clamp({ ...v, scrollX: v.scrollX + dx, scrollY: v.scrollY + dy }));
             },
             onGestureEnd: () => {
                 // Bitmap refresh is handled by the settle timer on scale change.
+            },
+            onTap: (x, y) => {
+                // Tap a measure to seek there — with the pan tool (or as a
+                // read-only viewer, whose taps can't mean anything else).
+                const feature = playbackRef.current;
+                if (!feature?.score) {
+                    return;
+                }
+                const state = useViewerStore.getState();
+                if (!readOnlyRef.current && state.tool !== 'pan') {
+                    return;
+                }
+                const point = viewportToPagePoint(state.view, layoutRef.current.layouts, x, y);
+                if (!point) {
+                    return;
+                }
+                const index = measureIndexAtPagePoint(feature.score, point.pageIndex, point.nx, point.ny);
+                if (index < 0) {
+                    return;
+                }
+                feature.getEngine()?.seek(measureStartTick(feature.score.measures, index));
             },
         });
         controller.setInkDelegate(ink.delegate);
@@ -255,6 +308,29 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
         syncOnPeers,
         syncOnDocReplaced,
     ]);
+
+    // Playhead: imperative rAF controller over the two overlay divs below.
+    const playbackScore = playback?.score ?? null;
+    const playbackGetEngine = playback?.getEngine;
+    useEffect(() => {
+        if (!playbackScore || !playbackGetEngine || !playheadLineEl || !measureHighlightEl) {
+            return;
+        }
+        const controller = new PlayheadController({
+            getEngine: playbackGetEngine,
+            getScore: () => playbackScore,
+            lineEl: playheadLineEl,
+            highlightEl: measureHighlightEl,
+            getLayout: () => layoutRef.current,
+            getRenderScale: () => renderScaleRef.current,
+            getViewportSize: () => viewportSizeRef.current,
+        });
+        playheadControllerRef.current = controller;
+        return () => {
+            playheadControllerRef.current = null;
+            controller.destroy();
+        };
+    }, [playbackScore, playbackGetEngine, playheadLineEl, measureHighlightEl]);
 
     // Presence: report the top visible page (debounced against scroll churn).
     useEffect(() => {
@@ -372,6 +448,23 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, sync }: Pdf
                         }}
                     >
                         {pages}
+                        {playbackScore ? (
+                            <>
+                                <LoopRangeOverlay score={playbackScore} layout={layout} renderScale={renderScale} />
+                                <div
+                                    ref={setMeasureHighlightEl}
+                                    aria-hidden="true"
+                                    className="pointer-events-none absolute left-0 top-0 rounded-[2px] bg-accent/10"
+                                    style={{ display: 'none' }}
+                                />
+                                <div
+                                    ref={setPlayheadLineEl}
+                                    aria-hidden="true"
+                                    className="pointer-events-none absolute left-0 top-0 w-[2px] rounded-full bg-accent/70"
+                                    style={{ display: 'none' }}
+                                />
+                            </>
+                        ) : null}
                     </div>
                     {overlayMode === 'history' ? (
                         <div

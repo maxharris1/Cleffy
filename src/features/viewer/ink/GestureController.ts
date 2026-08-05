@@ -17,7 +17,16 @@ export interface GestureCallbacks {
     onWheelScroll: (dx: number, dy: number) => void;
     /** A navigation gesture (pan/pinch) ended — commit crisp re-render, inertia, etc. */
     onGestureEnd: () => void;
+    /**
+     * A single non-ink pointer went down and up without moving (tap/click) —
+     * local viewport coords. Used for tap-a-measure-to-seek during playback.
+     */
+    onTap?: (x: number, y: number, pointerType: string) => void;
 }
+
+/** Tap thresholds: total movement and press duration. */
+const TAP_MAX_DIST_PX = 8;
+const TAP_MAX_MS = 350;
 
 export interface InkDelegate {
     /** Return true to claim the pointer for inking (checked on pointerdown). */
@@ -33,6 +42,12 @@ interface TrackedPointer {
     x: number;
     y: number;
     type: string;
+    downX: number;
+    downY: number;
+    downAt: number;
+    maxDist: number;
+    /** True once this pointer ever shared the surface with another (pinch). */
+    multi: boolean;
 }
 
 /** Safari-proprietary gesture events (desktop trackpad pinch). */
@@ -124,7 +139,22 @@ export class GestureController {
         }
 
         const { x, y } = this.toLocal(e);
-        this.pointers.set(e.pointerId, { id: e.pointerId, x, y, type: e.pointerType });
+        this.pointers.set(e.pointerId, {
+            id: e.pointerId,
+            x,
+            y,
+            type: e.pointerType,
+            downX: x,
+            downY: y,
+            downAt: performance.now(),
+            maxDist: 0,
+            multi: this.pointers.size > 0,
+        });
+        if (this.pointers.size > 1) {
+            for (const pointer of this.pointers.values()) {
+                pointer.multi = true;
+            }
+        }
         this.navigating = true;
     };
 
@@ -165,6 +195,7 @@ export class GestureController {
 
         tracked.x = x;
         tracked.y = y;
+        tracked.maxDist = Math.max(tracked.maxDist, Math.hypot(x - tracked.downX, y - tracked.downY));
     };
 
     private onPointerUp = (e: PointerEvent): void => {
@@ -174,7 +205,17 @@ export class GestureController {
             this.inkDelegate?.onInkUp(e);
             return;
         }
+        const tracked = this.pointers.get(e.pointerId);
         this.pointers.delete(e.pointerId);
+        if (
+            tracked &&
+            !tracked.multi &&
+            this.pointers.size === 0 &&
+            tracked.maxDist < TAP_MAX_DIST_PX &&
+            performance.now() - tracked.downAt < TAP_MAX_MS
+        ) {
+            this.callbacks.onTap?.(tracked.x, tracked.y, tracked.type);
+        }
         if (this.pointers.size === 0 && this.navigating) {
             this.navigating = false;
             this.callbacks.onGestureEnd();

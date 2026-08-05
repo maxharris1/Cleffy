@@ -8,6 +8,9 @@ import {
     MAX_SCALE,
     MIN_SCALE,
     PAGE_GAP,
+    pagePointToViewport,
+    scrollForPagePoint,
+    viewportToPagePoint,
     visiblePageRange,
     zoomAt,
 } from '@/features/viewer/geometry';
@@ -107,6 +110,68 @@ describe('clampScroll', () => {
     it('centers content narrower than the viewport', () => {
         const clamped = clampScroll({ scale: 1, scrollX: 0, scrollY: 0 }, layout, 1000, 600);
         expect(clamped.scrollX).toBe(-(1000 - layout.contentWidth) / 2);
+    });
+});
+
+describe('pagePointToViewport', () => {
+    const { layouts } = computeDocumentLayout(pages);
+
+    it('inverts viewportToPagePoint', () => {
+        const view = { scale: 1.7, scrollX: 120, scrollY: 940 };
+        for (const [nx, ny, pageIndex] of [
+            [0.25, 0.4, 0],
+            [0.9, 0.05, 1],
+            [0.5, 0.99, 2],
+        ] as const) {
+            const layout = layouts[pageIndex];
+            if (!layout) {
+                throw new Error('missing layout');
+            }
+            const { x, y } = pagePointToViewport(view, layout, nx, ny);
+            const roundTrip = viewportToPagePoint(view, layouts, x, y);
+            expect(roundTrip?.pageIndex).toBe(pageIndex);
+            expect(roundTrip?.nx).toBeCloseTo(nx);
+            expect(roundTrip?.ny).toBeCloseTo(ny);
+        }
+    });
+
+    it('matches the raw formula at identity view', () => {
+        const layout = layouts[0];
+        if (!layout) {
+            throw new Error('missing layout');
+        }
+        const { x, y } = pagePointToViewport({ scale: 1, scrollX: 0, scrollY: 0 }, layout, 0.5, 0.5);
+        expect(x).toBe(layout.left + layout.width / 2);
+        expect(y).toBe(layout.top + layout.height / 2);
+    });
+});
+
+describe('scrollForPagePoint', () => {
+    const layout = computeDocumentLayout(pages);
+
+    it('places the page point at the requested viewport anchor', () => {
+        const pageLayout = layout.layouts[1];
+        if (!pageLayout) {
+            throw new Error('missing layout');
+        }
+        const view = { scale: 2, scrollX: 0, scrollY: 0 };
+        const scrolled = scrollForPagePoint(view, pageLayout, 0.5, 0.25, 800, 600, 0.5, 0.15);
+        const { x, y } = pagePointToViewport(scrolled, pageLayout, 0.5, 0.25);
+        expect(x).toBeCloseTo(800 * 0.5);
+        expect(y).toBeCloseTo(600 * 0.15);
+        expect(scrolled.scale).toBe(2);
+    });
+
+    it('composes with clampScroll without changing scale', () => {
+        const pageLayout = layout.layouts[0];
+        if (!pageLayout) {
+            throw new Error('missing layout');
+        }
+        const view = { scale: 1, scrollX: 0, scrollY: 0 };
+        // Anchoring the very top of page 0 near the viewport top over-scrolls above the content.
+        const clamped = clampScroll(scrollForPagePoint(view, pageLayout, 0.5, 0, 800, 600, 0.5, 0.9), layout, 800, 600);
+        expect(clamped.scrollY).toBe(0);
+        expect(clamped.scale).toBe(1);
     });
 });
 

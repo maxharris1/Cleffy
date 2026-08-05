@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-    { ignores: ['dist', 'dev-dist', 'coverage', 'node_modules'] },
+    { ignores: ['dist', 'dev-dist', 'coverage', 'node_modules', 'services/omr-service/dist'] },
     {
         files: ['**/*.{ts,tsx}'],
         extends: [
@@ -36,6 +36,7 @@ export default tseslint.config(
                 process: 'readonly',
                 URL: 'readonly',
                 crypto: 'readonly',
+                fetch: 'readonly',
                 setTimeout: 'readonly',
                 clearTimeout: 'readonly',
                 // Browser globals: E2E scripts embed page-context closures

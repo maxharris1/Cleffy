@@ -22,7 +22,49 @@ export const ERASER_RADIUS_CSS: Record<StrokeWidthKey, number> = {
 /** Highlighter is a fat translucent pen. */
 export const HIGHLIGHT_WIDTH_FACTOR = 3.5;
 
-interface ViewerStore {
+export type PlaybackStatus = 'idle' | 'loading' | 'counting' | 'playing' | 'paused' | 'ended';
+
+/** Auto-follow: on (playhead drives scroll), suspended (user panned mid-play), off. */
+export type FollowMode = 'on' | 'suspended' | 'off';
+
+/** Inclusive measure-index range for the A-B practice loop. */
+export interface LoopRange {
+    a: number;
+    b: number;
+}
+
+export const BPM_MIN = 40;
+export const BPM_MAX = 240;
+export const DEFAULT_BPM = 100;
+
+interface PlaybackSlice {
+    playbackStatus: PlaybackStatus;
+    bpm: number;
+    /** Index into ScoreData.measures (not the printed number), null before playback. */
+    currentMeasureIndex: number | null;
+    muteRH: boolean;
+    muteLH: boolean;
+    /** Per-hand volume 0–1 (independent of mute). */
+    volRH: number;
+    volLH: number;
+    metronomeOn: boolean;
+    countInOn: boolean;
+    loopRange: LoopRange | null;
+    followMode: FollowMode;
+    setPlaybackStatus: (playbackStatus: PlaybackStatus) => void;
+    setBpm: (bpm: number) => void;
+    setCurrentMeasureIndex: (currentMeasureIndex: number | null) => void;
+    setHandMuted: (hand: 0 | 1, muted: boolean) => void;
+    setHandVolume: (hand: 0 | 1, volume: number) => void;
+    setMetronomeOn: (metronomeOn: boolean) => void;
+    setCountInOn: (countInOn: boolean) => void;
+    setLoopRange: (loopRange: LoopRange | null) => void;
+    setFollowMode: (followMode: FollowMode) => void;
+    /** Back to defaults when the viewer switches documents. */
+    resetPlayback: () => void;
+}
+
+interface ViewerStore extends PlaybackSlice {
     view: ViewState;
     pinch: PinchPreview | null;
     tool: Tool;
@@ -43,6 +85,20 @@ interface ViewerStore {
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
+
+const INITIAL_PLAYBACK = {
+    playbackStatus: 'idle',
+    bpm: DEFAULT_BPM,
+    currentMeasureIndex: null,
+    muteRH: false,
+    muteLH: false,
+    volRH: 1,
+    volLH: 1,
+    metronomeOn: false,
+    countInOn: true,
+    loopRange: null,
+    followMode: 'on',
+} satisfies Partial<ViewerStore>;
 
 /**
  * Viewer UI state (zoom/pan, active tool, transient gesture preview).
@@ -66,4 +122,18 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setWidthKey: (widthKey) => set({ widthKey }),
     setFocusedPageIndex: (focusedPageIndex) => set({ focusedPageIndex }),
     setFingerDraws: (fingerDraws) => set({ fingerDraws }),
+    ...INITIAL_PLAYBACK,
+    setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
+    setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),
+    setCurrentMeasureIndex: (currentMeasureIndex) => set({ currentMeasureIndex }),
+    setHandMuted: (hand, muted) => set(hand === 0 ? { muteRH: muted } : { muteLH: muted }),
+    setHandVolume: (hand, volume) => {
+        const clamped = Math.min(1, Math.max(0, volume));
+        set(hand === 0 ? { volRH: clamped } : { volLH: clamped });
+    },
+    setMetronomeOn: (metronomeOn) => set({ metronomeOn }),
+    setCountInOn: (countInOn) => set({ countInOn }),
+    setLoopRange: (loopRange) => set({ loopRange }),
+    setFollowMode: (followMode) => set({ followMode }),
+    resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));

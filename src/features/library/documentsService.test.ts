@@ -42,6 +42,7 @@ vi.mock('@/sync/db', () => {
             annotationSnapshots: table({
                 where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }),
             }),
+            scoreCache: table({ delete: () => Promise.resolve() }),
         }),
     };
 });

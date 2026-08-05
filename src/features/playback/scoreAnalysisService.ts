@@ -1,0 +1,111 @@
+import { getSupabase } from '@/lib/supabase';
+import { getDb } from '@/sync/db';
+import type { CachedScoreAnalysis } from '@/sync/db';
+import type { ScoreAnalysisStatus } from '@/types/database';
+import { parseScoreData } from '@/types/scoreData';
+
+/**
+ * Client access to score_analyses. Free-plan discipline: polling reads the
+ * lifecycle columns only — the ScoreData jsonb travels once, when the row is
+ * ready, and then lives in the Dexie scoreCache for offline replays.
+ */
+
+export interface ScoreAnalysisStatusRow {
+    status: ScoreAnalysisStatus;
+    error: string | null;
+    progress: number | null;
+    updatedAt: string;
+}
+
+/** A processing row untouched for this long is a lost job (service died/recycled). */
+export const STALE_PROCESSING_MS = 20 * 60 * 1000;
+
+export const isProcessingStale = (updatedAt: string): boolean =>
+    Date.now() - new Date(updatedAt).getTime() > STALE_PROCESSING_MS;
+
+/** Lifecycle-only poll — never pulls the jsonb. Null = no analysis row yet. */
+export const fetchScoreAnalysisStatus = async (docId: string): Promise<ScoreAnalysisStatusRow | null> => {
+    const { data, error } = await getSupabase()
+        .from('score_analyses')
+        .select('status, error, progress, updated_at')
+        .eq('document_id', docId)
+        .maybeSingle();
+    if (error) {
+        throw new Error(`Could not check play-along status: ${error.message}`);
+    }
+    if (!data) {
+        return null;
+    }
+    return { status: data.status, error: data.error, progress: data.progress, updatedAt: data.updated_at };
+};
+
+/** Full row (including ScoreData), validated and mirrored into the Dexie cache. */
+export const fetchScoreAnalysisFull = async (docId: string): Promise<CachedScoreAnalysis | null> => {
+    const { data, error } = await getSupabase()
+        .from('score_analyses')
+        .select('*')
+        .eq('document_id', docId)
+        .maybeSingle();
+    if (error) {
+        throw new Error(`Could not load play-along data: ${error.message}`);
+    }
+    if (!data) {
+        return null;
+    }
+    const previous = await getDb().scoreCache.get(docId);
+    const cached: CachedScoreAnalysis = {
+        docId,
+        status: data.status,
+        error: data.error,
+        score: data.score ? parseScoreData(data.score) : null,
+        engineVersion: data.engine_version,
+        bpmDefault: data.bpm_default,
+        fetchedAt: new Date().toISOString(),
+        ...(previous?.bpmOverride !== undefined ? { bpmOverride: previous.bpmOverride } : {}),
+    };
+    await getDb().scoreCache.put(cached);
+    return cached;
+};
+
+export const loadCachedScoreAnalysis = async (docId: string): Promise<CachedScoreAnalysis | null> => {
+    return (await getDb().scoreCache.get(docId)) ?? null;
+};
+
+/** Remember the user's practice tempo for this score across sessions. */
+export const saveBpmOverride = async (docId: string, bpm: number): Promise<void> => {
+    const cached = await getDb().scoreCache.get(docId);
+    if (cached) {
+        await getDb().scoreCache.put({ ...cached, bpmOverride: bpm });
+    }
+};
+
+export interface RequestAnalysisResult {
+    ok: boolean;
+    /** Machine code when not ok (e.g. already_running, too_large, service_unreachable). */
+    code?: string;
+}
+
+/** Kick off (or retry) analysis via the score-analyze Edge Function. */
+export const requestScoreAnalysis = async (docId: string): Promise<RequestAnalysisResult> => {
+    const { data, error } = await getSupabase().functions.invoke<{ ok: boolean; code?: string }>('score-analyze', {
+        body: { documentId: docId },
+    });
+    if (error) {
+        const context = (error as { context?: Response }).context;
+        if (context) {
+            try {
+                const body = (await context.json()) as { code?: string };
+                if (typeof body.code === 'string') {
+                    return { ok: false, code: body.code };
+                }
+            } catch {
+                // fall through
+            }
+        }
+        return { ok: false, code: 'service_unreachable' };
+    }
+    if (data && data.ok === false) {
+        return { ok: false, code: data.code ?? 'internal' };
+    }
+    return { ok: true };
+};

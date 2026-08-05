@@ -101,6 +101,9 @@ export const signInAnonymouslyWithName = async (displayName: string): Promise<vo
 
 export const signOut = async (): Promise<void> => {
     await getSupabase().auth.signOut();
+    // Drop cached ScoreData so a later account on this browser can't replay it.
+    const { getDb } = await import('@/sync/db');
+    await getDb().scoreCache.clear().catch(() => undefined);
 };
 
 /** Display name for presence/attribution: metadata name, else email, else Guest. */

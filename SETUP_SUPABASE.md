@@ -104,7 +104,31 @@ turns it into editable Cleffy annotations. Its parts:
     $0.03–0.08 per scanned page (claude-sonnet-5, one call per page that has
     colored ink).
 
-## 5. (Optional) Let the Claude environment reach Supabase
+## 5. Play-along analysis (OMR service + Edge Function)
+
+The play-along feature converts uploaded PDFs to notes + measure positions via
+a self-hosted [Audiveris](https://github.com/Audiveris/audiveris) container
+(`services/omr-service/` — see the README for build/deploy). Once the
+container is reachable somewhere (Cloud Run / Fly.io / your own box):
+
+1. Apply the `score_analyses` migration (part of step 1 above / `scripts/apply-migrations.sql`).
+2. Deploy the Edge Function: `npx supabase functions deploy score-analyze --project-ref jibgwgosihadbjgxdsfe`
+3. Set its secrets (generate the shared secret with `openssl rand -hex 32` and
+   give the same value to the container's `OMR_SERVICE_SECRET` env):
+
+```bash
+npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe \
+  OMR_SERVICE_URL=https://your-omr-service.example.com \
+  OMR_SERVICE_SECRET=<shared secret>
+```
+
+The OMR service also needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` env
+vars so it can write results back to `score_analyses`. Without any of this
+configured the app still works — the transport bar just reports analysis as
+unavailable and offers a retry once the service exists.
+
+
+## 6. (Optional) Let the Claude environment reach Supabase
 
 To let Claude verify against the real backend (and run `db push` itself), allow
 `*.supabase.co` in this environment's **network policy** (Claude Code on the web →
