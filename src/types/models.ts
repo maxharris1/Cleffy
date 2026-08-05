@@ -56,7 +56,7 @@ export const isTextPayload = (payload: AnnotationPayload): payload is TextPayloa
     return 'text' in payload;
 };
 
-export type Tool = 'pan' | 'pen' | 'highlighter' | 'eraser' | 'text';
+export type Tool = 'pan' | 'pen' | 'highlighter' | 'eraser' | 'text' | 'fingering';
 
 export type StrokeWidthKey = 'thin' | 'medium' | 'thick';
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
@@ -16,7 +16,7 @@ import {
 } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
-import { InkController, type TextIntent } from '@/features/viewer/ink/InkController';
+import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
@@ -34,6 +34,11 @@ import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
+
+/** Fingering feature loads on first use — keeps it out of the viewer bundle. */
+const FingeringFlow = lazy(() =>
+    import('@/features/fingering/FingeringFlow').then((m) => ({ default: m.FingeringFlow })),
+);
 
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
@@ -84,6 +89,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
     const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
+    const [fingeringSel, setFingeringSel] = useState<FingeringSelection | null>(null);
     const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
 
@@ -198,6 +204,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 textIntentHandled.current = false;
                 setTextIntent(intent);
             },
+            onFingeringSelect: (selection) => setFingeringSel(selection),
         });
 
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
@@ -423,6 +430,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
     const previewFactor = view.scale / renderScale;
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
+    const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
@@ -495,6 +503,19 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                                 setTextIntent(null);
                             }}
                         />
+                    ) : null}
+                    {fingeringSel && fingeringLayout ? (
+                        <Suspense fallback={null}>
+                            <FingeringFlow
+                                key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}
+                                docId={docId}
+                                selection={fingeringSel}
+                                layout={fingeringLayout}
+                                store={annotationStore}
+                                canWrite={!readOnly}
+                                onClose={() => setFingeringSel(null)}
+                            />
+                        </Suspense>
                     ) : null}
                     <ZoomControls
                         onZoomBy={(factor) => {
