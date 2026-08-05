@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
-import { playheadRect } from '@/features/playback/PlayheadController';
+import { PlayheadController, playheadRect } from '@/features/playback/PlayheadController';
 import { measureIndexAtPagePoint } from '@/features/playback/scoreTime';
+import { computeDocumentLayout } from '@/features/viewer/geometry';
+import type { DocumentLayout } from '@/features/viewer/geometry';
+import { useViewerStore } from '@/state/store';
 
 describe('playheadRect', () => {
     it('sweeps linearly through a measure on the right system band', () => {
@@ -30,6 +33,74 @@ describe('playheadRect', () => {
         };
         expect(playheadRect(degraded, 1000)).toBeNull();
         expect(playheadRect(degraded, 0)).not.toBeNull();
+    });
+});
+
+describe('PlayheadController drawing', () => {
+    const frames: FrameRequestCallback[] = [];
+    const flushFrame = () => {
+        const pending = frames.splice(0, frames.length);
+        for (const callback of pending) {
+            callback(0);
+        }
+    };
+
+    const EMPTY_LAYOUT: DocumentLayout = { layouts: [], contentWidth: 0, contentHeight: 0 };
+    const PAGED_LAYOUT = computeDocumentLayout([
+        { width: 612, height: 792 },
+        { width: 612, height: 792 },
+    ]);
+
+    const mount = (getLayout: () => DocumentLayout) => {
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        const lineEl = document.createElement('div');
+        const highlightEl = document.createElement('div');
+        const controller = new PlayheadController({
+            // No engine yet: a freshly opened, never-played score sits at tick 0.
+            getEngine: () => null,
+            getScore: () => tinyScore,
+            lineEl,
+            highlightEl,
+            getLayout,
+            getRenderScale: () => 1,
+            getViewportSize: () => ({ width: 800, height: 600 }),
+        });
+        return { controller, lineEl, highlightEl };
+    };
+
+    afterEach(() => {
+        frames.length = 0;
+        vi.unstubAllGlobals();
+        useViewerStore.getState().resetPlayback();
+    });
+
+    it('shows the playhead and highlight on the opening measure without pressing play', () => {
+        const { controller, lineEl, highlightEl } = mount(() => PAGED_LAYOUT);
+        flushFrame();
+        expect(lineEl.style.display).toBe('block');
+        expect(highlightEl.style.display).toBe('block');
+        expect(useViewerStore.getState().currentMeasureIndex).toBe(0);
+        controller.destroy();
+    });
+
+    it('keeps retrying until the pages are measured (reopening a cached score)', () => {
+        let layout = EMPTY_LAYOUT;
+        const { controller, lineEl, highlightEl } = mount(() => layout);
+
+        // The controller can start before the PDF has laid out: nothing to draw
+        // on, and the tick never moves while paused.
+        flushFrame();
+        expect(lineEl.style.display).toBe('none');
+        flushFrame();
+        expect(lineEl.style.display).toBe('none');
+
+        layout = PAGED_LAYOUT;
+        flushFrame();
+        expect(lineEl.style.display).toBe('block');
+        expect(highlightEl.style.display).toBe('block');
+        expect(Number.parseFloat(highlightEl.style.height)).toBeGreaterThan(0);
+        controller.destroy();
     });
 });
 

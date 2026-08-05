@@ -78,13 +78,14 @@ class MockContext implements AudioContextLike {
     async close(): Promise<void> {}
 }
 
-const fakeBuffers = () => new Map(PIANO_ANCHORS.map((midi) => [midi, { buffer: {} as AudioBuffer, onsetSec: 0 }]));
+const fakeBuffers = (attackLagSec = 0) =>
+    new Map(PIANO_ANCHORS.map((midi) => [midi, { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec }]));
 
 // Graph construction order in buildGraph(): master, RH bus, LH bus, click bus.
 const BUS_RH = 1;
 const BUS_LH = 2;
 
-const makeEngine = (overrides?: { bpm?: number; score?: typeof tinyScore }) => {
+const makeEngine = (overrides?: { bpm?: number; score?: typeof tinyScore; attackLagSec?: number }) => {
     const ctx = new MockContext();
     const statuses: PlaybackStatus[] = [];
     const engine = new PlaybackEngine({
@@ -92,7 +93,7 @@ const makeEngine = (overrides?: { bpm?: number; score?: typeof tinyScore }) => {
         bpm: overrides?.bpm ?? 120,
         onStatus: (status) => statuses.push(status),
         createContext: () => ctx,
-        loadBuffers: async () => fakeBuffers(),
+        loadBuffers: async () => fakeBuffers(overrides?.attackLagSec),
     });
     return { ctx, engine, statuses };
 };
@@ -231,6 +232,32 @@ describe('PlaybackEngine', () => {
         expect(ctx.oscillators[0]?.frequency.value).toBe(1300);
         expect(ctx.oscillators[1]?.frequency.value).toBe(1800);
         expect(ctx.oscillators.some((o) => o.frequency.value === 1800)).toBe(true);
+    });
+
+    it('starts each note early by its attack lag so it is heard on the click', async () => {
+        const lag = 0.02;
+        const { ctx, engine } = makeEngine({ attackLagSec: lag });
+        engine.setMetronome(true);
+        await engine.play();
+        await advance(ctx, 2.6);
+
+        // Beat 1 of m.1 (tick 480) — click and note share the musical instant.
+        const beatAt = 0.08 + 480 * SPT_120;
+        const click = ctx.oscillators.find((o) => Math.abs((o.startedAt ?? -1) - beatAt) < 0.001);
+        expect(click).toBeDefined(); // the click stays on the grid…
+        const notes = ctx.sources.filter((s) => Math.abs((s.startedAt ?? -1) - (beatAt - lag)) < 0.001);
+        expect(notes.length).toBeGreaterThan(0); // …and the note leads it by its rise time
+        expect(ctx.sources.some((s) => Math.abs((s.startedAt ?? -1) - beatAt) < 0.001)).toBe(false);
+    });
+
+    it('never schedules a lag-compensated note into the past', async () => {
+        const { ctx, engine } = makeEngine({ attackLagSec: 0.02 });
+        await engine.play(); // first note sits 0.08 s out, well inside the lag
+        ctx.currentTime = 0.075;
+        await advance(ctx, 0.05);
+        for (const source of ctx.sources) {
+            expect(source.startedAt).toBeGreaterThanOrEqual(0);
+        }
     });
 
     it('pauses cleanly when the context is suspended (iOS interruption)', async () => {

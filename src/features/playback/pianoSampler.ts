@@ -52,6 +52,8 @@ export interface PianoVoice {
     buffer: AudioBuffer;
     /** Seconds into the buffer where the attack actually begins (see below). */
     onsetSec: number;
+    /** Seconds from that first movement to the note's perceived beat (see below). */
+    attackLagSec: number;
 }
 
 export type PianoBuffers = Map<number, PianoVoice>;
@@ -82,6 +84,59 @@ export const detectOnsetSec = (buffer: AudioBuffer): number => {
     return 0;
 };
 
+/** Window of the envelope scan used to locate the perceived attack. */
+const ENVELOPE_WINDOW_S = 0.002;
+/** How far past the onset a piano attack can still be building. */
+const ATTACK_SEARCH_S = 0.3;
+/** Fraction of the attack's peak energy that reads as "the note has spoken". */
+const ATTACK_ENERGY_FRACTION = 0.5;
+/** Ceiling on the correction — a bad measurement must never smear the beat. */
+export const MAX_ATTACK_LAG_S = 0.025;
+
+/**
+ * How long after `onsetSec` the note is actually *heard* to land.
+ *
+ * Physical alignment is not perceptual alignment. A metronome click is a step
+ * discontinuity: it reads as an event at its very first sample. A piano note
+ * ramps — low strings need 15–25 ms to speak — so starting the sample exactly
+ * on the beat leaves the ear hearing the click first and the note trailing it,
+ * which is what "the click is rushing" actually is. Measuring the energy rise
+ * lets the engine start each note that much early, so its perceived attack —
+ * not its first inaudible movement — sits on the beat.
+ */
+export const detectAttackLagSec = (buffer: AudioBuffer, onsetSec: number): number => {
+    const data = buffer.getChannelData(0);
+    const rate = buffer.sampleRate;
+    const window = Math.max(1, Math.round(rate * ENVELOPE_WINDOW_S));
+    const from = Math.max(0, Math.floor(onsetSec * rate));
+    const to = Math.min(data.length, from + Math.ceil(ATTACK_SEARCH_S * rate));
+
+    const energyAt = (start: number): number => {
+        let sum = 0;
+        const end = Math.min(to, start + window);
+        for (let i = start; i < end; i++) {
+            const sample = data[i] ?? 0;
+            sum += sample * sample;
+        }
+        return Math.sqrt(sum / window);
+    };
+
+    let peak = 0;
+    for (let start = from; start < to; start += window) {
+        peak = Math.max(peak, energyAt(start));
+    }
+    if (peak <= 0) {
+        return 0;
+    }
+    const target = peak * ATTACK_ENERGY_FRACTION;
+    for (let start = from; start < to; start += window) {
+        if (energyAt(start) >= target) {
+            return Math.min(MAX_ATTACK_LAG_S, Math.max(0, (start - from) / rate));
+        }
+    }
+    return 0;
+};
+
 let cache: Promise<PianoBuffers> | null = null;
 
 /**
@@ -99,7 +154,8 @@ export const loadPianoBuffers = (decoder: SampleDecoder, fetchImpl: typeof fetch
                         throw new Error(`Piano sample ${anchorFileName(midi)}: HTTP ${res.status}`);
                     }
                     const buffer = await decoder.decodeAudioData(await res.arrayBuffer());
-                    return [midi, { buffer, onsetSec: detectOnsetSec(buffer) }];
+                    const onsetSec = detectOnsetSec(buffer);
+                    return [midi, { buffer, onsetSec, attackLagSec: detectAttackLagSec(buffer, onsetSec) }];
                 }),
             );
             return new Map(entries);

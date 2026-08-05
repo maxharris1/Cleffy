@@ -76,23 +76,27 @@ describe('TransportBar states', () => {
 });
 
 describe('TransportBar ready controls', () => {
-    it('play uses count-in preference; pause when already running', async () => {
+    it('play, pause and rewind are separate controls that each hit the engine', async () => {
         const { engine } = renderBar();
         await userEvent.click(screen.getByRole('button', { name: 'Play' }));
         expect(engine.play).toHaveBeenCalledWith({ countIn: true });
 
-        setStore(() => {
-            useViewerStore.getState().setCountInOn(false);
-            useViewerStore.getState().setPlaybackStatus('playing');
-        });
         await userEvent.click(screen.getByRole('button', { name: 'Pause' }));
         expect(engine.pause).toHaveBeenCalled();
+
+        await userEvent.click(screen.getByRole('button', { name: /rewind to start/i }));
+        expect(engine.stop).toHaveBeenCalled();
     });
 
-    it('stop and measure steppers hit the engine', async () => {
+    it('does not restart playback when Play is pressed mid-play', async () => {
         const { engine } = renderBar();
-        await userEvent.click(screen.getByRole('button', { name: /stop and rewind/i }));
-        expect(engine.stop).toHaveBeenCalled();
+        setStore(() => useViewerStore.getState().setPlaybackStatus('playing'));
+        await userEvent.click(screen.getByRole('button', { name: 'Play' }));
+        expect(engine.play).not.toHaveBeenCalled();
+    });
+
+    it('measure steppers hit the engine', async () => {
+        const { engine } = renderBar();
         await userEvent.click(screen.getByRole('button', { name: /next measure/i }));
         expect(engine.seek).toHaveBeenCalledWith(480); // m0 → m1 barline
     });
@@ -103,13 +107,51 @@ describe('TransportBar ready controls', () => {
         expect(screen.getByText('m. 5 / 8')).toBeInTheDocument();
     });
 
-    it('bpm stepper clamps into range and updates the store', async () => {
+    it('shows the time signature in force at the playhead', () => {
+        const shifting = {
+            ...tinyScore,
+            timeSignatures: [
+                { tick: 0, num: 4, den: 4 },
+                { tick: 960, num: 3, den: 8 },
+            ],
+        };
+        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null } });
+        expect(screen.getByLabelText('Time signature 4/4')).toBeInTheDocument();
+
+        cleanup();
+        setStore(() => useViewerStore.getState().setCurrentMeasureIndex(3)); // tick 1440
+        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null } });
+        expect(screen.getByLabelText('Time signature 3/8')).toBeInTheDocument();
+    });
+
+    it('bpm steps by one and clamps into range', async () => {
         renderBar();
-        setStore(() => useViewerStore.getState().setBpm(45));
+        setStore(() => useViewerStore.getState().setBpm(100));
+        await userEvent.click(screen.getByRole('button', { name: 'Faster' }));
+        expect(useViewerStore.getState().bpm).toBe(101);
+        await userEvent.click(screen.getByRole('button', { name: 'Slower' }));
+        expect(useViewerStore.getState().bpm).toBe(100);
+
+        setStore(() => useViewerStore.getState().setBpm(41));
         await userEvent.click(screen.getByRole('button', { name: 'Slower' }));
         expect(useViewerStore.getState().bpm).toBe(40);
         await userEvent.click(screen.getByRole('button', { name: 'Slower' }));
         expect(useViewerStore.getState().bpm).toBe(40); // clamped at BPM_MIN
+    });
+
+    it('bpm can be typed, and commits clamped on blur', async () => {
+        renderBar();
+        const field = screen.getByRole('textbox', { name: /tempo in beats per minute/i });
+        await userEvent.clear(field);
+        await userEvent.type(field, '137');
+        expect(useViewerStore.getState().bpm).toBe(100); // uncommitted while typing
+        await userEvent.tab();
+        expect(useViewerStore.getState().bpm).toBe(137);
+
+        await userEvent.clear(field);
+        await userEvent.type(field, '900');
+        await userEvent.tab();
+        expect(useViewerStore.getState().bpm).toBe(240); // clamped at BPM_MAX
     });
 
     it('hand mutes toggle store state with aria-pressed', async () => {
@@ -127,16 +169,46 @@ describe('TransportBar ready controls', () => {
         expect(screen.getByRole('button', { name: /mute left hand/i })).toBeDisabled();
     });
 
-    it('arms and sets the A-B loop from the current measure', async () => {
+    it('loop is a plain on/off toggle that opens a real range at the playhead', async () => {
         setStore(() => useViewerStore.getState().setCurrentMeasureIndex(2));
         renderBar();
-        const loop = screen.getByRole('button', { name: /set loop start/i });
-        await userEvent.click(loop);
-        setStore(() => useViewerStore.getState().setCurrentMeasureIndex(4));
-        await userEvent.click(screen.getByRole('button', { name: /set loop end/i }));
-        expect(useViewerStore.getState().loopRange).toEqual({ a: 2, b: 4 });
-        await userEvent.click(screen.getByRole('button', { name: /clear practice loop/i }));
+        await userEvent.click(screen.getByRole('button', { name: /loop a few bars/i }));
+        expect(useViewerStore.getState().loopRange).toEqual({ a: 2, b: 5 }); // four bars
+
+        await userEvent.click(screen.getByRole('button', { name: /turn off the loop/i }));
         expect(useViewerStore.getState().loopRange).toBeNull();
+    });
+
+    it('clamps a loop opened on the last bar of the score', async () => {
+        setStore(() => useViewerStore.getState().setCurrentMeasureIndex(8)); // last index
+        renderBar();
+        await userEvent.click(screen.getByRole('button', { name: /loop a few bars/i }));
+        expect(useViewerStore.getState().loopRange).toEqual({ a: 8, b: 8 });
+    });
+
+    it('nudges each loop edge by a bar, never letting them cross', async () => {
+        setStore(() => useViewerStore.getState().setLoopRange({ a: 2, b: 3 }));
+        renderBar();
+        await userEvent.click(screen.getByRole('button', { name: /move loop end forward one bar/i }));
+        expect(useViewerStore.getState().loopRange).toEqual({ a: 2, b: 4 });
+        await userEvent.click(screen.getByRole('button', { name: /move loop start back one bar/i }));
+        expect(useViewerStore.getState().loopRange).toEqual({ a: 1, b: 4 });
+
+        // Dragging the end below the start carries the start with it.
+        for (let i = 0; i < 4; i++) {
+            await userEvent.click(screen.getByRole('button', { name: /move loop end back one bar/i }));
+        }
+        expect(useViewerStore.getState().loopRange).toEqual({ a: 0, b: 0 });
+    });
+
+    it('"Start here" moves the loop start to the playhead', async () => {
+        setStore(() => {
+            useViewerStore.getState().setLoopRange({ a: 0, b: 5 });
+            useViewerStore.getState().setCurrentMeasureIndex(3);
+        });
+        renderBar();
+        await userEvent.click(screen.getByRole('button', { name: /start here/i }));
+        expect(useViewerStore.getState().loopRange).toEqual({ a: 3, b: 5 });
     });
 
     it('shows the dotted-quarter equivalent for compound meters', () => {

@@ -519,6 +519,11 @@ export class PlaybackEngine {
         if (!voice) {
             return;
         }
+        // Start early by the sample's own rise time so the note is *heard* on
+        // the beat rather than just beginning there — otherwise every attack
+        // trails the click, which reads as the click rushing (pianoSampler:
+        // detectAttackLagSec). Never schedule into the past.
+        const at = Math.max(ctx.currentTime, startAt - voice.attackLagSec);
         const source = ctx.createBufferSource();
         source.buffer = voice.buffer;
         source.playbackRate.value = playbackRateFor(midi, anchor);
@@ -530,12 +535,13 @@ export class PlaybackEngine {
         source.connect(gain);
         gain.connect(bus);
 
-        const endAt = startAt + Math.max(0.05, durationSec);
+        // The whole envelope shifts with the attack, so note lengths stay exact.
+        const endAt = at + Math.max(0.05, durationSec);
         gain.gain.setValueAtTime(gainValue, endAt);
         gain.gain.setTargetAtTime(0, endAt, RELEASE_TAU_S);
-        // Start from the measured onset so the attack lands exactly on the
-        // beat — decoded mp3s carry codec padding at the front.
-        source.start(startAt, voice.onsetSec);
+        // Start from the measured onset so no codec padding is heard —
+        // decoded mp3s carry ~50 ms of it at the front.
+        source.start(at, voice.onsetSec);
         source.stop(endAt + RELEASE_STOP_S);
 
         const entry: ActiveNote = { source, gain };
