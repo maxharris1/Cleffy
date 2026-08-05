@@ -1,32 +1,60 @@
 import { useMemo, useState } from 'react';
 
+import { canPlaceProposals } from '@/features/fingering/applyFingerings';
 import { KeyboardDiagram } from '@/features/fingering/diagram/KeyboardDiagram';
 import { HAND_COLORS, snapRange } from '@/features/fingering/diagram/keyboardLayout';
+import { suggestForRegion } from '@/features/fingering/engine/suggest';
 import {
     buildSequences,
     mergedEventIndices,
     midiToName,
     pressedAtIndex,
+    type FingeringSequence,
+    type Hand,
     type RecognizedRegion,
 } from '@/features/fingering/model';
 import { buttonClassName } from '@/ui/classNames';
 import { CloseIcon } from '@/ui/icons';
 
+export type FingeringSource = 'annotated' | 'suggested';
+
 export interface FingeringDiagramPanelProps {
     region: RecognizedRegion;
+    /** Owner/editor on a writable doc — shows "Apply to score". */
+    canApply: boolean;
+    onApply?: (sequences: Record<Hand, FingeringSequence | null>) => void;
     onEditNotes: () => void;
     onClose: () => void;
 }
 
 /**
  * Floating, non-modal card housing the keyboard diagram — the score and the
- * selection stay visible while teaching. Chords render as one step; phrases
- * step through left-to-right with ‹ › controls.
+ * selection stay visible while teaching. One toggle switches the populator:
+ * fingerings written on the score vs. the suggestion engine; the SAME
+ * KeyboardDiagram renders both. Chords are one step; phrases step through
+ * left-to-right.
  */
-export const FingeringDiagramPanel = ({ region, onEditNotes, onClose }: FingeringDiagramPanelProps) => {
-    const sequences = useMemo(() => buildSequences(region), [region]);
-    const steps = useMemo(() => mergedEventIndices(region), [region]);
+export const FingeringDiagramPanel = ({
+    region,
+    canApply,
+    onApply,
+    onEditNotes,
+    onClose,
+}: FingeringDiagramPanelProps) => {
+    const [source, setSource] = useState<FingeringSource>('annotated');
+    const [keepWritten, setKeepWritten] = useState(true);
     const [step, setStep] = useState(0);
+
+    const annotated = useMemo(() => buildSequences(region), [region]);
+    const suggested = useMemo(
+        () => (source === 'suggested' ? suggestForRegion(region, keepWritten) : null),
+        [source, region, keepWritten],
+    );
+    const sequences = source === 'suggested' && suggested ? suggested : annotated;
+
+    // `current` clamps rather than resetting on region edits, so a re-reviewed
+    // phrase keeps (or safely truncates to) the step the teacher was on.
+    const steps = useMemo(() => mergedEventIndices(region), [region]);
     const current = Math.min(step, Math.max(0, steps.length - 1));
 
     const range = useMemo(() => {
@@ -39,6 +67,7 @@ export const FingeringDiagramPanel = ({ region, onEditNotes, onClose }: Fingerin
 
     const eventIndex = steps[current];
     const pressed = eventIndex === undefined ? [] : pressedAtIndex(sequences, eventIndex);
+    const showApply = source === 'suggested' && canApply && onApply !== undefined && canPlaceProposals(region);
 
     return (
         <div
@@ -46,9 +75,35 @@ export const FingeringDiagramPanel = ({ region, onEditNotes, onClose }: Fingerin
             className="pointer-events-none absolute inset-x-0 bottom-[calc(4.5rem+var(--safe-bottom))] z-30 flex justify-center px-2 sm:bottom-6"
         >
             <div className="pointer-events-auto w-full max-w-xl rounded-2xl border border-stone-200 bg-white/95 p-3 shadow-xl backdrop-blur">
-                <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-semibold text-stone-800">Fingering — p. {region.page + 1}</h3>
                     <div className="flex items-center gap-1">
+                        <div
+                            role="group"
+                            aria-label="Fingering source"
+                            className="flex rounded-lg border border-stone-200 p-0.5 text-xs"
+                        >
+                            <button
+                                type="button"
+                                aria-pressed={source === 'annotated'}
+                                onClick={() => setSource('annotated')}
+                                className={`rounded-md px-2 py-1 transition ${
+                                    source === 'annotated' ? 'bg-accent-soft text-accent' : 'text-stone-600'
+                                }`}
+                            >
+                                From score
+                            </button>
+                            <button
+                                type="button"
+                                aria-pressed={source === 'suggested'}
+                                onClick={() => setSource('suggested')}
+                                className={`rounded-md px-2 py-1 transition ${
+                                    source === 'suggested' ? 'bg-accent-soft text-accent' : 'text-stone-600'
+                                }`}
+                            >
+                                Suggested
+                            </button>
+                        </div>
                         <button type="button" onClick={onEditNotes} className={buttonClassName('ghost', 'sm')}>
                             Edit notes
                         </button>
@@ -120,6 +175,29 @@ export const FingeringDiagramPanel = ({ region, onEditNotes, onClose }: Fingerin
                         </div>
                     ) : null}
                 </div>
+
+                {source === 'suggested' ? (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-stone-100 pt-2">
+                        <label className="flex items-center gap-1.5 text-xs text-stone-600">
+                            <input
+                                type="checkbox"
+                                checked={keepWritten}
+                                onChange={(e) => setKeepWritten(e.target.checked)}
+                                className="h-3.5 w-3.5 accent-[--color-accent]"
+                            />
+                            Keep written fingerings
+                        </label>
+                        {showApply && suggested ? (
+                            <button
+                                type="button"
+                                onClick={() => onApply(suggested)}
+                                className={buttonClassName('primary', 'sm')}
+                            >
+                                Apply to score…
+                            </button>
+                        ) : null}
+                    </div>
+                ) : null}
             </div>
         </div>
     );

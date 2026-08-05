@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
 
+import { buildFingeringProposals } from '@/features/fingering/applyFingerings';
 import { bindRegionDigits } from '@/features/fingering/bindFingerings';
 import { FingeringDiagramPanel } from '@/features/fingering/diagram/FingeringDiagramPanel';
 import { FingeringReviewPanel } from '@/features/fingering/FingeringReviewPanel';
 import { FingeringSelectionPopover } from '@/features/fingering/FingeringSelectionPopover';
-import { emptyRegion, type NormRect, type RecognizedRegion } from '@/features/fingering/model';
+import { emptyRegion, type FingeringSequence, type Hand, type NormRect, type RecognizedRegion } from '@/features/fingering/model';
 import { buildRegionImages } from '@/features/fingering/regionCrop';
 import { makeRecognizeNotesFn } from '@/features/fingering/recognizeApi';
 import { isCloudDocId } from '@/features/library/documentsService';
@@ -12,6 +13,8 @@ import { pagePointToViewport, type PageLayout } from '@/features/viewer/geometry
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { useViewerStore } from '@/state/store';
+import type { Annotation } from '@/types/models';
+import { buttonClassName } from '@/ui/classNames';
 
 export interface FingeringFlowProps {
     docId: string;
@@ -24,7 +27,7 @@ export interface FingeringFlowProps {
     onClose: () => void;
 }
 
-type Phase = 'choose' | 'recognizing' | 'review' | 'diagram';
+type Phase = 'choose' | 'recognizing' | 'review' | 'diagram' | 'applying';
 
 /** Matches the edge function's cap — checked client-side for a friendly message. */
 const MAX_REGION_AREA = 0.5;
@@ -34,7 +37,7 @@ const MAX_REGION_AREA = 0.5;
  * → note recognition (or manual entry) → review → keyboard diagram. Mounted
  * lazily by PdfViewport per selection (keyed remount resets the flow).
  */
-export const FingeringFlow = ({ docId, selection, layout, store, onClose }: FingeringFlowProps) => {
+export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClose }: FingeringFlowProps) => {
     const view = useViewerStore((s) => s.view);
     const { doc } = usePdf();
     const [phase, setPhase] = useState<Phase>('choose');
@@ -44,6 +47,7 @@ export const FingeringFlow = ({ docId, selection, layout, store, onClose }: Fing
     const [visionSeed, setVisionSeed] = useState<RecognizedRegion | null>(null);
     const [snapshot, setSnapshot] = useState<{ dataUrl: string; rect: NormRect } | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [pendingProposals, setPendingProposals] = useState<Annotation[]>([]);
     const recognize = useMemo(() => (isCloudDocId(docId) ? makeRecognizeNotesFn(docId) : null), [docId]);
 
     const { rect } = selection;
@@ -88,6 +92,43 @@ export const FingeringFlow = ({ docId, selection, layout, store, onClose }: Fing
         }
     };
 
+    /** Preview suggested digits on the page via the store's overlay mechanism. */
+    const startApply = (sequences: Record<Hand, FingeringSequence | null>) => {
+        if (!region) {
+            return;
+        }
+        const proposals = buildFingeringProposals({
+            region,
+            sequences,
+            existing: [...store.getPage(selection.pageIndex).values()],
+            aspect: layout.width / layout.height,
+            docId,
+        });
+        if (proposals.length === 0) {
+            setError('Every suggested fingering is already written on the score.');
+            return;
+        }
+        setError(null);
+        setPendingProposals(proposals);
+        store.setHistoryOverlay([...store.liveAnnotations(), ...proposals], 'preview');
+        setPhase('applying');
+    };
+
+    const finishApply = async (commit: boolean) => {
+        // Clear the overlay FIRST — createMany is a no-op while it is shown.
+        store.setHistoryOverlay(null);
+        if (commit && pendingProposals.length > 0) {
+            store.beginBatch();
+            try {
+                await store.createMany(pendingProposals);
+            } finally {
+                store.endBatch();
+            }
+        }
+        setPendingProposals([]);
+        setPhase('diagram');
+    };
+
     return (
         <>
             <div
@@ -130,7 +171,49 @@ export const FingeringFlow = ({ docId, selection, layout, store, onClose }: Fing
                 />
             ) : null}
             {phase === 'diagram' && region ? (
-                <FingeringDiagramPanel region={region} onEditNotes={() => setPhase('review')} onClose={onClose} />
+                <>
+                    {error ? (
+                        <div
+                            data-ui-overlay
+                            className="pointer-events-none absolute inset-x-0 top-14 z-30 flex justify-center px-2"
+                        >
+                            <p className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs text-amber-900 shadow">
+                                {error}
+                            </p>
+                        </div>
+                    ) : null}
+                    <FingeringDiagramPanel
+                        region={region}
+                        canApply={canWrite}
+                        onApply={startApply}
+                        onEditNotes={() => setPhase('review')}
+                        onClose={onClose}
+                    />
+                </>
+            ) : null}
+            {phase === 'applying' ? (
+                <div data-ui-overlay className="pointer-events-none absolute inset-x-0 top-3 z-30 flex justify-center">
+                    <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 py-1.5 text-sm text-teal-950 shadow">
+                        <span>
+                            Previewing {pendingProposals.length} suggested fingering
+                            {pendingProposals.length === 1 ? '' : 's'}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => void finishApply(true)}
+                            className={buttonClassName('primary', 'sm', 'px-2.5 py-1 text-xs')}
+                        >
+                            Add to score
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void finishApply(false)}
+                            className={buttonClassName('ghost', 'sm', 'px-2.5 py-1 text-xs')}
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
             ) : null}
         </>
     );
