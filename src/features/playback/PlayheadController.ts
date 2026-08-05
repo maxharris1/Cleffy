@@ -81,6 +81,7 @@ export class PlayheadController {
     private lastMeasureIndex = -2;
     private lastRenderScale = -1;
     private lastScore: ScoreData | null = null;
+    private lastLayout: DocumentLayout | null = null;
     private forceFollow = false;
 
     private anim: { from: { x: number; y: number }; to: { x: number; y: number }; startedAt: number } | null = null;
@@ -118,7 +119,6 @@ export class PlayheadController {
         }
     }
 
-
     private frame(): void {
         if (this.disposed) {
             return;
@@ -142,10 +142,15 @@ export class PlayheadController {
         const engine = this.deps.getEngine();
         const tick = engine ? engine.getPositionTicks() : 0;
         const renderScale = this.deps.getRenderScale();
+        const layoutNow = this.deps.getLayout();
+        // Page geometry is part of the frame's identity: a paused transport
+        // holds one tick forever, so without this the overlays would stay
+        // wherever (or hidden) they were when the pages first measured.
         if (
             tick === this.lastTick &&
             renderScale === this.lastRenderScale &&
             score === this.lastScore &&
+            layoutNow === this.lastLayout &&
             !this.forceFollow
         ) {
             return;
@@ -153,6 +158,7 @@ export class PlayheadController {
         this.lastTick = tick;
         this.lastRenderScale = renderScale;
         this.lastScore = score;
+        this.lastLayout = layoutNow;
 
         const rect = playheadRect(score, tick);
         const measureIndex = rect ? rect.measureIndex : measureIndexAtTick(score.measures, tick);
@@ -171,8 +177,13 @@ export class PlayheadController {
             highlightEl.style.display = 'none';
             return;
         }
-        const layout = this.deps.getLayout().layouts[rect.pageIndex];
+        const layout = layoutNow.layouts[rect.pageIndex];
         if (!layout) {
+            // Pages have not been measured yet (the controller can outrun the
+            // PDF's first layout pass). Drop the memo so the next frame retries
+            // instead of latching "hidden" until the tick moves.
+            this.lastTick = -1;
+            this.lastLayout = null;
             lineEl.style.display = 'none';
             highlightEl.style.display = 'none';
             return;

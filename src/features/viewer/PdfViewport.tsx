@@ -114,8 +114,14 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     }, [layout, viewportSize, effectiveReadOnly, renderScale, playback]);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
-    const playheadLineRef = useRef<HTMLDivElement | null>(null);
-    const measureHighlightRef = useRef<HTMLDivElement | null>(null);
+    // These live in state, not refs: the overlay divs only exist once the PDF
+    // has rendered, which can happen AFTER the score analysis arrives (a warm
+    // Dexie cache serves ScoreData almost immediately on reopen). A ref would
+    // still be null when the controller effect first ran, and nothing would
+    // re-run it — the playhead then never appeared for the rest of the
+    // session. Callback refs re-fire the effect the moment the divs mount.
+    const [playheadLineEl, setPlayheadLineEl] = useState<HTMLDivElement | null>(null);
+    const [measureHighlightEl, setMeasureHighlightEl] = useState<HTMLDivElement | null>(null);
     const playheadControllerRef = useRef<PlayheadController | null>(null);
 
     useEffect(() => {
@@ -307,16 +313,14 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const playbackScore = playback?.score ?? null;
     const playbackGetEngine = playback?.getEngine;
     useEffect(() => {
-        const lineEl = playheadLineRef.current;
-        const highlightEl = measureHighlightRef.current;
-        if (!playbackScore || !playbackGetEngine || !lineEl || !highlightEl) {
+        if (!playbackScore || !playbackGetEngine || !playheadLineEl || !measureHighlightEl) {
             return;
         }
         const controller = new PlayheadController({
             getEngine: playbackGetEngine,
             getScore: () => playbackScore,
-            lineEl,
-            highlightEl,
+            lineEl: playheadLineEl,
+            highlightEl: measureHighlightEl,
             getLayout: () => layoutRef.current,
             getRenderScale: () => renderScaleRef.current,
             getViewportSize: () => viewportSizeRef.current,
@@ -326,7 +330,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             playheadControllerRef.current = null;
             controller.destroy();
         };
-    }, [playbackScore, playbackGetEngine]);
+    }, [playbackScore, playbackGetEngine, playheadLineEl, measureHighlightEl]);
 
     // Presence: report the top visible page (debounced against scroll churn).
     useEffect(() => {
@@ -448,13 +452,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             <>
                                 <LoopRangeOverlay score={playbackScore} layout={layout} renderScale={renderScale} />
                                 <div
-                                    ref={measureHighlightRef}
+                                    ref={setMeasureHighlightEl}
                                     aria-hidden="true"
                                     className="pointer-events-none absolute left-0 top-0 rounded-[2px] bg-accent/10"
                                     style={{ display: 'none' }}
                                 />
                                 <div
-                                    ref={playheadLineRef}
+                                    ref={setPlayheadLineEl}
                                     aria-hidden="true"
                                     className="pointer-events-none absolute left-0 top-0 w-[2px] rounded-full bg-accent/70"
                                     style={{ display: 'none' }}

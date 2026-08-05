@@ -5,6 +5,7 @@ import {
     ChevronRight,
     ChevronUp,
     EllipsisVertical,
+    Hourglass,
     LocateFixed,
     Minus,
     Music,
@@ -53,6 +54,7 @@ export const PlayIcon = withBrandStroke(Play);
 export const PauseIcon = withBrandStroke(Pause);
 export const StopIcon = withBrandStroke(Square);
 export const SkipBackIcon = withBrandStroke(SkipBack);
+export const HourglassIcon = withBrandStroke(Hourglass);
 export const ChevronLeftIcon = withBrandStroke(ChevronLeft);
 export const ChevronRightIcon = withBrandStroke(ChevronRight);
 export const ChevronDownIcon = withBrandStroke(ChevronDown);

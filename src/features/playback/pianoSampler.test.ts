@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+    MAX_ATTACK_LAG_S,
     PIANO_ANCHORS,
     anchorFileName,
+    detectAttackLagSec,
     detectOnsetSec,
     loadPianoBuffers,
     nearestAnchor,
@@ -14,6 +16,18 @@ const stubBuffer = (leadingSilenceSamples: number, sampleRate = 22050): AudioBuf
     const data = new Float32Array(leadingSilenceSamples + 1000);
     for (let i = leadingSilenceSamples; i < data.length; i++) {
         data[i] = 0.5;
+    }
+    return { sampleRate, length: data.length, getChannelData: () => data } as unknown as AudioBuffer;
+};
+
+/** Leading silence, then a linear ramp to full over `riseSamples`, then steady. */
+const rampBuffer = (leadingSilenceSamples: number, riseSamples: number, sampleRate = 22050): AudioBuffer => {
+    const data = new Float32Array(leadingSilenceSamples + riseSamples + 4000);
+    for (let i = 0; i < riseSamples; i++) {
+        data[leadingSilenceSamples + i] = 0.8 * (i / riseSamples);
+    }
+    for (let i = leadingSilenceSamples + riseSamples; i < data.length; i++) {
+        data[i] = 0.8;
     }
     return { sampleRate, length: data.length, getChannelData: () => data } as unknown as AudioBuffer;
 };
@@ -59,6 +73,49 @@ describe('detectOnsetSec', () => {
         expect(detectOnsetSec(stubBuffer(0))).toBe(0);
         const silent = { sampleRate: 22050, length: 100, getChannelData: () => new Float32Array(100) };
         expect(detectOnsetSec(silent as unknown as AudioBuffer)).toBe(0);
+    });
+});
+
+describe('detectAttackLagSec', () => {
+    /**
+     * The engine plays buffer position `onsetSec` at `beat − attackLagSec`, so
+     * the audible attack lands `attackLagSec − (trueAttack − onsetSec)` off the
+     * beat. Zero means the note is heard exactly on the click.
+     */
+    const alignmentErrorSec = (buffer: AudioBuffer, trueAttackSec: number): number => {
+        const onsetSec = detectOnsetSec(buffer);
+        return detectAttackLagSec(buffer, onsetSec) - (trueAttackSec - onsetSec);
+    };
+
+    it('cancels the onset pre-roll for a step attack', () => {
+        const buffer = stubBuffer(2205); // silence, then full amplitude at 100 ms
+        expect(detectAttackLagSec(buffer, detectOnsetSec(buffer))).toBeCloseTo(0.002, 3);
+        expect(Math.abs(alignmentErrorSec(buffer, 0.1))).toBeLessThan(0.001);
+    });
+
+    it('measures how long a slow attack takes to speak', () => {
+        // 220 samples ≈ 10 ms of rise: half energy lands around 5–7 ms in.
+        const buffer = rampBuffer(2205, 220);
+        const lag = detectAttackLagSec(buffer, detectOnsetSec(buffer));
+        expect(lag).toBeGreaterThan(0.003);
+        expect(lag).toBeLessThan(0.014);
+    });
+
+    it('lands a slow attack far closer to the beat than playing it raw', () => {
+        // A 15 ms rise: uncompensated, this note is heard ~9 ms behind the click.
+        const buffer = rampBuffer(2205, 330);
+        const halfWay = 2205 / 22050 + 330 / 2 / 22050;
+        expect(Math.abs(alignmentErrorSec(buffer, halfWay))).toBeLessThan(0.003);
+    });
+
+    it('never exceeds the cap, so a bad measurement cannot smear the beat', () => {
+        const buffer = rampBuffer(2205, 22050); // absurd 1-second rise
+        expect(detectAttackLagSec(buffer, detectOnsetSec(buffer))).toBe(MAX_ATTACK_LAG_S);
+    });
+
+    it('is zero for silence', () => {
+        const silent = { sampleRate: 22050, length: 1000, getChannelData: () => new Float32Array(1000) };
+        expect(detectAttackLagSec(silent as unknown as AudioBuffer, 0)).toBe(0);
     });
 });
 
