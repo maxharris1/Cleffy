@@ -25,12 +25,42 @@ describe('golden fingerings — scales', () => {
         expect(fingersOf(melody('R', [60, 62, 64, 65, 67, 69, 71, 72]))).toEqual([1, 2, 3, 1, 2, 3, 4, 5]);
     });
 
+    it('RH C major, TWO octaves — the loop crossing, never a pass around 5', () => {
+        expect(
+            fingersOf(melody('R', [60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 83, 84])),
+        ).toEqual([1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 5]);
+    });
+
     it('LH C major, one octave ascending: 5 4 3 2 1 3 2 1', () => {
         expect(fingersOf(melody('L', [48, 50, 52, 53, 55, 57, 59, 60]))).toEqual([5, 4, 3, 2, 1, 3, 2, 1]);
     });
 
     it('RH F major keeps the thumb off Bb: 1 2 3 4 1 2 3 4', () => {
         expect(fingersOf(melody('R', [65, 67, 69, 70, 72, 74, 76, 77]))).toEqual([1, 2, 3, 4, 1, 2, 3, 4]);
+    });
+
+    it('RH Bb major, two octaves — the RCM print, both octaves', () => {
+        expect(
+            fingersOf(melody('R', [70, 72, 74, 75, 77, 79, 81, 82, 84, 86, 87, 89, 91, 93, 94])),
+        ).toEqual([2, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 1, 2, 3, 4]);
+    });
+
+    it('RH Db major: 2 3 1 2 3 4 1 2 (thumb on C and F only)', () => {
+        expect(fingersOf(melody('R', [61, 63, 65, 66, 68, 70, 72, 73]))).toEqual([2, 3, 1, 2, 3, 4, 1, 2]);
+    });
+
+    it('RH F# major, two octaves — thumb on B and E# in the loop', () => {
+        const fingers = fingersOf(melody('R', [66, 68, 70, 71, 73, 75, 77, 78, 80, 82, 83, 85, 87, 89, 90]));
+        // The mid-scale loop is canonical (2 3 4 1 2 3 1 | 2 3 4 1 2 3);
+        // only the final two notes may take the terminal-fragment 4-5 ending.
+        expect(fingers.slice(0, 13)).toEqual([2, 3, 4, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3]);
+    });
+
+    it('LH Bb major: 3 2 1 4 3 2 1 … with the canonical interior across octaves', () => {
+        const twoOctaves = fingersOf(melody('L', [34, 36, 38, 39, 41, 43, 45, 46, 48, 50, 51, 53, 55, 57, 58]));
+        // Print fingering is 3 2 1 4 3 2 1 3 repeating; the very last note of a
+        // terminal fragment may relax to 2 — everything else must be exact.
+        expect(twoOctaves.slice(0, 14)).toEqual([3, 2, 1, 4, 3, 2, 1, 3, 2, 1, 4, 3, 2, 1]);
     });
 
     it('RH C major descending mirrors the ascent: 5 4 3 2 1 3 2 1', () => {
@@ -51,8 +81,53 @@ describe('golden fingerings — chords and arpeggios', () => {
         expect(fingersOf(chord('L', [48, 52, 55]))).toEqual([5, 3, 1]);
     });
 
+    it('flat-key chords still take the thumb on black keys: Bb and Eb = 1-3-5 / 5-3-1', () => {
+        // The thumb-on-black rule is for passing motion, not held shapes —
+        // penalizing it in chords mis-fingers every flat-key chord (the
+        // educator-review bug: Bb major came out 2-4-5).
+        expect(fingersOf(chord('R', [70, 74, 77]))).toEqual([1, 3, 5]);
+        expect(fingersOf(chord('R', [63, 67, 70]))).toEqual([1, 3, 5]);
+        expect(fingersOf(chord('L', [58, 62, 65]))).toEqual([5, 3, 1]);
+        expect(fingersOf(chord('L', [47, 50, 53]))).toEqual([5, 3, 1]);
+    });
+
+    it('octave chord: 1-5', () => {
+        expect(fingersOf(chord('R', [60, 72]))).toEqual([1, 5]);
+    });
+
     it('RH C major arpeggio C-E-G-C: 1 2 3 5', () => {
         expect(fingersOf(melody('R', [60, 64, 67, 72]))).toEqual([1, 2, 3, 5]);
+    });
+
+    it('RH G major arpeggio, two octaves: 1 2 3 1 2 3 5', () => {
+        expect(fingersOf(melody('R', [67, 71, 74, 79, 83, 86, 91]))).toEqual([1, 2, 3, 1, 2, 3, 5]);
+    });
+
+    it('LH Alberti bass anchors the pinky: 5 1 3 1', () => {
+        expect(fingersOf(melody('L', [48, 55, 52, 55, 48, 55, 52, 55]))).toEqual([5, 1, 3, 1, 5, 1, 3, 1]);
+    });
+});
+
+describe('hand size', () => {
+    it('a small hand still fingers the common shapes', () => {
+        const result = suggestFingerings({
+            hand: 'R',
+            events: [{ index: 0, noteIds: ['a', 'b', 'c', 'd'], midis: [60, 64, 67, 72] }],
+            handSpan: 'small',
+        });
+        expect(result.sequence.events[0]?.notes.map((n) => n.finger)).toEqual([1, 2, 3, 5]);
+    });
+
+    it('is honest about reach: a tenth is unfingerable at standard span, playable at large', () => {
+        const tenth = (handSpan: 'small' | 'standard' | 'large') =>
+            suggestFingerings({
+                hand: 'R',
+                events: [{ index: 0, noteIds: ['a', 'b'], midis: [60, 76] }],
+                handSpan,
+            }).sequence.events[0]?.notes.map((n) => n.finger);
+        expect(tenth('standard')).toEqual([null, null]);
+        expect(tenth('small')).toEqual([null, null]);
+        expect(tenth('large')).toEqual([1, 5]);
     });
 });
 

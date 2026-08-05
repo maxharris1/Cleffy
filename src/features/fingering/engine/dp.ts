@@ -1,5 +1,6 @@
 import { enumerateStates } from '@/features/fingering/engine/chords';
 import { transitionCost, unaryCost, type EventGeometry } from '@/features/fingering/engine/cost';
+import type { HandSpan } from '@/features/fingering/engine/span';
 import type { Finger } from '@/features/fingering/model';
 
 /**
@@ -34,13 +35,13 @@ const matchesPins = (fingers: readonly Finger[], pinned: ReadonlyMap<number, Fin
     return true;
 };
 
-export const solve = (events: readonly DpEvent[]): DpResult => {
+export const solve = (events: readonly DpEvent[], hand: HandSpan = 'standard'): DpResult => {
     const ignoredPinEvents: number[] = [];
 
     // Per-event state sets, pins applied (falling back to unpinned when pins
     // would make the event unplayable).
     const states: Finger[][][] = events.map((event, index) => {
-        const all = enumerateStates(event.midis);
+        const all = enumerateStates(event.midis, hand);
         if (all.length === 0) {
             return [];
         }
@@ -65,7 +66,7 @@ export const solve = (events: readonly DpEvent[]): DpResult => {
         while (segmentEnd + 1 < events.length && states[segmentEnd + 1]!.length > 0) {
             segmentEnd++;
         }
-        solveSegment(events, states, assignments, segmentStart, segmentEnd);
+        solveSegment(events, states, assignments, segmentStart, segmentEnd, hand);
         segmentStart = segmentEnd + 1;
     }
 
@@ -78,8 +79,9 @@ const solveSegment = (
     assignments: Array<Finger[] | null>,
     start: number,
     end: number,
+    hand: HandSpan,
 ): void => {
-    let prevCosts = states[start]!.map((s) => unaryCost(events[start]!, s));
+    let prevCosts = states[start]!.map((s) => unaryCost(events[start]!, s, hand));
     const backpointers: number[][] = [];
 
     for (let i = start + 1; i <= end; i++) {
@@ -93,13 +95,13 @@ const solveSegment = (
             let bestPrev = 0;
             for (let p = 0; p < prevCosts.length; p++) {
                 const total =
-                    prevCosts[p]! + transitionCost(events[i - 1]!, states[i - 1]![p]!, event, state);
+                    prevCosts[p]! + transitionCost(events[i - 1]!, states[i - 1]![p]!, event, state, hand);
                 if (total < best) {
                     best = total;
                     bestPrev = p;
                 }
             }
-            costs[s] = best + unaryCost(event, state);
+            costs[s] = best + unaryCost(event, state, hand);
             back[s] = bestPrev;
         }
         backpointers.push(back);

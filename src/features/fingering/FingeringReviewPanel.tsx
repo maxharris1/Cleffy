@@ -6,6 +6,7 @@ import {
     clampMidi,
     midiToName,
     type Finger,
+    type Hand,
     type NormRect,
     type RecognizedNote,
     type RecognizedRegion,
@@ -48,6 +49,8 @@ export const FingeringReviewPanel = ({
         initial.notes.length > 0 ? Math.min(...initial.notes.map((n) => n.eventIndex)) : 0,
     );
     const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+    /** Which hand newly-tapped notes belong to — explicit, never guessed from pitch. */
+    const [entryHand, setEntryHand] = useState<Hand>('R');
 
     const eventIndices = useMemo(() => {
         const indices = new Set(region.notes.map((n) => n.eventIndex));
@@ -88,7 +91,9 @@ export const FingeringReviewPanel = ({
             removeNote(existing.id);
             return;
         }
-        const staff: Staff = midi >= 60 ? 'upper' : 'lower';
+        // The chosen entry hand decides the staff — left hands play above
+        // middle C all the time, so pitch must never guess the hand.
+        const staff: Staff = region.handOf.upper === entryHand ? 'upper' : 'lower';
         const note: RecognizedNote = {
             id: crypto.randomUUID(),
             midi,
@@ -198,6 +203,28 @@ export const FingeringReviewPanel = ({
                 </button>
             </div>
 
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs text-stone-600">
+                <span className="text-stone-500">Tapped keys go to</span>
+                {(['R', 'L'] as const).map((hand) => (
+                    <button
+                        key={hand}
+                        type="button"
+                        aria-pressed={entryHand === hand}
+                        onClick={() => setEntryHand(hand)}
+                        className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition ${
+                            entryHand === hand
+                                ? 'border-accent bg-accent-soft text-accent'
+                                : 'border-stone-200 hover:bg-stone-50'
+                        }`}
+                    >
+                        <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ backgroundColor: HAND_COLORS[hand] }}
+                        />
+                        {hand === 'R' ? 'Right hand' : 'Left hand'}
+                    </button>
+                ))}
+            </div>
             <div className="mb-3 overflow-x-auto rounded-lg border border-stone-200 bg-stone-50 p-1.5">
                 <KeyboardDiagram
                     pressed={stripPressed}

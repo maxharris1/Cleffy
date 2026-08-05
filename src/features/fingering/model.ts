@@ -98,6 +98,49 @@ export const isBlackKey = (midi: number): boolean => {
     return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10;
 };
 
+const LETTER_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+const parseSpelledName = (name: string): { letter: string; accidental: string; shift: number } | null => {
+    const match = /^([A-Ga-g])(##|#|bb|b|x)?(-?\d+)?$/.exec(name.trim());
+    if (!match) {
+        return null;
+    }
+    const letter = (match[1] as string).toUpperCase();
+    const accidental = match[2] ?? '';
+    const shift =
+        accidental === 'x' || accidental === '##'
+            ? 2
+            : accidental === '#'
+              ? 1
+              : accidental === 'bb'
+                ? -2
+                : accidental === 'b'
+                  ? -1
+                  : 0;
+    return { letter, accidental: accidental === 'x' ? '##' : accidental, shift };
+};
+
+/**
+ * Keep the score's printed spelling when it names this exact pitch — a B♭
+ * passing tone in C major must display as "Bb4", not the key-signature
+ * respelling "A#4". Only the octave digit is recomputed from midi (so a
+ * misread octave can't survive). Returns null when the spelling contradicts
+ * the pitch — fall back to midiToName then.
+ */
+export const respellFromPrinted = (printedName: string, midi: number): string | null => {
+    const parsed = parseSpelledName(printedName);
+    if (!parsed) {
+        return null;
+    }
+    const pc = ((LETTER_PC[parsed.letter] as number) + parsed.shift + 120) % 12;
+    if (pc !== ((midi % 12) + 12) % 12) {
+        return null;
+    }
+    // The LETTER's octave, not the sounding octave: Cb5 is midi 71, B#3 is 60.
+    const octave = Math.floor((midi - parsed.shift) / 12) - 1;
+    return `${parsed.letter}${parsed.accidental}${octave}`;
+};
+
 export const emptyRegion = (docId: string, page: number, rect: NormRect): RecognizedRegion => ({
     docId,
     page,

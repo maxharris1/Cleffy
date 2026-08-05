@@ -70,7 +70,15 @@ crop the user selected, which is the only part you report notes for.
 Report every note whose notehead is inside the REGION image:
 - "midi": the sounding pitch as a MIDI number (middle C = C4 = 60). Apply the
   key signature, accidentals, and any 8va/8vb markings.
-- "name": the spelled pitch, e.g. "C#4" or "Bb3".
+- CRITICAL — context that lies OUTSIDE the crop still applies INSIDE it. Check
+  the full-page image for: an accidental EARLIER in the same measure (it holds
+  for the rest of the measure, even though the region crop cannot show it); an
+  8va/8vb line that begins before the region; a clef or key change earlier in
+  the line. Courtesy accidentals in parentheses confirm, not alter, a pitch.
+- A note TIED from before the region is still sounding — report it (a finger
+  holds that key), using the tied notehead inside the region.
+- "name": the spelled pitch EXACTLY as printed, e.g. "C#4", "Bb3", "E#4" — do
+  not respell enharmonically.
 - "staff": "upper" for the upper staff of the system, "lower" for the lower.
   If the region shows a single staff, use "upper" and set clefLower to "none".
 - "x","y","w","h": the notehead's bounding box as FRACTIONS of the REGION

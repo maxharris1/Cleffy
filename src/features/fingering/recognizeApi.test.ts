@@ -67,7 +67,7 @@ describe('regionFromResponse', () => {
         expect(bb?.h).toBeCloseTo(0.05 * 0.24);
     });
 
-    it('carries fingers with source vision and respells names from midi + key', () => {
+    it('carries fingers with source vision and keeps the printed spelling', () => {
         const region = regionFromResponse('doc-1', selection, crop, validResponse);
         expect(region.source).toBe('vision');
         expect(region.keySignature).toBe(-2);
@@ -75,11 +75,32 @@ describe('regionFromResponse', () => {
         expect(fingered?.annotatedFinger).toBe(2);
         expect(fingered?.fingerSource).toBe('vision');
         expect(fingered?.fingerConfidence).toBe('high');
-        expect(fingered?.name).toBe('Bb3'); // flat spelling in a flat key
+        expect(fingered?.name).toBe('Bb3');
         const bare = region.notes[1];
         expect(bare?.annotatedFinger).toBeNull();
         expect(bare?.fingerSource).toBeNull();
         expect(bare?.fingerConfidence).toBeUndefined();
+    });
+
+    it('honors the printed enharmonic over the key-signature respelling', () => {
+        const chromatic = {
+            ...validResponse,
+            keySignature: 0,
+            events: [
+                {
+                    index: 0,
+                    notes: [
+                        // A Bb passing tone in C major must not display as A#.
+                        { ...validResponse.events[0]!.notes[0]!, name: 'Bb4', midi: 70 },
+                        // A contradictory spelling falls back to the key respelling.
+                        { ...validResponse.events[0]!.notes[1]!, name: 'C9', midi: 62 },
+                    ],
+                },
+            ],
+        };
+        const region = regionFromResponse('doc-1', selection, crop, chromatic);
+        expect(region.notes[0]?.name).toBe('Bb4');
+        expect(region.notes[1]?.name).toBe('D4');
     });
 
     it('groups notes by the reported event index', () => {

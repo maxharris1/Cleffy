@@ -1,33 +1,51 @@
-import { relaxedDeficit } from '@/features/fingering/engine/span';
+import {
+    comfortDeficit,
+    naturalSpan,
+    relaxedDeficit,
+    type HandSpan,
+} from '@/features/fingering/engine/span';
 import type { Finger } from '@/features/fingering/model';
 
 /**
- * Parncutt-subset cost rules. All costs are pure functions of finger/pitch
- * geometry (right-hand orientation; the left hand is solved mirrored).
- * Weights live in one place so golden tests pin behavior and tuning is one
- * diff.
+ * Parncutt-subset cost rules (with Jacobs-style refinements). All costs are
+ * pure functions of finger/pitch geometry in right-hand orientation; the left
+ * hand is solved mirrored. Weights live in one place so golden tests pin
+ * behavior and tuning is one diff.
+ *
+ * Context matters and the rules encode it deliberately:
+ * - CHORDS are held shapes → relaxed-span stretch applies, but black-key
+ *   finger choice is free (thumb on a black key in a B♭ chord is normal).
+ * - MELODIC lines are passing motion → comfort-span stretch applies, and
+ *   thumb-on-black / pinky-on-black are penalized (the classic scale rules).
  */
 export const WEIGHTS = {
     /** Within-chord stretch beyond the relaxed span (per semitone²). */
     stretch: 1.0,
-    /** Cross-event stretch beyond the relaxed span (per semitone²). */
+    /** Cross-event stretch beyond the COMFORT span (per semitone²). */
     stretchTrans: 0.35,
-    /** Weak-finger use (ring is weakest, pinky next) — a nudge, not a veto:
-     * kept well below pass costs so avoiding 3-4-5 never beats position play. */
-    weak4: 0.3,
-    weak5: 0.2,
-    /** Thumb / pinky on a black key (thumb-on-black is the classic avoid). */
+    /** Deviation from the pair's natural (resting) span, per semitone. */
+    naturalDev: 0.1,
+    /** Transitions: over-extension hurts more than curling fingers together. */
+    naturalDevTransStretch: 0.08,
+    naturalDevTransCompress: 0.05,
+    /** Weak-finger nudges (Jacobs: 4 is the weak one; 5 anchors fine). */
+    weak4: 0.15,
+    weak5: 0.1,
+    /** Melodic-only: thumb / pinky landing on a black key mid-line. */
     thumbBlack: 2.5,
     fiveBlack: 0.4,
-    /** Thumb passes: base cost by the finger crossed, plus black-key deltas.
-     * High enough that two passes never beat one pass + a weak finger. */
-    passUnder2: 1.4,
+    /** Thumb passes: base cost by the finger crossed. Crossing around the
+     * pinky is essentially never taught — priced accordingly. */
+    passUnder2: 1.5,
     passUnder3: 1.7,
     passUnder4: 2.2,
+    passUnder5: 6.0,
     /** Thumb LANDING on a black key during a pass is awkward… */
     passOntoBlack: 1.0,
-    /** …while passing FROM a black key eases the thumb under (small credit). */
-    passFromBlack: -0.3,
+    /** …while pivoting over a LONG finger on a black key is the classic easy
+     * pass (chromatic 1-3, D♭ major). Short finger 2 earns almost nothing. */
+    passFromBlackLong: -0.6,
+    passFromBlackShort: -0.1,
     /** Non-thumb finger crossings are almost never idiomatic. */
     awkwardCross: 8.0,
     /** Same finger on a new pitch breaks legato. */
@@ -59,8 +77,9 @@ export const handPosition = (midis: readonly number[], fingers: readonly Finger[
     return sum / Math.max(1, midis.length);
 };
 
-/** Cost of holding one event with one assignment (stretch + finger/key comfort). */
-export const unaryCost = (event: EventGeometry, fingers: readonly Finger[]): number => {
+/** Cost of holding one event with one assignment. */
+export const unaryCost = (event: EventGeometry, fingers: readonly Finger[], hand: HandSpan = 'standard'): number => {
+    const isChord = fingers.length > 1;
     let cost = 0;
     for (let i = 0; i < fingers.length; i++) {
         const finger = fingers[i] as Finger;
@@ -69,7 +88,9 @@ export const unaryCost = (event: EventGeometry, fingers: readonly Finger[]): num
         } else if (finger === 5) {
             cost += WEIGHTS.weak5;
         }
-        if (event.blacks[i]) {
+        // Black-key comfort rules are about PASSING motion — a held chord may
+        // put any finger on any key (B♭ major chord is 1-3-5, thumb on B♭).
+        if (!isChord && event.blacks[i]) {
             if (finger === 1) {
                 cost += WEIGHTS.thumbBlack;
             } else if (finger === 5) {
@@ -78,8 +99,10 @@ export const unaryCost = (event: EventGeometry, fingers: readonly Finger[]): num
         }
         if (i + 1 < fingers.length) {
             const span = (event.midis[i + 1] as number) - (event.midis[i] as number);
-            const deficit = relaxedDeficit(finger, fingers[i + 1] as Finger, span);
+            const next = fingers[i + 1] as Finger;
+            const deficit = relaxedDeficit(finger, next, span, hand);
             cost += WEIGHTS.stretch * deficit * deficit;
+            cost += WEIGHTS.naturalDev * Math.abs(span - naturalSpan(finger, next));
         }
     }
     return cost;
@@ -89,10 +112,10 @@ const PASS_COST: Record<number, number> = {
     2: WEIGHTS.passUnder2,
     3: WEIGHTS.passUnder3,
     4: WEIGHTS.passUnder4,
-    5: WEIGHTS.passUnder4, // passing around 5 is rarer and at least as hard
+    5: WEIGHTS.passUnder5,
 };
 
-/** Cost of one melodic connection (prev note → next note), both hands' rules. */
+/** Cost of one melodic connection (prev note → next note). */
 const pairTransitionCost = (
     fPrev: Finger,
     pPrev: number,
@@ -100,6 +123,7 @@ const pairTransitionCost = (
     fCur: Finger,
     pCur: number,
     curBlack: boolean,
+    hand: HandSpan,
 ): number => {
     const d = pCur - pPrev;
     if (fPrev === fCur) {
@@ -113,13 +137,13 @@ const pairTransitionCost = (
     if (thumbPassUp || thumbPassDown) {
         const crossed = thumbPassUp ? fPrev : fCur;
         const thumbLandsBlack = thumbPassUp ? curBlack : prevBlack;
-        const passesFromBlack = thumbPassUp ? prevBlack : curBlack;
+        const pivotOnBlack = thumbPassUp ? prevBlack : curBlack;
         let cost = PASS_COST[crossed] ?? WEIGHTS.passUnder4;
         if (thumbLandsBlack) {
             cost += WEIGHTS.passOntoBlack;
         }
-        if (passesFromBlack) {
-            cost += WEIGHTS.passFromBlack;
+        if (pivotOnBlack) {
+            cost += crossed >= 3 ? WEIGHTS.passFromBlackLong : WEIGHTS.passFromBlackShort;
         }
         return cost;
     }
@@ -128,15 +152,18 @@ const pairTransitionCost = (
     if (!ordered) {
         return WEIGHTS.awkwardCross;
     }
-    // Consistent direction: charge the relaxed-span deficit, but never more
-    // than simply relocating the hand — a big leap is a shift, not a stretch.
+    // Consistent direction: comfort-range stretch (never more than simply
+    // relocating the hand — a big leap is a shift, not a stretch) plus a mild
+    // preference for the pair whose natural span matches the interval.
     const low = Math.min(fPrev, fCur) as Finger;
     const high = Math.max(fPrev, fCur) as Finger;
     const span = fPrev < fCur ? d : -d;
-    const deficit = relaxedDeficit(low, high, span);
+    const deficit = comfortDeficit(low, high, span, hand);
     const stretch = WEIGHTS.stretchTrans * deficit * deficit;
     const relocate = WEIGHTS.shiftFixed + WEIGHTS.shiftPerSemitone * Math.abs(d);
-    return Math.min(stretch, relocate);
+    const dev = span - naturalSpan(low, high);
+    const devCost = dev > 0 ? WEIGHTS.naturalDevTransStretch * dev : WEIGHTS.naturalDevTransCompress * -dev;
+    return Math.min(stretch, relocate) + devCost;
 };
 
 /** Cost of moving from one event's assignment to the next's. */
@@ -145,6 +172,7 @@ export const transitionCost = (
     prevFingers: readonly Finger[],
     cur: EventGeometry,
     curFingers: readonly Finger[],
+    hand: HandSpan = 'standard',
 ): number => {
     let pairSum = 0;
     let pairCount = 0;
@@ -157,6 +185,7 @@ export const transitionCost = (
                 curFingers[j] as Finger,
                 cur.midis[j] as number,
                 cur.blacks[j] === true,
+                hand,
             );
             pairCount++;
         }

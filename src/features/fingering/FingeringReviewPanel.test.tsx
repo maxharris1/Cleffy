@@ -43,6 +43,22 @@ describe('FingeringReviewPanel', () => {
         expect(screen.getByRole('button', { name: 'Show diagram' })).toBeDisabled();
     });
 
+    it('sends tapped notes to the chosen hand — pitch never guesses the hand', async () => {
+        const user = userEvent.setup();
+        const onConfirm = vi.fn();
+        render(<FingeringReviewPanel initial={seed()} onConfirm={onConfirm} onCancel={vi.fn()} />);
+
+        // A left-hand note ABOVE middle C — the old midi>=60 heuristic would
+        // have mis-assigned this to the right hand.
+        await user.click(screen.getByRole('button', { name: 'Left hand' }));
+        await user.click(screen.getByRole('button', { name: 'C4' }));
+        await user.click(screen.getByRole('button', { name: 'Show diagram' }));
+
+        const region = onConfirm.mock.calls[0]?.[0] as RecognizedRegion;
+        expect(region.notes[0]?.staff).toBe('lower');
+        expect(region.handOf[region.notes[0]!.staff]).toBe('L');
+    });
+
     it('swaps hands for the whole region', async () => {
         const user = userEvent.setup();
         const onConfirm = vi.fn();

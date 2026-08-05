@@ -41,6 +41,29 @@ describe('midiToName', () => {
     });
 });
 
+describe('respellFromPrinted', () => {
+    it('keeps a printed spelling that names the same pitch', async () => {
+        const { respellFromPrinted } = await import('@/features/fingering/model');
+        expect(respellFromPrinted('Bb4', 70)).toBe('Bb4'); // chromatic Bb stays Bb, never A#
+        expect(respellFromPrinted('A#4', 70)).toBe('A#4');
+        expect(respellFromPrinted('E#4', 65)).toBe('E#4');
+    });
+
+    it('re-anchors only the octave digit to the midi pitch', async () => {
+        const { respellFromPrinted } = await import('@/features/fingering/model');
+        expect(respellFromPrinted('Bb3', 70)).toBe('Bb4'); // misread octave corrected
+        expect(respellFromPrinted('Cb5', 71)).toBe('Cb5'); // letter octave ≠ sounding octave
+        expect(respellFromPrinted('B#3', 60)).toBe('B#3');
+    });
+
+    it('rejects spellings that contradict the pitch, and garbage', async () => {
+        const { respellFromPrinted } = await import('@/features/fingering/model');
+        expect(respellFromPrinted('C4', 62)).toBeNull();
+        expect(respellFromPrinted('H4', 62)).toBeNull();
+        expect(respellFromPrinted('', 62)).toBeNull();
+    });
+});
+
 describe('clampMidi / isBlackKey', () => {
     it('clamps to the piano range and rounds', () => {
         expect(clampMidi(10)).toBe(21);

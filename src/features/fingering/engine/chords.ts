@@ -1,4 +1,4 @@
-import { withinPractical } from '@/features/fingering/engine/span';
+import { withinPractical, type HandSpan } from '@/features/fingering/engine/span';
 import type { Finger } from '@/features/fingering/model';
 
 /**
@@ -33,7 +33,7 @@ const combinations = (k: number): Finger[][] => {
  * result means the chord is unplayable as one hand-shape (or has >5 notes) —
  * the caller leaves it unfingered.
  */
-export const enumerateStates = (midis: readonly number[]): Finger[][] => {
+export const enumerateStates = (midis: readonly number[], hand: HandSpan = 'standard'): Finger[][] => {
     const k = midis.length;
     if (k === 0 || k > 5) {
         return [];
@@ -41,13 +41,13 @@ export const enumerateStates = (midis: readonly number[]): Finger[][] => {
     return combinations(k).filter((fingers) => {
         for (let i = 0; i + 1 < k; i++) {
             const span = (midis[i + 1] as number) - (midis[i] as number);
-            if (!withinPractical(fingers[i] as Finger, fingers[i + 1] as Finger, span)) {
+            if (!withinPractical(fingers[i] as Finger, fingers[i + 1] as Finger, span, hand)) {
                 return false;
             }
         }
         if (k > 2) {
             const outerSpan = (midis[k - 1] as number) - (midis[0] as number);
-            if (!withinPractical(fingers[0] as Finger, fingers[k - 1] as Finger, outerSpan)) {
+            if (!withinPractical(fingers[0] as Finger, fingers[k - 1] as Finger, outerSpan, hand)) {
                 return false;
             }
         }

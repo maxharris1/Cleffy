@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
     clampMidi,
     midiToName,
+    respellFromPrinted,
     type Clef,
     type Finger,
     type NormRect,
@@ -74,8 +75,10 @@ export const regionFromResponse = (
             notes.push({
                 id: crypto.randomUUID(),
                 midi,
-                // Respell locally so display is always consistent with midi.
-                name: midiToName(midi, data.keySignature),
+                // Prefer the score's printed spelling (octave re-anchored to
+                // midi); respell from the key signature only when the printed
+                // name contradicts the pitch.
+                name: respellFromPrinted(note.name, midi) ?? midiToName(midi, data.keySignature),
                 staff: note.staff,
                 bbox: {
                     x: cropRect.x + note.x * cropRect.w,

@@ -19,6 +19,24 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
 | Smart import | Uploads accept images (magic-byte sniffed, wrapped into single-page PDFs via pdf-lib). A free client-side chroma pass finds colored-ink handwriting (connected components → glyph clusters → fingering-run hints, RLE masks); the `analyze-annotations` edge function classifies clusters with claude-sonnet-5 (strict forced tool; owner-only, rate-limited, degrades to strokes-only when unavailable); real PDF FreeText/Ink annotations convert exactly. Review previews through the history overlay; accepting commits native annotations in one undo batch and can rebuild the PDF with paper-colored patches (rotation-mapped, worker-side), replacing `{id}/original.pdf` with the untouched original kept as `pre-import-original.pdf`. `documents.content_rev` + a broadcast trigger keep caches and open collaborator tabs consistent |
 | Fingering diagrams | A Fingering tool (marquee on the live canvas; usable by view-only students, single-finger draggable) selects a chord/phrase; `src/features/fingering/` (lazy chunk) renders a top-down keyboard diagram — pressed keys tinted per hand with finger badges, phrase step-through — through ONE pure `KeyboardDiagram`, whatever populated the data. Notes come from the `analyze-notes` edge function (claude-opus-5, any-member auth, annotations composited into the crop so written digits read in the same call; bboxes clamped server-side) behind a mandatory editable review, from single-digit text annotations bound client-side to noteheads (greedy nearest-x, staff-side preference, vision-merge rules), or from manual tap-to-enter — the offline path. The suggestion engine (`engine/`) is Parncutt-subset costs + Viterbi over ≤C(5,k) chord states, LH via pitch mirroring, golden-tested against canonical scale/chord fingerings; "Apply to score" places digits as ordinary teal text annotations (`sf` payload flag, wire-schema declared) via the preview overlay + one `createMany` undo batch. Readings cache locally in Dexie v3 `fingeringRegions` keyed by rect+contentRev+nearby-annotation hash |
 
+### Fingering accuracy (educator review, 2026-08-05)
+
+The suggestion engine was audited against standard editions (RCM/ABRSM/Hanon conventions) and
+re-tuned; the canon is pinned by 27 golden/property tests in `engine/suggest.test.ts`: major and
+harmonic-minor scales in white- and black-key tonalities both hands, TWO-octave forms (the loop
+crossings, never a pass around 5), flat-key block chords (thumb-on-black is a passing-motion rule,
+not a held-shape rule — B♭ major is 1-3-5), arpeggios, Alberti bass (5-1-3-1), octave = 1-5, and a
+hand-size setting (small/standard/large scales the Parncutt span tables; unreachable spans render
+an honest "?" rather than a strained stretch). **Known, disclosed deviations**: chromatic runs come
+out as the sequential legato fingering rather than the mainstream 1-3 pattern; terminal notes of a
+fragment may take an end-of-phrase finger where prints show the loop finger (the UI tells users to
+select through the end of the phrase); LH 2-octave C major aligns one thumb on D instead of C
+(equal-cost tie). The panel frames every suggestion as "one good option — editions differ." Vision
+note-reading remains **unvalidated end-to-end** (no API key in the build sandbox): before promoting
+"Read notes" accuracy, build a ground-truth eval set of real scanned pages, exercising accidentals
+earlier in the measure than the selection, 8va lines starting before it, and dense-chord digit
+binding (the prompt now directs attention to all three).
+
 ## How to test (once Supabase setup from SETUP_SUPABASE.md is done)
 
 1. **Local-only** (works with zero backend): `npm run dev` → "Open a PDF" → draw with

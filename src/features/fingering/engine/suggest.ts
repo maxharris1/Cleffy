@@ -1,4 +1,5 @@
 import { solve, type DpEvent } from '@/features/fingering/engine/dp';
+import type { HandSpan } from '@/features/fingering/engine/span';
 import {
     buildSequences,
     isBlackKey,
@@ -7,6 +8,8 @@ import {
     type Hand,
     type RecognizedRegion,
 } from '@/features/fingering/model';
+
+export type { HandSpan };
 
 /**
  * Public engine API: Parncutt-style ergonomic costs + Viterbi, per hand.
@@ -29,6 +32,8 @@ export interface EngineInput {
     events: EngineEvent[];
     /** Fingers to keep (from written fingerings), by noteId. */
     pins?: ReadonlyMap<string, Finger>;
+    /** Reach limits — children/small hands get tighter span tables. */
+    handSpan?: HandSpan;
 }
 
 export interface EngineResult {
@@ -61,7 +66,7 @@ export const suggestFingerings = (input: EngineInput): EngineResult => {
         return { midis, blacks, pinned: pinned.size > 0 ? pinned : undefined };
     });
 
-    const { assignments, ignoredPinEvents } = solve(dpEvents);
+    const { assignments, ignoredPinEvents } = solve(dpEvents, input.handSpan ?? 'standard');
 
     const events = input.events.map((event, i) => {
         const assignment = assignments[i];
@@ -102,6 +107,7 @@ export const suggestFingerings = (input: EngineInput): EngineResult => {
 export const suggestForRegion = (
     region: RecognizedRegion,
     keepWritten: boolean,
+    handSpan: HandSpan = 'standard',
 ): Record<Hand, FingeringSequence | null> => {
     const annotated = buildSequences(region);
     const result: Record<Hand, FingeringSequence | null> = { L: null, R: null };
@@ -125,6 +131,7 @@ export const suggestForRegion = (
                 midis: event.notes.map((n) => n.midi),
             })),
             pins,
+            handSpan,
         }).sequence;
     }
     return result;
