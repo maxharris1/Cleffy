@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 
 import { buildFingeringProposals } from '@/features/fingering/applyFingerings';
 import { bindRegionDigits } from '@/features/fingering/bindFingerings';
+import { readCachedRegion, regionCacheKey, writeCachedRegion } from '@/features/fingering/cache';
 import { FingeringDiagramPanel } from '@/features/fingering/diagram/FingeringDiagramPanel';
 import { FingeringReviewPanel } from '@/features/fingering/FingeringReviewPanel';
 import { FingeringSelectionPopover } from '@/features/fingering/FingeringSelectionPopover';
@@ -12,6 +13,7 @@ import { isCloudDocId } from '@/features/library/documentsService';
 import { pagePointToViewport, type PageLayout } from '@/features/viewer/geometry';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import type { AnnotationStore } from '@/sync/annotationStore';
+import { getDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
 import type { Annotation } from '@/types/models';
 import { buttonClassName } from '@/ui/classNames';
@@ -48,6 +50,8 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
     const [snapshot, setSnapshot] = useState<{ dataUrl: string; rect: NormRect } | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [pendingProposals, setPendingProposals] = useState<Annotation[]>([]);
+    const [cacheKey, setCacheKey] = useState<string | null>(null);
+    const [fromCache, setFromCache] = useState(false);
     const recognize = useMemo(() => (isCloudDocId(docId) ? makeRecognizeNotesFn(docId) : null), [docId]);
 
     const { rect } = selection;
@@ -72,19 +76,44 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
         setError(null);
         try {
             const annotations = [...store.getPage(selection.pageIndex).values()];
+            const aspect = layout.width / layout.height;
+            const db = getDb();
+
+            // A prior reading of this exact region (same PDF revision, same
+            // nearby annotations) is served from cache — corrections included.
+            const contentRev = (await db.pdfCache.get(docId))?.contentRev ?? 0;
+            const key = await regionCacheKey({
+                docId,
+                page: selection.pageIndex,
+                rect,
+                contentRev,
+                annotations,
+                aspect,
+            });
+            setCacheKey(key);
+
             const images = await buildRegionImages(doc, selection.pageIndex, rect, annotations);
+            setSnapshot({
+                dataUrl: `data:${images.regionImage.mediaType};base64,${images.regionImage.dataBase64}`,
+                rect: images.cropRect,
+            });
+
+            const cached = await readCachedRegion(db, key);
+            if (cached) {
+                setVisionSeed(cached);
+                setFromCache(true);
+                setPhase('review');
+                return;
+            }
+
             const recognized = await recognize(selection.pageIndex, rect, images);
             if (!recognized || recognized.notes.length === 0) {
                 setError("Couldn't read the passage — enter the notes by hand.");
                 setPhase('choose');
                 return;
             }
-            const aspect = layout.width / layout.height;
             setVisionSeed(bindRegionDigits(recognized, annotations, aspect));
-            setSnapshot({
-                dataUrl: `data:${images.regionImage.mediaType};base64,${images.regionImage.dataBase64}`,
-                rect: images.cropRect,
-            });
+            setFromCache(false);
             setPhase('review');
         } catch {
             setError("Couldn't read the passage — enter the notes by hand.");
@@ -157,9 +186,13 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
                 <FingeringReviewPanel
                     initial={reviewSeed}
                     snapshot={snapshot}
+                    fromCache={fromCache}
                     onConfirm={(next) => {
                         setRegion(next);
                         setPhase('diagram');
+                        if (cacheKey && next.source === 'vision') {
+                            void writeCachedRegion(getDb(), cacheKey, next);
+                        }
                     }}
                     onCancel={() => {
                         if (region) {

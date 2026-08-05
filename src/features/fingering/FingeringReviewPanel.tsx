@@ -19,6 +19,8 @@ export interface FingeringReviewPanelProps {
     initial: RecognizedRegion;
     /** The crop the vision reading saw, for tap-to-select note markers. */
     snapshot?: { dataUrl: string; rect: NormRect } | null;
+    /** The reading was served from the local cache (a prior session's review). */
+    fromCache?: boolean;
     onConfirm: (region: RecognizedRegion) => void;
     onCancel: () => void;
 }
@@ -34,7 +36,13 @@ const FINGER_OPTIONS: Array<Finger | null> = [1, 2, 3, 4, 5, null];
  * note-entry path (local docs, offline, AI unavailable): tap keys to add
  * notes to the selected step, then assign fingers.
  */
-export const FingeringReviewPanel = ({ initial, snapshot = null, onConfirm, onCancel }: FingeringReviewPanelProps) => {
+export const FingeringReviewPanel = ({
+    initial,
+    snapshot = null,
+    fromCache = false,
+    onConfirm,
+    onCancel,
+}: FingeringReviewPanelProps) => {
     const [region, setRegion] = useState<RecognizedRegion>(initial);
     const [selectedEvent, setSelectedEvent] = useState(() =>
         initial.notes.length > 0 ? Math.min(...initial.notes.map((n) => n.eventIndex)) : 0,
@@ -119,6 +127,7 @@ export const FingeringReviewPanel = ({ initial, snapshot = null, onConfirm, onCa
                 {initial.source === 'vision'
                     ? 'Check the reading before the diagram renders — tap a marker or chip to fix a note. Amber means unsure.'
                     : 'Tap keys to enter the notes of each step — a chord is one step with several notes. Select a note to set its finger.'}
+                {fromCache ? ' Loaded from a saved reading.' : ''}
             </p>
 
             {snapshot ? (

@@ -104,6 +104,23 @@ turns it into editable Cleffy annotations. Its parts:
     $0.03–0.08 per scanned page (claude-sonnet-5, one call per page that has
     colored ink).
 
+- **Edge function** `analyze-notes` — reads the pitches (and any visible
+  fingering digits) of a region the user selects with the Fingering tool, so
+  the app can render the piano-keyboard fingering diagram. Same secret, same
+  degrade behavior (no key → the flow falls back to manual note entry):
+
+    ```bash
+    npx supabase functions deploy analyze-notes --project-ref jibgwgosihadbjgxdsfe
+    ```
+
+    Defaults to `claude-opus-5` (accuracy-sensitive vision; roughly $0.05–0.15
+    per selection, rate-limited to 40/user/hour, and readings are cached
+    locally per region). To trade accuracy for cost:
+
+    ```bash
+    npx supabase secrets set ANALYZE_NOTES_MODEL=claude-sonnet-5 --project-ref jibgwgosihadbjgxdsfe
+    ```
+
 ## 5. Play-along analysis (OMR service + Edge Function)
 
 The play-along feature converts uploaded PDFs to notes + measure positions via
