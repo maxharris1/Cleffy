@@ -6,6 +6,7 @@ import {
     clampMidi,
     midiToName,
     type Finger,
+    type NormRect,
     type RecognizedNote,
     type RecognizedRegion,
     type Staff,
@@ -14,8 +15,10 @@ import { buttonClassName } from '@/ui/classNames';
 import { Dialog } from '@/ui/Dialog';
 
 export interface FingeringReviewPanelProps {
-    /** Seed region — vision result (M2) or an empty region for manual entry. */
+    /** Seed region — vision result or an empty region for manual entry. */
     initial: RecognizedRegion;
+    /** The crop the vision reading saw, for tap-to-select note markers. */
+    snapshot?: { dataUrl: string; rect: NormRect } | null;
     onConfirm: (region: RecognizedRegion) => void;
     onCancel: () => void;
 }
@@ -31,7 +34,7 @@ const FINGER_OPTIONS: Array<Finger | null> = [1, 2, 3, 4, 5, null];
  * note-entry path (local docs, offline, AI unavailable): tap keys to add
  * notes to the selected step, then assign fingers.
  */
-export const FingeringReviewPanel = ({ initial, onConfirm, onCancel }: FingeringReviewPanelProps) => {
+export const FingeringReviewPanel = ({ initial, snapshot = null, onConfirm, onCancel }: FingeringReviewPanelProps) => {
     const [region, setRegion] = useState<RecognizedRegion>(initial);
     const [selectedEvent, setSelectedEvent] = useState(() =>
         initial.notes.length > 0 ? Math.min(...initial.notes.map((n) => n.eventIndex)) : 0,
@@ -113,9 +116,46 @@ export const FingeringReviewPanel = ({ initial, onConfirm, onCancel }: Fingering
     return (
         <Dialog label="Notes in selection" onClose={onCancel} sheet>
             <p className="mb-3 text-sm text-stone-600">
-                Tap keys to enter the notes of each step — a chord is one step with several notes. Select a note to
-                set its finger.
+                {initial.source === 'vision'
+                    ? 'Check the reading before the diagram renders — tap a marker or chip to fix a note. Amber means unsure.'
+                    : 'Tap keys to enter the notes of each step — a chord is one step with several notes. Select a note to set its finger.'}
             </p>
+
+            {snapshot ? (
+                <div className="relative mb-3 overflow-hidden rounded-lg border border-stone-200 bg-white">
+                    <img src={snapshot.dataUrl} alt="Selected passage" className="w-full" />
+                    {region.notes.map((n) => {
+                        if (n.bbox.w <= 0) {
+                            return null;
+                        }
+                        const cx = (n.bbox.x + n.bbox.w / 2 - snapshot.rect.x) / snapshot.rect.w;
+                        const cy = (n.bbox.y + n.bbox.h / 2 - snapshot.rect.y) / snapshot.rect.h;
+                        if (cx < 0 || cx > 1 || cy < 0 || cy > 1) {
+                            return null;
+                        }
+                        return (
+                            <button
+                                key={n.id}
+                                type="button"
+                                aria-label={`Select note ${n.name}`}
+                                onClick={() => {
+                                    setSelectedEvent(n.eventIndex);
+                                    setSelectedNoteId(n.id);
+                                }}
+                                className={`absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white/90 shadow ${
+                                    selectedNoteId === n.id ? 'ring-2 ring-accent ring-offset-1' : 'opacity-75'
+                                }`}
+                                style={{
+                                    left: `${cx * 100}%`,
+                                    top: `${cy * 100}%`,
+                                    backgroundColor:
+                                        n.confidence === 'low' ? '#d97706' : HAND_COLORS[region.handOf[n.staff]],
+                                }}
+                            />
+                        );
+                    })}
+                </div>
+            ) : null}
 
             <div className="mb-3 flex flex-wrap items-center gap-1.5">
                 {eventIndices.map((index, position) => {

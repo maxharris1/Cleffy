@@ -394,6 +394,12 @@ verify_jwt = true
 [functions.analyze-annotations]
 verify_jwt = true
 
+# Fingering-diagram note recognition — JWT required; any document member
+# (owner/editor/viewer) enforced in-function. Uses the same ANTHROPIC_API_KEY;
+# model overridable via the ANALYZE_NOTES_MODEL secret (default claude-opus-5).
+[functions.analyze-notes]
+verify_jwt = true
+
 [functions.imslp-work]
 verify_jwt = true
 

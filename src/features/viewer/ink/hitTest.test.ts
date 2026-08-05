@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { hitTestAnnotation, hitTestPage } from '@/features/viewer/ink/hitTest';
+import { annotationBboxNorm, annotationsInRect, hitTestAnnotation, hitTestPage } from '@/features/viewer/ink/hitTest';
 import type { Annotation } from '@/types/models';
 
 const PAGE_W = 1000;
@@ -61,5 +61,51 @@ describe('hitTestPage', () => {
         const newer = { ...stroke('bb', [0.1, 0.5, 0.5, 0.5, 0.5, 0.5]), createdAt: '2026-02-01T00:00:00Z' };
         const hits = hitTestPage([older, newer], 0.3, 0.5, 6, PAGE_W, PAGE_H);
         expect(hits.map((h) => h.id)).toEqual(['bb', 'a']);
+    });
+});
+
+const ASPECT = PAGE_W / PAGE_H;
+
+const text = (id: string, x: number, y: number, content = '3', size = 0.02): Annotation => ({
+    ...stroke(id, []),
+    kind: 'text',
+    payload: { x, y, text: content, size },
+});
+
+describe('annotationBboxNorm', () => {
+    it('sizes text by the width-normalized char heuristic, height via aspect', () => {
+        const [minX, minY, maxX, maxY] = annotationBboxNorm(text('t', 0.1, 0.2, 'ab', 0.02), ASPECT);
+        expect(minX).toBe(0.1);
+        expect(minY).toBe(0.2);
+        expect(maxX).toBeCloseTo(0.1 + 2 * 0.02 * 0.6);
+        expect(maxY).toBeCloseTo(0.2 + 0.02 * 1.25 * ASPECT);
+    });
+
+    it('inflates stroke bboxes by half the stroke width per axis', () => {
+        const [minX, minY, maxX, maxY] = annotationBboxNorm(
+            stroke('s', [0.3, 0.4, 0.5, 0.35, 0.45, 0.5], 0.01),
+            ASPECT,
+        );
+        expect(minX).toBeCloseTo(0.3 - 0.005);
+        expect(maxX).toBeCloseTo(0.35 + 0.005);
+        expect(minY).toBeCloseTo(0.4 - 0.005 * ASPECT);
+        expect(maxY).toBeCloseTo(0.45 + 0.005 * ASPECT);
+    });
+});
+
+describe('annotationsInRect', () => {
+    it('returns annotations whose bbox intersects the rect, including edge touches', () => {
+        const inside = text('inside', 0.2, 0.2);
+        const outside = text('outside', 0.8, 0.8);
+        // Text starting exactly at the rect's right edge — touching counts.
+        const touching = text('touching', 0.4, 0.2);
+        const hits = annotationsInRect([inside, outside, touching], { x: 0.1, y: 0.1, w: 0.3, h: 0.3 }, ASPECT);
+        expect(hits.map((h) => h.id)).toEqual(['inside', 'touching']);
+    });
+
+    it('catches strokes that only clip a corner of the rect', () => {
+        const s = stroke('s', [0.05, 0.05, 0.5, 0.12, 0.12, 0.5]);
+        expect(annotationsInRect([s], { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, ASPECT)).toHaveLength(1);
+        expect(annotationsInRect([s], { x: 0.2, y: 0.2, w: 0.2, h: 0.2 }, ASPECT)).toHaveLength(0);
     });
 });

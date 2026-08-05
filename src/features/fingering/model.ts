@@ -39,6 +39,8 @@ export interface RecognizedNote {
     /** Fingering read off the page (or set in review), if any. */
     annotatedFinger: Finger | null;
     fingerSource: 'vision' | 'client-text' | 'manual' | null;
+    /** How sure vision was that the digit belongs to THIS note (merge input). */
+    fingerConfidence?: Confidence;
     confidence: Confidence;
 }
 
