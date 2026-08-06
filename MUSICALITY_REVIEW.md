@@ -208,6 +208,8 @@ be easy to read this as a broader indictment. It isn't.
 Ranked by musical impact per unit of effort. The first three need **no schema change and no
 client change** — they are all inside the OMR service.
 
+0. **Meter sanity check** — when a movement's modal bar content disagrees with the declared
+   signature by a clean ratio, trust the bars. Would have caught the worst error on the Schubert.
 1. **Per-staff dynamics resolved by `(tick, staff)`** — stops the melody being overwritten.
 2. **Articulations → gate + velocity** (`staccato`, `accent`, `strong-accent`, `tenuto`) — gives
    the playback touch, and fixes "everything sounds legato."
@@ -219,9 +221,151 @@ client change** — they are all inside the OMR service.
    revisit a printed bar. Keeps the engine linear and the geometry mapping intact.
 7. Pedal, ornaments, appoggiatura vs acciaccatura, swing.
 
-## Not yet reviewed: the specific document
+---
 
-This review covers the pipeline, not document `071f3c99-aee2-46cc-a2c5-bbdf22f43781`. The
-note-for-note accuracy pass — how well Audiveris read _that_ score's pitches, rhythms, and
-hand assignment — still needs the source PDF and its stored ScoreData; neither is reachable
-from the review sandbox (no localhost access; the Supabase MCP returns `permission denied`).
+# Case study: Schubert, _Moments musicaux_ D. 780 (Op. 94)
+
+Document `071f3c99-aee2-46cc-a2c5-bbdf22f43781` — Breitkopf & Härtel _Schubert's Werke_,
+Serie 11 No. 4. All six pieces, 16 pages, 679 measures, 8198 notes.
+Engine `audiveris-5.6.1+svc-4`. Stored warnings: `repeats_ignored`, `measure_overfull`,
+`measure_underfull`, `multiple_movements_concatenated`.
+
+Every claim below was checked against the rendered PDF at 400 dpi and against the stored
+ScoreData.
+
+## What it got right — and this is the strong half
+
+**Key signatures are essentially perfect.** All twenty key changes across the set are correct,
+including internal modulations:
+
+| | printed | read |
+| --- | --- | --- |
+| No. 1 | C major, → G major middle section | 0 (default), `fifths=1` @42000 ✓ |
+| No. 2 | A♭ major, → F♯ minor middle sections | `-4`, `+3` twice ✓ |
+| No. 3 | F minor | `-4` ✓ |
+| No. 4 | C♯ minor | `+4` ✓ |
+| No. 5 | F minor | `-4` ✓ |
+| No. 6 | A♭ major | `-4` ✓ |
+
+Catching the enharmonic F♯-minor episodes inside an A♭ movement — twice — is genuinely good.
+
+**Movement segmentation found all six.** **Time signatures: five of six correct.** And rhythm
+recognition in the back four movements is strong:
+
+| movement | bars | bars at correct length | rate |
+| --- | --- | --- | --- |
+| No. 3 (2/4) | 77 | 76 | **99%** |
+| No. 4 (2/4) | 182 | 172 | **95%** |
+| No. 5 (2/4) | 111 | 110 | **99%** |
+| No. 6 (3/4) | 120 | 116 | **97%** |
+
+## No. 2 is read in 6/8. It is printed in 9/8.
+
+Verified at 400 dpi: the signature is unambiguously **9/8**, key of four flats.
+
+This is an Audiveris misread, not a parser bug — but **the parser then amplifies it.** Expected
+bar length becomes 1440 ticks instead of 2160, so the underfull-padding path
+(`musicxml.ts:643-651`) pads bars to a target derived from the wrong meter:
+
+| movement | bars | at correct length | actual ticks | correct ticks |
+| --- | --- | --- | --- | --- |
+| No. 2 (9/8) | 94 | **18 (19%)** | 159,960 | 203,040 |
+
+44 bars were padded to exactly 1440 — each one **720 ticks short, a full dotted-quarter beat
+of 9/8**. The Andantino runs **21% short overall**, and because the error accumulates bar by
+bar, audio and page drift progressively further apart across the whole movement.
+
+The evidence to catch this was already in hand. The modal bar content in that movement is 2160
+against a declared 1440 — a clean 3:2 disagreement. **When a movement's bars systematically
+disagree with the declared signature by a simple ratio, the signature is wrong, not the bars.**
+A meter sanity-check would have caught the single highest-impact error on this document.
+Instead the padding logic propagated it, and the user was told nothing.
+
+## No. 1 loses its triplets
+
+| movement | bars | at correct length | rate |
+| --- | --- | --- | --- |
+| No. 1 (3/4) | 95 | 64 | **67%** |
+
+67% is an **upper bound** — silently padded underfull bars also land on exactly 1440 and are
+indistinguishable from correct ones in the stored data.
+
+The failures have a signature. Of the 31 wrong bars: **19 are exactly 1680 ticks (1440 + 240)**
+and **7 are exactly 1920 (1440 + 480)**. 240 ticks is precisely what a triplet-eighth group
+gains when its `<time-modification>` is lost — 3×160 read as 3×240. So 19 bars dropped one
+triplet, 7 dropped two.
+
+The duration histogram corroborates it: across the whole movement, only **49 triplet-eighths
+(160 ticks)** against **923 plain eighths (240)** — while the printed page carries triplet
+brackets in nearly every bar of the opening material.
+
+Bar 1's left hand came out as `(640, 160, 160)`. **640 is not a legal note value in 3/4** — it
+is the residue of a swallowed triplet member.
+
+## Zero grace notes. Out of 8198.
+
+Not one note in the document has the 110-tick grace length. Page 1 alone has at least six
+printed grace notes; the set is full of them. `grace_notes_skipped` never even fired, which
+means Audiveris emitted no `<grace>` elements at all — the noteheads were dropped or folded in
+as ordinary notes. Schubert's ornamental graces are simply gone.
+
+## Both hands play at the same volume for the entire work
+
+**95.9% of simultaneous RH/LH onsets carry identical velocity** (1772 of 1848). The 4% that
+differ are only the `fz`/`sfz` accent landing on whichever note happened to come first in
+document order.
+
+This is the P0 dynamics-bleed bug measured on real repertoire — in music built almost entirely
+on a singing line over a quieter accompaniment.
+
+The whole dynamic range of the set reduces to seven values:
+
+| velocity | notes | share | |
+| --- | --- | --- | --- |
+| 0.34 | 3460 | 42.2% | `pp` |
+| 0.46 | 3454 | 42.1% | `p` |
+| 0.82 | 885 | 10.8% | `f` |
+| 0.92 | 333 | 4.1% | `ff` |
+| 0.66 | 51 | 0.6% | accent over `p` |
+| 0.70 | 13 | 0.2% | `mf` |
+| 0.54 | 2 | 0.0% | accent over `pp` |
+
+**84% of the work plays at _p_ or _pp_.** Every value is an exact `DYNAMIC_LEVELS` constant or
+an accent offset — **there is not one intermediate value in 8198 notes**. That is direct proof
+that no hairpin is interpolated: the score's many `cresc.`, `decresc.`, `dim.` and printed
+wedges produce nothing at all.
+
+Spot-check matching the synthetic probe: the `>` accent on bar 2 of No. 1 came out at `v=0.46`,
+identical to its neighbours.
+
+## The whole set plays at a flat 100 bpm
+
+`bpm_default` is **null**. Every tempo in this edition is a word — _Moderato_, _Andantino_,
+_Allegro moderato_, _Moderato_, _Allegro vivace_, _Allegretto_ — and `<words>` is never parsed,
+so nothing reached `defaultBpm` and the app fell back to `DEFAULT_BPM = 100`.
+
+**No. 5 "Allegro vivace" and No. 2 "Andantino" play at exactly the same speed.**
+
+## Structural
+
+- **All six pieces are one 679-bar timeline.** The transport's measure counter resets to 1 five
+  times mid-score; measure-seek and A-B loop numbering are ambiguous as a result.
+- **Repeats and voltas dropped.** Pages 1–2 carry repeat barlines and visible `1.` / `2.`
+  endings; both endings play back-to-back.
+- None of the four stored warnings is shown to the user.
+
+## Verdict on this document
+
+The **pitch and key layer is strong** — keys, modulations, hand split, and the rhythm of four
+of six movements are all good enough to practise against. The failures cluster in exactly two
+places:
+
+1. **Rhythm, where the notation is dense** (No. 1's triplets, No. 2's misread meter). Both are
+   Audiveris limits, but both were *detectable* from data the pipeline already computes and
+   *worsened* by padding against a wrong target.
+2. **Everything expressive** — dynamics, accents, articulation, tempo, graces, repeats — which
+   is the pipeline's own gap, not Audiveris's.
+
+For a student, the practical result: Nos. 3–6 are usable play-alongs at the wrong tempo and a
+flat dynamic. No. 2 drifts out of sync with the page. No. 1 stumbles wherever Schubert wrote a
+triplet. And nothing on screen says any of this is happening.
