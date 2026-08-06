@@ -3,12 +3,15 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import {
     INK_PROGRESS_EVENT,
+    SCORE_ANALYSIS_EVENT,
     parseDbChange,
     parseDocumentChange,
     parseInkProgress,
+    parseScoreAnalysisBroadcast,
     presenceSchema,
     type InkProgressMsg,
     type PresencePeer,
+    type ScoreAnalysisBroadcast,
 } from '@/sync/wire';
 import type { AnnotationRow } from '@/types/database';
 
@@ -53,6 +56,8 @@ export interface DocRealtimeChannelOptions {
     onReconnect: () => void;
     /** Another member replaced the document's PDF bytes (smart-import cleanup). */
     onDocReplaced?: (contentRev: number) => void;
+    /** Play-along analysis lifecycle changed (trimmed broadcast). */
+    onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
 }
 
 /**
@@ -109,6 +114,13 @@ export class DocRealtimeChannel {
         };
         channel.on('broadcast', { event: 'INSERT' }, onDb);
         channel.on('broadcast', { event: 'UPDATE' }, onDb);
+
+        channel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
+            const msg = parseScoreAnalysisBroadcast(payload);
+            if (msg && msg.document_id === docId) {
+                this.opts.onScoreAnalysis?.(msg);
+            }
+        });
 
         channel.on('presence', { event: 'sync' }, () => {
             const state = channel.presenceState<Record<string, unknown>>();

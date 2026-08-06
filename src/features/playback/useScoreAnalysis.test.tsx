@@ -128,4 +128,15 @@ describe('useScoreAnalysis', () => {
         await result.current.generate();
         await waitFor(() => expect(result.current.state).toEqual({ kind: 'failed', code: 'too_large' }));
     });
+
+    it('rehydrates backlog_full from a persisted failed analysis row', async () => {
+        fake.row = {
+            status: 'failed',
+            error: 'backlog_full',
+            progress: null,
+            updated_at: now(),
+        };
+        const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(result.current.state).toEqual({ kind: 'failed', code: 'backlog_full' }));
+    });
 });

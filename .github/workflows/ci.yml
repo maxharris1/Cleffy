@@ -33,6 +33,7 @@ jobs:
                   cache: npm
                   cache-dependency-path: services/omr-service/package-lock.json
             - run: npm ci
+            - run: npm run check:engine-version
             - run: npm run typecheck
             - run: npm run test
             - run: npm run build

@@ -27,7 +27,7 @@ import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel } from '@/sync/realtimeChannel';
 import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
-import type { PresencePeer } from '@/sync/wire';
+import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
@@ -75,6 +75,8 @@ export interface PdfViewportProps {
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
         onDocReplaced?: (contentRev: number) => void;
+        /** Play-along analysis status changed. */
+        onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
     };
 }
 
@@ -145,6 +147,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
+    const syncOnScoreAnalysis = sync?.onScoreAnalysis;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
     // Track viewport size.
@@ -287,6 +290,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     void engine?.sync();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
+                onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);
@@ -314,6 +318,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncOnStatus,
         syncOnPeers,
         syncOnDocReplaced,
+        syncOnScoreAnalysis,
     ]);
 
     // Playhead: imperative rAF controller over the two overlay divs below.

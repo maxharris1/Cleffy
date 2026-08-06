@@ -2,7 +2,8 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
-import { runJob, type JobRequest } from './job.js';
+import { runClaimedJob, runJob, type JobRequest } from './job.js';
+import { claimJob, hasQueuedWork, newWorkerId, reapExpiredLeases } from './jobStore.js';
 import { JobQueue } from './queue.js';
 import { supabaseWriteback } from './writeback.js';
 
@@ -10,6 +11,10 @@ const PORT = Number.parseInt(process.env.PORT ?? '8080', 10);
 const SECRET = process.env.OMR_SERVICE_SECRET ?? '';
 const MAX_QUEUE_DEPTH = 4;
 const MAX_BODY_BYTES = 64 * 1024;
+/** Local-only self-claim interval. NEVER set in production (background work). */
+const DEV_POLL_MS = Number.parseInt(process.env.DEV_POLL_MS ?? '0', 10);
+const SELF_URL = (process.env.SELF_URL ?? '').replace(/\/$/, '');
+const POKE_SEND_RACE_MS = 250;
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -91,12 +96,86 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
     res.end(JSON.stringify(body));
 };
 
+/** Fire-and-forget self-poke: await only a short send-race, never the response. */
+const pokeSelf = async (): Promise<void> => {
+    if (!SELF_URL || !SECRET) {
+        return;
+    }
+    const more = await hasQueuedWork();
+    if (!more) {
+        return;
+    }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), POKE_SEND_RACE_MS);
+    try {
+        await fetch(`${SELF_URL}/poke`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-omr-secret': SECRET },
+            body: '{}',
+            signal: ac.signal,
+        });
+    } catch {
+        // Abort after headers / network error — expected for send-race.
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+/**
+ * Request-anchored worker body: claim ≤1 job and run it to completion.
+ * Returns whether a job was claimed.
+ */
+const processOneClaim = async (): Promise<boolean> => {
+    await reapExpiredLeases();
+
+    const workerId = newWorkerId();
+    const job = await claimJob(workerId);
+    if (!job) {
+        return false;
+    }
+
+    try {
+        await runClaimedJob(job, workerId, supabaseWriteback);
+    } catch (err) {
+        console.error('[poke] unexpected', err);
+    }
+    return true;
+};
+
+/**
+ * Request-anchored worker: claim ≤1 job, hold the HTTP request for the full
+ * run, self-poke before responding so --concurrency 1 fans out to another
+ * instance.
+ */
+const handlePoke = async (res: ServerResponse): Promise<void> => {
+    const claimed = await processOneClaim();
+    if (!claimed) {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+
+    // Fan-out: poke before respond so this instance (still busy) is ineligible.
+    await pokeSelf();
+    json(res, 200, { ok: true, claimed: true });
+};
+
 export const server = createServer((req, res) => {
     void (async () => {
         if (req.method === 'GET' && req.url === '/healthz') {
             json(res, 200, { ok: true });
             return;
         }
+
+        if (req.method === 'POST' && req.url === '/poke') {
+            if (!secretMatches(req.headers['x-omr-secret'] as string | undefined)) {
+                json(res, 401, { error: 'Unauthorized' });
+                return;
+            }
+            await handlePoke(res);
+            return;
+        }
+
         if (req.method !== 'POST' || req.url !== '/jobs') {
             json(res, 404, { error: 'Not found' });
             return;
@@ -135,4 +214,15 @@ if (process.argv[1]?.endsWith('server.js')) {
         process.exit(1);
     }
     server.listen(PORT, () => console.log(`omr-service listening on :${PORT}`));
+
+    if (DEV_POLL_MS > 0) {
+        console.warn(
+            `[dev] DEV_POLL_MS=${DEV_POLL_MS} — local self-claim loop; NEVER set in production`,
+        );
+        setInterval(() => {
+            void processOneClaim()
+                .then((claimed) => (claimed ? pokeSelf() : undefined))
+                .catch((err) => console.warn('[dev-poll]', err));
+        }, DEV_POLL_MS);
+    }
 }

@@ -3,68 +3,95 @@
 Turns an uploaded chart PDF into **ScoreData** — note events split right/left
 hand plus measure/system geometry in normalized page coordinates — using
 [Audiveris](https://github.com/Audiveris/audiveris) for optical music
-recognition, and writes the result into the `score_analyses` table.
+recognition, and writes the result into the `score_analyses` table via a
+durable `omr_jobs` claim queue.
 
 ```
-score-analyze Edge Fn ──POST /jobs {documentId, pdfSignedUrl, pageCount}──▶ this service
-                                                                              │ 1. download PDF (signed URL)
-                                                                              │ 2. Audiveris -batch -export
-                                                                              │ 3. parse .mxl (notes/hands/ties)
-                                                                              │    + .omr (measure pixel geometry)
-                                                                              │ 4. buildScoreData → self-check
-                                                                              ▼
-                                                        Supabase score_analyses (service-role upsert)
+score-analyze Edge Fn ──insert omr_jobs + POST /poke──▶ this service
+                                                         │ claim (SKIP LOCKED)
+                                                         │ download (self-minted signed URL)
+                                                         │ Audiveris -batch -export
+                                                         │ parse .mxl + .omr (+ content-hash cache)
+                                                         ▼
+                                   omr_complete_job (atomic job + score_analyses)
 ```
 
 ## Environment
 
 | Var                         | Purpose                                                                 |
 | --------------------------- | ----------------------------------------------------------------------- |
-| `OMR_SERVICE_SECRET`        | shared secret; the Edge Function sends it as `x-omr-secret`             |
-| `SUPABASE_URL`              | project URL (also the SSRF allowlist prefix for PDF downloads)          |
-| `SUPABASE_SERVICE_ROLE_KEY` | write-back credentials (server-side only, never in the app)             |
+| `OMR_SERVICE_SECRET`        | shared secret; Edge / sweeper send it as `x-omr-secret`                 |
+| `SUPABASE_URL`              | project URL (SSRF allowlist for push-mode URLs; writeback target)       |
+| `SUPABASE_SERVICE_ROLE_KEY` | write-back, claim RPCs, worker-minted signed URLs                       |
+| `SELF_URL`                  | public base URL of this service (drain-chain self-poke)                 |
 | `PORT`                      | default 8080                                                            |
 | `AUDIVERIS_BIN`             | default `/opt/audiveris/bin/Audiveris` (Docker image sets its own path) |
+| `DEV_POLL_MS`               | **local only** — self-claim interval. NEVER set in production.          |
 
 ## Run locally
 
+Hosted `pg_cron` pokes **production** Cloud Run — a local docker-compose
+worker never hears from the sweeper. Drain locally with:
+
 ```bash
 # from the repo root
-docker compose --profile omr up --build omr
-# or without Docker (needs a local Audiveris install):
-cd services/omr-service && npm ci && npm run build && \
-  OMR_SERVICE_SECRET=dev AUDIVERIS_BIN=/path/to/Audiveris node dist/server.js
+docker compose up --build omr
+# edge poke (after score-analyze enqueue) or manual:
+curl -X POST localhost:8090/poke -H "x-omr-secret: $OMR_SERVICE_SECRET" -H 'Content-Type: application/json' -d '{}'
+```
+
+Optional local self-claim (reintroduces background work — **dev only**):
+
+```bash
+DEV_POLL_MS=5000 SELF_URL=http://127.0.0.1:8090 …
 ```
 
 Smoke test: `curl localhost:8090/healthz`.
 
-## Deploy (Cloud Run example)
+## Deploy (Cloud Run)
 
 ```bash
 gcloud run deploy cleffy-omr --source services/omr-service \
-  --memory 4Gi --cpu 2 --timeout 3600 --concurrency 1 \
-  --min-instances 0 --max-instances 1 --no-cpu-throttling \
-  --set-env-vars OMR_SERVICE_SECRET=...,SUPABASE_URL=...,SUPABASE_SERVICE_ROLE_KEY=...
+  --memory 4Gi --cpu 2 --timeout 3600 \
+  --concurrency 1 --min-instances 0 --max-instances 3 \
+  --no-cpu-throttling \
+  --set-env-vars OMR_SERVICE_SECRET=…,SUPABASE_URL=…,SUPABASE_SERVICE_ROLE_KEY=…,SELF_URL=https://… \
 ```
 
-Then point the Edge Function at it (see `SETUP_SUPABASE.md`): secrets
-`OMR_SERVICE_URL` + `OMR_SERVICE_SECRET`. Scale-to-zero is fine — the first
-job after idle just pays a cold start. Fly.io / any container host works the
-same; give the JVM ~4 GB (`JAVA_TOOL_OPTIONS=-Xmx3g` is set in the image).
+- **1 JVM per instance** (`--concurrency 1`). Throughput knob = `--max-instances`.
+- `/tmp` is tmpfs and counts against memory alongside `-Xmx3g`.
+- Point the Edge Function at it (`OMR_SERVICE_URL` + `OMR_SERVICE_SECRET`).
+- Set `OMR_QUEUE_MODE=pull` on the Edge Function **after** worker v2 + sweeper
+  are live (code defaults to `push` until then).
+- Vault secrets for the sweeper (see `SETUP_SUPABASE.md`): `omr_service_url`, `omr_service_secret`.
+
+### Cutover
+
+1. Deploy worker v2 (dual-mode: `/poke` + legacy `/jobs`)
+2. Ensure sweeper live (pg_cron or Cloud Scheduler → `/poke`)
+3. Flip `OMR_QUEUE_MODE=pull`
+4. Confirm drain
+5. Remove push path (`/jobs`, `queue.ts`) in a follow-up
+
+Rollback: set `OMR_QUEUE_MODE=push`. Queued `omr_jobs` rows simply wait.
 
 ## Behavior notes
 
-- Queue: in-process FIFO, concurrency 1, depth 4 (then HTTP 429 →
-  `queue_full`). Jobs lost to an instance restart surface in the app as a
-  stale `processing` row → Retry button; nothing spins forever.
-- Status/error codes written to `score_analyses`: see `src/errors.ts`.
-- Degradations are graceful: unusable `.omr` geometry → audio-only ScoreData
-  (`no_geometry`); count mismatches degrade only the tail
-  (`measure_geometry_mismatch`); repeats are ignored (`repeats_ignored`).
+- Pull mode: request-anchored `POST /poke` holds the HTTP request for the whole
+  job (Cloud Run will not reclaim mid-JVM). Self-poke **before** 200 fans out
+  under `--concurrency 1`.
+- Per-user backlog cap 10 → `429 backlog_full` with **no** `score_analyses` row
+  (not-started UX). Files 11+ in a bulk upload skip auto-analysis until Generate.
+- Content-hash cache (`score_cache`) keyed by sha256 + `ENGINE_VERSION`.
+- Status/error codes: see `src/errors.ts`.
 - The contract file `src/scoreData.ts` must stay in lockstep with the app's
-  `src/types/scoreData.ts`. Writer version is **2** (per-staff bands, key
-  signatures, clefs); the app still accepts v1 caches. Re-run Generate
-  play-along on older scores to pick up v2 fields used by fingering apply.
+  `src/types/scoreData.ts`. Bump `ENGINE_VERSION` (`audiveris-…+svc-N`) when
+  parsers/geometry/flags change — CI enforces it.
+
+## Benchmarks
+
+See [`bench/README.md`](bench/README.md) for the x86 harness and Workstream C gates
+(including 2→4→8 vCPU before page-range sharding).
 
 ## Test fixtures
 
@@ -72,7 +99,4 @@ same; give the JVM ~4 GB (`JAVA_TOOL_OPTIONS=-Xmx3g` is set in the image).
 (source) was rendered to `tiny.pdf` (verovio + headless Chromium print) and
 transcribed with `Audiveris -batch -export`, producing `tiny.mxl` +
 `tiny.omr`. Regenerate after an Audiveris upgrade and re-verify
-`test/fixtures.test.ts` — the `.omr` layout is undocumented and
-version-coupled (that test failing loudly after an upgrade is by design).
-Known quirk baked into the fixture: Audiveris reads the metronome mark's
-note glyph as a real note in the pickup measure.
+`test/fixtures.test.ts`.

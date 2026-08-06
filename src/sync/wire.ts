@@ -105,6 +105,29 @@ export const parseInkProgress = (payload: unknown): InkProgressMsg | null => {
     return parsed.data;
 };
 
+/** Trimmed score_analyses lifecycle fan-out (never includes score jsonb). */
+export const SCORE_ANALYSIS_EVENT = 'score_analysis';
+
+const scoreAnalysisBroadcastSchema = z.object({
+    table: z.literal('score_analyses'),
+    document_id: z.string().min(1),
+    status: z.enum(['pending', 'processing', 'ready', 'failed']),
+    error: z.string().nullable().optional(),
+    progress: z.number().nullable().optional(),
+    updated_at: z.string(),
+});
+
+export type ScoreAnalysisBroadcast = z.infer<typeof scoreAnalysisBroadcastSchema>;
+
+export const parseScoreAnalysisBroadcast = (payload: unknown): ScoreAnalysisBroadcast | null => {
+    const parsed = scoreAnalysisBroadcastSchema.safeParse(payload);
+    if (!parsed.success) {
+        console.warn('Ignoring malformed score_analysis broadcast', parsed.error.issues[0]?.message);
+        return null;
+    }
+    return parsed.data;
+};
+
 /** Presence payload tracked per user. */
 export const presenceSchema = z.object({
     userId: z.string().min(1),

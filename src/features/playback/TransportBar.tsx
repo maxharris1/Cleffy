@@ -44,8 +44,10 @@ const ERROR_COPY: Record<string, string> = {
     omr_crash: 'The music-recognition engine crashed on this score.',
     musicxml_parse_failed: 'The recognized music could not be converted.',
     queue_full: 'The analysis service is busy — try again in a few minutes.',
+    backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
     service_unreachable: 'The analysis service is not reachable right now.',
     download_failed: 'The PDF could not be fetched for analysis.',
+    worker_lost: 'The analysis was interrupted and will retry automatically.',
     stale: 'The analysis was interrupted.',
     internal: 'Something went wrong during analysis.',
 };

@@ -128,7 +128,8 @@ a self-hosted [Audiveris](https://github.com/Audiveris/audiveris) container
 (`services/omr-service/` — see the README for build/deploy). Once the
 container is reachable somewhere (Cloud Run / Fly.io / your own box):
 
-1. Apply the `score_analyses` migration (part of step 1 above / `scripts/apply-migrations.sql`).
+1. Apply migrations through `20260806140000_omr_cron` (`omr_jobs`, `score_cache`,
+   timings, realtime broadcast, pg_cron sweeper).
 2. Deploy the Edge Function: `npx supabase functions deploy score-analyze --project-ref jibgwgosihadbjgxdsfe`
 3. Set its secrets (generate the shared secret with `openssl rand -hex 32` and
    give the same value to the container's `OMR_SERVICE_SECRET` env):
@@ -136,13 +137,28 @@ container is reachable somewhere (Cloud Run / Fly.io / your own box):
 ```bash
 npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe \
   OMR_SERVICE_URL=https://your-omr-service.example.com \
-  OMR_SERVICE_SECRET=<shared secret>
+  OMR_SERVICE_SECRET=<shared secret> \
+  OMR_QUEUE_MODE=pull
 ```
 
-The OMR service also needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` env
-vars so it can write results back to `score_analyses`. Without any of this
-configured the app still works — the transport bar just reports analysis as
-unavailable and offers a retry once the service exists.
+4. Store the same URL/secret in Vault so `omr_sweep` can poke workers:
+
+```sql
+select vault.create_secret('https://your-omr-service.example.com', 'omr_service_url');
+select vault.create_secret('<shared secret>', 'omr_service_secret');
+```
+
+If `pg_cron` / `pg_net` are unavailable, schedule Cloud Scheduler to
+`POST /poke` every minute instead; the worker calls `omr_reap_expired_leases`
+at the top of each poke.
+
+The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
+`SELF_URL` (its public base URL for drain-chain self-pokes). Without any of
+this configured the app still works — the transport bar just reports analysis
+as unavailable and offers a retry once the service exists.
+
+**Cutover:** deploy worker dual-mode → sweeper live → `OMR_QUEUE_MODE=pull` →
+confirm drain → remove push path later. Rollback = `OMR_QUEUE_MODE=push`.
 
 
 ## 6. (Optional) Let the Claude environment reach Supabase
