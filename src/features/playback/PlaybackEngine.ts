@@ -8,6 +8,7 @@ import {
     secondsPerTick,
 } from '@/features/playback/scoreTime';
 import type { BeatTick } from '@/features/playback/scoreTime';
+import { getSharedAudioContext } from '@/features/playback/sharedAudioContext';
 import type { PlaybackStatus } from '@/state/store';
 import { HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData } from '@/types/scoreData';
@@ -135,7 +136,7 @@ export class PlaybackEngine {
         this.onStatus = options.onStatus;
         this.onPositionJump = options.onPositionJump;
         this.onWarning = options.onWarning;
-        this.createContext = options.createContext ?? (() => new AudioContext() as unknown as AudioContextLike);
+        this.createContext = options.createContext ?? (() => getSharedAudioContext() as unknown as AudioContextLike);
         this.loadBuffers = options.loadBuffers ?? ((ctx) => loadPianoBuffers(ctx));
     }
 
@@ -300,7 +301,8 @@ export class PlaybackEngine {
         this.destroyed = true;
         this.stopScheduler();
         this.cancelActiveNotes();
-        void this.ctx?.close().catch(() => undefined);
+        this.teardownGraph();
+        // Do not close the shared AudioContext — Hear / next PlaybackEngine reuse it.
         this.ctx = null;
         this.setStatus('idle');
     }
@@ -312,6 +314,29 @@ export class PlaybackEngine {
             this.status = status;
             this.onStatus(status);
         }
+    }
+
+    private teardownGraph(): void {
+        for (const bus of this.handBuses ?? []) {
+            try {
+                bus.disconnect();
+            } catch {
+                // already disconnected
+            }
+        }
+        try {
+            this.clickBus?.disconnect();
+        } catch {
+            // already disconnected
+        }
+        try {
+            this.master?.disconnect();
+        } catch {
+            // already disconnected
+        }
+        this.handBuses = null;
+        this.clickBus = null;
+        this.master = null;
     }
 
     private buildGraph(ctx: AudioContextLike): void {

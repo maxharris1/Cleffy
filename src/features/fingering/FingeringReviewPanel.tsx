@@ -2,6 +2,9 @@ import { useMemo, useState } from 'react';
 
 import { KeyboardDiagram, type PressedKey } from '@/features/fingering/diagram/KeyboardDiagram';
 import { HAND_COLORS } from '@/features/fingering/diagram/keyboardLayout';
+import { suggestForRegionDetailed } from '@/features/fingering/engine/suggest';
+import type { HandSpan } from '@/features/fingering/engine/span';
+import { HandSpanToggle } from '@/features/fingering/HandSpanToggle';
 import {
     clampMidi,
     midiToName,
@@ -12,6 +15,8 @@ import {
     type RecognizedRegion,
     type Staff,
 } from '@/features/fingering/model';
+import { StepHearBar } from '@/features/fingering/StepHearBar';
+import { useAuditionChord } from '@/features/fingering/useAuditionChord';
 import { buttonClassName } from '@/ui/classNames';
 import { Dialog } from '@/ui/Dialog';
 
@@ -22,6 +27,9 @@ export interface FingeringReviewPanelProps {
     snapshot?: { dataUrl: string; rect: NormRect } | null;
     /** The reading was served from the local cache (a prior session's review). */
     fromCache?: boolean;
+    /** Flow-owned hand size — kept in sync with the diagram. */
+    handSpan: HandSpan;
+    onHandSpanChange: (span: HandSpan) => void;
     onConfirm: (region: RecognizedRegion) => void;
     onCancel: () => void;
 }
@@ -32,15 +40,17 @@ const ENTRY_RANGE = { min: 36, max: 96 };
 const FINGER_OPTIONS: Array<Finger | null> = [1, 2, 3, 4, 5, null];
 
 /**
- * Verify/correct the notes of a selected passage before the diagram renders —
- * wrong pitches make a teaching diagram actively harmful. Also the manual
- * note-entry path (local docs, offline, AI unavailable): tap keys to add
- * notes to the selected step, then assign fingers.
+ * Verify/correct the notes of a selected passage and preview suggested
+ * fingerings — wrong pitches make a teaching diagram actively harmful. Also
+ * the manual note-entry path (local docs, offline, AI unavailable): tap keys
+ * to add notes to the selected step, then assign fingers.
  */
 export const FingeringReviewPanel = ({
     initial,
     snapshot = null,
     fromCache = false,
+    handSpan,
+    onHandSpanChange,
     onConfirm,
     onCancel,
 }: FingeringReviewPanelProps) => {
@@ -51,6 +61,7 @@ export const FingeringReviewPanel = ({
     const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
     /** Which hand newly-tapped notes belong to — explicit, never guessed from pitch. */
     const [entryHand, setEntryHand] = useState<Hand>('R');
+    const { hearing, hear } = useAuditionChord();
 
     const eventIndices = useMemo(() => {
         const indices = new Set(region.notes.map((n) => n.eventIndex));
@@ -58,7 +69,23 @@ export const FingeringReviewPanel = ({
         return [...indices].sort((a, b) => a - b);
     }, [region.notes, selectedEvent]);
 
+    const selectedStepNotes = useMemo(
+        () => region.notes.filter((n) => n.eventIndex === selectedEvent),
+        [region.notes, selectedEvent],
+    );
     const selectedNote = region.notes.find((n) => n.id === selectedNoteId) ?? null;
+
+    const suggestion = useMemo(
+        () => suggestForRegionDetailed(region, true, handSpan),
+        [region, handSpan],
+    );
+
+    const selectStep = (index: number) => {
+        setSelectedEvent(index);
+        setSelectedNoteId(null);
+    };
+
+    const hearStep = () => hear(selectedStepNotes.map((n) => n.midi));
 
     const updateNote = (id: string, patch: Partial<RecognizedNote>) => {
         setRegion((r) => ({
@@ -122,18 +149,25 @@ export const FingeringReviewPanel = ({
         }));
     };
 
-    const stripPressed: PressedKey[] = region.notes
-        .filter((n) => n.eventIndex === selectedEvent)
-        .map((n) => ({ midi: n.midi, finger: n.annotatedFinger, hand: region.handOf[n.staff] }));
+    const displayFinger = (n: RecognizedNote): Finger | null =>
+        n.annotatedFinger ?? suggestion.fingerById.get(n.id) ?? null;
+
+    const stripPressed: PressedKey[] = selectedStepNotes.map((n) => ({
+        midi: n.midi,
+        finger: displayFinger(n),
+        hand: suggestion.fingeringHand.get(n.id) ?? region.handOf[n.staff],
+    }));
+
+    const showMissingFinger = selectedStepNotes.some((n) => displayFinger(n) === null);
 
     const sourceBlurb = (() => {
         switch (initial.source) {
             case 'omr':
-                return 'From play-along analysis — check pitches before the diagram renders. Amber means unsure.';
+                return 'From play-along analysis — check pitches; suggested fingers update as you edit. Amber means unsure.';
             case 'vision':
-                return 'Read from image — check the reading before the diagram renders. Tap a marker or chip to fix a note. Amber means unsure.';
+                return 'Read from image — check pitches; suggested fingers update as you edit. Tap a marker or chip to fix a note. Amber means unsure.';
             case 'manual':
-                return 'Tap keys to enter the notes of each step — a chord is one step with several notes. Select a note to set its finger.';
+                return 'Tap keys to enter the notes of each step — a chord is one step with several notes. Suggested fingers appear on the keyboard; select a note to pin a written finger.';
             default: {
                 const _exhaustive: never = initial.source;
                 return _exhaustive;
@@ -176,7 +210,11 @@ export const FingeringReviewPanel = ({
                                     left: `${cx * 100}%`,
                                     top: `${cy * 100}%`,
                                     backgroundColor:
-                                        n.confidence === 'low' ? '#d97706' : HAND_COLORS[region.handOf[n.staff]],
+                                        n.confidence === 'low'
+                                            ? '#d97706'
+                                            : HAND_COLORS[
+                                                  suggestion.fingeringHand.get(n.id) ?? region.handOf[n.staff]
+                                              ],
                                 }}
                             />
                         );
@@ -184,7 +222,7 @@ export const FingeringReviewPanel = ({
                 </div>
             ) : null}
 
-            <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
                 {eventIndices.map((index, position) => {
                     const notes = region.notes.filter((n) => n.eventIndex === index);
                     return (
@@ -193,10 +231,7 @@ export const FingeringReviewPanel = ({
                             type="button"
                             aria-pressed={selectedEvent === index}
                             aria-label={`Step ${position + 1}`}
-                            onClick={() => {
-                                setSelectedEvent(index);
-                                setSelectedNoteId(null);
-                            }}
+                            onClick={() => selectStep(index)}
                             className={`rounded-lg border px-2 py-1 text-xs transition ${
                                 selectedEvent === index
                                     ? 'border-accent bg-accent-soft text-accent'
@@ -216,27 +251,38 @@ export const FingeringReviewPanel = ({
                 </button>
             </div>
 
-            <div className="mb-1.5 flex items-center gap-1.5 text-xs text-stone-600">
-                <span className="text-stone-500">Tapped keys go to</span>
-                {(['R', 'L'] as const).map((hand) => (
-                    <button
-                        key={hand}
-                        type="button"
-                        aria-pressed={entryHand === hand}
-                        onClick={() => setEntryHand(hand)}
-                        className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition ${
-                            entryHand === hand
-                                ? 'border-accent bg-accent-soft text-accent'
-                                : 'border-stone-200 hover:bg-stone-50'
-                        }`}
-                    >
-                        <span
-                            className="h-2 w-2 rounded-full"
-                            style={{ backgroundColor: HAND_COLORS[hand] }}
-                        />
-                        {hand === 'R' ? 'Right hand' : 'Left hand'}
-                    </button>
-                ))}
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+                <StepHearBar
+                    hearing={hearing}
+                    hearDisabled={selectedStepNotes.length === 0}
+                    onHear={hearStep}
+                />
+            </div>
+
+            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-600">
+                <div className="flex items-center gap-1.5">
+                    <span className="text-stone-500">Tapped keys go to</span>
+                    {(['R', 'L'] as const).map((hand) => (
+                        <button
+                            key={hand}
+                            type="button"
+                            aria-pressed={entryHand === hand}
+                            onClick={() => setEntryHand(hand)}
+                            className={`flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition ${
+                                entryHand === hand
+                                    ? 'border-accent bg-accent-soft text-accent'
+                                    : 'border-stone-200 hover:bg-stone-50'
+                            }`}
+                        >
+                            <span
+                                className="h-2 w-2 rounded-full"
+                                style={{ backgroundColor: HAND_COLORS[hand] }}
+                            />
+                            {hand === 'R' ? 'Right hand' : 'Left hand'}
+                        </button>
+                    ))}
+                </div>
+                <HandSpanToggle value={handSpan} onChange={onHandSpanChange} />
             </div>
             <div className="mb-3 overflow-x-auto rounded-lg border border-stone-200 bg-stone-50 p-1.5">
                 <KeyboardDiagram
@@ -244,16 +290,19 @@ export const FingeringReviewPanel = ({
                     range={ENTRY_RANGE}
                     onKeyTap={toggleKey}
                     keySignature={region.keySignature}
+                    showMissingFinger={showMissingFinger}
                     className="h-24 min-w-[640px]"
                 />
             </div>
 
-            {region.notes.filter((n) => n.eventIndex === selectedEvent).length > 0 ? (
+            {selectedStepNotes.length > 0 ? (
                 <div className="mb-3 flex flex-wrap items-center gap-1.5">
-                    {region.notes
-                        .filter((n) => n.eventIndex === selectedEvent)
+                    {[...selectedStepNotes]
                         .sort((a, b) => a.midi - b.midi)
-                        .map((n) => (
+                        .map((n) => {
+                            const finger = displayFinger(n);
+                            const hand = suggestion.fingeringHand.get(n.id) ?? region.handOf[n.staff];
+                            return (
                             <button
                                 key={n.id}
                                 type="button"
@@ -269,12 +318,13 @@ export const FingeringReviewPanel = ({
                             >
                                 <span
                                     className="mr-1 inline-block h-2 w-2 rounded-full"
-                                    style={{ backgroundColor: HAND_COLORS[region.handOf[n.staff]] }}
+                                    style={{ backgroundColor: HAND_COLORS[hand] }}
                                 />
                                 {n.name}
-                                {n.annotatedFinger ? ` · ${n.annotatedFinger}` : ''}
+                                {finger !== null ? ` · ${finger}` : showMissingFinger ? ' · ?' : ''}
                             </button>
-                        ))}
+                            );
+                        })}
                 </div>
             ) : null}
 

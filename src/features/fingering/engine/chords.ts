@@ -1,5 +1,5 @@
 import { withinPractical, type HandSpan } from '@/features/fingering/engine/span';
-import type { Finger } from '@/features/fingering/model';
+import type { Finger, Hand } from '@/features/fingering/model';
 
 /**
  * Candidate finger assignments for one event (right-hand geometry): strictly
@@ -53,4 +53,22 @@ export const enumerateStates = (midis: readonly number[], hand: HandSpan = 'stan
         }
         return true;
     });
+};
+
+/** True when `midis` form a physically playable one-hand shape (or empty). */
+export const isFingerableChord = (
+    midis: readonly number[],
+    hand: Hand,
+    handSpan: HandSpan = 'standard',
+): boolean => {
+    if (midis.length === 0) {
+        return true;
+    }
+    if (midis.length > 5) {
+        return false;
+    }
+    const sorted = [...midis].sort((a, b) => a - b);
+    // LH uses mirrored geometry (same as suggestFingerings).
+    const geometry = hand === 'L' ? sorted.map((m) => -m).sort((a, b) => a - b) : sorted;
+    return enumerateStates(geometry, handSpan).length > 0;
 };

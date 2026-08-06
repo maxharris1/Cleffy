@@ -33,11 +33,19 @@ fragment may take an end-of-phrase finger where prints show the loop finger (the
 select through the end of the phrase); LH 2-octave C major aligns one thumb on D instead of C
 (equal-cost tie). The panel frames every suggestion as "one good option — editions differ." When
 ScoreData covers the selection, notes come from play-along analysis (review label: "From play-along
-analysis"); vision is the silent fallthrough for empty/partial coverage. **Defer the vision
-ground-truth eval set** until usage shows how often vision still fires on clean analyzed scores —
-if unexpected vision traffic appears there, check the `measure_geometry_mismatch` warning rate
-before blaming the mapper. Vision remains required for phone-photo / failed-OMR docs and for
-reading Pencil ink digits.
+analysis"); vision is the silent fallthrough for empty/partial coverage. Unplayable same-onset packs
+are redistributed (low→L / high→R, melody peel) before Viterbi; the review modal shows live
+suggestions; the diagram labels notes moved for reach. Soft phrase resets discount transitions
+across ≥12-semitone leaps; monophonic 2nd-order history is a Viterbi tie-break; the diagram offers
+top-k Option 1/2/3 when distinct alternates exist. **Eval**: `engine/evalMetrics.ts` (match rate +
+IFR) runs on committed fixtures in CI. Optional `PIG_DIR=… node scripts/eval-fingering-pig.mjs` only
+inventories the [PIG dataset](https://beam.kisarazu.ac.jp/research/PianoFingeringDataset/) (register;
+research/non-profit; cite Nakamura, Saito & Yoshii 2020) — it does not run the fingering engine or
+compute IFR; not vendored, not required for CI.
+**Defer the vision ground-truth eval set** until usage shows how often vision still fires on clean
+analyzed scores — if unexpected vision traffic appears there, check the `measure_geometry_mismatch`
+warning rate before blaming the mapper. Vision remains required for phone-photo / failed-OMR docs and
+for reading Pencil ink digits.
 
 ## How to test (once Supabase setup from SETUP_SUPABASE.md is done)
 

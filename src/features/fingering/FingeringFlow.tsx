@@ -4,6 +4,7 @@ import { buildFingeringProposals } from '@/features/fingering/applyFingerings';
 import { bindRegionDigits } from '@/features/fingering/bindFingerings';
 import { readCachedRegion, regionCacheKey, scoreCacheEpoch, writeCachedRegion } from '@/features/fingering/cache';
 import { FingeringDiagramPanel } from '@/features/fingering/diagram/FingeringDiagramPanel';
+import type { HandSpan } from '@/features/fingering/engine/span';
 import { FingeringReviewPanel } from '@/features/fingering/FingeringReviewPanel';
 import { FingeringSelectionPopover } from '@/features/fingering/FingeringSelectionPopover';
 import { emptyRegion, type FingeringSequence, type Hand, type NormRect, type RecognizedRegion } from '@/features/fingering/model';
@@ -56,6 +57,7 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score
     const [pendingProposals, setPendingProposals] = useState<Annotation[]>([]);
     const [cacheKey, setCacheKey] = useState<string | null>(null);
     const [fromCache, setFromCache] = useState(false);
+    const [handSpan, setHandSpan] = useState<HandSpan>('standard');
     const recognize = useMemo(() => (isCloudDocId(docId) ? makeRecognizeNotesFn(docId) : null), [docId]);
     const canReadNotes = Boolean(score) || Boolean(recognize && doc);
 
@@ -208,6 +210,8 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score
                     initial={reviewSeed}
                     snapshot={snapshot}
                     fromCache={fromCache}
+                    handSpan={handSpan}
+                    onHandSpanChange={setHandSpan}
                     onConfirm={(next) => {
                         setRegion(next);
                         setPhase('diagram');
@@ -239,6 +243,8 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score
                     <FingeringDiagramPanel
                         region={region}
                         canApply={canWrite}
+                        handSpan={handSpan}
+                        onHandSpanChange={setHandSpan}
                         onApply={startApply}
                         onEditNotes={() => setPhase('review')}
                         onClose={onClose}

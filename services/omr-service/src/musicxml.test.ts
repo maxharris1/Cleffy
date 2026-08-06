@@ -114,6 +114,69 @@ describe('parseMusicXmlString', () => {
         expect(score.warnings).not.toContain('single_staff_all_rh');
     });
 
+    it('prefers a later Piano grand staff over sparse Voice dummy parts', () => {
+        // Audiveris often emits Voice/Voice before Piano; document order must not win.
+        const voiceMeasure = (id: string, step: string, octave: number) =>
+            `<part id="${id}"><measure number="1">${ATTRS_44}${note(step, octave, 16)}</measure>
+             <measure number="2">${ATTRS_44}<note><rest/><duration>16</duration><voice>1</voice></note></measure></part>`;
+        const pianoAttrs = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
+        const xml = `<?xml version="1.0"?>
+          <score-partwise version="4.0">
+            <part-list>
+              <score-part id="P1"><part-name>Voice</part-name></score-part>
+              <score-part id="P2"><part-name>Voice</part-name></score-part>
+              <score-part id="P3"><part-name>Piano</part-name></score-part>
+            </part-list>
+            ${voiceMeasure('P1', 'G', 4)}
+            ${voiceMeasure('P2', 'E', 4)}
+            <part id="P3">
+              <measure number="1">${pianoAttrs}
+                ${note('C', 5, 8, '<staff>1</staff>')}
+                ${note('E', 5, 8, '<staff>1</staff>')}
+                ${note('C', 3, 16, '<staff>2</staff>')}
+              </measure>
+              <measure number="2">${pianoAttrs}
+                ${note('D', 5, 16, '<staff>1</staff>')}
+                ${note('G', 2, 16, '<staff>2</staff>')}
+              </measure>
+            </part>
+          </score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('multi_part_collapsed');
+        expect(score.notes.map((n) => n.p).sort((a, b) => a - b)).toEqual([43, 48, 72, 74, 76]);
+        expect(score.notes.some((n) => n.h === 1)).toBe(true);
+        // Voice pitches (G4=67, E4=64) must not appear.
+        expect(score.notes.every((n) => n.p !== 67 && n.p !== 64)).toBe(true);
+        expect(score.measures).toHaveLength(2);
+    });
+
+    it('keeps Piano alone when a denser vocal line is listed first (art song)', () => {
+        const xml = `<?xml version="1.0"?>
+          <score-partwise version="4.0">
+            <part-list>
+              <score-part id="P1"><part-name>Voice</part-name></score-part>
+              <score-part id="P2"><part-name>Piano</part-name></score-part>
+            </part-list>
+            <part id="P1"><measure number="1">${ATTRS_44}
+              ${note('A', 4, 4)}${note('B', 4, 4)}${note('C', 5, 4)}${note('D', 5, 4)}
+            </measure></part>
+            <part id="P2"><measure number="1">
+              <attributes><divisions>4</divisions><staves>2</staves>
+                <time><beats>4</beats><beat-type>4</beat-type></time>
+              </attributes>
+              ${note('C', 4, 16, '<staff>1</staff>')}
+              <backup><duration>16</duration></backup>
+              ${note('C', 3, 16, '<staff>2</staff>')}
+            </measure></part>
+          </score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('multi_part_collapsed');
+        expect(score.notes).toEqual([
+            { t: 0, d: 1920, p: 60, h: 0 },
+            { t: 0, d: 1920, p: 48, h: 1 },
+        ]);
+    });
+
     it('flags a lone single-staff part as all right hand', () => {
         const xml = `<?xml version="1.0"?><score-partwise>
             <part-list><score-part id="P1"/></part-list>

@@ -137,11 +137,30 @@ interface PartParseTarget {
     fallbackHand: 0 | 1;
 }
 
+/** Cleffy is piano-first — boost keyboard names, penalize vocal/OCR ghosts. */
+const PIANO_NAME_RE = /\b(piano|pianoforte|pno\.?|kbd|keyboard|clavier)\b/i;
+const NOISE_NAME_RE = /\b(voice|vocal|soprano|alto|tenor|bass|choir|chorus|lyrics?)\b/i;
+/** Parts below this fraction of the densest part's pitched notes are treated as noise. */
+const NOISE_PITCHED_FRACTION = 0.1;
+
+interface PartCandidate {
+    part: Elem;
+    index: number;
+    name: string;
+    staves: number;
+    pitchedNotes: number;
+    nameScore: number;
+}
+
 /**
  * Parse one exported MusicXML document (score-partwise) into musical content.
  * Time base: everything is normalized to 480 ticks/quarter regardless of the
  * file's <divisions>. Ties are merged; grace notes are skipped; repeats are
  * ignored (linear playthrough) with a warning.
+ *
+ * Part selection is piano-primary: prefer a grand-staff / Piano-named part over
+ * document order so Audiveris "Voice" dummy parts (and art-song vocal lines)
+ * do not become the play-along timeline.
  */
 export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore => {
     const doc = new DOMParser().parseFromString(xml, 'text/xml');
@@ -156,19 +175,12 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No <part> elements');
     }
 
-    const lead = parts[0];
+    const targets = selectPartTargets(root, parts, warnings);
+    const lead = targets[0]?.part;
     if (!lead) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No lead part');
     }
     const leadStaves = countDeclaredStaves(lead);
-    const targets: PartParseTarget[] = [{ part: lead, fallbackHand: 0 }];
-    if (leadStaves < 2 && parts.length >= 2 && parts[1]) {
-        // Two single-staff parts: treat the second as the left hand.
-        targets.push({ part: parts[1], fallbackHand: 1 });
-    }
-    if (parts.length > targets.length) {
-        warnings.add('multi_part_collapsed');
-    }
 
     // The lead part is the timeline authority: its measures define barlines.
     const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings });
@@ -201,6 +213,87 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
     };
 };
 
+/**
+ * Choose which MusicXML parts feed playback/fingering.
+ *
+ * 1. Grand staff (staves ≥ 2) or strongly Piano-named → richest such part alone.
+ * 2. Else densest non-noise single-staff parts, pairing a second as LH when present.
+ * 3. Noise = sparse pitched content (< 10% of max) and/or vocal-ish names when a
+ *    denser part exists — never merge those notes into the piano timeline.
+ */
+const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): PartParseTarget[] => {
+    const names = partNameById(root);
+    const candidates: PartCandidate[] = parts.map((part, index) => {
+        const id = part.getAttribute('id') ?? '';
+        const name = names.get(id) ?? '';
+        const staves = countDeclaredStaves(part);
+        const pitchedNotes = countPitchedNotes(part);
+        let nameScore = 0;
+        if (PIANO_NAME_RE.test(name)) {
+            nameScore += 2;
+        }
+        if (NOISE_NAME_RE.test(name)) {
+            nameScore -= 2;
+        }
+        return { part, index, name, staves, pitchedNotes, nameScore };
+    });
+
+    const maxPitched = Math.max(0, ...candidates.map((c) => c.pitchedNotes));
+    const isNoise = (c: PartCandidate): boolean =>
+        maxPitched > 0 && c.pitchedNotes < maxPitched * NOISE_PITCHED_FRACTION;
+
+    const rank = (a: PartCandidate, b: PartCandidate): number =>
+        b.pitchedNotes - a.pitchedNotes || b.nameScore - a.nameScore || b.staves - a.staves || a.index - b.index;
+
+    const grands = candidates
+        .filter((c) => c.staves >= 2 || (c.nameScore > 0 && !isNoise(c)))
+        .sort(rank);
+
+    let selected: PartCandidate[];
+    if (grands[0]) {
+        // Piano product rule: one grand/piano timeline — do not pair leftover Voices.
+        selected = [grands[0]];
+    } else {
+        const usable = candidates.filter((c) => !isNoise(c));
+        const pool = (usable.length > 0 ? usable : candidates).slice().sort(rank);
+        const lead = pool[0];
+        if (!lead) {
+            selected = candidates.slice(0, 1);
+        } else if (lead.staves < 2) {
+            const secondary = pool.find((c) => c.part !== lead.part && c.staves < 2);
+            selected = secondary ? [lead, secondary] : [lead];
+        } else {
+            selected = [lead];
+        }
+    }
+
+    if (parts.length > selected.length) {
+        warnings.add('multi_part_collapsed');
+    }
+
+    return selected.map((c, i) => ({
+        part: c.part,
+        fallbackHand: (i === 0 ? 0 : 1) as 0 | 1,
+    }));
+};
+
+/** Map score-part id → printed part-name (empty when absent). */
+const partNameById = (root: Elem): Map<string, string> => {
+    const map = new Map<string, string>();
+    const partList = firstChild(root, 'part-list');
+    if (!partList) {
+        return map;
+    }
+    for (const scorePart of childElements(partList, 'score-part')) {
+        const id = scorePart.getAttribute('id');
+        if (!id) {
+            continue;
+        }
+        map.set(id, (childText(scorePart, 'part-name') ?? '').trim());
+    }
+    return map;
+};
+
 const countDeclaredStaves = (part: Elem): number => {
     let staves = 1;
     for (const measure of childElements(part, 'measure')) {
@@ -212,6 +305,22 @@ const countDeclaredStaves = (part: Elem): number => {
         }
     }
     return staves;
+};
+
+/** Pitched (non-rest) note elements — used only for part ranking, not playback. */
+const countPitchedNotes = (part: Elem): number => {
+    let count = 0;
+    for (const measure of childElements(part, 'measure')) {
+        for (const noteEl of childElements(measure, 'note')) {
+            if (firstChild(noteEl, 'rest') || firstChild(noteEl, 'grace')) {
+                continue;
+            }
+            if (firstChild(noteEl, 'pitch')) {
+                count += 1;
+            }
+        }
+    }
+    return count;
 };
 
 interface PartContext {

@@ -13,7 +13,7 @@ import { parseMxlFiles } from './musicxml.js';
 import { parseOmrGeometry } from './omrGeometry.js';
 import type { Writeback } from './writeback.js';
 
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-1';
+export const ENGINE_VERSION = 'audiveris-5.6.1+svc-2';
 
 /** Matches the Edge Function's guard and the scores bucket's 50 MB cap. */
 const MAX_PDF_BYTES = 60 * 1024 * 1024;

@@ -56,6 +56,15 @@ export const WEIGHTS = {
     shiftFree: 3,
     shiftPerSemitone: 0.15,
     shiftFixed: 0.4,
+    /**
+     * Soft phrase reset: monophonic pitch leap ≥ phraseResetLeap scales the
+     * transition by phraseResetFactor so 5→1 across a gap is cheap. Hand-position
+     * alone is not used (arpeggio thumb-unders also jump the estimated anchor).
+     */
+    phraseResetLeap: 12,
+    phraseResetFactor: 0.05,
+    /** 2nd-order monophonic pattern weight (tie-break only in DP). */
+    order2: 0.25,
 } as const;
 
 /** Typical offset of each finger from the thumb in a relaxed hand position. */
@@ -197,5 +206,49 @@ export const transitionCost = (
     const excess = Math.max(0, shift - WEIGHTS.shiftFree);
     const shiftCost = excess > 0 ? WEIGHTS.shiftFixed + WEIGHTS.shiftPerSemitone * excess : 0;
 
-    return pairCost + shiftCost;
+    const raw = pairCost + shiftCost;
+    const monoLeap =
+        prev.midis.length === 1 && cur.midis.length === 1
+            ? Math.abs((cur.midis[0] as number) - (prev.midis[0] as number))
+            : 0;
+    if (monoLeap >= WEIGHTS.phraseResetLeap) {
+        return raw * WEIGHTS.phraseResetFactor;
+    }
+    return raw;
+};
+
+/**
+ * 2nd-order monophonic pattern cost over three consecutive fingers/pitches.
+ * Negative = preferred idiomatic continuation; positive = mild thrash penalty.
+ */
+export const order2Cost = (
+    f0: Finger,
+    f1: Finger,
+    f2: Finger,
+    midi0: number,
+    midi1: number,
+    midi2: number,
+): number => {
+    const d01 = midi1 - midi0;
+    const d12 = midi2 - midi1;
+    let raw = 0;
+    // Ascending 1-2-3 then thumb-under is the classic scale loop.
+    if (d01 > 0 && d12 > 0 && f0 === 1 && f1 === 2 && f2 === 3) {
+        raw -= 1;
+    }
+    if (d01 > 0 && d12 > 0 && f0 === 2 && f1 === 3 && f2 === 1) {
+        raw -= 1;
+    }
+    // Descending mirror: 3-2-1 then 3 over.
+    if (d01 < 0 && d12 < 0 && f0 === 3 && f1 === 2 && f2 === 1) {
+        raw -= 1;
+    }
+    if (d01 < 0 && d12 < 0 && f0 === 1 && f1 === 3 && f2 === 2) {
+        raw -= 0.5;
+    }
+    // Thrash: reverse direction with the same finger pair twice.
+    if (f0 === f2 && f0 !== f1 && Math.sign(d01) !== 0 && Math.sign(d01) === -Math.sign(d12)) {
+        raw += 0.8;
+    }
+    return WEIGHTS.order2 * raw;
 };

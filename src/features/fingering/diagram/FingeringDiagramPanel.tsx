@@ -3,7 +3,9 @@ import { useMemo, useState } from 'react';
 import { canPlaceProposals } from '@/features/fingering/applyFingerings';
 import { KeyboardDiagram } from '@/features/fingering/diagram/KeyboardDiagram';
 import { HAND_COLORS, snapRange } from '@/features/fingering/diagram/keyboardLayout';
-import { suggestForRegion, type HandSpan } from '@/features/fingering/engine/suggest';
+import type { HandSpan } from '@/features/fingering/engine/span';
+import { suggestForRegionDetailed } from '@/features/fingering/engine/suggest';
+import { HandSpanToggle } from '@/features/fingering/HandSpanToggle';
 import {
     buildSequences,
     mergedEventIndices,
@@ -13,15 +15,23 @@ import {
     type Hand,
     type RecognizedRegion,
 } from '@/features/fingering/model';
+import { StepHearBar } from '@/features/fingering/StepHearBar';
+import { SuggestOptionToggle } from '@/features/fingering/SuggestOptionToggle';
+import { useAuditionChord } from '@/features/fingering/useAuditionChord';
 import { buttonClassName } from '@/ui/classNames';
 import { CloseIcon } from '@/ui/icons';
 
 export type FingeringSource = 'annotated' | 'suggested';
 
+const SUGGEST_TOP_K = 3;
+
 export interface FingeringDiagramPanelProps {
     region: RecognizedRegion;
     /** Owner/editor on a writable doc — shows "Apply to score". */
     canApply: boolean;
+    /** Flow-owned hand size — shared with review. */
+    handSpan: HandSpan;
+    onHandSpanChange: (span: HandSpan) => void;
     onApply?: (sequences: Record<Hand, FingeringSequence | null>) => void;
     onEditNotes: () => void;
     onClose: () => void;
@@ -31,27 +41,47 @@ export interface FingeringDiagramPanelProps {
  * Floating, non-modal card housing the keyboard diagram — the score and the
  * selection stay visible while teaching. One toggle switches the populator:
  * fingerings written on the score vs. the suggestion engine; the SAME
- * KeyboardDiagram renders both. Chords are one step; phrases step through
- * left-to-right.
+ * KeyboardDiagram renders both. "From score" is hidden when nothing is
+ * annotated. Chords are one step; phrases step through left-to-right.
  */
 export const FingeringDiagramPanel = ({
     region,
     canApply,
+    handSpan,
+    onHandSpanChange,
     onApply,
     onEditNotes,
     onClose,
 }: FingeringDiagramPanelProps) => {
-    const [source, setSource] = useState<FingeringSource>('annotated');
+    const hasAnnotated = region.notes.some((n) => n.annotatedFinger !== null);
+    // Review always previews suggestions — open on Suggested so redistribution
+    // and live digits match what the teacher just verified. "From score" remains
+    // one tap away when written digits exist.
+    const [source, setSource] = useState<FingeringSource>('suggested');
     const [keepWritten, setKeepWritten] = useState(true);
-    const [handSpan, setHandSpan] = useState<HandSpan>('standard');
     const [step, setStep] = useState(0);
+    const [optionIndex, setOptionIndex] = useState(0);
+    const { hearing, hear } = useAuditionChord();
+
+    const effectiveSource: FingeringSource = hasAnnotated ? source : 'suggested';
 
     const annotated = useMemo(() => buildSequences(region), [region]);
-    const suggested = useMemo(
-        () => (source === 'suggested' ? suggestForRegion(region, keepWritten, handSpan) : null),
-        [source, region, keepWritten, handSpan],
+    const suggestion = useMemo(
+        () =>
+            effectiveSource === 'suggested'
+                ? suggestForRegionDetailed(region, keepWritten && hasAnnotated, handSpan, { k: SUGGEST_TOP_K })
+                : null,
+        [effectiveSource, region, keepWritten, hasAnnotated, handSpan],
     );
-    const sequences = source === 'suggested' && suggested ? suggested : annotated;
+
+    const optionCount = suggestion ? 1 + suggestion.alternatives.length : 1;
+    const selectedOption = Math.min(optionIndex, optionCount - 1);
+    const selectedSequences =
+        suggestion && selectedOption > 0
+            ? (suggestion.alternatives[selectedOption - 1]?.sequences ?? suggestion.sequences)
+            : suggestion?.sequences;
+    const sequences =
+        effectiveSource === 'suggested' && selectedSequences ? selectedSequences : annotated;
 
     // `current` clamps rather than resetting on region edits, so a re-reviewed
     // phrase keeps (or safely truncates to) the step the teacher was on.
@@ -68,7 +98,37 @@ export const FingeringDiagramPanel = ({
 
     const eventIndex = steps[current];
     const pressed = eventIndex === undefined ? [] : pressedAtIndex(sequences, eventIndex);
-    const showApply = source === 'suggested' && canApply && onApply !== undefined && canPlaceProposals(region);
+    const showApply =
+        effectiveSource === 'suggested' && canApply && onApply !== undefined && canPlaceProposals(region);
+
+    const movedForReach = useMemo(() => {
+        if (!suggestion || eventIndex === undefined) {
+            return null;
+        }
+        const moved = region.notes.filter(
+            (n) => n.eventIndex === eventIndex && suggestion.movedNoteIds.includes(n.id),
+        );
+        if (moved.length === 0) {
+            return null;
+        }
+        const byHand: Record<Hand, string[]> = { L: [], R: [] };
+        for (const n of moved) {
+            const hand = suggestion.fingeringHand.get(n.id);
+            if (hand) {
+                byHand[hand].push(midiToName(n.midi, region.keySignature));
+            }
+        }
+        const parts: string[] = [];
+        if (byHand.L.length > 0) {
+            parts.push(`${byHand.L.join('·')} moved to left hand for reach`);
+        }
+        if (byHand.R.length > 0) {
+            parts.push(`${byHand.R.join('·')} moved to right hand for reach`);
+        }
+        return parts.length > 0 ? `${parts.join('; ')}. Edit notes to reassign.` : null;
+    }, [suggestion, eventIndex, region]);
+
+    const hearStep = () => hear(pressed.map((p) => p.midi));
 
     return (
         <div
@@ -79,32 +139,40 @@ export const FingeringDiagramPanel = ({
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-semibold text-stone-800">Fingering — p. {region.page + 1}</h3>
                     <div className="flex items-center gap-1">
-                        <div
-                            role="group"
-                            aria-label="Fingering source"
-                            className="flex rounded-lg border border-stone-200 p-0.5 text-xs"
-                        >
-                            <button
-                                type="button"
-                                aria-pressed={source === 'annotated'}
-                                onClick={() => setSource('annotated')}
-                                className={`rounded-md px-2 py-1 transition ${
-                                    source === 'annotated' ? 'bg-accent-soft text-accent' : 'text-stone-600'
-                                }`}
+                        {hasAnnotated ? (
+                            <div
+                                role="group"
+                                aria-label="Fingering source"
+                                className="flex rounded-lg border border-stone-200 p-0.5 text-xs"
                             >
-                                From score
-                            </button>
-                            <button
-                                type="button"
-                                aria-pressed={source === 'suggested'}
-                                onClick={() => setSource('suggested')}
-                                className={`rounded-md px-2 py-1 transition ${
-                                    source === 'suggested' ? 'bg-accent-soft text-accent' : 'text-stone-600'
-                                }`}
-                            >
-                                Suggested
-                            </button>
-                        </div>
+                                <button
+                                    type="button"
+                                    aria-pressed={effectiveSource === 'annotated'}
+                                    onClick={() => setSource('annotated')}
+                                    className={`rounded-md px-2 py-1 transition ${
+                                        effectiveSource === 'annotated'
+                                            ? 'bg-accent-soft text-accent'
+                                            : 'text-stone-600'
+                                    }`}
+                                >
+                                    From score
+                                </button>
+                                <button
+                                    type="button"
+                                    aria-pressed={effectiveSource === 'suggested'}
+                                    onClick={() => setSource('suggested')}
+                                    className={`rounded-md px-2 py-1 transition ${
+                                        effectiveSource === 'suggested'
+                                            ? 'bg-accent-soft text-accent'
+                                            : 'text-stone-600'
+                                    }`}
+                                >
+                                    Suggested
+                                </button>
+                            </div>
+                        ) : (
+                            <span className="rounded-md bg-accent-soft px-2 py-1 text-xs text-accent">Suggested</span>
+                        )}
                         <button type="button" onClick={onEditNotes} className={buttonClassName('ghost', 'sm')}>
                             Edit notes
                         </button>
@@ -123,6 +191,7 @@ export const FingeringDiagramPanel = ({
                     pressed={pressed}
                     range={range}
                     keySignature={region.keySignature}
+                    showMissingFinger={effectiveSource === 'suggested'}
                     className="w-full rounded-lg border border-stone-200 bg-stone-50"
                 />
 
@@ -150,31 +219,23 @@ export const FingeringDiagramPanel = ({
                             </span>
                         ) : null}
                     </div>
-                    {steps.length > 1 ? (
-                        <div className="flex items-center gap-1.5">
-                            <button
-                                type="button"
-                                aria-label="Previous step"
-                                disabled={current === 0}
-                                onClick={() => setStep(current - 1)}
-                                className={buttonClassName('secondary', 'sm', 'px-2.5')}
-                            >
-                                ‹
-                            </button>
-                            <span className="text-xs tabular-nums text-stone-600">
-                                {current + 1} / {steps.length}
-                            </span>
-                            <button
-                                type="button"
-                                aria-label="Next step"
-                                disabled={current >= steps.length - 1}
-                                onClick={() => setStep(current + 1)}
-                                className={buttonClassName('secondary', 'sm', 'px-2.5')}
-                            >
-                                ›
-                            </button>
-                        </div>
-                    ) : null}
+                    <div className="flex items-center gap-1.5">
+                        <StepHearBar
+                            step={
+                                steps.length > 1
+                                    ? {
+                                          current,
+                                          total: steps.length,
+                                          onPrev: () => setStep(current - 1),
+                                          onNext: () => setStep(current + 1),
+                                      }
+                                    : undefined
+                            }
+                            hearing={hearing}
+                            hearDisabled={pressed.length === 0}
+                            onHear={hearStep}
+                        />
+                    </div>
                 </div>
 
                 {steps.length > 1 ? (
@@ -183,46 +244,36 @@ export const FingeringDiagramPanel = ({
                     </p>
                 ) : null}
 
-                {source === 'suggested' ? (
+                {movedForReach ? (
+                    <p className="mt-1.5 text-[11px] leading-snug text-amber-800">{movedForReach}</p>
+                ) : null}
+
+                {effectiveSource === 'suggested' ? (
                     <div className="mt-2 border-t border-stone-100 pt-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="flex flex-wrap items-center gap-3">
-                                <label className="flex items-center gap-1.5 text-xs text-stone-600">
-                                    <input
-                                        type="checkbox"
-                                        checked={keepWritten}
-                                        onChange={(e) => setKeepWritten(e.target.checked)}
-                                        className="h-3.5 w-3.5 accent-[--color-accent]"
-                                    />
-                                    Keep written fingerings
-                                </label>
-                                <div
-                                    role="group"
-                                    aria-label="Hand size"
-                                    className="flex items-center gap-1 text-xs text-stone-600"
-                                >
-                                    <span className="text-stone-500">Hand size</span>
-                                    {(['small', 'standard', 'large'] as const).map((size) => (
-                                        <button
-                                            key={size}
-                                            type="button"
-                                            aria-pressed={handSpan === size}
-                                            onClick={() => setHandSpan(size)}
-                                            className={`rounded-md border px-1.5 py-0.5 capitalize transition ${
-                                                handSpan === size
-                                                    ? 'border-accent bg-accent-soft text-accent'
-                                                    : 'border-stone-200 hover:bg-stone-50'
-                                            }`}
-                                        >
-                                            {size}
-                                        </button>
-                                    ))}
-                                </div>
+                                {hasAnnotated ? (
+                                    <label className="flex items-center gap-1.5 text-xs text-stone-600">
+                                        <input
+                                            type="checkbox"
+                                            checked={keepWritten}
+                                            onChange={(e) => setKeepWritten(e.target.checked)}
+                                            className="h-3.5 w-3.5 accent-[--color-accent]"
+                                        />
+                                        Keep written fingerings
+                                    </label>
+                                ) : null}
+                                <HandSpanToggle value={handSpan} onChange={onHandSpanChange} />
+                                <SuggestOptionToggle
+                                    count={optionCount}
+                                    value={selectedOption}
+                                    onChange={setOptionIndex}
+                                />
                             </div>
-                            {showApply && suggested ? (
+                            {showApply && selectedSequences ? (
                                 <button
                                     type="button"
-                                    onClick={() => onApply(suggested)}
+                                    onClick={() => onApply(selectedSequences)}
                                     className={buttonClassName('primary', 'sm')}
                                 >
                                     Apply to score…
@@ -230,9 +281,11 @@ export const FingeringDiagramPanel = ({
                             ) : null}
                         </div>
                         <p className="mt-1.5 text-[11px] leading-snug text-stone-500">
-                            One good option, not the only one — editions differ, and suggestions consider only the
-                            selected notes. Select through the end of a phrase so crossings land where the music
-                            continues. A “?” badge means the reach exceeds the chosen hand size.
+                            One good option, not the only one — editions differ
+                            {optionCount > 1 ? '; try Option 2/3 for nearby alternatives' : ''}. Suggestions
+                            consider only the selected notes. Select through the end of a phrase so crossings
+                            land where the music continues. A “?” badge means the reach exceeds the chosen hand
+                            size.
                         </p>
                     </div>
                 ) : null}
