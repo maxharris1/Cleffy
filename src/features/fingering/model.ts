@@ -1,8 +1,8 @@
 /**
- * Fingering domain model — the contract that makes "one diagram renderer, two
- * populators" true. Both the vision path (M2) and manual entry produce a
- * RecognizedRegion; both page annotations and the suggestion engine (M3)
- * produce FingeringSequences; the keyboard diagram consumes FingeringEvents.
+ * Fingering domain model — the contract that makes "one diagram renderer, N
+ * populators" true. Vision, ScoreData (OMR), and manual entry all produce a
+ * RecognizedRegion; page annotations and the suggestion engine produce
+ * FingeringSequences; the keyboard diagram consumes FingeringEvents.
  */
 
 export type Hand = 'L' | 'R';
@@ -56,7 +56,7 @@ export interface RecognizedRegion {
     notes: RecognizedNote[];
     /** Staff → hand mapping; default upper→R, lower→L, user-swappable. */
     handOf: Record<Staff, Hand>;
-    source: 'vision' | 'manual';
+    source: 'omr' | 'vision' | 'manual';
 }
 
 export interface FingeredNote {
@@ -155,11 +155,14 @@ export const emptyRegion = (docId: string, page: number, rect: NormRect): Recogn
 const xCenter = (n: RecognizedNote): number => n.bbox.x + n.bbox.w / 2;
 
 /**
- * Event groups in left-to-right page order: [eventIndex, notes][] sorted by the
- * group's min notehead x-center, falling back to eventIndex when bboxes are
- * absent (manual entry) or tie.
+ * Event groups in performance order: [eventIndex, notes][]. OMR regions use
+ * tick-assigned eventIndex (required across system breaks where page-x resets).
+ * Vision/manual sort by notehead x-center, falling back to eventIndex.
  */
-const orderedEventGroups = (notes: readonly RecognizedNote[]): Array<[number, RecognizedNote[]]> => {
+const orderedEventGroups = (
+    notes: readonly RecognizedNote[],
+    orderBy: 'eventIndex' | 'x',
+): Array<[number, RecognizedNote[]]> => {
     const byEvent = new Map<number, RecognizedNote[]>();
     for (const note of notes) {
         const group = byEvent.get(note.eventIndex);
@@ -170,6 +173,9 @@ const orderedEventGroups = (notes: readonly RecognizedNote[]): Array<[number, Re
         }
     }
     return [...byEvent.entries()].sort((a, b) => {
+        if (orderBy === 'eventIndex') {
+            return a[0] - b[0];
+        }
         const ax = Math.min(...a[1].map(xCenter));
         const bx = Math.min(...b[1].map(xCenter));
         return ax !== bx ? ax - bx : a[0] - b[0];
@@ -210,13 +216,14 @@ export const groupIntoEvents = (notes: readonly RecognizedNote[]): RecognizedNot
  * score. Events keep their region eventIndex so the panel can merge L/R steps.
  */
 export const buildSequences = (region: RecognizedRegion): Record<Hand, FingeringSequence | null> => {
+    const orderBy = region.source === 'omr' ? 'eventIndex' : 'x';
     const result: Record<Hand, FingeringSequence | null> = { L: null, R: null };
     for (const hand of ['L', 'R'] as const) {
         const notes = region.notes.filter((n) => region.handOf[n.staff] === hand);
         if (notes.length === 0) {
             continue;
         }
-        const events: FingeringEvent[] = orderedEventGroups(notes).map(([index, group]) => ({
+        const events: FingeringEvent[] = orderedEventGroups(notes, orderBy).map(([index, group]) => ({
             index,
             hand,
             notes: [...group]
@@ -228,9 +235,9 @@ export const buildSequences = (region: RecognizedRegion): Record<Hand, Fingering
     return result;
 };
 
-/** Union of event indices across both hands, in left-to-right page order. */
+/** Union of event indices across both hands, in performance / page order. */
 export const mergedEventIndices = (region: RecognizedRegion): number[] =>
-    orderedEventGroups(region.notes).map(([index]) => index);
+    orderedEventGroups(region.notes, region.source === 'omr' ? 'eventIndex' : 'x').map(([index]) => index);
 
 /** Keys down at one merged step, both hands, for the keyboard diagram. */
 export const pressedAtIndex = (

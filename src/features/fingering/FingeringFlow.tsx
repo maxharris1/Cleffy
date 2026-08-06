@@ -2,11 +2,12 @@ import { useMemo, useState } from 'react';
 
 import { buildFingeringProposals } from '@/features/fingering/applyFingerings';
 import { bindRegionDigits } from '@/features/fingering/bindFingerings';
-import { readCachedRegion, regionCacheKey, writeCachedRegion } from '@/features/fingering/cache';
+import { readCachedRegion, regionCacheKey, scoreCacheEpoch, writeCachedRegion } from '@/features/fingering/cache';
 import { FingeringDiagramPanel } from '@/features/fingering/diagram/FingeringDiagramPanel';
 import { FingeringReviewPanel } from '@/features/fingering/FingeringReviewPanel';
 import { FingeringSelectionPopover } from '@/features/fingering/FingeringSelectionPopover';
 import { emptyRegion, type FingeringSequence, type Hand, type NormRect, type RecognizedRegion } from '@/features/fingering/model';
+import { regionFromScoreData } from '@/features/fingering/regionFromScoreData';
 import { buildRegionImages } from '@/features/fingering/regionCrop';
 import { makeRecognizeNotesFn } from '@/features/fingering/recognizeApi';
 import { isCloudDocId } from '@/features/library/documentsService';
@@ -16,6 +17,7 @@ import type { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
 import type { Annotation } from '@/types/models';
+import type { ScoreData } from '@/types/scoreData';
 import { buttonClassName } from '@/ui/classNames';
 
 export interface FingeringFlowProps {
@@ -26,6 +28,8 @@ export interface FingeringFlowProps {
     store: AnnotationStore;
     /** Owner/editor — gates the M3 apply-to-score action. */
     canWrite: boolean;
+    /** Ready play-along ScoreData when available — preferred note source. */
+    score?: ScoreData | null;
     onClose: () => void;
 }
 
@@ -39,32 +43,33 @@ const MAX_REGION_AREA = 0.5;
  * → note recognition (or manual entry) → review → keyboard diagram. Mounted
  * lazily by PdfViewport per selection (keyed remount resets the flow).
  */
-export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClose }: FingeringFlowProps) => {
+export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score = null, onClose }: FingeringFlowProps) => {
     const view = useViewerStore((s) => s.view);
     const { doc } = usePdf();
     const [phase, setPhase] = useState<Phase>('choose');
     /** Set on review confirm — the flow's source of truth for the diagram. */
     const [region, setRegion] = useState<RecognizedRegion | null>(null);
-    /** Vision result awaiting review (cleared once confirmed into `region`). */
-    const [visionSeed, setVisionSeed] = useState<RecognizedRegion | null>(null);
+    /** OMR/vision/cache result awaiting review (cleared once confirmed into `region`). */
+    const [pendingRegion, setPendingRegion] = useState<RecognizedRegion | null>(null);
     const [snapshot, setSnapshot] = useState<{ dataUrl: string; rect: NormRect } | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [pendingProposals, setPendingProposals] = useState<Annotation[]>([]);
     const [cacheKey, setCacheKey] = useState<string | null>(null);
     const [fromCache, setFromCache] = useState(false);
     const recognize = useMemo(() => (isCloudDocId(docId) ? makeRecognizeNotesFn(docId) : null), [docId]);
+    const canReadNotes = Boolean(score) || Boolean(recognize && doc);
 
     const { rect } = selection;
     const topLeft = pagePointToViewport(view, layout, rect.x, rect.y);
     const bottomRight = pagePointToViewport(view, layout, rect.x + rect.w, rect.y + rect.h);
 
     const reviewSeed = useMemo(
-        () => region ?? visionSeed ?? emptyRegion(docId, selection.pageIndex, rect),
-        [region, visionSeed, docId, selection.pageIndex, rect],
+        () => region ?? pendingRegion ?? emptyRegion(docId, selection.pageIndex, rect),
+        [region, pendingRegion, docId, selection.pageIndex, rect],
     );
 
     const readNotes = async () => {
-        if (!recognize || !doc) {
+        if (!canReadNotes) {
             setPhase('review');
             return;
         }
@@ -79,9 +84,9 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
             const aspect = layout.width / layout.height;
             const db = getDb();
 
-            // A prior reading of this exact region (same PDF revision, same
-            // nearby annotations) is served from cache — corrections included.
             const contentRev = (await db.pdfCache.get(docId))?.contentRev ?? 0;
+            // Epoch from the same ScoreData instance used for mapping — no Dexie dig.
+            const scoreEpoch = scoreCacheEpoch(score);
             const key = await regionCacheKey({
                 docId,
                 page: selection.pageIndex,
@@ -89,30 +94,46 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
                 contentRev,
                 annotations,
                 aspect,
+                scoreEpoch,
             });
             setCacheKey(key);
 
-            const images = await buildRegionImages(doc, selection.pageIndex, rect, annotations);
-            setSnapshot({
-                dataUrl: `data:${images.regionImage.mediaType};base64,${images.regionImage.dataBase64}`,
-                rect: images.cropRect,
-            });
-
             const cached = await readCachedRegion(db, key);
             if (cached) {
-                setVisionSeed(cached);
+                setPendingRegion(cached);
                 setFromCache(true);
                 setPhase('review');
                 return;
             }
 
+            if (score) {
+                const fromOmr = regionFromScoreData(docId, selection.pageIndex, rect, score);
+                if (fromOmr && fromOmr.notes.length > 0) {
+                    setPendingRegion(bindRegionDigits(fromOmr, annotations, aspect));
+                    setFromCache(false);
+                    setPhase('review');
+                    return;
+                }
+            }
+
+            // Vision path only — pay the PDF crop cost here, not on the OMR/cache hits.
+            if (!recognize || !doc) {
+                setError("Couldn't read the passage — enter the notes by hand.");
+                setPhase('choose');
+                return;
+            }
+            const images = await buildRegionImages(doc, selection.pageIndex, rect, annotations);
+            setSnapshot({
+                dataUrl: `data:${images.regionImage.mediaType};base64,${images.regionImage.dataBase64}`,
+                rect: images.cropRect,
+            });
             const recognized = await recognize(selection.pageIndex, rect, images);
             if (!recognized || recognized.notes.length === 0) {
                 setError("Couldn't read the passage — enter the notes by hand.");
                 setPhase('choose');
                 return;
             }
-            setVisionSeed(bindRegionDigits(recognized, annotations, aspect));
+            setPendingRegion(bindRegionDigits(recognized, annotations, aspect));
             setFromCache(false);
             setPhase('review');
         } catch {
@@ -177,7 +198,7 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
                     anchorY={bottomRight.y}
                     busy={phase === 'recognizing'}
                     error={error}
-                    onReadNotes={recognize && doc ? () => void readNotes() : null}
+                    onReadNotes={canReadNotes ? () => void readNotes() : null}
                     onEnterNotes={() => setPhase('review')}
                     onCancel={onClose}
                 />
@@ -190,7 +211,7 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, onClo
                     onConfirm={(next) => {
                         setRegion(next);
                         setPhase('diagram');
-                        if (cacheKey && next.source === 'vision') {
+                        if (cacheKey && next.source !== 'manual') {
                             void writeCachedRegion(getDb(), cacheKey, next);
                         }
                     }}

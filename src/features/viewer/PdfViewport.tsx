@@ -514,6 +514,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                                 layout={fingeringLayout}
                                 store={annotationStore}
                                 canWrite={!readOnly}
+                                score={playbackScore}
                                 onClose={() => setFingeringSel(null)}
                             />
                         </Suspense>

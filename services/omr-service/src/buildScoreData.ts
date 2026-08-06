@@ -25,7 +25,12 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         for (const sheet of geometry.sheets) {
             for (const system of sheet.systems) {
                 const sysIndex = systems.length;
-                systems.push({ page: sheet.pageIndex, y0: system.y0, y1: system.y1 });
+                systems.push({
+                    page: sheet.pageIndex,
+                    y0: system.y0,
+                    y1: system.y1,
+                    ...((system.staves?.length ?? 0) > 0 ? { staves: system.staves } : {}),
+                });
                 for (const stack of system.stacks) {
                     stacks.push({ page: sheet.pageIndex, sys: sysIndex, x0: stack.x0, x1: stack.x1, slots: stack.slots });
                 }
@@ -61,6 +66,8 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         ticksPerQuarter: TICKS_PER_QUARTER,
         defaultBpm: musical.defaultBpm,
         timeSignatures: musical.timeSignatures,
+        ...((musical.keySignatures?.length ?? 0) > 0 ? { keySignatures: musical.keySignatures } : {}),
+        ...((musical.clefs?.length ?? 0) > 0 ? { clefs: musical.clefs } : {}),
         totalTicks: Math.max(1, musical.totalTicks),
         notes: musical.notes,
         measures,

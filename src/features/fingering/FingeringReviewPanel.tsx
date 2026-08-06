@@ -126,12 +126,25 @@ export const FingeringReviewPanel = ({
         .filter((n) => n.eventIndex === selectedEvent)
         .map((n) => ({ midi: n.midi, finger: n.annotatedFinger, hand: region.handOf[n.staff] }));
 
+    const sourceBlurb = (() => {
+        switch (initial.source) {
+            case 'omr':
+                return 'From play-along analysis — check pitches before the diagram renders. Amber means unsure.';
+            case 'vision':
+                return 'Read from image — check the reading before the diagram renders. Tap a marker or chip to fix a note. Amber means unsure.';
+            case 'manual':
+                return 'Tap keys to enter the notes of each step — a chord is one step with several notes. Select a note to set its finger.';
+            default: {
+                const _exhaustive: never = initial.source;
+                return _exhaustive;
+            }
+        }
+    })();
+
     return (
         <Dialog label="Notes in selection" onClose={onCancel} sheet>
             <p className="mb-3 text-sm text-stone-600">
-                {initial.source === 'vision'
-                    ? 'Check the reading before the diagram renders — tap a marker or chip to fix a note. Amber means unsure.'
-                    : 'Tap keys to enter the notes of each step — a chord is one step with several notes. Select a note to set its finger.'}
+                {sourceBlurb}
                 {fromCache ? ' Loaded from a saved reading.' : ''}
             </p>
 

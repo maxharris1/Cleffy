@@ -62,7 +62,9 @@ same; give the JVM ~4 GB (`JAVA_TOOL_OPTIONS=-Xmx3g` is set in the image).
   (`no_geometry`); count mismatches degrade only the tail
   (`measure_geometry_mismatch`); repeats are ignored (`repeats_ignored`).
 - The contract file `src/scoreData.ts` must stay in lockstep with the app's
-  `src/types/scoreData.ts`.
+  `src/types/scoreData.ts`. Writer version is **2** (per-staff bands, key
+  signatures, clefs); the app still accepts v1 caches. Re-run Generate
+  play-along on older scores to pick up v2 fields used by fingering apply.
 
 ## Test fixtures
 

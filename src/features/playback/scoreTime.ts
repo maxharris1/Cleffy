@@ -98,6 +98,48 @@ export const xAtTickInMeasure = (measure: ScoreMeasure, tick: number): number =>
 };
 
 /**
+ * Inverse of {@link xAtTickInMeasure}: tick within a measure at a normalized
+ * page x. Used by the fingering OMR populator to turn a marquee into a tick
+ * range. Clamps x to the measure span; pre-slot (header) x maps to the first
+ * chord column's tick.
+ */
+export const tickAtXInMeasure = (measure: ScoreMeasure, nx: number): number => {
+    const x = Math.min(measure.x1, Math.max(measure.x0, nx));
+    const slots = measure.sl;
+    if (!slots || slots.length === 0) {
+        const width = measure.x1 - measure.x0;
+        const frac = width <= 0 ? 0 : (x - measure.x0) / width;
+        return measure.tick + Math.round(frac * measure.dTicks);
+    }
+    const first = slots[0];
+    if (!first) {
+        return measure.tick;
+    }
+    if (x <= first.x) {
+        return measure.tick + first.t;
+    }
+    for (let i = 0; i + 1 < slots.length; i++) {
+        const a = slots[i];
+        const b = slots[i + 1];
+        if (a && b && x < b.x) {
+            const span = b.x - a.x;
+            const frac = span <= 0 ? 0 : (x - a.x) / span;
+            return measure.tick + Math.round(a.t + frac * (b.t - a.t));
+        }
+    }
+    const last = slots[slots.length - 1];
+    if (!last) {
+        return measure.tick;
+    }
+    const tail = measure.x1 - last.x;
+    if (tail <= 0) {
+        return measure.tick + last.t;
+    }
+    const frac = Math.min(1, (x - last.x) / tail);
+    return measure.tick + Math.round(last.t + frac * (measure.dTicks - last.t));
+};
+
+/**
  * Prev/next-measure stepping, with the standard transport nuance: stepping
  * back from >20% into a measure returns to that measure's own start first.
  * Returns the target start tick.

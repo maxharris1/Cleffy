@@ -15,6 +15,8 @@ const musical: MusicalScore = {
         { n: 2, tick: 1920, dTicks: 1920 },
     ],
     timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+    keySignatures: [],
+    clefs: [],
     defaultBpm: 88,
     totalTicks: 3840,
     warnings: ['repeats_ignored'],
@@ -30,6 +32,10 @@ const geometry: OmrGeometry = {
                 {
                     y0: 0.1,
                     y1: 0.3,
+                    staves: [
+                        { y0: 0.12, y1: 0.18 },
+                        { y0: 0.22, y1: 0.28 },
+                    ],
                     stacks: [
                         { x0: 0.1, x1: 0.5, slots: [] },
                         { x0: 0.5, x1: 0.9, slots: [] },
@@ -45,9 +51,20 @@ describe('buildScoreData', () => {
         const score = buildScoreData(musical, geometry);
         expect(score.measures[0]).toEqual({ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.1, x1: 0.5 });
         expect(score.measures[1]).toMatchObject({ sys: 0, x0: 0.5, x1: 0.9 });
-        expect(score.systems).toEqual([{ page: 0, y0: 0.1, y1: 0.3 }]);
+        expect(score.systems).toEqual([
+            {
+                page: 0,
+                y0: 0.1,
+                y1: 0.3,
+                staves: [
+                    { y0: 0.12, y1: 0.18 },
+                    { y0: 0.22, y1: 0.28 },
+                ],
+            },
+        ]);
         expect(score.defaultBpm).toBe(88);
         expect(score.warnings).toContain('repeats_ignored');
+        expect(score.version).toBe(2);
     });
 
     it('degrades to geometry-less measures when the .omr is unusable', () => {
@@ -63,7 +80,7 @@ describe('buildScoreData', () => {
                     pageIndex: 0,
                     widthPx: 1000,
                     heightPx: 1000,
-                    systems: [{ y0: 0.1, y1: 0.3, stacks: [{ x0: 0.1, x1: 0.5, slots: [] }] }],
+                    systems: [{ y0: 0.1, y1: 0.3, staves: [], stacks: [{ x0: 0.1, x1: 0.5, slots: [] }] }],
                 },
             ],
         };

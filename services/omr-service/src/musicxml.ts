@@ -2,7 +2,7 @@ import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
 import { TICKS_PER_QUARTER } from './scoreData.js';
-import type { ScoreNote, ScoreTimeSig } from './scoreData.js';
+import type { ScoreClef, ScoreKeySig, ScoreNote, ScoreTimeSig } from './scoreData.js';
 import { ERROR_CODES, JobError } from './errors.js';
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
@@ -11,6 +11,8 @@ export interface MusicalScore {
     /** In score order; geometry is zipped on later. */
     measures: Array<{ n: number; tick: number; dTicks: number }>;
     timeSignatures: ScoreTimeSig[];
+    keySignatures: ScoreKeySig[];
+    clefs: ScoreClef[];
     defaultBpm: number | null;
     totalTicks: number;
     warnings: string[];
@@ -191,6 +193,8 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         notes,
         measures: leadResult.measures,
         timeSignatures: leadResult.timeSignatures,
+        keySignatures: leadResult.keySignatures,
+        clefs: leadResult.clefs,
         defaultBpm: leadResult.defaultBpm,
         totalTicks: lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : tickOffset,
         warnings: [...warnings],
@@ -222,6 +226,8 @@ interface PartResult {
     notes: ScoreNote[];
     measures: Array<{ n: number; tick: number; dTicks: number }>;
     timeSignatures: ScoreTimeSig[];
+    keySignatures: ScoreKeySig[];
+    clefs: ScoreClef[];
     defaultBpm: number | null;
 }
 
@@ -229,6 +235,8 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
     const notes: ScoreNote[] = [];
     const measures: Array<{ n: number; tick: number; dTicks: number }> = [];
     const timeSignatures: ScoreTimeSig[] = [];
+    const keySignatures: ScoreKeySig[] = [];
+    const clefs: ScoreClef[] = [];
     let defaultBpm: number | null = null;
 
     let divisions = 1;
@@ -280,6 +288,32 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                                 if (!last || last.num !== num || last.den !== den) {
                                     timeSignatures.push({ tick: measureStart, num, den });
                                 }
+                            }
+                        }
+                    }
+                    if (!ctx.timeline) {
+                        const key = firstChild(child, 'key');
+                        if (key) {
+                            const fifths = childInt(key, 'fifths');
+                            if (fifths !== null && fifths >= -7 && fifths <= 7) {
+                                const last = keySignatures[keySignatures.length - 1];
+                                if (!last || last.fifths !== fifths) {
+                                    keySignatures.push({ tick: measureStart, fifths });
+                                }
+                            }
+                        }
+                        for (const clefEl of childElements(child, 'clef')) {
+                            const signRaw = (childText(clefEl, 'sign') ?? '').toUpperCase();
+                            if (signRaw !== 'G' && signRaw !== 'F' && signRaw !== 'C') {
+                                continue;
+                            }
+                            const numberAttr = clefEl.getAttribute('number');
+                            const staffNum = numberAttr ? Number.parseInt(numberAttr, 10) : 1;
+                            const staff: 0 | 1 = staffNum >= 2 ? 1 : 0;
+                            const line = childInt(clefEl, 'line') ?? (signRaw === 'F' ? 4 : signRaw === 'C' ? 3 : 2);
+                            const last = [...clefs].reverse().find((c) => c.staff === staff);
+                            if (!last || last.sign !== signRaw || last.line !== line) {
+                                clefs.push({ tick: measureStart, staff, sign: signRaw, line });
                             }
                         }
                     }
@@ -524,7 +558,7 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
         timeSignatures.push({ tick: ctx.tickOffset, num: currentSig.num, den: currentSig.den });
     }
 
-    return { notes, measures, timeSignatures, defaultBpm };
+    return { notes, measures, timeSignatures, keySignatures, clefs, defaultBpm };
 };
 
 const ticksOf = (duration: number, divisions: number): number =>
@@ -568,6 +602,8 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         notes: [],
         measures: [],
         timeSignatures: [],
+        keySignatures: [],
+        clefs: [],
         defaultBpm: null,
         totalTicks: 0,
         warnings: [],
@@ -578,6 +614,8 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         combined.notes.push(...parsed.notes);
         combined.measures.push(...parsed.measures);
         combined.timeSignatures.push(...parsed.timeSignatures);
+        combined.keySignatures.push(...parsed.keySignatures);
+        combined.clefs.push(...parsed.clefs);
         combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
         combined.totalTicks = parsed.totalTicks;
         parsed.warnings.forEach((warning) => warnings.add(warning));

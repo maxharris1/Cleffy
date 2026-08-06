@@ -5,7 +5,8 @@ import { z } from 'zod';
  * service (Audiveris → MusicXML + pixel geometry) and stored in
  * `score_analyses.score`. It is everything playback needs: note events split
  * by hand, and the measure/system geometry that anchors the moving playhead
- * to the rendered PDF.
+ * to the rendered PDF. v2 also carries per-staff bands, key signatures, and
+ * clefs so the fingering populator can synthesize notehead bboxes.
  *
  * All geometry is normalized 0–1 against its page (the same contract as
  * annotations), so it is zoom/DPI/rotation invariant.
@@ -13,7 +14,10 @@ import { z } from 'zod';
  * KEEP IN LOCKSTEP with services/omr-service/src/scoreData.ts.
  */
 
-export const SCORE_DATA_VERSION = 1;
+/** Current writer version. Readers accept 1 and 2 (see parseScoreData). */
+export const SCORE_DATA_VERSION = 2;
+/** Oldest ScoreData version the client still serves from cache. */
+export const SCORE_DATA_MIN_VERSION = 1;
 
 /** Canonical tick resolution — every duration is normalized to 480 ticks per quarter note. */
 export const TICKS_PER_QUARTER = 480;
@@ -63,11 +67,18 @@ const scoreMeasureSchema = z.object({
         .optional(),
 });
 
+const scoreStaffBandSchema = z.object({
+    y0: z.number().min(0).max(1),
+    y1: z.number().min(0).max(1),
+});
+
 const scoreSystemSchema = z.object({
     page: z.number().int().nonnegative(),
     /** Vertical band of the system on its page, normalized 0–1. */
     y0: z.number().min(0).max(1),
     y1: z.number().min(0).max(1),
+    /** Per-staff bands in score order (0 = upper/RH, 1 = lower/LH). v2+. */
+    staves: z.array(scoreStaffBandSchema).max(4).optional(),
 });
 
 const scoreTimeSigSchema = z.object({
@@ -76,11 +87,30 @@ const scoreTimeSigSchema = z.object({
     den: z.number().int().positive(),
 });
 
+const scoreKeySigSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    /** Circle-of-fifths: sharps positive, flats negative (−7…7). */
+    fifths: z.number().int().min(-7).max(7),
+});
+
+const scoreClefSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    /** 0 = upper staff, 1 = lower staff. */
+    staff: z.union([z.literal(0), z.literal(1)]),
+    sign: z.enum(['G', 'F', 'C']),
+    /** Staff line counted from the bottom (MusicXML convention), default 2/4/3. */
+    line: z.number().int().min(1).max(5).optional(),
+});
+
 export const scoreDataSchema = z.object({
     version: z.number().int(),
     ticksPerQuarter: z.literal(TICKS_PER_QUARTER),
     defaultBpm: z.number().positive().nullable(),
     timeSignatures: z.array(scoreTimeSigSchema).max(64),
+    /** v2+; absent on v1 caches. */
+    keySignatures: z.array(scoreKeySigSchema).max(64).optional(),
+    /** v2+; absent on v1 caches. */
+    clefs: z.array(scoreClefSchema).max(64).optional(),
     totalTicks: z.number().int().positive(),
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),
@@ -93,13 +123,15 @@ export type ScoreNote = z.infer<typeof scoreNoteSchema>;
 export type ScoreMeasure = z.infer<typeof scoreMeasureSchema>;
 export type ScoreSystem = z.infer<typeof scoreSystemSchema>;
 export type ScoreTimeSig = z.infer<typeof scoreTimeSigSchema>;
+export type ScoreKeySig = z.infer<typeof scoreKeySigSchema>;
+export type ScoreClef = z.infer<typeof scoreClefSchema>;
 export type ScoreData = z.infer<typeof scoreDataSchema>;
 
 /**
  * Parse ScoreData arriving from Postgres jsonb or the Dexie cache. Malformed
  * or future-versioned payloads degrade to a warn + null, never a crash
  * (wire.ts discipline). Notes and measures are defensively re-sorted — every
- * consumer binary-searches them.
+ * consumer binary-searches them. v1 caches remain valid after the v2 bump.
  */
 export const parseScoreData = (raw: unknown): ScoreData | null => {
     const parsed = scoreDataSchema.safeParse(raw);
@@ -107,7 +139,7 @@ export const parseScoreData = (raw: unknown): ScoreData | null => {
         console.warn('Ignoring malformed ScoreData', parsed.error.issues[0]?.message);
         return null;
     }
-    if (parsed.data.version !== SCORE_DATA_VERSION) {
+    if (parsed.data.version < SCORE_DATA_MIN_VERSION || parsed.data.version > SCORE_DATA_VERSION) {
         console.warn(`Ignoring ScoreData with unsupported version ${parsed.data.version}`);
         return null;
     }
@@ -116,8 +148,43 @@ export const parseScoreData = (raw: unknown): ScoreData | null => {
         notes: [...parsed.data.notes].sort((a, b) => a.t - b.t),
         measures: [...parsed.data.measures].sort((a, b) => a.tick - b.tick),
         timeSignatures: [...parsed.data.timeSignatures].sort((a, b) => a.tick - b.tick),
+        keySignatures: parsed.data.keySignatures
+            ? [...parsed.data.keySignatures].sort((a, b) => a.tick - b.tick)
+            : undefined,
+        clefs: parsed.data.clefs ? [...parsed.data.clefs].sort((a, b) => a.tick - b.tick) : undefined,
     };
 };
 
 /** True when the score has any left-hand material (drives the LH mute control). */
 export const hasLeftHand = (score: ScoreData): boolean => score.notes.some((note) => note.h === HAND_LH);
+
+/** Key signature in force at a tick (last change at or before it); 0 when unknown. */
+export const keySigAt = (score: ScoreData, tick: number): number => {
+    let fifths = 0;
+    for (const sig of score.keySignatures ?? []) {
+        if (sig.tick > tick) {
+            break;
+        }
+        fifths = sig.fifths;
+    }
+    return fifths;
+};
+
+/** Clef in force for a staff at a tick; defaults treble/bass by staff. */
+export const clefAt = (score: ScoreData, tick: number, staff: 0 | 1): ScoreClef => {
+    let active: ScoreClef = {
+        tick: 0,
+        staff,
+        sign: staff === HAND_LH ? 'F' : 'G',
+        line: staff === HAND_LH ? 4 : 2,
+    };
+    for (const clef of score.clefs ?? []) {
+        if (clef.tick > tick) {
+            break;
+        }
+        if (clef.staff === staff) {
+            active = clef;
+        }
+    }
+    return active;
+};

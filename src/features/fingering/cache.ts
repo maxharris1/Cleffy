@@ -3,6 +3,7 @@ import { inflateRect } from '@/features/fingering/selection';
 import { annotationBboxNorm } from '@/features/viewer/ink/hitTest';
 import type { ScribblerDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';
+import type { ScoreData } from '@/types/scoreData';
 
 /**
  * Local cache of note readings so re-opening a diagram is instant and free.
@@ -28,7 +29,45 @@ export interface RegionCacheKeyInput {
     annotations: readonly Annotation[];
     /** Page width/height ratio, for annotation bbox math. */
     aspect: number;
+    /**
+     * Play-along identity so a regenerated analysis invalidates OMR readings.
+     * Prefer {@link scoreCacheEpoch} from the same ScoreData instance used for
+     * mapping — never a separate Dexie dig that can desync from the `score` prop.
+     */
+    scoreEpoch: string;
 }
+
+/** Stable-enough identity for a ScoreData payload (invalidates on re-analysis). */
+export const scoreCacheEpoch = (score: ScoreData | null | undefined): string => {
+    if (!score) {
+        return '';
+    }
+    // Include geometry + warnings so a re-run that only fixes positions /
+    // measure_geometry_mismatch still invalidates cached OMR readings.
+    const measures = score.measures
+        .map((m) => {
+            const slots = (m.sl ?? []).map((s) => `${s.x.toFixed(4)}:${s.t}`).join('/');
+            return `${m.n}:${m.tick}:${m.page}:${m.sys}:${m.x0.toFixed(4)}:${m.x1.toFixed(4)}:${slots}`;
+        })
+        .join(',');
+    const systems = score.systems
+        .map(
+            (s) =>
+                `${s.page}:${s.y0.toFixed(4)}:${s.y1.toFixed(4)}:${(s.staves ?? []).map((b) => `${b.y0.toFixed(4)}-${b.y1.toFixed(4)}`).join('/')}`,
+        )
+        .join(',');
+    const notes = score.notes.map((n) => `${n.t}:${n.p}:${n.h}`).join(',');
+    return [
+        score.version,
+        score.totalTicks,
+        score.warnings.join(','),
+        score.keySignatures?.map((k) => `${k.tick}:${k.fifths}`).join(',') ?? '',
+        score.clefs?.map((c) => `${c.tick}:${c.staff}:${c.sign}:${c.line ?? ''}`).join(',') ?? '',
+        measures,
+        systems,
+        notes,
+    ].join('|');
+};
 
 export const regionCacheKey = async (input: RegionCacheKeyInput): Promise<string> => {
     const searchRect = inflateRect(input.rect, KEY_MARGIN, KEY_MARGIN);
@@ -48,7 +87,7 @@ export const regionCacheKey = async (input: RegionCacheKeyInput): Promise<string
     const quantized = [input.rect.x, input.rect.y, input.rect.w, input.rect.h]
         .map((v) => v.toFixed(3))
         .join(',');
-    const material = `${input.docId}|${input.page}|${quantized}|${input.contentRev}|${nearby}`;
+    const material = `${input.docId}|${input.page}|${quantized}|${input.contentRev}|${nearby}|${input.scoreEpoch}`;
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material));
     return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 };

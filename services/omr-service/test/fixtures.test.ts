@@ -124,4 +124,10 @@ describe('key-signature fixture (G major, real Audiveris 5.6.1 artifact)', () =>
         ]);
         expect(musical.totalTicks).toBe(3840);
     });
+
+    it('exports the G-major key signature and treble/bass clefs', () => {
+        expect(musical.keySignatures).toEqual([{ tick: 0, fifths: 1 }]);
+        expect(musical.clefs.some((c) => c.staff === 0 && c.sign === 'G')).toBe(true);
+        expect(musical.clefs.some((c) => c.staff === 1 && c.sign === 'F')).toBe(true);
+    });
 });

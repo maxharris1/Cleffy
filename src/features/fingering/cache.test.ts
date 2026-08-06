@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { readCachedRegion, regionCacheKey, writeCachedRegion } from '@/features/fingering/cache';
+import { readCachedRegion, regionCacheKey, scoreCacheEpoch, writeCachedRegion } from '@/features/fingering/cache';
 import { emptyRegion } from '@/features/fingering/model';
+import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { ScribblerDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';
 
@@ -30,6 +31,7 @@ const keyFor = (overrides?: Partial<Parameters<typeof regionCacheKey>[0]>) =>
         contentRev: 1,
         annotations: [],
         aspect: ASPECT,
+        scoreEpoch: '',
         ...overrides,
     });
 
@@ -54,6 +56,21 @@ describe('regionCacheKey', () => {
     it('invalidates when the PDF bytes are replaced (contentRev bump)', async () => {
         expect(await keyFor({ contentRev: 2 })).not.toBe(await keyFor({ contentRev: 1 }));
     });
+
+    it('invalidates when play-along analysis is regenerated (scoreEpoch)', async () => {
+        expect(await keyFor({ scoreEpoch: '2026-08-05T12:00:00.000Z' })).not.toBe(
+            await keyFor({ scoreEpoch: '2026-08-05T13:00:00.000Z' }),
+        );
+        expect(await keyFor({ scoreEpoch: '' })).not.toBe(await keyFor({ scoreEpoch: 't' }));
+    });
+
+    it('scoreCacheEpoch changes when ScoreData identity changes', () => {
+        expect(scoreCacheEpoch(null)).toBe('');
+        expect(scoreCacheEpoch(tinyScore)).toBe(scoreCacheEpoch(tinyScore));
+        expect(scoreCacheEpoch(tinyScore)).not.toBe(
+            scoreCacheEpoch({ ...tinyScore, version: 2, systems: tinyScore.systems.map((s) => ({ ...s, staves: [{ y0: 0.1, y1: 0.2 }] })) }),
+        );
+    });
 });
 
 describe('read/write cached regions', () => {
@@ -73,6 +90,14 @@ describe('read/write cached regions', () => {
         const cached = await readCachedRegion(db, key);
         expect(cached?.keySignature).toBe(2);
         expect(cached?.source).toBe('vision');
+    });
+
+    it('round-trips an omr-sourced post-review region', async () => {
+        db = new ScribblerDb(`test-fingering-cache-${crypto.randomUUID()}`);
+        const key = await keyFor();
+        const region = { ...emptyRegion('doc', 0, RECT), source: 'omr' as const };
+        await writeCachedRegion(db, key, region);
+        expect((await readCachedRegion(db, key))?.source).toBe('omr');
     });
 
     it('prunes the oldest rows past the cap', async () => {

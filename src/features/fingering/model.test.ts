@@ -147,6 +147,18 @@ describe('buildSequences', () => {
         const manual = regionWith([note({ midi: 60, eventIndex: 1 }), note({ midi: 62, eventIndex: 0 })]);
         expect(buildSequences(manual).R?.events.map((e) => e.index)).toEqual([0, 1]);
     });
+
+    it('OMR regions keep tick/eventIndex order across system breaks (ignore page-x reset)', () => {
+        const region = regionWith(
+            [
+                note({ midi: 60, eventIndex: 0, bbox: { x: 0.8, y: 0.1, w: 0.02, h: 0.01 } }),
+                note({ midi: 62, eventIndex: 1, bbox: { x: 0.1, y: 0.4, w: 0.02, h: 0.01 } }),
+            ],
+            { source: 'omr' },
+        );
+        expect(buildSequences(region).R?.events.map((e) => e.index)).toEqual([0, 1]);
+        expect(mergedEventIndices(region)).toEqual([0, 1]);
+    });
 });
 
 describe('mergedEventIndices / pressedAtIndex', () => {

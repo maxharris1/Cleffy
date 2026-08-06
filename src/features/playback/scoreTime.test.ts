@@ -12,11 +12,12 @@ import {
     measureStartTick,
     secondsPerTick,
     stepMeasure,
+    tickAtXInMeasure,
     ticksPerBeat,
     timeSigAt,
     xAtTickInMeasure,
 } from '@/features/playback/scoreTime';
-import { parseScoreData } from '@/types/scoreData';
+import { parseScoreData, type ScoreMeasure } from '@/types/scoreData';
 
 const { measures, notes, timeSignatures } = tinyScore;
 
@@ -120,6 +121,38 @@ describe('xAtTickInMeasure', () => {
     it('falls back to linear interpolation without slot data', () => {
         const plain = { ...withSlots, sl: undefined };
         expect(xAtTickInMeasure(plain, 1000 + 960)).toBeCloseTo(0.3, 6);
+    });
+});
+
+describe('tickAtXInMeasure', () => {
+    const withSlots: ScoreMeasure = {
+        n: 1,
+        tick: 1000,
+        dTicks: 1920,
+        page: 0,
+        sys: 0,
+        x0: 0.2,
+        x1: 0.4,
+        sl: [
+            { x: 0.22, t: 0 },
+            { x: 0.3, t: 1440 },
+        ],
+    };
+
+    it('inverts slot-aware xAtTickInMeasure within rounding', () => {
+        const midTick = 1000 + 720;
+        const x = xAtTickInMeasure(withSlots, midTick);
+        expect(tickAtXInMeasure(withSlots, x)).toBe(midTick);
+    });
+
+    it('maps pre-slot x to the first column tick', () => {
+        expect(tickAtXInMeasure(withSlots, 0.2)).toBe(1000);
+        expect(tickAtXInMeasure(withSlots, 0.22)).toBe(1000);
+    });
+
+    it('falls back to linear without slots', () => {
+        const plain = { ...withSlots, sl: undefined };
+        expect(tickAtXInMeasure(plain, 0.3)).toBe(1000 + 960);
     });
 });
 
