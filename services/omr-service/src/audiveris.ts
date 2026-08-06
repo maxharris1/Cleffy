@@ -19,9 +19,13 @@ const AUDIVERIS_BIN = process.env.AUDIVERIS_BIN ?? '/opt/audiveris/bin/Audiveris
 
 /**
  * Run Audiveris headless on a PDF: transcribe + export MusicXML (-export)
- * and save the .omr project (-save) into outDir. Verified against 5.6.1:
- * outputs land as <base>.mxl (or <base>.mvtN.mxl per movement) and
- * <base>.omr directly in the output folder.
+ * into outDir. Verified against 5.6.1: outputs land as <base>.mxl (or
+ * <base>.mvtN.mxl per movement) and <base>.omr directly in the output folder.
+ *
+ * Do NOT pass `-save`. In batch, `-save` writes the .omr zip on every step;
+ * reopening that zip during `-export` trips FileSystemAlreadyExistsException
+ * and a sheet-reload NPE (exit 255 / omr_crash) on multi-page scores.
+ * `-export` alone still writes the final .omr needed for measure geometry.
  */
 export const runAudiveris = async (
     pdfPath: string,
@@ -29,7 +33,7 @@ export const runAudiveris = async (
     options: AudiverisOptions,
 ): Promise<AudiverisResult> => {
     await new Promise<void>((resolve, reject) => {
-        const child = spawn(AUDIVERIS_BIN, ['-batch', '-export', '-save', '-output', outDir, '--', pdfPath], {
+        const child = spawn(AUDIVERIS_BIN, ['-batch', '-export', '-output', outDir, '--', pdfPath], {
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true, // own process group, so the timeout can kill the whole JVM tree
         });

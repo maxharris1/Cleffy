@@ -8,7 +8,7 @@ recognition, and writes the result into the `score_analyses` table.
 ```
 score-analyze Edge Fn ──POST /jobs {documentId, pdfSignedUrl, pageCount}──▶ this service
                                                                               │ 1. download PDF (signed URL)
-                                                                              │ 2. Audiveris -batch -export -save
+                                                                              │ 2. Audiveris -batch -export
                                                                               │ 3. parse .mxl (notes/hands/ties)
                                                                               │    + .omr (measure pixel geometry)
                                                                               │ 4. buildScoreData → self-check
@@ -68,7 +68,7 @@ same; give the JVM ~4 GB (`JAVA_TOOL_OPTIONS=-Xmx3g` is set in the image).
 
 `test/fixtures/` contains REAL Audiveris 5.6.1 artifacts: `tiny.musicxml`
 (source) was rendered to `tiny.pdf` (verovio + headless Chromium print) and
-transcribed with `Audiveris -batch -export -save`, producing `tiny.mxl` +
+transcribed with `Audiveris -batch -export`, producing `tiny.mxl` +
 `tiny.omr`. Regenerate after an Audiveris upgrade and re-verify
 `test/fixtures.test.ts` — the `.omr` layout is undocumented and
 version-coupled (that test failing loudly after an upgrade is by design).
