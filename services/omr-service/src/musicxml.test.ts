@@ -304,3 +304,117 @@ describe('parseMusicXmlString', () => {
         expect(parseMusicXmlString(xml).measures.map((m) => m.n)).toEqual([1, 2]);
     });
 });
+
+/**
+ * Meter reconciliation. Ticks: 480/quarter, so 6/8 = 1440 and 9/8 = 2160.
+ * `divisions=4` means a duration unit is a 16th, i.e. 120 ticks.
+ */
+describe('meter reconciliation', () => {
+    const ATTRS = (num: number, den: number) =>
+        `<attributes><divisions>4</divisions><time><beats>${num}</beats><beat-type>${den}</beat-type></time></attributes>`;
+
+    /** One bar holding `units` sixteenths, as a single chain of quarter-ish notes. */
+    const bar = (units: number, first = ''): string =>
+        `<measure>${first}<note><pitch><step>C</step><octave>4</octave></pitch><duration>${units}</duration><voice>1</voice></note></measure>`;
+
+    const spanOf = (declaredNum: number, declaredDen: number, lengths: number[]): string =>
+        wrap(lengths.map((u, i) => bar(u, i === 0 ? ATTRS(declaredNum, declaredDen) : '')).join(''));
+
+    it('corrects a signature the over-length bars outvote, and re-signs the timeline', () => {
+        // 12 bars of true 9/8 (18 sixteenths = 2160 ticks) declared as 6/8.
+        const score = parseMusicXmlString(spanOf(6, 8, Array.from({ length: 12 }, () => 18)));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 9, den: 8 }]);
+        expect(score.measures.every((m) => m.dTicks === 2160)).toBe(true);
+        expect(score.warnings).toContain('meter_corrected');
+        // Corrected bars are exactly full, so they are neither over nor under.
+        expect(score.warnings).not.toContain('measure_overfull');
+        expect(score.warnings).not.toContain('measure_underfull');
+    });
+
+    it('corrects on the real-world mix, where the MODE is the wrong length', () => {
+        // Schubert D.780 No. 2 measured: of 94 bars, 49 exceed the declared 1440,
+        // 35 sit exactly on it and only 18 reach the true 2160. A modal test would
+        // pick 1440 and leave the movement broken; the over-length population is
+        // what carries the signal.
+        const lengths = [
+            ...Array.from({ length: 18 }, () => 18), // 2160 — true 9/8
+            ...Array.from({ length: 14 }, () => 14), // 1680 — over, scattered
+            ...Array.from({ length: 10 }, () => 16), // 1920 — over, scattered
+            ...Array.from({ length: 7 }, () => 17), // 2040 — over, scattered
+            ...Array.from({ length: 35 }, () => 12), // 1440 — exactly the declared bar
+            ...Array.from({ length: 9 }, () => 10), // 1200 — under-read
+        ];
+        const score = parseMusicXmlString(spanOf(6, 8, lengths));
+        expect(score.warnings).toContain('meter_corrected');
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 9, den: 8 }]);
+    });
+
+    it('leaves a genuine signature alone when its bars agree', () => {
+        const score = parseMusicXmlString(spanOf(6, 8, Array.from({ length: 12 }, () => 12)));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 6, den: 8 }]);
+        expect(score.warnings).not.toContain('meter_corrected');
+        expect(score.warnings).not.toContain('meter_suspect');
+    });
+
+    it('is not fooled by a handful of overfull misreads', () => {
+        const lengths = [...Array.from({ length: 30 }, () => 12), ...Array.from({ length: 4 }, () => 18)];
+        const score = parseMusicXmlString(spanOf(6, 8, lengths));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 6, den: 8 }]);
+        expect(score.warnings).not.toContain('meter_corrected');
+    });
+
+    it('warns but does not act when the disagreement is not a simple misread', () => {
+        // 1800 vs 1440 is 5:4 — not a ratio a signature misread produces.
+        const score = parseMusicXmlString(spanOf(6, 8, Array.from({ length: 12 }, () => 15)));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 6, den: 8 }]);
+        expect(score.warnings).toContain('meter_suspect');
+        expect(score.warnings).not.toContain('meter_corrected');
+    });
+
+    it('warns but does not act when the over-length bars do not cluster', () => {
+        const score = parseMusicXmlString(spanOf(6, 8, [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]));
+        expect(score.warnings).toContain('meter_suspect');
+        expect(score.warnings).not.toContain('meter_corrected');
+    });
+
+    it('does not correct a span too short to judge', () => {
+        const score = parseMusicXmlString(spanOf(6, 8, [18, 18, 18, 18, 18]));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 6, den: 8 }]);
+        expect(score.warnings).not.toContain('meter_corrected');
+    });
+
+    it('reads 4/4 misdeclared as 2/4', () => {
+        const score = parseMusicXmlString(spanOf(2, 4, Array.from({ length: 12 }, () => 16)));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 4, den: 4 }]);
+        expect(score.warnings).toContain('meter_corrected');
+    });
+
+    it('judges each meter span separately', () => {
+        // 10 genuine 3/4 bars, then a change to 6/8 whose bars are really 9/8.
+        const first = Array.from({ length: 10 }, (_, i) => bar(12, i === 0 ? ATTRS(3, 4) : '')).join('');
+        const second = Array.from({ length: 12 }, (_, i) => bar(18, i === 0 ? ATTRS(6, 8) : '')).join('');
+        const score = parseMusicXmlString(wrap(first + second));
+        expect(score.timeSignatures).toEqual([
+            { tick: 0, num: 3, den: 4 },
+            { tick: 14400, num: 9, den: 8 },
+        ]);
+        expect(score.measures.slice(0, 10).every((m) => m.dTicks === 1440)).toBe(true);
+        expect(score.measures.slice(10).every((m) => m.dTicks === 2160)).toBe(true);
+    });
+
+    it('excludes pickups and the final bar from the vote', () => {
+        // 12 full 6/8 bars, a short pickup at the front and a short final bar.
+        // Neither should drag the span toward a correction.
+        const lengths = Array.from({ length: 12 }, () => 12);
+        const inner = lengths.map((u, i) => bar(u, i === 0 ? ATTRS(6, 8) : '')).join('');
+        const xml = wrap(
+            `<measure number="0" implicit="yes">${ATTRS(6, 8)}<note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note></measure>` +
+                inner +
+                bar(4),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 6, den: 8 }]);
+        expect(score.warnings).not.toContain('meter_corrected');
+        expect(score.measures[0]?.dTicks).toBe(480); // pickup keeps its real length
+    });
+});

@@ -592,6 +592,172 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
     return raws;
 };
 
+/** Notated bar length of a signature, in ticks. */
+const barTicksOf = (sig: { num: number; den: number }): number =>
+    Math.max(1, Math.round(sig.num * ((TICKS_PER_QUARTER * 4) / sig.den)));
+
+const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+
+/**
+ * Ratios a time-signature misread actually produces (9/8 read as 6/8, 4/4 as
+ * 2/4, …). A disagreement that is not one of these is far likelier to be
+ * damaged bars than a wrong signature, so we refuse to act on it.
+ */
+const METER_RATIOS: ReadonlyArray<readonly [number, number]> = [
+    [3, 2],
+    [2, 3],
+    [2, 1],
+    [1, 2],
+    [4, 3],
+    [3, 4],
+];
+
+const MAX_METER_NUM = 32;
+const VALID_DENOMINATORS = new Set([1, 2, 4, 8, 16]);
+
+/** Apply a ratio to a signature, preferring to move the numerator. */
+const resignature = (
+    sig: { num: number; den: number },
+    rn: number,
+    rd: number,
+): { num: number; den: number } | null => {
+    if ((sig.num * rn) % rd === 0) {
+        const num = (sig.num * rn) / rd;
+        if (num > 0 && num <= MAX_METER_NUM) {
+            return { num, den: sig.den };
+        }
+    }
+    if ((sig.den * rd) % rn === 0) {
+        const den = (sig.den * rd) / rn;
+        if (VALID_DENOMINATORS.has(den)) {
+            return { num: sig.num, den };
+        }
+    }
+    return null;
+};
+
+/** Effective signature for a contiguous run of measures sharing one declared one. */
+interface MeterVerdict {
+    /** Inclusive positions into the RawMeasure array. */
+    from: number;
+    to: number;
+    sig: { num: number; den: number };
+    corrected: boolean;
+}
+
+const MIN_METER_VOTES = 8;
+/** A correct signature is rarely exceeded by a quarter of its own bars. */
+const MIN_OVER_SHARE = 0.25;
+/** The over-length bars must cluster, not scatter. */
+const MIN_OVER_MODAL_COUNT = 6;
+
+/**
+ * Decide what signature a span of measures is really in.
+ *
+ * The discriminator is deliberately NOT "the modal bar length disagrees with the
+ * signature". Measured on Schubert D. 780 No. 2 — printed 9/8, read by Audiveris
+ * as 6/8 — the span's 94 bars split 49 longer than the declared 1440 ticks, 35
+ * at exactly 1440, 9 shorter, with only 18 at the true 2160. The mode is
+ * therefore the WRONG length, because OMR under-reads far more bars than it
+ * over-reads; a modal test would leave that movement broken.
+ *
+ * What is distinctive is the over-length population. Dropping notes shortens a
+ * bar, so a genuinely correct signature is seldom exceeded; a wrong one is
+ * exceeded constantly, and those excesses cluster at the true bar length.
+ */
+const judgeSpan = (
+    raws: readonly RawMeasure[],
+    from: number,
+    to: number,
+    warnings: Set<string>,
+): MeterVerdict => {
+    const declared = raws[from]?.sig ?? { num: 4, den: 4 };
+    const fallback: MeterVerdict = { from, to, sig: declared, corrected: false };
+    const expected = barTicksOf(declared);
+
+    // Pickups are legitimately short, and so is the final bar of a part.
+    const votes: number[] = [];
+    for (let i = from; i <= to; i++) {
+        const raw = raws[i];
+        if (!raw || raw.isPickup || raw.contentTicks <= 0 || i === raws.length - 1) {
+            continue;
+        }
+        votes.push(raw.contentTicks);
+    }
+    const n = votes.length;
+    if (n < MIN_METER_VOTES) {
+        return fallback;
+    }
+
+    const over = votes.filter((v) => v > expected);
+    const exact = votes.filter((v) => v === expected).length;
+    if (over.length / n < MIN_OVER_SHARE || over.length <= exact) {
+        return fallback;
+    }
+
+    // Modal length among the over-length bars — the candidate true bar length.
+    const counts = new Map<number, number>();
+    for (const v of over) {
+        counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    let modal = 0;
+    let modalCount = 0;
+    for (const [len, count] of counts) {
+        if (count > modalCount || (count === modalCount && len < modal)) {
+            modalCount = count;
+            modal = len;
+        }
+    }
+
+    const g = gcd(modal, expected);
+    const rn = modal / g;
+    const rd = expected / g;
+    const known = METER_RATIOS.some(([a, b]) => a === rn && b === rd);
+    const corrected = modalCount >= MIN_OVER_MODAL_COUNT && known ? resignature(declared, rn, rd) : null;
+
+    if (!corrected) {
+        // Noticed and did not act — worth far more to the reader than silence.
+        warnings.add('meter_suspect');
+        return fallback;
+    }
+    warnings.add('meter_corrected');
+    return { from, to, sig: corrected, corrected: true };
+};
+
+/**
+ * Split a part into contiguous runs sharing a declared signature and judge each.
+ * Correction only ever changes a bar's LENGTH, never the bar count — that is
+ * what keeps buildScoreData's positional measure↔geometry zip valid.
+ */
+const reconcileMeter = (raws: readonly RawMeasure[], warnings: Set<string>): MeterVerdict[] => {
+    const verdicts: MeterVerdict[] = [];
+    if (raws.length === 0) {
+        return verdicts;
+    }
+    let from = 0;
+    for (let i = 1; i <= raws.length; i++) {
+        const prev = raws[i - 1]?.sig;
+        const cur = raws[i]?.sig;
+        if (prev && cur && cur.num === prev.num && cur.den === prev.den) {
+            continue;
+        }
+        verdicts.push(judgeSpan(raws, from, i - 1, warnings));
+        from = i;
+    }
+    return verdicts;
+};
+
+/** Per-measure effective signature, expanded from the span verdicts. */
+const effectiveSigs = (raws: readonly RawMeasure[], verdicts: readonly MeterVerdict[]) => {
+    const sigs = raws.map((raw) => raw.sig);
+    for (const verdict of verdicts) {
+        for (let i = verdict.from; i <= verdict.to; i++) {
+            sigs[i] = verdict.sig;
+        }
+    }
+    return sigs;
+};
+
 /**
  * Pass 2 — assign absolute ticks, merge ties, pad, and resolve velocities.
  * Events are walked in document order, which is what dynamics currently key off;
@@ -618,7 +784,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
     const openTies = new Map<string, ScoreNote>();
 
-    for (const raw of raws) {
+    // Secondary parts take their barlines from the lead, so only the lead's
+    // signatures are worth second-guessing.
+    const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
+
+    for (let pos = 0; pos < raws.length; pos++) {
+        const raw = raws[pos];
+        if (!raw) {
+            continue;
+        }
+        const sig = sigs[pos] ?? raw.sig;
         if (ctx.timeline) {
             const slot = ctx.timeline[raw.index];
             if (slot) {
@@ -630,9 +805,13 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             switch (ev.k) {
                 case 'time': {
                     if (!ctx.timeline) {
+                        // Publish the RECONCILED signature, never both it and the
+                        // declared one — the client clicks its metronome and counts
+                        // its count-in off this, and 6/8 against a 9/8 timeline is
+                        // worse than either alone.
                         const last = timeSignatures[timeSignatures.length - 1];
-                        if (!last || last.num !== ev.num || last.den !== ev.den) {
-                            timeSignatures.push({ tick: measureStart, num: ev.num, den: ev.den });
+                        if (!last || last.num !== sig.num || last.den !== sig.den) {
+                            timeSignatures.push({ tick: measureStart, num: sig.num, den: sig.den });
                         }
                     }
                     break;
@@ -770,7 +949,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
 
-        const expected = Math.max(1, Math.round(raw.sig.num * ((TICKS_PER_QUARTER * 4) / raw.sig.den)));
+        const expected = barTicksOf(sig);
         // Pickups stay content-length (MusicXML implicit / measure 0); other bars
         // snap underfull content up to the active signature so later ticks don't skew.
         let length = raw.contentTicks;
@@ -811,7 +990,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     }
 
     if (timeSignatures.length === 0 && !ctx.timeline) {
-        const finalSig = raws[raws.length - 1]?.sig ?? { num: 4, den: 4 };
+        const finalSig = sigs[sigs.length - 1] ?? { num: 4, den: 4 };
         timeSignatures.push({ tick: ctx.tickOffset, num: finalSig.num, den: finalSig.den });
     }
 
