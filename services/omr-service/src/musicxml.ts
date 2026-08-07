@@ -56,6 +56,87 @@ const HAIRPIN_FLOOR = 0.26;
 /** A hairpin whose end was never engraved cannot run forever. */
 const UNCLOSED_HAIRPIN_BARS = 8;
 
+/**
+ * How much of its written value a note actually sounds. Nothing was ever
+ * shortened before, and the engine adds a release tail on top, so consecutive
+ * notes overlapped and every texture came out legato — a staccato Alberti bass
+ * and a slurred nocturne had identical touch.
+ *
+ * A single winner applies, never a product: `staccato x slur` is not 0.5, it is
+ * portato, which is its own row.
+ */
+const GATE_STACCATISSIMO = 0.25;
+const GATE_STACCATO = 0.5;
+const GATE_PORTATO = 0.7;
+const GATE_DEFAULT = 0.9;
+const GATE_LEGATO = 1;
+/** Below this a gated note stops reading as a pitch at all. */
+const MIN_SOUNDING_TICKS = 60;
+
+/** Articulation, reduced to the two things playback can act on. */
+interface ArtSet {
+    gate: number;
+    boost: number;
+}
+
+const PLAIN_ART: ArtSet = { gate: GATE_DEFAULT, boost: 0 };
+
+const markNames = (noteEl: Elem, container: string): Set<string> => {
+    const names = new Set<string>();
+    const groups = noteEl.getElementsByTagName(container);
+    for (let i = 0; i < groups.length; i++) {
+        const group = groups.item(i) as Elem | null;
+        if (!group) {
+            continue;
+        }
+        for (const mark of childElements(group)) {
+            names.add(mark.nodeName);
+        }
+    }
+    return names;
+};
+
+const slurTypesOf = (noteEl: Elem): string[] => {
+    const out: string[] = [];
+    const slurs = noteEl.getElementsByTagName('slur');
+    for (let i = 0; i < slurs.length; i++) {
+        const type = (slurs.item(i) as Elem | null)?.getAttribute('type');
+        if (type) {
+            out.push(type);
+        }
+    }
+    return out;
+};
+
+/** Accents shape velocity only — a `>` on a staccato note stays short. */
+const articulationOf = (arts: Set<string>, underSlur: boolean): ArtSet => {
+    const short = arts.has('staccatissimo') || arts.has('spiccato');
+    const gate = short
+        ? GATE_STACCATISSIMO
+        : arts.has('staccato')
+          ? underSlur
+              ? GATE_PORTATO // portato: dots under a slur are lifted, not clipped
+              : GATE_STACCATO
+          : arts.has('detached-legato')
+            ? GATE_PORTATO
+            : arts.has('tenuto') || underSlur
+              ? GATE_LEGATO
+              : GATE_DEFAULT;
+    const boost = arts.has('strong-accent')
+        ? 0.25
+        : arts.has('accent')
+          ? 0.15
+          : short
+            ? 0.05
+            : arts.has('tenuto')
+              ? 0.03
+              : 0;
+    return { gate, boost };
+};
+
+const gateDuration = (dur: number, gate: number): number =>
+    Math.max(MIN_SOUNDING_TICKS, Math.min(dur, Math.round(dur * gate)));
+
 /** Crushed grace-note length (≈55 ms at 120 bpm) — acciaccatura feel. */
 const GRACE_TICKS = 110;
 
@@ -381,6 +462,7 @@ type RawEvent =
           chord: boolean;
           tieStart: boolean;
           tieStop: boolean;
+          arts: ArtSet;
       }
     | { k: 'grace'; rel: number; midi: number; staff: number }
     | { k: 'dyn'; rel: number; staff: EventStaff; v: number }
@@ -419,6 +501,10 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
     let divisions = 1;
     let currentSig = { num: 4, den: 4 };
     let runningNumber: number | null = null;
+    /** Open slurs per staff — phrasing runs across barlines. */
+    const slurDepth = new Map<number, number>();
+    /** Last non-chord articulation per staff, for chord members to inherit. */
+    const lastArts = new Map<number, ArtSet>();
 
     const measureElems = childElements(part, 'measure');
     for (let index = 0; index < measureElems.length; index++) {
@@ -584,6 +670,22 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                     const start = isChord ? lastNoteStart : cursor;
                     const isRest = firstChild(child, 'rest') !== null;
 
+                    const noteStaff = childInt(child, 'staff') ?? 1;
+                    let arts = lastArts.get(noteStaff) ?? PLAIN_ART;
+                    if (!isChord) {
+                        // A slur's LAST note is its release, so it is not "under"
+                        // the slur for gating — that is what lets a phrase end.
+                        const slurs = slurTypesOf(child);
+                        const starts = slurs.filter((t) => t === 'start').length;
+                        const stops = slurs.filter((t) => t === 'stop').length;
+                        const depth = slurDepth.get(noteStaff) ?? 0;
+                        const underSlur = (depth > 0 || starts > 0) && stops === 0;
+                        slurDepth.set(noteStaff, Math.max(0, depth + starts - stops));
+                        arts = articulationOf(markNames(child, 'articulations'), underSlur);
+                        // Chord members carry the marking of the note they hang off.
+                        lastArts.set(noteStaff, arts);
+                    }
+
                     if (!isRest && durTicks > 0) {
                         const pitch = firstChild(child, 'pitch');
                         const midi = pitch ? midiFromPitch(pitch) : null;
@@ -594,11 +696,12 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                                 rel: start,
                                 dur: durTicks,
                                 midi,
-                                staff: childInt(child, 'staff') ?? 1,
+                                staff: noteStaff,
                                 voice: childText(child, 'voice') ?? '1',
                                 chord: isChord,
                                 tieStart: tieTypes.includes('start'),
                                 tieStop: tieTypes.includes('stop'),
+                                arts,
                             });
                         }
                     }
@@ -1344,6 +1447,12 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                             if (ev.tieStart) {
                                 // Chain continues under this note's identity.
                                 openTies.set(tieKey, open);
+                            } else {
+                                // A tie chain is one sounding event: gate it once,
+                                // here, from the marking that closes it. Doing it
+                                // per link would also corrupt resolveOpenTie above,
+                                // which matches on where an open note ENDS.
+                                open.d = gateDuration(open.d, ev.arts.gate);
                             }
                         }
                         break;
@@ -1367,13 +1476,18 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         pendingGraces = [];
                     }
                     // Velocity is now a pure function of (staff, tick), so every
-                    // member of a chord gets the same value for free.
-                    const velocity = accents.has(`${ev.staff}:${start}`)
-                        ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + 0.2))
-                        : sustained;
+                    // member of a chord gets the same value for free. An sf-family
+                    // direction and a printed accent on the same attack take the
+                    // LARGER boost, never the sum — stacking them overshoots.
+                    const boost = Math.max(accents.has(`${ev.staff}:${start}`) ? 0.2 : 0, ev.arts.boost);
+                    const velocity =
+                        boost > 0
+                            ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + boost))
+                            : sustained;
                     const note: ScoreNote = {
                         t: start,
-                        d: ev.dur,
+                        // Held notes are gated when their chain closes, not here.
+                        d: ev.tieStart ? ev.dur : gateDuration(ev.dur, ev.arts.gate),
                         p: ev.midi,
                         h: hand,
                         ...(velocity !== undefined ? { v: velocity } : {}),
@@ -1398,6 +1512,12 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         }
 
         measures.push({ n: raw.n, tick: place.tick, dTicks: place.dTicks });
+    }
+
+    // A tie whose stop was never engraved never reached its gating point. Close
+    // it out with the plain gate so it does not sound longer than its neighbours.
+    for (const open of openTies.values()) {
+        open.d = gateDuration(open.d, GATE_DEFAULT);
     }
 
     if (pendingGraces.length > 0) {
