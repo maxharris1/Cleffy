@@ -436,6 +436,107 @@ describe('dynamics resolution', () => {
         const score = parseMusicXmlString(wrap(twoHandBar(GRAND)));
         expect(score.notes.every((n) => n.v === undefined)).toBe(true);
     });
+
+    describe('hairpins', () => {
+        const wedge = (type: string, staff?: number, num = 1): string =>
+            `<direction><direction-type><wedge type="${type}" number="${num}"/></direction-type>${staff ? `<staff>${staff}</staff>` : ''}</direction>`;
+
+        const words = (text: string, staff?: number): string =>
+            `<direction><direction-type><words>${text}</words></direction-type>${staff ? `<staff>${staff}</staff>` : ''}</direction>`;
+
+        /** One 4/4 bar of four right-hand quarters, with hooks before/after. */
+        const rhBar = (lead = '', tail = ''): string =>
+            `<measure>${lead}${sn('C', 5, 4, 1)}${sn('D', 5, 4, 1)}${sn('E', 5, 4, 1)}${sn('F', 5, 4, 1)}${tail}</measure>`;
+
+        const rh = (score: ReturnType<typeof parseMusicXmlString>) =>
+            score.notes.filter((n) => n.h === 0).map((n) => n.v);
+
+        it('interpolates between the dynamic before and the one after', () => {
+            const xml = wrap(
+                rhBar(`${GRAND}${dyn('p')}${wedge('crescendo')}`, wedge('stop')) + rhBar(dyn('f')),
+            );
+            const got = rh(parseMusicXmlString(xml));
+            expect(got[0]).toBe(0.46); // p, at the wedge start
+            expect(got[4]).toBe(0.82); // f, at the wedge end
+            // Everything between rises, strictly.
+            const middle = got.slice(0, 5) as number[];
+            for (let i = 1; i < middle.length; i++) {
+                expect(middle[i]!).toBeGreaterThan(middle[i - 1]!);
+            }
+        });
+
+        it('reads a textual cresc. as a hairpin', () => {
+            const xml = wrap(rhBar(`${GRAND}${dyn('p')}${words('cresc.')}`) + rhBar(dyn('f')));
+            const got = rh(parseMusicXmlString(xml)) as number[];
+            expect(got[0]).toBe(0.46);
+            expect(got[1]!).toBeGreaterThan(0.46);
+            expect(got[1]!).toBeLessThan(0.82);
+        });
+
+        it('reads dim. and decresc. as diminuendos', () => {
+            for (const text of ['dim.', 'decresc.', 'morendo']) {
+                const xml = wrap(rhBar(`${GRAND}${dyn('f')}${words(text)}`) + rhBar(dyn('pp')));
+                const got = rh(parseMusicXmlString(xml)) as number[];
+                expect(got[1]!).toBeLessThan(0.82);
+            }
+        });
+
+        it('is not fooled by ordinary words that merely start similarly', () => {
+            const xml = wrap(rhBar(`${GRAND}${dyn('p')}${words('dolce')}`) + rhBar());
+            expect(rh(parseMusicXmlString(xml)).every((v) => v === 0.46)).toBe(true);
+        });
+
+        it('holds its arrival when no dynamic is printed after the hairpin', () => {
+            // Without materialising the target, the note after the wedge would
+            // snap back to where the crescendo started.
+            const xml = wrap(rhBar(`${GRAND}${dyn('p')}${wedge('crescendo')}`, wedge('stop')) + rhBar());
+            const got = rh(parseMusicXmlString(xml)) as number[];
+            const arrival = got[4]!;
+            expect(arrival).toBeGreaterThan(0.46);
+            expect(got.slice(4).every((v) => v === arrival)).toBe(true);
+        });
+
+        it('treats a dynamic inside a hairpin as a waypoint', () => {
+            const xml = wrap(
+                rhBar(`${GRAND}${dyn('p')}${wedge('crescendo')}`) + rhBar(dyn('mf'), wedge('stop')) + rhBar(dyn('f')),
+            );
+            const got = rh(parseMusicXmlString(xml)) as number[];
+            expect(got[0]).toBe(0.46);
+            expect(got[4]).toBe(0.7); // mf lands exactly, mid-hairpin
+            expect(got[8]).toBe(0.82); // f at the end
+            expect(got[2]!).toBeGreaterThan(0.46);
+            expect(got[2]!).toBeLessThan(0.7);
+        });
+
+        it('does not let a diminuendo fade below ppp', () => {
+            const xml = wrap(rhBar(`${GRAND}${dyn('pp')}${wedge('diminuendo')}`, wedge('stop')) + rhBar());
+            const got = rh(parseMusicXmlString(xml)) as number[];
+            expect(Math.min(...got)).toBeGreaterThanOrEqual(0.26);
+        });
+
+        it('gives an unclosed hairpin a musical length rather than the whole piece', () => {
+            const bars = Array.from({ length: 20 }, (_, i) =>
+                rhBar(i === 0 ? `${GRAND}${dyn('p')}${wedge('crescendo')}` : ''),
+            ).join('');
+            const got = rh(parseMusicXmlString(wrap(bars))) as number[];
+            // Eight bars of four quarters = 32 notes; past that it must be level.
+            const tail = got.slice(34);
+            expect(new Set(tail).size).toBe(1);
+        });
+
+        it('keeps hairpins on the hand they were printed under', () => {
+            const xml = wrap(
+                twoHandBar(`${GRAND}${dyn('p', 1)}${wedge('crescendo', 1)}`, dyn('p', 2)) +
+                    twoHandBar(dyn('f', 1), '') +
+                    twoHandBar(),
+            );
+            const score = parseMusicXmlString(xml);
+            // Right hand swells into the f; left hand stays put at p throughout.
+            expect(at(score, 0, 1920)).toEqual([0.82, 0.82, 0.82, 0.82]);
+            expect(at(score, 1, 0)).toEqual([0.46]);
+            expect(at(score, 1, 1920)).toEqual([0.46]);
+        });
+    });
 });
 
 /**

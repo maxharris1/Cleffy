@@ -40,6 +40,22 @@ const DYNAMIC_LEVELS: Record<string, number> = {
 /** One-note accents: sforzando family punches the next attack only. */
 const ACCENT_DYNAMICS = new Set(['sf', 'sfz', 'sffz', 'fz', 'rf', 'rfz', 'fp', 'sfp']);
 
+/**
+ * Hairpins are printed as often in words as in wedges — this Schubert edition
+ * uses both — so the text forms have to be read to get any dynamic shape at all.
+ * Anchored at the start of the string so "poco a poco cresc." is the only kind
+ * of miss, and a stray "dimenticato" is not a diminuendo.
+ */
+const TEXT_HAIRPIN_RE = /^\s*(decresc|decr|dim(?:in)?|calando|smorz|morendo|perdendosi|cresc)/i;
+
+/** Where a wedge with no printed target lands, as a factor on where it started. */
+const HAIRPIN_GROWTH = 1.35;
+const HAIRPIN_DECAY = 0.72;
+/** A morendo should fade, not vanish. */
+const HAIRPIN_FLOOR = 0.26;
+/** A hairpin whose end was never engraved cannot run forever. */
+const UNCLOSED_HAIRPIN_BARS = 8;
+
 /** Crushed grace-note length (≈55 ms at 120 bpm) — acciaccatura feel. */
 const GRACE_TICKS = 110;
 
@@ -369,6 +385,7 @@ type RawEvent =
     | { k: 'grace'; rel: number; midi: number; staff: number }
     | { k: 'dyn'; rel: number; staff: EventStaff; v: number }
     | { k: 'accentDyn'; rel: number; staff: EventStaff; toPiano: boolean }
+    | { k: 'wedge'; rel: number; staff: EventStaff; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }
     | { k: 'tempo'; rel: number; qbpm: number }
     | { k: 'time'; rel: number; num: number; den: number }
     | { k: 'key'; rel: number; fifths: number }
@@ -475,6 +492,29 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                     }
 
                     const staff = directionStaff(child);
+                    const wedgeEl = child.getElementsByTagName('wedge').item(0) as Elem | null;
+                    if (wedgeEl) {
+                        const type = (wedgeEl.getAttribute('type') ?? '').toLowerCase();
+                        const numAttr = Number.parseInt(wedgeEl.getAttribute('number') ?? '1', 10);
+                        const num = Number.isFinite(numAttr) ? numAttr : 1;
+                        if (type === 'crescendo' || type === 'diminuendo' || type === 'stop') {
+                            events.push({ k: 'wedge', rel: cursor, staff, dir: type, num });
+                        }
+                    } else {
+                        const wordsEl = child.getElementsByTagName('words').item(0) as Elem | null;
+                        const text = wordsEl ? (wordsEl.textContent ?? '') : '';
+                        const hairpin = TEXT_HAIRPIN_RE.exec(text);
+                        if (hairpin) {
+                            events.push({
+                                k: 'wedge',
+                                rel: cursor,
+                                staff,
+                                dir: /^cresc/i.test(hairpin[1] ?? '') ? 'crescendo' : 'diminuendo',
+                                num: 1,
+                            });
+                        }
+                    }
+
                     const dynamics = child.getElementsByTagName('dynamics').item(0) as Elem | null;
                     if (dynamics) {
                         for (const mark of childElements(dynamics)) {
@@ -856,7 +896,103 @@ interface DynamicMark {
     /** Sustained level, or undefined for a bare sf-family accent. */
     v?: number;
     accent: boolean;
+    wedge?: { dir: 'crescendo' | 'diminuendo' | 'stop'; num: number };
 }
+
+/** Value of the step-wise part of a curve at a tick — ramps not consulted. */
+const pointValueAt = (points: ReadonlyArray<{ tick: number; v: number }>, tick: number): number | undefined => {
+    let value: number | undefined;
+    for (const point of points) {
+        if (point.tick > tick) {
+            break;
+        }
+        value = point.v;
+    }
+    return value;
+};
+
+/**
+ * Turn one staff's wedge starts/stops into interpolated ramps.
+ *
+ * Ramps are linear in velocity. The engine already applies a v^1.6 gain curve,
+ * so linear-in-v is perceptually convex — slow to bloom, then rushing — which is
+ * how a crescendo actually feels. A second curve here would double-count it.
+ */
+const buildRamps = (
+    curve: DynamicCurve,
+    wedges: ReadonlyArray<{ tick: number; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }>,
+    endTick: number,
+    barTicksAt: (tick: number) => number,
+): void => {
+    const open = new Map<number, { tick: number; dir: 'crescendo' | 'diminuendo' }>();
+    const spans: Array<{ from: number; to: number; dir: 'crescendo' | 'diminuendo' }> = [];
+
+    for (const wedge of wedges) {
+        const existing = open.get(wedge.num);
+        if (existing && wedge.tick > existing.tick) {
+            // A stop closes it; a fresh start on the same number implicitly does too.
+            spans.push({ from: existing.tick, to: wedge.tick, dir: existing.dir });
+            open.delete(wedge.num);
+        }
+        if (wedge.dir !== 'stop') {
+            open.set(wedge.num, { tick: wedge.tick, dir: wedge.dir });
+        }
+    }
+    for (const [, remaining] of open) {
+        // Never engraved an end — a text "cresc." never has one. The next printed
+        // dynamic finishes it, which is exactly what "p cresc. ——— f" means; only
+        // when nothing follows does it fall back to a plain musical length.
+        const arrival = curve.points.find((p) => p.tick > remaining.tick);
+        const limit = remaining.tick + UNCLOSED_HAIRPIN_BARS * barTicksAt(remaining.tick);
+        const to = Math.min(endTick, limit, arrival?.tick ?? Number.POSITIVE_INFINITY);
+        if (to > remaining.tick) {
+            spans.push({ from: remaining.tick, to, dir: remaining.dir });
+        }
+    }
+    spans.sort((a, b) => a.from - b.from);
+
+    for (const span of spans) {
+        const vFrom = pointValueAt(curve.points, span.from) ?? DEFAULT_VELOCITY;
+        const slack = Math.max(1, Math.floor(barTicksAt(span.to) / 2));
+
+        // The classic "p [<<<] f" engraves the f at, or just past, the wedge end.
+        const target = curve.points.find((p) => p.tick >= span.to && p.tick <= span.to + slack);
+        let rampEnd = span.to;
+        let vTo: number;
+        if (target) {
+            // Run the ramp all the way into the printed dynamic, or the value
+            // would snap back to vFrom in the gap between them.
+            rampEnd = Math.max(span.to, target.tick);
+            vTo = target.v;
+        } else {
+            const grown = vFrom * (span.dir === 'crescendo' ? HAIRPIN_GROWTH : HAIRPIN_DECAY);
+            vTo = roundVelocity(
+                span.dir === 'crescendo'
+                    ? clampVelocity(grown)
+                    : Math.max(HAIRPIN_FLOOR, clampVelocity(grown)),
+            );
+            // Materialise the arrival, so the very next note holds it instead of
+            // snapping back to where the hairpin started.
+            curve.points.push({ tick: span.to, v: vTo });
+            curve.points.sort((a, b) => a.tick - b.tick);
+        }
+        if (rampEnd <= span.from) {
+            continue;
+        }
+
+        // A dynamic printed inside the hairpin is a waypoint: lerp to it, then on.
+        const waypoints = curve.points.filter((p) => p.tick > span.from && p.tick < rampEnd);
+        let cursorTick = span.from;
+        let cursorV = vFrom;
+        for (const point of waypoints) {
+            curve.ramps.push({ from: cursorTick, to: point.tick, vFrom: cursorV, vTo: point.v });
+            cursorTick = point.tick;
+            cursorV = point.v;
+        }
+        curve.ramps.push({ from: cursorTick, to: rampEnd, vFrom: cursorV, vTo });
+    }
+    curve.ramps.sort((a, b) => a.from - b.from);
+};
 
 interface DynamicsResolution {
     curves: Map<number, DynamicCurve>;
@@ -916,6 +1052,14 @@ const resolveDynamics = (
                     accent: true,
                     pos,
                 });
+            } else if (ev.k === 'wedge') {
+                marks.push({
+                    tick: place.tick + ev.rel,
+                    staff: ev.staff,
+                    accent: false,
+                    wedge: { dir: ev.dir, num: ev.num },
+                    pos,
+                });
             } else if (ev.k === 'note') {
                 const list = onsets.get(ev.staff) ?? [];
                 list.push(place.tick + ev.rel);
@@ -965,6 +1109,10 @@ const resolveDynamics = (
         return found !== undefined && found - tick <= window ? found : null;
     };
 
+    const wedges = new Map<number, Array<{ tick: number; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }>>(
+        staves.map((s) => [s, []]),
+    );
+
     const applyTo = (staff: number, mark: DynamicMark, window: number): void => {
         if (mark.v !== undefined) {
             curves.get(staff)?.points.push({ tick: mark.tick, v: mark.v });
@@ -974,6 +1122,9 @@ const resolveDynamics = (
             if (onset !== null) {
                 accents.add(`${staff}:${onset}`);
             }
+        }
+        if (mark.wedge) {
+            wedges.get(staff)?.push({ tick: mark.tick, dir: mark.wedge.dir, num: mark.wedge.num });
         }
     };
 
@@ -1041,8 +1192,21 @@ const resolveDynamics = (
         }
     }
 
-    for (const curve of curves.values()) {
+    const last = placements[placements.length - 1];
+    const endTick = last ? last.tick + last.dTicks : 0;
+    const barTicksAt = (tick: number): number => {
+        for (let pos = placements.length - 1; pos >= 0; pos--) {
+            const place = placements[pos];
+            if (place && place.tick <= tick) {
+                return barTicksOf(sigs[pos] ?? raws[pos]?.sig ?? { num: 4, den: 4 });
+            }
+        }
+        return barTicksOf(sigs[0] ?? { num: 4, den: 4 });
+    };
+
+    for (const [staff, curve] of curves) {
         curve.points.sort((a, b) => a.tick - b.tick);
+        buildRamps(curve, wedges.get(staff) ?? [], endTick, barTicksAt);
     }
     return { curves, accents };
 };
