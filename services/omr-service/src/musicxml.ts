@@ -758,6 +758,295 @@ const effectiveSigs = (raws: readonly RawMeasure[], verdicts: readonly MeterVerd
     return sigs;
 };
 
+/** Where a measure sits once padding is settled. */
+interface MeasurePlacement {
+    tick: number;
+    dTicks: number;
+    /** Ticks inserted after the real content — open ties stretch across it. */
+    pad: number;
+}
+
+/**
+ * Pad and lay out measures. Pure with respect to notes, so absolute ticks are
+ * known before velocities are resolved — which is what lets dynamics be looked
+ * up by musical position instead of by document order.
+ */
+const placeMeasures = (
+    raws: readonly RawMeasure[],
+    sigs: ReadonlyArray<{ num: number; den: number }>,
+    ctx: PartContext,
+): MeasurePlacement[] => {
+    const out: MeasurePlacement[] = [];
+    let measureStart = ctx.tickOffset;
+
+    for (let pos = 0; pos < raws.length; pos++) {
+        const raw = raws[pos];
+        if (!raw) {
+            continue;
+        }
+        const sig = sigs[pos] ?? raw.sig;
+        if (ctx.timeline) {
+            const slot = ctx.timeline[raw.index];
+            if (slot) {
+                measureStart = slot.tick;
+            }
+        }
+        const expected = barTicksOf(sig);
+        // Pickups stay content-length (MusicXML implicit / measure 0); other bars
+        // snap underfull content up to the active signature so later ticks don't skew.
+        const contentLen = raw.contentTicks;
+        let length = contentLen;
+        let pad = 0;
+        if (ctx.timeline) {
+            length = ctx.timeline[raw.index]?.dTicks ?? length;
+            // Lead timeline may be longer after underfull padding — extend open
+            // ties so secondary-part cross-bar ties still sound past the pad.
+            if (length > contentLen) {
+                pad = length - contentLen;
+            }
+        } else if (length <= 0) {
+            length = expected;
+        } else if (!raw.isPickup && length < expected) {
+            pad = expected - length;
+            ctx.warnings.add('measure_underfull');
+            length = expected;
+        } else if (!raw.isPickup && length > expected) {
+            ctx.warnings.add('measure_overfull');
+            // Keep content length so note onsets stay consistent with the timeline.
+        }
+
+        out.push({ tick: measureStart, dTicks: length, pad });
+        measureStart += length;
+    }
+    return out;
+};
+
+/**
+ * A staff's dynamic shape over time: `points` hold until the next one.
+ * (`ramps` are filled in by hairpin interpolation.)
+ */
+interface DynamicCurve {
+    points: Array<{ tick: number; v: number }>;
+    ramps: Array<{ from: number; to: number; vFrom: number; vTo: number }>;
+}
+
+const velocityAt = (curve: DynamicCurve | undefined, tick: number): number | undefined => {
+    if (!curve) {
+        return undefined;
+    }
+    for (const ramp of curve.ramps) {
+        if (tick > ramp.from && tick < ramp.to && ramp.to > ramp.from) {
+            const t = (tick - ramp.from) / (ramp.to - ramp.from);
+            return roundVelocity(clampVelocity(ramp.vFrom + t * (ramp.vTo - ramp.vFrom)));
+        }
+    }
+    let value: number | undefined;
+    for (const point of curve.points) {
+        if (point.tick > tick) {
+            break;
+        }
+        value = point.v;
+    }
+    return value;
+};
+
+interface DynamicMark {
+    tick: number;
+    staff: EventStaff;
+    /** Sustained level, or undefined for a bare sf-family accent. */
+    v?: number;
+    accent: boolean;
+}
+
+interface DynamicsResolution {
+    curves: Map<number, DynamicCurve>;
+    /** `${staff}:${onsetTick}` for attacks a sf-family mark punches. */
+    accents: Set<string>;
+}
+
+/**
+ * The largest gap still unambiguously ONE gesture. Cross-staff marks are
+ * engraved on the same beat but land on different voices, so OMR quantization
+ * can offset them by a sixteenth. Not a full beat: in 2/4, a right-hand f on
+ * beat 1 and a left-hand p on beat 2 is a real two-gesture reading.
+ */
+const momentWindow = (sig: { num: number; den: number }): number =>
+    Math.max(60, Math.min(240, Math.floor(barTicksOf(sig) / 4)));
+
+/**
+ * Resolve printed dynamics into a per-staff curve.
+ *
+ * The hard part is not the lookup, it is deciding whether a mark belongs to one
+ * hand or to the texture. Scoping strictly per staff would leave the left hand
+ * silent-dynamics whenever Audiveris attributes everything to staff 1 — worse
+ * than the bug being fixed. Deciding per event flaps: a bar with two marks goes
+ * independent, the next bar's single mark broadcasts and clobbers what was just
+ * established.
+ *
+ * So classify the PART once — a writer either distinguishes the hands or does
+ * not — and, when it does, make independence sticky.
+ */
+const resolveDynamics = (
+    raws: readonly RawMeasure[],
+    placements: readonly MeasurePlacement[],
+    sigs: ReadonlyArray<{ num: number; den: number }>,
+    staffCount: number,
+    warnings: Set<string>,
+): DynamicsResolution => {
+    const staves = Array.from({ length: Math.max(1, staffCount) }, (_, i) => i + 1);
+    const curves = new Map<number, DynamicCurve>(staves.map((s) => [s, { points: [], ramps: [] }]));
+    const accents = new Set<string>();
+
+    const marks: Array<DynamicMark & { pos: number }> = [];
+    const onsets = new Map<number, number[]>();
+    for (let pos = 0; pos < raws.length; pos++) {
+        const raw = raws[pos];
+        const place = placements[pos];
+        if (!raw || !place) {
+            continue;
+        }
+        for (const ev of raw.events) {
+            if (ev.k === 'dyn') {
+                marks.push({ tick: place.tick + ev.rel, staff: ev.staff, v: ev.v, accent: false, pos });
+            } else if (ev.k === 'accentDyn') {
+                marks.push({
+                    tick: place.tick + ev.rel,
+                    staff: ev.staff,
+                    ...(ev.toPiano ? { v: DYNAMIC_LEVELS['p'] } : {}),
+                    accent: true,
+                    pos,
+                });
+            } else if (ev.k === 'note') {
+                const list = onsets.get(ev.staff) ?? [];
+                list.push(place.tick + ev.rel);
+                onsets.set(ev.staff, list);
+            }
+        }
+    }
+    if (marks.length === 0) {
+        return { curves, accents };
+    }
+    marks.sort((a, b) => a.tick - b.tick);
+    for (const list of onsets.values()) {
+        list.sort((a, b) => a - b);
+    }
+
+    // Tier 1 — does this writer distinguish the hands at all?
+    const attributed = new Set<number>();
+    for (const mark of marks) {
+        if (mark.staff !== null) {
+            attributed.add(mark.staff);
+        }
+    }
+    const perStaff = attributed.size >= 2;
+    if (!perStaff && staffCount >= 2 && marks.length >= 4) {
+        // "All null" and "all on staff 1" are indistinguishable from a score with
+        // one dynamic line, so broadcasting is the only safe reading — but say so.
+        warnings.add('dynamics_not_staff_split');
+    }
+
+    /** Earliest attack at or just after a mark, so an accent lands on a real chord. */
+    const attackAt = (staff: number, tick: number, window: number): number | null => {
+        const list = onsets.get(staff);
+        if (!list) {
+            return null;
+        }
+        let lo = 0;
+        let hi = list.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if ((list[mid] ?? 0) < tick) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        const found = list[lo];
+        return found !== undefined && found - tick <= window ? found : null;
+    };
+
+    const applyTo = (staff: number, mark: DynamicMark, window: number): void => {
+        if (mark.v !== undefined) {
+            curves.get(staff)?.points.push({ tick: mark.tick, v: mark.v });
+        }
+        if (mark.accent) {
+            const onset = attackAt(staff, mark.tick, window);
+            if (onset !== null) {
+                accents.add(`${staff}:${onset}`);
+            }
+        }
+    };
+
+    /** Staves that have been given a dynamic of their own, and keep it. */
+    const independent = new Set<number>();
+
+    for (let i = 0; i < marks.length; ) {
+        const first = marks[i];
+        if (!first) {
+            break;
+        }
+        const window = momentWindow(sigs[first.pos] ?? raws[first.pos]?.sig ?? { num: 4, den: 4 });
+        let j = i;
+        while (j < marks.length && (marks[j]?.tick ?? 0) - first.tick <= window) {
+            j += 1;
+        }
+        const moment = marks.slice(i, j);
+        i = j;
+
+        if (!perStaff) {
+            for (const mark of moment) {
+                for (const staff of staves) {
+                    applyTo(staff, mark, window);
+                }
+            }
+            continue;
+        }
+
+        const momentStaves = new Set(moment.filter((m) => m.staff !== null).map((m) => m.staff as number));
+        const hasUnattributed = moment.some((m) => m.staff === null);
+
+        if (hasUnattributed) {
+            // In a file that attributes when it means to, an unattributed mark is
+            // a whole-texture marking — it overrides an established separation.
+            for (const mark of moment) {
+                for (const staff of staves) {
+                    applyTo(staff, mark, window);
+                }
+            }
+            independent.clear();
+            continue;
+        }
+
+        if (momentStaves.size >= 2) {
+            for (const mark of moment) {
+                applyTo(mark.staff as number, mark, window);
+            }
+            for (const staff of momentStaves) {
+                independent.add(staff);
+            }
+            continue;
+        }
+
+        // One attributed staff. It applies there, and reaches any staff that has
+        // not been given a dynamic of its own — so a later lone staff-1 ff does
+        // not silently overwrite the left hand's established p.
+        for (const mark of moment) {
+            const own = mark.staff as number;
+            applyTo(own, mark, window);
+            for (const staff of staves) {
+                if (staff !== own && !independent.has(staff)) {
+                    applyTo(staff, mark, window);
+                }
+            }
+        }
+    }
+
+    for (const curve of curves.values()) {
+        curve.points.sort((a, b) => a.tick - b.tick);
+    }
+    return { curves, accents };
+};
+
 /**
  * Pass 2 — assign absolute ticks, merge ties, pad, and resolve velocities.
  * Events are walked in document order, which is what dynamics currently key off;
@@ -772,13 +1061,6 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const clefs: ScoreClef[] = [];
     let defaultBpm: number | null = null;
 
-    let measureStart = ctx.tickOffset;
-    /** Sustained dynamic level in force (undefined → engine default). */
-    let currentVelocity: number | undefined;
-    /** A sforzando-family mark punches only the next attack. */
-    let pendingAccent = false;
-    /** Velocity given to the current chord's base note — chord members share it. */
-    let slotVelocity: number | undefined;
     /** Grace notes buffered until their principal note arrives. */
     let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
@@ -787,19 +1069,27 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     // Secondary parts take their barlines from the lead, so only the lead's
     // signatures are worth second-guessing.
     const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
+    const placements = placeMeasures(raws, sigs, ctx);
+
+    let staffCount = 1;
+    for (const raw of raws) {
+        for (const ev of raw.events) {
+            if (ev.k === 'note' && ev.staff > staffCount) {
+                staffCount = ev.staff;
+            }
+        }
+    }
+    const { curves, accents } = resolveDynamics(raws, placements, sigs, staffCount, ctx.warnings);
+    const curveFor = (staff: number): DynamicCurve | undefined => curves.get(staff) ?? curves.get(1);
 
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
-        if (!raw) {
+        const place = placements[pos];
+        if (!raw || !place) {
             continue;
         }
         const sig = sigs[pos] ?? raw.sig;
-        if (ctx.timeline) {
-            const slot = ctx.timeline[raw.index];
-            if (slot) {
-                measureStart = slot.tick;
-            }
-        }
+        const measureStart = place.tick;
 
         for (const ev of raw.events) {
             switch (ev.k) {
@@ -840,17 +1130,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     }
                     break;
                 }
-                case 'dyn': {
-                    currentVelocity = ev.v;
+                case 'dyn':
+                case 'accentDyn':
+                    // Already resolved into per-staff curves by musical position.
                     break;
-                }
-                case 'accentDyn': {
-                    pendingAccent = true;
-                    if (ev.toPiano) {
-                        currentVelocity = DYNAMIC_LEVELS['p'];
-                    }
-                    break;
-                }
                 case 'grace': {
                     // Buffer graces; they crush in just before their principal.
                     if (pendingGraces.length < 8) {
@@ -902,6 +1185,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         break;
                     }
 
+                    const sustained = velocityAt(curveFor(ev.staff), start);
                     if (!ev.chord && pendingGraces.length > 0) {
                         // Crush buffered graces just before this attack, stealing
                         // time from what came before (they may reach back across
@@ -913,24 +1197,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                                 d: GRACE_TICKS,
                                 p: grace.midi,
                                 h: grace.hand,
-                                v: roundVelocity(clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) * 0.8)),
+                                v: roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) * 0.8)),
                             });
                         });
                         pendingGraces = [];
                     }
-                    // Chord members share their base note's velocity so an accent
-                    // lands on the whole chord, not just one voice.
-                    let velocity: number | undefined;
-                    if (ev.chord) {
-                        velocity = slotVelocity;
-                    } else if (pendingAccent) {
-                        pendingAccent = false;
-                        velocity = roundVelocity(clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) + 0.2));
-                        slotVelocity = velocity;
-                    } else {
-                        velocity = currentVelocity;
-                        slotVelocity = velocity;
-                    }
+                    // Velocity is now a pure function of (staff, tick), so every
+                    // member of a chord gets the same value for free.
+                    const velocity = accents.has(`${ev.staff}:${start}`)
+                        ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + 0.2))
+                        : sustained;
                     const note: ScoreNote = {
                         t: start,
                         d: ev.dur,
@@ -949,39 +1225,15 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
 
-        const expected = barTicksOf(sig);
-        // Pickups stay content-length (MusicXML implicit / measure 0); other bars
-        // snap underfull content up to the active signature so later ticks don't skew.
-        let length = raw.contentTicks;
-        const contentLen = length;
-        if (ctx.timeline) {
-            length = ctx.timeline[raw.index]?.dTicks ?? length;
-            // Lead timeline may be longer after underfull padding — extend open
-            // ties so secondary-part cross-bar ties still sound past the pad.
-            if (length > contentLen) {
-                const pad = length - contentLen;
-                for (const open of openTies.values()) {
-                    open.d += pad;
-                }
-            }
-        } else if (length <= 0) {
-            length = expected;
-        } else if (!raw.isPickup && length < expected) {
-            const pad = expected - length;
-            ctx.warnings.add('measure_underfull');
-            // Extend open ties across the inserted gap so a tie-stop in the next
-            // bar still lands after the real sounding content, not in the pad.
+        // Extend open ties across inserted padding so a tie-stop in the next bar
+        // still lands after the real sounding content, not inside the pad.
+        if (place.pad > 0) {
             for (const open of openTies.values()) {
-                open.d += pad;
+                open.d += place.pad;
             }
-            length = expected;
-        } else if (!raw.isPickup && length > expected) {
-            ctx.warnings.add('measure_overfull');
-            // Keep content length so note onsets stay consistent with the timeline.
         }
 
-        measures.push({ n: raw.n, tick: measureStart, dTicks: length });
-        measureStart += length;
+        measures.push({ n: raw.n, tick: place.tick, dTicks: place.dTicks });
     }
 
     if (pendingGraces.length > 0) {

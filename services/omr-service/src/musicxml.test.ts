@@ -306,6 +306,139 @@ describe('parseMusicXmlString', () => {
 });
 
 /**
+ * Dynamics. `divisions=4`, so a duration unit is a 16th (120 ticks) and a bar
+ * of 4/4 is 1920. Staff 1 is the right hand (h=0), staff 2 the left (h=1).
+ */
+describe('dynamics resolution', () => {
+    const GRAND = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
+
+    const dyn = (mark: string, staff?: number): string =>
+        `<direction><direction-type><dynamics><${mark}/></dynamics></direction-type>${staff ? `<staff>${staff}</staff>` : ''}</direction>`;
+
+    const sn = (step: string, octave: number, duration: number, staff: number, extra = ''): string =>
+        `<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>${duration}</duration><voice>${staff}</voice><staff>${staff}</staff>${extra}</note>`;
+
+    /** Four quarters in the right hand, then a whole note in the left. */
+    const twoHandBar = (lead = '', afterBackup = ''): string =>
+        `<measure>${lead}${sn('C', 5, 4, 1)}${sn('D', 5, 4, 1)}${sn('E', 5, 4, 1)}${sn('F', 5, 4, 1)}` +
+        `<backup><duration>16</duration></backup>${afterBackup}${sn('C', 3, 16, 2)}</measure>`;
+
+    const at = (score: ReturnType<typeof parseMusicXmlString>, hand: 0 | 1, tick: number) =>
+        score.notes.filter((n) => n.h === hand && n.t >= tick && n.t < tick + 1920).map((n) => n.v);
+
+    it('does not let the lower staff dynamic govern the next bar of the upper staff', () => {
+        // The headline regression: MusicXML writes [staff 1] <backup> [staff 2],
+        // so the left hand's mark used to be the last one seen in the bar and
+        // silently became the right hand's dynamic from the next bar onward.
+        const xml = wrap(
+            twoHandBar(`${GRAND}${dyn('f', 1)}`, dyn('p', 2)) + twoHandBar() + twoHandBar(),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 0)).toEqual([0.82, 0.82, 0.82, 0.82]);
+        expect(at(score, 1, 0)).toEqual([0.46]);
+        // Bars 2 and 3 carry no marks at all — both hands must hold their own.
+        expect(at(score, 0, 1920)).toEqual([0.82, 0.82, 0.82, 0.82]);
+        expect(at(score, 1, 1920)).toEqual([0.46]);
+        expect(at(score, 0, 3840)).toEqual([0.82, 0.82, 0.82, 0.82]);
+        expect(at(score, 1, 3840)).toEqual([0.46]);
+    });
+
+    it('applies an unattributed dynamic to both hands', () => {
+        const xml = wrap(twoHandBar(`${GRAND}${dyn('ff')}`) + twoHandBar());
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 1920)).toEqual([0.92, 0.92, 0.92, 0.92]);
+        expect(at(score, 1, 1920)).toEqual([0.92]);
+    });
+
+    it('still reaches the left hand when the writer only ever marks staff 1', () => {
+        // Audiveris often attributes every dynamic to the upper staff. That is
+        // indistinguishable from a score with one dynamic line, so broadcast —
+        // scoping strictly per staff would leave the left hand with nothing.
+        const xml = wrap(
+            twoHandBar(`${GRAND}${dyn('pp', 1)}`) +
+                twoHandBar(dyn('f', 1)) +
+                twoHandBar(dyn('p', 1)) +
+                twoHandBar(dyn('ff', 1)),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 1, 0)).toEqual([0.34]);
+        expect(at(score, 1, 1920)).toEqual([0.82]);
+        expect(at(score, 1, 5760)).toEqual([0.92]);
+        expect(score.warnings).toContain('dynamics_not_staff_split');
+    });
+
+    it('does not warn about staff splitting when the writer does distinguish hands', () => {
+        const xml = wrap(twoHandBar(`${GRAND}${dyn('f', 1)}`, dyn('p', 2)) + twoHandBar());
+        expect(parseMusicXmlString(xml).warnings).not.toContain('dynamics_not_staff_split');
+    });
+
+    it('keeps an established left-hand dynamic when a later mark names only staff 1', () => {
+        // Independence is sticky: a lone staff-1 ff in bar 3 must not silently
+        // overwrite the p the left hand was given in bar 1.
+        const xml = wrap(
+            twoHandBar(`${GRAND}${dyn('f', 1)}`, dyn('p', 2)) + twoHandBar() + twoHandBar(dyn('ff', 1)),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 3840)).toEqual([0.92, 0.92, 0.92, 0.92]);
+        expect(at(score, 1, 3840)).toEqual([0.46]);
+    });
+
+    it('re-unifies both hands on an unattributed dynamic after a split', () => {
+        // In a file that attributes when it means to, a mark with no staff is a
+        // whole-texture marking and overrides the separation.
+        const xml = wrap(
+            twoHandBar(`${GRAND}${dyn('f', 1)}`, dyn('p', 2)) + twoHandBar(dyn('pp')) + twoHandBar(),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 3840)).toEqual([0.34, 0.34, 0.34, 0.34]);
+        expect(at(score, 1, 3840)).toEqual([0.34]);
+    });
+
+    it('treats cross-staff marks a sixteenth apart as one gesture', () => {
+        // The staff-2 mark sits after a backup of 15 units, i.e. 120 ticks into
+        // the bar — engraved on the same beat, quantized apart.
+        const xml = wrap(
+            `<measure>${GRAND}${dyn('f', 1)}${sn('C', 5, 4, 1)}${sn('D', 5, 4, 1)}${sn('E', 5, 4, 1)}${sn('F', 5, 4, 1)}` +
+                `<backup><duration>15</duration></backup>${dyn('p', 2)}${sn('C', 3, 12, 2)}</measure>` +
+                twoHandBar(),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 1920)).toEqual([0.82, 0.82, 0.82, 0.82]);
+        expect(at(score, 1, 1920)).toEqual([0.46]);
+    });
+
+    it('lands an sf-family accent on the staff it names, not the next note in document order', () => {
+        // The sfz is attributed to staff 1 but written after the backup, so in
+        // document order the next note is a LEFT-hand one. It belongs to the
+        // right hand's whole note, which is engraved under it.
+        const xml = wrap(
+            `<measure>${GRAND}${dyn('p', 1)}${sn('C', 5, 16, 1)}` +
+                `<backup><duration>16</duration></backup>${dyn('p', 2)}${dyn('sfz', 1)}` +
+                `${sn('C', 3, 4, 2)}${sn('D', 3, 4, 2)}${sn('E', 3, 4, 2)}${sn('F', 3, 4, 2)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 0)).toEqual([0.66]);
+        expect(at(score, 1, 0)).toEqual([0.46, 0.46, 0.46, 0.46]);
+    });
+
+    it('punches every note of a chord an sfz falls on', () => {
+        const xml = wrap(
+            `<measure>${GRAND}${dyn('p', 1)}${dyn('sfz', 1)}${sn('C', 5, 8, 1)}` +
+                `<note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><staff>1</staff></note>` +
+                `<note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>8</duration><voice>1</voice><staff>1</staff></note>` +
+                `${sn('A', 5, 8, 1)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(at(score, 0, 0)).toEqual([0.66, 0.66, 0.66, 0.46]);
+    });
+
+    it('leaves velocity unset when the score prints no dynamics at all', () => {
+        const score = parseMusicXmlString(wrap(twoHandBar(GRAND)));
+        expect(score.notes.every((n) => n.v === undefined)).toBe(true);
+    });
+});
+
+/**
  * Meter reconciliation. Ticks: 480/quarter, so 6/8 = 1440 and 9/8 = 2160.
  * `divisions=4` means a duration unit is a 16th, i.e. 120 ticks.
  */
