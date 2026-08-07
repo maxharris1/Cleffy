@@ -6,7 +6,9 @@ import { z } from 'zod';
  * `score_analyses.score`. It is everything playback needs: note events split
  * by hand, and the measure/system geometry that anchors the moving playhead
  * to the rendered PDF. v2 also carries per-staff bands, key signatures, and
- * clefs so the fingering populator can synthesize notehead bboxes.
+ * clefs so the fingering populator can synthesize notehead bboxes. v3 adds a
+ * tempo map and fermata holds, so playback can follow the score's own tempo
+ * instead of one number for the whole piece.
  *
  * All geometry is normalized 0–1 against its page (the same contract as
  * annotations), so it is zoom/DPI/rotation invariant.
@@ -14,8 +16,8 @@ import { z } from 'zod';
  * KEEP IN LOCKSTEP with services/omr-service/src/scoreData.ts.
  */
 
-/** Current writer version. Readers accept 1 and 2 (see parseScoreData). */
-export const SCORE_DATA_VERSION = 2;
+/** Current writer version. Readers accept 1 through 3 (see parseScoreData). */
+export const SCORE_DATA_VERSION = 3;
 /** Oldest ScoreData version the client still serves from cache. */
 export const SCORE_DATA_MIN_VERSION = 1;
 
@@ -110,6 +112,31 @@ const scoreClefSchema = z.object({
     line: z.number().int().min(1).max(5).optional(),
 });
 
+/**
+ * A tempo in force from `tick` onward, in quarter-notes per minute. Gradual
+ * changes (rit., accel.) are pre-discretized into a run of these at build time,
+ * which keeps the reader's tick-to-seconds map a plain prefix sum — exactly
+ * invertible, with no closed-form integral to get wrong. v3+.
+ */
+const scoreTempoSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    /** Quarter-notes per minute. */
+    bpm: z.number().min(10).max(400),
+    /** Where it came from; 'word' means inferred from an Italian term. */
+    src: z.enum(['sound', 'metronome', 'word', 'ramp']).optional(),
+});
+
+/**
+ * A fermata: on ARRIVING at `tick`, the clock stops for `beats` before moving on.
+ * Modelled as a clock stop rather than a tempo dip so it leaves tick space
+ * untouched — a dip would also slow the metronome and generate beats inside the
+ * hold. Expressed in beats so it scales with the practice tempo. v3+.
+ */
+const scoreHoldSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    beats: z.number().positive().max(16),
+});
+
 export const scoreDataSchema = z.object({
     version: z.number().int(),
     ticksPerQuarter: z.literal(TICKS_PER_QUARTER),
@@ -119,6 +146,10 @@ export const scoreDataSchema = z.object({
     keySignatures: z.array(scoreKeySigSchema).max(64).optional(),
     /** v2+; absent on v1 caches. */
     clefs: z.array(scoreClefSchema).max(64).optional(),
+    /** v3+; absent on v1/v2 caches, where defaultBpm is the whole story. */
+    tempos: z.array(scoreTempoSchema).max(512).optional(),
+    /** v3+; fermata holds. */
+    holds: z.array(scoreHoldSchema).max(128).optional(),
     totalTicks: z.number().int().positive(),
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),
@@ -133,13 +164,16 @@ export type ScoreSystem = z.infer<typeof scoreSystemSchema>;
 export type ScoreTimeSig = z.infer<typeof scoreTimeSigSchema>;
 export type ScoreKeySig = z.infer<typeof scoreKeySigSchema>;
 export type ScoreClef = z.infer<typeof scoreClefSchema>;
+export type ScoreTempo = z.infer<typeof scoreTempoSchema>;
+export type ScoreHold = z.infer<typeof scoreHoldSchema>;
 export type ScoreData = z.infer<typeof scoreDataSchema>;
 
 /**
  * Parse ScoreData arriving from Postgres jsonb or the Dexie cache. Malformed
  * or future-versioned payloads degrade to a warn + null, never a crash
  * (wire.ts discipline). Notes and measures are defensively re-sorted — every
- * consumer binary-searches them. v1 caches remain valid after the v2 bump.
+ * consumer binary-searches them. Older caches stay valid: every field added
+ * after v1 is optional, so readers use `?? []` rather than a version branch.
  */
 export const parseScoreData = (raw: unknown): ScoreData | null => {
     const parsed = scoreDataSchema.safeParse(raw);
@@ -160,6 +194,8 @@ export const parseScoreData = (raw: unknown): ScoreData | null => {
             ? [...parsed.data.keySignatures].sort((a, b) => a.tick - b.tick)
             : undefined,
         clefs: parsed.data.clefs ? [...parsed.data.clefs].sort((a, b) => a.tick - b.tick) : undefined,
+        tempos: parsed.data.tempos ? [...parsed.data.tempos].sort((a, b) => a.tick - b.tick) : undefined,
+        holds: parsed.data.holds ? [...parsed.data.holds].sort((a, b) => a.tick - b.tick) : undefined,
     };
 };
 
@@ -196,3 +232,21 @@ export const clefAt = (score: ScoreData, tick: number, staff: 0 | 1): ScoreClef 
     }
     return active;
 };
+
+/**
+ * Quarter-BPM in force at a tick. Falls back to `defaultBpm`, so a v1/v2 payload
+ * with no tempo map behaves exactly as it always did.
+ */
+export const tempoAt = (score: ScoreData, tick: number, fallback: number): number => {
+    let bpm = score.defaultBpm ?? fallback;
+    for (const tempo of score.tempos ?? []) {
+        if (tempo.tick > tick) {
+            break;
+        }
+        bpm = tempo.bpm;
+    }
+    return bpm;
+};
+
+/** True when the opening tempo was guessed from a word rather than printed. */
+export const tempoIsInferred = (score: ScoreData): boolean => score.tempos?.[0]?.src === 'word';

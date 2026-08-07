@@ -782,3 +782,91 @@ describe('meter reconciliation', () => {
         expect(score.measures[0]?.dTicks).toBe(480); // pickup keeps its real length
     });
 });
+
+/** Tempo map. `divisions=4`; a 4/4 bar is 1920 ticks. */
+describe('tempo', () => {
+    const words = (text: string): string =>
+        `<direction><direction-type><words>${text}</words></direction-type></direction>`;
+
+    const soundTempo = (bpm: number): string =>
+        `<direction><direction-type><words>x</words></direction-type><sound tempo="${bpm}"/></direction>`;
+
+    const bar = (lead = ''): string => `<measure>${lead}${note('C', 4, 16)}</measure>`;
+
+    it('collects every tempo mark, not just the first', () => {
+        const score = parseMusicXmlString(
+            wrap(bar(`${ATTRS_44}${soundTempo(120)}`) + bar(soundTempo(60)) + bar()),
+        );
+        expect(score.tempos).toEqual([
+            { tick: 0, bpm: 120, src: 'sound' },
+            { tick: 1920, bpm: 60, src: 'sound' },
+        ]);
+        expect(score.defaultBpm).toBe(120);
+    });
+
+    it('infers a tempo from an Italian heading when no number is printed', () => {
+        const score = parseMusicXmlString(wrap(bar(`${ATTRS_44}${words('Andantino.')}`) + bar()));
+        expect(score.tempos).toEqual([{ tick: 0, bpm: 94, src: 'word' }]);
+        expect(score.defaultBpm).toBe(94);
+        expect(score.warnings).toContain('tempo_inferred');
+    });
+
+    it('averages the terms of a compound heading', () => {
+        const score = parseMusicXmlString(wrap(bar(`${ATTRS_44}${words('Allegro moderato')}`) + bar()));
+        expect(score.tempos[0]?.bpm).toBe(120); // (132 + 108) / 2
+    });
+
+    it('lets a printed number anywhere beat a word everywhere', () => {
+        const score = parseMusicXmlString(
+            wrap(bar(`${ATTRS_44}${words('Adagio')}`) + bar(soundTempo(144)) + bar()),
+        );
+        expect(score.tempos).toEqual([{ tick: 1920, bpm: 144, src: 'sound' }]);
+        expect(score.warnings).not.toContain('tempo_inferred');
+    });
+
+    it('does not mistake expression marks for tempo marks', () => {
+        for (const text of ['dolce', 'espressivo', 'cantabile', 'con moto', 'Trio', 'Fine', 'sempre legato']) {
+            const score = parseMusicXmlString(wrap(bar(`${ATTRS_44}${words(text)}`) + bar()));
+            expect(score.tempos).toEqual([]);
+        }
+    });
+
+    it('bends the pulse through a rit. and restores it at a tempo', () => {
+        const score = parseMusicXmlString(
+            wrap(bar(`${ATTRS_44}${soundTempo(120)}`) + bar(words('rit.')) + bar(words('a tempo')) + bar()),
+        );
+        const bpms = score.tempos.map((t) => t.bpm);
+        expect(bpms[0]).toBe(120);
+        // Descends across the rit., then snaps back to the printed tempo.
+        expect(Math.min(...bpms)).toBe(90); // 120 * 0.75
+        expect(score.tempos[score.tempos.length - 1]).toMatchObject({ tick: 3840, bpm: 120 });
+        for (let i = 1; i < bpms.length - 1; i++) {
+            expect(bpms[i]!).toBeLessThanOrEqual(bpms[i - 1]!);
+        }
+    });
+
+    it('ignores a rit. that has no tempo to bend', () => {
+        const score = parseMusicXmlString(wrap(bar(`${ATTRS_44}${words('rit.')}`) + bar()));
+        expect(score.tempos).toEqual([]);
+    });
+
+    it('emits a fermata as a hold at the note it sits over, leaving the note alone', () => {
+        const score = parseMusicXmlString(
+            wrap(
+                `<measure>${ATTRS_44}${note('C', 4, 8)}${note('E', 4, 8, '<notations><fermata/></notations>')}</measure>`,
+            ),
+        );
+        expect(score.holds).toEqual([{ tick: 960, beats: 2 }]);
+        expect(score.notes.map((n) => n.d)).toEqual([plain(960), plain(960)]);
+    });
+
+    it('counts a fermata over a chord once', () => {
+        const score = parseMusicXmlString(
+            wrap(
+                `<measure>${ATTRS_44}${note('C', 4, 16, '<notations><fermata/></notations>')}` +
+                    `<note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>16</duration><voice>1</voice><notations><fermata/></notations></note></measure>`,
+            ),
+        );
+        expect(score.holds).toHaveLength(1);
+    });
+});

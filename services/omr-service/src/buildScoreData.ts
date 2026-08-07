@@ -68,6 +68,8 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         timeSignatures: musical.timeSignatures,
         ...((musical.keySignatures?.length ?? 0) > 0 ? { keySignatures: musical.keySignatures } : {}),
         ...((musical.clefs?.length ?? 0) > 0 ? { clefs: musical.clefs } : {}),
+        ...((musical.tempos?.length ?? 0) > 0 ? { tempos: musical.tempos } : {}),
+        ...((musical.holds?.length ?? 0) > 0 ? { holds: musical.holds } : {}),
         totalTicks: Math.max(1, musical.totalTicks),
         notes: musical.notes,
         measures,

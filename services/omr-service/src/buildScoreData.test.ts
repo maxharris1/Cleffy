@@ -17,6 +17,8 @@ const musical: MusicalScore = {
     timeSignatures: [{ tick: 0, num: 4, den: 4 }],
     keySignatures: [],
     clefs: [],
+    tempos: [],
+    holds: [],
     defaultBpm: 88,
     totalTicks: 3840,
     warnings: ['repeats_ignored'],
@@ -64,7 +66,7 @@ describe('buildScoreData', () => {
         ]);
         expect(score.defaultBpm).toBe(88);
         expect(score.warnings).toContain('repeats_ignored');
-        expect(score.version).toBe(2);
+        expect(score.version).toBe(3);
     });
 
     it('degrades to geometry-less measures when the .omr is unusable', () => {

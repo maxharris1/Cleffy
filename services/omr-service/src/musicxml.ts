@@ -2,7 +2,7 @@ import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
 import { DEFAULT_VELOCITY, TICKS_PER_QUARTER } from './scoreData.js';
-import type { ScoreClef, ScoreKeySig, ScoreNote, ScoreTimeSig } from './scoreData.js';
+import type { ScoreClef, ScoreHold, ScoreKeySig, ScoreNote, ScoreTempo, ScoreTimeSig } from './scoreData.js';
 import { ERROR_CODES, JobError } from './errors.js';
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
@@ -13,6 +13,8 @@ export interface MusicalScore {
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
+    tempos: ScoreTempo[];
+    holds: ScoreHold[];
     defaultBpm: number | null;
     totalTicks: number;
     warnings: string[];
@@ -52,6 +54,80 @@ const HAIRPIN_DECAY = 0.72;
 const HAIRPIN_FLOOR = 0.26;
 /** A hairpin whose end was never engraved cannot run forever. */
 const UNCLOSED_HAIRPIN_BARS = 8;
+
+/**
+ * Italian tempo terms, as quarter-BPM.
+ *
+ * Most published editions mark tempo with a WORD and no metronome number —
+ * every one of the six Schubert Moments musicaux does — so without this the
+ * whole set plays at one fallback speed and Allegro vivace is indistinguishable
+ * from Andantino. A defensible estimate beats that, provided it is disclosed.
+ *
+ * Read as quarter-BPM directly, with no compound-meter multiplier: "in 9/8 the
+ * word describes the dotted beat" is right for fast compound meters and badly
+ * wrong for slow ones, and erring slow is the safe direction for practice.
+ */
+const TEMPO_TERMS: Record<string, number> = {
+    larghissimo: 24,
+    grave: 40,
+    largo: 50,
+    lento: 54,
+    larghetto: 63,
+    adagio: 66,
+    adagietto: 72,
+    andante: 84,
+    andantino: 94,
+    moderato: 108,
+    allegretto: 116,
+    allegro: 132,
+    vivace: 152,
+    vivo: 152,
+    presto: 172,
+    prestissimo: 190,
+};
+
+const TEMPO_TERM_SOURCE =
+    'larghissimo|grave|larghetto|largo|lento|adagietto|adagio|andantino|andante|moderato|allegretto|allegro|vivacissimo|vivace|vivo|prestissimo|presto';
+/** Anchored: a heading starts with its tempo term. "dolce" is not a tempo. */
+const TEMPO_HEADING_RE = new RegExp(
+    `^\\s*(?:molto\\s+|assai\\s+|poco\\s+|non\\s+troppo\\s+)?(?:${TEMPO_TERM_SOURCE})\\b`,
+    'i',
+);
+const TEMPO_TERM_RE = new RegExp(`\\b(${TEMPO_TERM_SOURCE})\\b`, 'gi');
+
+/** Gradual tempo changes, which arrive as words and never as numbers. */
+const RITARDANDO_RE = /^\s*(rit\b|rit\.|ritard|rall|allarg|slentando|calando\s+e)/i;
+const ACCELERANDO_RE = /^\s*(accel|stringendo|affrett)/i;
+const A_TEMPO_RE = /^\s*(a\s*tempo|tempo\s+prim|tempo\s+i\b)/i;
+
+/** How far a rit./accel. bends the pulse, and how long it runs unbounded. */
+const RITARDANDO_FACTOR = 0.75;
+const ACCELERANDO_FACTOR = 1.25;
+const GRADUAL_TEMPO_BARS = 4;
+
+/**
+ * Quarter-BPM for a tempo heading, or null. A compound heading averages its two
+ * terms — "Allegro moderato" reads as neither Allegro nor Moderato.
+ */
+const tempoFromWords = (text: string): number | null => {
+    if (!TEMPO_HEADING_RE.test(text)) {
+        return null;
+    }
+    const found: number[] = [];
+    for (const match of text.matchAll(TEMPO_TERM_RE)) {
+        const bpm = TEMPO_TERMS[(match[1] ?? '').toLowerCase()];
+        if (bpm !== undefined) {
+            found.push(bpm);
+        }
+        if (found.length === 2) {
+            break;
+        }
+    }
+    if (found.length === 0) {
+        return null;
+    }
+    return Math.round(found.reduce((sum, bpm) => sum + bpm, 0) / found.length);
+};
 
 /**
  * How much of its written value a note actually sounds. Nothing was ever
@@ -308,6 +384,8 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         timeSignatures: leadResult.timeSignatures,
         keySignatures: leadResult.keySignatures,
         clefs: leadResult.clefs,
+        tempos: leadResult.tempos,
+        holds: leadResult.holds,
         defaultBpm: leadResult.defaultBpm,
         totalTicks,
         warnings: [...warnings],
@@ -438,6 +516,8 @@ interface PartResult {
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
+    tempos: ScoreTempo[];
+    holds: ScoreHold[];
     defaultBpm: number | null;
 }
 
@@ -467,12 +547,14 @@ type RawEvent =
           tieStart: boolean;
           tieStop: boolean;
           arts: ArtSet;
+          fermata: boolean;
       }
     | { k: 'grace'; rel: number; midi: number; staff: number }
     | { k: 'dyn'; rel: number; staff: EventStaff; v: number }
     | { k: 'accentDyn'; rel: number; staff: EventStaff; toPiano: boolean }
     | { k: 'wedge'; rel: number; staff: EventStaff; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }
-    | { k: 'tempo'; rel: number; qbpm: number }
+    | { k: 'tempo'; rel: number; qbpm: number; src: 'sound' | 'metronome' | 'word' }
+    | { k: 'gradual'; rel: number; kind: 'rit' | 'accel' | 'atempo' }
     | { k: 'time'; rel: number; num: number; den: number }
     | { k: 'key'; rel: number; fifths: number }
     | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number };
@@ -562,6 +644,7 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                     // <sound tempo> is quarter-BPM by definition — prefer it; a printed
                     // metronome mark is per BEAT UNIT and converts.
                     let qbpm: number | null = null;
+                    let tempoSrc: 'sound' | 'metronome' = 'sound';
                     const tempoAttr = sound?.getAttribute('tempo');
                     if (tempoAttr) {
                         const parsed = Number.parseFloat(tempoAttr);
@@ -575,10 +658,28 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                         const parsed = perMinute ? Number.parseFloat(perMinute) : NaN;
                         if (Number.isFinite(parsed) && parsed > 0) {
                             qbpm = Math.round(parsed * beatUnitToQuarters(metronome));
+                            tempoSrc = 'metronome';
                         }
                     }
                     if (qbpm !== null) {
-                        events.push({ k: 'tempo', rel: cursor, qbpm });
+                        events.push({ k: 'tempo', rel: cursor, qbpm, src: tempoSrc });
+                    }
+
+                    const wordsForTempo = child.getElementsByTagName('words').item(0) as Elem | null;
+                    const wordText = wordsForTempo ? (wordsForTempo.textContent ?? '') : '';
+                    if (wordText) {
+                        if (RITARDANDO_RE.test(wordText)) {
+                            events.push({ k: 'gradual', rel: cursor, kind: 'rit' });
+                        } else if (ACCELERANDO_RE.test(wordText)) {
+                            events.push({ k: 'gradual', rel: cursor, kind: 'accel' });
+                        } else if (A_TEMPO_RE.test(wordText)) {
+                            events.push({ k: 'gradual', rel: cursor, kind: 'atempo' });
+                        } else if (qbpm === null) {
+                            const worded = tempoFromWords(wordText);
+                            if (worded !== null) {
+                                events.push({ k: 'tempo', rel: cursor, qbpm: worded, src: 'word' });
+                            }
+                        }
                     }
 
                     const staff = directionStaff(child);
@@ -706,6 +807,7 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                                 tieStart: tieTypes.includes('start'),
                                 tieStop: tieTypes.includes('stop'),
                                 arts,
+                                fermata: child.getElementsByTagName('fermata').length > 0,
                             });
                         }
                     }
@@ -905,6 +1007,98 @@ const effectiveSigs = (raws: readonly RawMeasure[], verdicts: readonly MeterVerd
     return sigs;
 };
 
+type TempoMark =
+    | { tick: number; kind: 'abs'; bpm: number; src: 'sound' | 'metronome' | 'word' }
+    | { tick: number; kind: 'rit' | 'accel' | 'atempo' };
+
+/**
+ * Turn tempo marks into a stepwise map.
+ *
+ * Gradual changes are pre-discretized here, one point per beat, rather than
+ * represented as ramps in the schema. That keeps the reader's tick-to-seconds
+ * conversion a plain prefix sum — exactly invertible, with no closed-form
+ * integral to get wrong — and puts the only awkward arithmetic somewhere it can
+ * be tested in isolation. At one point per beat the steps are inaudible.
+ */
+const resolveTempos = (
+    marks: readonly TempoMark[],
+    endTick: number,
+    barTicksAt: (tick: number) => number,
+    beatTicksAt: (tick: number) => number,
+    warnings: Set<string>,
+): ScoreTempo[] => {
+    // A printed number anywhere in the movement beats a word everywhere in it.
+    const hasPrinted = marks.some((m) => m.kind === 'abs' && m.src !== 'word');
+    const usable = marks
+        .filter((m) => !(m.kind === 'abs' && m.src === 'word' && hasPrinted))
+        .slice()
+        .sort((a, b) => a.tick - b.tick);
+    if (usable.length === 0) {
+        return [];
+    }
+    if (usable.some((m) => m.kind === 'abs' && m.src === 'word')) {
+        warnings.add('tempo_inferred');
+    }
+
+    const out: ScoreTempo[] = [];
+    const push = (tick: number, bpm: number, src?: ScoreTempo['src']): void => {
+        const rounded = Math.round(Math.min(400, Math.max(10, bpm)));
+        const last = out[out.length - 1];
+        if (last && last.tick === tick) {
+            last.bpm = rounded;
+            return;
+        }
+        if (last && last.bpm === rounded) {
+            return;
+        }
+        out.push({ tick, bpm: rounded, ...(src ? { src } : {}) });
+    };
+
+    let current: number | null = null;
+    /** The last tempo that was actually printed — what "a tempo" returns to. */
+    let steady: number | null = null;
+
+    for (let i = 0; i < usable.length; i++) {
+        const mark = usable[i];
+        if (!mark) {
+            continue;
+        }
+        if (mark.kind === 'abs') {
+            push(mark.tick, mark.bpm, mark.src);
+            current = mark.bpm;
+            steady = mark.bpm;
+            continue;
+        }
+        if (mark.kind === 'atempo') {
+            if (steady !== null) {
+                push(mark.tick, steady, 'ramp');
+                current = steady;
+            }
+            continue;
+        }
+        if (current === null) {
+            // A rit. before any tempo is known has nothing to bend.
+            continue;
+        }
+        const next = usable[i + 1];
+        const limit = mark.tick + GRADUAL_TEMPO_BARS * barTicksAt(mark.tick);
+        const spanEnd = Math.min(endTick, limit, next ? next.tick : Number.POSITIVE_INFINITY);
+        const step = Math.max(1, beatTicksAt(mark.tick));
+        const from: number = current;
+        const target: number = from * (mark.kind === 'rit' ? RITARDANDO_FACTOR : ACCELERANDO_FACTOR);
+        // Reach the target on the LAST beat inside the span, not at its edge:
+        // a rit. is at its slowest just before the a tempo, and a point sitting
+        // exactly on the next mark would be overwritten by it anyway.
+        const reachBy = Math.max(step, spanEnd - mark.tick - step);
+        for (let tick = mark.tick + step; tick < spanEnd; tick += step) {
+            const progress = Math.min(1, (tick - mark.tick) / reachBy);
+            push(tick, from + (target - from) * progress, 'ramp');
+        }
+        current = target;
+    }
+    return out;
+};
+
 /** Where a measure sits once padding is settled. */
 interface MeasurePlacement {
     tick: number;
@@ -1063,7 +1257,9 @@ const buildRamps = (
         const slack = Math.max(1, Math.floor(barTicksAt(span.to) / 2));
 
         // The classic "p [<<<] f" engraves the f at, or just past, the wedge end.
-        const target = curve.points.find((p) => p.tick >= span.to && p.tick <= span.to + slack);
+        const target: { tick: number; v: number } | undefined = curve.points.find(
+            (p) => p.tick >= span.to && p.tick <= span.to + slack,
+        );
         let rampEnd = span.to;
         let vTo: number;
         if (target) {
@@ -1330,7 +1526,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const timeSignatures: ScoreTimeSig[] = [];
     const keySignatures: ScoreKeySig[] = [];
     const clefs: ScoreClef[] = [];
-    let defaultBpm: number | null = null;
+    const tempoMarks: TempoMark[] = [];
+    const holds: ScoreHold[] = [];
 
     /** Grace notes buffered until their principal note arrives. */
     let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
@@ -1396,9 +1593,11 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     break;
                 }
                 case 'tempo': {
-                    if (defaultBpm === null) {
-                        defaultBpm = ev.qbpm;
-                    }
+                    tempoMarks.push({ tick: measureStart + ev.rel, kind: 'abs', bpm: ev.qbpm, src: ev.src });
+                    break;
+                }
+                case 'gradual': {
+                    tempoMarks.push({ tick: measureStart + ev.rel, kind: ev.kind });
                     break;
                 }
                 case 'dyn':
@@ -1497,6 +1696,11 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         ...(velocity !== undefined ? { v: velocity } : {}),
                     };
                     notes.push(note);
+                    if (ev.fermata) {
+                        // Hold on ARRIVING at the onset, so the note itself still
+                        // starts on time and everything sounding across it rings on.
+                        holds.push({ tick: start, beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)) });
+                    }
                     if (ev.tieStart) {
                         openTies.set(tieKey, note);
                     }
@@ -1534,7 +1738,45 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         timeSignatures.push({ tick: ctx.tickOffset, num: finalSig.num, den: finalSig.den });
     }
 
-    return { notes, measures, timeSignatures, keySignatures, clefs, defaultBpm };
+    const lastMeasure = measures[measures.length - 1];
+    const endTick = lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : ctx.tickOffset;
+    const sigAtTick = (tick: number): { num: number; den: number } => {
+        for (let pos = measures.length - 1; pos >= 0; pos--) {
+            if ((measures[pos]?.tick ?? 0) <= tick) {
+                return sigs[pos] ?? { num: 4, den: 4 };
+            }
+        }
+        return sigs[0] ?? { num: 4, den: 4 };
+    };
+    const tempos = ctx.timeline
+        ? []
+        : resolveTempos(
+              tempoMarks,
+              endTick,
+              (tick) => barTicksOf(sigAtTick(tick)),
+              (tick) => Math.round((TICKS_PER_QUARTER * 4) / sigAtTick(tick).den),
+              ctx.warnings,
+          );
+
+    // Dedupe holds: a fermata over a chord is one pause, not one per note.
+    const holdByTick = new Map<number, ScoreHold>();
+    for (const hold of holds) {
+        const existing = holdByTick.get(hold.tick);
+        if (!existing || hold.beats > existing.beats) {
+            holdByTick.set(hold.tick, hold);
+        }
+    }
+
+    return {
+        notes,
+        measures,
+        timeSignatures,
+        keySignatures,
+        clefs,
+        tempos,
+        holds: [...holdByTick.values()].sort((a, b) => a.tick - b.tick),
+        defaultBpm: tempos[0]?.bpm ?? null,
+    };
 };
 
 const parsePart = (part: Elem, ctx: PartContext): PartResult => placeAndEmit(scanPart(part, ctx), ctx);
@@ -1582,6 +1824,8 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         timeSignatures: [],
         keySignatures: [],
         clefs: [],
+        tempos: [],
+        holds: [],
         defaultBpm: null,
         totalTicks: 0,
         warnings: [],
@@ -1594,6 +1838,10 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         combined.timeSignatures.push(...parsed.timeSignatures);
         combined.keySignatures.push(...parsed.keySignatures);
         combined.clefs.push(...parsed.clefs);
+        // Each movement carries its own tempo: this is what stops an Allegro
+        // vivace and an Andantino playing at identical speeds.
+        combined.tempos.push(...parsed.tempos);
+        combined.holds.push(...parsed.holds);
         combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
         combined.totalTicks = parsed.totalTicks;
         parsed.warnings.forEach((warning) => warnings.add(warning));
