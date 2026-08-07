@@ -96,13 +96,30 @@ for reading Pencil ink digits.
 | Looping       | One on/off toggle — no arming. Switching it on lays a four-bar range at the playhead, drawn on the score as an amber band with end brackets and a "Loop" tag; a range row in the transport nudges either end by a bar or snaps the start to the playhead                                                                                                                                                                                |
 | Musicality    | Printed dynamics (pp…fff, sfz accents, `<sound dynamics>`) drive velocities through a perceptual v^1.6 gain curve; grace notes play as crushed acciaccaturas; metronome marks convert beat-unit → quarter-BPM; each sample's codec padding **and** its attack rise time are measured at decode time, and notes start early by that rise so the note is _heard_ on the click rather than beginning there (bass anchors need up to 25 ms) |
 
-**Known v1 limitations** (all surfaced as ScoreData `warnings` where applicable): repeats /
-D.C. / D.S. are ignored (linear playthrough); one global tempo (score tempo marks beyond the
-first are not followed); hairpin crescendos are not interpolated (stepwise dynamics only);
-OMR accuracy depends on scan quality — clean typeset PDFs work best, and wrong notes are a
+**⚠️ Deploy the app before the OMR service.** ScoreData is now **v3**. The app rejects any
+payload newer than its own `SCORE_DATA_VERSION` — `parseScoreData` returns null, the row caches
+as ready with no score, and the viewer sticks on a generic "internal" failure that Retry cannot
+clear. A v3-aware client reads v1/v2/v3 fine, so client-first is safe and service-first is not.
+
+**Musicality (v3).** Dynamics resolve per `(tick, staff)` rather than from one mutable value
+walked in document order, so a left-hand `p` no longer overwrites the right hand's `f` from the
+next bar on; the part is classified once as staff-split or not, and independence is sticky.
+Hairpins (wedges **and** textual `cresc.`/`dim.`) interpolate. Articulation gates sounding
+duration — staccato 0.5, portato 0.7, plain 0.9, tenuto/slur 1.0 — applied once per tie chain,
+from the marking that closes it. A misread time signature is detected from the over-length bars
+and corrected before padding (`meter_corrected` / `meter_suspect`). Tempo is a map, not a
+scalar: every printed mark, Italian headings inferred as quarter-BPM and marked `tempo_inferred`,
+and rit./accel./a tempo pre-discretized to a point per beat. Fermatas are clock stops
+(`holds`), so a note sounding across one rings through it.
+
+**Known limitations** (surfaced as ScoreData `warnings`, and now shown in the transport):
+repeats / D.C. / D.S. are ignored (linear playthrough, so 1st and 2nd endings both play in
+order); pedal, ornaments and swing feel are not modelled; grace-note nuance is blocked on
+Audiveris emitting `<grace>` at all, which it did not do once across an entire 8198-note score.
+OMR accuracy still depends on scan quality — clean typeset PDFs work best, and wrong notes are a
 per-measure OMR limitation, not a playback bug. Geometry failures degrade gracefully: audio
-still plays with the playhead hidden. Re-run "Generate play-along" on older scores to pick up
-slot/dynamics data produced by the updated OMR service.
+still plays with the playhead hidden. **Nothing re-analyzes an existing document automatically** —
+the transport compares the stored `svc-<n>` against the client's and offers a regenerate.
 
 ### Play-along test script
 
