@@ -340,28 +340,68 @@ interface PartResult {
     defaultBpm: number | null;
 }
 
-const parsePart = (part: Elem, ctx: PartContext): PartResult => {
-    const notes: ScoreNote[] = [];
-    const measures: Array<{ n: number; tick: number; dTicks: number }> = [];
-    const timeSignatures: ScoreTimeSig[] = [];
-    const keySignatures: ScoreKeySig[] = [];
-    const clefs: ScoreClef[] = [];
-    let defaultBpm: number | null = null;
+/**
+ * A mark's staff, when the writer said which: `null` means unattributed.
+ * Deliberately NOT collapsed to staff 1 — that default is what destroys the
+ * only signal distinguishing "this writer separates the hands" from "this
+ * writer doesn't".
+ */
+type EventStaff = number | null;
 
+/**
+ * One thing that happens inside a measure, positioned at `rel` ticks from the
+ * barline. Directions sit at the cursor where they were met, so a dynamic
+ * written after a <backup> lands near the start of the bar rather than after
+ * the whole upper staff.
+ */
+type RawEvent =
+    | {
+          k: 'note';
+          rel: number;
+          dur: number;
+          midi: number;
+          staff: number;
+          voice: string;
+          chord: boolean;
+          tieStart: boolean;
+          tieStop: boolean;
+      }
+    | { k: 'grace'; rel: number; midi: number; staff: number }
+    | { k: 'dyn'; rel: number; staff: EventStaff; v: number }
+    | { k: 'accentDyn'; rel: number; staff: EventStaff; toPiano: boolean }
+    | { k: 'tempo'; rel: number; qbpm: number }
+    | { k: 'time'; rel: number; num: number; den: number }
+    | { k: 'key'; rel: number; fifths: number }
+    | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number };
+
+/** Pass-1 output for one <measure>. Nothing here is padded or velocity-resolved. */
+interface RawMeasure {
+    /** Position in the part's <measure> list — how secondary parts index the timeline. */
+    index: number;
+    /** Display number as printed (pickups are 0). */
+    n: number;
+    isPickup: boolean;
+    /** Real content length, BEFORE any padding — the meter check's evidence. */
+    contentTicks: number;
+    /** Signature in force after this measure's own <attributes>. */
+    sig: { num: number; den: number };
+    /** Document order, preserved: resolution may reorder, scanning must not. */
+    events: RawEvent[];
+}
+
+/** The optional <staff> child of a <direction>; null when unattributed. */
+const directionStaff = (direction: Elem): EventStaff => childInt(direction, 'staff');
+
+/**
+ * Pass 1 — the only place that knows about document order. Emits measure-RELATIVE
+ * onsets: absolute ticks depend on padding, padding depends on the signature, and
+ * the signature is exactly what meter reconciliation wants to change.
+ */
+const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
+    const raws: RawMeasure[] = [];
     let divisions = 1;
     let currentSig = { num: 4, den: 4 };
-    let measureStart = ctx.tickOffset;
     let runningNumber: number | null = null;
-    /** Sustained dynamic level in force (undefined → engine default). */
-    let currentVelocity: number | undefined;
-    /** A sforzando-family mark punches only the next attack. */
-    let pendingAccent = false;
-    /** Velocity given to the current chord's base note — chord members share it. */
-    let slotVelocity: number | undefined;
-    /** Grace notes buffered until their principal note arrives. */
-    let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
-    /** Ties still waiting for their stop, keyed by staff:voice:midi. */
-    const openTies = new Map<string, ScoreNote>();
 
     const measureElems = childElements(part, 'measure');
     for (let index = 0; index < measureElems.length; index++) {
@@ -369,15 +409,10 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
         if (!measure) {
             continue;
         }
-        if (ctx.timeline) {
-            const slot = ctx.timeline[index];
-            if (slot) {
-                measureStart = slot.tick;
-            }
-        }
-        let cursor = measureStart;
-        let maxCursor = measureStart;
-        let lastNoteStart = measureStart;
+        const events: RawEvent[] = [];
+        let cursor = 0;
+        let maxCursor = 0;
+        let lastNoteStart = 0;
 
         for (const child of childElements(measure)) {
             switch (child.nodeName) {
@@ -392,78 +427,69 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                         const den = childInt(time, 'beat-type');
                         if (num && den) {
                             currentSig = { num, den };
-                            if (!ctx.timeline) {
-                                const last = timeSignatures[timeSignatures.length - 1];
-                                if (!last || last.num !== num || last.den !== den) {
-                                    timeSignatures.push({ tick: measureStart, num, den });
-                                }
-                            }
+                            events.push({ k: 'time', rel: cursor, num, den });
                         }
                     }
-                    if (!ctx.timeline) {
-                        const key = firstChild(child, 'key');
-                        if (key) {
-                            const fifths = childInt(key, 'fifths');
-                            if (fifths !== null && fifths >= -7 && fifths <= 7) {
-                                const last = keySignatures[keySignatures.length - 1];
-                                if (!last || last.fifths !== fifths) {
-                                    keySignatures.push({ tick: measureStart, fifths });
-                                }
-                            }
+                    const key = firstChild(child, 'key');
+                    if (key) {
+                        const fifths = childInt(key, 'fifths');
+                        if (fifths !== null && fifths >= -7 && fifths <= 7) {
+                            events.push({ k: 'key', rel: cursor, fifths });
                         }
-                        for (const clefEl of childElements(child, 'clef')) {
-                            const signRaw = (childText(clefEl, 'sign') ?? '').toUpperCase();
-                            if (signRaw !== 'G' && signRaw !== 'F' && signRaw !== 'C') {
-                                continue;
-                            }
-                            const numberAttr = clefEl.getAttribute('number');
-                            const staffNum = numberAttr ? Number.parseInt(numberAttr, 10) : 1;
-                            const staff: 0 | 1 = staffNum >= 2 ? 1 : 0;
-                            const line = childInt(clefEl, 'line') ?? (signRaw === 'F' ? 4 : signRaw === 'C' ? 3 : 2);
-                            const last = [...clefs].reverse().find((c) => c.staff === staff);
-                            if (!last || last.sign !== signRaw || last.line !== line) {
-                                clefs.push({ tick: measureStart, staff, sign: signRaw, line });
-                            }
+                    }
+                    for (const clefEl of childElements(child, 'clef')) {
+                        const signRaw = (childText(clefEl, 'sign') ?? '').toUpperCase();
+                        if (signRaw !== 'G' && signRaw !== 'F' && signRaw !== 'C') {
+                            continue;
                         }
+                        const numberAttr = clefEl.getAttribute('number');
+                        const staffNum = numberAttr ? Number.parseInt(numberAttr, 10) : 1;
+                        const staff: 0 | 1 = staffNum >= 2 ? 1 : 0;
+                        const line = childInt(clefEl, 'line') ?? (signRaw === 'F' ? 4 : signRaw === 'C' ? 3 : 2);
+                        events.push({ k: 'clef', rel: cursor, staff, sign: signRaw, line });
                     }
                     break;
                 }
                 case 'direction': {
-                    // <sound tempo> is quarter-BPM by definition — prefer it.
                     const sound = firstChild(child, 'sound');
-                    const tempo = sound?.getAttribute('tempo');
-                    if (defaultBpm === null && tempo) {
-                        // MusicXML <sound tempo> is always quarter-notes-per-minute.
-                        const parsed = Number.parseFloat(tempo);
+                    // <sound tempo> is quarter-BPM by definition — prefer it; a printed
+                    // metronome mark is per BEAT UNIT and converts.
+                    let qbpm: number | null = null;
+                    const tempoAttr = sound?.getAttribute('tempo');
+                    if (tempoAttr) {
+                        const parsed = Number.parseFloat(tempoAttr);
                         if (Number.isFinite(parsed) && parsed > 0) {
-                            defaultBpm = Math.round(parsed);
+                            qbpm = Math.round(parsed);
                         }
                     }
-                    // A printed metronome mark is per BEAT UNIT: convert to quarter-BPM.
-                    if (defaultBpm === null) {
+                    if (qbpm === null) {
                         const metronome = child.getElementsByTagName('metronome').item(0) as Elem | null;
                         const perMinute = metronome ? childText(metronome, 'per-minute') : null;
                         const parsed = perMinute ? Number.parseFloat(perMinute) : NaN;
                         if (Number.isFinite(parsed) && parsed > 0) {
-                            // Convert beat-unit (and dots) to quarter-note BPM.
-                            const quartersPerBeat = beatUnitToQuarters(metronome);
-                            defaultBpm = Math.round(parsed * quartersPerBeat);
+                            qbpm = Math.round(parsed * beatUnitToQuarters(metronome));
                         }
                     }
-                    // Dynamics shape every following attack; sf-family accents one.
+                    if (qbpm !== null) {
+                        events.push({ k: 'tempo', rel: cursor, qbpm });
+                    }
+
+                    const staff = directionStaff(child);
                     const dynamics = child.getElementsByTagName('dynamics').item(0) as Elem | null;
                     if (dynamics) {
                         for (const mark of childElements(dynamics)) {
                             const level = DYNAMIC_LEVELS[mark.nodeName];
                             if (level !== undefined) {
-                                currentVelocity = level;
+                                events.push({ k: 'dyn', rel: cursor, staff, v: level });
                                 break;
                             }
                             if (ACCENT_DYNAMICS.has(mark.nodeName)) {
-                                pendingAccent = true;
-                                if (mark.nodeName === 'fp' || mark.nodeName === 'sfp') {
-                                    currentVelocity = DYNAMIC_LEVELS['p'];
-                                }
+                                events.push({
+                                    k: 'accentDyn',
+                                    rel: cursor,
+                                    staff,
+                                    toPiano: mark.nodeName === 'fp' || mark.nodeName === 'sfp',
+                                });
                                 break;
                             }
                         }
@@ -472,14 +498,19 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                         const soundDynamics = sound?.getAttribute('dynamics');
                         const pct = soundDynamics ? Number.parseFloat(soundDynamics) : NaN;
                         if (Number.isFinite(pct) && pct > 0) {
-                            currentVelocity = roundVelocity(clampVelocity((pct / 100) * 0.82));
+                            events.push({
+                                k: 'dyn',
+                                rel: cursor,
+                                staff,
+                                v: roundVelocity(clampVelocity((pct / 100) * 0.82)),
+                            });
                         }
                     }
                     break;
                 }
                 case 'backup': {
                     const dur = childInt(child, 'duration') ?? 0;
-                    cursor = Math.max(measureStart, cursor - ticksOf(dur, divisions));
+                    cursor = Math.max(0, cursor - ticksOf(dur, divisions));
                     break;
                 }
                 case 'forward': {
@@ -496,12 +527,15 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                 }
                 case 'note': {
                     if (firstChild(child, 'grace')) {
-                        // Buffer graces; they crush in just before their principal.
                         const gracePitch = firstChild(child, 'pitch');
                         const graceMidi = gracePitch ? midiFromPitch(gracePitch) : null;
-                        if (graceMidi !== null && pendingGraces.length < 8) {
-                            const graceStaff = childInt(child, 'staff') ?? 1;
-                            pendingGraces.push({ midi: graceMidi, hand: graceStaff >= 2 ? 1 : ctx.fallbackHand });
+                        if (graceMidi !== null) {
+                            events.push({
+                                k: 'grace',
+                                rel: cursor,
+                                midi: graceMidi,
+                                staff: childInt(child, 'staff') ?? 1,
+                            });
                         }
                         break;
                     }
@@ -514,92 +548,18 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                         const pitch = firstChild(child, 'pitch');
                         const midi = pitch ? midiFromPitch(pitch) : null;
                         if (midi !== null) {
-                            const staffNum = childInt(child, 'staff') ?? 1;
-                            const hand: 0 | 1 = staffNum >= 2 ? 1 : ctx.fallbackHand;
-                            const voice = childText(child, 'voice') ?? '1';
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
-                            const tieKey = `${staffNum}:${voice}:${midi}`;
-
-                            // A tie-stop must continue a note of the same pitch
-                            // that ends exactly where this one starts. Match by
-                            // key first, but fall back on that musical adjacency
-                            // — Audiveris renumbers voices across system breaks,
-                            // and a missed merge re-attacks a held note.
-                            const resolveOpenTie = (): string | null => {
-                                if (openTies.has(tieKey)) {
-                                    return tieKey;
-                                }
-                                let crossStaff: string | null = null;
-                                for (const [key, open] of openTies) {
-                                    const parts = key.split(':');
-                                    if (parts[2] !== String(midi) || Math.abs(open.t + open.d - start) > 2) {
-                                        continue;
-                                    }
-                                    if (parts[0] === String(staffNum)) {
-                                        return key;
-                                    }
-                                    crossStaff = crossStaff ?? key;
-                                }
-                                return crossStaff;
-                            };
-
-                            const openKey = tieTypes.includes('stop') ? resolveOpenTie() : null;
-                            if (openKey) {
-                                const open = openTies.get(openKey);
-                                if (open) {
-                                    open.d += durTicks;
-                                    openTies.delete(openKey);
-                                    if (tieTypes.includes('start')) {
-                                        // Chain continues under this note's identity.
-                                        openTies.set(tieKey, open);
-                                    }
-                                }
-                            } else {
-                                if (!isChord && pendingGraces.length > 0) {
-                                    // Crush buffered graces just before this attack,
-                                    // stealing time from what came before (they may
-                                    // reach back across the barline — that's correct).
-                                    const count = pendingGraces.length;
-                                    pendingGraces.forEach((grace, i) => {
-                                        notes.push({
-                                            t: Math.max(ctx.tickOffset, start - GRACE_TICKS * (count - i)),
-                                            d: GRACE_TICKS,
-                                            p: grace.midi,
-                                            h: grace.hand,
-                                            v: roundVelocity(
-                                                clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) * 0.8),
-                                            ),
-                                        });
-                                    });
-                                    pendingGraces = [];
-                                }
-                                // Chord members share their base note's velocity so an
-                                // accent lands on the whole chord, not just one voice.
-                                let velocity: number | undefined;
-                                if (isChord) {
-                                    velocity = slotVelocity;
-                                } else if (pendingAccent) {
-                                    pendingAccent = false;
-                                    velocity = roundVelocity(
-                                        clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) + 0.2),
-                                    );
-                                    slotVelocity = velocity;
-                                } else {
-                                    velocity = currentVelocity;
-                                    slotVelocity = velocity;
-                                }
-                                const note: ScoreNote = {
-                                    t: start,
-                                    d: durTicks,
-                                    p: midi,
-                                    h: hand,
-                                    ...(velocity !== undefined ? { v: velocity } : {}),
-                                };
-                                notes.push(note);
-                                if (tieTypes.includes('start')) {
-                                    openTies.set(tieKey, note);
-                                }
-                            }
+                            events.push({
+                                k: 'note',
+                                rel: start,
+                                dur: durTicks,
+                                midi,
+                                staff: childInt(child, 'staff') ?? 1,
+                                voice: childText(child, 'voice') ?? '1',
+                                chord: isChord,
+                                tieStart: tieTypes.includes('start'),
+                                tieStop: tieTypes.includes('stop'),
+                            });
                         }
                     }
                     if (!isChord) {
@@ -619,17 +579,204 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
         const displayNumber: number = Number.isFinite(parsedNumber) ? parsedNumber : (runningNumber ?? 0) + 1;
         runningNumber = displayNumber;
 
-        const expected = Math.max(
-            1,
-            Math.round(currentSig.num * ((TICKS_PER_QUARTER * 4) / currentSig.den)),
-        );
+        raws.push({
+            index,
+            n: displayNumber,
+            isPickup: measure.getAttribute('implicit') === 'yes' || displayNumber === 0,
+            contentTicks: maxCursor,
+            sig: { ...currentSig },
+            events,
+        });
+    }
+
+    return raws;
+};
+
+/**
+ * Pass 2 — assign absolute ticks, merge ties, pad, and resolve velocities.
+ * Events are walked in document order, which is what dynamics currently key off;
+ * their `rel` positions are carried through so that resolution can move to a
+ * (tick, staff) lookup without touching the scanner again.
+ */
+const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult => {
+    const notes: ScoreNote[] = [];
+    const measures: Array<{ n: number; tick: number; dTicks: number }> = [];
+    const timeSignatures: ScoreTimeSig[] = [];
+    const keySignatures: ScoreKeySig[] = [];
+    const clefs: ScoreClef[] = [];
+    let defaultBpm: number | null = null;
+
+    let measureStart = ctx.tickOffset;
+    /** Sustained dynamic level in force (undefined → engine default). */
+    let currentVelocity: number | undefined;
+    /** A sforzando-family mark punches only the next attack. */
+    let pendingAccent = false;
+    /** Velocity given to the current chord's base note — chord members share it. */
+    let slotVelocity: number | undefined;
+    /** Grace notes buffered until their principal note arrives. */
+    let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
+    /** Ties still waiting for their stop, keyed by staff:voice:midi. */
+    const openTies = new Map<string, ScoreNote>();
+
+    for (const raw of raws) {
+        if (ctx.timeline) {
+            const slot = ctx.timeline[raw.index];
+            if (slot) {
+                measureStart = slot.tick;
+            }
+        }
+
+        for (const ev of raw.events) {
+            switch (ev.k) {
+                case 'time': {
+                    if (!ctx.timeline) {
+                        const last = timeSignatures[timeSignatures.length - 1];
+                        if (!last || last.num !== ev.num || last.den !== ev.den) {
+                            timeSignatures.push({ tick: measureStart, num: ev.num, den: ev.den });
+                        }
+                    }
+                    break;
+                }
+                case 'key': {
+                    if (!ctx.timeline) {
+                        const last = keySignatures[keySignatures.length - 1];
+                        if (!last || last.fifths !== ev.fifths) {
+                            keySignatures.push({ tick: measureStart, fifths: ev.fifths });
+                        }
+                    }
+                    break;
+                }
+                case 'clef': {
+                    if (!ctx.timeline) {
+                        const last = [...clefs].reverse().find((c) => c.staff === ev.staff);
+                        if (!last || last.sign !== ev.sign || last.line !== ev.line) {
+                            clefs.push({ tick: measureStart, staff: ev.staff, sign: ev.sign, line: ev.line });
+                        }
+                    }
+                    break;
+                }
+                case 'tempo': {
+                    if (defaultBpm === null) {
+                        defaultBpm = ev.qbpm;
+                    }
+                    break;
+                }
+                case 'dyn': {
+                    currentVelocity = ev.v;
+                    break;
+                }
+                case 'accentDyn': {
+                    pendingAccent = true;
+                    if (ev.toPiano) {
+                        currentVelocity = DYNAMIC_LEVELS['p'];
+                    }
+                    break;
+                }
+                case 'grace': {
+                    // Buffer graces; they crush in just before their principal.
+                    if (pendingGraces.length < 8) {
+                        pendingGraces.push({
+                            midi: ev.midi,
+                            hand: ev.staff >= 2 ? 1 : ctx.fallbackHand,
+                        });
+                    }
+                    break;
+                }
+                case 'note': {
+                    const start = measureStart + ev.rel;
+                    const hand: 0 | 1 = ev.staff >= 2 ? 1 : ctx.fallbackHand;
+                    const tieKey = `${ev.staff}:${ev.voice}:${ev.midi}`;
+
+                    // A tie-stop must continue a note of the same pitch that ends
+                    // exactly where this one starts. Match by key first, but fall
+                    // back on that musical adjacency — Audiveris renumbers voices
+                    // across system breaks, and a missed merge re-attacks a held note.
+                    const resolveOpenTie = (): string | null => {
+                        if (openTies.has(tieKey)) {
+                            return tieKey;
+                        }
+                        let crossStaff: string | null = null;
+                        for (const [key, open] of openTies) {
+                            const parts = key.split(':');
+                            if (parts[2] !== String(ev.midi) || Math.abs(open.t + open.d - start) > 2) {
+                                continue;
+                            }
+                            if (parts[0] === String(ev.staff)) {
+                                return key;
+                            }
+                            crossStaff = crossStaff ?? key;
+                        }
+                        return crossStaff;
+                    };
+
+                    const openKey = ev.tieStop ? resolveOpenTie() : null;
+                    if (openKey) {
+                        const open = openTies.get(openKey);
+                        if (open) {
+                            open.d += ev.dur;
+                            openTies.delete(openKey);
+                            if (ev.tieStart) {
+                                // Chain continues under this note's identity.
+                                openTies.set(tieKey, open);
+                            }
+                        }
+                        break;
+                    }
+
+                    if (!ev.chord && pendingGraces.length > 0) {
+                        // Crush buffered graces just before this attack, stealing
+                        // time from what came before (they may reach back across
+                        // the barline — that's correct).
+                        const count = pendingGraces.length;
+                        pendingGraces.forEach((grace, i) => {
+                            notes.push({
+                                t: Math.max(ctx.tickOffset, start - GRACE_TICKS * (count - i)),
+                                d: GRACE_TICKS,
+                                p: grace.midi,
+                                h: grace.hand,
+                                v: roundVelocity(clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) * 0.8)),
+                            });
+                        });
+                        pendingGraces = [];
+                    }
+                    // Chord members share their base note's velocity so an accent
+                    // lands on the whole chord, not just one voice.
+                    let velocity: number | undefined;
+                    if (ev.chord) {
+                        velocity = slotVelocity;
+                    } else if (pendingAccent) {
+                        pendingAccent = false;
+                        velocity = roundVelocity(clampVelocity((currentVelocity ?? DEFAULT_VELOCITY) + 0.2));
+                        slotVelocity = velocity;
+                    } else {
+                        velocity = currentVelocity;
+                        slotVelocity = velocity;
+                    }
+                    const note: ScoreNote = {
+                        t: start,
+                        d: ev.dur,
+                        p: ev.midi,
+                        h: hand,
+                        ...(velocity !== undefined ? { v: velocity } : {}),
+                    };
+                    notes.push(note);
+                    if (ev.tieStart) {
+                        openTies.set(tieKey, note);
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        const expected = Math.max(1, Math.round(raw.sig.num * ((TICKS_PER_QUARTER * 4) / raw.sig.den)));
         // Pickups stay content-length (MusicXML implicit / measure 0); other bars
         // snap underfull content up to the active signature so later ticks don't skew.
-        const isPickup = measure.getAttribute('implicit') === 'yes' || displayNumber === 0;
-        let length = maxCursor - measureStart;
+        let length = raw.contentTicks;
         const contentLen = length;
         if (ctx.timeline) {
-            length = ctx.timeline[index]?.dTicks ?? length;
+            length = ctx.timeline[raw.index]?.dTicks ?? length;
             // Lead timeline may be longer after underfull padding — extend open
             // ties so secondary-part cross-bar ties still sound past the pad.
             if (length > contentLen) {
@@ -640,7 +787,7 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
             }
         } else if (length <= 0) {
             length = expected;
-        } else if (!isPickup && length < expected) {
+        } else if (!raw.isPickup && length < expected) {
             const pad = expected - length;
             ctx.warnings.add('measure_underfull');
             // Extend open ties across the inserted gap so a tie-stop in the next
@@ -649,12 +796,12 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
                 open.d += pad;
             }
             length = expected;
-        } else if (!isPickup && length > expected) {
+        } else if (!raw.isPickup && length > expected) {
             ctx.warnings.add('measure_overfull');
             // Keep content length so note onsets stay consistent with the timeline.
         }
 
-        measures.push({ n: displayNumber, tick: measureStart, dTicks: length });
+        measures.push({ n: raw.n, tick: measureStart, dTicks: length });
         measureStart += length;
     }
 
@@ -664,11 +811,14 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
     }
 
     if (timeSignatures.length === 0 && !ctx.timeline) {
-        timeSignatures.push({ tick: ctx.tickOffset, num: currentSig.num, den: currentSig.den });
+        const finalSig = raws[raws.length - 1]?.sig ?? { num: 4, den: 4 };
+        timeSignatures.push({ tick: ctx.tickOffset, num: finalSig.num, den: finalSig.den });
     }
 
     return { notes, measures, timeSignatures, keySignatures, clefs, defaultBpm };
 };
+
+const parsePart = (part: Elem, ctx: PartContext): PartResult => placeAndEmit(scanPart(part, ctx), ctx);
 
 const ticksOf = (duration: number, divisions: number): number =>
     Math.max(0, Math.round((duration * TICKS_PER_QUARTER) / Math.max(1, divisions)));
