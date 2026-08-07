@@ -155,6 +155,11 @@ export const solve = (
     const alternativeAssignments = ranked.slice(1).filter((alt) =>
         alt.some((a, i) => {
             const best = primary[i];
+            if (best === undefined) {
+                // Every ranked row is built from `events`, so this cannot happen;
+                // if it ever did, rows of different lengths ARE a difference.
+                return true;
+            }
             if (a === null && best === null) {
                 return false;
             }
