@@ -11,10 +11,14 @@
  * The numbers that matter, and how to read them:
  *
  *   RH/LH velocity identity — the share of simultaneous two-hand onsets playing
- *   at the same volume. On grand-staff piano this should sit around 55-80%.
- *   Above ~90% the staff-split classifier chose `broadcast`, so look at whether
- *   the exporter attributed its dynamics; below ~40% the sticky rule is leaking
- *   and the hands have been over-separated.
+ *   at the same volume. Read it TOGETHER with the `dynamics_not_staff_split`
+ *   warning, never alone. A high rate with that warning present is the correct
+ *   outcome, not a leak: it means the exporter did not tell the hands apart, so
+ *   every mark was broadcast on purpose. Measured on Schubert D.780, Audiveris
+ *   attributed 137 dynamics to staff 1 and 4 to staff 2, which is no attribution
+ *   at all in practice, and the rate stayed at 92.7% — correctly. Only a high
+ *   rate WITHOUT that warning is worth chasing. Below ~40% the sticky rule is
+ *   leaking and the hands have been over-separated.
  *
  *   Distinct velocities — one value per printed dynamic level means no hairpin
  *   was interpolated. A shaped score should show dozens.
