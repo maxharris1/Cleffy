@@ -86,10 +86,14 @@ const report = (score) => {
     rows.push(['  notes at p or softer', pct(soft, notes.length)]);
 
     // --- articulation -------------------------------------------------------
-    // `d` is a sounding duration; anything not a clean multiple of the notated
-    // grid means a gate was applied.
-    const gated = notes.filter((n) => n.d % 10 !== 0 || n.d % TICKS_PER_QUARTER !== 0).length;
-    rows.push(['notes shorter than a whole beat grid', `${gated} (${pct(gated, notes.length)})`]);
+    // Every notated value — including dotted ones and triplets — is a multiple
+    // of 20 ticks, and multiplying by the 0.9 default gate always breaks that.
+    // So the share NOT on the grid is a decent read on how much was shortened.
+    // (A staccato halving is invisible here: 480 -> 240 still looks notated.)
+    const NOTATED_UNIT = 20;
+    const onGridDur = notes.filter((n) => n.d % NOTATED_UNIT === 0).length;
+    rows.push(['notes at a full notated length', `${onGridDur} (${pct(onGridDur, notes.length)})`]);
+    rows.push(['  shortened by articulation', pct(notes.length - onGridDur, notes.length)]);
     rows.push(['grace notes (110 ticks)', notes.filter((n) => n.d === 110).length]);
 
     // --- tempo --------------------------------------------------------------
