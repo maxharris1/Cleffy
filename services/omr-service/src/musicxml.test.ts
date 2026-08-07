@@ -214,7 +214,7 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 370, d: 110, p: 62, h: 0, v: 0.58 }, // acciaccatura — never gated
+            { t: 370, d: 110, p: 62, h: 0, v: 0.6 }, // acciaccatura — never gated
             { t: 480, d: plain(480), p: 64, h: 0 },
         ]);
         expect(score.warnings).not.toContain('grace_notes_skipped');

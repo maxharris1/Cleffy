@@ -230,3 +230,47 @@ describe('TransportBar ready controls', () => {
         expect(useViewerStore.getState().followMode).toBe('on');
     });
 });
+
+describe('analysis warnings', () => {
+    const withWarnings = (warnings: string[]) =>
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: { ...tinyScore, warnings },
+                bpmDefault: 90,
+                bpmOverride: null,
+            },
+        });
+
+    it('says nothing when the analysis was clean', () => {
+        withWarnings([]);
+        expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
+    });
+
+    it('discloses that repeats were dropped, collapsed until asked', () => {
+        withWarnings(['repeats_ignored']);
+        const toggle = screen.getByRole('button', { name: /1 thing to know/i });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.queryByText(/first and second endings/i)).toBeNull();
+    });
+
+    it('explains each warning once expanded', async () => {
+        withWarnings(['repeats_ignored', 'measure_underfull']);
+        await userEvent.click(screen.getByRole('button', { name: /2 things to know/i }));
+        expect(screen.getByText(/first and second endings/i)).toBeInTheDocument();
+        expect(screen.getByText(/padded, so notes there may fall early/i)).toBeInTheDocument();
+    });
+
+    it('ranks the most misleading warning first', async () => {
+        withWarnings(['grace_notes_skipped', 'no_geometry', 'repeats_ignored']);
+        await userEvent.click(screen.getByRole('button', { name: /3 things to know/i }));
+        const items = screen.getAllByRole('listitem').map((li) => li.textContent ?? '');
+        expect(items[0]).toMatch(/repeats/i);
+    });
+
+    it('ignores codes it has no copy for rather than leaking them raw', () => {
+        withWarnings(['something_new_from_the_service']);
+        expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
+        expect(screen.queryByText(/something_new_from_the_service/)).toBeNull();
+    });
+});

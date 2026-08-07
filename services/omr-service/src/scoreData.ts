@@ -10,6 +10,14 @@ import { z } from 'zod';
 export const SCORE_DATA_VERSION = 2;
 export const TICKS_PER_QUARTER = 480;
 
+/**
+ * Velocity for a note the score never gave a dynamic — roughly mezzo-forte.
+ * Both the writer (as the base an accent lifts from) and the reader (for notes
+ * carrying no `v` at all) must agree on this, or an accented note in an
+ * unmarked score is measured against a level nothing else plays at.
+ */
+export const DEFAULT_VELOCITY = 0.75;
+
 export const HAND_RH = 0;
 export const HAND_LH = 1;
 

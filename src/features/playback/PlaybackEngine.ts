@@ -10,7 +10,7 @@ import {
 import type { BeatTick } from '@/features/playback/scoreTime';
 import { getSharedAudioContext } from '@/features/playback/sharedAudioContext';
 import type { PlaybackStatus } from '@/state/store';
-import { HAND_LH, HAND_RH } from '@/types/scoreData';
+import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData } from '@/types/scoreData';
 
 /**
@@ -455,7 +455,7 @@ export class PlaybackEngine {
                 break;
             }
             this.nextNoteIndex += 1;
-            this.scheduleNote(note.p, note.h, startAt, Math.min(note.d, regionEnd - note.t) * this.spt, note.v ?? 0.75);
+            this.scheduleNote(note.p, note.h, startAt, Math.min(note.d, regionEnd - note.t) * this.spt, note.v ?? DEFAULT_VELOCITY);
         }
     }
 
@@ -480,7 +480,7 @@ export class PlaybackEngine {
             if (noteEnd <= tick) {
                 continue;
             }
-            this.scheduleNote(note.p, note.h, startAt, (noteEnd - tick) * this.spt, note.v ?? 0.75);
+            this.scheduleNote(note.p, note.h, startAt, (noteEnd - tick) * this.spt, note.v ?? DEFAULT_VELOCITY);
         }
     }
 

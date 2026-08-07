@@ -22,6 +22,14 @@ export const SCORE_DATA_MIN_VERSION = 1;
 /** Canonical tick resolution — every duration is normalized to 480 ticks per quarter note. */
 export const TICKS_PER_QUARTER = 480;
 
+/**
+ * Velocity for a note the score never gave a dynamic — roughly mezzo-forte.
+ * Both the writer (as the base an accent lifts from) and the reader (for notes
+ * carrying no `v` at all) must agree on this, or an accented note in an
+ * unmarked score is measured against a level nothing else plays at.
+ */
+export const DEFAULT_VELOCITY = 0.75;
+
 /** Right hand (upper staff). */
 export const HAND_RH = 0;
 /** Left hand (lower staff). */

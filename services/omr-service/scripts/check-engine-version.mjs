@@ -107,8 +107,7 @@ try {
     });
     baseVer = extractVersion(baseSrc);
 } catch {
-    // File may not exist on base — treat as first introduction.
-    baseVer = null;
+    // File may not exist on base — treat as first introduction (baseVer stays null).
 }
 
 if (baseVer !== null && baseVer === headVer) {

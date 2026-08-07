@@ -58,6 +58,85 @@ const WARNING_COPY: Record<string, string> = {
 };
 
 /**
+ * What the analysis had to give up on, in the reader's terms rather than ours.
+ * These are facts about the score, not transient errors, so they persist rather
+ * than being dismissible — a student who loses their place needs to be able to
+ * find out it was the software and not their reading.
+ *
+ * Ordered by how badly each one can mislead someone following the page.
+ */
+const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
+    {
+        code: 'repeats_ignored',
+        text: 'Repeats are played straight through once. First and second endings will both be played, in order.',
+    },
+    {
+        code: 'meter_corrected',
+        text: 'A time signature looked misread and was corrected to match the bars. If the beat feels wrong, this is why.',
+    },
+    {
+        code: 'meter_suspect',
+        text: "Some bars don't match their time signature. Rhythms in that section may be off.",
+    },
+    {
+        code: 'measure_overfull',
+        text: 'Some bars came out longer than their time signature — usually a misread rhythm.',
+    },
+    {
+        code: 'measure_underfull',
+        text: 'Some bars came out short and were padded, so notes there may fall early.',
+    },
+    {
+        code: 'multiple_movements_concatenated',
+        text: 'The pieces in this file play back to back as one, so bar numbers restart partway through.',
+    },
+    {
+        code: 'multi_part_collapsed',
+        text: 'This score has more parts than two hands — only the main one is played.',
+    },
+    { code: 'single_staff_all_rh', text: 'Only one staff was found, so everything plays as the right hand.' },
+    {
+        code: 'dynamics_not_staff_split',
+        text: 'Dynamics could not be told apart between the hands, so both play at the same volume.',
+    },
+    { code: 'grace_notes_skipped', text: 'Some grace notes had nothing to attach to and were left out.' },
+    { code: 'no_geometry', text: 'The page positions could not be read, so there is no moving playhead.' },
+    {
+        code: 'measure_geometry_mismatch',
+        text: 'Bars stopped lining up with the page partway through; the playhead hides there.',
+    },
+];
+
+/** Persistent, collapsed disclosure of what the analysis could not do. */
+const ScoreWarnings = (props: { warnings: readonly string[] }) => {
+    const [open, setOpen] = useState(false);
+    const present = SCORE_WARNING_COPY.filter((entry) => props.warnings.includes(entry.code));
+    if (present.length === 0) {
+        return null;
+    }
+    return (
+        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5" role="status">
+            <button
+                type="button"
+                aria-expanded={open}
+                onClick={() => setOpen((v) => !v)}
+                className="flex w-full items-center gap-1.5 text-left text-xs font-medium text-amber-900"
+            >
+                {open ? <ChevronDownIcon size={13} /> : <ChevronUpIcon size={13} />}
+                {present.length === 1 ? '1 thing to know about this play-along' : `${present.length} things to know about this play-along`}
+            </button>
+            {open ? (
+                <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-amber-900">
+                    {present.map((entry) => (
+                        <li key={entry.code}>{entry.text}</li>
+                    ))}
+                </ul>
+            ) : null}
+        </div>
+    );
+};
+
+/**
  * Docked play-along transport below the score. Playback is local to this
  * device, so every role gets it; only Generate/Retry are owner/editor-gated
  * (matching RLS). Practice tools: count-in, metronome, A-B loop, per-hand
@@ -202,6 +281,8 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     </button>
                 </div>
             ) : null}
+
+            <ScoreWarnings warnings={score.warnings} />
 
             {loopRange ? (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/30 bg-accent-soft/50 px-2 py-1">

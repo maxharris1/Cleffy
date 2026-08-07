@@ -1,7 +1,7 @@
 import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
-import { TICKS_PER_QUARTER } from './scoreData.js';
+import { DEFAULT_VELOCITY, TICKS_PER_QUARTER } from './scoreData.js';
 import type { ScoreClef, ScoreKeySig, ScoreNote, ScoreTimeSig } from './scoreData.js';
 import { ERROR_CODES, JobError } from './errors.js';
 
@@ -19,9 +19,6 @@ export interface MusicalScore {
 }
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
-
-/** The engine's default when a note carries no velocity — roughly mezzo-forte. */
-const DEFAULT_VELOCITY = 0.72;
 
 /** Sustained dynamic marks → velocity levels (perceptual spread pp…fff). */
 const DYNAMIC_LEVELS: Record<string, number> = {
@@ -137,7 +134,7 @@ const articulationOf = (arts: Set<string>, underSlur: boolean): ArtSet => {
 const gateDuration = (dur: number, gate: number): number =>
     Math.max(MIN_SOUNDING_TICKS, Math.min(dur, Math.round(dur * gate)));
 
-/** Crushed grace-note length (≈55 ms at 120 bpm) — acciaccatura feel. */
+/** Crushed grace-note length (≈115 ms at 120 bpm) — acciaccatura feel. */
 const GRACE_TICKS = 110;
 
 const clampVelocity = (v: number): number => Math.min(1, Math.max(0.1, v));
@@ -298,6 +295,13 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
 
     notes.sort((a, b) => a.t - b.t || a.h - b.h || a.p - b.p);
     const lastMeasure = leadResult.measures[leadResult.measures.length - 1];
+    // The lead part's final barline is the end of the timeline, but a secondary
+    // part can run past it — playback stops at totalTicks, so anything beyond
+    // would silently never sound.
+    let totalTicks = lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : tickOffset;
+    for (const note of notes) {
+        totalTicks = Math.max(totalTicks, note.t + note.d);
+    }
     return {
         notes,
         measures: leadResult.measures,
@@ -305,7 +309,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         keySignatures: leadResult.keySignatures,
         clefs: leadResult.clefs,
         defaultBpm: leadResult.defaultBpm,
-        totalTicks: lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : tickOffset,
+        totalTicks,
         warnings: [...warnings],
     };
 };
