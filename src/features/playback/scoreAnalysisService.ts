@@ -37,7 +37,12 @@ const engineGeneration = (engineVersion: string | null): number | null => {
 /** True when this analysis predates the current engine and could be improved. */
 export const analysisIsStale = (engineVersion: string | null): boolean => {
     const generation = engineGeneration(engineVersion);
-    return generation !== null && generation < CURRENT_ENGINE_GENERATION;
+    // Absent or unreadable means it predates version stamping, so it is the
+    // oldest data there is. This is only ever asked of a READY analysis, where
+    // a missing stamp cannot mean "not finished yet". Five rows in the live
+    // database are in exactly this state and would otherwise never be offered
+    // a re-run — the documents most in need of one.
+    return generation === null || generation < CURRENT_ENGINE_GENERATION;
 };
 
 /** A processing row untouched for this long is a lost job (service died/recycled). */

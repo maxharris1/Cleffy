@@ -277,7 +277,7 @@ describe('analysis warnings', () => {
 });
 
 describe('tempo disclosure and stale analyses', () => {
-    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine = 'audiveris-5.6.1+svc-5') =>
+    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine: string | null = 'audiveris-5.6.1+svc-5') =>
         renderBar({
             state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },
             ...over,
@@ -303,6 +303,13 @@ describe('tempo disclosure and stale analyses', () => {
     it('says nothing when the analysis is current', () => {
         ready();
         expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+    });
+
+    it('offers a re-run for an analysis with no engine stamp at all', () => {
+        // The oldest rows predate version stamping; they are the ones that most
+        // need regenerating, and a null must not read as "current".
+        ready({}, tinyScore, null);
+        expect(screen.getByRole('button', { name: /regenerate it/i })).toBeInTheDocument();
     });
 
     it('does not offer a re-run to someone who cannot start one', () => {
