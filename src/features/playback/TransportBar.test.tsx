@@ -21,7 +21,7 @@ const makeEngine = () => {
 const renderBar = (overrides: Partial<TransportBarProps> = {}) => {
     const engine = makeEngine();
     const props: TransportBarProps = {
-        state: { kind: 'ready', score: tinyScore, bpmDefault: 90, bpmOverride: null },
+        state: { kind: 'ready', score: tinyScore, bpmDefault: 90, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' },
         role: 'owner',
         onGenerate: vi.fn(),
         getEngine: () => engine,
@@ -115,12 +115,12 @@ describe('TransportBar ready controls', () => {
                 { tick: 960, num: 3, den: 8 },
             ],
         };
-        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByLabelText('Time signature 4/4')).toBeInTheDocument();
 
         cleanup();
         setStore(() => useViewerStore.getState().setCurrentMeasureIndex(3)); // tick 1440
-        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByLabelText('Time signature 3/8')).toBeInTheDocument();
     });
 
@@ -165,7 +165,7 @@ describe('TransportBar ready controls', () => {
 
     it('disables the left hand for single-staff scores', () => {
         const rhOnly = { ...tinyScore, notes: tinyScore.notes.filter((n) => n.h === 0) };
-        renderBar({ state: { kind: 'ready', score: rhOnly, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: rhOnly, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByRole('button', { name: /mute left hand/i })).toBeDisabled();
     });
 
@@ -214,7 +214,7 @@ describe('TransportBar ready controls', () => {
     it('shows the dotted-quarter equivalent for compound meters', () => {
         setStore(() => useViewerStore.getState().setBpm(90));
         const compound = { ...tinyScore, timeSignatures: [{ tick: 0, num: 6, den: 8 }] };
-        renderBar({ state: { kind: 'ready', score: compound, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: compound, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByText(/♩· = 60/)).toBeInTheDocument();
 
         cleanup();
@@ -239,6 +239,7 @@ describe('analysis warnings', () => {
                 score: { ...tinyScore, warnings },
                 bpmDefault: 90,
                 bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
             },
         });
 
@@ -272,5 +273,40 @@ describe('analysis warnings', () => {
         withWarnings(['something_new_from_the_service']);
         expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
         expect(screen.queryByText(/something_new_from_the_service/)).toBeNull();
+    });
+});
+
+describe('tempo disclosure and stale analyses', () => {
+    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine = 'audiveris-5.6.1+svc-5') =>
+        renderBar({
+            state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },
+            ...over,
+        });
+
+    it('marks a tempo estimated from a word rather than passing it off as printed', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 0, bpm: 94, src: 'word' }] });
+        expect(screen.getByText('est.')).toBeInTheDocument();
+    });
+
+    it('does not mark a printed tempo as estimated', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 0, bpm: 94, src: 'metronome' }] });
+        expect(screen.queryByText('est.')).toBeNull();
+    });
+
+    it('offers to regenerate an analysis made by an older engine', async () => {
+        const onGenerate = vi.fn();
+        ready({ onGenerate }, tinyScore, 'audiveris-5.6.1+svc-2');
+        await userEvent.click(screen.getByRole('button', { name: /regenerate it/i }));
+        expect(onGenerate).toHaveBeenCalled();
+    });
+
+    it('says nothing when the analysis is current', () => {
+        ready();
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+    });
+
+    it('does not offer a re-run to someone who cannot start one', () => {
+        ready({ role: 'viewer' }, tinyScore, 'audiveris-5.6.1+svc-2');
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
     });
 });

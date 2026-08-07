@@ -2,10 +2,11 @@ import { useState } from 'react';
 
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
+import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import { BPM_MAX, BPM_MIN, useViewerStore } from '@/state/store';
 import type { MemberRole } from '@/types/database';
-import { hasLeftHand } from '@/types/scoreData';
+import { hasLeftHand, tempoIsInferred } from '@/types/scoreData';
 import type { ScoreData } from '@/types/scoreData';
 import {
     ChevronDownIcon,
@@ -106,6 +107,30 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'Bars stopped lining up with the page partway through; the playhead hides there.',
     },
 ];
+
+/**
+ * Offer a re-run when the stored analysis predates the current engine. Nothing
+ * else in the system ever re-analyzes a document, so without this every fix
+ * lands only on scores uploaded afterwards.
+ */
+const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: boolean; onGenerate: () => void }) => {
+    if (!props.canManage || !analysisIsStale(props.engineVersion)) {
+        return null;
+    }
+    return (
+        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900" role="status">
+            This play-along was made by an older version of the analysis.{' '}
+            <button
+                type="button"
+                onClick={props.onGenerate}
+                className="font-medium underline underline-offset-2"
+            >
+                Regenerate it
+            </button>{' '}
+            to pick up the improvements.
+        </div>
+    );
+};
 
 /** Persistent, collapsed disclosure of what the analysis could not do. */
 const ScoreWarnings = (props: { warnings: readonly string[] }) => {
@@ -282,6 +307,11 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 </div>
             ) : null}
 
+            <StaleAnalysisNotice
+                engineVersion={props.state.kind === 'ready' ? props.state.engineVersion : null}
+                canManage={props.role === 'owner' || props.role === 'editor'}
+                onGenerate={props.onGenerate}
+            />
             <ScoreWarnings warnings={score.warnings} />
 
             {loopRange ? (
@@ -400,7 +430,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} />
+                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} inferred={tempoIsInferred(score)} />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
@@ -519,7 +549,17 @@ const LoopEdge = ({
  * for a big jump. The draft state lets "1…0…5" exist mid-keystroke without the
  * clamp snapping it to 40 on the way.
  */
-const TempoControl = ({ bpm, onBpm, compound }: { bpm: number; onBpm: (bpm: number) => void; compound: boolean }) => {
+const TempoControl = ({
+    bpm,
+    onBpm,
+    compound,
+    inferred,
+}: {
+    bpm: number;
+    onBpm: (bpm: number) => void;
+    compound: boolean;
+    inferred: boolean;
+}) => {
     const [draft, setDraft] = useState<string | null>(null);
 
     const commit = (text: string) => {
@@ -531,7 +571,14 @@ const TempoControl = ({ bpm, onBpm, compound }: { bpm: number; onBpm: (bpm: numb
     };
 
     return (
-        <div className="flex items-center gap-0.5" title="Tempo (quarter note BPM)">
+        <div
+            className="flex items-center gap-0.5"
+            title={
+                inferred
+                    ? 'Tempo (quarter note BPM) — estimated from the tempo marking, which prints no number'
+                    : 'Tempo (quarter note BPM)'
+            }
+        >
             <span className="text-sm text-stone-500">♩=</span>
             <button type="button" aria-label="Slower" onClick={() => onBpm(bpm - 1)} className={squareButton(false)}>
                 −
@@ -564,6 +611,14 @@ const TempoControl = ({ bpm, onBpm, compound }: { bpm: number; onBpm: (bpm: numb
                 +
             </button>
             {compound ? <span className="ml-0.5 text-xs text-stone-400">(♩· = {Math.round(bpm / 1.5)})</span> : null}
+            {inferred ? (
+                <span
+                    className="ml-0.5 text-xs text-stone-400"
+                    title="Estimated from the printed tempo marking, which gives no number"
+                >
+                    est.
+                </span>
+            ) : null}
         </div>
     );
 };

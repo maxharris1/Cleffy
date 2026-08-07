@@ -15,7 +15,14 @@ export type ScoreAnalysisState =
     | { kind: 'none' } // no analysis requested yet
     | { kind: 'pending' }
     | { kind: 'processing'; progress: number | null }
-    | { kind: 'ready'; score: ScoreData; bpmDefault: number | null; bpmOverride: number | null }
+    | {
+          kind: 'ready';
+          score: ScoreData;
+          bpmDefault: number | null;
+          bpmOverride: number | null;
+          /** Which engine produced this, so a stale analysis can offer a re-run. */
+          engineVersion: string | null;
+      }
     | { kind: 'failed'; code: string };
 
 /** Fallback poll while pending/processing — Realtime is primary. */
@@ -63,6 +70,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                         score: cached.score,
                         bpmDefault: cached.bpmDefault,
                         bpmOverride: cached.bpmOverride ?? null,
+                        engineVersion: cached.engineVersion,
                     });
                 } else {
                     set({ kind: 'unavailable' });
@@ -96,12 +104,19 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                     score: cached.score,
                     bpmDefault: cached.bpmDefault,
                     bpmOverride: cached.bpmOverride ?? null,
+                    engineVersion: cached.engineVersion,
                 });
                 return;
             }
             const full = await fetchScoreAnalysisFull(docIdNow).catch(() => null);
             if (full?.status === 'ready' && full.score) {
-                set({ kind: 'ready', score: full.score, bpmDefault: full.bpmDefault, bpmOverride: full.bpmOverride ?? null });
+                set({
+                    kind: 'ready',
+                    score: full.score,
+                    bpmDefault: full.bpmDefault,
+                    bpmOverride: full.bpmOverride ?? null,
+                    engineVersion: full.engineVersion,
+                });
             } else {
                 set({ kind: 'failed', code: 'internal' });
             }
