@@ -63,6 +63,9 @@ const report = (score) => {
     rows.push(['warnings', JSON.stringify(score.warnings)]);
 
     // --- dynamics -----------------------------------------------------------
+    // One vote per ONSET, not per note: a six-note chord against a single bass
+    // note is one moment of two hands agreeing or disagreeing, and counting its
+    // members separately would weight dense textures into the answer.
     const byTickHand = new Map();
     for (const n of notes) {
         const key = `${n.t}:${n.h}`;
@@ -70,12 +73,10 @@ const report = (score) => {
     }
     let pairs = 0;
     let identical = 0;
-    for (const n of notes) {
-        if (n.h !== 0) continue;
-        const lh = byTickHand.get(`${n.t}:1`);
-        if (lh === undefined && !byTickHand.has(`${n.t}:1`)) continue;
+    for (const tick of new Set(notes.map((n) => n.t))) {
+        if (!byTickHand.has(`${tick}:0`) || !byTickHand.has(`${tick}:1`)) continue;
         pairs += 1;
-        if (byTickHand.get(`${n.t}:0`) === lh) identical += 1;
+        if (byTickHand.get(`${tick}:0`) === byTickHand.get(`${tick}:1`)) identical += 1;
     }
     rows.push(['simultaneous RH/LH onsets', pairs]);
     rows.push(['  sharing a velocity', `${identical} (${pct(identical, pairs)})`]);
