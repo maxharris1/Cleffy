@@ -80,11 +80,13 @@ export const parseLimitResponse = async (response: Response): Promise<LimitReach
  * Maps the cloud-score cap trigger's exception. The trigger raises P0001 with
  * the payload as JSON in DETAIL, which PostgREST surfaces as `details`.
  */
-export const parsePostgrestLimitError = (error: {
-    code?: string | null;
-    message?: string | null;
-    details?: string | null;
-} | null): LimitReachedError | null => {
+export const parsePostgrestLimitError = (
+    error: {
+        code?: string | null;
+        message?: string | null;
+        details?: string | null;
+    } | null,
+): LimitReachedError | null => {
     if (!error || error.message !== 'limit_reached') {
         return null;
     }
@@ -132,5 +134,4 @@ export const limitAction = (payload: LimitReachedPayload): string => {
     return METRIC_COPY[payload.metric].upgrade;
 };
 
-const limitMessage = (payload: LimitReachedPayload): string =>
-    `${limitHeadline(payload)}. ${limitAction(payload)}`;
+const limitMessage = (payload: LimitReachedPayload): string => `${limitHeadline(payload)}. ${limitAction(payload)}`;

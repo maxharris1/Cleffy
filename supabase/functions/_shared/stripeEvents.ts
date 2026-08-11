@@ -221,8 +221,7 @@ export const handleStripeEvent = async (
             const sub = event.data.object as StripeSubscriptionLike;
             const customerId = idOf(sub.customer);
             const userId =
-                (await resolveUserId(store, customerId, sub.metadata)) ??
-                (await store.userIdForSubscription(sub.id));
+                (await resolveUserId(store, customerId, sub.metadata)) ?? (await store.userIdForSubscription(sub.id));
             if (!userId) {
                 store.log(`${event.type} ${event.id}: no user could be resolved`);
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
@@ -252,8 +251,7 @@ export const handleStripeEvent = async (
             }
             const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
             const userId =
-                (await resolveUserId(store, customerId, sub.metadata)) ??
-                (await store.userIdForSubscription(sub.id));
+                (await resolveUserId(store, customerId, sub.metadata)) ?? (await store.userIdForSubscription(sub.id));
             if (!userId) {
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
             }

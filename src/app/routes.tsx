@@ -19,9 +19,7 @@ const ViewerPage = lazy(() => import('@/features/viewer/ViewerPage').then((m) =>
 
 // Lazy: billing is a rarely-visited surface — keep Stripe copy and the pricing
 // dialog out of the shell bundle that every session pays for.
-const SettingsPage = lazy(() =>
-    import('@/features/billing/SettingsPage').then((m) => ({ default: m.SettingsPage })),
-);
+const SettingsPage = lazy(() => import('@/features/billing/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 
 const ViewerFallback = () => (
     <main className="flex min-h-full items-center justify-center p-8">

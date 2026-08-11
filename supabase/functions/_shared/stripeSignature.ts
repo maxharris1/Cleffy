@@ -14,11 +14,7 @@
  */
 
 export type SignatureFailure =
-    | 'missing_header'
-    | 'malformed_header'
-    | 'no_v1_signature'
-    | 'timestamp_out_of_tolerance'
-    | 'signature_mismatch';
+    'missing_header' | 'malformed_header' | 'no_v1_signature' | 'timestamp_out_of_tolerance' | 'signature_mismatch';
 
 export type SignatureCheck = { ok: true } | { ok: false; reason: SignatureFailure };
 
@@ -79,28 +75,17 @@ export const parseSignatureHeader = (header: string): ParsedSignatureHeader => {
 };
 
 /** HMAC-SHA256 of `${timestamp}.${payload}`, hex-encoded — Stripe's v1 scheme. */
-export const computeStripeSignature = async (
-    timestamp: number,
-    payload: string,
-    secret: string,
-): Promise<string> => {
-    const key = await crypto.subtle.importKey(
-        'raw',
-        encoder.encode(secret),
-        { name: 'HMAC', hash: 'SHA-256' },
-        false,
-        ['sign'],
-    );
+export const computeStripeSignature = async (timestamp: number, payload: string, secret: string): Promise<string> => {
+    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, [
+        'sign',
+    ]);
     const mac = await crypto.subtle.sign('HMAC', key, encoder.encode(`${timestamp}.${payload}`));
     return toHex(mac);
 };
 
 /** Builds a valid `Stripe-Signature` header — used by tests and `stripe listen` parity checks. */
-export const buildSignatureHeader = async (
-    timestamp: number,
-    payload: string,
-    secret: string,
-): Promise<string> => `t=${timestamp},v1=${await computeStripeSignature(timestamp, payload, secret)}`;
+export const buildSignatureHeader = async (timestamp: number, payload: string, secret: string): Promise<string> =>
+    `t=${timestamp},v1=${await computeStripeSignature(timestamp, payload, secret)}`;
 
 /**
  * `payload` MUST be the raw request body exactly as received — re-serializing

@@ -33,6 +33,7 @@ import {
 } from '@/features/library/tagsService';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
+import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
@@ -356,7 +357,9 @@ export const LibraryPage = () => {
                             {query.trim() || favoritesOnly || activeTagId
                                 ? `${visible?.length ?? 0} of ${documents.length}`
                                 : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId ? ' · showing latest 100' : null}
+                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId
+                                ? ' · showing latest 100'
+                                : null}
                         </p>
                     </div>
 
@@ -572,17 +575,29 @@ const ScoreRow = ({
             <div className="group flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40">
                 <div className="flex min-w-0 flex-1 items-center gap-4 py-3.5">
                     <div className="min-w-0 flex-1">
-                        <Link
-                            to={`/doc/${doc.id}`}
-                            className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
-                        >
-                            {stripComposer ? displayTitleOf(doc.title) : doc.title}
-                        </Link>
+                        <div className="flex min-w-0 items-center gap-2">
+                            <Link
+                                to={`/doc/${doc.id}`}
+                                className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
+                            >
+                                {stripComposer ? displayTitleOf(doc.title) : doc.title}
+                            </Link>
+                            {/* Past the free cap: still readable and exportable, just not writable. */}
+                            {doc.archived_at ? (
+                                <span className="shrink-0" title="Read-only — over your plan’s score limit">
+                                    <Badge tone="warn">Archived</Badge>
+                                </span>
+                            ) : null}
+                        </div>
                         {hasTags ? (
                             <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 {visibleTags.map((tag, i) => (
                                     <span key={tag.id} className="inline-flex items-center gap-1.5">
-                                        {i > 0 ? <span className="text-stone-300" aria-hidden="true">·</span> : null}
+                                        {i > 0 ? (
+                                            <span className="text-stone-300" aria-hidden="true">
+                                                ·
+                                            </span>
+                                        ) : null}
                                         <button
                                             type="button"
                                             onClick={() => onFilterTag(tag.id)}
@@ -634,9 +649,7 @@ const ScoreRow = ({
                 >
                     <TagIcon size={16} />
                 </button>
-                {isOwner ? (
-                    <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} />
-                ) : null}
+                {isOwner ? <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} /> : null}
             </div>
         </li>
     );

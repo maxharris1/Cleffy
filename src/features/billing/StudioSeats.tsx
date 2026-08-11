@@ -101,9 +101,7 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
 
             {!studio ? (
                 <>
-                    <p className="mt-2 text-sm text-stone-600">
-                        Name your studio to start adding teachers.
-                    </p>
+                    <p className="mt-2 text-sm text-stone-600">Name your studio to start adding teachers.</p>
                     <Button
                         size="sm"
                         className="mt-3"

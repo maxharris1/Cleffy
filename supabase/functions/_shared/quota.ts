@@ -1,82 +1,51 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import {
-    isFairUseCap,
-    isUnlimited,
-    limitReachedBody,
+    enforceQuota,
     type Entitlements,
-    type LimitReachedBody,
+    type EnforceOutcome,
+    type QuotaBackend,
     type UsageMetric,
 } from './entitlements.ts';
 
 /**
- * The metered gate. Every expensive endpoint calls `enforce` BEFORE doing any
- * work, and nothing about the decision comes from the client.
+ * Postgres-backed implementation of the metered gate.
  *
- * Both halves run in Postgres: get_entitlements() resolves the tier (including
- * Studio seats), and consume_quota() does the check and the increment in a
- * single statement whose ON CONFLICT ... WHERE re-evaluates the cap against the
- * locked row — so there is no check-then-write window between two concurrent
- * requests.
+ * Both halves of the decision run in the database: get_entitlements() resolves
+ * the tier (including Studio seats), and consume_quota() does the check and the
+ * increment in a single statement whose ON CONFLICT ... WHERE re-evaluates the
+ * cap against the locked row — so there is no check-then-write window between
+ * two concurrent requests.
+ *
+ * The decision logic itself lives in ./entitlements.ts behind QuotaBackend, so
+ * it is exercised by tests/billing/enforcement.test.ts rather than only in
+ * production.
  */
 
-export type EnforceResult =
-    | { ok: true; entitlements: Entitlements; count: number }
-    | { ok: false; status: number; body: LimitReachedBody | { error: string } };
-
-export const loadEntitlements = async (admin: SupabaseClient, userId: string): Promise<Entitlements | null> => {
-    const { data, error } = await admin.rpc('get_entitlements', { p_user: userId });
-    if (error || !data) {
-        return null;
-    }
-    return data as Entitlements;
-};
-
-export const enforce = async (
-    admin: SupabaseClient,
-    userId: string,
-    metric: UsageMetric,
-): Promise<EnforceResult> => {
-    const entitlements = await loadEntitlements(admin, userId);
-    if (!entitlements) {
-        // Fail closed: an unresolvable tier must not silently grant unlimited use.
-        return { ok: false, status: 500, body: { error: 'Could not resolve entitlements' } };
-    }
-
-    const limit = entitlements.limits[metric];
-    if (isUnlimited(limit)) {
-        return { ok: true, entitlements, count: 0 };
-    }
-
-    const { data, error } = await admin.rpc('consume_quota', {
-        p_user: userId,
-        p_metric: metric,
-        p_limit: limit,
-    });
-    if (error || !data) {
-        return { ok: false, status: 500, body: { error: 'Could not record usage' } };
-    }
-
-    const result = data as { ok: boolean; count: number; limit: number };
-    if (!result.ok) {
-        if (isFairUseCap(entitlements.tier, metric)) {
-            // A paying teacher hitting the fair-use ceiling is an anomaly worth
-            // seeing in the logs, not a growth prompt — the body carries
-            // `fair_use_cap` so the UI points at support instead of Checkout.
-            console.warn(
-                `fair-use cap hit: user=${userId} metric=${metric} tier=${entitlements.tier} ` +
-                    `count=${result.count} limit=${limit}`,
-            );
+export const supabaseQuotaBackend = (admin: SupabaseClient): QuotaBackend => ({
+    getEntitlements: async (userId) => {
+        const { data, error } = await admin.rpc('get_entitlements', { p_user: userId });
+        if (error || !data) {
+            return null;
         }
-        return {
-            ok: false,
-            status: 402,
-            body: limitReachedBody(metric, limit, entitlements.tier),
-        };
-    }
+        return data as Entitlements;
+    },
+    consumeQuota: async (userId, metric, limit) => {
+        const { data, error } = await admin.rpc('consume_quota', {
+            p_user: userId,
+            p_metric: metric,
+            p_limit: limit,
+        });
+        if (error || !data) {
+            return null;
+        }
+        const result = data as { ok: boolean; count: number };
+        return { ok: result.ok, count: result.count };
+    },
+});
 
-    return { ok: true, entitlements, count: result.count };
-};
+export const enforce = (admin: SupabaseClient, userId: string, metric: UsageMetric): Promise<EnforceOutcome> =>
+    enforceQuota(supabaseQuotaBackend(admin), userId, metric);
 
 /**
  * Give a consumed unit back when the work it paid for failed. Callers should use

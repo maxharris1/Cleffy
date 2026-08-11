@@ -52,8 +52,7 @@ export const METRIC_BY_FUNCTION: Record<string, UsageMetric> = {
 };
 
 /** Statuses that grant paid entitlements — must match get_entitlements(). */
-export const isEntitlingStatus = (status: string | null): boolean =>
-    status === 'active' || status === 'trialing';
+export const isEntitlingStatus = (status: string | null): boolean => status === 'active' || status === 'trialing';
 
 export const isUnlimited = (limit: number): boolean => limit < 0;
 
@@ -118,6 +117,61 @@ export const downgradeExpired = (entitlements: Entitlements, nowMs: number): Ent
         return entitlements;
     }
     return { ...freeEntitlements(entitlements.user_id), status: entitlements.status };
+};
+
+/**
+ * The metered gate, expressed over an injected backend so it can be driven by a
+ * fake in tests — the same shape `SyncEngine` uses for its API. ./quota.ts
+ * supplies the Postgres-backed implementation.
+ */
+export interface QuotaBackend {
+    getEntitlements: (userId: string) => Promise<Entitlements | null>;
+    /** Mirrors consume_quota(): null means the call itself failed. */
+    consumeQuota: (
+        userId: string,
+        metric: UsageMetric,
+        limit: number,
+    ) => Promise<{ ok: boolean; count: number } | null>;
+}
+
+export type EnforceOutcome =
+    | { ok: true; entitlements: Entitlements; count: number }
+    | { ok: false; status: number; body: LimitReachedBody | { error: string } };
+
+export const enforceQuota = async (
+    backend: QuotaBackend,
+    userId: string,
+    metric: UsageMetric,
+): Promise<EnforceOutcome> => {
+    const entitlements = await backend.getEntitlements(userId);
+    if (!entitlements) {
+        // Fail closed: an unresolvable tier must not silently grant unlimited use.
+        return { ok: false, status: 500, body: { error: 'Could not resolve entitlements' } };
+    }
+
+    const limit = entitlements.limits[metric];
+    if (isUnlimited(limit)) {
+        return { ok: true, entitlements, count: 0 };
+    }
+
+    const consumed = await backend.consumeQuota(userId, metric, limit);
+    if (!consumed) {
+        return { ok: false, status: 500, body: { error: 'Could not record usage' } };
+    }
+
+    if (!consumed.ok) {
+        if (isFairUseCap(entitlements.tier, metric)) {
+            // A paying teacher hitting the fair-use ceiling is an anomaly worth
+            // seeing in the logs, not a growth prompt.
+            console.warn(
+                `fair-use cap hit: user=${userId} metric=${metric} tier=${entitlements.tier} ` +
+                    `count=${consumed.count} limit=${limit}`,
+            );
+        }
+        return { ok: false, status: LIMIT_REACHED_STATUS, body: limitReachedBody(metric, limit, entitlements.tier) };
+    }
+
+    return { ok: true, entitlements, count: consumed.count };
 };
 
 export interface SubscriptionLike {

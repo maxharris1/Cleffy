@@ -35,7 +35,9 @@ export const SettingsPage = () => {
     const checkout = params.get('checkout');
 
     useEffect(() => {
-        void loadUsage().then(setUsage).catch(() => undefined);
+        void loadUsage()
+            .then(setUsage)
+            .catch(() => undefined);
     }, [entitlements]);
 
     useEffect(() => {
@@ -81,7 +83,10 @@ export const SettingsPage = () => {
             <h1 className="font-display text-2xl font-semibold text-stone-900">Settings</h1>
 
             {checkout === 'success' ? (
-                <p role="status" className="mt-4 rounded-xl border border-emerald-300/70 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-900">
+                <p
+                    role="status"
+                    className="mt-4 rounded-xl border border-emerald-300/70 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-900"
+                >
                     Thanks — your subscription is active. It can take a moment to appear here.
                 </p>
             ) : null}
@@ -119,7 +124,12 @@ export const SettingsPage = () => {
                             </Button>
                         )}
                         {entitlements?.source !== 'studio_member' ? (
-                            <Button size="sm" variant="secondary" disabled={portalBusy} onClick={() => void openPortal()}>
+                            <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={portalBusy}
+                                onClick={() => void openPortal()}
+                            >
                                 {portalBusy ? 'Opening…' : 'Manage subscription'}
                             </Button>
                         ) : null}

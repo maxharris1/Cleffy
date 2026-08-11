@@ -116,6 +116,61 @@ describe('LibraryPage', () => {
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
     });
 
+    it('marks archived scores, which stay open but read-only', async () => {
+        listDocuments.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), archived_at: '2026-08-01T00:00:00Z' },
+            ],
+            hasMore: false,
+        });
+        renderLibrary();
+
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        expect(screen.getAllByText('Archived')).toHaveLength(1);
+        // Still a link — archived means read-only, never hidden or deleted.
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toHaveAttribute(
+            'href',
+            '/doc/d2',
+        );
+    });
+
+    it('does not mark anything archived when nothing is', async () => {
+        renderLibrary();
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+    });
+
+    it('shows the limit-reached notice with an upgrade action instead of red error text', async () => {
+        const user = userEvent.setup();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        const openPricing = vi.fn();
+        const context: LibraryOutletContext = {
+            ...outletContext,
+            openPricing,
+            uploadLimit: new LimitReachedError({
+                code: 'limit_reached',
+                metric: 'cloud_scores',
+                limit: 3,
+                tier: 'free',
+            }),
+        };
+
+        render(
+            <MemoryRouter initialEntries={['/library']}>
+                <Routes>
+                    <Route element={<Outlet context={context} />}>
+                        <Route path="/library" element={<LibraryPage />} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        expect(await screen.findByText(/reached your 3 free cloud scores/)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'See plans' }));
+        expect(openPricing).toHaveBeenCalled();
+    });
+
     it('toggles a favorite through the service', async () => {
         const user = userEvent.setup();
         renderLibrary();

@@ -4,8 +4,7 @@ import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient, tryDownloadPdf } from '../_shared/imslp.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
-const uuidRe =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
@@ -119,12 +118,10 @@ Deno.serve(async (req) => {
             );
         }
 
-        const { error: uploadError } = await userClient.storage
-            .from('scores')
-            .upload(doc.storage_path, result.bytes, {
-                contentType: 'application/pdf',
-                upsert: true,
-            });
+        const { error: uploadError } = await userClient.storage.from('scores').upload(doc.storage_path, result.bytes, {
+            contentType: 'application/pdf',
+            upsert: true,
+        });
         if (uploadError) {
             await refund(admin, doc.owner_id, 'smart_imports');
             return jsonResponse({ error: `Storage upload failed: ${uploadError.message}` }, 502);
@@ -141,9 +138,6 @@ Deno.serve(async (req) => {
         });
     } catch (err) {
         await refund(admin, doc.owner_id, 'smart_imports');
-        return jsonResponse(
-            { error: err instanceof Error ? err.message : 'IMSLP download failed' },
-            502,
-        );
+        return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP download failed' }, 502);
     }
 });
