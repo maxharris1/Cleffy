@@ -17,6 +17,35 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
 | Export       | pdf-lib in a Web Worker; rotation-aware coordinate mapping (0/90/180/270 fixture-tested); identical perfect-freehand geometry as on screen (explicit-Q SVG paths — pdf-lib mangles `T` commands); WinAnsi-sanitized text; share sheet on mobile                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | PWA          | Installable, app-shell precache, iOS safe-areas, responsive layout (bottom toolbar on phones)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Smart import | Uploads accept images (magic-byte sniffed, wrapped into single-page PDFs via pdf-lib). A free client-side chroma pass finds colored-ink handwriting (connected components → glyph clusters → fingering-run hints, RLE masks); the `analyze-annotations` edge function classifies clusters with claude-sonnet-5 (strict forced tool; owner-only, rate-limited, degrades to strokes-only when unavailable); real PDF FreeText/Ink annotations convert exactly. Review previews through the history overlay; accepting commits native annotations in one undo batch and can rebuild the PDF with paper-colored patches (rotation-mapped, worker-side), replacing `{id}/original.pdf` with the untouched original kept as `pre-import-original.pdf`. `documents.content_rev` + a broadcast trigger keep caches and open collaborator tabs consistent |
+| Fingering diagrams | A Fingering tool (marquee on the live canvas; usable by view-only students, single-finger draggable) selects a chord/phrase; `src/features/fingering/` (lazy chunk) renders a top-down keyboard diagram — pressed keys tinted per hand with finger badges, phrase step-through — through ONE pure `KeyboardDiagram`, whatever populated the data. **Note source order**: Dexie-corrected cache → ScoreData (`regionFromScoreData`, when play-along analysis covers the selection fully) → `analyze-notes` vision → manual. OMR path is instant/offline/deterministic and shares pitches with playback; Phase-1 zero-bbox regions gate apply-to-score, ScoreData v2 staff bands synthesize notehead bboxes to unlock it. Vision remains the fallback (and the only reader for ink digits). Suggestion engine is Parncutt-subset + Viterbi; apply places teal `sf` text annotations. |
+
+### Fingering accuracy (educator review, 2026-08-05)
+
+The suggestion engine was audited against standard editions (RCM/ABRSM/Hanon conventions) and
+re-tuned; the canon is pinned by 27 golden/property tests in `engine/suggest.test.ts`: major and
+harmonic-minor scales in white- and black-key tonalities both hands, TWO-octave forms (the loop
+crossings, never a pass around 5), flat-key block chords (thumb-on-black is a passing-motion rule,
+not a held-shape rule — B♭ major is 1-3-5), arpeggios, Alberti bass (5-1-3-1), octave = 1-5, and a
+hand-size setting (small/standard/large scales the Parncutt span tables; unreachable spans render
+an honest "?" rather than a strained stretch). **Known, disclosed deviations**: chromatic runs come
+out as the sequential legato fingering rather than the mainstream 1-3 pattern; terminal notes of a
+fragment may take an end-of-phrase finger where prints show the loop finger (the UI tells users to
+select through the end of the phrase); LH 2-octave C major aligns one thumb on D instead of C
+(equal-cost tie). The panel frames every suggestion as "one good option — editions differ." When
+ScoreData covers the selection, notes come from play-along analysis (review label: "From play-along
+analysis"); vision is the silent fallthrough for empty/partial coverage. Unplayable same-onset packs
+are redistributed (low→L / high→R, melody peel) before Viterbi; the review modal shows live
+suggestions; the diagram labels notes moved for reach. Soft phrase resets discount transitions
+across ≥12-semitone leaps; monophonic 2nd-order history is a Viterbi tie-break; the diagram offers
+top-k Option 1/2/3 when distinct alternates exist. **Eval**: `engine/evalMetrics.ts` (match rate +
+IFR) runs on committed fixtures in CI. Optional `PIG_DIR=… node scripts/eval-fingering-pig.mjs` only
+inventories the [PIG dataset](https://beam.kisarazu.ac.jp/research/PianoFingeringDataset/) (register;
+research/non-profit; cite Nakamura, Saito & Yoshii 2020) — it does not run the fingering engine or
+compute IFR; not vendored, not required for CI.
+**Defer the vision ground-truth eval set** until usage shows how often vision still fires on clean
+analyzed scores — if unexpected vision traffic appears there, check the `measure_geometry_mismatch`
+warning rate before blaming the mapper. Vision remains required for phone-photo / failed-OMR docs and
+for reading Pencil ink digits.
 
 ## How to test (once Supabase setup from SETUP_SUPABASE.md is done)
 
@@ -59,7 +88,7 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
 
 | Piece         | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Analysis      | `services/omr-service/` (Audiveris 5.6.1 in Docker + Node wrapper) turns the PDF into **ScoreData**: notes split RH/LH by staff, ties merged, plus measure x-ranges and system y-bands parsed from the `.omr` project file, normalized to the same 0–1 page coords annotations use                                                                                                                                                      |
+| Analysis      | `services/omr-service/` (Audiveris 5.6.1 in Docker + Node wrapper) turns the PDF into **ScoreData** (v2): notes split RH/LH by staff, ties merged, measure x-ranges, system y-bands **and per-staff bands**, key signatures, and clefs — normalized to the same 0–1 page coords annotations use. v1 caches still parse. Re-run "Generate play-along" to pick up v2 fields. |
 | Orchestration | Upload/IMSLP import fire the `score-analyze` Edge Function (role check, page cap, stale-run guard, signed PDF URL) → OMR service queue → service-role write-back into `score_analyses` (status/progress/error lifecycle). Client polls lifecycle columns only; ScoreData travels once                                                                                                                                                   |
 | Playback      | Hand-rolled Web Audio engine: 25ms/120ms lookahead scheduler, 29 bundled Salamander anchors (nearest-anchor playbackRate pitch shift), per-hand gain buses (mute keeps scheduling → instant unmute), synthesized click bus, anchor-swap timebase for bpm/seek/count-in/gapless A-B loops                                                                                                                                                |
 | Playhead      | Imperative rAF controller inside the viewer's transformed wrapper: sweeping line + measure highlight, auto-follow with glide + suspend-on-gesture, tap-a-measure-to-seek (pan tool / read-only), loop-range tint. Rides the engraved chord columns (Audiveris slot data in `measures[].sl`) so the line sits on each chord as it sounds; linear fallback without slots. Measure number is the only per-frame state that touches React   |
@@ -67,13 +96,39 @@ Built across six milestones, one commit each (M0–M6 in `git log`).
 | Looping       | One on/off toggle — no arming. Switching it on lays a four-bar range at the playhead, drawn on the score as an amber band with end brackets and a "Loop" tag; a range row in the transport nudges either end by a bar or snaps the start to the playhead                                                                                                                                                                                |
 | Musicality    | Printed dynamics (pp…fff, sfz accents, `<sound dynamics>`) drive velocities through a perceptual v^1.6 gain curve; grace notes play as crushed acciaccaturas; metronome marks convert beat-unit → quarter-BPM; each sample's codec padding **and** its attack rise time are measured at decode time, and notes start early by that rise so the note is _heard_ on the click rather than beginning there (bass anchors need up to 25 ms) |
 
-**Known v1 limitations** (all surfaced as ScoreData `warnings` where applicable): repeats /
-D.C. / D.S. are ignored (linear playthrough); one global tempo (score tempo marks beyond the
-first are not followed); hairpin crescendos are not interpolated (stepwise dynamics only);
-OMR accuracy depends on scan quality — clean typeset PDFs work best, and wrong notes are a
+**⚠️ Deploy the app before the OMR service.** ScoreData is now **v3**. The app rejects any
+payload newer than its own `SCORE_DATA_VERSION` — `parseScoreData` returns null, the row caches
+as ready with no score, and the viewer sticks on a generic "internal" failure that Retry cannot
+clear. A v3-aware client reads v1/v2/v3 fine, so client-first is safe and service-first is not.
+
+**Musicality (v3).** Dynamics resolve per `(tick, staff)` rather than from one mutable value
+walked in document order, so a left-hand `p` no longer overwrites the right hand's `f` from the
+next bar on; the part is classified once as staff-split or not, and independence is sticky.
+Hairpins (wedges **and** textual `cresc.`/`dim.`) interpolate. Articulation gates sounding
+duration — staccato 0.5, portato 0.7, plain 0.9, tenuto/slur 1.0 — applied once per tie chain,
+from the marking that closes it. A misread time signature is detected from the over-length bars
+and corrected before padding (`meter_corrected` / `meter_suspect`). Tempo is a map, not a
+scalar: every printed mark, Italian headings inferred as quarter-BPM and marked `tempo_inferred`,
+and rit./accel./a tempo pre-discretized to a point per beat. Fermatas are clock stops
+(`holds`), so a note sounding across one rings through it.
+
+**Repeats and voltas are performed as written.** Barline marks resolve into a performance
+order and the score is unrolled in `buildScoreData`, after the geometry zip — a repeated bar is
+a clone that keeps its page position, so the playhead sweeps the same printed bar again for
+free. `measures[].srcIndex` names the engraved bar, and anything reasoning about the PAGE
+rather than the performance must group by it (`regionFromScoreData` does; getting this wrong
+silently drops OMR fingering to the paid vision path). Unresolvable structure, or a projected
+length past the 2000-measure schema cap, degrades wholesale to linear.
+
+**Known limitations** (surfaced as ScoreData `warnings`, and now shown in the transport):
+D.C. / D.S. / Coda / Fine are ignored — they arrive as text Audiveris emits unreliably, and a
+wrong repeat misplaces eight bars where a wrong D.S. reorders pages; pedal, ornaments and swing
+feel are not modelled; grace-note nuance is blocked on
+Audiveris emitting `<grace>` at all, which it did not do once across an entire 8198-note score.
+OMR accuracy still depends on scan quality — clean typeset PDFs work best, and wrong notes are a
 per-measure OMR limitation, not a playback bug. Geometry failures degrade gracefully: audio
-still plays with the playhead hidden. Re-run "Generate play-along" on older scores to pick up
-slot/dynamics data produced by the updated OMR service.
+still plays with the playhead hidden. **Nothing re-analyzes an existing document automatically** —
+the transport compares the stored `svc-<n>` against the client's and offers a regenerate.
 
 ### Play-along test script
 

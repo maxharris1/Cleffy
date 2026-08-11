@@ -89,7 +89,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [docId]);
 
     // Play-along: analysis lifecycle + the audio engine for this document.
-    const { state: analysisState, generate } = useScoreAnalysis(docId, true);
+    const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, true);
     const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
 
     useEffect(() => {
@@ -232,6 +232,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                             onStatus,
                             onPeers,
                             onDocReplaced,
+                            onScoreAnalysis: applyBroadcast,
                         }}
                     />
                 </PdfProvider>

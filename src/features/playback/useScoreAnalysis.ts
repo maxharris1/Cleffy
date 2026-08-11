@@ -7,6 +7,7 @@ import {
     loadCachedScoreAnalysis,
     requestScoreAnalysis,
 } from '@/features/playback/scoreAnalysisService';
+import type { ScoreAnalysisBroadcast } from '@/sync/wire';
 import type { ScoreData } from '@/types/scoreData';
 
 export type ScoreAnalysisState =
@@ -14,31 +15,35 @@ export type ScoreAnalysisState =
     | { kind: 'none' } // no analysis requested yet
     | { kind: 'pending' }
     | { kind: 'processing'; progress: number | null }
-    | { kind: 'ready'; score: ScoreData; bpmDefault: number | null; bpmOverride: number | null }
+    | {
+          kind: 'ready';
+          score: ScoreData;
+          bpmDefault: number | null;
+          bpmOverride: number | null;
+          /** Which engine produced this, so a stale analysis can offer a re-run. */
+          engineVersion: string | null;
+      }
     | { kind: 'failed'; code: string };
 
-const POLL_MS = 5000;
+/** Fallback poll while pending/processing — Realtime is primary. */
+const POLL_MS = 30_000;
 
 /**
  * Lifecycle of a document's play-along analysis: fetch → poll while the OMR
- * service works (5s, only while the tab is visible) → deliver validated
- * ScoreData, with the Dexie cache covering offline opens. `generate()`
- * requests/retries analysis (owner/editor only — RLS backstops the UI).
+ * service works (30s fallback; Realtime drives sub-second updates) → deliver
+ * validated ScoreData, with the Dexie cache covering offline opens.
  */
 /** How many polls to spend after open while status is still `none` — covers the
  * race where LibraryShell fires requestScoreAnalysis then navigates before the
- * score_analyses row exists (6 × 5 s ≈ 30 s window). A countdown rather than a
- * wall-clock deadline keeps render pure (react-hooks/purity). */
+ * score_analyses row exists (6 × 30 s is long; bootstrap uses a shorter cadence). */
 const BOOTSTRAP_POLLS = 6;
+const BOOTSTRAP_POLL_MS = 5_000;
 
 export const useScoreAnalysis = (docId: string, enabled: boolean) => {
     const [state, setState] = useState<ScoreAnalysisState>({ kind: enabled ? 'none' : 'unavailable' });
     const aliveRef = useRef(true);
     const [bootstrapPollsLeft, setBootstrapPollsLeft] = useState(BOOTSTRAP_POLLS);
 
-    // Reset synchronously when the document (or availability) changes —
-    // during render, per the React "adjusting state" pattern, so the old
-    // score never flashes against the new document.
     const [resetKey, setResetKey] = useState(`${docId}:${enabled}`);
     const key = `${docId}:${enabled}`;
     if (resetKey !== key) {
@@ -58,7 +63,6 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
             try {
                 status = await fetchScoreAnalysisStatus(docIdNow);
             } catch {
-                // Offline: a cached ready analysis still plays.
                 const cached = await loadCachedScoreAnalysis(docIdNow).catch(() => null);
                 if (cached?.status === 'ready' && cached.score) {
                     set({
@@ -66,6 +70,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                         score: cached.score,
                         bpmDefault: cached.bpmDefault,
                         bpmOverride: cached.bpmOverride ?? null,
+                        engineVersion: cached.engineVersion,
                     });
                 } else {
                     set({ kind: 'unavailable' });
@@ -92,7 +97,6 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                 return;
             }
 
-            // ready — serve from cache when it's fresher than the row's last update.
             const cached = await loadCachedScoreAnalysis(docIdNow).catch(() => null);
             if (cached?.status === 'ready' && cached.score && cached.fetchedAt >= status.updatedAt) {
                 set({
@@ -100,14 +104,20 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                     score: cached.score,
                     bpmDefault: cached.bpmDefault,
                     bpmOverride: cached.bpmOverride ?? null,
+                    engineVersion: cached.engineVersion,
                 });
                 return;
             }
             const full = await fetchScoreAnalysisFull(docIdNow).catch(() => null);
             if (full?.status === 'ready' && full.score) {
-                set({ kind: 'ready', score: full.score, bpmDefault: full.bpmDefault, bpmOverride: full.bpmOverride ?? null });
+                set({
+                    kind: 'ready',
+                    score: full.score,
+                    bpmDefault: full.bpmDefault,
+                    bpmOverride: full.bpmOverride ?? null,
+                    engineVersion: full.engineVersion,
+                });
             } else {
-                // Row said ready but the payload didn't validate — treat as failure.
                 set({ kind: 'failed', code: 'internal' });
             }
         },
@@ -124,23 +134,21 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         };
     }, [docId, enabled, applyStatus]);
 
-    // Poll while a job is in flight, and briefly while `none` after open so we
-    // catch analyses started from the library before the row was visible.
     const awaitingBootstrap = state.kind === 'none' && bootstrapPollsLeft > 0;
     const inFlight = state.kind === 'pending' || state.kind === 'processing' || awaitingBootstrap;
     useEffect(() => {
         if (!inFlight || !enabled) {
             return;
         }
+        const interval = awaitingBootstrap ? BOOTSTRAP_POLL_MS : POLL_MS;
         const timer = setInterval(() => {
             if (awaitingBootstrap) {
-                // Spend the bootstrap budget so `none` documents don't poll forever.
                 setBootstrapPollsLeft((left) => (left > 0 ? left - 1 : 0));
             }
             if (document.visibilityState === 'visible') {
                 void applyStatus(docId);
             }
-        }, POLL_MS);
+        }, interval);
         return () => clearInterval(timer);
     }, [inFlight, awaitingBootstrap, enabled, docId, applyStatus]);
 
@@ -150,7 +158,15 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!aliveRef.current) {
             return;
         }
-        if (!result.ok && result.code !== 'already_running') {
+        if (!result.ok && result.code === 'already_running') {
+            return;
+        }
+        // backlog_full — show copy, Generate/Retry remains available via failed UI.
+        if (!result.ok && result.code === 'backlog_full') {
+            setState({ kind: 'failed', code: 'backlog_full' });
+            return;
+        }
+        if (!result.ok) {
             setState({ kind: 'failed', code: result.code ?? 'internal' });
         }
     }, [docId]);
@@ -159,5 +175,33 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         void applyStatus(docId);
     }, [applyStatus, docId]);
 
-    return { state, generate, refresh };
+    /** Apply trimmed realtime payload; only fetch full ScoreData on ready. */
+    const applyBroadcast = useCallback(
+        (msg: ScoreAnalysisBroadcast) => {
+            if (msg.document_id !== docId || !aliveRef.current) {
+                return;
+            }
+            switch (msg.status) {
+                case 'pending':
+                    setState({ kind: 'pending' });
+                    return;
+                case 'processing':
+                    setState({ kind: 'processing', progress: msg.progress ?? null });
+                    return;
+                case 'failed':
+                    setState({ kind: 'failed', code: msg.error ?? 'internal' });
+                    return;
+                case 'ready':
+                    void applyStatus(docId);
+                    return;
+                default: {
+                    const _exhaustive: never = msg.status;
+                    return _exhaustive;
+                }
+            }
+        },
+        [docId, applyStatus],
+    );
+
+    return { state, generate, refresh, applyBroadcast };
 };

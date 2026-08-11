@@ -21,3 +21,6 @@ supabase/.branches/
 live-*.png
 verify-*.png
 e2e-shots/
+
+# local secrets (service accounts, etc.)
+.secrets/

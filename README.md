@@ -19,6 +19,15 @@ sweeping the actual PDF, auto-follow scrolling, tempo control, count-in, metrono
 tap-a-measure-to-seek, and per-hand mute/volume — so a student can practice one hand while
 Cleffy plays the other.
 
+**Fingering diagrams**: drag the Fingering tool over a chord or phrase and Cleffy renders a
+top-down piano keyboard showing exactly which fingers go on which keys, per hand, with
+step-through for phrases. The notes are read from the score with Claude vision (teacher fingering
+digits included — annotations are composited into the crop it reads) behind an editable review, or
+entered by hand on any score, offline. A built-in optimizer (Parncutt-style ergonomic model +
+dynamic programming) suggests fingerings for unmarked passages; suggestions preview on the page
+and apply as ordinary teal text annotations that sync, erase, undo, and export like everything
+else.
+
 ## Stack
 
 - **Frontend**: Vite + React 19 + TypeScript (strict), Tailwind CSS 4, PWA (installable, offline-capable)

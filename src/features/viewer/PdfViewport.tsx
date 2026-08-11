@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
@@ -16,7 +16,7 @@ import {
 } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
-import { InkController, type TextIntent } from '@/features/viewer/ink/InkController';
+import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
@@ -27,13 +27,18 @@ import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel } from '@/sync/realtimeChannel';
 import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
-import type { PresencePeer } from '@/sync/wire';
+import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
+
+/** Fingering feature loads on first use — keeps it out of the viewer bundle. */
+const FingeringFlow = lazy(() =>
+    import('@/features/fingering/FingeringFlow').then((m) => ({ default: m.FingeringFlow })),
+);
 
 /** Delay before re-rendering page bitmaps at a new zoom level (ms). */
 const RENDER_SETTLE_MS = 200;
@@ -70,6 +75,8 @@ export interface PdfViewportProps {
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
         onDocReplaced?: (contentRev: number) => void;
+        /** Play-along analysis status changed. */
+        onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
     };
 }
 
@@ -84,6 +91,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
     const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
+    const [fingeringSel, setFingeringSel] = useState<FingeringSelection | null>(null);
     const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
 
@@ -139,6 +147,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
+    const syncOnScoreAnalysis = sync?.onScoreAnalysis;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
     // Track viewport size.
@@ -198,6 +207,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 textIntentHandled.current = false;
                 setTextIntent(intent);
             },
+            onFingeringSelect: (selection) => setFingeringSel(selection),
         });
 
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
@@ -237,7 +247,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 if (!point) {
                     return;
                 }
-                const index = measureIndexAtPagePoint(feature.score, point.pageIndex, point.nx, point.ny);
+                // Bias to the pass being played, so tapping a repeated bar
+                // mid-second-pass does not throw the playhead back to the first.
+                const index = measureIndexAtPagePoint(
+                    feature.score,
+                    point.pageIndex,
+                    point.nx,
+                    point.ny,
+                    feature.getEngine()?.getPositionTicks() ?? 0,
+                );
                 if (index < 0) {
                     return;
                 }
@@ -280,6 +298,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     void engine?.sync();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
+                onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);
@@ -307,6 +326,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncOnStatus,
         syncOnPeers,
         syncOnDocReplaced,
+        syncOnScoreAnalysis,
     ]);
 
     // Playhead: imperative rAF controller over the two overlay divs below.
@@ -423,6 +443,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     // differ, canvases are CSS-stretched by wrapping pages in a scaling transform.
     const previewFactor = view.scale / renderScale;
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
+    const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
@@ -484,6 +505,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         </div>
                     ) : null}
                     {effectiveReadOnly ? null : <Toolbar store={annotationStore} />}
+                    {readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
                     {!effectiveReadOnly && textIntent && textIntentLayout ? (
                         <TextEditorOverlay
                             intent={textIntent}
@@ -496,6 +518,20 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             }}
                         />
                     ) : null}
+                    {fingeringSel && fingeringLayout ? (
+                        <Suspense fallback={null}>
+                            <FingeringFlow
+                                key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}
+                                docId={docId}
+                                selection={fingeringSel}
+                                layout={fingeringLayout}
+                                store={annotationStore}
+                                canWrite={!readOnly}
+                                score={playbackScore}
+                                onClose={() => setFingeringSel(null)}
+                            />
+                        </Suspense>
+                    ) : null}
                     <ZoomControls
                         onZoomBy={(factor) => {
                             const { view: v, setView } = useViewerStore.getState();
@@ -506,6 +542,39 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     {layout.layouts.length > 1 ? <PageChip pageCount={layout.layouts.length} /> : null}
                 </>
             )}
+        </div>
+    );
+};
+
+/**
+ * View-only members get no Toolbar, but the fingering diagram is FOR students —
+ * this pill is their way into the (read-only, never-writes) selection tool.
+ */
+const ReadOnlyFingeringToggle = () => {
+    const tool = useViewerStore((s) => s.tool);
+    const active = tool === 'fingering';
+    return (
+        <div
+            data-ui-overlay
+            className="pointer-events-none absolute inset-x-0 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:bottom-auto sm:top-3"
+        >
+            <button
+                type="button"
+                aria-pressed={active}
+                title={active ? 'Stop selecting' : 'Fingering — drag over a chord or phrase'}
+                onClick={() => useViewerStore.getState().setTool(active ? 'pan' : 'fingering')}
+                className={`pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg backdrop-blur transition ${
+                    active
+                        ? 'border-accent bg-accent-soft text-accent'
+                        : 'border-stone-200 bg-white/95 text-stone-600 hover:bg-white'
+                }`}
+            >
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+                    <rect x="4" y="5" width="16" height="14" rx="1.5" />
+                    <path strokeLinecap="round" strokeWidth="2.5" d="M9.33 5.5v6M14.67 5.5v6" />
+                </svg>
+                Fingering
+            </button>
         </div>
     );
 };

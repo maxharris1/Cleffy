@@ -11,6 +11,7 @@ const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }
     { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
     { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
+    { tool: 'fingering', label: 'Fingering — drag over a chord or phrase', short: 'Hands', icon: <FingeringIcon /> },
 ];
 
 const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
@@ -214,6 +215,17 @@ function TextIcon() {
     return (
         <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
             <path strokeLinecap="round" strokeLinejoin="round" d="M5 7V5h14v2M12 5v14M9 19h6" />
+        </svg>
+    );
+}
+
+function FingeringIcon() {
+    // Three white keys, two black keys straddling the dividers (piano octave slice).
+    return (
+        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+            <rect x="4" y="5" width="16" height="14" rx="1.5" />
+            <path strokeLinecap="round" strokeWidth="2.5" d="M9.33 5.5v6M14.67 5.5v6" />
+            <path strokeLinecap="round" d="M9.33 13.5v5M14.67 13.5v5" className="opacity-50" />
         </svg>
     );
 }

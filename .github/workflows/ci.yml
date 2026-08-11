@@ -26,13 +26,19 @@ jobs:
             run:
                 working-directory: services/omr-service
         steps:
+            # Full history: check:engine-version diffs against the base ref, and a
+            # depth-1 clone has no origin/main to diff against — the script would
+            # silently skip and let an unbumped ENGINE_VERSION through.
             - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
             - uses: actions/setup-node@v4
               with:
                   node-version: 22
                   cache: npm
                   cache-dependency-path: services/omr-service/package-lock.json
             - run: npm ci
+            - run: npm run check:engine-version
             - run: npm run typecheck
             - run: npm run test
             - run: npm run build

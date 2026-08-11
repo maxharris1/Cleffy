@@ -21,7 +21,7 @@ const makeEngine = () => {
 const renderBar = (overrides: Partial<TransportBarProps> = {}) => {
     const engine = makeEngine();
     const props: TransportBarProps = {
-        state: { kind: 'ready', score: tinyScore, bpmDefault: 90, bpmOverride: null },
+        state: { kind: 'ready', score: tinyScore, bpmDefault: 90, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' },
         role: 'owner',
         onGenerate: vi.fn(),
         getEngine: () => engine,
@@ -115,12 +115,12 @@ describe('TransportBar ready controls', () => {
                 { tick: 960, num: 3, den: 8 },
             ],
         };
-        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByLabelText('Time signature 4/4')).toBeInTheDocument();
 
         cleanup();
         setStore(() => useViewerStore.getState().setCurrentMeasureIndex(3)); // tick 1440
-        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: shifting, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByLabelText('Time signature 3/8')).toBeInTheDocument();
     });
 
@@ -165,7 +165,7 @@ describe('TransportBar ready controls', () => {
 
     it('disables the left hand for single-staff scores', () => {
         const rhOnly = { ...tinyScore, notes: tinyScore.notes.filter((n) => n.h === 0) };
-        renderBar({ state: { kind: 'ready', score: rhOnly, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: rhOnly, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByRole('button', { name: /mute left hand/i })).toBeDisabled();
     });
 
@@ -214,7 +214,7 @@ describe('TransportBar ready controls', () => {
     it('shows the dotted-quarter equivalent for compound meters', () => {
         setStore(() => useViewerStore.getState().setBpm(90));
         const compound = { ...tinyScore, timeSignatures: [{ tick: 0, num: 6, den: 8 }] };
-        renderBar({ state: { kind: 'ready', score: compound, bpmDefault: null, bpmOverride: null } });
+        renderBar({ state: { kind: 'ready', score: compound, bpmDefault: null, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' } });
         expect(screen.getByText(/♩· = 60/)).toBeInTheDocument();
 
         cleanup();
@@ -228,5 +228,122 @@ describe('TransportBar ready controls', () => {
         const resume = screen.getByRole('button', { name: /resume auto-follow/i });
         await userEvent.click(resume);
         expect(useViewerStore.getState().followMode).toBe('on');
+    });
+});
+
+describe('analysis warnings', () => {
+    const withWarnings = (warnings: string[]) =>
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: { ...tinyScore, warnings },
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+            },
+        });
+
+    it('says nothing when the analysis was clean', () => {
+        withWarnings([]);
+        expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
+    });
+
+    it('discloses that repeats were dropped, collapsed until asked', () => {
+        withWarnings(['repeats_ignored']);
+        const toggle = screen.getByRole('button', { name: /1 thing to know/i });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.queryByText(/first and second endings/i)).toBeNull();
+    });
+
+    it('explains each warning once expanded', async () => {
+        withWarnings(['repeats_ignored', 'measure_underfull']);
+        await userEvent.click(screen.getByRole('button', { name: /2 things to know/i }));
+        expect(screen.getByText(/first and second endings/i)).toBeInTheDocument();
+        expect(screen.getByText(/padded, so notes there may fall early/i)).toBeInTheDocument();
+    });
+
+    it('ranks the most misleading warning first', async () => {
+        withWarnings(['grace_notes_skipped', 'no_geometry', 'repeats_ignored']);
+        await userEvent.click(screen.getByRole('button', { name: /3 things to know/i }));
+        const items = screen.getAllByRole('listitem').map((li) => li.textContent ?? '');
+        expect(items[0]).toMatch(/repeats/i);
+    });
+
+    it('ignores codes it has no copy for rather than leaking them raw', () => {
+        withWarnings(['something_new_from_the_service']);
+        expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
+        expect(screen.queryByText(/something_new_from_the_service/)).toBeNull();
+    });
+});
+
+describe('tempo disclosure and stale analyses', () => {
+    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine: string | null = 'audiveris-5.6.1+svc-5') =>
+        renderBar({
+            state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },
+            ...over,
+        });
+
+    it('marks a tempo estimated from a word rather than passing it off as printed', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 0, bpm: 94, src: 'word' }] });
+        expect(screen.getByText('est.')).toBeInTheDocument();
+    });
+
+    it('does not mark a printed tempo as estimated', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 0, bpm: 94, src: 'metronome' }] });
+        expect(screen.queryByText('est.')).toBeNull();
+    });
+
+    it('offers to regenerate an analysis made by an older engine', async () => {
+        const onGenerate = vi.fn();
+        ready({ onGenerate }, tinyScore, 'audiveris-5.6.1+svc-2');
+        await userEvent.click(screen.getByRole('button', { name: /regenerate it/i }));
+        expect(onGenerate).toHaveBeenCalled();
+    });
+
+    it('says nothing when the analysis is current', () => {
+        ready();
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+    });
+
+    it('offers a re-run for an analysis with no engine stamp at all', () => {
+        // The oldest rows predate version stamping; they are the ones that most
+        // need regenerating, and a null must not read as "current".
+        ready({}, tinyScore, null);
+        expect(screen.getByRole('button', { name: /regenerate it/i })).toBeInTheDocument();
+    });
+
+    it('does not offer a re-run to someone who cannot start one', () => {
+        ready({ role: 'viewer' }, tinyScore, 'audiveris-5.6.1+svc-2');
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+    });
+});
+
+describe('repeated bars in the measure counter', () => {
+    const shift = tinyScore.totalTicks;
+    const repeated = {
+        ...tinyScore,
+        measures: [
+            ...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })),
+            ...tinyScore.measures.slice(0, 3).map((m, i) => ({ ...m, srcIndex: i, tick: m.tick + shift })),
+        ].sort((a, b) => a.tick - b.tick),
+        totalTicks: shift * 2,
+    };
+
+    const renderWith = (score: typeof tinyScore) =>
+        renderBar({
+            state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' },
+        });
+
+    it('marks which pass of a repeated bar the loop range names', async () => {
+        renderWith(repeated);
+        // The loop labels name bars; a bar performed twice must say which time.
+        act(() => useViewerStore.getState().setLoopRange({ a: 0, b: 2 }));
+        expect(document.body.textContent).toMatch(/\(1st\)/);
+    });
+
+    it('leaves bar numbers alone when nothing repeats', () => {
+        renderWith(tinyScore);
+        act(() => useViewerStore.getState().setLoopRange({ a: 0, b: 2 }));
+        expect(document.body.textContent).not.toMatch(/\(1st\)|\(2nd\)/);
     });
 });

@@ -98,6 +98,48 @@ export const xAtTickInMeasure = (measure: ScoreMeasure, tick: number): number =>
 };
 
 /**
+ * Inverse of {@link xAtTickInMeasure}: tick within a measure at a normalized
+ * page x. Used by the fingering OMR populator to turn a marquee into a tick
+ * range. Clamps x to the measure span; pre-slot (header) x maps to the first
+ * chord column's tick.
+ */
+export const tickAtXInMeasure = (measure: ScoreMeasure, nx: number): number => {
+    const x = Math.min(measure.x1, Math.max(measure.x0, nx));
+    const slots = measure.sl;
+    if (!slots || slots.length === 0) {
+        const width = measure.x1 - measure.x0;
+        const frac = width <= 0 ? 0 : (x - measure.x0) / width;
+        return measure.tick + Math.round(frac * measure.dTicks);
+    }
+    const first = slots[0];
+    if (!first) {
+        return measure.tick;
+    }
+    if (x <= first.x) {
+        return measure.tick + first.t;
+    }
+    for (let i = 0; i + 1 < slots.length; i++) {
+        const a = slots[i];
+        const b = slots[i + 1];
+        if (a && b && x < b.x) {
+            const span = b.x - a.x;
+            const frac = span <= 0 ? 0 : (x - a.x) / span;
+            return measure.tick + Math.round(a.t + frac * (b.t - a.t));
+        }
+    }
+    const last = slots[slots.length - 1];
+    if (!last) {
+        return measure.tick;
+    }
+    const tail = measure.x1 - last.x;
+    if (tail <= 0) {
+        return measure.tick + last.t;
+    }
+    const frac = Math.min(1, (x - last.x) / tail);
+    return measure.tick + Math.round(last.t + frac * (measure.dTicks - last.t));
+};
+
+/**
  * Prev/next-measure stepping, with the standard transport nuance: stepping
  * back from >20% into a measure returns to that measure's own start first.
  * Returns the target start tick.
@@ -231,7 +273,19 @@ export const measureEndTick = (measures: readonly ScoreMeasure[], index: number)
  * system whose y-band contains the point, then the measure whose x-range
  * contains it. Returns the measure index, or -1.
  */
-export const measureIndexAtPagePoint = (score: ScoreData, pageIndex: number, nx: number, ny: number): number => {
+export const measureIndexAtPagePoint = (
+    score: ScoreData,
+    pageIndex: number,
+    nx: number,
+    ny: number,
+    /**
+     * Where playback currently is. A printed bar inside a repeat is performed
+     * more than once, and tapping it should seek to the pass being played, not
+     * always back to the first. Omit for the plain first-match behaviour.
+     */
+    nearTick?: number,
+): number => {
+    let best = -1;
     for (let sysIndex = 0; sysIndex < score.systems.length; sysIndex++) {
         const system = score.systems[sysIndex];
         if (!system || system.page !== pageIndex || ny < system.y0 || ny > system.y1) {
@@ -239,10 +293,162 @@ export const measureIndexAtPagePoint = (score: ScoreData, pageIndex: number, nx:
         }
         for (let i = 0; i < score.measures.length; i++) {
             const measure = score.measures[i];
-            if (measure && measure.sys === sysIndex && nx >= measure.x0 && nx <= measure.x1) {
+            if (!measure || measure.sys !== sysIndex || nx < measure.x0 || nx > measure.x1) {
+                continue;
+            }
+            if (nearTick === undefined) {
                 return i;
+            }
+            const bestMeasure = best >= 0 ? score.measures[best] : undefined;
+            if (
+                !bestMeasure ||
+                Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)
+            ) {
+                best = i;
             }
         }
     }
-    return -1;
+    return best;
 };
+
+/**
+ * Tick↔seconds conversion under a tempo map.
+ *
+ * Segment `i` runs from `ticks[i]` to `ticks[i+1]` at `spt[i]` seconds per tick.
+ * `at[i]` is the wall time of ARRIVING at `ticks[i]`, and `hold[i]` is the pause
+ * taken on arrival there before moving on — a fermata stops the clock rather
+ * than bending the tempo, so tick space stays untouched and the metronome does
+ * not generate beats inside the pause.
+ *
+ * Everything is a prefix sum, so it is exactly invertible: no closed-form
+ * integral, and gradual tempo changes are already discretized by the writer.
+ */
+export interface TempoMap {
+    ticks: number[];
+    spt: number[];
+    at: number[];
+    hold: number[];
+}
+
+/** Practice-tempo scaling is a single multiplier over the whole map. */
+export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: number): TempoMap => {
+    const safeScale = scale > 0 && Number.isFinite(scale) ? scale : 1;
+    const tempos = score.tempos ?? [];
+    const holds = score.holds ?? [];
+
+    const boundaries = new Set<number>([0]);
+    for (const tempo of tempos) {
+        boundaries.add(tempo.tick);
+    }
+    for (const hold of holds) {
+        boundaries.add(hold.tick);
+    }
+    const ticks = [...boundaries].sort((a, b) => a - b);
+
+    const bpmAt = (tick: number): number => {
+        let bpm = score.defaultBpm ?? fallbackBpm;
+        for (const tempo of tempos) {
+            if (tempo.tick > tick) {
+                break;
+            }
+            bpm = tempo.bpm;
+        }
+        return bpm;
+    };
+    const holdBeatsAt = (tick: number): number => {
+        let beats = 0;
+        for (const hold of holds) {
+            if (hold.tick === tick) {
+                beats = Math.max(beats, hold.beats);
+            }
+        }
+        return beats;
+    };
+
+    const spt: number[] = [];
+    const hold: number[] = [];
+    const at: number[] = [];
+    for (let i = 0; i < ticks.length; i++) {
+        const tick = ticks[i] ?? 0;
+        const bpm = Math.max(1, bpmAt(tick) * safeScale);
+        spt.push(secondsPerTick(bpm));
+        // A hold is measured in beats, so it stretches with the practice tempo.
+        hold.push((holdBeatsAt(tick) * 60) / bpm);
+        if (i === 0) {
+            at.push(0);
+        } else {
+            const prev = i - 1;
+            at.push((at[prev] ?? 0) + (hold[prev] ?? 0) + ((tick - (ticks[prev] ?? 0)) * (spt[prev] ?? 0)));
+        }
+    }
+    return { ticks, spt, at, hold };
+};
+
+/** Index of the segment containing `tick` (0 for anything before the start). */
+const segmentAt = (map: TempoMap, tick: number): number => {
+    let lo = 0;
+    let hi = map.ticks.length - 1;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if ((map.ticks[mid] ?? 0) <= tick) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return lo;
+};
+
+/**
+ * Wall seconds at a tick. A hold sitting exactly on `tick` is NOT counted: the
+ * note there still starts on time, and only what comes after it is delayed —
+ * which is precisely what makes a fermata ring rather than arrive late.
+ * Extrapolates before tick 0, which the count-in needs.
+ */
+export const secondsAtTick = (map: TempoMap, tick: number): number => {
+    const first = map.ticks[0] ?? 0;
+    if (tick <= first) {
+        return (map.at[0] ?? 0) + (tick - first) * (map.spt[0] ?? 0);
+    }
+    const i = segmentAt(map, tick);
+    const base = map.at[i] ?? 0;
+    if (tick === (map.ticks[i] ?? 0)) {
+        return base;
+    }
+    return base + (map.hold[i] ?? 0) + (tick - (map.ticks[i] ?? 0)) * (map.spt[i] ?? 0);
+};
+
+/** Inverse of {@link secondsAtTick}; parks on a hold's tick for its duration. */
+export const tickAtSeconds = (map: TempoMap, seconds: number): number => {
+    const firstAt = map.at[0] ?? 0;
+    if (seconds <= firstAt) {
+        return (map.ticks[0] ?? 0) + (seconds - firstAt) / (map.spt[0] ?? 1);
+    }
+    let lo = 0;
+    let hi = map.at.length - 1;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if ((map.at[mid] ?? 0) <= seconds) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    const start = map.ticks[lo] ?? 0;
+    const elapsed = seconds - (map.at[lo] ?? 0) - (map.hold[lo] ?? 0);
+    if (elapsed <= 0) {
+        return start; // still inside the fermata — the playhead waits here
+    }
+    const tick = start + elapsed / (map.spt[lo] ?? 1);
+    const next = map.ticks[lo + 1];
+    return next !== undefined ? Math.min(tick, next) : tick;
+};
+
+/** Seconds per tick in force at a tick — for showing the tempo actually playing. */
+export const sptAtTick = (map: TempoMap, tick: number): number =>
+    map.spt[segmentAt(map, tick)] ?? map.spt[0] ?? secondsPerTick(DEFAULT_MAP_BPM);
+
+const DEFAULT_MAP_BPM = 100;
+
+/** Quarter-BPM in force at a tick, as the map is actually playing it. */
+export const bpmAtTick = (map: TempoMap, tick: number): number => 60 / (sptAtTick(map, tick) * TICKS_PER_QUARTER);

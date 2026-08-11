@@ -1,4 +1,4 @@
-import { pointSegmentDistanceSq, strokeBbox } from '@/features/viewer/geometry';
+import { pointSegmentDistanceSq, strokeBbox, type Bbox } from '@/features/viewer/geometry';
 import { isTextPayload, type Annotation } from '@/types/models';
 
 /**
@@ -61,6 +61,42 @@ export const hitTestAnnotation = (
         }
     }
     return false;
+};
+
+/**
+ * Approximate normalized bounding box of an annotation. `aspect` is the page's
+ * width/height ratio — scalar sizes (stroke w, text size) are normalized
+ * against page WIDTH, so projecting them onto the y axis multiplies by it.
+ * Text extents use the same per-char heuristic as hitTestAnnotation.
+ */
+export const annotationBboxNorm = (annotation: Annotation, aspect: number): Bbox => {
+    if (isTextPayload(annotation.payload)) {
+        const { x, y, text, size } = annotation.payload;
+        const lines = text.split('\n');
+        const widthN = Math.max(...lines.map((l) => l.length), 1) * size * 0.6;
+        const heightN = lines.length * size * 1.25 * aspect;
+        return [x, y, x + widthN, y + heightN];
+    }
+    const [minX, minY, maxX, maxY] = strokeBbox(annotation.payload.pts);
+    const rx = annotation.payload.w / 2;
+    const ry = rx * aspect;
+    return [minX - rx, minY - ry, maxX + rx, maxY + ry];
+};
+
+/** Annotations whose bbox intersects the normalized rect (touching counts). */
+export const annotationsInRect = (
+    annotations: Iterable<Annotation>,
+    rect: { x: number; y: number; w: number; h: number },
+    aspect: number,
+): Annotation[] => {
+    const hits: Annotation[] = [];
+    for (const annotation of annotations) {
+        const [minX, minY, maxX, maxY] = annotationBboxNorm(annotation, aspect);
+        if (minX <= rect.x + rect.w && maxX >= rect.x && minY <= rect.y + rect.h && maxY >= rect.y) {
+            hits.push(annotation);
+        }
+    }
+    return hits;
 };
 
 /** All annotations on a page hit by the point, topmost (newest) first. */

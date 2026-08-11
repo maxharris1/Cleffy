@@ -37,6 +37,8 @@ export interface OmrStack {
 export interface OmrSystem {
     y0: number;
     y1: number;
+    /** Per-staff bands (score order), page-normalized — kept for fingering bboxes. */
+    staves: Array<{ y0: number; y1: number }>;
     stacks: OmrStack[];
 }
 
@@ -140,6 +142,10 @@ const parseSheetXml = (xml: string, pageIndex: number): OmrSheet | null => {
             systems.push({
                 y0: clamp01((top - pad) / height),
                 y1: clamp01((bottom + pad) / height),
+                staves: staffSpans.map((s) => ({
+                    y0: clamp01(s.top / height),
+                    y1: clamp01(s.bottom / height),
+                })),
                 stacks,
             });
         }

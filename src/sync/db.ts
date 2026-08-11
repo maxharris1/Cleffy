@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 
+import type { RecognizedRegion } from '@/features/fingering/model';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import type { ScoreAnalysisStatus } from '@/types/database';
 import type { Annotation } from '@/types/models';
@@ -59,6 +60,21 @@ export interface CachedScoreAnalysis {
     fetchedAt: string;
 }
 
+/**
+ * Cached note-reading for one selected region (local-only, never synced).
+ * Recognition is the expensive step — cache the POST-REVIEW region (user
+ * corrections included) keyed by everything that could change the reading:
+ * the rect, the PDF revision, and the annotations composited into the crop.
+ */
+export interface FingeringRegionCache {
+    /** SHA-256 over docId | page | quantized rect | contentRev | annotationsHash. */
+    id: string;
+    docId: string;
+    page: number;
+    region: RecognizedRegion;
+    createdAt: string;
+}
+
 export class ScribblerDb extends Dexie {
     annotations!: Table<LocalAnnotation, string>;
     ops!: Table<PendingOp, number>;
@@ -66,6 +82,7 @@ export class ScribblerDb extends Dexie {
     pdfCache!: Table<CachedPdf, string>;
     annotationSnapshots!: Table<LocalAnnotationSnapshot, string>;
     scoreCache!: Table<CachedScoreAnalysis, string>;
+    fingeringRegions!: Table<FingeringRegionCache, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -89,6 +106,15 @@ export class ScribblerDb extends Dexie {
             pdfCache: 'docId',
             annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
             scoreCache: 'docId',
+        });
+        this.version(4).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
         });
     }
 }

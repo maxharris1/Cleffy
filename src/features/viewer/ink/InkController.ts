@@ -1,3 +1,4 @@
+import { MIN_SELECTION_CSS, rectFromPoints } from '@/features/fingering/selection';
 import {
     decimateStroke,
     viewportToPageClamped,
@@ -27,6 +28,12 @@ export interface TextIntent {
     existing: Annotation | null;
 }
 
+export interface FingeringSelection {
+    pageIndex: number;
+    /** Normalized page rect of the dragged marquee. */
+    rect: { x: number; y: number; w: number; h: number };
+}
+
 interface LiveStroke {
     strokeId: string;
     pageIndex: number;
@@ -54,6 +61,8 @@ const DECIMATE_CSS = 0.75;
  */
 export class InkController {
     private live: LiveStroke | null = null;
+    /** In-flight fingering marquee (page-anchored drag corners, normalized). */
+    private fingeringSel: { pageIndex: number; x0: number; y0: number; x1: number; y1: number } | null = null;
     private downX = 0;
     private downY = 0;
     private moved = false;
@@ -74,6 +83,7 @@ export class InkController {
             /** Viewport-local coords for a pointer event. */
             toLocal: (e: { clientX: number; clientY: number }) => { x: number; y: number };
             onTextIntent: (intent: TextIntent) => void;
+            onFingeringSelect: (selection: FingeringSelection) => void;
         },
     ) {
         this.unsubscribes = [
@@ -161,15 +171,19 @@ export class InkController {
     };
 
     private shouldInk(e: PointerEvent): boolean {
-        if (this.opts.isReadOnly()) {
-            return false;
-        }
         const { tool, fingerDraws } = useViewerStore.getState();
         if (tool === 'pan') {
             return false;
         }
-        if (e.pointerType === 'touch' && !fingerDraws) {
-            return false;
+        // The fingering tool only selects a region (never writes), so view-only
+        // members may use it and a single finger may drag the marquee.
+        if (tool !== 'fingering') {
+            if (this.opts.isReadOnly()) {
+                return false;
+            }
+            if (e.pointerType === 'touch' && !fingerDraws) {
+                return false;
+            }
         }
         // Only claim the pointer when it lands on a page.
         const { x, y } = this.opts.toLocal(e);
@@ -187,6 +201,17 @@ export class InkController {
         this.downY = y;
         this.moved = false;
 
+        if (tool === 'fingering') {
+            this.fingeringSel = {
+                pageIndex: point.pageIndex,
+                x0: point.nx,
+                y0: point.ny,
+                x1: point.nx,
+                y1: point.ny,
+            };
+            this.scheduleLiveRender();
+            return;
+        }
         if (tool === 'eraser') {
             this.opts.store.beginBatch();
             this.eraseAt(point.pageIndex, point.nx, point.ny);
@@ -227,6 +252,20 @@ export class InkController {
         }
 
         const tool = useViewerStore.getState().tool;
+        if (tool === 'fingering') {
+            const sel = this.fingeringSel;
+            const layout = sel ? this.opts.getLayout().layouts[sel.pageIndex] : undefined;
+            if (sel && layout) {
+                // Clamp to the anchor page, like an in-flight stroke.
+                const p = viewportToPageClamped(this.opts.getView(), layout, x, y);
+                if (p) {
+                    sel.x1 = p.nx;
+                    sel.y1 = p.ny;
+                    this.scheduleLiveRender();
+                }
+            }
+            return;
+        }
         if (tool === 'eraser') {
             const point = viewportToPagePoint(this.opts.getView(), this.opts.getLayout().layouts, x, y);
             if (point) {
@@ -276,6 +315,28 @@ export class InkController {
 
     private onUp(e: PointerEvent): void {
         const tool = useViewerStore.getState().tool;
+        if (tool === 'fingering') {
+            const sel = this.fingeringSel;
+            this.fingeringSel = null;
+            if (!sel) {
+                return;
+            }
+            this.renderPageLive(sel.pageIndex);
+            const layout = this.opts.getLayout().layouts[sel.pageIndex];
+            if (!this.moved || !layout) {
+                return;
+            }
+            const view = this.opts.getView();
+            const rect = rectFromPoints(sel.x0, sel.y0, sel.x1, sel.y1);
+            // Reject accidental slivers (threshold in CSS px at current zoom).
+            const minW = MIN_SELECTION_CSS / (layout.width * view.scale);
+            const minH = MIN_SELECTION_CSS / (layout.height * view.scale);
+            if (rect.w < minW || rect.h < minH) {
+                return;
+            }
+            this.opts.onFingeringSelect({ pageIndex: sel.pageIndex, rect });
+            return;
+        }
         if (tool === 'eraser') {
             this.opts.store.endBatch();
             return;
@@ -345,6 +406,11 @@ export class InkController {
             this.publisher?.cancel();
             this.renderPageLive(page);
         }
+        if (this.fingeringSel) {
+            const page = this.fingeringSel.pageIndex;
+            this.fingeringSel = null;
+            this.renderPageLive(page);
+        }
         if (useViewerStore.getState().tool === 'eraser') {
             this.opts.store.endBatch();
         }
@@ -407,6 +473,9 @@ export class InkController {
         if (this.live) {
             this.renderPageLive(this.live.pageIndex);
         }
+        if (this.fingeringSel) {
+            this.renderPageLive(this.fingeringSel.pageIndex);
+        }
     }
 
     /** Repaint a page's live canvas: local in-flight stroke + remote previews. */
@@ -456,6 +525,23 @@ export class InkController {
         if (live && live.pageIndex === pageIndex) {
             const pts = live.predicted.length > 0 ? [...live.pts, ...live.predicted] : live.pts;
             drawInk(pts, live.w, live.color, live.kind, live.simulatePressure);
+        }
+
+        const sel = this.fingeringSel;
+        if (sel && sel.pageIndex === pageIndex) {
+            const x = Math.min(sel.x0, sel.x1) * width;
+            const y = Math.min(sel.y0, sel.y1) * height;
+            const w = Math.abs(sel.x1 - sel.x0) * width;
+            const h = Math.abs(sel.y1 - sel.y0) * height;
+            ctx.save();
+            // Accent marquee (canvas can't read CSS tokens — keep in sync with --color-accent).
+            ctx.fillStyle = 'rgba(67, 56, 202, 0.08)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = '#4338ca';
+            ctx.lineWidth = Math.max(1, width / 700);
+            ctx.setLineDash([width / 120, width / 200]);
+            ctx.strokeRect(x, y, w, h);
+            ctx.restore();
         }
     }
 }

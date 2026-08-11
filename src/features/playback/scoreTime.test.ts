@@ -3,20 +3,26 @@ import { describe, expect, it } from 'vitest';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import {
     beatsForMeasure,
+    bpmAtTick,
+    buildTempoMap,
     clickBeatTicks,
+    secondsAtTick,
+    tickAtSeconds,
     countInClicks,
     firstNoteIndexAtOrAfter,
     fractionWithinMeasure,
     measureEndTick,
+    measureIndexAtPagePoint,
     measureIndexAtTick,
     measureStartTick,
     secondsPerTick,
     stepMeasure,
+    tickAtXInMeasure,
     ticksPerBeat,
     timeSigAt,
     xAtTickInMeasure,
 } from '@/features/playback/scoreTime';
-import { parseScoreData } from '@/types/scoreData';
+import { parseScoreData, type ScoreData, type ScoreMeasure } from '@/types/scoreData';
 
 const { measures, notes, timeSignatures } = tinyScore;
 
@@ -120,6 +126,38 @@ describe('xAtTickInMeasure', () => {
     it('falls back to linear interpolation without slot data', () => {
         const plain = { ...withSlots, sl: undefined };
         expect(xAtTickInMeasure(plain, 1000 + 960)).toBeCloseTo(0.3, 6);
+    });
+});
+
+describe('tickAtXInMeasure', () => {
+    const withSlots: ScoreMeasure = {
+        n: 1,
+        tick: 1000,
+        dTicks: 1920,
+        page: 0,
+        sys: 0,
+        x0: 0.2,
+        x1: 0.4,
+        sl: [
+            { x: 0.22, t: 0 },
+            { x: 0.3, t: 1440 },
+        ],
+    };
+
+    it('inverts slot-aware xAtTickInMeasure within rounding', () => {
+        const midTick = 1000 + 720;
+        const x = xAtTickInMeasure(withSlots, midTick);
+        expect(tickAtXInMeasure(withSlots, x)).toBe(midTick);
+    });
+
+    it('maps pre-slot x to the first column tick', () => {
+        expect(tickAtXInMeasure(withSlots, 0.2)).toBe(1000);
+        expect(tickAtXInMeasure(withSlots, 0.22)).toBe(1000);
+    });
+
+    it('falls back to linear without slots', () => {
+        const plain = { ...withSlots, sl: undefined };
+        expect(tickAtXInMeasure(plain, 0.3)).toBe(1000 + 960);
     });
 });
 
@@ -227,5 +265,140 @@ describe('measureStartTick / measureEndTick', () => {
         expect(measureStartTick(measures, 99)).toBe(12480);
         expect(measureEndTick(measures, 8)).toBe(13920);
         expect(measureEndTick(measures, 99)).toBe(13920);
+    });
+});
+
+describe('tempo map', () => {
+    const scoreWith = (over: Partial<ScoreData>): ScoreData => ({ ...tinyScore, defaultBpm: 120, ...over });
+
+    // At 120 quarter-BPM a tick is 60/(120*480) s, so a 4/4 bar (1920) is 2 s.
+    it('is exact across a tempo change', () => {
+        const map = buildTempoMap(
+            scoreWith({
+                tempos: [
+                    { tick: 0, bpm: 120 },
+                    { tick: 7680, bpm: 60 },
+                ],
+            }),
+            1,
+            100,
+        );
+        expect(secondsAtTick(map, 7680)).toBeCloseTo(8, 6); // 4 bars at 120
+        expect(secondsAtTick(map, 15360)).toBeCloseTo(24, 6); // + 4 bars at 60
+    });
+
+    it('inverts exactly', () => {
+        const map = buildTempoMap(
+            scoreWith({
+                tempos: [
+                    { tick: 0, bpm: 120 },
+                    { tick: 3000, bpm: 72 },
+                    { tick: 9000, bpm: 144 },
+                ],
+                holds: [{ tick: 6000, beats: 2 }],
+            }),
+            1,
+            100,
+        );
+        for (let tick = 0; tick <= 12000; tick += 61) {
+            // Ticks inside a hold's shadow are the one place this is not 1:1 —
+            // arrival maps back to the hold tick itself.
+            expect(tickAtSeconds(map, secondsAtTick(map, tick))).toBeCloseTo(tick, 3);
+        }
+    });
+
+    it('does not delay the very tick a fermata sits on', () => {
+        // The fermata note must still START on time; only what follows waits.
+        const map = buildTempoMap(scoreWith({ holds: [{ tick: 1920, beats: 2 }] }), 1, 100);
+        expect(secondsAtTick(map, 1920)).toBeCloseTo(2, 6);
+        expect(secondsAtTick(map, 1921)).toBeCloseTo(2 + 1 + 1 / 960, 5);
+        // ...and the note rings through the pause rather than being cut at it.
+        expect(secondsAtTick(map, 2880) - secondsAtTick(map, 1920)).toBeCloseTo(2, 5);
+    });
+
+    it('parks the playhead on a fermata for its duration', () => {
+        const map = buildTempoMap(scoreWith({ holds: [{ tick: 1920, beats: 2 }] }), 1, 100);
+        expect(tickAtSeconds(map, 2.0)).toBe(1920);
+        expect(tickAtSeconds(map, 2.5)).toBe(1920);
+        expect(tickAtSeconds(map, 2.99)).toBe(1920);
+        expect(tickAtSeconds(map, 3.5)).toBeGreaterThan(1920);
+    });
+
+    it('never runs backwards', () => {
+        const map = buildTempoMap(
+            scoreWith({
+                tempos: [
+                    { tick: 0, bpm: 60 },
+                    { tick: 2000, bpm: 200 },
+                ],
+                holds: [{ tick: 2000, beats: 3 }],
+            }),
+            1,
+            100,
+        );
+        let previous = -1;
+        for (let s = 0; s < 20; s += 0.05) {
+            const tick = tickAtSeconds(map, s);
+            expect(tick).toBeGreaterThanOrEqual(previous);
+            previous = tick;
+        }
+    });
+
+    it('extrapolates before the start, which the count-in needs', () => {
+        const map = buildTempoMap(scoreWith({ tempos: [{ tick: 0, bpm: 120 }] }), 1, 100);
+        expect(secondsAtTick(map, -1920)).toBeCloseTo(-2, 6);
+    });
+
+    it('scales every point by the practice tempo', () => {
+        const score = scoreWith({
+            tempos: [
+                { tick: 0, bpm: 120 },
+                { tick: 1920, bpm: 60 },
+            ],
+        });
+        const full = buildTempoMap(score, 1, 100);
+        const half = buildTempoMap(score, 0.5, 100);
+        expect(secondsAtTick(half, 5760)).toBeCloseTo(secondsAtTick(full, 5760) * 2, 6);
+    });
+
+    it('reduces to a flat map for a score with no tempo data', () => {
+        const map = buildTempoMap({ ...tinyScore, defaultBpm: null }, 1, 100);
+        // Falls back to the supplied bpm, exactly as before v3.
+        expect(secondsAtTick(map, 480)).toBeCloseTo(60 / 100, 6);
+        expect(bpmAtTick(map, 99999)).toBeCloseTo(100, 6);
+    });
+});
+
+describe('measureIndexAtPagePoint with repeats', () => {
+    // Measures 0-2 of tinyScore performed a second time at later ticks, with
+    // the same geometry — what an unrolled repeat looks like.
+    const shift = tinyScore.totalTicks;
+    const repeated: ScoreData = {
+        ...tinyScore,
+        measures: [
+            ...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })),
+            ...tinyScore.measures.slice(0, 3).map((m, i) => ({ ...m, srcIndex: i, tick: m.tick + shift })),
+        ].sort((a, b) => a.tick - b.tick),
+    };
+    const inM1 = tinyScore.measures[1]!;
+    const sys0 = tinyScore.systems[inM1.sys]!;
+    const nx = (inM1.x0 + inM1.x1) / 2;
+    const ny = (sys0.y0 + sys0.y1) / 2;
+
+    it('keeps first-match behaviour when no playhead position is given', () => {
+        const i = measureIndexAtPagePoint(repeated, inM1.page, nx, ny);
+        expect(repeated.measures[i]?.tick).toBe(inM1.tick);
+    });
+
+    it('picks the pass nearest the playhead', () => {
+        const second = measureIndexAtPagePoint(repeated, inM1.page, nx, ny, shift + inM1.tick);
+        expect(repeated.measures[second]?.tick).toBe(shift + inM1.tick);
+
+        const first = measureIndexAtPagePoint(repeated, inM1.page, nx, ny, inM1.tick);
+        expect(repeated.measures[first]?.tick).toBe(inM1.tick);
+    });
+
+    it('still misses cleanly off any system', () => {
+        expect(measureIndexAtPagePoint(repeated, inM1.page, nx, 0.999, 0)).toBe(-1);
     });
 });

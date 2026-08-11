@@ -44,8 +44,9 @@ export const parseDocumentChange = (payload: unknown): { id: string; content_rev
     return parsed.success ? parsed.data.record : null;
 };
 
-// `src` (smart-import provenance) MUST be declared here: zod strips unknown
-// keys, so omitting it would silently diverge peer payloads from the writer's.
+// Provenance flags (`src` smart-import, `sf` suggested fingering) MUST be
+// declared here: zod strips unknown keys, so omitting one would silently
+// diverge peer payloads from the writer's.
 const strokePayloadSchema = z.object({
     pts: z.array(z.number()),
     w: z.number().positive(),
@@ -59,6 +60,7 @@ const textPayloadSchema = z.object({
     text: z.string(),
     size: z.number().positive(),
     src: z.literal(1).optional(),
+    sf: z.literal(1).optional(),
 });
 
 /** Envelope produced by realtime.broadcast_changes() for annotation writes. */
@@ -98,6 +100,29 @@ export const parseInkProgress = (payload: unknown): InkProgressMsg | null => {
     const parsed = inkProgressSchema.safeParse(payload);
     if (!parsed.success) {
         console.warn('Ignoring malformed ink broadcast', parsed.error.issues[0]?.message);
+        return null;
+    }
+    return parsed.data;
+};
+
+/** Trimmed score_analyses lifecycle fan-out (never includes score jsonb). */
+export const SCORE_ANALYSIS_EVENT = 'score_analysis';
+
+const scoreAnalysisBroadcastSchema = z.object({
+    table: z.literal('score_analyses'),
+    document_id: z.string().min(1),
+    status: z.enum(['pending', 'processing', 'ready', 'failed']),
+    error: z.string().nullable().optional(),
+    progress: z.number().nullable().optional(),
+    updated_at: z.string(),
+});
+
+export type ScoreAnalysisBroadcast = z.infer<typeof scoreAnalysisBroadcastSchema>;
+
+export const parseScoreAnalysisBroadcast = (payload: unknown): ScoreAnalysisBroadcast | null => {
+    const parsed = scoreAnalysisBroadcastSchema.safeParse(payload);
+    if (!parsed.success) {
+        console.warn('Ignoring malformed score_analysis broadcast', parsed.error.issues[0]?.message);
         return null;
     }
     return parsed.data;
