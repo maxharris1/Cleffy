@@ -395,6 +395,19 @@ verify_jwt = true
 [functions.imslp-download]
 verify_jwt = true
 
+# Billing — teacher-initiated, so a JWT is required.
+[functions.stripe-checkout]
+verify_jwt = true
+
+[functions.stripe-portal]
+verify_jwt = true
+
+# Stripe has no Supabase JWT to present: this endpoint authenticates the request
+# by its Stripe-Signature against STRIPE_WEBHOOK_SECRET instead. Deploy with
+# `supabase functions deploy stripe-webhook --no-verify-jwt`.
+[functions.stripe-webhook]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
