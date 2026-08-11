@@ -112,9 +112,18 @@ scalar: every printed mark, Italian headings inferred as quarter-BPM and marked 
 and rit./accel./a tempo pre-discretized to a point per beat. Fermatas are clock stops
 (`holds`), so a note sounding across one rings through it.
 
+**Repeats and voltas are performed as written.** Barline marks resolve into a performance
+order and the score is unrolled in `buildScoreData`, after the geometry zip — a repeated bar is
+a clone that keeps its page position, so the playhead sweeps the same printed bar again for
+free. `measures[].srcIndex` names the engraved bar, and anything reasoning about the PAGE
+rather than the performance must group by it (`regionFromScoreData` does; getting this wrong
+silently drops OMR fingering to the paid vision path). Unresolvable structure, or a projected
+length past the 2000-measure schema cap, degrades wholesale to linear.
+
 **Known limitations** (surfaced as ScoreData `warnings`, and now shown in the transport):
-repeats / D.C. / D.S. are ignored (linear playthrough, so 1st and 2nd endings both play in
-order); pedal, ornaments and swing feel are not modelled; grace-note nuance is blocked on
+D.C. / D.S. / Coda / Fine are ignored — they arrive as text Audiveris emits unreliably, and a
+wrong repeat misplaces eight bars where a wrong D.S. reorders pages; pedal, ornaments and swing
+feel are not modelled; grace-note nuance is blocked on
 Audiveris emitting `<grace>` at all, which it did not do once across an entire 8198-note score.
 OMR accuracy still depends on scan quality — clean typeset PDFs work best, and wrong notes are a
 per-measure OMR limitation, not a playback bug. Geometry failures degrade gracefully: audio
