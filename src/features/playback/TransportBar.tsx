@@ -75,6 +75,10 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'Repeats are played straight through once. First and second endings will both be played, in order.',
     },
     {
+        code: 'repeats_unrolled',
+        text: 'Repeats and endings are played as written, so bar numbers go back on each repeat.',
+    },
+    {
         code: 'meter_corrected',
         text: 'A time signature looked misread and was corrected to match the bars. If the beat feels wrong, this is why.',
     },

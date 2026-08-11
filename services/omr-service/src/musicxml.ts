@@ -15,6 +15,8 @@ export interface MusicalScore {
     clefs: ScoreClef[];
     tempos: ScoreTempo[];
     holds: ScoreHold[];
+    /** Repeat structure per measure, aligned with `measures`. Never enters ScoreData. */
+    repeats: MeasureRepeatMarks[];
     defaultBpm: number | null;
     totalTicks: number;
     warnings: string[];
@@ -386,6 +388,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         clefs: leadResult.clefs,
         tempos: leadResult.tempos,
         holds: leadResult.holds,
+        repeats: leadResult.repeats,
         defaultBpm: leadResult.defaultBpm,
         totalTicks,
         warnings: [...warnings],
@@ -518,6 +521,7 @@ interface PartResult {
     clefs: ScoreClef[];
     tempos: ScoreTempo[];
     holds: ScoreHold[];
+    repeats: MeasureRepeatMarks[];
     defaultBpm: number | null;
 }
 
@@ -559,6 +563,31 @@ type RawEvent =
     | { k: 'key'; rel: number; fifths: number }
     | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number };
 
+/**
+ * Repeat structure engraved on a measure's barlines. Service-side only — this
+ * never reaches ScoreData, which stores the performance, not the notation.
+ */
+export interface MeasureRepeatMarks {
+    /** `|:` — where a backward repeat returns to. */
+    repeatForward: boolean;
+    /** `:|` */
+    repeatBackward: boolean;
+    /** <repeat times>, i.e. total passes; 2 unless stated. */
+    repeatTimes: number;
+    /** Volta passes this bar belongs to, e.g. [1] or [1,3]; null when not in one. */
+    endingStart: number[] | null;
+    /** A volta bracket closes here. */
+    endingStop: boolean;
+}
+
+const NO_REPEAT_MARKS: MeasureRepeatMarks = {
+    repeatForward: false,
+    repeatBackward: false,
+    repeatTimes: 2,
+    endingStart: null,
+    endingStop: false,
+};
+
 /** Pass-1 output for one <measure>. Nothing here is padded or velocity-resolved. */
 interface RawMeasure {
     /** Position in the part's <measure> list — how secondary parts index the timeline. */
@@ -572,6 +601,7 @@ interface RawMeasure {
     sig: { num: number; den: number };
     /** Document order, preserved: resolution may reorder, scanning must not. */
     events: RawEvent[];
+    repeat: MeasureRepeatMarks;
 }
 
 /** The optional <staff> child of a <direction>; null when unattributed. */
@@ -599,6 +629,7 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
             continue;
         }
         const events: RawEvent[] = [];
+        const repeat: MeasureRepeatMarks = { ...NO_REPEAT_MARKS };
         let cursor = 0;
         let maxCursor = 0;
         let lastNoteStart = 0;
@@ -751,8 +782,35 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                     break;
                 }
                 case 'barline': {
-                    if (firstChild(child, 'repeat')) {
+                    const repeatEl = firstChild(child, 'repeat');
+                    if (repeatEl) {
                         ctx.warnings.add('repeats_ignored');
+                        const direction = (repeatEl.getAttribute('direction') ?? '').toLowerCase();
+                        if (direction === 'forward') {
+                            repeat.repeatForward = true;
+                        } else if (direction === 'backward') {
+                            repeat.repeatBackward = true;
+                            const times = Number.parseInt(repeatEl.getAttribute('times') ?? '', 10);
+                            if (Number.isFinite(times) && times >= 2 && times <= 16) {
+                                repeat.repeatTimes = times;
+                            }
+                        }
+                    }
+                    const endingEl = firstChild(child, 'ending');
+                    if (endingEl) {
+                        const type = (endingEl.getAttribute('type') ?? '').toLowerCase();
+                        if (type === 'start') {
+                            // "1, 2" or "1,3" — the passes this bracket covers.
+                            const passes = (endingEl.getAttribute('number') ?? '')
+                                .split(',')
+                                .map((part) => Number.parseInt(part.trim(), 10))
+                                .filter((n) => Number.isFinite(n) && n > 0);
+                            repeat.endingStart = passes.length > 0 ? passes : [1];
+                        } else if (type === 'stop' || type === 'discontinue') {
+                            // "discontinue" is an open-ended bracket; for playback
+                            // purposes it ends here just the same.
+                            repeat.endingStop = true;
+                        }
                     }
                     break;
                 }
@@ -835,6 +893,7 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
             contentTicks: maxCursor,
             sig: { ...currentSig },
             events,
+            repeat,
         });
     }
 
@@ -1775,6 +1834,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         clefs,
         tempos,
         holds: [...holdByTick.values()].sort((a, b) => a.tick - b.tick),
+        repeats: raws.map((raw) => raw.repeat),
         defaultBpm: tempos[0]?.bpm ?? null,
     };
 };
@@ -1826,6 +1886,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         clefs: [],
         tempos: [],
         holds: [],
+        repeats: [],
         defaultBpm: null,
         totalTicks: 0,
         warnings: [],
@@ -1842,6 +1903,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         // vivace and an Andantino playing at identical speeds.
         combined.tempos.push(...parsed.tempos);
         combined.holds.push(...parsed.holds);
+        combined.repeats.push(...parsed.repeats);
         combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
         combined.totalTicks = parsed.totalTicks;
         parsed.warnings.forEach((warning) => warnings.add(warning));

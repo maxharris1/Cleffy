@@ -870,3 +870,33 @@ describe('tempo', () => {
         expect(score.holds).toHaveLength(1);
     });
 });
+
+describe('repeat structure', () => {
+    const bl = (inner: string, loc = 'right') => `<barline location="${loc}">${inner}</barline>`;
+
+    it('records forward and backward repeats with their pass count', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${bl('<repeat direction="forward"/>', 'left')}${note('C', 4, 16)}</measure>` +
+                `<measure number="2">${note('D', 4, 16)}${bl('<repeat direction="backward" times="3"/>')}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.repeats[0]).toMatchObject({ repeatForward: true, repeatBackward: false });
+        expect(score.repeats[1]).toMatchObject({ repeatBackward: true, repeatTimes: 3 });
+    });
+
+    it('reads volta brackets, including a comma-separated pass list', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}</measure>` +
+                `<measure number="2">${bl('<ending number="1, 3" type="start"/>', 'left')}${note('D', 4, 16)}${bl('<ending number="1, 3" type="stop"/>')}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.repeats[1]).toMatchObject({ endingStart: [1, 3], endingStop: true });
+    });
+
+    it('treats a discontinued bracket as a stop', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}${bl('<ending number="2" type="discontinue"/>')}</measure>`,
+        );
+        expect(parseMusicXmlString(xml).repeats[0]).toMatchObject({ endingStop: true });
+    });
+});
