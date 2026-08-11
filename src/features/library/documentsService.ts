@@ -1,6 +1,7 @@
 import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/imslp/imslpApi';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
+import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import type { DocumentRow, MemberRole } from '@/types/database';
 
@@ -163,6 +164,12 @@ export const uploadDocument = async (
         .select()
         .single();
     if (insertError) {
+        // The free-tier cap is a database trigger, so it arrives here rather
+        // than as an HTTP 402 — normalize it to the same typed error.
+        const limit = parsePostgrestLimitError(insertError);
+        if (limit) {
+            throw limit;
+        }
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
@@ -210,6 +217,12 @@ export const importDocumentFromImslp = async (
         .select()
         .single();
     if (insertError) {
+        // The free-tier cap is a database trigger, so it arrives here rather
+        // than as an HTTP 402 — normalize it to the same typed error.
+        const limit = parsePostgrestLimitError(insertError);
+        if (limit) {
+            throw limit;
+        }
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 

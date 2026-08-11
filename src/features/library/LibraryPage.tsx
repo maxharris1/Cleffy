@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
+import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import {
     deleteDocument,
     listCachedDocuments,
@@ -49,7 +50,8 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 
 export const LibraryPage = () => {
-    const { userId, uploading, uploadPct, onUpload, uploadError } = useOutletContext<LibraryOutletContext>();
+    const { userId, uploading, uploadPct, onUpload, uploadError, uploadLimit, openPricing } =
+        useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
     const [favorites, setFavorites] = useState<Set<string>>(new Set());
     const [tags, setTags] = useState<LibraryTagRow[]>([]);
@@ -322,7 +324,9 @@ export const LibraryPage = () => {
                 <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
             ) : null}
 
-            {statusError ? (
+            {uploadLimit ? (
+                <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" />
+            ) : statusError ? (
                 isOfflineNotice && !uploadError && !actionError ? (
                     <p className="mt-5 text-sm text-amber-800" role="status">
                         {statusError}

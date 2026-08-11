@@ -153,12 +153,14 @@ export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_
 /** Per-metric ceilings; -1 means unlimited. Mirrors public.tier_limits(). */
 export type EntitlementLimits = Record<UsageMetric, number>;
 
+/** How the tier was reached: own subscription, a studio seat, or nothing. */
+export type EntitlementSource = 'subscription' | 'studio_member' | 'none';
+
 export type Entitlements = {
     user_id: string;
     tier: BillingTier;
     status: string | null;
-    /** How the tier was reached: own subscription, a studio seat, or nothing. */
-    source: 'subscription' | 'studio_member' | 'none';
+    source: EntitlementSource;
     current_period_end: string | null;
     limits: EntitlementLimits;
 };
@@ -341,6 +343,10 @@ export type Database = {
             studio_remove_member: {
                 Args: { p_studio: string; p_user: string };
                 Returns: undefined;
+            };
+            studio_roster: {
+                Args: { p_studio: string };
+                Returns: Array<{ user_id: string; email: string }>;
             };
         };
         Enums: Record<string, never>;

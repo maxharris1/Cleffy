@@ -68,6 +68,9 @@ const outletContext: LibraryOutletContext = {
     onImportImslp: vi.fn(),
     uploadError: null,
     clearUploadError: vi.fn(),
+    uploadLimit: null,
+    tier: 'free',
+    openPricing: vi.fn(),
 };
 
 const ContextFrame = () => <Outlet context={outletContext} />;

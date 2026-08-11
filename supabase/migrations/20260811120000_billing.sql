@@ -414,6 +414,31 @@ begin
 end;
 $$;
 
+-- Seat roster with emails, owner only. studio_members holds ids, and auth.users
+-- is not client-readable, so the join has to happen behind a definer boundary.
+create or replace function public.studio_roster (p_studio uuid) returns table (user_id uuid, email text) language plpgsql stable security definer
+set search_path = public as $$
+-- OUT params (user_id, email) share names with the columns below; let columns win,
+-- same hazard redeem_share_link documents.
+#variable_conflict use_column
+declare
+    v_caller uuid := auth.uid();
+    v_owner uuid;
+begin
+    select st.owner_id into v_owner from public.studios st where st.id = p_studio;
+    if v_caller is null or v_owner is null or v_owner <> v_caller then
+        raise exception 'only the studio owner can list seats' using errcode = '42501';
+    end if;
+
+    return query
+        select sm.user_id, u.email::text
+        from public.studio_members sm
+        join auth.users u on u.id = sm.user_id
+        where sm.studio_id = p_studio
+        order by u.email;
+end;
+$$;
+
 create or replace function public.studio_remove_member (p_studio uuid, p_user uuid) returns void language plpgsql security definer
 set search_path = public as $$
 declare
@@ -554,3 +579,7 @@ grant execute on function public.studio_invite_member (uuid, text) to authentica
 revoke all on function public.studio_remove_member (uuid, uuid) from public;
 revoke all on function public.studio_remove_member (uuid, uuid) from anon;
 grant execute on function public.studio_remove_member (uuid, uuid) to authenticated;
+
+revoke all on function public.studio_roster (uuid) from public;
+revoke all on function public.studio_roster (uuid) from anon;
+grant execute on function public.studio_roster (uuid) to authenticated;

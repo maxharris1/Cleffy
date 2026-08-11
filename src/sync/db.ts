@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
+import type { Entitlements } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
 /** Server-mirror row: an Annotation plus a dirty flag for the op queue. */
@@ -40,12 +41,23 @@ export interface CachedPdf {
     archivedAt?: string | null;
 }
 
+/**
+ * Last-known entitlements, so an offline start still knows the tier (M6).
+ * Enforcement is always server-side; this only keeps the UI honest offline.
+ */
+export interface CachedEntitlements {
+    userId: string;
+    entitlements: Entitlements;
+    cachedAt: string;
+}
+
 export class ScribblerDb extends Dexie {
     annotations!: Table<LocalAnnotation, string>;
     ops!: Table<PendingOp, number>;
     syncState!: Table<SyncState, string>;
     pdfCache!: Table<CachedPdf, string>;
     annotationSnapshots!: Table<LocalAnnotationSnapshot, string>;
+    entitlements!: Table<CachedEntitlements, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -61,6 +73,14 @@ export class ScribblerDb extends Dexie {
             syncState: 'docId',
             pdfCache: 'docId',
             annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+        });
+        this.version(3).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            entitlements: 'userId',
         });
     }
 }
