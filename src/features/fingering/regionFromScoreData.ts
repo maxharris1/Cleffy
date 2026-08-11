@@ -35,6 +35,12 @@ const hasGeometry = (m: ScoreMeasure): boolean => m.page >= 0 && m.sys >= 0;
 const measureKey = (m: ScoreMeasure): string => `${m.n}:${m.tick}`;
 
 /**
+ * Identity of the ENGRAVED bar an entry performs. Equal to the array index for
+ * a linear score; on an unrolled repeat, several entries share one.
+ */
+const printedIndexOf = (score: ScoreData, index: number): number => score.measures[index]?.srcIndex ?? index;
+
+/**
  * True when the sorted-by-x0 measures cover [xLo, xHi] without gaps.
  */
 const measuresCoverXSpan = (measures: readonly ScoreMeasure[], xLo: number, xHi: number): boolean => {
@@ -144,10 +150,15 @@ const clefSignToName = (sign: ScoreClef['sign']): RecognizedRegion['clefs']['upp
  * Build a RecognizedRegion from ScoreData for a fingering marquee, or null when
  * coverage is empty/partial (caller falls through to vision).
  *
- * Coverage is all-or-nothing: every measure in the tick span must be collected
+ * Coverage is all-or-nothing: every PRINTED bar in the span must be collected
  * with geometry, each hit system's x-span must be contiguous, and a selection
  * that overhangs a system's engraved band fails unless the next/prev score
  * measure was also collected (e.g. on the next system of a multi-system marquee).
+ *
+ * "Printed bar" rather than "measure" is load-bearing. A marquee is spatial, so
+ * over a repeated system it collects every pass of the same engraved bar; the
+ * passes are deduplicated to the earliest, and coverage is judged in printed-bar
+ * space so an unrolled repeat does not read as a hole.
  */
 export const regionFromScoreData = (
     docId: string,
@@ -170,14 +181,18 @@ export const regionFromScoreData = (
         return null;
     }
 
-    const collected: ScoreMeasure[] = [];
+    const collectedIdx: number[] = [];
     for (const sysIndex of hitSysIndexes) {
-        const inSystem = score.measures.filter(
-            (m) => m.sys === sysIndex && m.page === page && hasGeometry(m) && rectsOverlapX(rect, m.x0, m.x1),
-        );
-        if (inSystem.length === 0) {
+        const inSystemIdx: number[] = [];
+        score.measures.forEach((m, i) => {
+            if (m.sys === sysIndex && m.page === page && hasGeometry(m) && rectsOverlapX(rect, m.x0, m.x1)) {
+                inSystemIdx.push(i);
+            }
+        });
+        if (inSystemIdx.length === 0) {
             return null;
         }
+        const inSystem = inSystemIdx.map((i) => score.measures[i]!);
         const sysX0 = Math.min(...inSystem.map((m) => m.x0));
         const sysX1 = Math.max(...inSystem.map((m) => m.x1));
         const xLo = Math.max(rect.x, sysX0);
@@ -185,9 +200,21 @@ export const regionFromScoreData = (
         if (!measuresCoverXSpan(inSystem, xLo, xHi)) {
             return null;
         }
-        collected.push(...inSystem);
+        collectedIdx.push(...inSystemIdx);
     }
 
+    // One entry per PRINTED bar. A marquee is spatial, so on a repeat it picks
+    // up every pass of the same engraved measure; keep the earliest, since the
+    // passes are identical by construction and fingering is about the page.
+    const byPrinted = new Map<number, number>();
+    for (const i of collectedIdx) {
+        const printed = printedIndexOf(score, i);
+        const prev = byPrinted.get(printed);
+        if (prev === undefined || score.measures[i]!.tick < score.measures[prev]!.tick) {
+            byPrinted.set(printed, i);
+        }
+    }
+    const collected = [...byPrinted.values()].map((i) => score.measures[i]!);
     const collectedKeys = new Set(collected.map(measureKey));
 
     // Per-system overhang past the engraved band only fails when the
@@ -214,17 +241,23 @@ export const regionFromScoreData = (
         }
     }
 
-    const byTick = [...collected].sort((a, b) => a.tick - b.tick);
-    const tickLo = byTick[0]!.tick;
-    const tickHi = byTick[byTick.length - 1]!.tick + byTick[byTick.length - 1]!.dTicks;
-
-    // Every measure in the tick span must be among the collected set (catches
-    // geometry-less holes and measure_geometry_mismatch tails inside the span).
-    for (const m of score.measures) {
-        if (m.tick + m.dTicks <= tickLo || m.tick >= tickHi) {
+    // Every PRINTED bar between the first and last collected must be present and
+    // carry geometry (catches geometry-less holes and measure_geometry_mismatch
+    // tails inside the span). Deliberately checked in printed-bar space rather
+    // than tick space: once repeats are unrolled, the collected bars' ticks span
+    // the intervening second pass, and a tick-space check would reject every
+    // marquee on a repeated system — silently dropping the free OMR reading and
+    // falling back to the paid vision path.
+    const printedSpan = [...byPrinted.keys()].sort((a, b) => a - b);
+    const printedLo = printedSpan[0]!;
+    const printedHi = printedSpan[printedSpan.length - 1]!;
+    const printedPresent = new Set(printedSpan);
+    for (let i = 0; i < score.measures.length; i++) {
+        const printed = printedIndexOf(score, i);
+        if (printed < printedLo || printed > printedHi) {
             continue;
         }
-        if (!collectedKeys.has(measureKey(m)) || !hasGeometry(m)) {
+        if (!printedPresent.has(printed) || !hasGeometry(score.measures[i]!)) {
             return null;
         }
     }

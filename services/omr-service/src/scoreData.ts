@@ -43,6 +43,13 @@ const scoreMeasureSchema = z.object({
     sys: z.number().int().min(-1),
     x0: z.number().min(0).max(1),
     x1: z.number().min(0).max(1),
+    /**
+     * Which PRINTED measure this entry performs. Equal to the array index for a
+     * linear score; on a repeat, several entries share one srcIndex because they
+     * sweep the same engraved bar. Anything reasoning about the PAGE rather than
+     * the performance must group by it. v3+.
+     */
+    srcIndex: z.number().int().nonnegative().optional(),
     /** Chord columns from the engraving — lets the playhead sweep note-accurately. */
     sl: z.array(scoreSlotSchema).max(64).optional(),
 });

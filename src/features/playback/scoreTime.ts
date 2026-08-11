@@ -273,7 +273,19 @@ export const measureEndTick = (measures: readonly ScoreMeasure[], index: number)
  * system whose y-band contains the point, then the measure whose x-range
  * contains it. Returns the measure index, or -1.
  */
-export const measureIndexAtPagePoint = (score: ScoreData, pageIndex: number, nx: number, ny: number): number => {
+export const measureIndexAtPagePoint = (
+    score: ScoreData,
+    pageIndex: number,
+    nx: number,
+    ny: number,
+    /**
+     * Where playback currently is. A printed bar inside a repeat is performed
+     * more than once, and tapping it should seek to the pass being played, not
+     * always back to the first. Omit for the plain first-match behaviour.
+     */
+    nearTick?: number,
+): number => {
+    let best = -1;
     for (let sysIndex = 0; sysIndex < score.systems.length; sysIndex++) {
         const system = score.systems[sysIndex];
         if (!system || system.page !== pageIndex || ny < system.y0 || ny > system.y1) {
@@ -281,12 +293,22 @@ export const measureIndexAtPagePoint = (score: ScoreData, pageIndex: number, nx:
         }
         for (let i = 0; i < score.measures.length; i++) {
             const measure = score.measures[i];
-            if (measure && measure.sys === sysIndex && nx >= measure.x0 && nx <= measure.x1) {
+            if (!measure || measure.sys !== sysIndex || nx < measure.x0 || nx > measure.x1) {
+                continue;
+            }
+            if (nearTick === undefined) {
                 return i;
+            }
+            const bestMeasure = best >= 0 ? score.measures[best] : undefined;
+            if (
+                !bestMeasure ||
+                Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)
+            ) {
+                best = i;
             }
         }
     }
-    return -1;
+    return best;
 };
 
 /**

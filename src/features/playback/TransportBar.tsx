@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
@@ -52,6 +52,9 @@ const ERROR_COPY: Record<string, string> = {
     stale: 'The analysis was interrupted.',
     internal: 'Something went wrong during analysis.',
 };
+
+/** Pass markers for a bar performed more than once (a repeat). */
+const ORDINAL: Record<number, string> = { 1: ' (1st)', 2: ' (2nd)', 3: ' (3rd)', 4: ' (4th)' };
 
 const WARNING_COPY: Record<string, string> = {
     samples_unavailable: 'Piano sounds could not be loaded — check your connection and press play again.',
@@ -273,7 +276,20 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
             return;
         }
         const a = Math.min(lastIndex, Math.max(0, currentMeasureIndex ?? 0));
-        setLoopRange({ a, b: Math.min(lastIndex, a + DEFAULT_LOOP_BARS - 1) });
+        let b = Math.min(lastIndex, a + DEFAULT_LOOP_BARS - 1);
+        // Stop at a repeat seam. A default span that runs across one produces a
+        // range like "m. 8 – m. 2", which reads as nonsense even though the
+        // ticks are contiguous. Deliberate ranges may still straddle a seam —
+        // this only shapes the one we choose on the user's behalf.
+        for (let i = a; i < b; i++) {
+            const here = score.measures[i]?.srcIndex ?? i;
+            const next = score.measures[i + 1]?.srcIndex ?? i + 1;
+            if (next <= here) {
+                b = i;
+                break;
+            }
+        }
+        setLoopRange({ a, b });
     };
 
     const moveLoopEdge = (edge: 'a' | 'b', to: number) => {
@@ -288,9 +304,37 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
         setLoopRange(next);
     };
 
+    // A printed bar inside a repeat is performed more than once, and its number
+    // alone then names two different places in the playthrough. Count the passes
+    // once per score so the label can say which one you are on.
+    const passOrdinals = useMemo(() => {
+        const seen = new Map<number, number>();
+        return score.measures.map((m, i) => {
+            const printed = m.srcIndex ?? i;
+            const nth = (seen.get(printed) ?? 0) + 1;
+            seen.set(printed, nth);
+            return nth;
+        });
+    }, [score]);
+    const repeatedPrinted = useMemo(() => {
+        const counts = new Map<number, number>();
+        score.measures.forEach((m, i) => {
+            const printed = m.srcIndex ?? i;
+            counts.set(printed, (counts.get(printed) ?? 0) + 1);
+        });
+        return counts;
+    }, [score]);
+
     const measureLabel = (index: number | null) => {
         const measure = index !== null ? score.measures[index] : undefined;
-        return measure ? `${measure.n}` : '–';
+        if (!measure) {
+            return '–';
+        }
+        const printed = measure.srcIndex ?? index!;
+        if ((repeatedPrinted.get(printed) ?? 1) < 2) {
+            return `${measure.n}`;
+        }
+        return `${measure.n}${ORDINAL[passOrdinals[index!] ?? 1] ?? ''}`;
     };
 
     const currentTick = score.measures[currentMeasureIndex ?? 0]?.tick ?? 0;

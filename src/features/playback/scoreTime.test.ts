@@ -12,6 +12,7 @@ import {
     firstNoteIndexAtOrAfter,
     fractionWithinMeasure,
     measureEndTick,
+    measureIndexAtPagePoint,
     measureIndexAtTick,
     measureStartTick,
     secondsPerTick,
@@ -365,5 +366,39 @@ describe('tempo map', () => {
         // Falls back to the supplied bpm, exactly as before v3.
         expect(secondsAtTick(map, 480)).toBeCloseTo(60 / 100, 6);
         expect(bpmAtTick(map, 99999)).toBeCloseTo(100, 6);
+    });
+});
+
+describe('measureIndexAtPagePoint with repeats', () => {
+    // Measures 0-2 of tinyScore performed a second time at later ticks, with
+    // the same geometry — what an unrolled repeat looks like.
+    const shift = tinyScore.totalTicks;
+    const repeated: ScoreData = {
+        ...tinyScore,
+        measures: [
+            ...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })),
+            ...tinyScore.measures.slice(0, 3).map((m, i) => ({ ...m, srcIndex: i, tick: m.tick + shift })),
+        ].sort((a, b) => a.tick - b.tick),
+    };
+    const inM1 = tinyScore.measures[1]!;
+    const sys0 = tinyScore.systems[inM1.sys]!;
+    const nx = (inM1.x0 + inM1.x1) / 2;
+    const ny = (sys0.y0 + sys0.y1) / 2;
+
+    it('keeps first-match behaviour when no playhead position is given', () => {
+        const i = measureIndexAtPagePoint(repeated, inM1.page, nx, ny);
+        expect(repeated.measures[i]?.tick).toBe(inM1.tick);
+    });
+
+    it('picks the pass nearest the playhead', () => {
+        const second = measureIndexAtPagePoint(repeated, inM1.page, nx, ny, shift + inM1.tick);
+        expect(repeated.measures[second]?.tick).toBe(shift + inM1.tick);
+
+        const first = measureIndexAtPagePoint(repeated, inM1.page, nx, ny, inM1.tick);
+        expect(repeated.measures[first]?.tick).toBe(inM1.tick);
+    });
+
+    it('still misses cleanly off any system', () => {
+        expect(measureIndexAtPagePoint(repeated, inM1.page, nx, 0.999, 0)).toBe(-1);
     });
 });

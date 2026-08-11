@@ -53,6 +53,9 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
             n: measure.n,
             tick: measure.tick,
             dTicks: measure.dTicks,
+            // Identity of the engraved bar. Trivially the index today; once
+            // repeats are unrolled, several entries will share one.
+            srcIndex: index,
             page: stack ? stack.page : -1,
             sys: stack ? stack.sys : -1,
             x0: stack ? stack.x0 : 0,

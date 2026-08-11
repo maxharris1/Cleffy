@@ -51,7 +51,10 @@ const geometry: OmrGeometry = {
 describe('buildScoreData', () => {
     it('zips measures with geometry and carries warnings/bpm through', () => {
         const score = buildScoreData(musical, geometry);
-        expect(score.measures[0]).toEqual({ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.1, x1: 0.5 });
+        expect(score.measures[0]).toEqual({ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.1, x1: 0.5, srcIndex: 0 });
+        // Trivially the index while scores are linear; repeats will make several
+        // entries share one.
+        expect(score.measures.map((m) => m.srcIndex)).toEqual([0, 1]);
         expect(score.measures[1]).toMatchObject({ sys: 0, x0: 0.5, x1: 0.9 });
         expect(score.systems).toEqual([
             {

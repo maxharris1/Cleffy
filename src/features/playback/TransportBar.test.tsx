@@ -317,3 +317,33 @@ describe('tempo disclosure and stale analyses', () => {
         expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
     });
 });
+
+describe('repeated bars in the measure counter', () => {
+    const shift = tinyScore.totalTicks;
+    const repeated = {
+        ...tinyScore,
+        measures: [
+            ...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })),
+            ...tinyScore.measures.slice(0, 3).map((m, i) => ({ ...m, srcIndex: i, tick: m.tick + shift })),
+        ].sort((a, b) => a.tick - b.tick),
+        totalTicks: shift * 2,
+    };
+
+    const renderWith = (score: typeof tinyScore) =>
+        renderBar({
+            state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: 'audiveris-5.6.1+svc-5' },
+        });
+
+    it('marks which pass of a repeated bar the loop range names', async () => {
+        renderWith(repeated);
+        // The loop labels name bars; a bar performed twice must say which time.
+        act(() => useViewerStore.getState().setLoopRange({ a: 0, b: 2 }));
+        expect(document.body.textContent).toMatch(/\(1st\)/);
+    });
+
+    it('leaves bar numbers alone when nothing repeats', () => {
+        renderWith(tinyScore);
+        act(() => useViewerStore.getState().setLoopRange({ a: 0, b: 2 }));
+        expect(document.body.textContent).not.toMatch(/\(1st\)|\(2nd\)/);
+    });
+});
