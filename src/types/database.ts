@@ -21,6 +21,8 @@ export type DocumentRow = {
     page_count: number | null;
     created_at: string;
     updated_at: string;
+    /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
+    archived_at: string | null;
 };
 
 export type DocumentInsert = {
@@ -29,6 +31,7 @@ export type DocumentInsert = {
     title: string;
     storage_path: string;
     page_count?: number | null;
+    archived_at?: string | null;
 };
 
 export type DocumentMemberRow = {
@@ -141,6 +144,72 @@ export type AnnotationSnapshotInsert = {
     created_by?: string | null;
 };
 
+/** Billing tiers. Founding Teacher is a second price on the Pro product, so it resolves to 'pro'. */
+export type BillingTier = 'free' | 'pro' | 'studio';
+
+/** Metered metrics. `cloud_scores` is a stock (live count), the rest are monthly flows. */
+export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_imports';
+
+/** Per-metric ceilings; -1 means unlimited. Mirrors public.tier_limits(). */
+export type EntitlementLimits = Record<UsageMetric, number>;
+
+export type Entitlements = {
+    user_id: string;
+    tier: BillingTier;
+    status: string | null;
+    /** How the tier was reached: own subscription, a studio seat, or nothing. */
+    source: 'subscription' | 'studio_member' | 'none';
+    current_period_end: string | null;
+    limits: EntitlementLimits;
+};
+
+export type BillingCustomerRow = {
+    user_id: string;
+    stripe_customer_id: string;
+    created_at: string;
+};
+
+export type SubscriptionRow = {
+    stripe_subscription_id: string;
+    user_id: string;
+    tier: BillingTier;
+    status: string;
+    price_id: string | null;
+    current_period_end: string | null;
+    cancel_at_period_end: boolean;
+    created_at: string;
+    updated_at: string;
+};
+
+export type StudioRow = {
+    id: string;
+    owner_id: string;
+    name: string;
+    seat_limit: number;
+    created_at: string;
+};
+
+export type StudioInsert = {
+    id: string;
+    owner_id: string;
+    name: string;
+};
+
+export type StudioMemberRow = {
+    studio_id: string;
+    user_id: string;
+    created_at: string;
+};
+
+export type UsageCounterRow = {
+    user_id: string;
+    metric: UsageMetric;
+    /** First day of the calendar month, ISO date. */
+    month: string;
+    count: number;
+    updated_at: string;
+};
+
 export type Database = {
     public: {
         Tables: {
@@ -195,6 +264,39 @@ export type Database = {
                 Update: never;
                 Relationships: [];
             };
+            // Billing tables are read-only to clients — every write happens in an
+            // Edge Function under the service role, or in a SECURITY DEFINER RPC.
+            billing_customers: {
+                Row: BillingCustomerRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
+            subscriptions: {
+                Row: SubscriptionRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
+            usage_counters: {
+                Row: UsageCounterRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
+            studios: {
+                Row: StudioRow;
+                Insert: StudioInsert;
+                Update: Partial<Pick<StudioRow, 'name'>>;
+                Relationships: [];
+            };
+            studio_members: {
+                // Seats are added/removed via studio_invite_member / studio_remove_member.
+                Row: StudioMemberRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
         };
         Views: Record<string, never>;
         Functions: {
@@ -217,6 +319,28 @@ export type Database = {
             check_edge_rate_limit: {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
+            };
+            // p_user is omitted by clients — the function resolves auth.uid() and
+            // rejects any attempt to read another user's entitlements.
+            get_entitlements: {
+                Args: { p_user?: string };
+                Returns: Entitlements;
+            };
+            tier_limits: {
+                Args: { p_tier: BillingTier };
+                Returns: EntitlementLimits;
+            };
+            document_is_archived: {
+                Args: { doc: string };
+                Returns: boolean;
+            };
+            studio_invite_member: {
+                Args: { p_studio: string; p_email: string };
+                Returns: string;
+            };
+            studio_remove_member: {
+                Args: { p_studio: string; p_user: string };
+                Returns: undefined;
             };
         };
         Enums: Record<string, never>;

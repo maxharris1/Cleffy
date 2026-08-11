@@ -18,6 +18,7 @@ const doc = (id: string, title: string, updated_at: string): DocumentRow => ({
     page_count: null,
     created_at: updated_at,
     updated_at,
+    archived_at: null,
 });
 
 const tag = (id: string, name: string): LibraryTagRow => ({

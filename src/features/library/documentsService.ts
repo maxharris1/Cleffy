@@ -14,7 +14,7 @@ export const LIBRARY_PAGE_SIZE = 100;
 export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
     const { data, error } = await getSupabase()
         .from('documents')
-        .select('id, owner_id, title, storage_path, page_count, created_at, updated_at')
+        .select('id, owner_id, title, storage_path, page_count, created_at, updated_at, archived_at')
         .order('updated_at', { ascending: false })
         .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
@@ -59,7 +59,12 @@ export interface OfflineDocFallback {
     bytes: ArrayBuffer;
 }
 
-export const documentRowFromCache = (cached: { id: string; title: string; cachedAt: string }): DocumentRow => ({
+export const documentRowFromCache = (cached: {
+    id: string;
+    title: string;
+    cachedAt: string;
+    archivedAt?: string | null;
+}): DocumentRow => ({
     id: cached.id,
     owner_id: '',
     title: cached.title,
@@ -67,6 +72,7 @@ export const documentRowFromCache = (cached: { id: string; title: string; cached
     page_count: null,
     created_at: cached.cachedAt,
     updated_at: cached.cachedAt,
+    archived_at: cached.archivedAt ?? null,
 });
 
 /**
@@ -81,7 +87,12 @@ export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFall
         return null;
     }
     return {
-        doc: documentRowFromCache({ id: docId, title: cached.title, cachedAt: cached.cachedAt }),
+        doc: documentRowFromCache({
+            id: docId,
+            title: cached.title,
+            cachedAt: cached.cachedAt,
+            archivedAt: cached.archivedAt,
+        }),
         role: cached.myRole ?? 'editor',
         bytes: await cached.bytes.arrayBuffer(),
     };
@@ -92,7 +103,14 @@ export const listCachedDocuments = async (): Promise<DocumentRow[]> => {
     const rows = await getDb().pdfCache.toArray();
     return rows
         .filter((row) => isCloudDocId(row.docId))
-        .map((row) => documentRowFromCache({ id: row.docId, title: row.title, cachedAt: row.cachedAt }))
+        .map((row) =>
+            documentRowFromCache({
+                id: row.docId,
+                title: row.title,
+                cachedAt: row.cachedAt,
+                archivedAt: row.archivedAt,
+            }),
+        )
         .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 };
 
@@ -294,12 +312,23 @@ export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> 
     const db = getDb();
     const cached = await db.pdfCache.get(doc.id);
     if (cached) {
+        // Refresh the archive flag from the row we were handed, same as fetchMyRole
+        // does for the role — an offline open must know the score is read-only.
+        if (cached.archivedAt !== doc.archived_at) {
+            await db.pdfCache.put({ ...cached, archivedAt: doc.archived_at });
+        }
         return cached.bytes.arrayBuffer();
     }
     const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
     if (error || !data) {
         throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
     }
-    await db.pdfCache.put({ docId: doc.id, bytes: data, title: doc.title, cachedAt: new Date().toISOString() });
+    await db.pdfCache.put({
+        docId: doc.id,
+        bytes: data,
+        title: doc.title,
+        cachedAt: new Date().toISOString(),
+        archivedAt: doc.archived_at,
+    });
     return data.arrayBuffer();
 };

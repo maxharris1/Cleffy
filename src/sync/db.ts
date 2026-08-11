@@ -36,6 +36,8 @@ export interface CachedPdf {
     cachedAt: string;
     /** Last-known membership role — lets the viewer open offline with the right mode. */
     myRole?: 'owner' | 'editor' | 'viewer';
+    /** Last-known archive state — archived scores are read-only (billing, M6). */
+    archivedAt?: string | null;
 }
 
 export class ScribblerDb extends Dexie {
