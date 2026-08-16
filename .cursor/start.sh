@@ -3,6 +3,7 @@
 # Runs after `install` (npm ci). Fail-loud: exits non-zero if any step fails
 # so Cursor does not mark a broken environment as ready.
 #
+# Writes .env.local (Vite) + supabase/functions/.env — does not overwrite .env.
 # Does not start the OMR service and does not touch hosted Supabase.
 
 set -uo pipefail
