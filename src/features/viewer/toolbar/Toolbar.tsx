@@ -8,10 +8,10 @@ import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
     { tool: 'pan', label: 'Pan', short: 'Pan', icon: <PanIcon /> },
     { tool: 'pen', label: 'Pen', short: 'Pen', icon: <PenIcon /> },
-    { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
+    { tool: 'highlighter', label: 'Highlighter', short: 'Highlighter', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
     { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
-    { tool: 'fingering', label: 'Fingering — drag over a chord or phrase', short: 'Hands', icon: <FingeringIcon /> },
+    { tool: 'fingering', label: 'Fingering', short: 'Fingering', icon: <FingeringIcon /> },
 ];
 
 const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
@@ -25,8 +25,8 @@ export interface ToolbarProps {
 }
 
 /**
- * Floating tool palette. Desktop: top-center. Phones: bottom (thumb-reachable),
- * above the safe area. Hidden entirely for view-only roles (M3).
+ * Docked tool palette in viewer chrome — never overlays the engraving.
+ * Hidden entirely for view-only roles (M3).
  */
 export const Toolbar = ({ store }: ToolbarProps) => {
     const tool = useViewerStore((s) => s.tool);
@@ -46,16 +46,13 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const sizeCaption = tool === 'eraser' ? 'Eraser size' : tool === 'highlighter' ? 'Marker size' : 'Pen size';
 
     return (
-        <div
-            data-ui-overlay
-            className="pointer-events-none absolute inset-x-0 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:bottom-auto sm:top-3"
-        >
-            <div className="pointer-events-auto flex max-w-[calc(100vw-1rem)] flex-wrap items-center justify-center gap-1 rounded-2xl border border-stone-200 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur">
+        <div data-ui-overlay className="flex flex-none justify-center border-b border-stone-200 bg-white px-2 py-1">
+            <div className="flex max-w-[calc(100vw-1rem)] flex-wrap items-center justify-center gap-1">
                 {TOOLS.map(({ tool: t, label, short, icon }) => (
                     <button
                         key={t}
                         type="button"
-                        title={label}
+                        title={t === 'fingering' ? 'Fingering — drag over a chord or phrase' : label}
                         aria-label={label}
                         aria-pressed={tool === t}
                         onClick={() => setTool(t)}
@@ -150,10 +147,8 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                 <div className="mx-1 h-6 w-px bg-stone-200" />
                 <button
                     type="button"
-                    title={
-                        fingerDraws ? 'Finger drawing on — a finger draws ink' : 'Finger drawing off — a finger pans'
-                    }
-                    aria-label="Draw with finger"
+                    title={fingerDraws ? 'Touch draw on — a finger draws ink' : 'Touch draw off — a finger pans'}
+                    aria-label="Touch draw"
                     aria-pressed={fingerDraws}
                     onClick={() => setFingerDraws(!fingerDraws)}
                     className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
@@ -163,7 +158,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     <span className="flex h-5 w-5 items-center justify-center">
                         <PointerIcon size={20} />
                     </span>
-                    <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
+                    <span className="hidden text-[10px] font-medium leading-none sm:block">Touch draw</span>
                 </button>
             </div>
         </div>

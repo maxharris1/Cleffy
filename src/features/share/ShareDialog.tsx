@@ -83,7 +83,7 @@ export const ShareDialog = ({ docId, userId, onClose }: ShareDialogProps) => {
     };
 
     return (
-        <Dialog label="Share this score" onClose={onClose}>
+        <Dialog label="Invite to this score" onClose={onClose}>
             <div className="mt-4 flex items-center gap-2">
                 <div className="flex rounded-lg border border-stone-300 p-0.5">
                     {(['editor', 'viewer'] as const).map((r) => (

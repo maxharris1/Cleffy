@@ -222,6 +222,15 @@ body {
     animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
+/* Visited/active UA link color must not leak indigo onto score titles. */
+.library-list-item a:link,
+.library-list-item a:visited,
+.library-list-item a:hover,
+.library-list-item a:active {
+    color: var(--color-ink);
+    text-decoration: none;
+}
+
 .library-empty {
     animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
 }

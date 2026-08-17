@@ -4,6 +4,7 @@ import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { exportAnnotatedPdf } from '@/features/export/exportPdf';
 import { getDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
+import { ErrorText } from '@/ui/ErrorText';
 import { buttonClassName } from '@/ui/classNames';
 
 interface ShareExportMenuProps {
@@ -13,13 +14,27 @@ interface ShareExportMenuProps {
     title: string;
 }
 
+const EXPORT_ERROR_COPY = {
+    not_cached: 'This score is not ready to export yet. Wait a moment and try again.',
+    failed: 'Could not export. Check your connection and try again.',
+} as const;
+
+const mapExportError = (err: unknown): string => {
+    const message = err instanceof Error ? err.message : '';
+    if (/not cached/i.test(message)) {
+        return EXPORT_ERROR_COPY.not_cached;
+    }
+    return EXPORT_ERROR_COPY.failed;
+};
+
 /**
- * Share/export menu: this page as photo or PDF (Web Share → Messages on iOS),
+ * Export menu: this page as photo or PDF (Web Share → Messages on iOS),
  * or the whole annotated score as PDF.
  */
 export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
     const rootRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
 
@@ -58,12 +73,13 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
 
     const run = async (label: string, action: (source: ArrayBuffer) => Promise<void>) => {
         setBusy(label);
+        setError(null);
         try {
             const source = await resolveBytes();
             await action(source);
             setOpen(false);
         } catch (err) {
-            console.warn('Share/export failed', err);
+            setError(mapExportError(err));
         } finally {
             setBusy(null);
         }
@@ -78,11 +94,12 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                 disabled={busy !== null}
                 aria-expanded={open}
                 aria-haspopup="menu"
-                title="Share or save annotated page"
+                aria-label="Export"
+                title="Export annotated page or score"
                 onClick={() => setOpen((v) => !v)}
                 className={buttonClassName('ghost', 'sm')}
             >
-                {busy ?? 'Share'}
+                {busy ?? 'Export'}
             </button>
             {open ? (
                 <div
@@ -90,18 +107,18 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                     className="absolute right-0 z-30 mt-1 w-64 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     <MenuItem
-                        label={`Share page ${pageLabel} as photo`}
+                        label={`Export page ${pageLabel} as photo`}
                         hint="PNG — send via Messages"
                         onClick={() =>
-                            void run('Sharing…', (source) =>
+                            void run('Exporting…', (source) =>
                                 exportAnnotatedPageImage(docId, source, focusedPageIndex, title),
                             )
                         }
                     />
                     <MenuItem
-                        label={`Share page ${pageLabel} as PDF`}
+                        label={`Export page ${pageLabel} as PDF`}
                         onClick={() =>
-                            void run('Sharing…', (source) =>
+                            void run('Exporting…', (source) =>
                                 exportAnnotatedPdf(docId, source, title, { pageIndex: focusedPageIndex }),
                             )
                         }
@@ -111,7 +128,10 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                         label="Export whole score as PDF"
                         onClick={() => void run('Exporting…', (source) => exportAnnotatedPdf(docId, source, title))}
                     />
+                    {error ? <ErrorText className="px-3 py-2">{error}</ErrorText> : null}
                 </div>
+            ) : error ? (
+                <ErrorText className="absolute right-0 top-full z-30 mt-1 w-64 text-right">{error}</ErrorText>
             ) : null}
         </div>
     );
@@ -124,7 +144,7 @@ const MenuItem = ({ label, hint, onClick }: { label: string; hint?: string; onCl
         onClick={onClick}
         className="flex w-full flex-col items-start px-3 py-2 text-left transition hover:bg-ink/5"
     >
-        <span className="text-sm text-stone-800">{label}</span>
-        {hint ? <span className="text-xs text-stone-500">{hint}</span> : null}
+        <span className="text-sm text-ink">{label}</span>
+        {hint ? <span className="text-xs text-ink-muted">{hint}</span> : null}
     </button>
 );

@@ -1,7 +1,7 @@
 /** Friendly copy for common Supabase Auth failures. */
 
 const INVALID_CREDENTIALS = 'Email or password is incorrect.';
-const USER_EXISTS = 'An account with this email already exists. Try signing in.';
+const USER_EXISTS = 'An account with this email already exists. Try logging in.';
 const RATE_LIMITED = 'Too many attempts. Try again later.';
 const LINK_EXPIRED = 'This link has expired. Request a new one.';
 

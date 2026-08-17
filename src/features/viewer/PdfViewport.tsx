@@ -445,106 +445,123 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const textIntentLayout = textIntent ? layout.layouts[textIntent.pageIndex] : undefined;
     const fingeringLayout = fingeringSel ? layout.layouts[fingeringSel.pageIndex] : undefined;
 
+    const chrome =
+        overlayMode === 'history' ? (
+            <HistoryOverlayBanner onBack={() => annotationStore.setHistoryOverlay(null)} />
+        ) : effectiveReadOnly ? (
+            readOnly ? (
+                <ReadOnlyFingeringToggle />
+            ) : null
+        ) : (
+            <Toolbar store={annotationStore} />
+        );
+
     // NOTE: the ref'd container must render in every state — the ResizeObserver
     // and GestureController bind once and would otherwise attach to nothing.
+    // Chrome (toolbar / fingering toggle) is a sibling above the score surface
+    // so tools never cover engraving.
     return (
-        <div ref={containerRef} className="ink-surface relative h-full overflow-hidden bg-stone-200">
-            {status === 'loading' ? (
-                <div className="flex h-full items-center justify-center">
-                    <LoadingText>Loading score…</LoadingText>
-                </div>
-            ) : status === 'error' || !doc ? (
-                <div className="flex h-full items-center justify-center p-8">
-                    <ErrorText>Could not open this PDF{error ? `: ${error}` : '.'}</ErrorText>
-                </div>
-            ) : (
-                <>
-                    <div
-                        className="absolute left-0 top-0"
-                        style={{
-                            transform: `translate(${-view.scrollX}px, ${-view.scrollY}px) scale(${previewFactor})`,
-                            transformOrigin: '0 0',
-                            width: layout.contentWidth * renderScale,
-                            height: layout.contentHeight * renderScale,
-                        }}
-                    >
-                        {pages}
-                        {playbackScore ? (
-                            <>
-                                <LoopRangeOverlay score={playbackScore} layout={layout} renderScale={renderScale} />
-                                <div
-                                    ref={setMeasureHighlightEl}
-                                    aria-hidden="true"
-                                    className="pointer-events-none absolute left-0 top-0 rounded-[2px] bg-accent/10"
-                                    style={{ display: 'none' }}
-                                />
-                                <div
-                                    ref={setPlayheadLineEl}
-                                    aria-hidden="true"
-                                    className="pointer-events-none absolute left-0 top-0 w-[2px] rounded-full bg-accent/70"
-                                    style={{ display: 'none' }}
-                                />
-                            </>
-                        ) : null}
+        <div className="flex h-full min-h-0 flex-col">
+            {status === 'ready' && doc ? chrome : null}
+            <div ref={containerRef} className="ink-surface relative min-h-0 flex-1 overflow-hidden bg-stone-200">
+                {status === 'loading' ? (
+                    <div className="flex h-full items-center justify-center">
+                        <LoadingText>Loading score…</LoadingText>
                     </div>
-                    {overlayMode === 'history' ? (
+                ) : status === 'error' || !doc ? (
+                    <div className="flex h-full items-center justify-center p-8">
+                        <ErrorText>Could not open this PDF{error ? `: ${error}` : '.'}</ErrorText>
+                    </div>
+                ) : (
+                    <>
                         <div
-                            data-ui-overlay
-                            className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center"
+                            className="absolute left-0 top-0"
+                            style={{
+                                transform: `translate(${-view.scrollX}px, ${-view.scrollY}px) scale(${previewFactor})`,
+                                transformOrigin: '0 0',
+                                width: layout.contentWidth * renderScale,
+                                height: layout.contentHeight * renderScale,
+                            }}
                         >
-                            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950 shadow">
-                                <span>Viewing day starting point</span>
-                                <button
-                                    type="button"
-                                    onClick={() => annotationStore.setHistoryOverlay(null)}
-                                    className="rounded-full bg-amber-800 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-amber-700"
-                                >
-                                    Back to current
-                                </button>
-                            </div>
+                            {pages}
+                            {playbackScore ? (
+                                <>
+                                    <LoopRangeOverlay score={playbackScore} layout={layout} renderScale={renderScale} />
+                                    <div
+                                        ref={setMeasureHighlightEl}
+                                        aria-hidden="true"
+                                        className="pointer-events-none absolute left-0 top-0 rounded-[2px] bg-accent/10"
+                                        style={{ display: 'none' }}
+                                    />
+                                    <div
+                                        ref={setPlayheadLineEl}
+                                        aria-hidden="true"
+                                        className="pointer-events-none absolute left-0 top-0 w-[2px] rounded-full bg-accent/70"
+                                        style={{ display: 'none' }}
+                                    />
+                                </>
+                            ) : null}
                         </div>
-                    ) : null}
-                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} />}
-                    {readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
-                    {!effectiveReadOnly && textIntent && textIntentLayout ? (
-                        <TextEditorOverlay
-                            intent={textIntent}
-                            layout={textIntentLayout}
-                            view={view}
-                            onCommit={commitText}
-                            onCancel={() => {
-                                textIntentHandled.current = true;
-                                setTextIntent(null);
+                        {!effectiveReadOnly && textIntent && textIntentLayout ? (
+                            <TextEditorOverlay
+                                intent={textIntent}
+                                layout={textIntentLayout}
+                                view={view}
+                                onCommit={commitText}
+                                onCancel={() => {
+                                    textIntentHandled.current = true;
+                                    setTextIntent(null);
+                                }}
+                            />
+                        ) : null}
+                        {fingeringSel && fingeringLayout ? (
+                            <Suspense fallback={null}>
+                                <FingeringFlow
+                                    key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}
+                                    docId={docId}
+                                    selection={fingeringSel}
+                                    layout={fingeringLayout}
+                                    store={annotationStore}
+                                    canWrite={!readOnly}
+                                    score={playbackScore}
+                                    onClose={() => setFingeringSel(null)}
+                                />
+                            </Suspense>
+                        ) : null}
+                        <ZoomControls
+                            onZoomBy={(factor) => {
+                                const { view: v, setView } = useViewerStore.getState();
+                                const zoomed = zoomAt(
+                                    v,
+                                    v.scale * factor,
+                                    viewportSize.width / 2,
+                                    viewportSize.height / 2,
+                                );
+                                setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height));
                             }}
                         />
-                    ) : null}
-                    {fingeringSel && fingeringLayout ? (
-                        <Suspense fallback={null}>
-                            <FingeringFlow
-                                key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}
-                                docId={docId}
-                                selection={fingeringSel}
-                                layout={fingeringLayout}
-                                store={annotationStore}
-                                canWrite={!readOnly}
-                                score={playbackScore}
-                                onClose={() => setFingeringSel(null)}
-                            />
-                        </Suspense>
-                    ) : null}
-                    <ZoomControls
-                        onZoomBy={(factor) => {
-                            const { view: v, setView } = useViewerStore.getState();
-                            const zoomed = zoomAt(v, v.scale * factor, viewportSize.width / 2, viewportSize.height / 2);
-                            setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height));
-                        }}
-                    />
-                    {layout.layouts.length > 1 ? <PageChip pageCount={layout.layouts.length} /> : null}
-                </>
-            )}
+                        {layout.layouts.length > 1 ? <PageChip pageCount={layout.layouts.length} /> : null}
+                    </>
+                )}
+            </div>
         </div>
     );
 };
+
+const HistoryOverlayBanner = ({ onBack }: { onBack: () => void }) => (
+    <div data-ui-overlay className="flex flex-none justify-center border-b border-amber-200 bg-amber-50 px-3 py-1.5">
+        <div className="flex items-center gap-2 text-sm text-amber-950">
+            <span>Viewing day starting point</span>
+            <button
+                type="button"
+                onClick={onBack}
+                className="rounded-full bg-amber-800 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-amber-700"
+            >
+                Back to current
+            </button>
+        </div>
+    </div>
+);
 
 /**
  * View-only members get no Toolbar, but the fingering diagram is FOR students —
@@ -554,22 +571,27 @@ const ReadOnlyFingeringToggle = () => {
     const tool = useViewerStore((s) => s.tool);
     const active = tool === 'fingering';
     return (
-        <div
-            data-ui-overlay
-            className="pointer-events-none absolute inset-x-0 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:bottom-auto sm:top-3"
-        >
+        <div data-ui-overlay className="flex flex-none justify-center border-b border-stone-200 bg-white px-2 py-1">
             <button
                 type="button"
                 aria-pressed={active}
+                aria-label="Fingering"
                 title={active ? 'Stop selecting' : 'Fingering — drag over a chord or phrase'}
                 onClick={() => useViewerStore.getState().setTool(active ? 'pan' : 'fingering')}
-                className={`pointer-events-auto flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm shadow-lg backdrop-blur transition ${
+                className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition ${
                     active
                         ? 'border-accent bg-accent-soft text-accent'
-                        : 'border-stone-200 bg-white/95 text-stone-600 hover:bg-white'
+                        : 'border-stone-200 text-stone-600 hover:bg-ink/5'
                 }`}
             >
-                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+                <svg
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    aria-hidden
+                >
                     <rect x="4" y="5" width="16" height="14" rx="1.5" />
                     <path strokeLinecap="round" strokeWidth="2.5" d="M9.33 5.5v6M14.67 5.5v6" />
                 </svg>
@@ -585,9 +607,9 @@ const PageChip = ({ pageCount }: { pageCount: number }) => {
     return (
         <div
             data-ui-overlay
-            className="pointer-events-none absolute left-2 top-2 z-10 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-4 sm:top-auto"
+            className="pointer-events-none absolute bottom-[calc(1rem+var(--safe-bottom))] left-4 z-10"
         >
-            <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-stone-600 shadow-sm">
+            <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-ink-muted shadow-sm">
                 p. {Math.min(pageIndex + 1, pageCount)} / {pageCount}
             </span>
         </div>
@@ -596,10 +618,7 @@ const PageChip = ({ pageCount }: { pageCount: number }) => {
 
 const ZoomControls = ({ onZoomBy }: { onZoomBy: (factor: number) => void }) => {
     return (
-        <div
-            data-ui-overlay
-            className="absolute bottom-[calc(4.5rem+var(--safe-bottom))] right-4 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))]"
-        >
+        <div data-ui-overlay className="absolute bottom-[calc(1rem+var(--safe-bottom))] right-4 flex flex-col gap-2">
             <button
                 type="button"
                 aria-label="Zoom in"

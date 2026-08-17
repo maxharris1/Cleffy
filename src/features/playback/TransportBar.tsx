@@ -38,19 +38,19 @@ export interface TransportBarProps {
 }
 
 const ERROR_COPY: Record<string, string> = {
-    too_large: 'This score is too long to analyze (60-page limit).',
-    page_count_unknown: 'Page count is missing — reopen the score so we can measure it, then try Generate again.',
+    too_large: 'This score is too long to turn into play-along (60-page limit).',
+    page_count_unknown: 'We could not count the pages. Reopen the score, then try Generate again.',
     no_staves_found: "Couldn't find readable music in this PDF.",
-    omr_timeout: 'Analysis took too long and was stopped.',
-    omr_crash: 'The music-recognition engine crashed on this score.',
-    musicxml_parse_failed: 'The recognized music could not be converted.',
-    queue_full: 'The analysis service is busy — try again in a few minutes.',
-    backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
-    service_unreachable: 'The analysis service is not reachable right now.',
-    download_failed: 'The PDF could not be fetched for analysis.',
-    worker_lost: 'The analysis was interrupted and will retry automatically.',
-    stale: 'The analysis was interrupted.',
-    internal: 'Something went wrong during analysis.',
+    omr_timeout: 'Reading this score took too long and was stopped.',
+    omr_crash: 'Play-along could not read this score. Try Generate again, or a cleaner scan.',
+    musicxml_parse_failed: 'The notes we found could not be turned into play-along.',
+    queue_full: 'Play-along is busy — try again in a few minutes.',
+    backlog_full: 'Several of your scores are already analyzing — try Generate again shortly.',
+    service_unreachable: 'Play-along is unreachable right now. Try again in a moment.',
+    download_failed: 'The PDF could not be fetched for play-along.',
+    worker_lost: 'Play-along was interrupted and will retry automatically.',
+    stale: 'Play-along was interrupted.',
+    internal: 'Something went wrong making the play-along.',
 };
 
 /** Pass markers for a bar performed more than once (a repeat). */
@@ -76,7 +76,7 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
     },
     {
         code: 'repeats_unrolled',
-        text: 'Repeats and endings are played as written, so bar numbers go back on each repeat.',
+        text: 'Bar numbers go back on each repeat — the music is played as written, including endings.',
     },
     {
         code: 'meter_corrected',
@@ -88,11 +88,11 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
     },
     {
         code: 'measure_overfull',
-        text: 'Some bars came out longer than their time signature — usually a misread rhythm.',
+        text: 'A few bars may run long — rhythms there can feel stretched.',
     },
     {
         code: 'measure_underfull',
-        text: 'Some bars came out short and were padded, so notes there may fall early.',
+        text: 'A few bars may be short — notes there can come in early.',
     },
     {
         code: 'multiple_movements_concatenated',
@@ -125,13 +125,12 @@ const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: b
         return null;
     }
     return (
-        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900" role="status">
+        <div
+            className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900"
+            role="status"
+        >
             This play-along was made by an older version of the analysis.{' '}
-            <button
-                type="button"
-                onClick={props.onGenerate}
-                className="font-medium underline underline-offset-2"
-            >
+            <button type="button" onClick={props.onGenerate} className="font-medium underline underline-offset-2">
                 Regenerate it
             </button>{' '}
             to pick up the improvements.
@@ -139,30 +138,56 @@ const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: b
     );
 };
 
-/** Persistent, collapsed disclosure of what the analysis could not do. */
+const REPEAT_WARNING_CODES = new Set(['repeats_ignored', 'repeats_unrolled', 'multiple_movements_concatenated']);
+const TIMING_WARNING_CODES = new Set(['meter_corrected', 'meter_suspect', 'measure_overfull', 'measure_underfull']);
+
+const scoreWarningChipLabel = (codes: readonly string[]): string => {
+    const hasRepeat = codes.some((code) => REPEAT_WARNING_CODES.has(code));
+    const hasTiming = codes.some((code) => TIMING_WARNING_CODES.has(code));
+    if (hasRepeat && hasTiming) {
+        return 'Bar numbers restart on repeats; a few bars may be slightly off.';
+    }
+    if (hasRepeat) {
+        return 'Bar numbers restart on repeats';
+    }
+    if (hasTiming) {
+        return 'A few bars may be slightly off';
+    }
+    return codes.length === 1 ? '1 note about this play-along' : `${codes.length} notes about this play-along`;
+};
+
+/** Quiet chip by the measure counter — expands the analysis caveats on demand. */
 const ScoreWarnings = (props: { warnings: readonly string[] }) => {
     const [open, setOpen] = useState(false);
     const present = SCORE_WARNING_COPY.filter((entry) => props.warnings.includes(entry.code));
     if (present.length === 0) {
         return null;
     }
+    const label = scoreWarningChipLabel(present.map((entry) => entry.code));
     return (
-        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5" role="status">
+        <div className="relative">
             <button
                 type="button"
                 aria-expanded={open}
+                aria-label={label}
+                title={label}
                 onClick={() => setOpen((v) => !v)}
-                className="flex w-full items-center gap-1.5 text-left text-xs font-medium text-amber-900"
+                className="max-w-[11rem] truncate rounded-full px-2 py-0.5 text-left text-xs text-ink-muted transition hover:bg-ink/5"
             >
-                {open ? <ChevronDownIcon size={13} /> : <ChevronUpIcon size={13} />}
-                {present.length === 1 ? '1 thing to know about this play-along' : `${present.length} things to know about this play-along`}
+                {present.length === 1 ? '1 note' : `${present.length} notes`}
             </button>
             {open ? (
-                <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-amber-900">
-                    {present.map((entry) => (
-                        <li key={entry.code}>{entry.text}</li>
-                    ))}
-                </ul>
+                <div
+                    role="status"
+                    className="absolute bottom-full left-0 z-20 mb-1 w-72 rounded-xl border border-stone-200 bg-white p-3 text-left shadow-lg"
+                >
+                    <p className="text-xs font-medium text-ink">{label}</p>
+                    <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-ink-muted">
+                        {present.map((entry) => (
+                            <li key={entry.code}>{entry.text}</li>
+                        ))}
+                    </ul>
+                </div>
             ) : null}
         </div>
     );
@@ -253,11 +278,16 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
     const lastMeasure = score.measures[score.measures.length - 1];
     const lastIndex = score.measures.length - 1;
 
-    const play = () => {
+    const togglePlay = () => {
         const engine = getEngine();
-        if (engine && !running) {
-            void engine.play({ countIn: countInOn });
+        if (!engine) {
+            return;
         }
+        if (running) {
+            engine.pause();
+            return;
+        }
+        void engine.play({ countIn: countInOn });
     };
 
     const step = (direction: -1 | 1) => {
@@ -360,7 +390,6 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 canManage={props.role === 'owner' || props.role === 'editor'}
                 onGenerate={props.onGenerate}
             />
-            <ScoreWarnings warnings={score.warnings} />
 
             {loopRange ? (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/30 bg-accent-soft/50 px-2 py-1">
@@ -401,7 +430,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
             ) : null}
 
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                {/* Core transport — explicit rewind / play / pause, always visible */}
+                {/* Core transport — rewind plus one play/pause toggle */}
                 <div className="flex items-center gap-1">
                     <button
                         type="button"
@@ -414,24 +443,14 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     </button>
                     <button
                         type="button"
-                        aria-label="Play"
-                        title={countInOn ? 'Play (with count-in)' : 'Play'}
+                        aria-label={running ? 'Pause' : 'Play'}
+                        title={running ? 'Pause' : countInOn ? 'Play (with count-in)' : 'Play'}
                         disabled={loading}
                         aria-pressed={running}
-                        onClick={play}
-                        className={roundButton(!running)}
+                        onClick={togglePlay}
+                        className={roundButton(true)}
                     >
-                        <PlayIcon size={18} className="translate-x-[1px]" />
-                    </button>
-                    <button
-                        type="button"
-                        aria-label="Pause"
-                        title="Pause"
-                        aria-pressed={playbackStatus === 'paused'}
-                        onClick={() => getEngine()?.pause()}
-                        className={roundButton(running)}
-                    >
-                        <PauseIcon size={18} />
+                        {running ? <PauseIcon size={18} /> : <PlayIcon size={18} className="translate-x-[1px]" />}
                     </button>
                 </div>
 
@@ -444,7 +463,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     >
                         <ChevronLeftIcon size={16} />
                     </button>
-                    <span className="min-w-[4.5rem] text-center text-sm tabular-nums text-stone-700 sm:min-w-[5.5rem]">
+                    <span className="min-w-[4.5rem] text-center text-sm tabular-nums text-ink sm:min-w-[5.5rem]">
                         m. {measureLabel(currentMeasureIndex)} / {lastMeasure ? lastMeasure.n : '–'}
                     </span>
                     <button
@@ -455,6 +474,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     >
                         <ChevronRightIcon size={16} />
                     </button>
+                    <ScoreWarnings warnings={score.warnings} />
                 </div>
 
                 <span
@@ -478,7 +498,12 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} inferred={tempoIsInferred(score)} />
+                    <TempoControl
+                        bpm={bpm}
+                        onBpm={setBpm}
+                        compound={isCompoundMeter(score)}
+                        inferred={tempoIsInferred(score)}
+                    />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
@@ -736,11 +761,7 @@ const squareButton = (active: boolean): string =>
         active ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5',
     ].join(' ');
 
-/**
- * Transport keys. `primary` marks the one that does the obvious next thing —
- * Play when stopped, Pause when running — so all three stay visible and
- * labelled while the useful one still reads at a glance.
- */
+/** Transport keys. `primary` is the play/pause toggle. */
 const roundButton = (primary: boolean): string =>
     [
         'flex h-10 w-10 items-center justify-center rounded-full transition disabled:animate-pulse',

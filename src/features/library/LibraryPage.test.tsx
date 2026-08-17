@@ -107,7 +107,9 @@ describe('LibraryPage', () => {
     it('renders rows with favorite stars, tag buttons, and action menus', async () => {
         renderLibrary();
         expect(await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)')).toBeInTheDocument();
-        expect(screen.getAllByRole('button', { name: 'Add to favorites' })).toHaveLength(2);
+        const stars = screen.getAllByRole('button', { name: 'Add to favorites' });
+        expect(stars).toHaveLength(2);
+        expect(stars[0]).toHaveClass('h-10', 'w-10');
         expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
@@ -155,6 +157,7 @@ describe('LibraryPage', () => {
         renderLibrary();
         await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+        expect(screen.getByRole('separator')).toBeInTheDocument();
         await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
         expect(screen.getByRole('dialog', { name: 'Delete this score?' })).toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Delete' }));
@@ -162,12 +165,29 @@ describe('LibraryPage', () => {
         await waitFor(() => expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument());
     });
 
+    it('pluralizes a single-page score', async () => {
+        listDocuments.mockResolvedValue({
+            documents: [{ ...doc('d1', 'One-page study'), page_count: 1 }],
+            hasMore: false,
+        });
+        renderLibrary();
+        expect(await screen.findByText(/1 page ·/)).toBeInTheDocument();
+        expect(screen.queryByText(/1 pages/)).not.toBeInTheDocument();
+    });
+
+    it('does not style score titles as visited links', async () => {
+        renderLibrary();
+        const title = await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        expect(title).toHaveClass('visited:text-ink');
+        expect(title).toHaveClass('no-underline');
+    });
+
     it('opens the share dialog for a row', async () => {
         const user = userEvent.setup();
         renderLibrary();
         await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
-        await user.click(screen.getByRole('menuitem', { name: 'Share…' }));
+        await user.click(screen.getByRole('menuitem', { name: 'Invite' }));
         expect(screen.getByTestId('share-dialog')).toHaveTextContent('d1');
     });
 

@@ -176,31 +176,41 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
     return (
         <div className="fixed inset-0 flex flex-col">
-            <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
+            <ViewerHeader
+                backTo={backTo}
+                backLabel={backLabel}
+                title={state.doc.title}
+                overflow={
+                    <>
+                        {annotationStore && state.role === 'owner' ? (
+                            <ImportScanButton
+                                store={annotationStore}
+                                docId={docId}
+                                bytes={state.bytes}
+                                classify={classify}
+                                includeBornDigital
+                                clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
+                                    setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));
+                                })}
+                                autoOpen={autoOpenImport}
+                            />
+                        ) : null}
+                        {annotationStore ? (
+                            <LessonHistoryButton store={annotationStore} canRestore={!readOnly} />
+                        ) : null}
+                        {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
+                        <ShareExportMenu docId={docId} title={state.doc.title} />
+                        {state.role === 'owner' ? (
+                            <Button variant="ghost" size="sm" onClick={() => setShareOpen(true)}>
+                                Invite
+                            </Button>
+                        ) : null}
+                    </>
+                }
+            >
                 <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
                 {readOnly ? <Badge>view only</Badge> : null}
-                {annotationStore && state.role === 'owner' ? (
-                    <ImportScanButton
-                        store={annotationStore}
-                        docId={docId}
-                        bytes={state.bytes}
-                        classify={classify}
-                        includeBornDigital
-                        clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
-                            setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));
-                        })}
-                        autoOpen={autoOpenImport}
-                    />
-                ) : null}
-                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
-                {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
-                <ShareExportMenu docId={docId} title={state.doc.title} />
-                {state.role === 'owner' ? (
-                    <Button size="sm" onClick={() => setShareOpen(true)}>
-                        Invite
-                    </Button>
-                ) : null}
             </ViewerHeader>
             {session?.user.is_anonymous ? <UpgradeBanner /> : null}
             {staleBytes ? (
@@ -262,7 +272,7 @@ const SyncDot = ({ status }: { status: SyncStatus }) => {
     return (
         <span title={label} className="flex items-center gap-1.5">
             <span aria-hidden="true" className={`h-2.5 w-2.5 rounded-full ${dot}`} />
-            <span className="sr-only whitespace-nowrap text-xs text-stone-500 md:not-sr-only">{short}</span>
+            <span className="sr-only whitespace-nowrap text-xs text-ink-muted md:not-sr-only">{short}</span>
         </span>
     );
 };
@@ -333,20 +343,28 @@ const LocalViewer = ({ docId }: { docId: string }) => {
 
     return (
         <div className="fixed inset-0 flex flex-col">
-            <ViewerHeader backTo="/" backLabel="Back to home" title="Local score">
+            <ViewerHeader
+                backTo="/"
+                backLabel="Back to home"
+                title="Local score"
+                overflow={
+                    <>
+                        {annotationStore ? (
+                            <ImportScanButton
+                                store={annotationStore}
+                                docId={docId}
+                                bytes={bytes}
+                                classify={null}
+                                includeBornDigital={false}
+                                clean={null}
+                            />
+                        ) : null}
+                        {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
+                        <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
+                    </>
+                }
+            >
                 <Badge>this device only</Badge>
-                {annotationStore ? (
-                    <ImportScanButton
-                        store={annotationStore}
-                        docId={docId}
-                        bytes={bytes}
-                        classify={null}
-                        includeBornDigital={false}
-                        clean={null}
-                    />
-                ) : null}
-                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
-                <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
             </ViewerHeader>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>

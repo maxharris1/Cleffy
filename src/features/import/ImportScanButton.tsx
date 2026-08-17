@@ -32,11 +32,12 @@ export const ImportScanButton = ({
         <>
             <button
                 type="button"
-                title="Detect handwritten marks already on the pages and make them editable"
+                aria-label="Find handwritten notes"
+                title="Find handwritten notes already on the pages and make them editable"
                 onClick={() => setOpen(true)}
                 className={buttonClassName('ghost', 'sm')}
             >
-                Import marks
+                Find handwritten notes
             </button>
             {open ? (
                 <ImportReviewPanel

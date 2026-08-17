@@ -23,8 +23,8 @@ const LoginForm = () => {
                 emailId="login-email"
                 passwordId="login-password"
                 submitLabel="Log in"
-                busyLabel="Signing in…"
-                fallbackError="Could not sign in."
+                busyLabel="Logging in…"
+                fallbackError="Could not log in."
                 afterPassword={
                     <div className="mt-2 text-right">
                         <Link to="/forgot-password" className={linkClassName}>

@@ -300,7 +300,7 @@ export const ImportReviewPanel = ({
                                 ? 'The original ink stays printed on the page here — imported marks sit on top of it.'
                                 : 'Heads-up: for scores opened without an account, the original handwriting stays ' +
                                   'printed on the page — imported marks sit on top of it, so erasing one reveals the ' +
-                                  'ink underneath. Sign in and upload the score to also lift the original ink off ' +
+                                  'ink underneath. Log in and upload the score to also lift the original ink off ' +
                                   'the page.'}
                         </p>
                     )}
@@ -383,7 +383,10 @@ const PageSection = ({
                     </span>
                     Page {page.pageIndex + 1}
                     <span className="truncate font-normal text-stone-500">
-                        · {enabledCount === page.items.length ? page.items.length : `${enabledCount}/${page.items.length}`}{' '}
+                        ·{' '}
+                        {enabledCount === page.items.length
+                            ? page.items.length
+                            : `${enabledCount}/${page.items.length}`}{' '}
                         marks
                     </span>
                 </button>

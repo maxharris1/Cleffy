@@ -349,16 +349,18 @@ export const LibraryPage = () => {
                             placeholder="Search by title…"
                             className={fieldClassName('sm', 'sm:max-w-xs')}
                         />
-                        <p className="text-xs text-stone-600">
+                        <p className="text-xs text-ink-muted">
                             {query.trim() || favoritesOnly || activeTagId
                                 ? `${visible?.length ?? 0} of ${documents.length}`
                                 : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId ? ' · showing latest 100' : null}
+                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId
+                                ? ' · showing latest 100'
+                                : null}
                         </p>
                     </div>
 
                     <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs">
-                        <span className="text-stone-500">Sort</span>
+                        <span className="text-ink-muted">Sort</span>
                         <FilterTag active={sort === 'recent'} onClick={() => setSort('recent')}>
                             Recent
                         </FilterTag>
@@ -391,7 +393,7 @@ export const LibraryPage = () => {
                             Favorites
                         </FilterTag>
                         <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
-                        <span className="text-stone-500">Tags</span>
+                        <span className="text-ink-muted">Tags</span>
                         {tags.length === 0 ? (
                             <FilterTag active={false} onClick={() => setManageTagsOpen(true)}>
                                 Add a tag…
@@ -526,7 +528,7 @@ const FilterTag = ({ active, onClick, children }: { active: boolean; onClick: ()
         aria-pressed={active}
         onClick={onClick}
         className={`transition ${
-            active ? 'font-semibold text-ink underline underline-offset-[0.2em]' : 'text-stone-500 hover:text-stone-700'
+            active ? 'font-semibold text-ink underline underline-offset-[0.2em]' : 'text-ink-muted hover:text-ink'
         }`}
     >
         {children}
@@ -566,12 +568,12 @@ const ScoreRow = ({
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div className="group flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40">
+            <div className="group flex items-center gap-1.5 border-b border-stone-300/50 transition hover:bg-ink/5">
                 <div className="flex min-w-0 flex-1 items-center gap-4 py-3.5">
                     <div className="min-w-0 flex-1">
                         <Link
                             to={`/doc/${doc.id}`}
-                            className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
+                            className="block truncate font-medium text-ink no-underline transition visited:text-ink hover:text-ink active:text-ink"
                         >
                             {stripComposer ? displayTitleOf(doc.title) : doc.title}
                         </Link>
@@ -579,7 +581,11 @@ const ScoreRow = ({
                             <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 {visibleTags.map((tag, i) => (
                                     <span key={tag.id} className="inline-flex items-center gap-1.5">
-                                        {i > 0 ? <span className="text-stone-300" aria-hidden="true">·</span> : null}
+                                        {i > 0 ? (
+                                            <span className="text-stone-300" aria-hidden="true">
+                                                ·
+                                            </span>
+                                        ) : null}
                                         <button
                                             type="button"
                                             onClick={() => onFilterTag(tag.id)}
@@ -603,8 +609,8 @@ const ScoreRow = ({
                             </div>
                         ) : null}
                     </div>
-                    <span className="shrink-0 text-xs text-stone-500">
-                        {doc.page_count ? `${doc.page_count} pages · ` : ''}
+                    <span className="shrink-0 text-xs text-ink-muted">
+                        {doc.page_count ? `${formatPageCount(doc.page_count)} · ` : ''}
                         {formatUpdated(doc.updated_at)}
                     </span>
                 </div>
@@ -614,26 +620,24 @@ const ScoreRow = ({
                     aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     onClick={onToggleFavorite}
-                    className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
-                        isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
+                    className={`flex h-10 w-10 items-center justify-center rounded-lg transition hover:bg-ink/5 ${
+                        isFavorite ? 'text-amber-500' : 'text-ink-muted hover:text-ink'
                     }`}
                 >
-                    <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
+                    <StarIcon size={18} fill={isFavorite ? 'currentColor' : 'none'} />
                 </button>
                 <button
                     type="button"
                     aria-label={hasTags ? 'Edit tags' : 'Add tags'}
                     title={hasTags ? 'Edit tags' : 'Add tags'}
                     onClick={onTags}
-                    className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
-                        hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
+                    className={`flex h-10 w-10 items-center justify-center rounded-lg transition hover:bg-ink/5 ${
+                        hasTags ? 'text-accent' : 'text-ink-muted hover:text-ink'
                     }`}
                 >
-                    <TagIcon size={16} />
+                    <TagIcon size={18} />
                 </button>
-                {isOwner ? (
-                    <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} />
-                ) : null}
+                {isOwner ? <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} /> : null}
             </div>
         </li>
     );
@@ -686,17 +690,18 @@ const RowMenu = ({
                 aria-expanded={open}
                 aria-label="Score actions"
                 onClick={() => setOpen((v) => !v)}
-                className="rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600"
+                className="flex h-10 w-10 items-center justify-center rounded-lg text-ink-muted transition hover:bg-ink/5 hover:text-ink"
             >
                 <MoreVerticalIcon size={16} />
             </button>
             {open ? (
                 <div
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-36 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="absolute right-0 z-20 mt-1 w-40 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     <MenuItem label="Rename" onClick={() => pick(onRename)} />
-                    <MenuItem label="Share…" onClick={() => pick(onShare)} />
+                    <MenuItem label="Invite" onClick={() => pick(onShare)} />
+                    <div className="my-1.5 border-t border-stone-200" role="separator" />
                     <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
                 </div>
             ) : null}
@@ -709,8 +714,8 @@ const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: 
         type="button"
         role="menuitem"
         onClick={onClick}
-        className={`w-full px-3 py-2 text-left text-sm transition hover:bg-ink/5 ${
-            danger ? 'text-danger' : 'text-stone-800'
+        className={`w-full px-3 text-left text-sm transition hover:bg-ink/5 ${
+            danger ? 'py-2.5 text-danger' : 'py-2 text-ink'
         }`}
     >
         {label}
@@ -816,6 +821,8 @@ const EmptyLibrary = ({
         <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
     </EmptyState>
 );
+
+const formatPageCount = (count: number): string => (count === 1 ? '1 page' : `${count} pages`);
 
 const formatUpdated = (iso: string): string => {
     const date = new Date(iso);

@@ -129,10 +129,10 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                     <div className="flex items-start justify-between gap-4 md:block">
                         <div>
                             <p className="landing-brand font-display text-2xl font-semibold sm:text-3xl">Cleffy</p>
-                            <p className="mt-1 text-sm text-stone-500 md:mt-1.5">Your scores</p>
+                            <p className="mt-1 text-sm text-ink-muted md:mt-1.5">Your scores</p>
                         </div>
                         <div className="flex shrink-0 items-center gap-2 pt-1 md:hidden">
-                            <span className="hidden max-w-[8rem] truncate text-sm text-stone-500 sm:inline">
+                            <span className="hidden max-w-[8rem] truncate text-sm text-ink-muted sm:inline">
                                 {userLabel}
                             </span>
                             <button
@@ -140,7 +140,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                                 onClick={() => void signOut()}
                                 className={buttonClassName('ghost', 'sm')}
                             >
-                                Sign out
+                                Log out
                             </button>
                         </div>
                     </div>
@@ -166,13 +166,13 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                     </nav>
 
                     <div className="mt-8 hidden border-t border-stone-300/50 pt-5 md:block">
-                        <p className="truncate text-sm text-stone-500">{userLabel}</p>
+                        <p className="truncate text-sm text-ink-muted">{userLabel}</p>
                         <button
                             type="button"
                             onClick={() => void signOut()}
                             className={buttonClassName('ghost', 'sm', 'mt-2')}
                         >
-                            Sign out
+                            Log out
                         </button>
                     </div>
                 </aside>
