@@ -18,11 +18,19 @@ import {
 const SECRET = 'whsec_test_secret';
 const NOW = 1_772_000_000;
 
+/**
+ * The env-driven catalogue, as supabase/functions/_shared/stripe.ts builds it.
+ * Founding Teacher is a second, cheaper price on the Teacher product, so it maps
+ * to 'teacher' like any other Teacher price — no schema, no special case.
+ */
 const PRICE_TIERS = {
-    price_pro_monthly: 'pro',
-    price_pro_annual: 'pro',
-    price_founding_annual: 'pro',
-    price_studio_annual: 'studio',
+    price_personal_monthly: 'personal',
+    price_personal_annual: 'personal',
+    price_teacher_monthly: 'teacher',
+    price_teacher_annual: 'teacher',
+    price_founding_annual: 'teacher',
+    price_academy_monthly: 'academy',
+    price_academy_annual: 'academy',
 } as const;
 
 /** In-memory stand-in for the tables the webhook writes. */
@@ -71,7 +79,7 @@ const subscriptionEvent = (
             status: 'active',
             customer: 'cus_1',
             current_period_end: 1_800_000_000,
-            items: { data: [{ price: { id: 'price_pro_annual' } }] },
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
             metadata: { user_id: 'teacher-1' },
             ...overrides,
         },
@@ -149,7 +157,7 @@ describe('stripe event handling', () => {
 
         const first = await handleStripeEvent(event, store, PRICE_TIERS);
         expect(first.body).toMatchObject({ applied: 'subscription_upserted' });
-        expect(store.subscriptions.get('sub_1')?.tier).toBe('pro');
+        expect(store.subscriptions.get('sub_1')?.tier).toBe('teacher');
 
         store.subscriptions.clear();
         const second = await handleStripeEvent(event, store, PRICE_TIERS);
@@ -172,7 +180,7 @@ describe('stripe event handling', () => {
             status: 'active',
             customer: 'cus_9',
             current_period_end: 1_800_000_000,
-            items: { data: [{ price: { id: 'price_studio_annual' } }] },
+            items: { data: [{ price: { id: 'price_academy_annual' } }] },
         });
 
         const result = await handleStripeEvent(
@@ -187,7 +195,7 @@ describe('stripe event handling', () => {
 
         expect(result.status).toBe(200);
         expect(store.customers.get('cus_9')).toBe('teacher-9');
-        expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', tier: 'studio' });
+        expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', tier: 'academy' });
         expect(store.archived).toEqual([]);
     });
 
@@ -212,7 +220,7 @@ describe('stripe event handling', () => {
             id: 'sub_1',
             status: 'unpaid',
             customer: 'cus_1',
-            items: { data: [{ price: { id: 'price_pro_annual' } }] },
+            items: { data: [{ price: { id: 'price_teacher_annual' } }] },
             metadata: { user_id: 'teacher-1' },
         });
 
@@ -256,7 +264,20 @@ describe('stripe event handling', () => {
 });
 
 describe('subscription row mapping', () => {
-    it('maps the founding price to pro, like any other pro price', () => {
+    it('maps every published price to the tier it was sold as', () => {
+        // Both intervals of all three products, so a mistyped env name in the
+        // catalogue cannot silently drop a plan to free.
+        for (const [priceId, tier] of Object.entries(PRICE_TIERS)) {
+            const row = subscriptionRowFrom(
+                { id: `sub_${priceId}`, status: 'active', items: { data: [{ price: { id: priceId } }] } },
+                'teacher-1',
+                PRICE_TIERS,
+            );
+            expect(row.tier).toBe(tier);
+        }
+    });
+
+    it('maps the founding price to teacher, like any other teacher price', () => {
         const row = subscriptionRowFrom(
             {
                 id: 'sub_f',
@@ -266,7 +287,7 @@ describe('subscription row mapping', () => {
             'teacher-1',
             PRICE_TIERS,
         );
-        expect(row.tier).toBe('pro');
+        expect(row.tier).toBe('teacher');
         expect(row.price_id).toBe('price_founding_annual');
     });
 
@@ -275,7 +296,7 @@ describe('subscription row mapping', () => {
             {
                 id: 'sub_x',
                 status: 'past_due',
-                items: { data: [{ price: { id: 'price_studio_annual' } }] },
+                items: { data: [{ price: { id: 'price_academy_annual' } }] },
             },
             'teacher-1',
             PRICE_TIERS,
@@ -288,7 +309,7 @@ describe('subscription row mapping', () => {
             {
                 id: 'sub_i',
                 status: 'active',
-                items: { data: [{ price: { id: 'price_pro_annual' }, current_period_end: 1_800_000_000 }] },
+                items: { data: [{ price: { id: 'price_teacher_annual' }, current_period_end: 1_800_000_000 }] },
             },
             'teacher-1',
             PRICE_TIERS,

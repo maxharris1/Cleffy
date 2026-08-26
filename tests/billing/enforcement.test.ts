@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { enforceQuota, TIER_LIMITS } from '../../supabase/functions/_shared/entitlements';
+import { METRIC_BY_FUNCTION, TIER_LIMITS, enforceQuota } from '../../supabase/functions/_shared/entitlements';
 import { parsePostgrestLimitError } from '../../src/features/billing/limitErrors';
 import { FakeBilling } from './fakeBilling';
 
 /**
  * The integration test the brief asks for: a free teacher's 4th cloud score and
- * 4th play-along run are both refused with the typed error, while Pro sails
- * through.
+ * 4th play-along run are both refused with the typed error, while a paid tier
+ * sails through.
  *
  * Real production code is under test on both paths — `enforceQuota` for the
  * metered endpoints and `parsePostgrestLimitError` for the database trigger.
@@ -124,9 +124,9 @@ describe('free tier limits', () => {
 });
 
 describe('paid tiers', () => {
-    it('lets a Pro teacher past the free cloud-score cap', async () => {
+    it('lets a Teacher past the free cloud-score cap', async () => {
         const billing = new FakeBilling();
-        billing.subscribe('teacher', 'pro');
+        billing.subscribe('teacher', 'teacher');
 
         for (let i = 0; i < FREE_SCORES + 5; i += 1) {
             await expect(billing.insertScore('teacher', `score-${i}`)).resolves.toBeUndefined();
@@ -134,9 +134,9 @@ describe('paid tiers', () => {
         expect(billing.activeScores.get('teacher')).toHaveLength(FREE_SCORES + 5);
     });
 
-    it('lets a Pro teacher run play-alongs without limit, and without metering them', async () => {
+    it('lets a Teacher run play-alongs without limit, and without metering them', async () => {
         const billing = new FakeBilling();
-        billing.subscribe('teacher', 'pro');
+        billing.subscribe('teacher', 'teacher');
 
         for (let i = 0; i < FREE_OMR + 20; i += 1) {
             expect((await enforceQuota(billing, 'teacher', 'omr_runs')).ok).toBe(true);
@@ -145,9 +145,25 @@ describe('paid tiers', () => {
         expect(billing.countOf('teacher', 'omr_runs')).toBe(0);
     });
 
-    it('gives a Studio member the same treatment as the paying owner', async () => {
+    it('gives a Personal subscriber the same unlimited scores and runs', async () => {
+        // Personal is only cheaper in what it unlocks (no roster), never in the
+        // ceilings a solo player actually meets while working.
         const billing = new FakeBilling();
-        billing.subscribe('owner', 'studio');
+        billing.subscribe('soloist', 'personal');
+
+        for (let i = 0; i < FREE_SCORES + 5; i += 1) {
+            await expect(billing.insertScore('soloist', `score-${i}`)).resolves.toBeUndefined();
+        }
+        for (let i = 0; i < FREE_OMR + 5; i += 1) {
+            expect((await enforceQuota(billing, 'soloist', 'omr_runs')).ok).toBe(true);
+        }
+        expect((await enforceQuota(billing, 'soloist', 'smart_imports')).ok).toBe(true);
+        expect(billing.countOf('soloist', 'omr_runs')).toBe(0);
+    });
+
+    it('gives an Academy member the same treatment as the paying owner', async () => {
+        const billing = new FakeBilling();
+        billing.subscribe('owner', 'academy');
         billing.seatIn('member', 'owner');
 
         for (let i = 0; i < FREE_SCORES + 2; i += 1) {
@@ -158,8 +174,8 @@ describe('paid tiers', () => {
 
     it('still applies the silent fair-use ceiling to vision reads', async () => {
         const billing = new FakeBilling();
-        billing.subscribe('teacher', 'pro');
-        const cap = TIER_LIMITS.pro.vision_reads;
+        billing.subscribe('teacher', 'teacher');
+        const cap = TIER_LIMITS.teacher.vision_reads;
 
         for (let i = 0; i < cap; i += 1) {
             expect((await enforceQuota(billing, 'teacher', 'vision_reads')).ok).toBe(true);
@@ -171,17 +187,44 @@ describe('paid tiers', () => {
             throw new Error('expected the fair-use ceiling to apply');
         }
         // A different code, so the UI points at support rather than at Checkout.
-        expect(refused.body).toMatchObject({ code: 'fair_use_cap', tier: 'pro' });
+        expect(refused.body).toMatchObject({ code: 'fair_use_cap', tier: 'teacher' });
     });
 
-    it('drops a lapsed Pro teacher back to free limits', async () => {
+    it('drops a lapsed Teacher back to free limits', async () => {
         const billing = new FakeBilling();
-        billing.subscribe('teacher', 'pro', { status: 'canceled' });
+        billing.subscribe('teacher', 'teacher', { status: 'canceled' });
 
         for (let i = 0; i < FREE_OMR; i += 1) {
             expect((await enforceQuota(billing, 'teacher', 'omr_runs')).ok).toBe(true);
         }
         expect((await enforceQuota(billing, 'teacher', 'omr_runs')).ok).toBe(false);
+    });
+});
+
+describe('the student roster is a stock, not a metered flow', () => {
+    it('is drawn on by no metered endpoint, so no usage counter ever moves for it', async () => {
+        const billing = new FakeBilling();
+
+        // The roster is enforced where a seat row is written, exactly like the
+        // cloud-score cap. No Edge Function meters it, so nothing can quietly bill
+        // a teacher a "student" unit for adding a pupil.
+        expect(Object.values(METRIC_BY_FUNCTION)).not.toContain('students');
+
+        for (const metric of Object.values(METRIC_BY_FUNCTION)) {
+            expect((await enforceQuota(billing, 'teacher', metric)).ok).toBe(true);
+            expect(billing.countOf('teacher', metric)).toBeGreaterThan(0);
+        }
+        expect(billing.countOf('teacher', 'students')).toBe(0);
+    });
+
+    it('gates the roster by tier instead: Personal gets none, Teacher and Academy no ceiling', () => {
+        // FakeBilling has no roster hook to grow yet — the roster tables land with
+        // the student work — so the contract those tables will enforce is asserted
+        // against the limits table they read.
+        expect(TIER_LIMITS.personal.students).toBe(0);
+        expect(TIER_LIMITS.teacher.students).toBe(-1);
+        expect(TIER_LIMITS.academy.students).toBe(-1);
+        expect(TIER_LIMITS.free.students).toBe(3);
     });
 });
 

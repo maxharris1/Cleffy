@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     TIER_LIMITS,
+    UNLIMITED,
     downgradeExpired,
     isFairUseCap,
     limitReachedBody,
@@ -14,7 +15,7 @@ import { FakeBilling } from './fakeBilling';
 const NOW = Date.parse('2026-08-11T12:00:00Z');
 
 const sub = (overrides: Partial<SubscriptionLike> & { user_id: string }): SubscriptionLike => ({
-    tier: 'pro',
+    tier: 'teacher',
     status: 'active',
     current_period_end: '2026-09-11T12:00:00Z',
     ...overrides,
@@ -31,53 +32,70 @@ describe('entitlement resolution', () => {
         expect(result.limits).toEqual(TIER_LIMITS.free);
     });
 
-    it('grants pro from the teacher’s own live subscription', () => {
+    it('grants teacher from the teacher’s own live subscription', () => {
         const result = resolve('teacher', [sub({ user_id: 'teacher' })]);
-        expect(result.tier).toBe('pro');
+        expect(result.tier).toBe('teacher');
         expect(result.source).toBe('subscription');
-        expect(result.limits.cloud_scores).toBe(-1);
+        expect(result.limits.cloud_scores).toBe(UNLIMITED);
+        expect(result.limits.students).toBe(UNLIMITED);
     });
 
-    it('treats a Founding Teacher subscription as plain pro', () => {
-        // The webhook resolves the founding price to tier 'pro', so there is no
+    it('grants personal to an individual, with the same paid ceilings but no roster', () => {
+        // Personal and Teacher share every metered limit; students: 0 is the whole
+        // difference, and it is what gates Personal out of the student features.
+        const result = resolve('soloist', [sub({ user_id: 'soloist', tier: 'personal' })]);
+        expect(result.tier).toBe('personal');
+        expect(result.source).toBe('subscription');
+        expect(result.limits.cloud_scores).toBe(UNLIMITED);
+        expect(result.limits.smart_imports).toBe(UNLIMITED);
+        expect(result.limits.students).toBe(0);
+    });
+
+    it('treats a Founding Teacher subscription as plain teacher', () => {
+        // The webhook resolves the founding price to tier 'teacher', so there is no
         // founding branch to get wrong here — that is the point of the design.
-        const founding = sub({ user_id: 'teacher', tier: 'pro' });
-        expect(resolve('teacher', [founding]).tier).toBe('pro');
-        expect(resolve('teacher', [founding]).limits).toEqual(TIER_LIMITS.pro);
+        const founding = sub({ user_id: 'teacher', tier: 'teacher' });
+        expect(resolve('teacher', [founding]).tier).toBe('teacher');
+        expect(resolve('teacher', [founding]).limits).toEqual(TIER_LIMITS.teacher);
     });
 
-    it('grants studio to a member through the owner’s subscription', () => {
-        const result = resolve('member', [sub({ user_id: 'owner', tier: 'studio' })], ['owner']);
-        expect(result.tier).toBe('studio');
+    it('grants academy to a member through the owner’s subscription', () => {
+        const result = resolve('member', [sub({ user_id: 'owner', tier: 'academy' })], ['owner']);
+        expect(result.tier).toBe('academy');
         expect(result.source).toBe('studio_member');
     });
 
-    it('does not grant studio from an owner who only has pro', () => {
-        const result = resolve('member', [sub({ user_id: 'owner', tier: 'pro' })], ['owner']);
+    it('does not grant academy from an owner who only has teacher', () => {
+        const result = resolve('member', [sub({ user_id: 'owner', tier: 'teacher' })], ['owner']);
         expect(result.tier).toBe('free');
     });
 
-    it('does not grant studio to someone holding no seat', () => {
-        const result = resolve('stranger', [sub({ user_id: 'owner', tier: 'studio' })], []);
+    it('does not grant academy from an owner who only has personal', () => {
+        const result = resolve('member', [sub({ user_id: 'owner', tier: 'personal' })], ['owner']);
         expect(result.tier).toBe('free');
     });
 
-    it('prefers the teacher’s own subscription over a studio seat', () => {
+    it('does not grant academy to someone holding no seat', () => {
+        const result = resolve('stranger', [sub({ user_id: 'owner', tier: 'academy' })], []);
+        expect(result.tier).toBe('free');
+    });
+
+    it('prefers the teacher’s own subscription over an academy seat', () => {
         const result = resolve(
             'member',
-            [sub({ user_id: 'member', tier: 'pro' }), sub({ user_id: 'owner', tier: 'studio' })],
+            [sub({ user_id: 'member', tier: 'teacher' }), sub({ user_id: 'owner', tier: 'academy' })],
             ['owner'],
         );
         expect(result.source).toBe('subscription');
-        expect(result.tier).toBe('pro');
+        expect(result.tier).toBe('teacher');
     });
 
     it('takes the highest tier when more than one subscription is live', () => {
         const result = resolve('teacher', [
-            sub({ user_id: 'teacher', tier: 'pro' }),
-            sub({ user_id: 'teacher', tier: 'studio' }),
+            sub({ user_id: 'teacher', tier: 'personal' }),
+            sub({ user_id: 'teacher', tier: 'academy' }),
         ]);
-        expect(result.tier).toBe('studio');
+        expect(result.tier).toBe('academy');
     });
 
     describe('lapsed and expired subscriptions', () => {
@@ -98,17 +116,17 @@ describe('entitlement resolution', () => {
         });
 
         it('honours trialing', () => {
-            expect(resolve('teacher', [sub({ user_id: 'teacher', status: 'trialing' })]).tier).toBe('pro');
+            expect(resolve('teacher', [sub({ user_id: 'teacher', status: 'trialing' })]).tier).toBe('teacher');
         });
 
         it('honours a subscription with no period end', () => {
-            expect(resolve('teacher', [sub({ user_id: 'teacher', current_period_end: null })]).tier).toBe('pro');
+            expect(resolve('teacher', [sub({ user_id: 'teacher', current_period_end: null })]).tier).toBe('teacher');
         });
 
-        it('revokes a studio seat when the owner’s subscription expires', () => {
+        it('revokes an academy seat when the owner’s subscription expires', () => {
             const result = resolve(
                 'member',
-                [sub({ user_id: 'owner', tier: 'studio', current_period_end: '2026-08-01T00:00:00Z' })],
+                [sub({ user_id: 'owner', tier: 'academy', current_period_end: '2026-08-01T00:00:00Z' })],
                 ['owner'],
             );
             expect(result.tier).toBe('free');
@@ -118,7 +136,7 @@ describe('entitlement resolution', () => {
     describe('downgradeExpired (the offline cache path)', () => {
         it('keeps a cached tier that is still within its period', () => {
             const cached = resolve('teacher', [sub({ user_id: 'teacher' })]);
-            expect(downgradeExpired(cached, NOW).tier).toBe('pro');
+            expect(downgradeExpired(cached, NOW).tier).toBe('teacher');
         });
 
         it('degrades a cached tier whose period ended while offline', () => {
@@ -128,10 +146,53 @@ describe('entitlement resolution', () => {
             expect(downgradeExpired(cached, later).limits).toEqual(TIER_LIMITS.free);
         });
 
+        it('degrades a cached personal tier the same way', () => {
+            const cached = resolve('soloist', [sub({ user_id: 'soloist', tier: 'personal' })]);
+            expect(downgradeExpired(cached, Date.parse('2026-10-01T00:00:00Z')).tier).toBe('free');
+        });
+
         it('leaves free alone', () => {
             const cached = resolve('teacher', []);
             expect(downgradeExpired(cached, Date.parse('2030-01-01T00:00:00Z')).tier).toBe('free');
         });
+    });
+});
+
+describe('the limits table', () => {
+    it('gives free a small allowance of everything, students included', () => {
+        expect(TIER_LIMITS.free).toEqual({
+            cloud_scores: 3,
+            omr_runs: 3,
+            vision_reads: 5,
+            smart_imports: 2,
+            pdf_exports: 1,
+            students: 3,
+        });
+    });
+
+    it('gives personal every paid ceiling but no roster at all', () => {
+        expect(TIER_LIMITS.personal).toEqual({
+            cloud_scores: UNLIMITED,
+            omr_runs: UNLIMITED,
+            vision_reads: 500,
+            smart_imports: UNLIMITED,
+            pdf_exports: UNLIMITED,
+            students: 0,
+        });
+        // Said plainly, because this single 0 is the "no student features" gate.
+        expect(TIER_LIMITS.personal.students).toBe(0);
+    });
+
+    it('gives teacher and academy an unlimited roster', () => {
+        expect(TIER_LIMITS.teacher.students).toBe(UNLIMITED);
+        expect(TIER_LIMITS.academy.students).toBe(UNLIMITED);
+        expect(TIER_LIMITS.teacher).toEqual(TIER_LIMITS.academy);
+    });
+
+    it('keeps vision reads finite on every paid tier — the fair-use ceiling', () => {
+        for (const tier of ['personal', 'teacher', 'academy'] as const) {
+            expect(TIER_LIMITS[tier].vision_reads).toBe(500);
+        }
     });
 });
 
@@ -168,14 +229,16 @@ describe('usage counter months', () => {
 
 describe('fair-use ceiling', () => {
     it('applies only to paid tiers with a finite limit', () => {
-        expect(isFairUseCap('pro', 'vision_reads')).toBe(true);
-        expect(isFairUseCap('studio', 'vision_reads')).toBe(true);
-        expect(isFairUseCap('pro', 'omr_runs')).toBe(false);
+        expect(isFairUseCap('personal', 'vision_reads')).toBe(true);
+        expect(isFairUseCap('teacher', 'vision_reads')).toBe(true);
+        expect(isFairUseCap('academy', 'vision_reads')).toBe(true);
+        expect(isFairUseCap('teacher', 'omr_runs')).toBe(false);
         expect(isFairUseCap('free', 'vision_reads')).toBe(false);
     });
 
     it('reports a different code so the UI can avoid an upsell', () => {
         expect(limitReachedBody('vision_reads', 5, 'free').code).toBe('limit_reached');
-        expect(limitReachedBody('vision_reads', 500, 'pro').code).toBe('fair_use_cap');
+        expect(limitReachedBody('vision_reads', 500, 'teacher').code).toBe('fair_use_cap');
+        expect(limitReachedBody('vision_reads', 500, 'personal').code).toBe('fair_use_cap');
     });
 });

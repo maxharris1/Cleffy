@@ -27,31 +27,42 @@ export const stripeClient = (): Stripe | null => {
 };
 
 export interface PriceCatalog {
-    proMonthly: string | null;
-    proAnnual: string | null;
-    studioAnnual: string | null;
-    /** Founding Teacher: a second, cheaper annual price on the same Pro product. */
+    personalMonthly: string | null;
+    personalAnnual: string | null;
+    teacherMonthly: string | null;
+    teacherAnnual: string | null;
+    academyMonthly: string | null;
+    academyAnnual: string | null;
+    /** Founding Teacher: a second, cheaper annual price on the same Teacher product. */
     foundingAnnual: string | null;
 }
 
 export const priceCatalog = (): PriceCatalog => ({
-    proMonthly: Deno.env.get('STRIPE_PRICE_PRO_MONTHLY') ?? null,
-    proAnnual: Deno.env.get('STRIPE_PRICE_PRO_ANNUAL') ?? null,
-    studioAnnual: Deno.env.get('STRIPE_PRICE_STUDIO_ANNUAL') ?? null,
+    personalMonthly: Deno.env.get('STRIPE_PRICE_PERSONAL_MONTHLY') ?? null,
+    personalAnnual: Deno.env.get('STRIPE_PRICE_PERSONAL_ANNUAL') ?? null,
+    teacherMonthly: Deno.env.get('STRIPE_PRICE_TEACHER_MONTHLY') ?? null,
+    teacherAnnual: Deno.env.get('STRIPE_PRICE_TEACHER_ANNUAL') ?? null,
+    academyMonthly: Deno.env.get('STRIPE_PRICE_ACADEMY_MONTHLY') ?? null,
+    academyAnnual: Deno.env.get('STRIPE_PRICE_ACADEMY_ANNUAL') ?? null,
     foundingAnnual: Deno.env.get('STRIPE_PRICE_FOUNDING_ANNUAL') ?? null,
 });
 
-/** price id -> tier. Founding maps to 'pro'; grandfathering is just renewal at that price. */
+/** price id -> tier. Founding maps to 'teacher'; grandfathering is just renewal at that price. */
 export const priceTiers = (): Record<string, BillingTier> => {
     const catalog = priceCatalog();
+    const byTier: Array<[BillingTier, Array<string | null>]> = [
+        ['personal', [catalog.personalMonthly, catalog.personalAnnual]],
+        ['teacher', [catalog.teacherMonthly, catalog.teacherAnnual, catalog.foundingAnnual]],
+        ['academy', [catalog.academyMonthly, catalog.academyAnnual]],
+    ];
+
     const tiers: Record<string, BillingTier> = {};
-    for (const price of [catalog.proMonthly, catalog.proAnnual, catalog.foundingAnnual]) {
-        if (price) {
-            tiers[price] = 'pro';
+    for (const [tier, prices] of byTier) {
+        for (const price of prices) {
+            if (price) {
+                tiers[price] = tier;
+            }
         }
-    }
-    if (catalog.studioAnnual) {
-        tiers[catalog.studioAnnual] = 'studio';
     }
     return tiers;
 };

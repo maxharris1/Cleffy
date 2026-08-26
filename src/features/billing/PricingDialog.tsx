@@ -23,8 +23,10 @@ export interface PricingDialogProps {
 }
 
 /**
- * The upgrade surface: three tier cards, a monthly/annual toggle, and the
- * Founding Teacher price when that launch offer is switched on.
+ * The upgrade surface: four tier cards in two personas — Personal for a player
+ * on their own, Teacher for anyone with students, Academy beneath it for a team
+ * of teachers — plus a monthly/annual toggle and the Founding Teacher price
+ * when that launch offer is switched on.
  */
 export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogProps) => {
     const [interval, setInterval] = useState<BillingInterval>('annual');
@@ -57,6 +59,10 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
         <Dialog label="Plans" onClose={onClose} sheet>
             <div className="w-full">
                 {reason ? <p className="mb-4 text-sm text-stone-600">{reason}</p> : null}
+
+                <p className="mb-4 text-sm text-stone-600">
+                    Personal is the practice tool. Teacher adds your students. Academy covers a team of teachers.
+                </p>
 
                 <div className="mb-5 flex items-center gap-2" role="group" aria-label="Billing interval">
                     {(['monthly', 'annual'] as const).map((option) => (

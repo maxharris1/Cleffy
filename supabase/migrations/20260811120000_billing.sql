@@ -1,17 +1,24 @@
--- Billing: Stripe customers/subscriptions, studio seats, metered usage, and the
+-- Billing: Stripe customers/subscriptions, academy seats, metered usage, and the
 -- free-tier cloud-score cap.
 --
 -- Design notes:
 --  * Stripe price IDs live in Edge Function env, never in the database. The
 --    webhook resolves price -> tier and stores the RESOLVED tier here, which is
 --    why Founding Teacher needs no schema support: it is a second price on the
---    Pro product, so a founding subscription is simply tier 'pro'.
+--    Teacher product, so a founding subscription is simply tier 'teacher'.
+--  * The seat tables keep their original names (studios, studio_members); only
+--    the tier they entitle was renamed, from the v1 studio tier to academy. The
+--    same goes for the studio_member entitlement source, which names the table
+--    the seat row lives in rather than the tier.
 --  * tier_limits() is the single source of truth for the numbers. The TS mirror
 --    in supabase/functions/_shared/entitlements.ts is drift-guarded by
 --    tests/billing/limitsInSync.test.ts, which parses this file.
---  * cloud_scores is a STOCK (live count of non-archived documents), not a flow,
---    so it is enforced by a trigger and never written to usage_counters. The
---    other three metrics are monthly flows.
+--  * cloud_scores and students are STOCKS (a live count of non-archived
+--    documents, and of roster rows), not flows, so they are enforced where the
+--    row is written and never reach usage_counters. The other metrics are
+--    monthly flows. pdf_exports is a flow with a caveat: the export itself runs
+--    on-device, so its gate is honest-UI plus this server-side counter, and it
+--    never applies to anonymous guests or provisioned students.
 --  * Lapsing NEVER deletes data. Scores beyond the free cap get archived_at set;
 --    they stay readable and exportable, only annotation writes are blocked.
 
@@ -27,7 +34,7 @@ create table public.billing_customers (
 create table public.subscriptions (
     stripe_subscription_id text primary key,
     user_id uuid not null references auth.users (id) on delete cascade,
-    tier text not null check (tier in ('free', 'pro', 'studio')),
+    tier text not null check (tier in ('free', 'personal', 'teacher', 'academy')),
     status text not null,
     price_id text,
     current_period_end timestamptz,
@@ -86,20 +93,24 @@ create index documents_owner_active on public.documents (owner_id) where archive
 create or replace function public.tier_limits (p_tier text) returns jsonb language sql immutable
 set search_path = public as $$
     select case p_tier
-        when 'pro' then jsonb_build_object(
-            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1
+        -- students = 0 is what makes Personal a solo plan: no roster, no seats.
+        when 'personal' then jsonb_build_object(
+            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', 0
         )
-        when 'studio' then jsonb_build_object(
-            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1
+        when 'teacher' then jsonb_build_object(
+            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', -1
+        )
+        when 'academy' then jsonb_build_object(
+            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', -1
         )
         else jsonb_build_object(
-            'cloud_scores', 3, 'omr_runs', 3, 'vision_reads', 5, 'smart_imports', 1
+            'cloud_scores', 3, 'omr_runs', 3, 'vision_reads', 5, 'smart_imports', 2, 'pdf_exports', 1, 'students', 3
         )
     end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Effective entitlements, resolving Studio membership
+-- Effective entitlements, resolving Academy seat membership
 -- ---------------------------------------------------------------------------
 -- SECURITY DEFINER so it can read subscriptions/studios past their own RLS.
 -- That makes the caller check mandatory: a signed-in user may only ask about
@@ -134,7 +145,7 @@ begin
     where s.user_id = v_user
       and s.status in ('active', 'trialing')
       and (s.current_period_end is null or s.current_period_end > now())
-    order by case s.tier when 'studio' then 2 when 'pro' then 1 else 0 end desc,
+    order by case s.tier when 'academy' then 3 when 'teacher' then 2 when 'personal' then 1 else 0 end desc,
              s.current_period_end desc nulls last
     limit 1;
 
@@ -144,21 +155,21 @@ begin
         v_period_end := v_sub.current_period_end;
         v_source := 'subscription';
     else
-        -- Otherwise: a seat in a studio whose owner is paying.
+        -- Otherwise: a seat in an academy whose owner is paying.
         select s.status, s.current_period_end
         into v_sub
         from public.studio_members sm
         join public.studios st on st.id = sm.studio_id
         join public.subscriptions s on s.user_id = st.owner_id
         where sm.user_id = v_user
-          and s.tier = 'studio'
+          and s.tier = 'academy'
           and s.status in ('active', 'trialing')
           and (s.current_period_end is null or s.current_period_end > now())
         order by s.current_period_end desc nulls last
         limit 1;
 
         if found then
-            v_tier := 'studio';
+            v_tier := 'academy';
             v_status := v_sub.status;
             v_period_end := v_sub.current_period_end;
             v_source := 'studio_member';
@@ -343,7 +354,7 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Studio seat management
+-- Academy seat management (on the studios/studio_members tables, v1 names kept)
 -- ---------------------------------------------------------------------------
 create or replace function public.studios_enforce_seat_limit () returns trigger language plpgsql security definer
 set search_path = public as $$

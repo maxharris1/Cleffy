@@ -4,6 +4,10 @@ import type { BillingTier } from '@/types/database';
  * Pricing catalogue. Every price id comes from env — nothing is hardcoded, so
  * the Stripe catalogue can be re-created without a code change.
  *
+ * Two personas, four tiers: Personal is the practice tool for one player,
+ * Teacher is the same app plus a student roster, and Academy is Teacher for a
+ * team of up to five instructors.
+ *
  * Env is read inside functions rather than at module scope so tests can
  * `vi.stubEnv` without having to re-import the module.
  */
@@ -16,16 +20,19 @@ const env = (key: string): string | null => {
 };
 
 export const stripePrices = () => ({
-    proMonthly: env('VITE_STRIPE_PRICE_PRO_MONTHLY'),
-    proAnnual: env('VITE_STRIPE_PRICE_PRO_ANNUAL'),
-    studioAnnual: env('VITE_STRIPE_PRICE_STUDIO_ANNUAL'),
+    personalMonthly: env('VITE_STRIPE_PRICE_PERSONAL_MONTHLY'),
+    personalAnnual: env('VITE_STRIPE_PRICE_PERSONAL_ANNUAL'),
+    teacherMonthly: env('VITE_STRIPE_PRICE_TEACHER_MONTHLY'),
+    teacherAnnual: env('VITE_STRIPE_PRICE_TEACHER_ANNUAL'),
+    academyMonthly: env('VITE_STRIPE_PRICE_ACADEMY_MONTHLY'),
+    academyAnnual: env('VITE_STRIPE_PRICE_ACADEMY_ANNUAL'),
     foundingAnnual: env('VITE_STRIPE_PRICE_FOUNDING_ANNUAL'),
 });
 
-/** Checkout cannot run without at least the Pro prices configured. */
+/** Checkout cannot run without both individual plans — Academy is the extra, not the offer. */
 export const isBillingConfigured = (): boolean => {
     const prices = stripePrices();
-    return Boolean(prices.proMonthly && prices.proAnnual);
+    return Boolean(prices.personalMonthly && prices.personalAnnual && prices.teacherMonthly && prices.teacherAnnual);
 };
 
 /**
@@ -41,7 +48,7 @@ export interface TierCard {
     tier: BillingTier;
     name: string;
     tagline: string;
-    /** Marketing copy for the free tier's ceilings — the numbers enforced in SQL. */
+    /** Marketing copy for the tier's ceilings — on Free, the numbers enforced in SQL. */
     features: string[];
 }
 
@@ -53,31 +60,45 @@ export const TIER_CARDS: TierCard[] = [
         features: [
             '3 active cloud scores',
             '3 play-along analyses a month',
-            '1 smart import a month',
+            '2 smart imports a month',
             '5 AI fingering reads a month',
-            'Unlimited annotation, fingering and PDF export',
+            '1 PDF export a month',
+            '3 student seats',
+            'Unlimited annotation and fingering tools',
         ],
     },
     {
-        tier: 'pro',
-        name: 'Pro',
-        tagline: 'For a working studio. Everything unlimited.',
+        tier: 'personal',
+        name: 'Personal',
+        tagline: 'Your personal practice tool — the whole app for one player, with no student features.',
         features: [
             'Unlimited cloud scores',
             'Unlimited play-along analysis',
             'Unlimited smart imports',
             'Unlimited AI fingering reads',
-            'Unlimited annotation, fingering and PDF export',
+            'Unlimited PDF export',
+            'No roster — this plan is just for you',
         ],
     },
     {
-        tier: 'studio',
-        name: 'Studio',
-        tagline: 'Pro for every teacher on your team, up to five seats.',
+        tier: 'teacher',
+        name: 'Teacher',
+        tagline: 'For a teaching studio: a class of twenty works out at under $1 per student.',
         features: [
-            'Everything in Pro, for up to 5 teachers',
-            'One invoice for the whole studio',
-            'Add and remove seats by email',
+            'Unlimited students',
+            'Everything unlimited, as in Personal',
+            'One roster for everyone you teach',
+            'Practice notes on every lesson',
+        ],
+    },
+    {
+        tier: 'academy',
+        name: 'Academy',
+        tagline: 'Teacher for every instructor on your team, up to five seats.',
+        features: [
+            'Everything in Teacher, for up to 5 teachers',
+            'One invoice for the whole academy',
+            'Add and remove teacher seats by email',
             'Students always join free',
         ],
     },
@@ -92,34 +113,46 @@ export interface PriceDisplay {
 
 export const priceFor = (tier: BillingTier, interval: BillingInterval): PriceDisplay | null => {
     const prices = stripePrices();
+    const monthly = interval === 'monthly';
     if (tier === 'free') {
         return { priceId: null, amount: 'Free', caption: 'no card required' };
     }
-    if (tier === 'studio') {
-        // Studio is annual-only — a flat rate for the whole team.
-        return { priceId: prices.studioAnnual, amount: '$299', caption: 'per year, up to 5 teachers' };
+    if (tier === 'personal') {
+        return monthly
+            ? { priceId: prices.personalMonthly, amount: '$7', caption: 'per month' }
+            : { priceId: prices.personalAnnual, amount: '$70', caption: 'per year', note: 'Two months free' };
     }
-    if (interval === 'monthly') {
-        return { priceId: prices.proMonthly, amount: '$15', caption: 'per month' };
+    if (tier === 'academy') {
+        return monthly
+            ? { priceId: prices.academyMonthly, amount: '$49', caption: 'per month, up to 5 teachers' }
+            : {
+                  priceId: prices.academyAnnual,
+                  amount: '$490',
+                  caption: 'per year, up to 5 teachers',
+                  note: 'Two months free',
+              };
     }
-    return { priceId: prices.proAnnual, amount: '$120', caption: 'per year', note: 'Two months free' };
+    return monthly
+        ? { priceId: prices.teacherMonthly, amount: '$19', caption: 'per month' }
+        : { priceId: prices.teacherAnnual, amount: '$190', caption: 'per year', note: 'Two months free' };
 };
 
-/** The Founding Teacher price, when the launch offer is switched on. */
+/** The Founding Teacher price — a second annual price on the Teacher product. */
 export const foundingPrice = (): PriceDisplay | null => {
     if (!isFoundingOfferEnabled()) {
         return null;
     }
     return {
         priceId: stripePrices().foundingAnnual,
-        amount: '$79',
+        amount: '$99',
         caption: 'per year, forever',
-        note: 'Founding Teacher — keeps this price for as long as you stay subscribed',
+        note: 'Founding Teacher — $99/yr on Teacher, and it keeps this price for as long as you stay subscribed',
     };
 };
 
 export const TIER_LABELS: Record<BillingTier, string> = {
     free: 'Free',
-    pro: 'Pro',
-    studio: 'Studio',
+    personal: 'Personal',
+    teacher: 'Teacher',
+    academy: 'Academy',
 };

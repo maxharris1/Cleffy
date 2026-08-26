@@ -8,7 +8,7 @@
  * `src/sync/syncEngine.test.ts`'s `FakeApi`.
  */
 
-export type BillingTier = 'free' | 'pro' | 'studio';
+export type BillingTier = 'free' | 'personal' | 'teacher' | 'academy';
 
 /** Statuses that actually grant paid entitlements — must match get_entitlements(). */
 const ENTITLING_STATUSES = ['active', 'trialing'];
@@ -95,8 +95,8 @@ export const idOf = (value: string | { id?: string } | null | undefined): string
 
 /**
  * Price -> tier comes from Edge Function env, never from the database. That is
- * what keeps Founding Teacher schema-free: it is a second price on the Pro
- * product, so it maps to 'pro' like any other Pro price.
+ * what keeps Founding Teacher schema-free: it is a second, cheaper price on the
+ * Teacher product, so it maps to 'teacher' like any other Teacher price.
  */
 export const tierForPrice = (priceId: string | null, priceTiers: Record<string, BillingTier>): BillingTier => {
     if (!priceId) {

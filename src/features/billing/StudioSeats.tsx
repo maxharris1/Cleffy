@@ -20,9 +20,12 @@ export interface StudioSeatsProps {
 }
 
 /**
- * Minimal seat management: the owner types a teacher's email and they get
- * Pro-equivalent entitlements. The seat cap itself is a database trigger, so
- * this UI only has to report what the server said.
+ * Minimal seat management for an Academy: the owner types a teacher's email and
+ * they get Teacher-equivalent entitlements. The seat cap itself is a database
+ * trigger, so this UI only has to report what the server said.
+ *
+ * The tables and services are still named `studio` — only the tier and the copy
+ * were renamed.
  */
 export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
     const [studio, setStudio] = useState<StudioRow | null>(null);
@@ -31,7 +34,7 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const isOwner = tier === 'studio' && source === 'subscription';
+    const isOwner = tier === 'academy' && source === 'subscription';
 
     const reload = useCallback(async () => {
         const owned = await fetchOwnedStudio(userId);
@@ -67,9 +70,9 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
     if (source === 'studio_member') {
         return (
             <section className="mt-8 border-t border-stone-300/50 pt-6">
-                <h2 className="text-sm font-medium uppercase tracking-[0.08em] text-stone-600">Studio</h2>
+                <h2 className="text-sm font-medium uppercase tracking-[0.08em] text-stone-600">Academy</h2>
                 <p className="mt-2 text-sm text-stone-600">
-                    You hold a seat in someone else&apos;s studio, so your plan is billed by its owner.
+                    You hold a seat in someone else&apos;s academy, so your plan is billed by its owner.
                 </p>
             </section>
         );
@@ -97,18 +100,18 @@ export const StudioSeats = ({ userId, tier, source }: StudioSeatsProps) => {
 
     return (
         <section className="mt-8 border-t border-stone-300/50 pt-6">
-            <h2 className="text-sm font-medium uppercase tracking-[0.08em] text-stone-600">Studio seats</h2>
+            <h2 className="text-sm font-medium uppercase tracking-[0.08em] text-stone-600">Academy seats</h2>
 
             {!studio ? (
                 <>
-                    <p className="mt-2 text-sm text-stone-600">Name your studio to start adding teachers.</p>
+                    <p className="mt-2 text-sm text-stone-600">Name your academy to start adding teachers.</p>
                     <Button
                         size="sm"
                         className="mt-3"
                         disabled={busy}
-                        onClick={() => void run(async () => void (await createStudio(userId, 'My studio')))}
+                        onClick={() => void run(async () => void (await createStudio(userId, 'My academy')))}
                     >
-                        Create studio
+                        Create academy
                     </Button>
                 </>
             ) : (

@@ -3,7 +3,12 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { TIER_LIMITS, type BillingTier, type UsageMetric } from '../../supabase/functions/_shared/entitlements';
+import {
+    TIER_LIMITS,
+    UNLIMITED,
+    type BillingTier,
+    type UsageMetric,
+} from '../../supabase/functions/_shared/entitlements';
 import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
 
 /**
@@ -20,7 +25,10 @@ import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
 // a non-file URL, so fileURLToPath cannot be used here.
 const MIGRATION = resolve(process.cwd(), 'supabase/migrations/20260811120000_billing.sql');
 
-const METRICS: UsageMetric[] = ['cloud_scores', 'omr_runs', 'vision_reads', 'smart_imports'];
+const TIERS: BillingTier[] = ['free', 'personal', 'teacher', 'academy'];
+const PAID_TIERS = ['personal', 'teacher', 'academy'] as const;
+
+const METRICS: UsageMetric[] = ['cloud_scores', 'omr_runs', 'vision_reads', 'smart_imports', 'pdf_exports', 'students'];
 
 /** Pulls the jsonb_build_object(...) body for one tier out of tier_limits(). */
 const limitsFromSql = (sql: string, tier: BillingTier): Record<string, number> => {
@@ -48,12 +56,12 @@ const limitsFromSql = (sql: string, tier: BillingTier): Record<string, number> =
 describe('tier limits stay in sync with the migration', () => {
     const sql = readFileSync(MIGRATION, 'utf8');
 
-    it.each(['free', 'pro', 'studio'] as const)('%s matches tier_limits() in SQL', (tier) => {
+    it.each(TIERS)('%s matches tier_limits() in SQL', (tier) => {
         expect(limitsFromSql(sql, tier)).toEqual(TIER_LIMITS[tier]);
     });
 
     it('covers every metric in every tier', () => {
-        for (const tier of ['free', 'pro', 'studio'] as const) {
+        for (const tier of TIERS) {
             expect(Object.keys(TIER_LIMITS[tier]).sort()).toEqual([...METRICS].sort());
         }
     });
@@ -62,14 +70,32 @@ describe('tier limits stay in sync with the migration', () => {
         expect(FREE_LIMITS).toEqual(TIER_LIMITS.free);
     });
 
-    it('keeps the paid tiers at least as generous as free', () => {
-        for (const metric of METRICS) {
+    it('keeps the paid tiers at least as generous as free on every metered budget', () => {
+        // `students` is the one deliberate exception, asserted on its own below:
+        // Personal sits BELOW free there, because the roster is a Teacher feature
+        // rather than a quantity Personal is given less of.
+        const metered = METRICS.filter((metric) => metric !== 'students');
+        expect(metered).toHaveLength(METRICS.length - 1);
+
+        for (const metric of metered) {
             const free = TIER_LIMITS.free[metric];
-            for (const tier of ['pro', 'studio'] as const) {
+            for (const tier of PAID_TIERS) {
                 const paid = TIER_LIMITS[tier][metric];
                 expect(paid < 0 || paid >= free).toBe(true);
             }
         }
+    });
+
+    it('deliberately gives Personal fewer student seats than free, and Teacher no ceiling', () => {
+        // The exception, spelled out so it cannot be "fixed" by mistake: buying the
+        // personal practice tool is not buying a smaller studio, it is buying no
+        // studio, so its roster is 0 while free still gets 3 to try the feature on.
+        expect(TIER_LIMITS.personal.students).toBe(0);
+        expect(TIER_LIMITS.free.students).toBe(3);
+        expect(TIER_LIMITS.personal.students).toBeLessThan(TIER_LIMITS.free.students);
+
+        expect(TIER_LIMITS.teacher.students).toBe(UNLIMITED);
+        expect(TIER_LIMITS.academy.students).toBe(UNLIMITED);
     });
 });
 
@@ -80,8 +106,31 @@ describe('the pricing page describes the limits it actually enforces', () => {
         const copy = free?.features.join(' ') ?? '';
 
         expect(copy).toContain(`${TIER_LIMITS.free.cloud_scores} active cloud scores`);
-        expect(copy).toContain(`${TIER_LIMITS.free.omr_runs} play-along`);
-        expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} smart import`);
-        expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI fingering reads`);
+        expect(copy).toContain(`${TIER_LIMITS.free.omr_runs} play-along analyses a month`);
+        expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} smart imports a month`);
+        expect(copy).toContain(`${TIER_LIMITS.free.pdf_exports} PDF export a month`);
+        expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI fingering reads a month`);
+        expect(copy).toContain(`${TIER_LIMITS.free.students} student seats`);
+        // Export left the unlimited line when it became a metered free allowance.
+        expect(copy).toContain('Unlimited annotation and fingering tools');
+    });
+
+    it('promises no student features on the Personal card, whose roster limit is zero', async () => {
+        const { TIER_CARDS } = await import('../../src/features/billing/pricing');
+        const personal = TIER_CARDS.find((card) => card.tier === 'personal');
+
+        expect(personal).toBeDefined();
+        expect(personal?.tagline).toMatch(/practice/i);
+        // Nothing on this card may advertise a roster it does not have.
+        expect(personal?.features.join(' ')).not.toMatch(/student/i);
+        expect(TIER_LIMITS.personal.students).toBe(0);
+    });
+
+    it('promises an unlimited roster on the Teacher card, which is what it sells', async () => {
+        const { TIER_CARDS } = await import('../../src/features/billing/pricing');
+        const teacher = TIER_CARDS.find((card) => card.tier === 'teacher');
+
+        expect(teacher?.features.join(' ')).toContain('Unlimited students');
+        expect(TIER_LIMITS.teacher.students).toBe(UNLIMITED);
     });
 });

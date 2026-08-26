@@ -144,16 +144,29 @@ export type AnnotationSnapshotInsert = {
     created_by?: string | null;
 };
 
-/** Billing tiers. Founding Teacher is a second price on the Pro product, so it resolves to 'pro'. */
-export type BillingTier = 'free' | 'pro' | 'studio';
+/**
+ * Billing tiers. 'personal' and 'teacher' share the same unlimited ceilings —
+ * what separates them is the student roster, which 'personal' has none of.
+ * Founding Teacher is a second price on the Teacher product, so it resolves to
+ * 'teacher'.
+ */
+export type BillingTier = 'free' | 'personal' | 'teacher' | 'academy';
 
-/** Metered metrics. `cloud_scores` is a stock (live count), the rest are monthly flows. */
-export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_imports';
+/**
+ * Metered metrics. `cloud_scores` and `students` are stocks — live counts taken
+ * from the table itself, never written to usage_counters — and the rest are
+ * monthly flows.
+ */
+export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_imports' | 'pdf_exports' | 'students';
 
 /** Per-metric ceilings; -1 means unlimited. Mirrors public.tier_limits(). */
 export type EntitlementLimits = Record<UsageMetric, number>;
 
-/** How the tier was reached: own subscription, a studio seat, or nothing. */
+/**
+ * How the tier was reached: own subscription, a seat in someone's Academy, or
+ * nothing. The value keeps the SQL table's name — 'studio' in the database is
+ * 'Academy' in the UI.
+ */
 export type EntitlementSource = 'subscription' | 'studio_member' | 'none';
 
 export type Entitlements = {
@@ -205,6 +218,7 @@ export type StudioMemberRow = {
 
 export type UsageCounterRow = {
     user_id: string;
+    /** Flow metrics only — the stocks (`cloud_scores`, `students`) are counted live. */
     metric: UsageMetric;
     /** First day of the calendar month, ISO date. */
     month: string;
@@ -286,6 +300,9 @@ export type Database = {
                 Update: never;
                 Relationships: [];
             };
+            // The Academy tier's teacher seats. The table names predate the
+            // rename and are deliberately unchanged — 'studio' in SQL is
+            // 'Academy' everywhere a teacher can see it.
             studios: {
                 Row: StudioRow;
                 Insert: StudioInsert;

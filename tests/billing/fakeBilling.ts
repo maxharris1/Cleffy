@@ -29,7 +29,10 @@ export interface FakeBillingOptions {
 
 export class FakeBilling implements QuotaBackend {
     subscriptions: SubscriptionLike[] = [];
-    /** user id -> owner ids of the studios they hold a seat in. */
+    /**
+     * user id -> owner ids of the studios they hold a seat in. The tables keep
+     * their v1 names; only the tier that pays for them is now 'academy'.
+     */
     studioSeats = new Map<string, string[]>();
     counters = new Map<string, number>();
     /** owner id -> ids of their non-archived documents. */
@@ -49,7 +52,7 @@ export class FakeBilling implements QuotaBackend {
         return this.counters.get(this.counterKey(userId, metric)) ?? 0;
     }
 
-    /** Mirrors get_entitlements(): own live subscription, then a paid studio seat, then free. */
+    /** Mirrors get_entitlements(): own live subscription, then a live Academy seat, then free. */
     getEntitlements = async (userId: string): Promise<Entitlements | null> =>
         resolveEntitlements(
             {
@@ -90,7 +93,11 @@ export class FakeBilling implements QuotaBackend {
         this.counters.set(key, Math.max(0, (this.counters.get(key) ?? 0) - 1));
     }
 
-    subscribe(userId: string, tier: 'pro' | 'studio', overrides: Partial<SubscriptionLike> = {}): void {
+    subscribe(
+        userId: string,
+        tier: 'personal' | 'teacher' | 'academy',
+        overrides: Partial<SubscriptionLike> = {},
+    ): void {
         this.subscriptions.push({
             user_id: userId,
             tier,
@@ -100,6 +107,7 @@ export class FakeBilling implements QuotaBackend {
         });
     }
 
+    /** Gives `memberId` a seat in `ownerId`'s studio — entitling only if the owner pays for Academy. */
     seatIn(memberId: string, ownerId: string): void {
         this.studioSeats.set(memberId, [...(this.studioSeats.get(memberId) ?? []), ownerId]);
     }

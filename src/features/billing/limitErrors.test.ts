@@ -24,9 +24,18 @@ describe('parseLimitResponse (Edge Function 402s)', () => {
 
     it('reads the fair-use variant', async () => {
         const error = await parseLimitResponse(
-            jsonResponse({ code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'pro' }, 402),
+            jsonResponse({ code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'teacher' }, 402),
         );
         expect(error?.code).toBe('fair_use_cap');
+        expect(error?.tier).toBe('teacher');
+    });
+
+    it('reads the student-roster metric', async () => {
+        const error = await parseLimitResponse(
+            jsonResponse({ code: 'limit_reached', metric: 'students', limit: 3, tier: 'free' }, 402),
+        );
+        expect(error?.metric).toBe('students');
+        expect(error?.limit).toBe(3);
     });
 
     it('ignores any status other than 402', async () => {
@@ -45,6 +54,15 @@ describe('parseLimitResponse (Edge Function 402s)', () => {
             jsonResponse({ code: 'limit_reached', metric: 'made_up', limit: 3, tier: 'free' }, 402),
         );
         expect(error).toBeNull();
+    });
+
+    it('falls back to free for a tier it does not recognise', async () => {
+        // The body is server-sent, but a retired or mistyped tier name must not
+        // reach the copy as if it were a plan we sell.
+        const error = await parseLimitResponse(
+            jsonResponse({ code: 'limit_reached', metric: 'omr_runs', limit: 3, tier: 'mystery' }, 402),
+        );
+        expect(error?.tier).toBe('free');
     });
 
     it('leaves the response readable for the caller', async () => {
@@ -88,7 +106,7 @@ describe('limit copy', () => {
     });
 
     it('points a paying teacher at support rather than at an upsell', () => {
-        const payload = { code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'pro' } as const;
+        const payload = { code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'teacher' } as const;
         expect(limitAction(payload)).not.toContain('Upgrade');
         expect(limitAction(payload)).toContain('get in touch');
     });
@@ -97,5 +115,12 @@ describe('limit copy', () => {
         expect(limitAction({ code: 'limit_reached', metric: 'cloud_scores', limit: 3, tier: 'free' })).toContain(
             'archive',
         );
+    });
+
+    it('names the roster and its number when a free teacher runs out of student seats', () => {
+        const payload = { code: 'limit_reached', metric: 'students', limit: 3, tier: 'free' } as const;
+        expect(limitHeadline(payload)).toContain('3');
+        expect(limitHeadline(payload)).toMatch(/student/i);
+        expect(limitAction(payload)).toContain('Upgrade');
     });
 });

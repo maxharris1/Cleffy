@@ -5,8 +5,8 @@ import type { BillingTier, UsageMetric } from '@/types/database';
  *
  * There are two wire formats, because there are two enforcement points:
  *  - Edge Functions return HTTP 402 with a JSON body (metered analysis, imports).
- *  - The cloud-score cap is a database trigger, so it arrives through PostgREST
- *    as an error with the payload in `details`.
+ *  - The stock caps (cloud scores, student seats) are database triggers, so they
+ *    arrive through PostgREST as an error with the payload in `details`.
  *
  * Both normalize to this. Client-side checks are UX only — the server has
  * already refused by the time any of this runs.
@@ -39,7 +39,10 @@ export class LimitReachedError extends Error {
 
 export const isLimitReachedError = (err: unknown): err is LimitReachedError => err instanceof LimitReachedError;
 
-const KNOWN_METRICS: UsageMetric[] = ['cloud_scores', 'omr_runs', 'vision_reads', 'smart_imports'];
+const KNOWN_METRICS: UsageMetric[] = ['cloud_scores', 'omr_runs', 'vision_reads', 'smart_imports', 'pdf_exports', 'students'];
+
+const isBillingTier = (value: unknown): value is BillingTier =>
+    value === 'free' || value === 'personal' || value === 'teacher' || value === 'academy';
 
 const asPayload = (value: unknown): LimitReachedPayload | null => {
     if (!value || typeof value !== 'object') {
@@ -59,7 +62,7 @@ const asPayload = (value: unknown): LimitReachedPayload | null => {
         code,
         metric: metric as UsageMetric,
         limit: typeof record.limit === 'number' ? record.limit : 0,
-        tier: tier === 'pro' || tier === 'studio' ? tier : 'free',
+        tier: isBillingTier(tier) ? tier : 'free',
     };
 };
 
@@ -77,8 +80,8 @@ export const parseLimitResponse = async (response: Response): Promise<LimitReach
 };
 
 /**
- * Maps the cloud-score cap trigger's exception. The trigger raises P0001 with
- * the payload as JSON in DETAIL, which PostgREST surfaces as `details`.
+ * Maps a stock-cap trigger's exception. The trigger raises P0001 with the
+ * payload as JSON in DETAIL, which PostgREST surfaces as `details`.
  */
 export const parsePostgrestLimitError = (
     error: {
@@ -115,8 +118,16 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; upgrade: string }> = {
         upgrade: 'Upgrade for unlimited AI fingering reads.',
     },
     smart_imports: {
-        spent: 'You have used your {limit} free smart import this month',
+        spent: 'You have used your {limit} free smart imports this month',
         upgrade: 'Upgrade for unlimited smart imports.',
+    },
+    pdf_exports: {
+        spent: 'You have used your {limit} free PDF export this month',
+        upgrade: 'Upgrade for unlimited PDF exports.',
+    },
+    students: {
+        spent: 'You have filled your {limit} free student seats',
+        upgrade: 'Upgrade to Teacher for unlimited students.',
     },
 };
 

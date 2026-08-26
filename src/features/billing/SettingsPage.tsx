@@ -18,12 +18,24 @@ const METERED: Array<{ metric: UsageMetric; label: string }> = [
     { metric: 'omr_runs', label: 'Play-along analyses' },
     { metric: 'vision_reads', label: 'AI fingering reads' },
     { metric: 'smart_imports', label: 'Smart imports' },
+    { metric: 'pdf_exports', label: 'PDF exports' },
 ];
 
 const describeLimit = (used: number, limit: number): string =>
     limit < 0 ? `${used} used · unlimited` : `${used} of ${limit} used this month`;
 
-/** Plan, usage, subscription management, and Studio seats. */
+/** Stocks (cloud scores, student seats) are ceilings, not monthly spend. */
+const describeStock = (limit: number): string => {
+    if (limit < 0) {
+        return 'unlimited';
+    }
+    if (limit === 0) {
+        return 'not included';
+    }
+    return `up to ${limit}`;
+};
+
+/** Plan, usage, subscription management, and Academy seats. */
 export const SettingsPage = () => {
     const { userId } = useOutletContext<LibraryOutletContext>();
     const { entitlements, loading, refresh } = useEntitlements(userId);
@@ -103,7 +115,7 @@ export const SettingsPage = () => {
                         <p className="mt-1.5 flex items-center gap-2 text-stone-900">
                             <PlanBadge tier={tier} />
                             {entitlements?.source === 'studio_member' ? (
-                                <span className="text-sm text-stone-600">through your studio</span>
+                                <span className="text-sm text-stone-600">through your academy</span>
                             ) : null}
                         </p>
                         {renewal ? (
@@ -152,11 +164,11 @@ export const SettingsPage = () => {
                     ))}
                     <li className="flex items-baseline justify-between gap-4 text-sm">
                         <span className="text-stone-700">Active cloud scores</span>
-                        <span className="text-stone-500">
-                            {(entitlements?.limits.cloud_scores ?? 0) < 0
-                                ? 'unlimited'
-                                : `up to ${entitlements?.limits.cloud_scores ?? 0}`}
-                        </span>
+                        <span className="text-stone-500">{describeStock(entitlements?.limits.cloud_scores ?? 0)}</span>
+                    </li>
+                    <li className="flex items-baseline justify-between gap-4 text-sm">
+                        <span className="text-stone-700">Student seats</span>
+                        <span className="text-stone-500">{describeStock(entitlements?.limits.students ?? 0)}</span>
                     </li>
                 </ul>
                 <p className="mt-3 text-xs text-stone-500">

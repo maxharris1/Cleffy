@@ -13,11 +13,15 @@
  * has not drifted from tier_limits().
  */
 
-export type BillingTier = 'free' | 'pro' | 'studio';
+export type BillingTier = 'free' | 'personal' | 'teacher' | 'academy';
 
-export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_imports';
+export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_imports' | 'pdf_exports' | 'students';
 
-/** -1 means unlimited. */
+/**
+ * -1 means unlimited. `students` is a STOCK like `cloud_scores` — the live
+ * roster count, never written to usage_counters — which is why 'personal'
+ * carrying 0 is exactly what gates that tier out of the student features.
+ */
 export type EntitlementLimits = Record<UsageMetric, number>;
 
 export type EntitlementSource = 'subscription' | 'studio_member' | 'none';
@@ -35,14 +39,40 @@ export const UNLIMITED = -1;
 
 /** Mirrors public.tier_limits(). Drift-guarded by tests/billing/limitsInSync.test.ts. */
 export const TIER_LIMITS: Record<BillingTier, EntitlementLimits> = {
-    free: { cloud_scores: 3, omr_runs: 3, vision_reads: 5, smart_imports: 1 },
-    pro: { cloud_scores: UNLIMITED, omr_runs: UNLIMITED, vision_reads: 500, smart_imports: UNLIMITED },
-    studio: { cloud_scores: UNLIMITED, omr_runs: UNLIMITED, vision_reads: 500, smart_imports: UNLIMITED },
+    free: { cloud_scores: 3, omr_runs: 3, vision_reads: 5, smart_imports: 2, pdf_exports: 1, students: 3 },
+    personal: {
+        cloud_scores: UNLIMITED,
+        omr_runs: UNLIMITED,
+        vision_reads: 500,
+        smart_imports: UNLIMITED,
+        pdf_exports: UNLIMITED,
+        // The personal practice tool: paid limits, no roster.
+        students: 0,
+    },
+    teacher: {
+        cloud_scores: UNLIMITED,
+        omr_runs: UNLIMITED,
+        vision_reads: 500,
+        smart_imports: UNLIMITED,
+        pdf_exports: UNLIMITED,
+        students: UNLIMITED,
+    },
+    academy: {
+        cloud_scores: UNLIMITED,
+        omr_runs: UNLIMITED,
+        vision_reads: 500,
+        smart_imports: UNLIMITED,
+        pdf_exports: UNLIMITED,
+        students: UNLIMITED,
+    },
 };
 
 /**
  * Which counter each metered endpoint draws on. Both analyze-* endpoints are
  * two views of the same vision feature, so they share one budget.
+ *
+ * `students` is deliberately absent: it is a stock enforced where a seat is
+ * provisioned, not a per-call budget any endpoint draws down.
  */
 export const METRIC_BY_FUNCTION: Record<string, UsageMetric> = {
     'score-analyze': 'omr_runs',
@@ -62,6 +92,9 @@ export const limitFor = (tier: BillingTier, metric: UsageMetric): number => TIER
  * Paid tiers advertise "unlimited" vision reads but carry a generous fair-use
  * ceiling. Hitting it is an anomaly worth logging, not an upsell moment, so it
  * reports a different code and the UI points at support rather than at Checkout.
+ *
+ * Only the metered budgets reach here: `students` is a stock, refused where a
+ * seat is provisioned, and never travels the quota path.
  */
 export const isFairUseCap = (tier: BillingTier, metric: UsageMetric): boolean =>
     tier !== 'free' && !isUnlimited(limitFor(tier, metric));
@@ -100,9 +133,9 @@ export const freeEntitlements = (userId: string): Entitlements => ({
 
 /**
  * A cached entitlement can outlive the period it was issued for — a teacher who
- * goes offline as Pro and comes back after renewal failed must not keep Pro
- * limits in the UI. Enforcement is server-side regardless; this only keeps the
- * offline display honest.
+ * goes offline on the Teacher tier and comes back after renewal failed must not
+ * keep Teacher limits in the UI. Enforcement is server-side regardless; this
+ * only keeps the offline display honest.
  */
 export const downgradeExpired = (entitlements: Entitlements, nowMs: number): Entitlements => {
     if (entitlements.tier === 'free') {
@@ -202,13 +235,14 @@ const isLive = (sub: SubscriptionLike, nowMs: number): boolean => {
     return Number.isFinite(endMs) ? endMs > nowMs : false;
 };
 
-const TIER_RANK: Record<BillingTier, number> = { free: 0, pro: 1, studio: 2 };
+const TIER_RANK: Record<BillingTier, number> = { free: 0, personal: 1, teacher: 2, academy: 3 };
 
 /**
  * Executable specification of get_entitlements(): own live subscription first
- * (highest tier wins), then a seat in a studio whose owner is paying, then free.
- * Founding Teacher needs no branch — the webhook stores tier 'pro' for that
- * price, so a founding subscription is a pro subscription.
+ * (highest tier wins), then a seat in a studio whose owner holds a live Academy
+ * subscription (the studios tables keep their v1 names), then free. Founding
+ * Teacher needs no branch — the webhook stores tier 'teacher' for that price, so
+ * a founding subscription is a teacher subscription.
  */
 export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Entitlements => {
     const own = input.subscriptions
@@ -228,17 +262,17 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
 
     const owners = new Set(input.studioOwnerIds);
     const seat = input.ownerSubscriptions.find(
-        (sub) => owners.has(sub.user_id) && sub.tier === 'studio' && isLive(sub, nowMs),
+        (sub) => owners.has(sub.user_id) && sub.tier === 'academy' && isLive(sub, nowMs),
     );
 
     if (seat) {
         return {
             user_id: input.userId,
-            tier: 'studio',
+            tier: 'academy',
             status: seat.status,
             source: 'studio_member',
             current_period_end: seat.current_period_end,
-            limits: TIER_LIMITS.studio,
+            limits: TIER_LIMITS.academy,
         };
     }
 
