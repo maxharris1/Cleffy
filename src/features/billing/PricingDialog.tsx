@@ -8,7 +8,7 @@ import {
     priceFor,
     type BillingInterval,
 } from '@/features/billing/pricing';
-import type { BillingTier } from '@/types/database';
+import type { EffectiveTier } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
@@ -16,8 +16,12 @@ import { ErrorText } from '@/ui/ErrorText';
 
 export interface PricingDialogProps {
     onClose: () => void;
-    /** The teacher's current tier, so the card they are on is marked. */
-    currentTier: BillingTier;
+    /**
+     * The teacher's current tier, so the card they are on is marked. Widened to
+     * EffectiveTier only so it accepts whatever get_entitlements() answered —
+     * 'student' simply matches no card, which is the right outcome.
+     */
+    currentTier: EffectiveTier;
     /** Optional line explaining what prompted the upgrade prompt. */
     reason?: string;
 }

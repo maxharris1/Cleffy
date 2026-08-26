@@ -9,7 +9,7 @@ import { isLimitReachedError, type LimitReachedError } from '@/features/billing/
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { importDocumentFromImslp, uploadDocument } from '@/features/library/documentsService';
 import { isSupabaseConfigured } from '@/lib/supabase';
-import type { BillingTier } from '@/types/database';
+import type { EffectiveTier } from '@/types/database';
 import { buttonClassName } from '@/ui/classNames';
 
 // Lazy for the same reason as the settings route: pricing copy is rarely needed.
@@ -30,7 +30,7 @@ export type LibraryOutletContext = {
     clearUploadError: () => void;
     /** Set when the server refused for quota reasons rather than a real failure. */
     uploadLimit: LimitReachedError | null;
-    tier: BillingTier;
+    tier: EffectiveTier;
     openPricing: () => void;
 };
 

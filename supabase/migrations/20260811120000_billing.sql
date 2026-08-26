@@ -19,6 +19,10 @@
 --    monthly flows. pdf_exports is a flow with a caveat: the export itself runs
 --    on-device, so its gate is honest-UI plus this server-side counter, and it
 --    never applies to anonymous guests or provisioned students.
+--  * A provisioned student is not a customer. get_entitlements() answers tier
+--    'student' (source 'managed') straight from app_metadata, before any
+--    subscription lookup, so the roster features in 20260812090000_roster.sql
+--    work for an account that will never have a Stripe row.
 --  * Lapsing NEVER deletes data. Scores beyond the free cap get archived_at set;
 --    they stay readable and exportable, only annotation writes are blocked.
 
@@ -103,6 +107,12 @@ set search_path = public as $$
         when 'academy' then jsonb_build_object(
             'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', -1
         )
+        -- Not purchasable: a provisioned student account. It creates nothing of
+        -- its own -- every score it can reach is one a teacher assigned -- and it
+        -- is never export-gated, because there is nobody to sell an upgrade to.
+        when 'student' then jsonb_build_object(
+            'cloud_scores', 0, 'omr_runs', 0, 'vision_reads', 0, 'smart_imports', 0, 'pdf_exports', -1, 'students', 0
+        )
         else jsonb_build_object(
             'cloud_scores', 3, 'omr_runs', 3, 'vision_reads', 5, 'smart_imports', 2, 'pdf_exports', 1, 'students', 3
         )
@@ -136,6 +146,26 @@ begin
             raise exception 'cannot read another user''s entitlements' using errcode = '42501';
         end if;
         v_user := v_caller;
+    end if;
+
+    -- A provisioned student short-circuits everything below. The flag is set by
+    -- the provisioning function through the admin API, so it is not something the
+    -- account itself can write, and a student has no subscription, no seat and no
+    -- upgrade path to resolve.
+    perform 1
+    from auth.users u
+    where u.id = v_user
+      and u.raw_app_meta_data ->> 'user_type' = 'student';
+
+    if found then
+        return jsonb_build_object(
+            'user_id', v_user,
+            'tier', 'student',
+            'status', null::text,
+            'source', 'managed',
+            'current_period_end', null::timestamptz,
+            'limits', public.tier_limits ('student')
+        );
     end if;
 
     -- Own subscription first. Highest tier wins if somehow more than one is live.
@@ -238,6 +268,45 @@ set search_path = public as $$
     where user_id = p_user
       and metric = p_metric
       and month = date_trunc('month', now())::date;
+$$;
+
+-- The PDF export runs entirely on-device, so nothing here can stop it: this is
+-- the honest-UI counter the client calls before exporting, not a hard gate. It
+-- is the one consume path granted to authenticated -- an export has no Edge
+-- Function to meter it -- which is safe because the worst a caller can do by
+-- calling it directly is spend their own allowance.
+create or replace function public.consume_pdf_export () returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+    v_user uuid := auth.uid();
+    v_ent jsonb;
+    v_limit int;
+begin
+    if v_user is null then
+        raise exception 'not authenticated' using errcode = '28000';
+    end if;
+
+    -- A share-link guest is someone else's visitor, with no plan of their own to
+    -- draw down and no way to upgrade. Never gated.
+    if coalesce((auth.jwt() ->> 'is_anonymous')::boolean, false) then
+        return jsonb_build_object('ok', true, 'exempt', 'anonymous');
+    end if;
+
+    v_ent := public.get_entitlements ();
+
+    -- Students print what they were assigned. That is the product working, not
+    -- usage to meter.
+    if v_ent ->> 'tier' = 'student' then
+        return jsonb_build_object('ok', true, 'exempt', 'student');
+    end if;
+
+    v_limit := (v_ent -> 'limits' ->> 'pdf_exports')::int;
+    if v_limit < 0 then
+        return jsonb_build_object('ok', true);
+    end if;
+
+    return public.consume_quota (v_user, 'pdf_exports', v_limit);
+end;
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -578,6 +647,12 @@ grant execute on function public.get_entitlements (uuid) to service_role;
 revoke all on function public.tier_limits (text) from public;
 revoke all on function public.tier_limits (text) from anon;
 grant execute on function public.tier_limits (text) to authenticated;
+
+-- Unlike consume_quota, this one IS a client RPC: the export it counts happens
+-- in the browser, so there is no server-side caller to keep it away from.
+revoke all on function public.consume_pdf_export () from public;
+revoke all on function public.consume_pdf_export () from anon;
+grant execute on function public.consume_pdf_export () to authenticated;
 
 revoke all on function public.document_is_archived (uuid) from public;
 revoke all on function public.document_is_archived (uuid) from anon;

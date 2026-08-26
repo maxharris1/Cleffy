@@ -15,6 +15,14 @@
 
 export type BillingTier = 'free' | 'personal' | 'teacher' | 'academy';
 
+/**
+ * What an account effectively is, which is not always something you can buy.
+ * 'student' is a provisioned account — a real user carrying
+ * app_metadata.user_type = 'student' — and it never appears on a subscription
+ * row, which is why TIER_LIMITS below stays keyed by the four purchasable tiers.
+ */
+export type EffectiveTier = BillingTier | 'student';
+
 export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_imports' | 'pdf_exports' | 'students';
 
 /**
@@ -24,11 +32,12 @@ export type UsageMetric = 'cloud_scores' | 'omr_runs' | 'vision_reads' | 'smart_
  */
 export type EntitlementLimits = Record<UsageMetric, number>;
 
-export type EntitlementSource = 'subscription' | 'studio_member' | 'none';
+/** 'managed' is a provisioned student: entitled by their teacher, billed to nobody. */
+export type EntitlementSource = 'subscription' | 'studio_member' | 'managed' | 'none';
 
 export interface Entitlements {
     user_id: string;
-    tier: BillingTier;
+    tier: EffectiveTier;
     status: string | null;
     source: EntitlementSource;
     current_period_end: string | null;
@@ -68,6 +77,25 @@ export const TIER_LIMITS: Record<BillingTier, EntitlementLimits> = {
 };
 
 /**
+ * Mirrors the 'student' branch of tier_limits(), and is drift-guarded with the
+ * rest. Zero everywhere a student would be creating something of their own, and
+ * unlimited exports: printing the piece your teacher assigned is the product
+ * working, and a student has no plan to upgrade anyway.
+ */
+export const STUDENT_LIMITS: EntitlementLimits = {
+    cloud_scores: 0,
+    omr_runs: 0,
+    vision_reads: 0,
+    smart_imports: 0,
+    pdf_exports: UNLIMITED,
+    students: 0,
+};
+
+/** The ceilings for any effective tier, purchasable or not. */
+export const limitsFor = (tier: EffectiveTier): EntitlementLimits =>
+    tier === 'student' ? STUDENT_LIMITS : TIER_LIMITS[tier];
+
+/**
  * Which counter each metered endpoint draws on. Both analyze-* endpoints are
  * two views of the same vision feature, so they share one budget.
  *
@@ -86,7 +114,7 @@ export const isEntitlingStatus = (status: string | null): boolean => status === 
 
 export const isUnlimited = (limit: number): boolean => limit < 0;
 
-export const limitFor = (tier: BillingTier, metric: UsageMetric): number => TIER_LIMITS[tier][metric];
+export const limitFor = (tier: EffectiveTier, metric: UsageMetric): number => limitsFor(tier)[metric];
 
 /**
  * Paid tiers advertise "unlimited" vision reads but carry a generous fair-use
@@ -94,10 +122,11 @@ export const limitFor = (tier: BillingTier, metric: UsageMetric): number => TIER
  * reports a different code and the UI points at support rather than at Checkout.
  *
  * Only the metered budgets reach here: `students` is a stock, refused where a
- * seat is provisioned, and never travels the quota path.
+ * seat is provisioned, and never travels the quota path. A student's zeroes are
+ * not a fair-use ceiling either — they are a feature they do not have.
  */
-export const isFairUseCap = (tier: BillingTier, metric: UsageMetric): boolean =>
-    tier !== 'free' && !isUnlimited(limitFor(tier, metric));
+export const isFairUseCap = (tier: EffectiveTier, metric: UsageMetric): boolean =>
+    tier !== 'free' && tier !== 'student' && !isUnlimited(limitFor(tier, metric));
 
 /** First day of the metric's calendar month, matching date_trunc('month', now())::date. */
 export const monthKeyOf = (date: Date): string => {
@@ -112,10 +141,11 @@ export interface LimitReachedBody {
     code: 'limit_reached' | 'fair_use_cap';
     metric: UsageMetric;
     limit: number;
-    tier: BillingTier;
+    /** EffectiveTier, not BillingTier: a student refused a metered call is told so. */
+    tier: EffectiveTier;
 }
 
-export const limitReachedBody = (metric: UsageMetric, limit: number, tier: BillingTier): LimitReachedBody => ({
+export const limitReachedBody = (metric: UsageMetric, limit: number, tier: EffectiveTier): LimitReachedBody => ({
     code: isFairUseCap(tier, metric) ? 'fair_use_cap' : 'limit_reached',
     metric,
     limit,
@@ -132,13 +162,30 @@ export const freeEntitlements = (userId: string): Entitlements => ({
 });
 
 /**
+ * The get_entitlements() short-circuit, in TypeScript: a user flagged
+ * app_metadata.user_type = 'student' is entitled by their teacher's plan rather
+ * than by one of their own, so there is no subscription or seat to resolve and
+ * nothing to expire.
+ */
+export const studentEntitlements = (userId: string): Entitlements => ({
+    user_id: userId,
+    tier: 'student',
+    status: null,
+    source: 'managed',
+    current_period_end: null,
+    limits: STUDENT_LIMITS,
+});
+
+/**
  * A cached entitlement can outlive the period it was issued for — a teacher who
  * goes offline on the Teacher tier and comes back after renewal failed must not
  * keep Teacher limits in the UI. Enforcement is server-side regardless; this
  * only keeps the offline display honest.
  */
 export const downgradeExpired = (entitlements: Entitlements, nowMs: number): Entitlements => {
-    if (entitlements.tier === 'free') {
+    // A student holds no period to outlive, and dropping them to free would take
+    // away the assigned scores they are meant to be practising from.
+    if (entitlements.tier === 'free' || entitlements.tier === 'student') {
         return entitlements;
     }
     const end = entitlements.current_period_end;

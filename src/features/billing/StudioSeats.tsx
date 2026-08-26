@@ -8,14 +8,14 @@ import {
     removeStudioMember,
     type StudioSeat,
 } from '@/features/billing/studiosService';
-import type { BillingTier, EntitlementSource, StudioRow } from '@/types/database';
+import type { EffectiveTier, EntitlementSource, StudioRow } from '@/types/database';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { fieldClassName } from '@/ui/classNames';
 
 export interface StudioSeatsProps {
     userId: string;
-    tier: BillingTier;
+    tier: EffectiveTier;
     source: EntitlementSource;
 }
 

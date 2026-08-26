@@ -1,6 +1,6 @@
 import { getSupabase } from '@/lib/supabase';
 import { getDb } from '@/sync/db';
-import type { BillingTier, Entitlements, EntitlementLimits, UsageMetric } from '@/types/database';
+import type { EffectiveTier, Entitlements, EntitlementLimits, UsageMetric } from '@/types/database';
 
 /**
  * Entitlements for the signed-in teacher.
@@ -36,7 +36,9 @@ export const freeEntitlements = (userId: string): Entitlements => ({
  * the truth is kinder than a surprise mid-lesson.
  */
 export const downgradeExpired = (entitlements: Entitlements, nowMs: number): Entitlements => {
-    if (entitlements.tier === 'free' || !entitlements.current_period_end) {
+    // A provisioned student has no period to outlive — and dropping them to free
+    // would hide the scores their teacher assigned.
+    if (entitlements.tier === 'free' || entitlements.tier === 'student' || !entitlements.current_period_end) {
         return entitlements;
     }
     const endMs = Date.parse(entitlements.current_period_end);
@@ -46,7 +48,8 @@ export const downgradeExpired = (entitlements: Entitlements, nowMs: number): Ent
     return { ...freeEntitlements(entitlements.user_id), status: entitlements.status };
 };
 
-export const isPaidTier = (tier: BillingTier): boolean => tier !== 'free';
+/** A student is entitled, but not by a plan of their own — nothing to sell them. */
+export const isPaidTier = (tier: EffectiveTier): boolean => tier !== 'free' && tier !== 'student';
 
 export const limitOf = (entitlements: Entitlements, metric: UsageMetric): number => entitlements.limits[metric];
 

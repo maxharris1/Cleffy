@@ -4,9 +4,12 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+    STUDENT_LIMITS,
     TIER_LIMITS,
     UNLIMITED,
     type BillingTier,
+    type EffectiveTier,
+    type EntitlementLimits,
     type UsageMetric,
 } from '../../supabase/functions/_shared/entitlements';
 import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
@@ -28,10 +31,18 @@ const MIGRATION = resolve(process.cwd(), 'supabase/migrations/20260811120000_bil
 const TIERS: BillingTier[] = ['free', 'personal', 'teacher', 'academy'];
 const PAID_TIERS = ['personal', 'teacher', 'academy'] as const;
 
+/**
+ * Every branch tier_limits() answers. 'student' is not purchasable and so is not
+ * in TIER_LIMITS, but the SQL carries it and it drifts just as easily.
+ */
+const SQL_TIERS: EffectiveTier[] = [...TIERS, 'student'];
+
+const LIMITS_BY_TIER: Record<EffectiveTier, EntitlementLimits> = { ...TIER_LIMITS, student: STUDENT_LIMITS };
+
 const METRICS: UsageMetric[] = ['cloud_scores', 'omr_runs', 'vision_reads', 'smart_imports', 'pdf_exports', 'students'];
 
 /** Pulls the jsonb_build_object(...) body for one tier out of tier_limits(). */
-const limitsFromSql = (sql: string, tier: BillingTier): Record<string, number> => {
+const limitsFromSql = (sql: string, tier: EffectiveTier): Record<string, number> => {
     const branch =
         tier === 'free'
             ? /else\s+jsonb_build_object\(([\s\S]*?)\)\s*end/i
@@ -56,14 +67,32 @@ const limitsFromSql = (sql: string, tier: BillingTier): Record<string, number> =
 describe('tier limits stay in sync with the migration', () => {
     const sql = readFileSync(MIGRATION, 'utf8');
 
-    it.each(TIERS)('%s matches tier_limits() in SQL', (tier) => {
-        expect(limitsFromSql(sql, tier)).toEqual(TIER_LIMITS[tier]);
+    it.each(SQL_TIERS)('%s matches tier_limits() in SQL', (tier) => {
+        expect(limitsFromSql(sql, tier)).toEqual(LIMITS_BY_TIER[tier]);
     });
 
     it('covers every metric in every tier', () => {
-        for (const tier of TIERS) {
-            expect(Object.keys(TIER_LIMITS[tier]).sort()).toEqual([...METRICS].sort());
+        for (const tier of SQL_TIERS) {
+            expect(Object.keys(LIMITS_BY_TIER[tier]).sort()).toEqual([...METRICS].sort());
         }
+    });
+
+    it('keeps TIER_LIMITS to the tiers someone can actually buy', () => {
+        // The student ceilings live in STUDENT_LIMITS on purpose: a tier nobody
+        // pays for must not be reachable from the table the pricing UI iterates.
+        expect(Object.keys(TIER_LIMITS).sort()).toEqual([...TIERS].sort());
+    });
+
+    it('gives a provisioned student nothing to create and no export gate', () => {
+        // Students are never billed and never gated: zero everywhere they would be
+        // creating something of their own, unlimited on the one thing they do —
+        // print the score their teacher assigned.
+        expect(STUDENT_LIMITS.cloud_scores).toBe(0);
+        expect(STUDENT_LIMITS.omr_runs).toBe(0);
+        expect(STUDENT_LIMITS.vision_reads).toBe(0);
+        expect(STUDENT_LIMITS.smart_imports).toBe(0);
+        expect(STUDENT_LIMITS.students).toBe(0);
+        expect(STUDENT_LIMITS.pdf_exports).toBe(UNLIMITED);
     });
 
     it('matches the client’s offline free-tier fallback', () => {

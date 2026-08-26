@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    STUDENT_LIMITS,
     TIER_LIMITS,
     UNLIMITED,
     downgradeExpired,
@@ -8,6 +9,7 @@ import {
     limitReachedBody,
     monthKeyOf,
     resolveEntitlements,
+    studentEntitlements,
     type SubscriptionLike,
 } from '../../supabase/functions/_shared/entitlements';
 import { FakeBilling } from './fakeBilling';
@@ -155,6 +157,31 @@ describe('entitlement resolution', () => {
             const cached = resolve('teacher', []);
             expect(downgradeExpired(cached, Date.parse('2030-01-01T00:00:00Z')).tier).toBe('free');
         });
+
+        it('leaves a provisioned student alone forever', () => {
+            // A student has no period to outlive, and degrading them to free would
+            // take away the scores their teacher assigned — mid-lesson, offline.
+            const student = studentEntitlements('student-1');
+            expect(downgradeExpired(student, Date.parse('2099-01-01T00:00:00Z'))).toEqual(student);
+        });
+    });
+});
+
+describe('provisioned students', () => {
+    it('are entitled by their teacher, not by a plan of their own', () => {
+        expect(studentEntitlements('student-1')).toEqual({
+            user_id: 'student-1',
+            tier: 'student',
+            status: null,
+            source: 'managed',
+            current_period_end: null,
+            limits: STUDENT_LIMITS,
+        });
+    });
+
+    it('are never a fair-use anomaly — their zeroes are a feature they lack', () => {
+        expect(isFairUseCap('student', 'vision_reads')).toBe(false);
+        expect(isFairUseCap('student', 'omr_runs')).toBe(false);
     });
 });
 
