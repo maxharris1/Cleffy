@@ -8,14 +8,18 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 > add `SUPABASE_ACCESS_TOKEN` to the Claude environment's env vars so future
 > sessions can run ops without re-pasting.
 >
-> **PENDING:** neither `20260826193902_billing.sql` (billing) nor
-> `20260826194426_roster.sql` (roster, assignments, practice notes) has been
-> applied yet, and no Stripe products/prices exist. Until all three are done, the
-> app runs exactly as before — the pricing dialog reports that billing is
-> unconfigured, nothing is gated, and there is no roster to provision into. Order
-> matters: the roster's student accounts rely on the `student` tier and the
-> entitlement short-circuit that billing adds, so billing goes first. Both §1
-> routes already do that for you. See §1 to apply them and §4 for Stripe.
+> **BILLING ROLLOUT (2026-08-26):** both `20260826193902_billing.sql` and
+> `20260826194426_roster.sql` are **applied** to the live project, and
+> `stripe-checkout`, `stripe-portal`, `stripe-webhook`, `student-provision`,
+> `student-login` and the metered `imslp-download` are **deployed** (the webhook
+> and student-login with `--no-verify-jwt`). Enforcement is live: the free-tier
+> caps, the roster, practice notes and code login all work with no Stripe
+> configuration at all. Still PENDING: the Stripe catalogue and Edge secrets
+> (§4a-4b — needs a Stripe key), the Vercel deploy (§5), and the analyze trio:
+> the repo carries metered sources for `score-analyze` / `analyze-annotations`
+> / `analyze-notes`, but the deployed versions are the earlier unmetered ones
+> and this build's client has no UI for them — deploy the repo versions when
+> those features come back.
 
 ## 1. Apply the database migrations (pick ONE)
 
@@ -97,13 +101,13 @@ of twenty works out at **under $1 per student**.
 Two personas, four tiers. Personal is the practice tool for one player; Teacher
 is the same app plus a roster; Academy is Teacher for a team.
 
-| Tier             | Price               | What it grants                                                                                                          |
-| ---------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Tier             | Price               | What it grants                                                                                                                  |
+| ---------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | Free             | — (no card, no row) | 3 active cloud scores · 3 play-along runs/mo · 5 AI fingering reads/mo · 2 smart imports/mo · 1 PDF export/mo · 3 student seats |
-| Personal         | $7/mo or $70/yr     | Everything unlimited for one player — and no roster at all (`students` is 0, not 3)                                     |
-| Teacher          | $19/mo or $190/yr   | Personal plus **unlimited students**, one roster, practice notes                                                        |
-| Academy          | $49/mo or $490/yr   | Teacher for up to **5 teacher seats**, on one invoice                                                                   |
-| Founding Teacher | $99/yr              | A second price on the **Teacher** product, shown only while the offer flag is on                                        |
+| Personal         | $7/mo or $70/yr     | Everything unlimited for one player — and no roster at all (`students` is 0, not 3)                                             |
+| Teacher          | $19/mo or $190/yr   | Personal plus **unlimited students**, one roster, practice notes                                                                |
+| Academy          | $49/mo or $490/yr   | Teacher for up to **5 teacher seats**, on one invoice                                                                           |
+| Founding Teacher | $99/yr              | A second price on the **Teacher** product, shown only while the offer flag is on                                                |
 
 Unlimited is unlimited except for AI fingering reads, which carry a silent
 500/mo fair-use ceiling on every paid tier.
@@ -255,15 +259,15 @@ the Stripe dashboard is a no-op (the handler reports `duplicate: true`).
 
 Client-side checks are UX only. Every limit is enforced server-side:
 
-| Limit                                   | Enforced by                                                                                                   |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database |
-| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                             |
+| Limit                                   | Enforced by                                                                                                                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                  |
+| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                              |
 | PDF export                              | `consume_pdf_export()` — the export runs on-device, so this is an honest-UI counter, not a hard gate. It exempts anonymous share-link guests and provisioned students outright |
-| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap |
-| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                      |
-| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about |
-| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed) |
+| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                     |
+| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                       |
+| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                  |
+| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                         |
 
 `students` and `cloud_scores` are **stocks** — a live count of rows, checked
 where the row is written — so neither ever reaches `usage_counters`. Everything
@@ -344,7 +348,29 @@ without even counting.) The one thing a lapse does reach a student through is th
 score itself — a document archived past the free cap becomes read-only for
 everybody who can see it, its assigned students included.
 
-## 5. (Optional) Let the Claude environment reach Supabase
+## 5. Deploy the app to Vercel (cleffy.io)
+
+The repo ships `vercel.json` with the SPA rewrite react-router needs, and
+Vercel auto-detects Vite (`npm run build`, output `dist/`).
+
+1. [vercel.com/new](https://vercel.com/new) → import the GitHub repo, keep the
+   detected settings, and set the **production branch to `main`** — every push
+   to main then deploys automatically.
+2. Project → Settings → **Environment Variables** (Production): paste
+   `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, plus the `VITE_STRIPE_*`
+   values once §4a has produced the price ids. Missing Stripe values are safe —
+   the pricing dialog says billing is unconfigured instead of breaking.
+3. Project → Settings → **Domains** → add `cleffy.io` (and `www.cleffy.io`
+   redirecting to it). The domain is already registered on Vercel, so it
+   attaches without DNS work.
+4. Back in Supabase [Auth → URL Configuration](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/auth/url-configuration):
+   set the Site URL to `https://cleffy.io` and add `https://cleffy.io`,
+   `https://cleffy.io/auth/callback` and `https://cleffy.io/update-password`
+   to the redirect list (keep the localhost entries for dev).
+5. When setting the Edge secrets in §4b, use `APP_URL=https://cleffy.io` so
+   Checkout and the Customer Portal return to production.
+
+## 6. (Optional) Let the Claude environment reach Supabase
 
 To let Claude verify against the real backend (and run `db push` itself), allow
 `*.supabase.co` in this environment's **network policy** (Claude Code on the web →
