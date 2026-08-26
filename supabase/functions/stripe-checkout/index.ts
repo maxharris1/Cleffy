@@ -1,4 +1,4 @@
-import { requireUser, rejectAnonymous } from '../_shared/auth.ts';
+import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { appOrigin, isKnownPrice, stripeClient } from '../_shared/stripe.ts';
@@ -30,6 +30,12 @@ Deno.serve(async (req) => {
     const anonymous = rejectAnonymous(auth.caller);
     if (anonymous) {
         return anonymous;
+    }
+    // A provisioned student has no billing relationship at all: their teacher's
+    // plan entitles them, and there is nothing here for them to buy.
+    const student = rejectStudent(auth.caller);
+    if (student) {
+        return student;
     }
 
     let body: { priceId?: string };

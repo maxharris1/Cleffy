@@ -418,6 +418,21 @@ verify_jwt = true
 [functions.stripe-webhook]
 verify_jwt = false
 
+# Roster — provisioning a student is a teacher action like any other, so it
+# takes the teacher's JWT and meters the `students` stock against their plan.
+[functions.student-provision]
+verify_jwt = true
+
+# The one other function that cannot require a JWT. A student typing the code
+# off their card has no session yet: the code IS the credential, and this is the
+# endpoint that trades it for one. Open is not the same as an oracle — the
+# endpoint is hard rate-limited (10/min per IP, against ~59-bit codes) and
+# answers every failure with the same indistinguishable 401. Deploy with
+# `supabase functions deploy student-login --no-verify-jwt`, as with
+# stripe-webhook above.
+[functions.student-login]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

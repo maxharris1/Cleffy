@@ -1,4 +1,4 @@
-import { requireUser } from './auth.ts';
+import { requireUser, rejectStudent } from './auth.ts';
 import { jsonResponse, optionsResponse } from './cors.ts';
 import { METRIC_BY_FUNCTION, type UsageMetric } from './entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from './imslp.ts';
@@ -12,6 +12,11 @@ import { enforce } from './quota.ts';
  * gate — auth, document access, entitlement lookup, atomic quota consume — and
  * then return 501 instead of doing the work. That makes the enforcement path,
  * and the client's limit-reached UI, real and testable today.
+ *
+ * Two callers are refused outright, before any budget is touched: an anonymous
+ * share-link guest, and a provisioned student. Teacher-pays means neither is
+ * ever billed, so neither may spend an analysis budget — and a student needs a
+ * check of their own, being a registered user rather than an anonymous one.
  *
  * When the real analysis lands, replace `notImplemented` with the work and wrap
  * it so any failure calls `refund(admin, userId, metric)`. Until then the
@@ -56,6 +61,14 @@ export const serveMeteredAnalysis = (functionName: string): void => {
                 { error: 'Sign in with a teacher account to run analysis', code: 'anonymous_session' },
                 403,
             );
+        }
+        // A provisioned student is a real, non-anonymous user, so the check above
+        // lets them through. Their metered limits are all zero, so without this
+        // they would draw on a budget they were never given and be told 402
+        // "limit reached" — when the truth is that analysis is the teacher's to run.
+        const student = rejectStudent(auth.caller);
+        if (student) {
+            return student;
         }
 
         let body: { documentId?: string };
