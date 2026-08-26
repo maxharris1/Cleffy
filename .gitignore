@@ -8,6 +8,8 @@ coverage/
 .env
 .env.*
 !.env.example
+# Committed on purpose: client-safe values only — they ship in the bundle anyway.
+!.env.production
 
 # supabase CLI local state
 supabase/.temp/
