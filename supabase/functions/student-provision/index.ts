@@ -12,7 +12,7 @@ import { formatLoginCode, generateLoginCode, hashLoginCode, syntheticStudentEmai
  *
  * Provisioning a student means creating a real auth user, which no client may
  * do, so every write here runs under the service role — managed_students has no
- * client write policy at all, by design (see 20260812090000_roster.sql).
+ * client write policy at all, by design (see 20260826194426_roster.sql).
  *
  * The roster is a STOCK, not a flow: `students` never reaches usage_counters, it
  * is the live count of unarchived rows, checked here where a seat is claimed.

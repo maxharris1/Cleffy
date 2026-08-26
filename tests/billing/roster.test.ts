@@ -239,7 +239,7 @@ describe('a teacher whose plan has lapsed', () => {
  * assign_score() maps the assignment's access onto a document_members role, and
  * unassign_score() takes that membership back. Both are SECURITY DEFINER SQL, so
  * what is checked here is the mapping table itself, transcribed from the two
- * CASE expressions in 20260812090000_roster.sql.
+ * CASE expressions in 20260826194426_roster.sql.
  */
 describe('what an assignment grants', () => {
     const ROLE_CASES: Array<{ what: string; current: MemberRole | null; access: AssignmentAccess; role: MemberRole }> =

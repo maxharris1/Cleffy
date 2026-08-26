@@ -14,8 +14,8 @@ import type { AssignmentAccess, MemberRole } from '../../src/types/database';
 
 /**
  * In-memory stand-in for the billing and roster tables, implementing the
- * contract that supabase/migrations/20260811120000_billing.sql and
- * 20260812090000_roster.sql define.
+ * contract that supabase/migrations/20260826193902_billing.sql and
+ * 20260826194426_roster.sql define.
  *
  * Same idea as `FakeApi` in src/sync/syncEngine.test.ts: the production code
  * under test is real, only the storage behind it is faked. What it reproduces

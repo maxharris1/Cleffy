@@ -701,7 +701,7 @@ using (
     )
 );
 
--- ===== supabase/migrations/20260811120000_billing.sql =====
+-- ===== supabase/migrations/20260826193902_billing.sql =====
 -- Billing: Stripe customers/subscriptions, academy seats, metered usage, and the
 -- free-tier cloud-score cap.
 --
@@ -725,7 +725,7 @@ using (
 --    never applies to anonymous guests or provisioned students.
 --  * A provisioned student is not a customer. get_entitlements() answers tier
 --    'student' (source 'managed') straight from app_metadata, before any
---    subscription lookup, so the roster features in 20260812090000_roster.sql
+--    subscription lookup, so the roster features in 20260826194426_roster.sql
 --    work for an account that will never have a Stripe row.
 --  * Lapsing NEVER deletes data. Scores beyond the free cap get archived_at set;
 --    they stay readable and exportable, only annotation writes are blocked.
@@ -1463,7 +1463,7 @@ revoke all on function public.studio_role (uuid) from public;
 revoke all on function public.studio_role (uuid) from anon;
 grant execute on function public.studio_role (uuid) to authenticated;
 
--- ===== supabase/migrations/20260812090000_roster.sql =====
+-- ===== supabase/migrations/20260826194426_roster.sql =====
 -- Roster, assignments, and practice notes — the teaching half of pricing v2.
 --
 -- The model, in one place:
@@ -1484,7 +1484,7 @@ grant execute on function public.studio_role (uuid) to authenticated;
 --    left hand in bar 12" for the student and "parents want to move to Tuesdays"
 --    for themselves, in the same place.
 --  * Students are never gated and never billed. get_entitlements() answers tier
---    'student' for them (see 20260811120000_billing.sql), and nothing in this
+--    'student' for them (see 20260826193902_billing.sql), and nothing in this
 --    file consumes a quota — the teacher's roster stock is what pricing meters.
 --
 -- Ids are caller-generated, matching documents/annotations/library_tags: the

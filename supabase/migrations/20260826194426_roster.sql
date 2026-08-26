@@ -18,7 +18,7 @@
 --    left hand in bar 12" for the student and "parents want to move to Tuesdays"
 --    for themselves, in the same place.
 --  * Students are never gated and never billed. get_entitlements() answers tier
---    'student' for them (see 20260811120000_billing.sql), and nothing in this
+--    'student' for them (see 20260826193902_billing.sql), and nothing in this
 --    file consumes a quota — the teacher's roster stock is what pricing meters.
 --
 -- Ids are caller-generated, matching documents/annotations/library_tags: the

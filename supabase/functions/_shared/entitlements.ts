@@ -6,7 +6,7 @@
  * other rejects. Anything needing a Supabase client lives in ./quota.ts instead.
  *
  * Postgres is the enforcement authority: get_entitlements() and consume_quota()
- * in supabase/migrations/20260811120000_billing.sql decide what actually
+ * in supabase/migrations/20260826193902_billing.sql decide what actually
  * happens. `resolveEntitlements` here is the executable specification of that
  * SQL — it is what lets the rules be tested in CI without a Postgres, and
  * tests/billing/limitsInSync.test.ts parses the migration to prove TIER_LIMITS

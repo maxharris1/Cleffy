@@ -8,8 +8,8 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 > add `SUPABASE_ACCESS_TOKEN` to the Claude environment's env vars so future
 > sessions can run ops without re-pasting.
 >
-> **PENDING:** neither `20260811120000_billing.sql` (billing) nor
-> `20260812090000_roster.sql` (roster, assignments, practice notes) has been
+> **PENDING:** neither `20260826193902_billing.sql` (billing) nor
+> `20260826194426_roster.sql` (roster, assignments, practice notes) has been
 > applied yet, and no Stripe products/prices exist. Until all three are done, the
 > app runs exactly as before — the pricing dialog reports that billing is
 > unconfigured, nothing is gated, and there is no roster to provision into. Order

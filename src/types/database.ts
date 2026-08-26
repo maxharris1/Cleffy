@@ -229,7 +229,7 @@ export type StudioMemberRow = {
  * what frees the seat it holds against the `students` limit.
  *
  * `login_code_hash` is deliberately absent: the table has it, but `authenticated`
- * holds no SELECT grant on that column (see 20260812090000_roster.sql), because
+ * holds no SELECT grant on that column (see 20260826194426_roster.sql), because
  * the select policy has a student branch and the hash is of the code that is also
  * the account's password. Only student-login reads it, under the service role.
  * That is also why the queries below name their columns instead of `*`.

@@ -26,7 +26,7 @@ import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
 
 // Resolved from the project root: the jsdom test environment gives import.meta
 // a non-file URL, so fileURLToPath cannot be used here.
-const MIGRATION = resolve(process.cwd(), 'supabase/migrations/20260811120000_billing.sql');
+const MIGRATION = resolve(process.cwd(), 'supabase/migrations/20260826193902_billing.sql');
 
 const TIERS: BillingTier[] = ['free', 'personal', 'teacher', 'academy'];
 const PAID_TIERS = ['personal', 'teacher', 'academy'] as const;
