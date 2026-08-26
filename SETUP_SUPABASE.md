@@ -14,8 +14,18 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 > `student-login` and the metered `imslp-download` are **deployed** (the webhook
 > and student-login with `--no-verify-jwt`). Enforcement is live: the free-tier
 > caps, the roster, practice notes and code login all work with no Stripe
-> configuration at all. Still PENDING: the Stripe catalogue and Edge secrets
-> (§4a-4b — needs a Stripe key), the Vercel deploy (§5), and the analyze trio:
+> configuration at all. The Stripe SANDBOX catalogue also exists (2026-08-26,
+> built via the Stripe connector — 3 products, 7 prices, webhook endpoint
+> `we_1U8njJ9EqxUjgZtnfBK3y0XH`), and `.env.production` on main carries the
+> client-safe env, so the Vercel build needs no dashboard variables. Still
+> PENDING — three human steps: (1) Edge secrets (§4b — the command below is
+> pre-filled with the real sandbox price ids; only `sk_test_…` and the
+> `whsec_…` from this rollout need pasting), (2) the Stripe test-mode dashboard
+> → Settings → Billing → Customer portal → Save once (the connector has no
+> billing-portal write API, and stripe-portal fails without a default
+> configuration), (3) the Vercel import (§5 — the API needs a GitHub Login
+> Connection on the Vercel account, so the first link must happen in the
+> dashboard). Also pending: the analyze trio:
 > the repo carries metered sources for `score-analyze` / `analyze-annotations`
 > / `analyze-notes`, but the deployed versions are the earlier unmetered ones
 > and this build's client has no UI for them — deploy the repo versions when
@@ -160,17 +170,20 @@ Server-side values. **Never** give any of these a `VITE_` prefix — that would
 ship them to the browser.
 
 ```bash
+# Pre-filled with the real SANDBOX price ids (test mode). Paste your sandbox
+# secret key (Dashboard, test mode → Developers → API keys) and the webhook
+# signing secret from the rollout notes; swap all of these at the live flip.
 supabase secrets set \
-  STRIPE_SECRET_KEY=sk_test_... \
-  STRIPE_WEBHOOK_SECRET=whsec_... \
-  STRIPE_PRICE_PERSONAL_MONTHLY=price_... \
-  STRIPE_PRICE_PERSONAL_ANNUAL=price_... \
-  STRIPE_PRICE_TEACHER_MONTHLY=price_... \
-  STRIPE_PRICE_TEACHER_ANNUAL=price_... \
-  STRIPE_PRICE_ACADEMY_MONTHLY=price_... \
-  STRIPE_PRICE_ACADEMY_ANNUAL=price_... \
-  STRIPE_PRICE_FOUNDING_ANNUAL=price_... \
-  APP_URL=https://YOUR-APP.vercel.app
+  STRIPE_SECRET_KEY=sk_test_PASTE_ME \
+  STRIPE_WEBHOOK_SECRET=whsec_PASTE_ME \
+  STRIPE_PRICE_PERSONAL_MONTHLY=price_1U8nin9EqxUjgZtnTC00MEwP \
+  STRIPE_PRICE_PERSONAL_ANNUAL=price_1U8niu9EqxUjgZtn3fGKope8 \
+  STRIPE_PRICE_TEACHER_MONTHLY=price_1U8niw9EqxUjgZtnSqC3tsTx \
+  STRIPE_PRICE_TEACHER_ANNUAL=price_1U8niy9EqxUjgZtn7TBy8cdn \
+  STRIPE_PRICE_ACADEMY_MONTHLY=price_1U8nj49EqxUjgZtnlVhAVP4P \
+  STRIPE_PRICE_ACADEMY_ANNUAL=price_1U8nj69EqxUjgZtnNZv0nUMq \
+  STRIPE_PRICE_FOUNDING_ANNUAL=price_1U8nj19EqxUjgZtnhcbeO9ct \
+  APP_URL=https://cleffy.io
 ```
 
 Those seven `STRIPE_PRICE_*` names are exactly the seven `priceCatalog()` reads
