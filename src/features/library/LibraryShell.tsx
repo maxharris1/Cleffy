@@ -36,6 +36,7 @@ export type LibraryOutletContext = {
 
 const NAV_ITEMS = [
     { to: '/library', label: 'Library', end: true },
+    { to: '/students', label: 'Students', end: true },
     { to: '/search', label: 'Find on IMSLP', end: true },
     { to: '/settings', label: 'Settings', end: true },
 ] as const;

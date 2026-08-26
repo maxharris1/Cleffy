@@ -11,6 +11,7 @@ import {
     loadDocumentBytes,
     loadDocumentOffline,
 } from '@/features/library/documentsService';
+import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
@@ -52,6 +53,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
     const [shareOpen, setShareOpen] = useState(false);
+    const [notesOpen, setNotesOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
 
@@ -133,6 +135,21 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 <SyncDot status={syncStatus} />
                 {readOnly ? <Badge>view only</Badge> : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
+                {/*
+                  Shown to everyone on the score, not just the owner. Whether a
+                  member has anything to read would take a query to know, and
+                  hiding the control until then makes it flicker in; opening it to
+                  "no notes yet" costs a student nothing and tells them where the
+                  notes will appear when there are some.
+                */}
+                <button
+                    type="button"
+                    title="Practice notes — a journal by lesson day"
+                    onClick={() => setNotesOpen(true)}
+                    className={buttonClassName('ghost', 'sm')}
+                >
+                    Notes
+                </button>
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 <ShareExportMenu docId={docId} title={state.doc.title} />
                 {state.role === 'owner' ? (
@@ -161,6 +178,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 </PdfProvider>
             </div>
             {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
+            {notesOpen ? (
+                <NotesPanel
+                    documentId={docId}
+                    role={state.role === 'owner' ? 'owner' : 'member'}
+                    onClose={() => setNotesOpen(false)}
+                />
+            ) : null}
         </div>
     );
 };

@@ -31,6 +31,7 @@ import {
     renameLibraryTag,
     setDocumentTag,
 } from '@/features/library/tagsService';
+import { AssignDialog } from '@/features/roster/AssignDialog';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
@@ -69,6 +70,7 @@ export const LibraryPage = () => {
     const [renameTarget, setRenameTarget] = useState<DocumentRow | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<DocumentRow | null>(null);
     const [shareTarget, setShareTarget] = useState<DocumentRow | null>(null);
+    const [assignTarget, setAssignTarget] = useState<DocumentRow | null>(null);
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
     const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
@@ -469,6 +471,7 @@ export const LibraryPage = () => {
                                             }
                                             onRename={() => setRenameTarget(doc)}
                                             onShare={() => setShareTarget(doc)}
+                                            onAssign={() => setAssignTarget(doc)}
                                             onDelete={() => setDeleteTarget(doc)}
                                         />
                                     ))}
@@ -500,6 +503,13 @@ export const LibraryPage = () => {
             ) : null}
             {shareTarget ? (
                 <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
+            ) : null}
+            {assignTarget ? (
+                <AssignDialog
+                    documentId={assignTarget.id}
+                    documentTitle={assignTarget.title}
+                    onClose={() => setAssignTarget(null)}
+                />
             ) : null}
             {tagTarget ? (
                 <TagAssignDialog
@@ -551,6 +561,7 @@ const ScoreRow = ({
     onFilterTag,
     onRename,
     onShare,
+    onAssign,
     onDelete,
 }: {
     doc: DocumentRow;
@@ -564,6 +575,7 @@ const ScoreRow = ({
     onFilterTag: (tagId: string) => void;
     onRename: () => void;
     onShare: () => void;
+    onAssign: () => void;
     onDelete: () => void;
 }) => {
     const hasTags = assignedTags.length > 0;
@@ -649,7 +661,9 @@ const ScoreRow = ({
                 >
                     <TagIcon size={16} />
                 </button>
-                {isOwner ? <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} /> : null}
+                {isOwner ? (
+                    <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                ) : null}
             </div>
         </li>
     );
@@ -658,10 +672,12 @@ const ScoreRow = ({
 const RowMenu = ({
     onRename,
     onShare,
+    onAssign,
     onDelete,
 }: {
     onRename: () => void;
     onShare: () => void;
+    onAssign: () => void;
     onDelete: () => void;
 }) => {
     const [open, setOpen] = useState(false);
@@ -709,10 +725,11 @@ const RowMenu = ({
             {open ? (
                 <div
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-36 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="absolute right-0 z-20 mt-1 w-44 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     <MenuItem label="Rename" onClick={() => pick(onRename)} />
                     <MenuItem label="Share…" onClick={() => pick(onShare)} />
+                    <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} />
                     <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
                 </div>
             ) : null}
