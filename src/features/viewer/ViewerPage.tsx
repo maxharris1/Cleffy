@@ -124,7 +124,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         );
     }
 
-    const readOnly = state.role !== 'owner' && state.role !== 'editor';
+    // Past the plan's score cap. RLS refuses every annotation write on an archived
+    // score (annotations_insert/annotations_update both test document_is_archived),
+    // and a refusal is not transient, so the sync engine discards the op — a whole
+    // lesson's marks drawn and silently dropped. Role alone would say `owner` here:
+    // the archive is a billing state, not a membership one. loadDocumentBytes keeps
+    // CachedPdf.archivedAt current for exactly this, so the offline open (which
+    // synthesizes its row from the cache) reads it too.
+    const archived = state.doc.archived_at !== null;
+    const readOnly = archived || (state.role !== 'owner' && state.role !== 'editor');
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
 
@@ -133,7 +141,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
                 <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
-                {readOnly ? <Badge>view only</Badge> : null}
+                {archived ? (
+                    <span title="Read-only — over your plan’s score limit">
+                        <Badge tone="warn">Archived</Badge>
+                    </span>
+                ) : readOnly ? (
+                    <Badge>view only</Badge>
+                ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
                 {/*
                   Shown to everyone on the score, not just the owner. Whether a

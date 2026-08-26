@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { METRIC_BY_FUNCTION, TIER_LIMITS, enforceQuota } from '../../supabase/functions/_shared/entitlements';
+import {
+    METRIC_BY_FUNCTION,
+    STUDENT_LIMITS,
+    TIER_LIMITS,
+    UNLIMITED,
+    enforceQuota,
+    studentEntitlements,
+    type UsageMetric,
+} from '../../supabase/functions/_shared/entitlements';
 import { parsePostgrestLimitError } from '../../src/features/billing/limitErrors';
 import { FakeBilling } from './fakeBilling';
 
@@ -114,7 +122,9 @@ describe('free tier limits', () => {
 
     it('refunds a consumed unit when the work fails', async () => {
         const billing = new FakeBilling();
-        await enforceQuota(billing, 'teacher', 'smart_imports');
+        const gate = await enforceQuota(billing, 'teacher', 'smart_imports');
+        // What the caller refunds on: a metered gate really did take a unit.
+        expect(gate).toMatchObject({ ok: true, consumed: true, count: 1 });
         expect(billing.countOf('teacher', 'smart_imports')).toBe(1);
 
         billing.releaseQuota('teacher', 'smart_imports');
@@ -143,6 +153,30 @@ describe('paid tiers', () => {
         }
         // Unlimited metrics short-circuit before consume_quota, so nothing is counted.
         expect(billing.countOf('teacher', 'omr_runs')).toBe(0);
+    });
+
+    it('has nothing to refund on an unlimited metric, even with a counter left from the free days', async () => {
+        // The mid-month upgrade: a teacher spends both free smart imports, then
+        // buys Teacher. The counter row survives the month, but the gate now
+        // short-circuits on the unlimited limit without touching it — so a failure
+        // path that refunded unconditionally would give that spent allowance back,
+        // and give it back again on every later failed import.
+        const billing = new FakeBilling();
+        const FREE_IMPORTS = TIER_LIMITS.free.smart_imports;
+        for (let i = 0; i < FREE_IMPORTS; i += 1) {
+            await enforceQuota(billing, 'teacher', 'smart_imports');
+        }
+        expect(billing.countOf('teacher', 'smart_imports')).toBe(FREE_IMPORTS);
+
+        billing.subscribe('teacher', 'teacher');
+        const gate = await enforceQuota(billing, 'teacher', 'smart_imports');
+        expect(gate).toMatchObject({ ok: true, consumed: false });
+
+        // Exactly what imslp-download's failure paths do with it.
+        if (gate.ok && gate.consumed) {
+            billing.releaseQuota('teacher', 'smart_imports');
+        }
+        expect(billing.countOf('teacher', 'smart_imports')).toBe(FREE_IMPORTS);
     });
 
     it('gives a Personal subscriber the same unlimited scores and runs', async () => {
@@ -218,13 +252,108 @@ describe('the student roster is a stock, not a metered flow', () => {
     });
 
     it('gates the roster by tier instead: Personal gets none, Teacher and Academy no ceiling', () => {
-        // FakeBilling has no roster hook to grow yet — the roster tables land with
-        // the student work — so the contract those tables will enforce is asserted
-        // against the limits table they read.
+        // The limits table those seats are checked against. The stock itself —
+        // provisioning, archiving, the restore that must re-claim its seat — is
+        // driven against FakeBilling in tests/billing/roster.test.ts.
         expect(TIER_LIMITS.personal.students).toBe(0);
         expect(TIER_LIMITS.teacher.students).toBe(-1);
         expect(TIER_LIMITS.academy.students).toBe(-1);
         expect(TIER_LIMITS.free.students).toBe(3);
+    });
+});
+
+describe('student accounts', () => {
+    /**
+     * A provisioned student, as get_entitlements() answers for one: the backend
+     * short-circuits to tier 'student' on app_metadata.user_type, so there is no
+     * subscription or seat to resolve. Only getEntitlements is swapped — the
+     * counters underneath stay the real fake's, which is what lets the "never
+     * incremented" assertions below mean anything.
+     */
+    const studentBackend = (billing: FakeBilling, userId: string) => ({
+        ...billing,
+        getEntitlements: async () => studentEntitlements(userId),
+    });
+
+    /** Everything a student would be creating something of their own with. */
+    const CREATION_METRICS: UsageMetric[] = ['omr_runs', 'vision_reads', 'smart_imports'];
+
+    it('carry zero creation limits and an unlimited export', () => {
+        for (const metric of CREATION_METRICS) {
+            expect(STUDENT_LIMITS[metric]).toBe(0);
+        }
+        // cloud_scores is zero for the same reason, though the refusal that
+        // matters there is the documents_insert policy in the roster migration,
+        // which keeps a student off the table entirely rather than at 0 rows.
+        expect(STUDENT_LIMITS.cloud_scores).toBe(0);
+        expect(STUDENT_LIMITS.students).toBe(0);
+
+        // The one thing they do: print the piece their teacher assigned. A
+        // student has no plan to upgrade to, so a gate here would just be a wall.
+        expect(STUDENT_LIMITS.pdf_exports).toBe(UNLIMITED);
+    });
+
+    it('are refused every metered call with limit 0, and never consume one', async () => {
+        const billing = new FakeBilling();
+        const student = studentBackend(billing, 'student-1');
+
+        for (const metric of CREATION_METRICS) {
+            const refused = await enforceQuota(student, 'student-1', metric);
+            expect(refused.ok).toBe(false);
+            if (refused.ok) {
+                throw new Error(`expected ${metric} to be refused for a student`);
+            }
+            expect(refused.status).toBe(402);
+            expect(refused.body).toEqual({ code: 'limit_reached', metric, limit: 0, tier: 'student' });
+        }
+
+        // A refusal at zero must not leave a counter behind: a student is not
+        // spending anyone's allowance, so there is nothing to have spent.
+        for (const metric of CREATION_METRICS) {
+            expect(billing.countOf('student-1', metric)).toBe(0);
+        }
+    });
+
+    it('are told limit_reached rather than fair_use_cap — their zeroes are a feature they lack', async () => {
+        const billing = new FakeBilling();
+        const refused = await enforceQuota(studentBackend(billing, 'student-1'), 'student-1', 'vision_reads');
+
+        expect(refused.ok).toBe(false);
+        if (refused.ok) {
+            throw new Error('expected the vision read to be refused');
+        }
+        // fair_use_cap would send them to support to have a ceiling lifted that
+        // is not a ceiling; limit_reached is the honest answer for a feature the
+        // account does not have at all.
+        expect(refused.body).toMatchObject({ code: 'limit_reached' });
+    });
+
+    it('export PDFs without a gate, and without metering them', async () => {
+        const billing = new FakeBilling();
+        const student = studentBackend(billing, 'student-1');
+
+        for (let i = 0; i < TIER_LIMITS.free.pdf_exports + 5; i += 1) {
+            const allowed = await enforceQuota(student, 'student-1', 'pdf_exports');
+            expect(allowed.ok).toBe(true);
+            if (!allowed.ok) {
+                throw new Error('expected the export to be allowed');
+            }
+            expect(allowed.entitlements.tier).toBe('student');
+        }
+
+        // Unlimited short-circuits ahead of consume_quota, so nothing is counted.
+        expect(billing.countOf('student-1', 'pdf_exports')).toBe(0);
+    });
+
+    it('are never billed for the seat they occupy', async () => {
+        // The teacher's roster is the stock that pays for them, and it is checked
+        // where the seat is claimed. Nothing a student does draws on a budget.
+        const billing = new FakeBilling();
+        const student = studentBackend(billing, 'student-1');
+
+        await enforceQuota(student, 'student-1', 'omr_runs');
+        expect(billing.countOf('student-1', 'students')).toBe(0);
+        expect(billing.activeStudents('student-1')).toHaveLength(0);
     });
 });
 

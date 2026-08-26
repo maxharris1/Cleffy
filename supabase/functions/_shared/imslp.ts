@@ -91,12 +91,27 @@ export const checkRateLimit = async (
     return { ok: false, retryAfterSec: 5 };
 };
 
+/**
+ * The rate-limit bucket key for a request — which must be something the CALLER
+ * cannot choose, or every limit built on it is decorative.
+ *
+ * cf-connecting-ip first: the edge proxy OVERWRITES it on every hop, so a header
+ * the client sets is discarded. x-forwarded-for is APPENDED to instead, which
+ * means its FIRST entry is whatever the client sent (`X-Forwarded-For: 10.0.0.$RANDOM`
+ * would hand an attacker a fresh bucket per request against the open student-login
+ * endpoint) and only its LAST entry is the address a proxy actually observed.
+ */
 export const clientKey = (req: Request): string => {
+    const connecting = req.headers.get('cf-connecting-ip')?.trim();
+    if (connecting) {
+        return connecting;
+    }
     const forwarded = req.headers.get('x-forwarded-for');
     if (forwarded) {
-        return forwarded.split(',')[0]?.trim() || 'unknown';
+        const hops = forwarded.split(',');
+        return hops[hops.length - 1]?.trim() || 'unknown';
     }
-    return req.headers.get('cf-connecting-ip') ?? 'unknown';
+    return 'unknown';
 };
 
 export const mwFetch = async (params: Record<string, string>): Promise<unknown> => {

@@ -180,6 +180,7 @@ create or replace function public.unassign_score (p_document uuid, p_student uui
 set search_path = public as $$
 declare
     v_caller uuid := auth.uid();
+    v_withdrawn int;
 begin
     if v_caller is null then
         raise exception 'not authenticated' using errcode = '28000';
@@ -193,8 +194,19 @@ begin
     where document_id = p_document
       and student_user_id = p_student;
 
-    -- Withdrawing an assignment withdraws the access it granted, but an owner row
-    -- was never the assignment's to give and is not its to take away.
+    get diagnostics v_withdrawn = row_count;
+
+    -- Only what the assignment granted comes back. Guarded on the delete above
+    -- actually having removed one: document_members has no client write policy,
+    -- so an unguarded delete here would quietly make this the app's general
+    -- membership-revocation primitive, accepting any user id -- a share-link
+    -- collaborator's editor row would vanish on an unassign that withdrew
+    -- nothing, while assign_score is careful to refuse anyone off the roster.
+    if v_withdrawn = 0 then
+        return;
+    end if;
+
+    -- An owner row was never the assignment's to give and is not its to take away.
     delete from public.document_members
     where document_id = p_document
       and user_id = p_student
@@ -251,9 +263,29 @@ with check (
     )
 );
 
+-- The WITH CHECK repeats the insert policy's two guarantees rather than trusting
+-- author_id alone: without them document_id, student_user_id and `shared` are all
+-- freely mutable after the fact, which dissolves both. A note could be moved onto
+-- a score its author does not own and re-aimed at somebody else's student, and
+-- the immutability of "who this note is about" -- the thing that stops a note
+-- written with nobody named from ever reaching anyone -- would be a client-side
+-- type and nothing more. The column grant below is the other half.
 create policy practice_notes_update on public.practice_notes for update to authenticated
 using (author_id = (select auth.uid()))
-with check (author_id = (select auth.uid()));
+with check (
+    author_id = (select auth.uid())
+    and public.document_role (document_id) = 'owner'
+    and (
+        student_user_id is null
+        or exists (
+            select 1
+            from public.managed_students ms
+            where ms.teacher_id = (select auth.uid())
+              -- Qualified: unqualified would bind to ms's own column.
+              and ms.student_user_id = practice_notes.student_user_id
+        )
+    )
+);
 
 create policy practice_notes_delete on public.practice_notes for delete to authenticated
 using (author_id = (select auth.uid()));
@@ -282,7 +314,15 @@ with check (
 revoke all on table public.managed_students from public;
 revoke all on table public.managed_students from anon;
 revoke all on table public.managed_students from authenticated;
-grant select on table public.managed_students to authenticated;
+-- Every column EXCEPT login_code_hash. The select policy above has a student
+-- branch, so a table-wide grant would ship the hash of the code that is also the
+-- account's Supabase password down to the student's own browser -- for a value
+-- nothing on the client reads, and that only student-login ever compares, under
+-- the service role. parent_email stays: it is the teacher's record of who to send
+-- the printed card home to, and there is no column grant that can show it to one
+-- side of this policy and not the other.
+grant select (id, teacher_id, student_user_id, display_name, parent_email, archived_at, created_at, updated_at)
+on table public.managed_students to authenticated;
 
 revoke all on table public.assignments from public;
 revoke all on table public.assignments from anon;
@@ -292,7 +332,11 @@ grant select on table public.assignments to authenticated;
 revoke all on table public.practice_notes from public;
 revoke all on table public.practice_notes from anon;
 revoke all on table public.practice_notes from authenticated;
-grant select, insert, update, delete on table public.practice_notes to authenticated;
+grant select, insert, delete on table public.practice_notes to authenticated;
+-- Exactly the fields PracticeNoteUpdate exposes. document_id, student_user_id and
+-- author_id are set once at insert, where the policy vets them, and a table-wide
+-- update grant is what would let them be rewritten afterwards.
+grant update (body, shared, noted_on) on table public.practice_notes to authenticated;
 
 -- Client RPCs: revoke PUBLIC/anon, keep authenticated.
 revoke all on function public.assign_score (uuid, uuid, text, text, timestamptz) from public;

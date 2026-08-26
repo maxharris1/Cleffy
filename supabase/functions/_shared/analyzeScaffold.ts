@@ -19,9 +19,11 @@ import { enforce } from './quota.ts';
  * check of their own, being a registered user rather than an anonymous one.
  *
  * When the real analysis lands, replace `notImplemented` with the work and wrap
- * it so any failure calls `refund(admin, userId, metric)`. Until then the
- * consume is deliberately NOT refunded: refunding would mean the counter never
- * advances and the limit could never actually be reached.
+ * it so any failure calls `refund(admin, userId, metric)` — guarded on
+ * `gate.consumed`, since an unlimited metric short-circuits before the counter
+ * and has nothing to give back (see imslp-download). Until then the consume is
+ * deliberately NOT refunded: refunding would mean the counter never advances and
+ * the limit could never actually be reached.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

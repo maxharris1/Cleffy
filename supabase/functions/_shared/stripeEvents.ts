@@ -21,9 +21,19 @@ const ENTITLING_STATUSES = ['active', 'trialing'];
  */
 const ARCHIVING_STATUSES = ['canceled', 'unpaid', 'incomplete_expired'];
 
+/**
+ * Statuses a Stripe subscription never comes back from, which is what makes them
+ * safe to treat as a floor. `unpaid` is deliberately NOT here even though it
+ * archives: paying the outstanding invoice can put that same subscription back
+ * to `active`, and a floor would strand the customer who just paid.
+ */
+const TERMINAL_STATUSES = ['canceled', 'incomplete_expired'];
+
 export const isEntitlingStatus = (status: string): boolean => ENTITLING_STATUSES.includes(status);
 
 export const shouldArchiveOnStatus = (status: string): boolean => ARCHIVING_STATUSES.includes(status);
+
+export const isTerminalStatus = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
 export interface SubscriptionUpsert {
     stripe_subscription_id: string;
@@ -76,6 +86,8 @@ export interface WebhookStore {
     /** checkout.session.completed carries only a subscription id, so it must be fetched. */
     fetchSubscription: (subscriptionId: string) => Promise<StripeSubscriptionLike | null>;
     userIdForSubscription: (subscriptionId: string) => Promise<string | null>;
+    /** The status already recorded for a subscription; null when there is no row yet. */
+    storedStatusOf: (subscriptionId: string) => Promise<string | null>;
     applyFreeTierArchival: (userId: string) => Promise<void>;
     log: (message: string) => void;
 }
@@ -230,6 +242,24 @@ export const handleStripeEvent = async (
             // A delete event's object can still read `active`; the row must not.
             const normalized: StripeSubscriptionLike =
                 event.type === 'customer.subscription.deleted' ? { ...sub, status: 'canceled' } : sub;
+
+            // Stripe guarantees delivery, never ORDER — and a retry after a 500
+            // makes a late arrival near-certain rather than exotic. These three
+            // event types are the only ones applied from the object Stripe
+            // embedded rather than from a live re-read, so they are the only ones
+            // that can carry a snapshot older than what is already recorded: an
+            // `updated` still reading `active`, landing after the `deleted` that
+            // cancelled the same subscription, would hand back paid entitlements
+            // for the rest of the period on a subscription that no longer exists.
+            // Idempotency cannot catch it — it is a different event id.
+            const stored = await store.storedStatusOf(sub.id);
+            if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(normalized.status)) {
+                store.log(
+                    `${event.type} ${event.id}: ${sub.id} is already ${stored}; ` +
+                        `refusing to reopen it as ${normalized.status}`,
+                );
+                return { status: 200, body: { received: true, ignored: 'terminal_status' } };
+            }
 
             await applySubscription(store, normalized, userId, priceTiers);
             return { status: 200, body: { received: true, applied: 'subscription_upserted' } };

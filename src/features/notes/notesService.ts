@@ -126,7 +126,7 @@ export const listNoteRecipients = async (documentId: string): Promise<NoteRecipi
     const studentIds = [...new Set(assignments.map((assignment) => assignment.student_user_id))];
     const { data: roster, error: rosterError } = await supabase
         .from('managed_students')
-        .select('*')
+        .select('student_user_id, display_name, archived_at')
         .in('student_user_id', studentIds);
     if (rosterError) {
         throw new Error(`Could not load who this score is assigned to: ${rosterError.message}`);

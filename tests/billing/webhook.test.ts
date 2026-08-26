@@ -58,6 +58,7 @@ class FakeStore implements WebhookStore {
     };
     fetchSubscription = async (id: string) => this.remote.get(id) ?? null;
     userIdForSubscription = async (id: string) => this.subscriptions.get(id)?.user_id ?? null;
+    storedStatusOf = async (id: string) => this.subscriptions.get(id)?.status ?? null;
     applyFreeTierArchival = async (userId: string) => {
         this.archived.push(userId);
     };
@@ -203,6 +204,47 @@ describe('stripe event handling', () => {
         await handleStripeEvent(subscriptionEvent('evt_d', 'customer.subscription.deleted'), store, PRICE_TIERS);
         expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'canceled', tier: 'free' });
         expect(store.archived).toEqual(['teacher-1']);
+    });
+
+    it('refuses to reopen a cancelled subscription with a late updated event', async () => {
+        // Stripe guarantees delivery, not order, and a retry after a 500 makes a
+        // late arrival ordinary rather than exotic: the `updated` that fires when
+        // a teacher cancels still reads `active`, and landing after the `deleted`
+        // it raced would hand Teacher entitlements back for the rest of the period
+        // on a subscription that no longer exists. A different event id, so
+        // idempotency cannot see it.
+        await handleStripeEvent(subscriptionEvent('evt_del', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'canceled', tier: 'free' });
+
+        const late = await handleStripeEvent(
+            subscriptionEvent('evt_late_update', 'customer.subscription.updated', { status: 'active' }),
+            store,
+            PRICE_TIERS,
+        );
+
+        expect(late.status).toBe(200);
+        expect(late.body).toMatchObject({ ignored: 'terminal_status' });
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'canceled', tier: 'free' });
+        // Refusing is not re-archiving: the deleted event already did that.
+        expect(store.archived).toEqual(['teacher-1']);
+    });
+
+    it('still lets an unpaid subscription come back, because paying the invoice can revive it', async () => {
+        // `unpaid` archives but is NOT terminal — a floor there would strand the
+        // customer who just settled the outstanding invoice.
+        await handleStripeEvent(
+            subscriptionEvent('evt_unpaid', 'customer.subscription.updated', { status: 'unpaid' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.subscriptions.get('sub_1')?.status).toBe('unpaid');
+
+        await handleStripeEvent(
+            subscriptionEvent('evt_paid', 'customer.subscription.updated', { status: 'active' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'active', tier: 'teacher' });
     });
 
     it('does not archive on past_due — Stripe is still retrying the card', async () => {

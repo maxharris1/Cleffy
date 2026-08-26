@@ -1,3 +1,4 @@
+import { MANAGED_STUDENT_COLUMNS } from '@/features/roster/rosterService';
 import { getSupabase } from '@/lib/supabase';
 import type { AssignmentRow, DocumentRow, ManagedStudentRow } from '@/types/database';
 
@@ -135,7 +136,11 @@ export const fetchMyAssignments = async (): Promise<AssignedScore[]> => {
  * calling this would match their whole roster under the same policy.
  */
 export const fetchMyRosterProfile = async (): Promise<ManagedStudentRow | null> => {
-    const { data, error } = await getSupabase().from('managed_students').select('*').limit(1).maybeSingle();
+    const { data, error } = await getSupabase()
+        .from('managed_students')
+        .select(MANAGED_STUDENT_COLUMNS)
+        .limit(1)
+        .maybeSingle();
     if (error) {
         throw new Error(`Could not load your profile: ${error.message}`);
     }

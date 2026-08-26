@@ -19,6 +19,12 @@ import { formatLoginCode, generateLoginCode, hashLoginCode, syntheticStudentEmai
  * That is why 'create' and 'restore' share one check and 'archive' needs none —
  * archiving is what gives a seat back.
  *
+ * 'archive' and 'restore' each touch TWO things, because the roster row and the
+ * auth account are two halves of one student: the row decides the seat and what
+ * student-login will match, and the account's ban decides whether the code still
+ * opens a session at all. Archiving only the row would leave the printed code
+ * working directly against /auth/v1/token.
+ *
  * Nothing in this file consumes a metered budget. Students are never billed, and
  * a teacher's roster is paid for by occupancy rather than by activity.
  */
@@ -29,6 +35,17 @@ const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const MAX_DISPLAY_NAME = 80;
+
+/**
+ * How long an archived student's account stays banned — a Go duration, GoTrue's
+ * format, set to a century because "until restored" has no spelling. 'none'
+ * lifts it, which is what 'restore' sends.
+ *
+ * A ban is the revocation archiving needs and the archived_at stamp is not: it
+ * refuses the password grant at /auth/v1/token AND every refresh, so a live
+ * session dies with its current access token rather than lasting forever.
+ */
+const ARCHIVE_BAN_DURATION = '876000h';
 
 interface ProvisionBody {
     action?: string;
@@ -262,8 +279,7 @@ const archiveStudent = async (admin: SupabaseClient, userId: string, body: Provi
         return owned.response;
     }
 
-    // Archiving frees the seat and revokes the code (student-login matches only
-    // unarchived rows). It deletes NOTHING — assignments, annotations and
+    // Archiving frees the seat. It deletes NOTHING — assignments, annotations and
     // practice notes all stay — so a restored student gets their history back.
     const { error } = await admin
         .from('managed_students')
@@ -274,8 +290,29 @@ const archiveStudent = async (admin: SupabaseClient, userId: string, body: Provi
         return jsonResponse({ error: 'Could not archive the student' }, 502);
     }
 
-    // Idempotent: an already-archived row matches no update and is already in
-    // the state the caller asked for.
+    // The stamp above only stops student-login. It is not a revocation on its
+    // own: the code on the card is still the account's Supabase password, and
+    // the synthetic address is a pure function of the roster id the student can
+    // read from their own row (managed_students_select), so an expelled student
+    // would sign straight back in at /auth/v1/token, never touching this
+    // function's archived filter — and their already-open tab would never stop
+    // working at all. Banning the account is what actually withdraws access.
+    //
+    // Run unconditionally rather than only when the update matched: a retry
+    // after a half-applied archive has to be able to finish the job, and the
+    // guarded update above no-ops on the second pass.
+    const { error: banError } = await admin.auth.admin.updateUserById(owned.row.student_user_id, {
+        ban_duration: ARCHIVE_BAN_DURATION,
+    });
+    if (banError) {
+        // Loud, and NOT reported as success: the row says archived while the
+        // account still signs in, which is exactly the state this guards against.
+        console.error(`could not revoke access for archived student ${owned.row.id}: ${banError.message}`);
+        return jsonResponse({ error: 'Could not archive the student' }, 502);
+    }
+
+    // Idempotent: an already-archived row matches no update, is already in the
+    // state the caller asked for, and is re-banned harmlessly.
     return jsonResponse({ ok: true });
 };
 
@@ -297,6 +334,18 @@ const restoreStudent = async (admin: SupabaseClient, userId: string, body: Provi
     const gate = await checkRosterStock(admin, userId);
     if (!gate.ok) {
         return gate.response;
+    }
+
+    // The ban comes off BEFORE the row comes back, so the two can only ever fail
+    // in the safe direction: a failure here leaves the student archived and still
+    // revoked, where the reverse would leave an active roster row whose account
+    // is silently banned — a student refused for a reason no teacher could see.
+    const { error: unbanError } = await admin.auth.admin.updateUserById(owned.row.student_user_id, {
+        ban_duration: 'none',
+    });
+    if (unbanError) {
+        console.error(`could not restore access for student ${owned.row.id}: ${unbanError.message}`);
+        return jsonResponse({ error: 'Could not restore the student' }, 502);
     }
 
     const { error } = await admin.from('managed_students').update({ archived_at: null }).eq('id', owned.row.id);

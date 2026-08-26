@@ -112,6 +112,14 @@ Deno.serve(async (req) => {
                 .maybeSingle();
             return data?.user_id ?? null;
         },
+        storedStatusOf: async (subscriptionId) => {
+            const { data } = await admin
+                .from('subscriptions')
+                .select('status')
+                .eq('stripe_subscription_id', subscriptionId)
+                .maybeSingle();
+            return data?.status ?? null;
+        },
         applyFreeTierArchival: async (userId) => {
             const { data, error } = await admin.rpc('apply_free_tier_archival', { p_user: userId });
             if (error) {

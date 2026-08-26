@@ -227,14 +227,18 @@ export type StudioMemberRow = {
  * A teacher's roster row for one provisioned student. The student account itself
  * is a real auth user — this is the teaching side of it, and archiving a row is
  * what frees the seat it holds against the `students` limit.
+ *
+ * `login_code_hash` is deliberately absent: the table has it, but `authenticated`
+ * holds no SELECT grant on that column (see 20260812090000_roster.sql), because
+ * the select policy has a student branch and the hash is of the code that is also
+ * the account's password. Only student-login reads it, under the service role.
+ * That is also why the queries below name their columns instead of `*`.
  */
 export type ManagedStudentRow = {
     id: string;
     teacher_id: string;
     student_user_id: string;
     display_name: string;
-    /** Never the code itself; comparison happens in the student-login function. */
-    login_code_hash: string;
     parent_email: string | null;
     archived_at: string | null;
     created_at: string;

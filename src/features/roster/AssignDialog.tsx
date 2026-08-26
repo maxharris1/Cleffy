@@ -46,15 +46,19 @@ export const AssignDialog = ({ documentId, documentTitle, onClose, onAssigned }:
         let mounted = true;
         void (async () => {
             try {
-                const active = (await listRoster()).filter((student) => student.archived_at === null);
+                // Both, before either renders. Sequentially, the roster arrives
+                // first and the list goes interactive with `assigned` still empty:
+                // a student who already has this score shows unticked, enabled and
+                // badge-less, and ticking them in that window re-runs the upsert —
+                // assign_score's `do update set note = excluded.note, due_at =
+                // excluded.due_at` would overwrite the note and due date they were
+                // given last time with the blank ones in this dialog.
+                const [roster, already] = await Promise.all([listRoster(), assignedStudentIds(documentId)]);
                 if (!mounted) {
                     return;
                 }
-                setRoster(active);
-                const already = await assignedStudentIds(documentId);
-                if (mounted) {
-                    setAssigned(already);
-                }
+                setRoster(roster.filter((student) => student.archived_at === null));
+                setAssigned(already);
             } catch (err) {
                 if (mounted) {
                     setError(err instanceof Error ? err.message : 'Could not load your roster.');

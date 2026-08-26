@@ -171,6 +171,79 @@ describe('LibraryPage', () => {
         expect(openPricing).toHaveBeenCalled();
     });
 
+    it('shows a later failure alongside the limit notice instead of behind it', async () => {
+        // The limit notice outlives the upload that raised it — nothing but the
+        // next upload clears it — so rendering it INSTEAD of the status error hid
+        // every later failure: the teacher deletes a score to make room, the
+        // delete fails, and all they see is the same unchanged upgrade prompt.
+        const user = userEvent.setup();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        deleteDocument.mockRejectedValue(new Error('Network request failed'));
+        const context: LibraryOutletContext = {
+            ...outletContext,
+            uploadLimit: new LimitReachedError({
+                code: 'limit_reached',
+                metric: 'cloud_scores',
+                limit: 3,
+                tier: 'free',
+            }),
+        };
+
+        render(
+            <MemoryRouter initialEntries={['/library']}>
+                <Routes>
+                    <Route element={<Outlet context={context} />}>
+                        <Route path="/library" element={<LibraryPage />} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+        expect(await screen.findByText('Network request failed')).toBeInTheDocument();
+        expect(screen.getByText(/reached your 3 free cloud scores/)).toBeInTheDocument();
+        // The score is still there, which is the thing the error has to explain.
+        expect(screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)')).toBeInTheDocument();
+    });
+
+    it('drops the limit notice once a delete frees a slot', async () => {
+        const user = userEvent.setup();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        const clearUploadError = vi.fn();
+        deleteDocument.mockResolvedValue(undefined);
+        const context: LibraryOutletContext = {
+            ...outletContext,
+            clearUploadError,
+            uploadLimit: new LimitReachedError({
+                code: 'limit_reached',
+                metric: 'cloud_scores',
+                limit: 3,
+                tier: 'free',
+            }),
+        };
+
+        render(
+            <MemoryRouter initialEntries={['/library']}>
+                <Routes>
+                    <Route element={<Outlet context={context} />}>
+                        <Route path="/library" element={<LibraryPage />} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+        await waitFor(() => expect(clearUploadError).toHaveBeenCalled());
+    });
+
     it('toggles a favorite through the service', async () => {
         const user = userEvent.setup();
         renderLibrary();

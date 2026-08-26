@@ -52,7 +52,7 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 
 export const LibraryPage = () => {
-    const { userId, uploading, uploadPct, onUpload, uploadError, uploadLimit, openPricing } =
+    const { userId, uploading, uploadPct, onUpload, uploadError, uploadLimit, clearUploadError, openPricing } =
         useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
     const [favorites, setFavorites] = useState<Set<string>>(new Set());
@@ -296,6 +296,9 @@ export const LibraryPage = () => {
                 next.delete(target.id);
                 return next;
             });
+            // A slot just came free, so the "you are at your score limit" notice
+            // from the upload that failed a moment ago is no longer true.
+            clearUploadError();
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {
@@ -327,9 +330,15 @@ export const LibraryPage = () => {
                 <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
             ) : null}
 
-            {uploadLimit ? (
-                <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" />
-            ) : statusError ? (
+            {/*
+              Both, never one instead of the other. The limit notice outlives the
+              upload that raised it — nothing but the next upload clears it — so
+              rendering it in place of statusError would swallow every later
+              failure: a delete that errored, a listDocuments that failed, the
+              offline notice. Two different things, and the teacher needs both.
+            */}
+            {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" /> : null}
+            {statusError ? (
                 isOfflineNotice && !uploadError && !actionError ? (
                     <p className="mt-5 text-sm text-amber-800" role="status">
                         {statusError}

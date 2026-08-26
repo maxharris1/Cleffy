@@ -17,11 +17,16 @@ import { hashLoginCode, isPlausibleLoginCode, normalizeLoginCode } from '../_sha
  * else, and whoever does not gets nowhere. Two things keep an endpoint this
  * open from being a guessing machine:
  *
- *  * The hard rate limit below, taken before any other work — 10 attempts per
- *    minute per IP against the ~59-bit code space of _shared/studentCodes.ts.
- *    That is the brute-force story: at that rate an attacker exhausts a
- *    meaningful fraction of the space some hundreds of millions of years from
- *    now, and checkRateLimit fails closed, so losing the RPC does not open it.
+ *  * The hard rate limit below, taken before any other work — per IP, against
+ *    the ~59-bit code space of _shared/studentCodes.ts. That is the brute-force
+ *    story: even at this ceiling an attacker exhausts a meaningful fraction of
+ *    the space some millions of years from now, and checkRateLimit fails closed,
+ *    so losing the RPC does not open it. The ceiling is a CLASSROOM rather than
+ *    a person, because a whole studio arrives behind one school NAT at the top
+ *    of a lesson — a limit tight enough to be interesting here would read as an
+ *    outage for the 11th child to sign in, and buys nothing against 59 bits.
+ *    clientKey() is what makes the bucket meaningful: see its note on why the
+ *    first x-forwarded-for entry is the caller's to choose.
  *  * One indistinguishable failure. Wrong shape, no such code, archived
  *    student, unreadable auth user, refused password — every path answers with
  *    exactly REJECTED, so this is never an oracle for which codes exist. Only
@@ -45,7 +50,7 @@ Deno.serve(async (req) => {
 
     // Ahead of everything, the body read included: this is the brute-force gate,
     // so it must cost an attacker a slot even for a request that never parses.
-    const rate = await checkRateLimit(`student-login:${clientKey(req)}`, 10, 60_000);
+    const rate = await checkRateLimit(`student-login:${clientKey(req)}`, 60, 60_000);
     if (!rate.ok) {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }

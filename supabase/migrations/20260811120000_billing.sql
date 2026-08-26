@@ -321,6 +321,16 @@ $$;
 -- so the cap lives in a trigger rather than an Edge Function. A WITH CHECK
 -- expression could reject the row but could not carry the structured payload the
 -- client needs, so this raises with a machine-readable DETAIL instead.
+--
+-- AFTER, not BEFORE, and behind a per-owner advisory lock: counting is otherwise
+-- check-then-write, the very window consume_quota goes out of its way to close.
+-- A BEFORE trigger counts against a snapshot that cannot include the row being
+-- written, so ten rows in one INSERT would each see the same pre-statement count
+-- and all ten would land. AFTER ROW triggers fire once the statement's rows are
+-- in, so the count includes them; the advisory lock does the same job across
+-- concurrent transactions, since a second inserter blocks here and then re-counts
+-- (a volatile function takes a fresh snapshot per statement) against the winner's
+-- committed row. Both cases end in the same rollback a BEFORE raise would give.
 create or replace function public.documents_enforce_score_cap () returns trigger language plpgsql security definer
 set search_path = public as $$
 declare
@@ -331,10 +341,10 @@ declare
 begin
     -- Only a row that is (or becomes) active claims a slot.
     if new.archived_at is not null then
-        return new;
+        return null;
     end if;
     if tg_op = 'UPDATE' and old.archived_at is null then
-        return new; -- already active; nothing new is being claimed
+        return null; -- already active; nothing new is being claimed
     end if;
 
     v_ent := public.get_entitlements (new.owner_id);
@@ -342,16 +352,20 @@ begin
     v_limit := (v_ent -> 'limits' ->> 'cloud_scores')::int;
 
     if v_limit < 0 then
-        return new;
+        return null;
     end if;
 
+    -- Taken only on a capped tier, and only once the cheap exits are past: an
+    -- unlimited plan never serializes against itself. Released at commit.
+    perform pg_advisory_xact_lock (hashtext('cleffy.documents_score_cap'), hashtext(new.owner_id::text));
+
+    -- The new row is already in, so it counts itself: the test is `>`, not `>=`.
     select count(*)::int into v_count
     from public.documents d
     where d.owner_id = new.owner_id
-      and d.archived_at is null
-      and d.id <> new.id;
+      and d.archived_at is null;
 
-    if v_count >= v_limit then
+    if v_count > v_limit then
         raise exception 'limit_reached'
             using errcode = 'P0001',
                   detail = json_build_object(
@@ -363,11 +377,11 @@ begin
                   hint = 'Upgrade for unlimited cloud scores.';
     end if;
 
-    return new;
+    return null;
 end;
 $$;
 
-create trigger documents_enforce_score_cap before insert or update on public.documents
+create trigger documents_enforce_score_cap after insert or update on public.documents
 for each row execute function public.documents_enforce_score_cap ();
 
 -- Archived scores are read-only. Enforced in RLS rather than in the client so it
@@ -390,6 +404,37 @@ with check (
     public.document_role (document_id) in ('owner', 'editor')
     and not public.document_is_archived (document_id)
 );
+
+-- Archiving is a plan event, not a touch. The pre-existing documents_touch
+-- trigger stamps updated_at = now() on every UPDATE, which apply_free_tier_archival
+-- below would otherwise fire on every score it archives -- making the read-only
+-- ones the NEWEST rows in the library (listDocuments orders by updated_at desc
+-- and stops at 100), and destroying the last-touched signal the keep-set below
+-- sorts on. Same drop-and-recreate as the annotations policies above; the shared
+-- touch_updated_at() is left alone because library_tags, managed_students,
+-- assignments and practice_notes all still want the plain behaviour.
+create or replace function public.documents_touch_updated_at () returns trigger language plpgsql
+set search_path = public as $$
+begin
+    if new.archived_at is distinct from old.archived_at then
+        new.updated_at := old.updated_at;
+        return new;
+    end if;
+    new.updated_at := now();
+    return new;
+end;
+$$;
+
+drop trigger if exists documents_touch on public.documents;
+
+create trigger documents_touch before update on public.documents
+for each row execute function public.documents_touch_updated_at ();
+
+revoke all on function public.documents_touch_updated_at () from public;
+
+revoke all on function public.documents_touch_updated_at () from anon;
+
+revoke all on function public.documents_touch_updated_at () from authenticated;
 
 -- Called by the webhook when a subscription lapses. Keeps the most recently
 -- touched scores active and archives the rest -- never deletes.
@@ -454,6 +499,24 @@ $$;
 create trigger studio_members_seat_limit before insert on public.studio_members
 for each row execute function public.studios_enforce_seat_limit ();
 
+-- SECURITY DEFINER for exactly the reason document_role() is (see
+-- 20260801160754_rls.sql): a studios policy that reads studio_members and a
+-- studio_members policy that reads studios are MUTUALLY recursive, and Postgres
+-- refuses both with "infinite recursion detected in policy" -- which is every
+-- read either table has, taking the whole Academy seats screen with it. Routing
+-- both through one definer function is what breaks the cycle.
+create or replace function public.studio_role (p_studio uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select case
+        when exists (
+            select 1 from public.studios st where st.id = p_studio and st.owner_id = auth.uid()
+        ) then 'owner'
+        when exists (
+            select 1 from public.studio_members sm where sm.studio_id = p_studio and sm.user_id = auth.uid()
+        ) then 'member'
+    end;
+$$;
+
 -- auth.users is not client-readable, so seat invites resolve the email here.
 create or replace function public.studio_invite_member (p_studio uuid, p_email text) returns uuid language plpgsql security definer
 set search_path = public as $$
@@ -469,6 +532,17 @@ begin
     select st.owner_id into v_owner from public.studios st where st.id = p_studio;
     if v_owner is null or v_owner <> v_caller then
         raise exception 'only the studio owner can add seats' using errcode = '42501';
+    end if;
+
+    -- Owning a studio is not the same as paying for one, and anyone may create a
+    -- studio row. Without this, the distinct "no Cleffy account" raise below is a
+    -- free, unrate-limited oracle over auth.users for any signed-in caller -- and
+    -- a way to push a stranger into a studio they never joined. Seats only exist
+    -- on Academy, so that is where the lookup lives.
+    if (public.get_entitlements () ->> 'tier') is distinct from 'academy' then
+        raise exception 'an Academy subscription is required to add seats'
+            using errcode = '42501',
+                  detail = json_build_object('code', 'academy_required')::text;
     end if;
 
     select u.id into v_target from auth.users u where lower(u.email) = lower(trim(p_email)) limit 1;
@@ -553,19 +627,25 @@ using (user_id = (select auth.uid()));
 create policy usage_counters_select on public.usage_counters for select to authenticated
 using (user_id = (select auth.uid()));
 
--- Owners manage their studio; members may see the studio they belong to.
+-- Owners manage their studio; members may see the studio they belong to. The
+-- owner branch is direct rather than through studio_role() for the reason
+-- documents_select keeps its own: an owner holds no studio_members row at all,
+-- and INSERT ... RETURNING has to see the row it just wrote.
 create policy studios_select on public.studios for select to authenticated
 using (
     owner_id = (select auth.uid())
-    or exists (
-        select 1
-        from public.studio_members sm
-        where sm.studio_id = id and sm.user_id = (select auth.uid())
-    )
+    or public.studio_role (id) = 'member'
 );
 
+-- Same two exclusions documents_insert carries: a share-link guest has no plan
+-- of their own and a provisioned student creates nothing, so neither has an
+-- academy to own. The column grants below are what keep seat_limit out of reach.
 create policy studios_insert on public.studios for insert to authenticated
-with check (owner_id = (select auth.uid()));
+with check (
+    owner_id = (select auth.uid())
+    and coalesce(((select auth.jwt()) ->> 'is_anonymous')::boolean, false) = false
+    and coalesce((select auth.jwt()) -> 'app_metadata' ->> 'user_type', '') <> 'student'
+);
 
 create policy studios_update on public.studios for update to authenticated
 using (owner_id = (select auth.uid()))
@@ -574,11 +654,7 @@ with check (owner_id = (select auth.uid()));
 create policy studio_members_select on public.studio_members for select to authenticated
 using (
     user_id = (select auth.uid())
-    or exists (
-        select 1
-        from public.studios st
-        where st.id = studio_id and st.owner_id = (select auth.uid())
-    )
+    or public.studio_role (studio_id) = 'owner'
 );
 
 -- ---------------------------------------------------------------------------
@@ -606,7 +682,15 @@ revoke all on table public.stripe_events from authenticated;
 revoke all on table public.studios from public;
 revoke all on table public.studios from anon;
 revoke all on table public.studios from authenticated;
-grant select, insert, update on table public.studios to authenticated;
+grant select on table public.studios to authenticated;
+-- Column-scoped on purpose: seat_limit is the SOLE input to
+-- studios_enforce_seat_limit, so a table-wide insert/update grant would make the
+-- Academy seat cap self-service -- one $49 subscription entitling any number of
+-- teachers through get_entitlements()'s seat branch. The policies above only
+-- check owner_id, and the CHECK constraint only asks for > 0, so nothing else
+-- stands between an owner and `{"seat_limit": 100000}`. Nothing legitimate wants
+-- it either: createStudio posts {id, owner_id, name} and StudioSeats only reads.
+grant insert (id, owner_id, name), update (name) on table public.studios to authenticated;
 
 revoke all on table public.studio_members from public;
 revoke all on table public.studio_members from anon;
@@ -669,3 +753,8 @@ grant execute on function public.studio_remove_member (uuid, uuid) to authentica
 revoke all on function public.studio_roster (uuid) from public;
 revoke all on function public.studio_roster (uuid) from anon;
 grant execute on function public.studio_roster (uuid) to authenticated;
+
+-- Read by the studios/studio_members policies, so authenticated must hold it.
+revoke all on function public.studio_role (uuid) from public;
+revoke all on function public.studio_role (uuid) from anon;
+grant execute on function public.studio_role (uuid) to authenticated;

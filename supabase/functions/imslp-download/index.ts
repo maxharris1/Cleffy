@@ -101,10 +101,20 @@ Deno.serve(async (req) => {
         return jsonResponse(gate.body, gate.status);
     }
 
+    // Only what was actually spent can be given back. On an unlimited plan the
+    // gate short-circuits without touching the counter, and refunding anyway
+    // would decrement a row left over from this teacher's free-tier days —
+    // restoring an allowance they already spent.
+    const giveBack = async (): Promise<void> => {
+        if (gate.consumed) {
+            await refund(admin, doc.owner_id, 'smart_imports');
+        }
+    };
+
     try {
         const result = await tryDownloadPdf(filename);
         if (!result.ok) {
-            await refund(admin, doc.owner_id, 'smart_imports');
+            await giveBack();
             return jsonResponse(
                 {
                     ok: false,
@@ -123,7 +133,7 @@ Deno.serve(async (req) => {
             upsert: true,
         });
         if (uploadError) {
-            await refund(admin, doc.owner_id, 'smart_imports');
+            await giveBack();
             return jsonResponse({ error: `Storage upload failed: ${uploadError.message}` }, 502);
         }
 
@@ -137,7 +147,7 @@ Deno.serve(async (req) => {
             byteLength: result.bytes.byteLength,
         });
     } catch (err) {
-        await refund(admin, doc.owner_id, 'smart_imports');
+        await giveBack();
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP download failed' }, 502);
     }
 });

@@ -24,6 +24,15 @@ import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRo
  * an error, and it has to reach the UI intact.
  */
 
+/**
+ * Every column of managed_students the client is granted, which is every column
+ * except login_code_hash — `select('*')` would ask for that one too and be
+ * refused outright. Shared so the three readers cannot drift from the grant, or
+ * from each other, when a column is added.
+ */
+export const MANAGED_STUDENT_COLUMNS =
+    'id, teacher_id, student_user_id, display_name, parent_email, archived_at, created_at, updated_at';
+
 export interface ProvisionedStudent {
     id: string;
     studentUserId: string;
@@ -140,7 +149,7 @@ export const restoreStudent = async (studentId: string): Promise<void> => {
  * archived_at would sort the archived block by when it was archived.
  */
 export const listRoster = async (): Promise<ManagedStudentRow[]> => {
-    const { data, error } = await getSupabase().from('managed_students').select('*');
+    const { data, error } = await getSupabase().from('managed_students').select(MANAGED_STUDENT_COLUMNS);
     if (error) {
         throw new Error(`Could not load your roster: ${error.message}`);
     }

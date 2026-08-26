@@ -171,9 +171,14 @@ export const SettingsPage = () => {
                         <span className="text-stone-500">{describeStock(entitlements?.limits.students ?? 0)}</span>
                     </li>
                 </ul>
+                {/*
+                  PDF export is deliberately absent: it is metered, and on
+                  {TIER_LABELS.free} the very list above this line reads "0 of 1
+                  used this month". The unlimited claim belongs to the two tools
+                  that really are ungated everywhere.
+                */}
                 <p className="mt-3 text-xs text-stone-500">
-                    Annotation, the fingering optimizer and PDF export are unlimited on every plan, including{' '}
-                    {TIER_LABELS.free}.
+                    Annotation and the fingering optimizer are unlimited on every plan, including {TIER_LABELS.free}.
                 </p>
             </section>
 

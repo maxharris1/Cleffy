@@ -215,7 +215,19 @@ export interface QuotaBackend {
 }
 
 export type EnforceOutcome =
-    | { ok: true; entitlements: Entitlements; count: number }
+    | {
+          ok: true;
+          entitlements: Entitlements;
+          count: number;
+          /**
+           * Whether a unit was actually taken. False on an unlimited metric,
+           * which short-circuits before consume_quota — and which is why a caller
+           * must consult this before refunding: release_quota would otherwise
+           * decrement a counter this call never incremented, handing a teacher who
+           * upgraded mid-month their whole spent free allowance back.
+           */
+          consumed: boolean;
+      }
     | { ok: false; status: number; body: LimitReachedBody | { error: string } };
 
 export const enforceQuota = async (
@@ -231,7 +243,7 @@ export const enforceQuota = async (
 
     const limit = entitlements.limits[metric];
     if (isUnlimited(limit)) {
-        return { ok: true, entitlements, count: 0 };
+        return { ok: true, entitlements, count: 0, consumed: false };
     }
 
     const consumed = await backend.consumeQuota(userId, metric, limit);
@@ -251,7 +263,7 @@ export const enforceQuota = async (
         return { ok: false, status: LIMIT_REACHED_STATUS, body: limitReachedBody(metric, limit, entitlements.tier) };
     }
 
-    return { ok: true, entitlements, count: consumed.count };
+    return { ok: true, entitlements, count: consumed.count, consumed: true };
 };
 
 export interface SubscriptionLike {
