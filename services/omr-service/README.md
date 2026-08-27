@@ -83,6 +83,10 @@ Rollback: set `OMR_QUEUE_MODE=push`. Queued `omr_jobs` rows simply wait.
 - Per-user backlog cap 10 → `429 backlog_full` with **no** `score_analyses` row
   (not-started UX). Files 11+ in a bulk upload skip auto-analysis until Generate.
 - Content-hash cache (`score_cache`) keyed by sha256 + `ENGINE_VERSION`.
+- Play-along defaults: `Book.Lyrics=false` (less OCR). Multi-page (`≥4` pages) runs
+  two Audiveris `-sheets` processes with a **1-page overlap**, merges `ScoreData`
+  (drop overlap page, inherit time/key/clef), and **falls back to a single full
+  JVM** if open ties or meter disagreement appear at the seam.
 - Status/error codes: see `src/errors.ts`.
 - The contract file `src/scoreData.ts` must stay in lockstep with the app's
   `src/types/scoreData.ts`. Bump `ENGINE_VERSION` (`audiveris-…+svc-N`) when

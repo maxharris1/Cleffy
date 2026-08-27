@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
@@ -20,6 +20,7 @@ import {
     stillOwnsJob,
     type OmJobRow,
 } from './jobStore.js';
+import { mergeScoreDataParts, seamIsUnsafe, splitSheetRangesOverlapping } from './mergeScoreData.js';
 import { parseMxlFiles } from './musicxml.js';
 import { parseOmrGeometry } from './omrGeometry.js';
 import { emptyTimings, type JobTimings } from './timings.js';
@@ -36,10 +37,14 @@ import type { ScoreData } from './scoreData.js';
  * comparing that integer: naming this svc-3 would make every production-analyzed
  * document look NEWER than the current engine and never offer to regenerate.
  */
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-5';
+export const ENGINE_VERSION = 'audiveris-5.6.1+svc-6';
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;
+/** Cost-neutral page parallel: 2 JVMs on the existing 2 vCPU shape. */
+const PARALLEL_SHEET_MIN_PAGES = 4;
+const PARALLEL_SHEET_SHARDS = 2;
+const PARALLEL_SHEET_OVERLAP = 1;
 
 const HEARTBEAT_MIN_INTERVAL_MS = 10_000;
 const LEASE_HEARTBEAT_MS = 60_000;
@@ -256,16 +261,116 @@ const transcribe = async (
     onSheet: (sheet: number) => void,
     registerKill?: (kill: KillJvm) => void,
 ): Promise<ScoreData> => {
-    const outDir = join(workDir, 'out');
+    const pages = timings.pageCount ?? 0;
+    if (pages >= PARALLEL_SHEET_MIN_PAGES) {
+        return transcribeParallel(pdfPath, workDir, timings, onSheet, registerKill);
+    }
+    return transcribeRange(pdfPath, join(workDir, 'out'), timings, onSheet, registerKill, undefined);
+};
+
+const transcribeParallel = async (
+    pdfPath: string,
+    workDir: string,
+    timings: JobTimings,
+    onSheet: (sheet: number) => void,
+    registerKill?: (kill: KillJvm) => void,
+): Promise<ScoreData> => {
+    const ranges = splitSheetRangesOverlapping(
+        timings.pageCount ?? 0,
+        PARALLEL_SHEET_SHARDS,
+        PARALLEL_SHEET_OVERLAP,
+    );
+    const kills: KillJvm[] = [];
+    registerKill?.(() => {
+        for (const kill of kills) {
+            kill();
+        }
+    });
+
+    const maxSheetByShard = ranges.map(() => 0);
+    const report = () => {
+        onSheet(Math.max(0, ...maxSheetByShard));
+    };
+
+    const started = Date.now();
+    const parts = await Promise.all(
+        ranges.map(async (sheets, index) => {
+            const outDir = join(workDir, `out-${sheets.from}-${sheets.to}`);
+            const { score, openTiesAtEnd } = await transcribeRangeDetailed(
+                pdfPath,
+                outDir,
+                timings,
+                (sheet) => {
+                    maxSheetByShard[index] = Math.max(maxSheetByShard[index]!, sheet);
+                    report();
+                },
+                (kill) => {
+                    kills.push(kill);
+                },
+                sheets,
+                /* aggregateTimings */ index === 0,
+            );
+            return { score, sheets, openTiesAtEnd };
+        }),
+    );
+
+    const safety = seamIsUnsafe(parts);
+    if (safety.unsafe) {
+        timings.parallelPath = 'serial_fallback';
+        timings.parallelFallbackReasons = safety.reasons;
+        timings.audiverisTotalMs = Date.now() - started;
+        return transcribeRange(pdfPath, join(workDir, 'out-serial'), timings, onSheet, registerKill, undefined);
+    }
+
+    timings.parallelPath = 'merged';
+    timings.audiverisTotalMs = Date.now() - started;
+    return mergeScoreDataParts(parts);
+};
+
+const transcribeRange = async (
+    pdfPath: string,
+    outDir: string,
+    timings: JobTimings,
+    onSheet: (sheet: number) => void,
+    registerKill: ((kill: KillJvm) => void) | undefined,
+    sheets: { from: number; to: number } | undefined,
+    aggregateTimings = true,
+): Promise<ScoreData> => {
+    const { score } = await transcribeRangeDetailed(
+        pdfPath,
+        outDir,
+        timings,
+        onSheet,
+        registerKill,
+        sheets,
+        aggregateTimings,
+    );
+    return score;
+};
+
+const transcribeRangeDetailed = async (
+    pdfPath: string,
+    outDir: string,
+    timings: JobTimings,
+    onSheet: (sheet: number) => void,
+    registerKill: ((kill: KillJvm) => void) | undefined,
+    sheets: { from: number; to: number } | undefined,
+    aggregateTimings = true,
+): Promise<{ score: ScoreData; openTiesAtEnd: number }> => {
+    await mkdir(outDir, { recursive: true });
     const result = await runAudiveris(pdfPath, outDir, {
         timeoutMs: timeoutForPages(timings.pageCount ?? null),
+        sheets,
         onSheetProgress: onSheet,
         onSpawned: registerKill,
     });
-    timings.jvmStartToFirstSheetMs = result.jvmStartToFirstSheetMs ?? undefined;
-    timings.perSheetMs = result.perSheetMs;
-    timings.audiverisTotalMs = result.audiverisTotalMs;
-    timings.steps = result.stepCounts;
+    if (aggregateTimings) {
+        timings.jvmStartToFirstSheetMs = result.jvmStartToFirstSheetMs ?? undefined;
+        timings.perSheetMs = result.perSheetMs;
+        timings.audiverisTotalMs = result.audiverisTotalMs;
+        timings.steps = result.stepDurationsMs;
+        timings.stepCounts = result.stepCounts;
+    }
 
     if (result.mxlPaths.length === 0) {
         throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML');
@@ -276,8 +381,12 @@ const transcribe = async (
     const musical = parseMxlFiles(mxlBuffers);
     const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
     const score = buildScoreData(musical, geometry);
-    timings.parseMs = Date.now() - tParse;
-    return score;
+    if (aggregateTimings) {
+        timings.parseMs = Date.now() - tParse;
+    } else {
+        timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
+    }
+    return { score, openTiesAtEnd: musical.openTiesAtEnd };
 };
 
 const downloadPdf = async (url: string, destination: string): Promise<void> => {

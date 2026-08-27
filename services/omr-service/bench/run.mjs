@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Benchmark harness: run Audiveris on a PDF, emit timings CSV.
- * Decision-grade numbers require x86 (not Apple Silicon qemu).
+ * Decision-grade timing numbers require x86 (not Apple Silicon qemu).
+ * Gate 1 (-sheets functional / continuity) may run in local Docker.
  */
 import { mkdir, appendFile, copyFile, access } from 'node:fs/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -18,16 +19,28 @@ const { values } = parseArgs({
         pdf: { type: 'string' },
         out: { type: 'string', default: 'bench-results.csv' },
         label: { type: 'string', default: '' },
+        sheets: { type: 'string' },
     },
 });
 
 const pdfArg = values.pdf;
 if (!pdfArg) {
-    console.error('Usage: node bench/run.mjs --pdf <path> [--out results.csv] [--label cpu4]');
+    console.error(
+        'Usage: node bench/run.mjs --pdf <path> [--out results.csv] [--label cpu4] [--sheets N:M]',
+    );
     process.exit(1);
 }
 
-// Dynamic import after build, or from src via tsx — prefer dist for CI image.
+let sheets;
+if (values.sheets) {
+    const m = /^(\d+):(\d+)$/.exec(values.sheets);
+    if (!m) {
+        console.error('--sheets must be N:M (1-based inclusive), e.g. 1:2');
+        process.exit(1);
+    }
+    sheets = { from: Number(m[1]), to: Number(m[2]) };
+}
+
 const audiverisPath = join(ROOT, 'dist/audiveris.js');
 try {
     await access(audiverisPath);
@@ -48,16 +61,19 @@ const t0 = Date.now();
 try {
     const result = await runAudiveris(pdfPath, outDir, {
         timeoutMs: timeoutForPages(20),
+        sheets,
         onSheetProgress: (n) => process.stderr.write(`sheet#${n}\n`),
     });
     const row = {
         label: values.label || '',
         pdf: pdfArg,
+        sheets: values.sheets || '',
         wallMs: Date.now() - t0,
         audiverisTotalMs: result.audiverisTotalMs,
         jvmStartToFirstSheetMs: result.jvmStartToFirstSheetMs,
         perSheetMs: result.perSheetMs.join('|'),
-        steps: JSON.stringify(result.stepCounts),
+        stepDurationsMs: result.stepDurationsMs,
+        stepCounts: result.stepCounts,
         mxlCount: result.mxlPaths.length,
         hasOmr: Boolean(result.omrPath),
         at: new Date().toISOString(),
@@ -65,16 +81,18 @@ try {
     console.log(JSON.stringify(row, null, 2));
 
     const header =
-        'at,label,pdf,wallMs,audiverisTotalMs,jvmStartToFirstSheetMs,perSheetMs,steps,mxlCount,hasOmr\n';
+        'at,label,pdf,sheets,wallMs,audiverisTotalMs,jvmStartToFirstSheetMs,perSheetMs,stepDurationsMs,stepCounts,mxlCount,hasOmr\n';
     const line = [
         row.at,
         row.label,
         JSON.stringify(row.pdf),
+        row.sheets,
         row.wallMs,
         row.audiverisTotalMs,
         row.jvmStartToFirstSheetMs ?? '',
         JSON.stringify(row.perSheetMs),
-        JSON.stringify(row.steps),
+        JSON.stringify(row.stepDurationsMs),
+        JSON.stringify(row.stepCounts),
         row.mxlCount,
         row.hasOmr,
     ].join(',');

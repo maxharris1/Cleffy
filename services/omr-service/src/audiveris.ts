@@ -13,11 +13,17 @@ export interface AudiverisResult {
     perSheetMs: number[];
     /** Counts of Audiveris step name sightings (LOAD, BINARY, GRID, TEXTS, …). */
     stepCounts: Record<string, number>;
+    /** Elapsed ms attributed to each step (time since previous step sighting). */
+    stepDurationsMs: Record<string, number>;
     audiverisTotalMs: number;
 }
 
 export interface AudiverisOptions {
     timeoutMs: number;
+    /** 1-based inclusive sheet range (`-sheets N-M`). */
+    sheets?: { from: number; to: number };
+    /** Extra CLI args inserted before `--` (overrides/extends env). */
+    extraArgs?: string[];
     /** Called with the highest sheet number seen in the log so far. */
     onSheetProgress?: (sheet: number) => void;
     /** Receives a killer for the JVM process group (lease loss / abandon). */
@@ -26,8 +32,53 @@ export interface AudiverisOptions {
 
 const AUDIVERIS_BIN = process.env.AUDIVERIS_BIN ?? '/opt/audiveris/bin/Audiveris';
 
+/**
+ * Play-along needs notes + measure geometry, not lyric OCR.
+ * Cost-neutral: less TEXTS work → fewer CPU-seconds on the same instance shape.
+ */
+export const PLAY_ALONG_AUDIVERIS_OPTIONS = ['-option', 'Book.Lyrics=false'] as const;
+
 const STEP_RE = /\b(LOAD|BINARY|GRID|HEADERS|STEMS|BEAMS|LEDGERS|HEADS|TEXTS|SYMBOLS|SLURS|CURVES|PAGES|REDUCTION|SHEET)\b/gi;
 const SHEET_RE = /sheet#(\d+)/gi;
+
+/** Split AUDIVERIS_EXTRA_OPTS on whitespace; supports simple double-quoted tokens. */
+export const parseExtraOpts = (raw: string | undefined): string[] => {
+    if (!raw || !raw.trim()) {
+        return [];
+    }
+    const out: string[] = [];
+    const re = /"([^"]*)"|(\S+)/g;
+    for (const match of raw.matchAll(re)) {
+        out.push(match[1] ?? match[2] ?? '');
+    }
+    return out.filter(Boolean);
+};
+
+/**
+ * Build Audiveris argv (excluding the binary). Order: batch/export/output,
+ * play-along defaults, env extra opts, call-site extra/sheets, then `--` + pdf.
+ */
+export const buildAudiverisArgs = (
+    pdfPath: string,
+    outDir: string,
+    options: Pick<AudiverisOptions, 'sheets' | 'extraArgs'> = {},
+): string[] => {
+    const args: string[] = ['-batch', '-export', '-output', outDir, ...PLAY_ALONG_AUDIVERIS_OPTIONS];
+    args.push(...parseExtraOpts(process.env.AUDIVERIS_EXTRA_OPTS));
+    if (options.extraArgs?.length) {
+        args.push(...options.extraArgs);
+    }
+    if (options.sheets) {
+        const { from, to } = options.sheets;
+        if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) {
+            throw new JobError(ERROR_CODES.internal, `Invalid sheets range ${from}-${to}`);
+        }
+        // One token: "N-M" (Audiveris rejects spaces around the hyphen).
+        args.push('-sheets', from === to ? String(from) : `${from}-${to}`);
+    }
+    args.push('--', pdfPath);
+    return args;
+};
 
 /**
  * Run Audiveris headless on a PDF: transcribe + export MusicXML (-export)
@@ -48,9 +99,14 @@ export const runAudiveris = async (
     let firstSheetAt: number | null = null;
     const sheetAts: number[] = [];
     const stepCounts: Record<string, number> = {};
+    const stepDurationsMs: Record<string, number> = {};
+    let lastStepAt = started;
+    let lastStepName: string | null = null;
+
+    const argv = buildAudiverisArgs(pdfPath, outDir, options);
 
     await new Promise<void>((resolve, reject) => {
-        const child = spawn(AUDIVERIS_BIN, ['-batch', '-export', '-output', outDir, '--', pdfPath], {
+        const child = spawn(AUDIVERIS_BIN, argv, {
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true, // own process group, so the timeout can kill the whole JVM tree
         });
@@ -102,9 +158,15 @@ export const runAudiveris = async (
             }
             for (const match of text.matchAll(STEP_RE)) {
                 const step = (match[1] ?? '').toUpperCase();
-                if (step) {
-                    stepCounts[step] = (stepCounts[step] ?? 0) + 1;
+                if (!step) {
+                    continue;
                 }
+                stepCounts[step] = (stepCounts[step] ?? 0) + 1;
+                if (lastStepName !== null) {
+                    stepDurationsMs[lastStepName] = (stepDurationsMs[lastStepName] ?? 0) + (now - lastStepAt);
+                }
+                lastStepName = step;
+                lastStepAt = now;
             }
         };
         child.stdout.on('data', scan);
@@ -123,6 +185,10 @@ export const runAudiveris = async (
     });
 
     const ended = Date.now();
+    if (lastStepName !== null) {
+        stepDurationsMs[lastStepName] = (stepDurationsMs[lastStepName] ?? 0) + (ended - lastStepAt);
+    }
+
     const perSheetMs: number[] = [];
     for (let i = 0; i < sheetAts.length; i++) {
         const prev = i === 0 ? started : sheetAts[i - 1]!;
@@ -135,6 +201,7 @@ export const runAudiveris = async (
         jvmStartToFirstSheetMs: firstSheetAt === null ? null : firstSheetAt - started,
         perSheetMs,
         stepCounts,
+        stepDurationsMs,
         audiverisTotalMs: ended - started,
     };
 };

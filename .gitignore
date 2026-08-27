@@ -28,3 +28,6 @@ e2e-shots
 
 # local secrets (service accounts, etc.)
 .secrets
+
+# OMR bench CSV output
+services/omr-service/bench/results
