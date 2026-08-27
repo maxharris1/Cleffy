@@ -236,6 +236,15 @@ body {
     animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
 }
 
+/* Horizontal chip strips on phones: scroll instead of wrapping, no visible scrollbar. */
+.no-scrollbar {
+    scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
 @keyframes library-row-in {
     from {
         opacity: 0;

@@ -115,6 +115,17 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 1, name: 'Library' })).toBeInTheDocument();
+    });
+
+    it('says “1 page”, not “1 pages”, for a single-page score', async () => {
+        listDocuments.mockResolvedValue({
+            documents: [{ ...doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), page_count: 1 }],
+            hasMore: false,
+        });
+        renderLibrary();
+        await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+        expect(screen.getByText(/1 page ·/)).toBeInTheDocument();
     });
 
     it('marks archived scores, which stay open but read-only', async () => {
