@@ -1,6 +1,6 @@
 import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
+import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { appOrigin, isKnownPrice, stripeClient } from '../_shared/stripe.ts';
 
 /**

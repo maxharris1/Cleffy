@@ -1,5 +1,5 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { serviceClient } from '../_shared/imslp.ts';
+import { serviceClient } from '../_shared/rateLimit.ts';
 import { priceTiers, stripeClient } from '../_shared/stripe.ts';
 import { handleStripeEvent, type StripeEventLike, type WebhookStore } from '../_shared/stripeEvents.ts';
 import { verifyStripeSignature } from '../_shared/stripeSignature.ts';
