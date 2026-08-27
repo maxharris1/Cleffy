@@ -55,19 +55,34 @@ expected. Branch config lives in `[remotes.dev]` in `config.toml`; the branch is
 **not seeded** (seed.sql's accounts have a documented password and this host is
 public), so the `scores` bucket comes from `[storage.buckets.scores]`. Edge
 function secrets do **not** inherit from production.
-## Migration divergence — verified 2026-08-27
+## Migration history — reconciled 2026-08-27
 
-Production has 25 applied migrations; the repo has 22. Four exist only in
-production, eight share a name but ran under a different timestamp, and
-`core_table_grants` exists only in the repo. **`db push` against production is
-off-limits** until reconciled, and the GitHub integration's deploy-to-production
-stays off. Details in `DEPLOY.md`.
+Production and the `dev` branch were hard-reset and rebuilt from
+`supabase/migrations/`. Both now carry the same 22 migrations (identical
+fingerprints), so `db push` is safe again and the earlier divergence is gone.
+All data was intentionally discarded.
 
-`20260827140000_core_table_grants.sql` matters: on the current Postgres image,
-tables created by `postgres` (which is what migrations run as) get only `Dxtm`
-for anon/authenticated, not `arwdDxtm`. Without it every core table answers
-`42501 permission denied` before RLS is consulted. Any new table needs an
-explicit grant — do not rely on default privileges.
+Resetting a hosted database has two traps (CLI 2.115.0), both hit in practice:
+
+- `db reset --linked` drops tables but **not sequences**, so the re-apply fails
+  with `annotations_seq already exists (42P07)` and leaves the database empty
+  and half-built. Drop leftover sequences/enums in `public`, then re-run.
+- `supabase storage rm` **silently no-ops** (`{"deleted":[]}`). Delete via the
+  Storage API: `DELETE /storage/v1/object/<bucket>` with `{"prefixes":[...]}`
+  and a service key.
+
+`db reset --linked` clears `auth.users` but not storage. Always pass `--no-seed`
+against a hosted environment — `seed.sql`'s accounts use a password documented
+in `.cursor/README.md`.
+
+## Grants — do not rely on default privileges
+
+The **local** Docker image gives anon/authenticated only `Dxtm` on tables
+created by `postgres` (which is what migrations run as), so a table with no
+explicit grant answers `42501 permission denied` before RLS is consulted.
+Hosted images give the full `arwdDxtm` from the default ACL, so
+`20260827140000_core_table_grants.sql` is load-bearing locally and a no-op
+hosted. **Every new table needs an explicit grant** matching its RLS policies.
 
 ## Credentials — where they live (NEVER commit any of these)
 
