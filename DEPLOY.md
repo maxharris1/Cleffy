@@ -15,6 +15,7 @@ the steps that need a human because no API exposes them — each one says why.
 | --- | --- |
 | Billing schema (`billing`, `roster` migrations) | ✅ applied to production |
 | Edge Functions (checkout, portal, webhook, student ×2, metered imslp) | ✅ deployed, ACTIVE |
+| Stripe functions redeployed at v2 with the self-configuring catalogue | ✅ verified live |
 | Stripe sandbox catalogue (3 products, 7 prices) | ✅ created |
 | Stripe webhook endpoint → `stripe-webhook` | ✅ enabled, 5 events |
 | Price ids: client ↔ Edge Function | ✅ committed, drift-guarded by tests |
@@ -41,6 +42,10 @@ That single save creates the default configuration. Verify with:
 GET /v1/billing_portal/configurations   # should return exactly one object
 ```
 
+Until then `stripe-portal` reaches Stripe and Stripe refuses — the function
+itself is healthy, which you can confirm with an `OPTIONS` preflight returning
+`200 ok`.
+
 ## 2. Edge Function secrets
 
 Only three values, and none of them can be committed:
@@ -59,6 +64,19 @@ npx supabase secrets set \
   re-revealable in the dashboard.
 - `APP_URL` — where Checkout and the Portal return to. Without it the functions
   fall back to the request `Origin`, which is fine locally and wrong in prod.
+
+To confirm the secrets landed, POST an unsigned body to the webhook:
+
+```bash
+curl -i -X POST https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/stripe-webhook \
+  -H 'Content-Type: application/json' -d '{"id":"evt_probe","type":"ping","data":{"object":{}}}'
+```
+
+`500 {"error":"Server misconfigured"}` means `STRIPE_WEBHOOK_SECRET` is still
+unset — the state as of this writing. Once set, the same call returns
+`400 {"error":"Invalid signature","code":"missing_header"}`, which is the
+success signal: the function booted, read the secret, and rejected an unsigned
+request exactly as it should.
 
 **The seven `STRIPE_PRICE_*` variables are no longer needed.** They are
 committed in `supabase/functions/_shared/stripe.ts` as `PUBLISHED_PRICES`,
