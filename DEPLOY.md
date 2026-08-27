@@ -21,7 +21,8 @@ the steps that need a human because no API exposes them — each one says why.
 | Price ids: client ↔ Edge Function | ✅ committed, drift-guarded by tests |
 | Stripe Customer portal configuration | ⛔ **§1 — human only** |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ⛔ **§2 — human only** |
-| Vercel project + domains | ⛔ **§3 — starts with a human step** |
+| Vercel project, linked to `main`, auto-deploying | ✅ created and verified live |
+| cleffy.io / dev.cleffy.io attached to the project | ⛔ **§3c — dashboard only** |
 | Separate dev Supabase backend | ⛔ **§5 — blocked on the free-project limit** |
 
 ---
@@ -110,26 +111,61 @@ auto-detects Vite; `vercel.json` already supplies the SPA rewrite.
 
 Production branch must be **main**.
 
-### 3c. Domains
+### 3c. Domains — the only step left
 
-| Domain | Git branch |
+The project exists: **cleffy** (`prj_aKb8bhLYHDA6P7DFb8F7bENTHUT8`), production
+branch `main`, linked to the repo, building on every push. `cleffy.vercel.app`
+is live and verified.
+
+`cleffy.io` is already registered to the Vercel account **and already using
+Vercel nameservers** (`ns1/ns2.vercel-dns.com`), and `dev.cleffy.io` already
+resolves to Vercel's edge. **No registrar or DNS work is required.** What is
+missing is only the project assignment — both hostnames currently answer:
+
+```
+HTTP 404  The deployment could not be found on Vercel.  DEPLOYMENT_NOT_FOUND
+```
+
+and HTTPS fails outright, because Vercel issues a certificate only once a
+domain belongs to a project.
+
+In **Project cleffy → Settings → Domains**, add:
+
+| Domain | Assign to |
 | --- | --- |
-| `cleffy.io` (+ `www`) | `main` (production) |
-| `dev.cleffy.io` | `dev` |
+| `cleffy.io` | production (`main`) |
+| `www.cleffy.io` | redirect to `cleffy.io` (Vercel offers this when adding) |
+| `dev.cleffy.io` | git branch **`dev`** |
 
-`dev.cleffy.io` is a **branch domain**: Project → Settings → Domains → add the
-domain, then assign it to the `dev` branch so every push to `dev` redeploys it.
+Because the nameservers are already Vercel's, the records are created
+automatically and certificates issue within a minute or two.
 
-### 3d. DNS
+There is no API for this: the Vercel connector exposes domain *purchase* tools
+only (`buy_domain`, `check_domain_availability_and_price`, `get_domain_order`),
+with nothing to attach an existing domain to a project.
 
-Add at whoever hosts cleffy.io's DNS. Vercel prints the authoritative values
-when the domain is added — prefer those over the table if they differ:
+## 3e. The `dev` branch is not deploy-ready
 
-| Record | Name | Value |
-| --- | --- | --- |
-| `A` | `@` | `76.76.21.21` |
-| `CNAME` | `www` | `cname.vercel-dns.com` |
-| `CNAME` | `dev` | `cname.vercel-dns.com` |
+`dev.cleffy.io` will resolve as soon as it is attached, but the branch behind it
+is missing two things `main` has. Verified by building `origin/dev` with the
+same command Vercel runs:
+
+- **No `.env.production`.** The build succeeds, but the bundle contains no
+  Supabase URL at all — the app would load and then talk to nothing.
+- **No `vercel.json`.** Vercel's Vite preset does *not* add an SPA fallback;
+  their docs list the catch-all rewrite as a required manual step. Without it
+  every deep link on dev.cleffy.io 404s. (`main` has it, and
+  `cleffy.vercel.app/settings` returning 200 proves it works.)
+
+Either fix works:
+
+1. **Vercel Preview environment variables** — set `VITE_SUPABASE_URL` and
+   `VITE_SUPABASE_ANON_KEY` for the Preview environment in the same dashboard
+   visit as the domains. Fixes the backend, not the deep links. A real
+   environment variable does beat a committed `.env` file under Vite 8, so this
+   also remains the mechanism for pointing dev at a separate backend later.
+2. **Commit the two files to `dev`** — fixes both, and makes the branch
+   self-describing the way `main` is.
 
 ## 4. Environment variables on Vercel
 
