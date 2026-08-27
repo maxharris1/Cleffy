@@ -19,6 +19,7 @@ import {
 import { TransportBar } from '@/features/playback/TransportBar';
 import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
+import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
@@ -60,6 +61,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
     const [shareOpen, setShareOpen] = useState(false);
+    const [notesOpen, setNotesOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     const [staleBytes, setStaleBytes] = useState(false);
@@ -170,7 +172,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         );
     }
 
-    const readOnly = state.role !== 'owner' && state.role !== 'editor';
+    // Past the plan's score cap. RLS refuses every annotation write on an archived
+    // score (annotations_insert/annotations_update both test document_is_archived),
+    // and a refusal is not transient, so the sync engine discards the op — a whole
+    // lesson's marks drawn and silently dropped. Role alone would say `owner` here:
+    // the archive is a billing state, not a membership one. loadDocumentBytes keeps
+    // CachedPdf.archivedAt current for exactly this, so the offline open (which
+    // synthesizes its row from the cache) reads it too.
+    const archived = state.doc.archived_at !== null;
+    const readOnly = archived || (state.role !== 'owner' && state.role !== 'editor');
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
 
@@ -179,7 +189,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
                 <PresenceBar peers={peers} selfUserId={userId} />
                 <SyncDot status={syncStatus} />
-                {readOnly ? <Badge>view only</Badge> : null}
+                {archived ? (
+                    <span title="Read-only — over your plan’s score limit">
+                        <Badge tone="warn">Archived</Badge>
+                    </span>
+                ) : readOnly ? (
+                    <Badge>view only</Badge>
+                ) : null}
                 {annotationStore && state.role === 'owner' ? (
                     <ImportScanButton
                         store={annotationStore}
@@ -194,6 +210,21 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     />
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
+                {/*
+                  Shown to everyone on the score, not just the owner. Whether a
+                  member has anything to read would take a query to know, and
+                  hiding the control until then makes it flicker in; opening it to
+                  "no notes yet" costs a student nothing and tells them where the
+                  notes will appear when there are some.
+                */}
+                <button
+                    type="button"
+                    title="Practice notes — a journal by lesson day"
+                    onClick={() => setNotesOpen(true)}
+                    className={buttonClassName('ghost', 'sm')}
+                >
+                    Notes
+                </button>
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 <ShareExportMenu docId={docId} title={state.doc.title} />
                 {state.role === 'owner' ? (
@@ -247,6 +278,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 onDismissWarning={dismissWarning}
             />
             {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
+            {notesOpen ? (
+                <NotesPanel
+                    documentId={docId}
+                    role={state.role === 'owner' ? 'owner' : 'member'}
+                    onClose={() => setNotesOpen(false)}
+                />
+            ) : null}
         </div>
     );
 };

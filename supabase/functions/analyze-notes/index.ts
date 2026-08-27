@@ -2,7 +2,8 @@ import Anthropic from 'npm:@anthropic-ai/sdk';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey } from '../_shared/rateLimit.ts';
+import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
+import { enforce, refund } from '../_shared/quota.ts';
 
 /**
  * Fingering-diagram note recognition: given a crop of a selected score region
@@ -17,6 +18,11 @@ import { checkRateLimit, clientKey } from '../_shared/rateLimit.ts';
  * — students are the audience for this feature, unlike analyze-annotations'
  * owner-only gate), per-user and per-IP rate limits (fail closed), strict body
  * budgets, and a region-size cap so a request can't smuggle arbitrary bytes.
+ *
+ * Metered as `vision_reads` against the DOCUMENT OWNER's budget, whoever
+ * presses the button: any member may read notes, and teacher-pays means the
+ * read draws on the owner's plan, never on a student's or guest's. Consumed
+ * only once all validation passes; every failure after that refunds.
  */
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -184,11 +190,39 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Not a member of this score' }, 403);
     }
 
+    // The read bills the score's owner (teacher-pays), so fetch who that is —
+    // members can read the row under RLS.
+    const { data: doc, error: docError } = await userClient
+        .from('documents')
+        .select('owner_id')
+        .eq('id', documentId)
+        .maybeSingle();
+    if (docError || !doc) {
+        return jsonResponse({ error: 'Not a member of this score' }, 403);
+    }
+
     const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
     if (!apiKey) {
         // Not configured — tell the client to degrade to manual entry, quietly.
         return jsonResponse({ error: 'Recognition is not configured', code: 'ai_unavailable' }, 503);
     }
+
+    const admin = serviceClient();
+    if (!admin) {
+        return jsonResponse({ error: 'Recognition is not configured', code: 'ai_unavailable' }, 503);
+    }
+
+    // Meter last, against the OWNER: everything cheap that can refuse has
+    // already run, so a consumed read is one the model was actually asked for.
+    const gate = await enforce(admin, doc.owner_id as string, 'vision_reads');
+    if (!gate.ok) {
+        return jsonResponse(gate.body, gate.status);
+    }
+    const giveBack = async (): Promise<void> => {
+        if (gate.consumed) {
+            await refund(admin, doc.owner_id as string, 'vision_reads');
+        }
+    };
 
     const anthropic = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 1 });
 
@@ -282,10 +316,12 @@ Deno.serve(async (req) => {
         });
 
         if (response.stop_reason === 'refusal') {
+            await giveBack();
             return jsonResponse({ error: 'Recognition declined', code: 'ai_unavailable' }, 502);
         }
         const toolUse = response.content.find((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
         if (!toolUse) {
+            await giveBack();
             return jsonResponse({ error: 'No reading produced', code: 'ai_unavailable' }, 502);
         }
         const input = toolUse.input as {
@@ -339,9 +375,7 @@ Deno.serve(async (req) => {
                             typeof note.finger === 'number' && note.finger >= 1 && note.finger <= 5
                                 ? Math.round(note.finger)
                                 : null,
-                        fingerConfidence: confidences.has(note.fingerConfidence ?? '')
-                            ? note.fingerConfidence
-                            : 'low',
+                        fingerConfidence: confidences.has(note.fingerConfidence ?? '') ? note.fingerConfidence : 'low',
                         confidence: confidences.has(note.confidence ?? '') ? note.confidence : 'low',
                     })),
             }))
@@ -358,6 +392,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ ok: true, page, keySignature, clefUpper, clefLower, events });
     } catch (err) {
         console.error('analyze-notes model call failed', err);
+        await giveBack();
         return jsonResponse({ error: 'Recognition unavailable', code: 'ai_unavailable' }, 502);
     }
 });

@@ -7,8 +7,16 @@ import { z } from 'zod';
  */
 
 /** Writer version for newly built analyses. */
-export const SCORE_DATA_VERSION = 2;
+export const SCORE_DATA_VERSION = 3;
 export const TICKS_PER_QUARTER = 480;
+
+/**
+ * Velocity for a note the score never gave a dynamic — roughly mezzo-forte.
+ * Both the writer (as the base an accent lifts from) and the reader (for notes
+ * carrying no `v` at all) must agree on this, or an accented note in an
+ * unmarked score is measured against a level nothing else plays at.
+ */
+export const DEFAULT_VELOCITY = 0.75;
 
 export const HAND_RH = 0;
 export const HAND_LH = 1;
@@ -35,6 +43,13 @@ const scoreMeasureSchema = z.object({
     sys: z.number().int().min(-1),
     x0: z.number().min(0).max(1),
     x1: z.number().min(0).max(1),
+    /**
+     * Which PRINTED measure this entry performs. Equal to the array index for a
+     * linear score; on a repeat, several entries share one srcIndex because they
+     * sweep the same engraved bar. Anything reasoning about the PAGE rather than
+     * the performance must group by it. v3+.
+     */
+    srcIndex: z.number().int().nonnegative().optional(),
     /** Chord columns from the engraving — lets the playhead sweep note-accurately. */
     sl: z.array(scoreSlotSchema).max(64).optional(),
 });
@@ -70,6 +85,31 @@ const scoreClefSchema = z.object({
     line: z.number().int().min(1).max(5).optional(),
 });
 
+/**
+ * A tempo in force from `tick` onward, in quarter-notes per minute. Gradual
+ * changes (rit., accel.) are pre-discretized into a run of these at build time,
+ * which keeps the reader's tick-to-seconds map a plain prefix sum — exactly
+ * invertible, with no closed-form integral to get wrong. v3+.
+ */
+const scoreTempoSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    /** Quarter-notes per minute. */
+    bpm: z.number().min(10).max(400),
+    /** Where it came from; 'word' means inferred from an Italian term. */
+    src: z.enum(['sound', 'metronome', 'word', 'ramp']).optional(),
+});
+
+/**
+ * A fermata: on ARRIVING at `tick`, the clock stops for `beats` before moving on.
+ * Modelled as a clock stop rather than a tempo dip so it leaves tick space
+ * untouched — a dip would also slow the metronome and generate beats inside the
+ * hold. Expressed in beats so it scales with the practice tempo. v3+.
+ */
+const scoreHoldSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    beats: z.number().positive().max(16),
+});
+
 export const scoreDataSchema = z.object({
     version: z.number().int(),
     ticksPerQuarter: z.literal(TICKS_PER_QUARTER),
@@ -77,6 +117,10 @@ export const scoreDataSchema = z.object({
     timeSignatures: z.array(scoreTimeSigSchema).max(64),
     keySignatures: z.array(scoreKeySigSchema).max(64).optional(),
     clefs: z.array(scoreClefSchema).max(64).optional(),
+    /** v3+; absent on v1/v2 caches, where defaultBpm is the whole story. */
+    tempos: z.array(scoreTempoSchema).max(512).optional(),
+    /** v3+; fermata holds. */
+    holds: z.array(scoreHoldSchema).max(128).optional(),
     totalTicks: z.number().int().positive(),
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),
@@ -90,4 +134,6 @@ export type ScoreSystem = z.infer<typeof scoreSystemSchema>;
 export type ScoreTimeSig = z.infer<typeof scoreTimeSigSchema>;
 export type ScoreKeySig = z.infer<typeof scoreKeySigSchema>;
 export type ScoreClef = z.infer<typeof scoreClefSchema>;
+export type ScoreTempo = z.infer<typeof scoreTempoSchema>;
+export type ScoreHold = z.infer<typeof scoreHoldSchema>;
 export type ScoreData = z.infer<typeof scoreDataSchema>;

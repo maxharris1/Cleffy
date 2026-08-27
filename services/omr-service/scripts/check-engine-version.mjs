@@ -12,23 +12,59 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * Repo-root-relative, matching `git diff --name-only` output directly. The app's
+ * ScoreData schema is watched too: it is kept in lockstep with the service copy,
+ * and a change there is just as much a contract change — editing it alone used to
+ * slip past this guard entirely.
+ */
 const WATCHED = [
-    'src/musicxml.ts',
-    'src/omrGeometry.ts',
-    'src/buildScoreData.ts',
-    'src/scoreData.ts',
-    'src/audiveris.ts',
+    'services/omr-service/src/musicxml.ts',
+    'services/omr-service/src/omrGeometry.ts',
+    'services/omr-service/src/buildScoreData.ts',
+    'services/omr-service/src/scoreData.ts',
+    'services/omr-service/src/audiveris.ts',
+    'src/types/scoreData.ts',
 ];
 
 const ENGINE_FILE = 'src/job.ts';
 const VERSION_RE = /export const ENGINE_VERSION = '(audiveris-\d+\.\d+\.\d+\+svc-\d+)'/;
 
+const revExists = (ref) => {
+    try {
+        execSync(`git rev-parse --verify --quiet ${ref}^{commit}`, { cwd: ROOT, stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+/**
+ * On pull_request events GITHUB_BASE_REF is a bare branch name ("main"), and a CI
+ * clone has no local branch of that name — only the remote-tracking ref. Try the
+ * bare name first, then origin/<name>.
+ */
+const resolveBase = (candidate) => {
+    if (revExists(candidate)) {
+        return candidate;
+    }
+    const remote = `origin/${candidate}`;
+    return revExists(remote) ? remote : null;
+};
+
 const baseArg = process.argv.find((a) => a.startsWith('--base='));
-const base =
+const requested =
     baseArg?.slice('--base='.length) ||
     process.env.GITHUB_BASE_REF ||
     process.env.ENGINE_VERSION_BASE ||
     'origin/main';
+const base = resolveBase(requested);
+
+if (base === null) {
+    // Loud, not silent: a skipped guard is how an unbumped ENGINE_VERSION ships.
+    console.log(`::warning::[engine-version] SKIPPED — no such ref '${requested}'. Guard did not run.`);
+    process.exit(0);
+}
 
 const extractVersion = (src) => {
     const m = src.match(VERSION_RE);
@@ -39,7 +75,7 @@ let diff = '';
 try {
     diff = execSync(`git diff --name-only ${base}...HEAD`, { cwd: ROOT, encoding: 'utf8' });
 } catch {
-    console.log('[engine-version] skip: could not diff against', base);
+    console.log(`::warning::[engine-version] SKIPPED — could not diff against '${base}'. Guard did not run.`);
     process.exit(0);
 }
 
@@ -47,8 +83,7 @@ const changed = new Set(
     diff
         .split('\n')
         .map((l) => l.trim())
-        .filter(Boolean)
-        .map((p) => p.replace(/^services\/omr-service\//, '')),
+        .filter(Boolean),
 );
 
 const hit = WATCHED.filter((f) => changed.has(f));
@@ -72,8 +107,7 @@ try {
     });
     baseVer = extractVersion(baseSrc);
 } catch {
-    // File may not exist on base — treat as first introduction.
-    baseVer = null;
+    // File may not exist on base — treat as first introduction (baseVer stays null).
 }
 
 if (baseVer !== null && baseVer === headVer) {

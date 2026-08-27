@@ -27,8 +27,17 @@ import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
 import type { ScoreData } from './scoreData.js';
 
-/** Bump svc-<n> when musicxml/omrGeometry/buildScoreData/scoreData/flags/tessdata change. */
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-4';
+/**
+ * Bump svc-<n> when musicxml/omrGeometry/buildScoreData/scoreData/flags/tessdata change.
+ *
+ * Jumped 2 → 5 deliberately. Analyses in production report `svc-4`, a value that
+ * has never existed in this repository's history — the deployed service was built
+ * from code that is not on main. Numbering past it keeps svc-<n> monotonic against
+ * what is actually deployed, which matters because staleness is judged by
+ * comparing that integer: naming this svc-3 would make every production-analyzed
+ * document look NEWER than the current engine and never offer to regenerate.
+ */
+export const ENGINE_VERSION = 'audiveris-5.6.1+svc-6';
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;

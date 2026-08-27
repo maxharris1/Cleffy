@@ -14,7 +14,10 @@ class MockBuffer implements AudioBuffer {
         this.data[10] = 0.5;
     }
 
-    getChannelData(): Float32Array {
+    // Explicitly over ArrayBuffer: a bare Float32Array widens to
+    // Float32Array<ArrayBufferLike>, which AudioBuffer does not accept, and the
+    // mock would then only satisfy `implements AudioBuffer` behind a cast.
+    getChannelData(): Float32Array<ArrayBuffer> {
         return this.data;
     }
     copyFromChannel(): void {}

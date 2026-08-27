@@ -2,15 +2,17 @@ import { loadPianoBuffers, nearestAnchor, playbackRateFor } from '@/features/pla
 import type { PianoBuffers } from '@/features/playback/pianoSampler';
 import {
     beatsForMeasure,
+    buildTempoMap,
     countInClicks,
     firstNoteIndexAtOrAfter,
     measureIndexAtTick,
-    secondsPerTick,
+    secondsAtTick,
+    tickAtSeconds,
 } from '@/features/playback/scoreTime';
-import type { BeatTick } from '@/features/playback/scoreTime';
+import type { BeatTick, TempoMap } from '@/features/playback/scoreTime';
 import { getSharedAudioContext } from '@/features/playback/sharedAudioContext';
 import type { PlaybackStatus } from '@/state/store';
-import { HAND_LH, HAND_RH } from '@/types/scoreData';
+import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData } from '@/types/scoreData';
 
 /**
@@ -91,6 +93,8 @@ export interface PlaybackEngineOptions {
 interface Anchor {
     tick: number;
     ctxTime: number;
+    /** Position on the score's own clock, so tempo changes stay continuous. */
+    baseSeconds: number;
 }
 
 interface ActiveNote {
@@ -113,9 +117,10 @@ export class PlaybackEngine {
     private clickBus: GainNodeLike | null = null;
 
     private status: PlaybackStatus = 'idle';
-    private spt: number;
+    /** The score's tempo map, scaled to the practice tempo. */
+    private map: TempoMap;
     private bpmValue: number;
-    private anchor: Anchor = { tick: 0, ctxTime: 0 };
+    private anchor: Anchor = { tick: 0, ctxTime: 0, baseSeconds: 0 };
     private pendingAnchor: Anchor | null = null;
     private pausedTick = 0;
     private nextNoteIndex = 0;
@@ -132,7 +137,7 @@ export class PlaybackEngine {
     constructor(options: PlaybackEngineOptions) {
         this.score = options.score;
         this.bpmValue = options.bpm;
-        this.spt = secondsPerTick(options.bpm);
+        this.map = buildTempoMap(options.score, this.scaleFor(options.bpm), options.bpm);
         this.onStatus = options.onStatus;
         this.onPositionJump = options.onPositionJump;
         this.onWarning = options.onWarning;
@@ -154,7 +159,7 @@ export class PlaybackEngine {
             return this.pausedTick;
         }
         this.promotePendingAnchor(this.ctx.currentTime);
-        const raw = this.anchor.tick + (this.ctx.currentTime - this.anchor.ctxTime) / this.spt;
+        const raw = tickAtSeconds(this.map, this.anchor.baseSeconds + (this.ctx.currentTime - this.anchor.ctxTime));
         // Never regress below the anchor (count-in and the 50 ms seek ramp sit
         // "before" it) and never overshoot the final barline.
         return Math.min(this.score.totalTicks, Math.max(this.anchor.tick, raw));
@@ -193,13 +198,17 @@ export class PlaybackEngine {
             // mid-bar entries land on the right count (see countInClicks).
             const clicks = countInClicks(this.score, startTick);
             const lead = clicks[0]?.offsetTicks ?? 0;
+            // Count-in ticks run BEFORE the entry point, so the map extrapolates
+            // back past zero; counting into a slow coda then counts slowly.
+            const leadSeconds = secondsAtTick(this.map, startTick) - secondsAtTick(this.map, startTick - lead);
             for (const click of clicks) {
-                this.scheduleClick(startAt + (lead - click.offsetTicks) * this.spt, click.accent);
+                const before = secondsAtTick(this.map, startTick - click.offsetTicks);
+                this.scheduleClick(startAt + (before - secondsAtTick(this.map, startTick - lead)), click.accent);
             }
-            this.anchor = { tick: startTick, ctxTime: startAt + lead * this.spt };
-            this.setStatus(lead > 0 ? 'counting' : 'playing');
+            this.anchor = this.anchorAt(startTick, startAt + leadSeconds);
+            this.setStatus(leadSeconds > 0 ? 'counting' : 'playing');
         } else {
-            this.anchor = { tick: startTick, ctxTime: startAt };
+            this.anchor = this.anchorAt(startTick, startAt);
             this.setStatus('playing');
         }
         this.pendingAnchor = null;
@@ -236,7 +245,7 @@ export class PlaybackEngine {
         const clamped = Math.max(0, Math.min(this.score.totalTicks, Math.round(tick)));
         if (this.ctx && (this.status === 'playing' || this.status === 'counting')) {
             this.cancelActiveNotes();
-            this.anchor = { tick: clamped, ctxTime: this.ctx.currentTime + 0.05 };
+            this.anchor = this.anchorAt(clamped, this.ctx.currentTime + 0.05);
             this.pendingAnchor = null;
             this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, clamped);
             this.nextBeat = null;
@@ -257,14 +266,37 @@ export class PlaybackEngine {
         this.bpmValue = bpm;
         const wasPlaying = this.ctx && (this.status === 'playing' || this.status === 'counting');
         if (wasPlaying && this.ctx) {
+            // Read the position on the OLD map before rebuilding, then re-anchor
+            // on the new one, or the playhead jumps when the tempo changes.
             const positionNow = this.getPositionTicks();
-            this.spt = secondsPerTick(bpm);
-            this.anchor = { tick: positionNow, ctxTime: this.ctx.currentTime };
+            this.map = buildTempoMap(this.score, this.scaleFor(bpm), bpm);
+            this.anchor = this.anchorAt(positionNow, this.ctx.currentTime);
             this.pendingAnchor = null;
             this.nextBeat = null;
         } else {
-            this.spt = secondsPerTick(bpm);
+            this.map = buildTempoMap(this.score, this.scaleFor(bpm), bpm);
         }
+    }
+
+    /**
+     * Quarter-BPM actually sounding at a tick. The transport field shows the
+     * opening tempo; mid-score this can differ, and saying so is the honest
+     * alternative to a number that quietly stops being true.
+     */
+    getBpmAt(tick: number): number {
+        return Math.round(this.bpmValue * this.tempoRatioAt(tick));
+    }
+
+    private tempoRatioAt(tick: number): number {
+        const nominal = this.score.tempos?.[0]?.bpm ?? this.score.defaultBpm ?? this.bpmValue;
+        let bpm = nominal;
+        for (const tempo of this.score.tempos ?? []) {
+            if (tempo.tick > tick) {
+                break;
+            }
+            bpm = tempo.bpm;
+        }
+        return nominal > 0 ? bpm / nominal : 1;
     }
 
     setHandMuted(hand: 0 | 1, muted: boolean): void {
@@ -399,7 +431,21 @@ export class PlaybackEngine {
     /** Time a tick will sound, against the anchor scheduling currently targets. */
     private timeOfTick(tick: number): number {
         const anchor = this.pendingAnchor ?? this.anchor;
-        return anchor.ctxTime + (tick - anchor.tick) * this.spt;
+        return anchor.ctxTime + (secondsAtTick(this.map, tick) - anchor.baseSeconds);
+    }
+
+    /** An anchor at a tick, pinned to a context time. */
+    private anchorAt(tick: number, ctxTime: number): Anchor {
+        return { tick, ctxTime, baseSeconds: secondsAtTick(this.map, tick) };
+    }
+
+    /**
+     * The transport shows an absolute BPM, but with a tempo map it means "the
+     * printed opening tempo, rescaled" — the whole map moves by one factor.
+     */
+    private scaleFor(bpm: number): number {
+        const nominal = this.score.tempos?.[0]?.bpm ?? this.score.defaultBpm ?? bpm;
+        return nominal > 0 ? bpm / nominal : 1;
     }
 
     private schedulerTick(): void {
@@ -424,7 +470,11 @@ export class PlaybackEngine {
 
             if (this.loop && this.timeOfTick(this.loop.endTick) < horizon && !this.pendingAnchor) {
                 // Seamless wrap: future content re-anchors at the loop start.
-                this.pendingAnchor = { tick: this.loop.startTick, ctxTime: this.timeOfTick(this.loop.endTick) };
+                this.pendingAnchor = {
+                    tick: this.loop.startTick,
+                    ctxTime: this.timeOfTick(this.loop.endTick),
+                    baseSeconds: secondsAtTick(this.map, this.loop.startTick),
+                };
                 this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, this.loop.startTick);
                 this.nextBeat = null;
                 // Do not scheduleSustainingNotesAt here — notes that began before the
@@ -455,7 +505,10 @@ export class PlaybackEngine {
                 break;
             }
             this.nextNoteIndex += 1;
-            this.scheduleNote(note.p, note.h, startAt, Math.min(note.d, regionEnd - note.t) * this.spt, note.v ?? 0.75);
+            // Durations convert through the map, so a note sounding across a
+            // fermata rings through the hold instead of being cut at it.
+            const endTick = Math.min(note.t + note.d, regionEnd);
+            this.scheduleNote(note.p, note.h, startAt, this.timeOfTick(endTick) - startAt, note.v ?? DEFAULT_VELOCITY);
         }
     }
 
@@ -480,7 +533,7 @@ export class PlaybackEngine {
             if (noteEnd <= tick) {
                 continue;
             }
-            this.scheduleNote(note.p, note.h, startAt, (noteEnd - tick) * this.spt, note.v ?? 0.75);
+            this.scheduleNote(note.p, note.h, startAt, this.timeOfTick(noteEnd) - startAt, note.v ?? DEFAULT_VELOCITY);
         }
     }
 

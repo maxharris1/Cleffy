@@ -269,3 +269,90 @@ describe('PlaybackEngine', () => {
         expect(engine.getStatus()).toBe('paused');
     });
 });
+
+describe('tempo map', () => {
+    // tinyScore's bars are 1920 ticks. Halve the tempo from bar 3 (tick 5760):
+    // bars 1-3 run at 120, everything after at 60.
+    const paced: typeof tinyScore = {
+        ...tinyScore,
+        defaultBpm: 120,
+        tempos: [
+            { tick: 0, bpm: 120 },
+            { tick: 5760, bpm: 60 },
+        ],
+    };
+
+    it('hears a mid-score tempo change at the right moment', async () => {
+        const { ctx, engine } = makeEngine({ score: paced, bpm: 120 });
+        await engine.play();
+        await advance(ctx, 30);
+        const started = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
+        const expected = paced.notes
+            .map((n) => 0.08 + (n.t <= 5760 ? n.t * SPT_120 : 5760 * SPT_120 + (n.t - 5760) * SPT_120 * 2))
+            .sort((a, b) => a - b);
+        expect(started).toHaveLength(expected.length);
+        started.forEach((at, i) => expect(at).toBeCloseTo(expected[i] ?? -1, 3));
+    });
+
+    it('rings a note through a fermata rather than cutting it at the hold', async () => {
+        const held: typeof tinyScore = { ...tinyScore, defaultBpm: 120, holds: [{ tick: 2400, beats: 2 }] };
+        const plain = makeEngine({ score: { ...tinyScore, defaultBpm: 120 }, bpm: 120 });
+        await plain.engine.play();
+        await advance(plain.ctx, 20);
+        const before = plain.ctx.sources.map((s) => (s.stoppedAt ?? 0) - (s.startedAt ?? 0));
+
+        const withHold = makeEngine({ score: held, bpm: 120 });
+        await withHold.engine.play();
+        await advance(withHold.ctx, 24);
+        const after = withHold.ctx.sources.map((s) => (s.stoppedAt ?? 0) - (s.startedAt ?? 0));
+
+        // Something now sounds a full second longer — the hold at 2400 stretched
+        // whatever was ringing across it.
+        expect(Math.max(...after)).toBeGreaterThan(Math.max(...before) + 0.9);
+    });
+
+    it('wraps an A-B loop across a tempo change without a gap', async () => {
+        // The loop spans the change at 5760, so the wrap has to re-base onto the
+        // map rather than assume one seconds-per-tick throughout.
+        const { ctx, engine } = makeEngine({ score: paced, bpm: 120 });
+        engine.setLoop({ startTick: 3840, endTick: 7680 });
+        await engine.play();
+        await advance(ctx, 24);
+
+        const loopSeconds =
+            (5760 - 3840) * SPT_120 + (7680 - 5760) * SPT_120 * 2; // 2 s at 120, then 4 s at 60
+        const onsets = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
+        expect(onsets.length).toBeGreaterThan(0);
+
+        // Every onset lands on the loop's grid: k full laps plus a real note offset.
+        const inLoop = paced.notes
+            .filter((n) => n.t >= 3840 && n.t < 7680)
+            .map((n) => (n.t <= 5760 ? (n.t - 3840) * SPT_120 : 1920 * SPT_120 + (n.t - 5760) * SPT_120 * 2));
+        for (const onset of onsets) {
+            const sinceStart = onset - 0.08 - (3840 - 3840) * SPT_120;
+            const lap = Math.floor(sinceStart / loopSeconds + 1e-6);
+            const offset = sinceStart - lap * loopSeconds;
+            expect(inLoop.some((o) => Math.abs(o - offset) < 0.02)).toBe(true);
+        }
+        // It really did wrap more than once.
+        expect(Math.max(...onsets)).toBeGreaterThan(0.08 + loopSeconds);
+    });
+
+    it('does not jump the position when the practice tempo changes mid-play', async () => {
+        const { ctx, engine } = makeEngine({ score: paced, bpm: 120 });
+        await engine.play();
+        await advance(ctx, 3);
+        const before = engine.getPositionTicks();
+        engine.setBpm(60);
+        expect(engine.getPositionTicks()).toBeCloseTo(before, 0);
+    });
+
+    it('reports the tempo actually sounding, which the field alone does not', () => {
+        const { engine } = makeEngine({ score: paced, bpm: 120 });
+        expect(engine.getBpmAt(0)).toBe(120);
+        expect(engine.getBpmAt(6000)).toBe(60);
+        engine.setBpm(60); // practise the whole thing at half speed
+        expect(engine.getBpmAt(0)).toBe(60);
+        expect(engine.getBpmAt(6000)).toBe(30);
+    });
+});

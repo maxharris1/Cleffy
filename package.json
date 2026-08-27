@@ -5,6 +5,8 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
+        "dev:local": "vite --host --port 5173",
+        "functions:serve": "npx supabase functions serve --env-file supabase/functions/.env --no-verify-jwt",
         "build": "tsc --noEmit && vite build",
         "preview": "vite preview",
         "typecheck": "tsc --noEmit",

@@ -56,6 +56,38 @@ describe('regionFromScoreData', () => {
         expect(regionFromScoreData('doc', 9, SYS0_RECT, tinyScore)).toBeNull();
     });
 
+    it('reads a repeated system once instead of falling through to vision', () => {
+        // Simulate an unrolled repeat of system 0: measures 0-2 perform twice,
+        // the second pass carrying the SAME geometry and srcIndex at later ticks.
+        // A marquee is spatial, so it collects both passes.
+        const src = tinyScore.measures.slice(0, 3);
+        const spanTicks = src[2]!.tick + src[2]!.dTicks - src[0]!.tick;
+        const shift = tinyScore.totalTicks;
+        const secondPass = src.map((m, i) => ({ ...m, srcIndex: i, tick: m.tick + shift }));
+        const repeatedNotes = tinyScore.notes
+            .filter((n) => n.t < src[0]!.tick + spanTicks)
+            .map((n) => ({ ...n, t: n.t + shift }));
+        const score: ScoreData = {
+            ...tinyScore,
+            measures: [
+                ...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })),
+                ...secondPass,
+            ].sort((a, b) => a.tick - b.tick),
+            notes: [...tinyScore.notes, ...repeatedNotes].sort((a, b) => a.t - b.t),
+            totalTicks: shift + spanTicks,
+        };
+
+        const linear = regionFromScoreData('doc', 0, SYS0_RECT, tinyScore);
+        const repeated = regionFromScoreData('doc', 0, SYS0_RECT, score);
+
+        // Without the printed-bar dedupe this is null — the tick span would run
+        // from the first pass to the second and read as a hole, silently costing
+        // the free OMR reading and spending a vision call instead.
+        expect(repeated).not.toBeNull();
+        // ...and the bar is read ONCE: same notes as the un-repeated score.
+        expect(repeated!.notes.length).toBe(linear!.notes.length);
+    });
+
     it('returns null when the score has no_geometry', () => {
         const score: ScoreData = { ...tinyScore, warnings: ['no_geometry'] };
         expect(regionFromScoreData('doc', 0, SYS0_RECT, score)).toBeNull();

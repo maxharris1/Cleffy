@@ -1,0 +1,18 @@
+{
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "install": "npm ci",
+    "start": "bash .cursor/start.sh",
+    "terminals": [
+        {
+            "name": "vite",
+            "command": "bash .cursor/wait-for-stack.sh && npm run dev:local"
+        },
+        {
+            "name": "functions",
+            "command": "bash .cursor/wait-for-stack.sh && npm run functions:serve"
+        }
+    ]
+}

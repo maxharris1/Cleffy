@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { NavLink, Navigate, Outlet, useNavigate } from 'react-router';
+import { Suspense, lazy, useState } from 'react';
+import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router';
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
@@ -8,9 +8,18 @@ import { prescanDocument } from '@/features/import/prescan';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
-import type { DocumentRow } from '@/types/database';
+import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
+import { PlanBadge } from '@/features/billing/PlanBadge';
+import { clearCachedEntitlements } from '@/features/billing/entitlementsService';
+import { isLimitReachedError, type LimitReachedError } from '@/features/billing/limitErrors';
+import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
+
+// Lazy for the same reason as the settings route: pricing copy is rarely needed.
+const PricingDialog = lazy(() =>
+    import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
+);
 
 export type LibraryOutletContext = {
     userId: string;
@@ -23,11 +32,17 @@ export type LibraryOutletContext = {
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
+    /** Set when the server refused for quota reasons rather than a real failure. */
+    uploadLimit: LimitReachedError | null;
+    tier: EffectiveTier;
+    openPricing: () => void;
 };
 
 const NAV_ITEMS = [
     { to: '/library', label: 'Library', end: true },
+    { to: '/students', label: 'Students', end: true },
     { to: '/search', label: 'Find on IMSLP', end: true },
+    { to: '/settings', label: 'Settings', end: true },
 ] as const;
 
 /** Authenticated app chrome: side nav + shared upload for library/search. */
@@ -46,10 +61,37 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     const [uploadPct, setUploadPct] = useState<number | null>(null);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
+    const [uploadLimit, setUploadLimit] = useState<LimitReachedError | null>(null);
+    const [pricingOpen, setPricingOpen] = useState(false);
+    const { entitlements } = useEntitlements(userId);
+    const tier = entitlements?.tier ?? 'free';
     const navigate = useNavigate();
 
-    const onUpload = async (file: File) => {
+    const clearErrors = () => {
         setUploadError(null);
+        setUploadLimit(null);
+    };
+
+    /** Drop the cached plan too — a shared device must not leak the last teacher's tier. */
+    const handleSignOut = async () => {
+        await clearCachedEntitlements(userId).catch(() => undefined);
+        await signOut();
+    };
+
+    /**
+     * A quota refusal is not a failure to report as one: it gets its own state so
+     * the library can offer an upgrade instead of showing red error text.
+     */
+    const captureFailure = (err: unknown, fallback: string) => {
+        if (isLimitReachedError(err)) {
+            setUploadLimit(err);
+            return;
+        }
+        setUploadError(err instanceof Error ? err.message : fallback);
+    };
+
+    const onUpload = async (file: File) => {
+        clearErrors();
         setUploadPct(0);
         try {
             const { document } = await uploadDocument(file, userId, ({ loaded, total }) => {
@@ -72,7 +114,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
             }
             navigate(`/doc/${document.id}`);
         } catch (err) {
-            setUploadError(err instanceof Error ? err.message : 'Upload failed.');
+            captureFailure(err, 'Upload failed.');
             throw err;
         } finally {
             setUploadPct(null);
@@ -90,7 +132,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     };
 
     const onImportImslp = async (filename: string, workTitle: string) => {
-        setUploadError(null);
+        clearErrors();
         setUploadPct(0);
         try {
             const result = await importDocumentFromImslp(filename, workTitle, userId);
@@ -105,7 +147,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
             navigate(`/doc/${result.document.id}`);
             return { ok: true as const };
         } catch (err) {
-            setUploadError(err instanceof Error ? err.message : 'Import failed.');
+            captureFailure(err, 'Import failed.');
             throw err;
         } finally {
             setUploadPct(null);
@@ -119,7 +161,10 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
         onUpload,
         onImportImslp,
         uploadError,
-        clearUploadError: () => setUploadError(null),
+        clearUploadError: clearErrors,
+        uploadLimit,
+        tier,
+        openPricing: () => setPricingOpen(true),
     };
 
     return (
@@ -137,7 +182,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                             </span>
                             <button
                                 type="button"
-                                onClick={() => void signOut()}
+                                onClick={() => void handleSignOut()}
                                 className={buttonClassName('ghost', 'sm')}
                             >
                                 Sign out
@@ -167,10 +212,13 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
 
                     <div className="mt-8 hidden border-t border-stone-300/50 pt-5 md:block">
                         <p className="truncate text-sm text-stone-500">{userLabel}</p>
+                        <Link to="/settings" className="mt-2 inline-block" aria-label={`Plan: ${tier}`}>
+                            <PlanBadge tier={tier} />
+                        </Link>
                         <button
                             type="button"
-                            onClick={() => void signOut()}
-                            className={buttonClassName('ghost', 'sm', 'mt-2')}
+                            onClick={() => void handleSignOut()}
+                            className={buttonClassName('ghost', 'sm', 'mt-2 block')}
                         >
                             Sign out
                         </button>
@@ -190,6 +238,12 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                     onConfirm={() => resolveImportOffer(true)}
                     onCancel={() => resolveImportOffer(false)}
                 />
+            ) : null}
+
+            {pricingOpen ? (
+                <Suspense fallback={null}>
+                    <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} />
+                </Suspense>
             ) : null}
         </main>
     );

@@ -1,3 +1,4 @@
+import { parseLimitResponse } from '@/features/billing/limitErrors';
 import type { SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
 import { getSupabase } from '@/lib/supabase';
 
@@ -146,6 +147,13 @@ export const importImslpPdfToStorage = async (
         },
         body: JSON.stringify({ filename, documentId, acceptedDisclaimer }),
     });
+
+    // Smart-import quota exhausted. Surfaced as the same typed error the other
+    // metered features raise, so one notice component renders all of them.
+    const limit = await parseLimitResponse(response);
+    if (limit) {
+        throw limit;
+    }
 
     if (response.status === 409) {
         const body = await response.json().catch(() => null);

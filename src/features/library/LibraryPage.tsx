@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
+import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import {
     deleteDocument,
     listCachedDocuments,
@@ -31,8 +32,10 @@ import {
     renameLibraryTag,
     setDocumentTag,
 } from '@/features/library/tagsService';
+import { AssignDialog } from '@/features/roster/AssignDialog';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
+import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
@@ -50,7 +53,8 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 
 export const LibraryPage = () => {
-    const { userId, uploading, uploadPct, onUpload, uploadError } = useOutletContext<LibraryOutletContext>();
+    const { userId, uploading, uploadPct, onUpload, uploadError, uploadLimit, clearUploadError, openPricing } =
+        useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
     const [favorites, setFavorites] = useState<Set<string>>(new Set());
     const [tags, setTags] = useState<LibraryTagRow[]>([]);
@@ -67,6 +71,7 @@ export const LibraryPage = () => {
     const [renameTarget, setRenameTarget] = useState<DocumentRow | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<DocumentRow | null>(null);
     const [shareTarget, setShareTarget] = useState<DocumentRow | null>(null);
+    const [assignTarget, setAssignTarget] = useState<DocumentRow | null>(null);
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
     const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
@@ -292,6 +297,9 @@ export const LibraryPage = () => {
                 next.delete(target.id);
                 return next;
             });
+            // A slot just came free, so the "you are at your score limit" notice
+            // from the upload that failed a moment ago is no longer true.
+            clearUploadError();
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {
@@ -323,6 +331,14 @@ export const LibraryPage = () => {
                 <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
             ) : null}
 
+            {/*
+              Both, never one instead of the other. The limit notice outlives the
+              upload that raised it — nothing but the next upload clears it — so
+              rendering it in place of statusError would swallow every later
+              failure: a delete that errored, a listDocuments that failed, the
+              offline notice. Two different things, and the teacher needs both.
+            */}
+            {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" /> : null}
             {statusError ? (
                 isOfflineNotice && !uploadError && !actionError ? (
                     <p className="mt-5 text-sm text-amber-800" role="status">
@@ -353,7 +369,9 @@ export const LibraryPage = () => {
                             {query.trim() || favoritesOnly || activeTagId
                                 ? `${visible?.length ?? 0} of ${documents.length}`
                                 : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId ? ' · showing latest 100' : null}
+                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId
+                                ? ' · showing latest 100'
+                                : null}
                         </p>
                     </div>
 
@@ -463,6 +481,7 @@ export const LibraryPage = () => {
                                             }
                                             onRename={() => setRenameTarget(doc)}
                                             onShare={() => setShareTarget(doc)}
+                                            onAssign={() => setAssignTarget(doc)}
                                             onDelete={() => setDeleteTarget(doc)}
                                         />
                                     ))}
@@ -494,6 +513,13 @@ export const LibraryPage = () => {
             ) : null}
             {shareTarget ? (
                 <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
+            ) : null}
+            {assignTarget ? (
+                <AssignDialog
+                    documentId={assignTarget.id}
+                    documentTitle={assignTarget.title}
+                    onClose={() => setAssignTarget(null)}
+                />
             ) : null}
             {tagTarget ? (
                 <TagAssignDialog
@@ -545,6 +571,7 @@ const ScoreRow = ({
     onFilterTag,
     onRename,
     onShare,
+    onAssign,
     onDelete,
 }: {
     doc: DocumentRow;
@@ -558,6 +585,7 @@ const ScoreRow = ({
     onFilterTag: (tagId: string) => void;
     onRename: () => void;
     onShare: () => void;
+    onAssign: () => void;
     onDelete: () => void;
 }) => {
     const hasTags = assignedTags.length > 0;
@@ -569,17 +597,29 @@ const ScoreRow = ({
             <div className="group flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40">
                 <div className="flex min-w-0 flex-1 items-center gap-4 py-3.5">
                     <div className="min-w-0 flex-1">
-                        <Link
-                            to={`/doc/${doc.id}`}
-                            className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
-                        >
-                            {stripComposer ? displayTitleOf(doc.title) : doc.title}
-                        </Link>
+                        <div className="flex min-w-0 items-center gap-2">
+                            <Link
+                                to={`/doc/${doc.id}`}
+                                className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
+                            >
+                                {stripComposer ? displayTitleOf(doc.title) : doc.title}
+                            </Link>
+                            {/* Past the free cap: still readable and exportable, just not writable. */}
+                            {doc.archived_at ? (
+                                <span className="shrink-0" title="Read-only — over your plan’s score limit">
+                                    <Badge tone="warn">Archived</Badge>
+                                </span>
+                            ) : null}
+                        </div>
                         {hasTags ? (
                             <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 {visibleTags.map((tag, i) => (
                                     <span key={tag.id} className="inline-flex items-center gap-1.5">
-                                        {i > 0 ? <span className="text-stone-300" aria-hidden="true">·</span> : null}
+                                        {i > 0 ? (
+                                            <span className="text-stone-300" aria-hidden="true">
+                                                ·
+                                            </span>
+                                        ) : null}
                                         <button
                                             type="button"
                                             onClick={() => onFilterTag(tag.id)}
@@ -632,7 +672,7 @@ const ScoreRow = ({
                     <TagIcon size={16} />
                 </button>
                 {isOwner ? (
-                    <RowMenu onRename={onRename} onShare={onShare} onDelete={onDelete} />
+                    <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
                 ) : null}
             </div>
         </li>
@@ -642,10 +682,12 @@ const ScoreRow = ({
 const RowMenu = ({
     onRename,
     onShare,
+    onAssign,
     onDelete,
 }: {
     onRename: () => void;
     onShare: () => void;
+    onAssign: () => void;
     onDelete: () => void;
 }) => {
     const [open, setOpen] = useState(false);
@@ -693,10 +735,11 @@ const RowMenu = ({
             {open ? (
                 <div
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-36 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="absolute right-0 z-20 mt-1 w-44 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     <MenuItem label="Rename" onClick={() => pick(onRename)} />
                     <MenuItem label="Share…" onClick={() => pick(onShare)} />
+                    <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} />
                     <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
                 </div>
             ) : null}

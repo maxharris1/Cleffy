@@ -17,6 +17,34 @@ export interface ScoreAnalysisStatusRow {
     updatedAt: string;
 }
 
+/**
+ * The svc-<n> this client expects. Keep in step with ENGINE_VERSION in
+ * services/omr-service/src/job.ts: an analysis produced by an older engine
+ * still plays, but is missing whatever that bump added, and nothing else in
+ * the system ever re-runs it — so the reader has to be offered the choice.
+ */
+export const CURRENT_ENGINE_GENERATION = 5;
+
+const engineGeneration = (engineVersion: string | null): number | null => {
+    const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');
+    if (!match?.[1]) {
+        return null;
+    }
+    const parsed = Number.parseInt(match[1], 10);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+/** True when this analysis predates the current engine and could be improved. */
+export const analysisIsStale = (engineVersion: string | null): boolean => {
+    const generation = engineGeneration(engineVersion);
+    // Absent or unreadable means it predates version stamping, so it is the
+    // oldest data there is. This is only ever asked of a READY analysis, where
+    // a missing stamp cannot mean "not finished yet". Five rows in the live
+    // database are in exactly this state and would otherwise never be offered
+    // a re-run — the documents most in need of one.
+    return generation === null || generation < CURRENT_ENGINE_GENERATION;
+};
+
 /** A processing row untouched for this long is a lost job (service died/recycled). */
 export const STALE_PROCESSING_MS = 20 * 60 * 1000;
 

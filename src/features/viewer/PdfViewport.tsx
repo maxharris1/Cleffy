@@ -247,7 +247,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 if (!point) {
                     return;
                 }
-                const index = measureIndexAtPagePoint(feature.score, point.pageIndex, point.nx, point.ny);
+                // Bias to the pass being played, so tapping a repeated bar
+                // mid-second-pass does not throw the playhead back to the first.
+                const index = measureIndexAtPagePoint(
+                    feature.score,
+                    point.pageIndex,
+                    point.nx,
+                    point.ny,
+                    feature.getEngine()?.getPositionTicks() ?? 0,
+                );
                 if (index < 0) {
                     return;
                 }

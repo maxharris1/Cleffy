@@ -31,8 +31,13 @@ RUN curl -fsSL -o /tmp/audiveris.deb \
     && mkdir -p /opt/tesseract-ocr/tessdata \
     && curl -fsSL -o /opt/tesseract-ocr/tessdata/eng.traineddata "${TESSDATA_ENG_URL}"
 
+# TESSDATA_PREFIX must name the tessdata FOLDER ITSELF, not its parent. Pointing
+# at the parent (the convention older Tesseract used) makes Audiveris log
+# "Language 'eng' is not supported" as a WARN, disable OCR, and carry on — so the
+# export silently contains no <words> at all: no tempo headings, no textual
+# cresc./dim., no lyrics. Verified against 5.6.1 on a real score.
 ENV AUDIVERIS_BIN=/opt/audiveris-root/opt/audiveris/bin/Audiveris \
-    TESSDATA_PREFIX=/opt/tesseract-ocr/ \
+    TESSDATA_PREFIX=/opt/tesseract-ocr/tessdata/ \
     JAVA_TOOL_OPTIONS="-Xmx3g --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED" \
     NODE_ENV=production \
     PORT=8080

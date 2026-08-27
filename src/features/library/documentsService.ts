@@ -2,6 +2,7 @@ import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/
 import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
+import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import type { DocumentRow, MemberRole } from '@/types/database';
 
@@ -15,7 +16,7 @@ export const LIBRARY_PAGE_SIZE = 100;
 export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
     const { data, error } = await getSupabase()
         .from('documents')
-        .select('id, owner_id, title, storage_path, page_count, content_rev, created_at, updated_at')
+        .select('id, owner_id, title, storage_path, page_count, content_rev, created_at, updated_at, archived_at')
         .order('updated_at', { ascending: false })
         .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
@@ -65,6 +66,7 @@ export const documentRowFromCache = (cached: {
     title: string;
     cachedAt: string;
     contentRev?: number;
+    archivedAt?: string | null;
 }): DocumentRow => ({
     id: cached.id,
     owner_id: '',
@@ -74,6 +76,7 @@ export const documentRowFromCache = (cached: {
     content_rev: cached.contentRev ?? 0,
     created_at: cached.cachedAt,
     updated_at: cached.cachedAt,
+    archived_at: cached.archivedAt ?? null,
 });
 
 /**
@@ -88,7 +91,12 @@ export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFall
         return null;
     }
     return {
-        doc: documentRowFromCache({ id: docId, title: cached.title, cachedAt: cached.cachedAt }),
+        doc: documentRowFromCache({
+            id: docId,
+            title: cached.title,
+            cachedAt: cached.cachedAt,
+            archivedAt: cached.archivedAt,
+        }),
         role: cached.myRole ?? 'editor',
         bytes: await cached.bytes.arrayBuffer(),
     };
@@ -99,7 +107,14 @@ export const listCachedDocuments = async (): Promise<DocumentRow[]> => {
     const rows = await getDb().pdfCache.toArray();
     return rows
         .filter((row) => isCloudDocId(row.docId))
-        .map((row) => documentRowFromCache({ id: row.docId, title: row.title, cachedAt: row.cachedAt }))
+        .map((row) =>
+            documentRowFromCache({
+                id: row.docId,
+                title: row.title,
+                cachedAt: row.cachedAt,
+                archivedAt: row.archivedAt,
+            }),
+        )
         .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 };
 
@@ -175,6 +190,12 @@ export const uploadDocument = async (
         .select()
         .single();
     if (insertError) {
+        // The free-tier cap is a database trigger, so it arrives here rather
+        // than as an HTTP 402 — normalize it to the same typed error.
+        const limit = parsePostgrestLimitError(insertError);
+        if (limit) {
+            throw limit;
+        }
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
@@ -222,6 +243,12 @@ export const importDocumentFromImslp = async (
         .select()
         .single();
     if (insertError) {
+        // The free-tier cap is a database trigger, so it arrives here rather
+        // than as an HTTP 402 — normalize it to the same typed error.
+        const limit = parsePostgrestLimitError(insertError);
+        if (limit) {
+            throw limit;
+        }
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
@@ -335,6 +362,11 @@ export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> 
     const cached = await db.pdfCache.get(doc.id);
     const wantRev = doc.content_rev ?? 0;
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
+        // Refresh the archive flag from the row we were handed, same as fetchMyRole
+        // does for the role — an offline open must know the score is read-only.
+        if (cached.archivedAt !== doc.archived_at) {
+            await db.pdfCache.put({ ...cached, archivedAt: doc.archived_at });
+        }
         return cached.bytes.arrayBuffer();
     }
     const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
@@ -352,6 +384,7 @@ export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> 
         cachedAt: new Date().toISOString(),
         myRole: cached?.myRole,
         contentRev: wantRev,
+        archivedAt: doc.archived_at,
     });
     return data.arrayBuffer();
 };
