@@ -10,7 +10,7 @@
 --   student@cleffy.local  — second account for share / RLS checks
 
 -- ---------------------------------------------------------------------------
--- Storage: private scores bucket (also declared in config.toml for start)
+-- Storage: private scores bucket (also declared in config.toml, keep in sync)
 -- ---------------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (

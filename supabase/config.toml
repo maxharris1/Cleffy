@@ -117,12 +117,13 @@ enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
-# Uncomment to configure local storage buckets
-# [storage.buckets.images]
-# public = false
-# file_size_limit = "50MiB"
-# allowed_mime_types = ["image/png", "image/jpeg"]
-# objects_path = "./images"
+# The scores bucket. Declared here rather than only in seed.sql so it exists on
+# any environment built from this config — including branches, which we do not
+# seed. Must stay in sync with the insert in seed.sql.
+[storage.buckets.scores]
+public = false
+file_size_limit = "50MiB"
+allowed_mime_types = ["application/pdf"]
 
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
@@ -460,3 +461,24 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# -----------------------------------------------------------------------------
+# Persistent `dev` branch (git branch: dev) -> https://dev.cleffy.io
+#
+# The branch deploy applies this file to the branch, so without these overrides
+# the branch would inherit auth.site_url = http://localhost:5173 from above and
+# every auth redirect on dev.cleffy.io would land on localhost.
+# -----------------------------------------------------------------------------
+[remotes.dev]
+project_id = "qdbnlrgylelelvwbkvnm"
+
+[remotes.dev.auth]
+site_url = "https://dev.cleffy.io"
+additional_redirect_urls = ["https://dev.cleffy.io", "http://localhost:5173"]
+
+# Seeding is off on purpose. seed.sql creates teacher@cleffy.local and
+# student@cleffy.local with the password `cleffy-local-test`, which is written
+# down in .cursor/README.md. That is fine on a local stack and not fine on an
+# internet-facing host. Sign up a real account on dev.cleffy.io instead.
+[remotes.dev.db.seed]
+enabled = false
