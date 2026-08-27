@@ -44,8 +44,8 @@ import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { TextField } from '@/ui/TextField';
-import { buttonClassName, fieldClassName } from '@/ui/classNames';
-import { MoreVerticalIcon, StarIcon, TagIcon } from '@/ui/icons';
+import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
+import { MoreVerticalIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 
 /** Above this count, tag filters switch from chips to a select. */
 const TAG_CHIP_LIMIT = 8;
@@ -317,9 +317,14 @@ export const LibraryPage = () => {
 
     return (
         <div>
+            <header>
+                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Library</h1>
+                <p className="mt-1 text-sm text-stone-500">Upload, organize, and share the scores you teach from.</p>
+            </header>
+
             {hasScores ? (
                 <>
-                    <div className="flex flex-wrap items-center gap-3">
+                    <div className="mt-5 flex flex-wrap items-center gap-3">
                         <UploadButton uploading={uploading} onUpload={onUpload} />
                         <LocalOpenControl label="Open locally without uploading" subtle />
                     </div>
@@ -375,16 +380,9 @@ export const LibraryPage = () => {
                         </p>
                     </div>
 
-                    <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs">
-                        <span className="text-stone-500">Sort</span>
-                        <FilterTag active={sort === 'recent'} onClick={() => setSort('recent')}>
-                            Recent
-                        </FilterTag>
-                        <FilterTag active={sort === 'title'} onClick={() => setSort('title')}>
-                            A–Z
-                        </FilterTag>
-                        <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
-                        <FilterTag
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <SortToggle sort={sort} onChange={setSort} />
+                        <FilterChip
                             active={groupComposer}
                             onClick={() => {
                                 setGroupComposer((v) => !v);
@@ -392,9 +390,9 @@ export const LibraryPage = () => {
                             }}
                         >
                             Group by composer
-                        </FilterTag>
+                        </FilterChip>
                         {tags.length > 0 ? (
-                            <FilterTag
+                            <FilterChip
                                 active={groupTag}
                                 onClick={() => {
                                     setGroupTag((v) => !v);
@@ -402,18 +400,23 @@ export const LibraryPage = () => {
                                 }}
                             >
                                 Group by tag
-                            </FilterTag>
+                            </FilterChip>
                         ) : null}
-                        <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
-                        <FilterTag active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
+                    </div>
+
+                    <div className="no-scrollbar -mx-4 mt-2 flex items-center gap-2 overflow-x-auto px-4 py-0.5 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0">
+                        <FilterChip active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
                             Favorites
-                        </FilterTag>
-                        <span aria-hidden="true" className="h-3 w-px bg-stone-300/70" />
-                        <span className="text-stone-500">Tags</span>
+                        </FilterChip>
+                        <span className="shrink-0 text-xs text-stone-500">Tags</span>
                         {tags.length === 0 ? (
-                            <FilterTag active={false} onClick={() => setManageTagsOpen(true)}>
+                            <button
+                                type="button"
+                                onClick={() => setManageTagsOpen(true)}
+                                className={chipClassName(false)}
+                            >
                                 Add a tag…
-                            </FilterTag>
+                            </button>
                         ) : (
                             <>
                                 {useTagSelect ? (
@@ -421,7 +424,7 @@ export const LibraryPage = () => {
                                         aria-label="Filter by tag"
                                         value={activeTagId ?? ''}
                                         onChange={(e) => setActiveTagId(e.target.value || null)}
-                                        className={fieldClassName('sm', 'max-w-[10rem] py-0.5 text-xs')}
+                                        className={fieldClassName('sm', 'h-8 w-auto max-w-[10rem] py-0 text-xs')}
                                     >
                                         <option value="">All tags</option>
                                         {tags.map((tag) => (
@@ -432,18 +435,23 @@ export const LibraryPage = () => {
                                     </select>
                                 ) : (
                                     tags.map((tag) => (
-                                        <FilterTag
+                                        <FilterChip
                                             key={tag.id}
                                             active={activeTagId === tag.id}
                                             onClick={() => setActiveTagId((id) => (id === tag.id ? null : tag.id))}
                                         >
                                             {tag.name}
-                                        </FilterTag>
+                                        </FilterChip>
                                     ))
                                 )}
-                                <FilterTag active={false} onClick={() => setManageTagsOpen(true)}>
+                                <button
+                                    type="button"
+                                    onClick={() => setManageTagsOpen(true)}
+                                    className={chipClassName(false)}
+                                >
+                                    <SettingsIcon size={14} />
                                     Manage
-                                </FilterTag>
+                                </button>
                             </>
                         )}
                     </div>
@@ -546,17 +554,37 @@ export const LibraryPage = () => {
     );
 };
 
-const FilterTag = ({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) => (
-    <button
-        type="button"
-        aria-pressed={active}
-        onClick={onClick}
-        className={`transition ${
-            active ? 'font-semibold text-ink underline underline-offset-[0.2em]' : 'text-stone-500 hover:text-stone-700'
-        }`}
-    >
+const FilterChip = ({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) => (
+    <button type="button" aria-pressed={active} onClick={onClick} className={chipClassName(active)}>
         {children}
     </button>
+);
+
+const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: LibrarySort) => void }) => (
+    <div
+        role="group"
+        aria-label="Sort"
+        className="flex h-8 shrink-0 items-center rounded-lg border border-stone-200 p-0.5 text-xs"
+    >
+        {(
+            [
+                ['recent', 'Recent'],
+                ['title', 'A–Z'],
+            ] as const
+        ).map(([value, label]) => (
+            <button
+                key={value}
+                type="button"
+                aria-pressed={sort === value}
+                onClick={() => onChange(value)}
+                className={`h-full rounded-md px-2.5 font-medium transition ${
+                    sort === value ? 'bg-accent-soft text-accent' : 'text-stone-600 hover:text-stone-800'
+                }`}
+            >
+                {label}
+            </button>
+        ))}
+    </div>
 );
 
 const ScoreRow = ({
@@ -594,25 +622,25 @@ const ScoreRow = ({
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
-            <div className="group flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40">
-                <div className="flex min-w-0 flex-1 items-center gap-4 py-3.5">
+            <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
+                <div className="flex min-w-0 flex-1 flex-col gap-1 py-3 sm:flex-row sm:items-center sm:gap-4 sm:py-3.5">
                     <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
                             <Link
                                 to={`/doc/${doc.id}`}
-                                className="block truncate font-medium text-stone-800 transition group-hover:text-accent-hover"
+                                className="min-w-0 font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover sm:line-clamp-none sm:block sm:truncate after:absolute after:inset-0 after:content-['']"
                             >
                                 {stripComposer ? displayTitleOf(doc.title) : doc.title}
                             </Link>
                             {/* Past the free cap: still readable and exportable, just not writable. */}
                             {doc.archived_at ? (
-                                <span className="shrink-0" title="Read-only — over your plan’s score limit">
+                                <span className="relative shrink-0" title="Read-only — over your plan’s score limit">
                                     <Badge tone="warn">Archived</Badge>
                                 </span>
                             ) : null}
                         </div>
                         {hasTags ? (
-                            <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                            <div className="relative mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 {visibleTags.map((tag, i) => (
                                     <span key={tag.id} className="inline-flex items-center gap-1.5">
                                         {i > 0 ? (
@@ -643,8 +671,8 @@ const ScoreRow = ({
                             </div>
                         ) : null}
                     </div>
-                    <span className="shrink-0 text-xs text-stone-500">
-                        {doc.page_count ? `${doc.page_count} pages · ` : ''}
+                    <span className="text-xs text-stone-500 sm:shrink-0">
+                        {doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : ''}
                         {formatUpdated(doc.updated_at)}
                     </span>
                 </div>
@@ -654,7 +682,7 @@ const ScoreRow = ({
                     aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                     onClick={onToggleFavorite}
-                    className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
+                    className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
                         isFavorite ? 'text-amber-500' : 'text-stone-300 hover:text-stone-500'
                     }`}
                 >
@@ -665,7 +693,7 @@ const ScoreRow = ({
                     aria-label={hasTags ? 'Edit tags' : 'Add tags'}
                     title={hasTags ? 'Edit tags' : 'Add tags'}
                     onClick={onTags}
-                    className={`rounded-lg p-1.5 transition hover:bg-ink/5 ${
+                    className={`relative rounded-lg p-2 transition hover:bg-ink/5 sm:p-1.5 ${
                         hasTags ? 'text-accent' : 'text-stone-300 hover:text-stone-500'
                     }`}
                 >
@@ -816,6 +844,7 @@ const RenameDialog = ({
 
 const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
     <label className={buttonClassName('primary', 'sm', uploading ? 'pointer-events-none opacity-80' : '')}>
+        <UploadIcon size={16} />
         {uploading ? 'Uploading…' : 'Upload score'}
         <input
             type="file"
@@ -877,5 +906,10 @@ const formatUpdated = (iso: string): string => {
             return 'Yesterday';
         }
     }
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const sameYear = date.getFullYear() === new Date(now).getFullYear();
+    return date.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        ...(sameYear ? {} : { year: 'numeric' as const }),
+    });
 };
