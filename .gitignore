@@ -1,8 +1,10 @@
 # dependencies / build
-node_modules/
-dist/
-dev-dist/
-coverage/
+# No trailing slash: a bare name also catches a stray file or symlink of that
+# name, which a "dir/" pattern silently lets through.
+node_modules
+dist
+dev-dist
+coverage
 
 # environment — never commit real keys
 .env
@@ -12,8 +14,8 @@ coverage/
 !.env.production
 
 # supabase CLI local state
-supabase/.temp/
-supabase/.branches/
+supabase/.temp
+supabase/.branches
 
 # editor / os
 .DS_Store
@@ -22,7 +24,7 @@ supabase/.branches/
 # E2E artifacts
 live-*.png
 verify-*.png
-e2e-shots/
+e2e-shots
 
 # local secrets (service accounts, etc.)
-.secrets/
+.secrets
