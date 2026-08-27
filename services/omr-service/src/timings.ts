@@ -9,7 +9,13 @@ export interface JobTimings {
     parseMs?: number;
     writebackMs?: number;
     cacheHit?: boolean;
+    /** Step durations in ms (share of wall); preferred over counts for OCR gate. */
     steps?: Record<string, number>;
+    /** Raw step sighting counts (debug). */
+    stepCounts?: Record<string, number>;
+    /** Parallel path outcome when pageCount >= 4. */
+    parallelPath?: 'merged' | 'serial_fallback';
+    parallelFallbackReasons?: string[];
 }
 
 export const emptyTimings = (): JobTimings => ({});

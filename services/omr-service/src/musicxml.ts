@@ -16,6 +16,8 @@ export interface MusicalScore {
     defaultBpm: number | null;
     totalTicks: number;
     warnings: string[];
+    /** Unresolved tie-starts still open at end of the lead part (shard seam risk). */
+    openTiesAtEnd: number;
 }
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -210,6 +212,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         defaultBpm: leadResult.defaultBpm,
         totalTicks: lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : tickOffset,
         warnings: [...warnings],
+        openTiesAtEnd: leadResult.openTiesAtEnd,
     };
 };
 
@@ -338,6 +341,7 @@ interface PartResult {
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
     defaultBpm: number | null;
+    openTiesAtEnd: number;
 }
 
 const parsePart = (part: Elem, ctx: PartContext): PartResult => {
@@ -667,7 +671,15 @@ const parsePart = (part: Elem, ctx: PartContext): PartResult => {
         timeSignatures.push({ tick: ctx.tickOffset, num: currentSig.num, den: currentSig.den });
     }
 
-    return { notes, measures, timeSignatures, keySignatures, clefs, defaultBpm };
+    return {
+        notes,
+        measures,
+        timeSignatures,
+        keySignatures,
+        clefs,
+        defaultBpm,
+        openTiesAtEnd: openTies.size,
+    };
 };
 
 const ticksOf = (duration: number, divisions: number): number =>
@@ -716,6 +728,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         defaultBpm: null,
         totalTicks: 0,
         warnings: [],
+        openTiesAtEnd: 0,
     };
     const warnings = new Set<string>();
     for (const file of files) {
@@ -727,6 +740,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         combined.clefs.push(...parsed.clefs);
         combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
         combined.totalTicks = parsed.totalTicks;
+        combined.openTiesAtEnd = parsed.openTiesAtEnd;
         parsed.warnings.forEach((warning) => warnings.add(warning));
     }
     if (files.length > 1) {
