@@ -19,11 +19,11 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe sandbox catalogue (3 products, 7 prices) | ✅ created |
 | Stripe webhook endpoint → `stripe-webhook` | ✅ enabled, 5 events |
 | Price ids: client ↔ Edge Function | ✅ committed, drift-guarded by tests |
-| Stripe Customer portal configuration | ⛔ **§1 — human only** |
-| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ⛔ **§2 — human only** |
+| Stripe Customer portal configuration | ✅ created, `is_default: true` |
+| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set |
 | Vercel project, linked to `main`, auto-deploying | ✅ created and verified live |
 | `dev` branch deploy config (SPA rewrite + Supabase env) | ✅ pushed, preview verified live |
-| cleffy.io / dev.cleffy.io attached to the project | ⛔ **§3c — dashboard only** |
+| cleffy.io / dev.cleffy.io attached, certs issued | ✅ live |
 | Separate dev Supabase backend | ⛔ **§5 — blocked on the free-project limit** |
 
 ---
@@ -202,16 +202,48 @@ Three ways forward, cheapest first:
 Until one is chosen, `dev.cleffy.io` shares the production backend (case 3 by
 default, since no Preview env vars are set).
 
-## 6. Smoke test
+## 6. Smoke test — passed 2026-08-27
 
-1. Sign up on cleffy.io, confirm the free tier works with no Stripe config.
-2. Upgrade → Stripe Checkout → card `4242 4242 4242 4242`, any future expiry.
-3. Confirm `subscriptions` gains a row with `status = 'active'` (the webhook
-   wrote it) and the plan badge updates.
-4. Settings → Manage billing → the Customer portal opens (proves §1).
-5. Cancel in the portal; confirm the row flips to `cancel_at_period_end`.
+Run end to end against the live stack, not simulated:
 
----
+| Step | Result |
+| --- | --- |
+| Sign up via the public auth API | user created, session returned |
+| `stripe-checkout` with a bogus price | `400 unknown_price` — the allowlist holds |
+| `stripe-checkout` with Teacher monthly | Checkout session created; Stripe customer carries `metadata.user_id` |
+| `stripe-portal` | returns a portal session URL |
+| Subscription created in Stripe | webhook wrote `tier=teacher`, `status=trialing`, correct `price_id` and period end |
+| Subscription cancelled | webhook wrote `tier=free`, `status=canceled` |
+| `get_entitlements` over PostgREST with the user's JWT | `tier=free` with the free ceilings |
+| `stripe_events` | both events recorded — idempotency table working |
+
+The tier mapping is the load-bearing result: **no `STRIPE_PRICE_*` Edge secret is
+set**, so `teacher` was resolved purely from `PUBLISHED_PRICES` in
+`_shared/stripe.ts`. The committed catalogue works in production.
+
+### Cleaning up the smoke-test rows
+
+The Supabase MCP runs SQL read-only, so these were left behind. Harmless — the
+subscription is cancelled and free-tier — but to remove them, run in the SQL
+editor:
+
+```sql
+delete from subscriptions      where user_id in (select id from auth.users where email like 'cleffy-smoke-%');
+delete from billing_customers  where user_id in (select id from auth.users where email like 'cleffy-smoke-%');
+delete from stripe_events      where type like 'customer.subscription.%';
+delete from auth.users         where email like 'cleffy-smoke-%';
+```
+
+The sandbox Stripe customer and its cancelled subscription can stay; they are
+test-mode records.
+
+### Still worth doing
+
+The portal's **subscription_update is disabled**, which is Stripe's default. So
+customers can cancel and update cards there, but cannot switch plans — despite
+`stripe-portal`'s own comment saying plan changes happen in the portal. To close
+that gap, enable "Switch plans" in the portal settings and add the three
+products.
 
 ## Known divergence — read before touching migrations
 
