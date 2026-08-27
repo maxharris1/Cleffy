@@ -22,6 +22,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe Customer portal configuration | ⛔ **§1 — human only** |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ⛔ **§2 — human only** |
 | Vercel project, linked to `main`, auto-deploying | ✅ created and verified live |
+| `dev` branch deploy config (SPA rewrite + Supabase env) | ✅ pushed, preview verified live |
 | cleffy.io / dev.cleffy.io attached to the project | ⛔ **§3c — dashboard only** |
 | Separate dev Supabase backend | ⛔ **§5 — blocked on the free-project limit** |
 
@@ -144,28 +145,23 @@ There is no API for this: the Vercel connector exposes domain *purchase* tools
 only (`buy_domain`, `check_domain_availability_and_price`, `get_domain_order`),
 with nothing to attach an existing domain to a project.
 
-## 3e. The `dev` branch is not deploy-ready
+## 3e. The `dev` branch — fixed
 
-`dev.cleffy.io` will resolve as soon as it is attached, but the branch behind it
-is missing two things `main` has. Verified by building `origin/dev` with the
-same command Vercel runs:
+`dev` could not have served dev.cleffy.io usefully: built the way Vercel builds
+it, the bundle contained no Supabase URL (no `.env.production` on that branch),
+and with no `vercel.json` every deep link would have 404d, because Vercel's Vite
+preset documents the catch-all rewrite as a step you perform rather than
+supplying it.
 
-- **No `.env.production`.** The build succeeds, but the bundle contains no
-  Supabase URL at all — the app would load and then talk to nothing.
-- **No `vercel.json`.** Vercel's Vite preset does *not* add an SPA fallback;
-  their docs list the catch-all rewrite as a required manual step. Without it
-  every deep link on dev.cleffy.io 404s. (`main` has it, and
-  `cleffy.vercel.app/settings` returning 200 proves it works.)
+Commit `710bd73` on `dev` adds both, plus the `!.env.production` exception its
+`.gitignore` was missing — the blanket `.env.*` rule had been swallowing the
+file. Typecheck and all 466 tests pass on that branch.
 
-Either fix works:
-
-1. **Vercel Preview environment variables** — set `VITE_SUPABASE_URL` and
-   `VITE_SUPABASE_ANON_KEY` for the Preview environment in the same dashboard
-   visit as the domains. Fixes the backend, not the deep links. A real
-   environment variable does beat a committed `.env` file under Vite 8, so this
-   also remains the mechanism for pointing dev at a separate backend later.
-2. **Commit the two files to `dev`** — fixes both, and makes the branch
-   self-describing the way `main` is.
+dev.cleffy.io shares the production Supabase project for now. To point it at a
+separate backend later, override `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_ANON_KEY` for the Vercel **Preview** environment rather than
+editing the committed file — a real environment variable wins under Vite 8,
+which was verified rather than assumed.
 
 ## 4. Environment variables on Vercel
 
