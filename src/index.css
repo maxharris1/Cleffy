@@ -124,9 +124,9 @@ body {
 
 .landing-rule {
     width: 3rem;
-    height: 1px;
+    height: 2px;
     margin: 1.25rem auto 0;
-    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
     animation: landing-rule-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s backwards;
 }
 
@@ -161,16 +161,26 @@ body {
     box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
-/* Hero demo: ink strokes draw themselves (pathLength=100), presence chips pop in. */
+/* Hero demo: ink strokes draw themselves (pathLength=100), presence chips pop in.
+   The animations wait for .is-inview, which HeroDemo latches on once the frame
+   scrolls into view. :where() contributes no specificity, so these stay at
+   (0,1,0) and the prefers-reduced-motion block below still wins on source
+   order — reduced motion keeps rendering the finished state. */
 .hero-ink {
     stroke-dasharray: 100;
     stroke-dashoffset: 100;
+}
+
+:where(.is-inview) .hero-ink {
     animation: hero-draw var(--dur, 0.9s) cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) forwards;
 }
 
 .hero-chip {
     opacity: 0;
     transform: scale(0.6);
+}
+
+:where(.is-inview) .hero-chip {
     animation: hero-chip-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) forwards;
 }
 
