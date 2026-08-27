@@ -2,12 +2,20 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
+import { enforce, refund } from '../_shared/quota.ts';
 
 /**
  * Kick off play-along analysis.
  *
  * OMR_QUEUE_MODE=pull: auth + omr_enqueue_job RPC + fire-and-forget /poke.
  * OMR_QUEUE_MODE=push (default until cutover): mint signed URL + POST /jobs.
+ *
+ * Metered as `omr_runs` against the DOCUMENT OWNER's budget, whoever presses
+ * the button: editors (share-link collaborators and provisioned students) may
+ * trigger a run, and teacher-pays means it draws on the owner's plan, never
+ * theirs. Results are cached per score, so students replaying a finished
+ * analysis cost nothing — only fresh runs are metered. Every failed dispatch
+ * refunds, so an owner is only charged for a run that actually queued.
  */
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -67,9 +75,10 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Only owners and editors can generate play-along' }, 403);
     }
 
+    // owner_id rides along so the run can be metered against the owner's plan.
     const { data: doc, error: docError } = await userClient
         .from('documents')
-        .select('id, storage_path, page_count')
+        .select('id, storage_path, page_count, owner_id')
         .eq('id', documentId)
         .maybeSingle();
     if (docError || !doc) {
@@ -85,11 +94,38 @@ Deno.serve(async (req) => {
         return pageFail;
     }
 
-    const queueMode = (Deno.env.get('OMR_QUEUE_MODE') ?? 'push').toLowerCase();
-    if (queueMode === 'pull') {
-        return await handlePull(userId, documentId, doc.storage_path, doc.page_count as number);
+    const admin = serviceClient();
+    if (!admin) {
+        return jsonResponse({ ok: false, code: 'service_unreachable' }, 502);
     }
-    return await handlePush(userClient, userId, documentId, doc.storage_path, doc.page_count as number);
+
+    // Gate BEFORE dispatch, against the OWNER. A refused run costs nothing and
+    // reports the owner's tier, so a free teacher's student sees the same
+    // limit-reached body the teacher would.
+    const gate = await enforce(admin, doc.owner_id as string, 'omr_runs');
+    if (!gate.ok) {
+        return jsonResponse(gate.body, gate.status);
+    }
+    // Only refund what was actually consumed — unlimited plans short-circuit
+    // without touching the counter.
+    const giveBack = async (): Promise<void> => {
+        if (gate.consumed) {
+            await refund(admin, doc.owner_id as string, 'omr_runs');
+        }
+    };
+
+    const queueMode = (Deno.env.get('OMR_QUEUE_MODE') ?? 'push').toLowerCase();
+    const response =
+        queueMode === 'pull'
+            ? await handlePull(userId, documentId, doc.storage_path, doc.page_count as number)
+            : await handlePush(userClient, userId, documentId, doc.storage_path, doc.page_count as number);
+
+    // A run that never queued must not cost a credit (already_running included —
+    // that run was paid for when IT was queued).
+    if (response.status >= 400) {
+        await giveBack();
+    }
+    return response;
 });
 
 type UserClient = ReturnType<typeof createClient>;
@@ -117,12 +153,7 @@ const rejectBadPageCount = async (
     return null;
 };
 
-const upsertAnalysis = (
-    userClient: UserClient,
-    documentId: string,
-    userId: string,
-    patch: Record<string, unknown>,
-) =>
+const upsertAnalysis = (userClient: UserClient, documentId: string, userId: string, patch: Record<string, unknown>) =>
     userClient.from('score_analyses').upsert(
         {
             document_id: documentId,

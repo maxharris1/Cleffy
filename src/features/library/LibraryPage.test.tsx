@@ -51,6 +51,7 @@ const doc = (id: string, title: string): DocumentRow => ({
     content_rev: 0,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    archived_at: null,
 });
 
 const tag = (id: string, name: string): LibraryTagRow => ({
@@ -68,6 +69,9 @@ const outletContext: LibraryOutletContext = {
     onImportImslp: vi.fn(),
     uploadError: null,
     clearUploadError: vi.fn(),
+    uploadLimit: null,
+    tier: 'free',
+    openPricing: vi.fn(),
 };
 
 const ContextFrame = () => <Outlet context={outletContext} />;
@@ -111,6 +115,134 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
+    });
+
+    it('marks archived scores, which stay open but read-only', async () => {
+        listDocuments.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), archived_at: '2026-08-01T00:00:00Z' },
+            ],
+            hasMore: false,
+        });
+        renderLibrary();
+
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        expect(screen.getAllByText('Archived')).toHaveLength(1);
+        // Still a link — archived means read-only, never hidden or deleted.
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toHaveAttribute(
+            'href',
+            '/doc/d2',
+        );
+    });
+
+    it('does not mark anything archived when nothing is', async () => {
+        renderLibrary();
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+    });
+
+    it('shows the limit-reached notice with an upgrade action instead of red error text', async () => {
+        const user = userEvent.setup();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        const openPricing = vi.fn();
+        const context: LibraryOutletContext = {
+            ...outletContext,
+            openPricing,
+            uploadLimit: new LimitReachedError({
+                code: 'limit_reached',
+                metric: 'cloud_scores',
+                limit: 3,
+                tier: 'free',
+            }),
+        };
+
+        render(
+            <MemoryRouter initialEntries={['/library']}>
+                <Routes>
+                    <Route element={<Outlet context={context} />}>
+                        <Route path="/library" element={<LibraryPage />} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        expect(await screen.findByText(/reached your 3 free cloud scores/)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'See plans' }));
+        expect(openPricing).toHaveBeenCalled();
+    });
+
+    it('shows a later failure alongside the limit notice instead of behind it', async () => {
+        // The limit notice outlives the upload that raised it — nothing but the
+        // next upload clears it — so rendering it INSTEAD of the status error hid
+        // every later failure: the teacher deletes a score to make room, the
+        // delete fails, and all they see is the same unchanged upgrade prompt.
+        const user = userEvent.setup();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        deleteDocument.mockRejectedValue(new Error('Network request failed'));
+        const context: LibraryOutletContext = {
+            ...outletContext,
+            uploadLimit: new LimitReachedError({
+                code: 'limit_reached',
+                metric: 'cloud_scores',
+                limit: 3,
+                tier: 'free',
+            }),
+        };
+
+        render(
+            <MemoryRouter initialEntries={['/library']}>
+                <Routes>
+                    <Route element={<Outlet context={context} />}>
+                        <Route path="/library" element={<LibraryPage />} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+        expect(await screen.findByText('Network request failed')).toBeInTheDocument();
+        expect(screen.getByText(/reached your 3 free cloud scores/)).toBeInTheDocument();
+        // The score is still there, which is the thing the error has to explain.
+        expect(screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)')).toBeInTheDocument();
+    });
+
+    it('drops the limit notice once a delete frees a slot', async () => {
+        const user = userEvent.setup();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        const clearUploadError = vi.fn();
+        deleteDocument.mockResolvedValue(undefined);
+        const context: LibraryOutletContext = {
+            ...outletContext,
+            clearUploadError,
+            uploadLimit: new LimitReachedError({
+                code: 'limit_reached',
+                metric: 'cloud_scores',
+                limit: 3,
+                tier: 'free',
+            }),
+        };
+
+        render(
+            <MemoryRouter initialEntries={['/library']}>
+                <Routes>
+                    <Route element={<Outlet context={context} />}>
+                        <Route path="/library" element={<LibraryPage />} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>,
+        );
+
+        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+        await waitFor(() => expect(clearUploadError).toHaveBeenCalled());
     });
 
     it('toggles a favorite through the service', async () => {

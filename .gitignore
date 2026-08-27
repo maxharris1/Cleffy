@@ -8,7 +8,7 @@ coverage/
 .env
 .env.*
 !.env.example
-# .env.production is client-safe by design and is what the Vercel build reads.
+# Committed on purpose: client-safe values only — they ship in the bundle anyway.
 !.env.production
 
 # supabase CLI local state

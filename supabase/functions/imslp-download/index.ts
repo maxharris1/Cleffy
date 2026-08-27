@@ -1,7 +1,8 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey, tryDownloadPdf } from '../_shared/imslp.ts';
+import { checkRateLimit, clientKey, serviceClient, tryDownloadPdf } from '../_shared/imslp.ts';
+import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -72,9 +73,12 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Only the document owner can import a score PDF' }, 403);
     }
 
+    // owner_id is selected so the import can be metered without a second auth
+    // round-trip: the document_role check above already proved the caller IS the
+    // owner, so this row's owner_id is the caller's user id.
     const { data: doc, error: docError } = await userClient
         .from('documents')
-        .select('id, storage_path')
+        .select('id, storage_path, owner_id')
         .eq('id', documentId)
         .maybeSingle();
     if (docError || !doc) {
@@ -84,9 +88,33 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unexpected storage path' }, 400);
     }
 
+    const admin = serviceClient();
+    if (!admin) {
+        return jsonResponse({ error: 'Server misconfigured' }, 500);
+    }
+
+    // Metered as smart_imports, and gated BEFORE the IMSLP fetch — the expensive
+    // part. Every failure path below refunds, so a teacher is only charged for an
+    // import that actually landed in Storage.
+    const gate = await enforce(admin, doc.owner_id, 'smart_imports');
+    if (!gate.ok) {
+        return jsonResponse(gate.body, gate.status);
+    }
+
+    // Only what was actually spent can be given back. On an unlimited plan the
+    // gate short-circuits without touching the counter, and refunding anyway
+    // would decrement a row left over from this teacher's free-tier days —
+    // restoring an allowance they already spent.
+    const giveBack = async (): Promise<void> => {
+        if (gate.consumed) {
+            await refund(admin, doc.owner_id, 'smart_imports');
+        }
+    };
+
     try {
         const result = await tryDownloadPdf(filename);
         if (!result.ok) {
+            await giveBack();
             return jsonResponse(
                 {
                     ok: false,
@@ -105,6 +133,7 @@ Deno.serve(async (req) => {
             upsert: true,
         });
         if (uploadError) {
+            await giveBack();
             return jsonResponse({ error: `Storage upload failed: ${uploadError.message}` }, 502);
         }
 
@@ -118,6 +147,7 @@ Deno.serve(async (req) => {
             byteLength: result.bytes.byteLength,
         });
     } catch (err) {
+        await giveBack();
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP download failed' }, 502);
     }
 });

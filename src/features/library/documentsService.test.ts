@@ -62,6 +62,7 @@ const doc = (over: Partial<DocumentRow> = {}): DocumentRow => ({
     content_rev: 0,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    archived_at: null,
     ...over,
 });
 

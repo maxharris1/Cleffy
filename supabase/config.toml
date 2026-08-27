@@ -117,11 +117,12 @@ enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
-# Local storage buckets (also ensured by supabase/seed.sql for db reset).
-[storage.buckets.scores]
-public = false
-file_size_limit = "50MiB"
-allowed_mime_types = ["application/pdf"]
+# Uncomment to configure local storage buckets
+# [storage.buckets.images]
+# public = false
+# file_size_limit = "50MiB"
+# allowed_mime_types = ["image/png", "image/jpeg"]
+# objects_path = "./images"
 
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
@@ -388,25 +389,49 @@ deno_version = 2
 [functions.imslp-search]
 verify_jwt = true
 
-# Smart-import classification — JWT required; owner-only enforced in-function.
-# Needs ANTHROPIC_API_KEY set via `supabase secrets set` (see SETUP_SUPABASE.md).
-[functions.analyze-annotations]
-verify_jwt = true
-
-# Fingering-diagram note recognition — JWT required; any document member
-# (owner/editor/viewer) enforced in-function. Uses the same ANTHROPIC_API_KEY;
-# model overridable via the ANALYZE_NOTES_MODEL secret (default claude-opus-5).
-[functions.analyze-notes]
-verify_jwt = true
-
 [functions.imslp-work]
 verify_jwt = true
 
 [functions.imslp-download]
 verify_jwt = true
 
+# Metered analysis endpoints — JWT required; each one meters the caller.
 [functions.score-analyze]
 verify_jwt = true
+
+[functions.analyze-annotations]
+verify_jwt = true
+
+[functions.analyze-notes]
+verify_jwt = true
+
+# Billing — teacher-initiated, so a JWT is required.
+[functions.stripe-checkout]
+verify_jwt = true
+
+[functions.stripe-portal]
+verify_jwt = true
+
+# Stripe has no Supabase JWT to present: this endpoint authenticates the request
+# by its Stripe-Signature against STRIPE_WEBHOOK_SECRET instead. Deploy with
+# `supabase functions deploy stripe-webhook --no-verify-jwt`.
+[functions.stripe-webhook]
+verify_jwt = false
+
+# Roster — provisioning a student is a teacher action like any other, so it
+# takes the teacher's JWT and meters the `students` stock against their plan.
+[functions.student-provision]
+verify_jwt = true
+
+# The one other function that cannot require a JWT. A student typing the code
+# off their card has no session yet: the code IS the credential, and this is the
+# endpoint that trades it for one. Open is not the same as an oracle — the
+# endpoint is hard rate-limited (10/min per IP, against ~59-bit codes) and
+# answers every failure with the same indistinguishable 401. Deploy with
+# `supabase functions deploy student-login --no-verify-jwt`, as with
+# stripe-webhook above.
+[functions.student-login]
+verify_jwt = false
 
 [analytics]
 enabled = true

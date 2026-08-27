@@ -47,6 +47,19 @@ export const isRegisteredSession = (session: Session | null): session is Session
     return Boolean(session && !session.user.is_anonymous);
 };
 
+/**
+ * Account type for provisioned students, else null.
+ *
+ * `app_metadata.user_type` is admin-set by student-provision (service role) and is not
+ * writable by the user, so it is trustworthy client-side — but use it for ROUTING only,
+ * i.e. deciding which chrome an account belongs in. RLS on managed_students, assignments
+ * and practice_notes is the actual enforcement; this is never an authorization check.
+ */
+export const userTypeOf = (session: Session | null): 'student' | null => {
+    const meta = session?.user.app_metadata as Record<string, unknown> | undefined;
+    return meta?.['user_type'] === 'student' ? 'student' : null;
+};
+
 /** Email/password registration. */
 export const signUpWithPassword = async (
     email: string,

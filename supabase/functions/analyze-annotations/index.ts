@@ -2,7 +2,8 @@ import Anthropic from 'npm:@anthropic-ai/sdk';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey } from '../_shared/rateLimit.ts';
+import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
+import { enforce, refund } from '../_shared/quota.ts';
 
 /**
  * Smart-import classification: given one score page plus the deterministic
@@ -15,6 +16,11 @@ import { checkRateLimit, clientKey } from '../_shared/rateLimit.ts';
  * anonymous users — they can never own documents), per-user and per-IP rate
  * limits (fail closed), strict body budgets so a request can't smuggle
  * arbitrary bytes to the model.
+ *
+ * Metered as `vision_reads` against the caller — who is the document owner by
+ * the gate above, so this is the teacher-pays budget. Consumed only once all
+ * validation passes and the model is about to be called; every failure after
+ * that refunds, so a read that produced nothing costs nothing.
  */
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -181,6 +187,23 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Recognition is not configured', code: 'ai_unavailable' }, 503);
     }
 
+    const admin = serviceClient();
+    if (!admin) {
+        return jsonResponse({ error: 'Recognition is not configured', code: 'ai_unavailable' }, 503);
+    }
+
+    // Meter last, right before the model call: everything cheap that can refuse
+    // has already run, so a consumed read is one the model was actually asked for.
+    const gate = await enforce(admin, userId, 'vision_reads');
+    if (!gate.ok) {
+        return jsonResponse(gate.body, gate.status);
+    }
+    const giveBack = async (): Promise<void> => {
+        if (gate.consumed) {
+            await refund(admin, userId, 'vision_reads');
+        }
+    };
+
     const anthropic = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 1 });
 
     const content: Anthropic.ContentBlockParam[] = [
@@ -273,10 +296,12 @@ Deno.serve(async (req) => {
         });
 
         if (response.stop_reason === 'refusal') {
+            await giveBack();
             return jsonResponse({ error: 'Recognition declined', code: 'ai_unavailable' }, 502);
         }
         const toolUse = response.content.find((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
         if (!toolUse) {
+            await giveBack();
             return jsonResponse({ error: 'No classification produced', code: 'ai_unavailable' }, 502);
         }
         const input = toolUse.input as {
@@ -292,6 +317,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ ok: true, page, clusters: outClusters, runs: outRuns });
     } catch (err) {
         console.error('analyze-annotations model call failed', err);
+        await giveBack();
         return jsonResponse({ error: 'Recognition unavailable', code: 'ai_unavailable' }, 502);
     }
 });
