@@ -1,5 +1,6 @@
 import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/imslp/imslpApi';
 import { prepareUploadFile } from '@/features/import/prepareUpload';
+import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
@@ -220,6 +221,10 @@ export const uploadDocument = async (
         cachedAt: new Date().toISOString(),
     });
 
+    // Render the library thumbnail from the bytes we already hold. Detached on
+    // purpose: the upload is done, and a slow pdf.js pass must not delay it.
+    void getThumbnail(id, 0).catch(() => undefined);
+
     return { document: { ...document, page_count: pageCount } };
 };
 
@@ -349,6 +354,7 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
         db.ops.where('docId').equals(doc.id).delete(),
         db.annotationSnapshots.where('docId').equals(doc.id).delete(),
         db.scoreCache.delete(doc.id),
+        db.thumbnails.delete(doc.id),
     ]);
 };
 
@@ -443,6 +449,10 @@ export const replaceDocumentPdf = async (
         myRole: cached?.myRole ?? 'owner',
         contentRev: updated.content_rev,
     });
+
+    // The stored bytes changed, so the old first-page render is wrong — the
+    // bumped revision makes the service regenerate it.
+    void getThumbnail(doc.id, updated.content_rev ?? 0).catch(() => undefined);
 
     // Best-effort audit row + backup pointer (never blocks the replacement).
     const { error: auditError } = await supabase.from('document_imports').upsert(

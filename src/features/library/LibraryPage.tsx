@@ -20,8 +20,10 @@ import {
     type LibrarySort,
 } from '@/features/library/libraryView';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
+import { FileDropZone } from '@/features/library/FileDropZone';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
+import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
 import { TagManageDialog } from '@/features/library/TagManageDialog';
 import {
@@ -316,241 +318,247 @@ export const LibraryPage = () => {
     let rowIndex = 0;
 
     return (
-        <div>
-            <header>
-                <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Library</h1>
-                <p className="mt-1 text-sm text-stone-500">Upload, organize, and share the scores you teach from.</p>
-            </header>
+        <FileDropZone disabled={uploading} onFile={(file) => void onUpload(file).catch(() => undefined)}>
+            <div>
+                <header>
+                    <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Library</h1>
+                    <p className="mt-1 text-sm text-stone-500">
+                        Upload, organize, and share the scores you teach from.
+                    </p>
+                </header>
 
-            {hasScores ? (
-                <>
-                    <div className="mt-5 flex flex-wrap items-center gap-3">
-                        <UploadButton uploading={uploading} onUpload={onUpload} />
-                        <LocalOpenControl label="Open locally without uploading" subtle />
-                    </div>
-                    {uploading && uploadPct !== null ? (
-                        <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
-                    ) : null}
-                </>
-            ) : documents !== null ? (
-                <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
-            ) : null}
+                {hasScores ? (
+                    <>
+                        <div className="mt-5 flex flex-wrap items-center gap-3">
+                            <UploadButton uploading={uploading} onUpload={onUpload} />
+                            <LocalOpenControl label="Open locally without uploading" subtle />
+                        </div>
+                        {uploading && uploadPct !== null ? (
+                            <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
+                        ) : null}
+                    </>
+                ) : documents !== null ? (
+                    <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
+                ) : null}
 
-            {/*
+                {/*
               Both, never one instead of the other. The limit notice outlives the
               upload that raised it — nothing but the next upload clears it — so
               rendering it in place of statusError would swallow every later
               failure: a delete that errored, a listDocuments that failed, the
               offline notice. Two different things, and the teacher needs both.
             */}
-            {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" /> : null}
-            {statusError ? (
-                isOfflineNotice && !uploadError && !actionError ? (
-                    <p className="mt-5 text-sm text-amber-800" role="status">
-                        {statusError}
-                    </p>
-                ) : (
-                    <ErrorText className="mt-5">{statusError}</ErrorText>
-                )
-            ) : null}
-
-            {documents === null ? (
-                <LoadingText className="mt-10">Loading scores…</LoadingText>
-            ) : hasScores ? (
-                <section className="mt-8">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <label className="sr-only" htmlFor="library-search">
-                            Search scores
-                        </label>
-                        <input
-                            id="library-search"
-                            type="search"
-                            value={query}
-                            onChange={(e) => setQuery(e.target.value)}
-                            placeholder="Search by title…"
-                            className={fieldClassName('sm', 'sm:max-w-xs')}
-                        />
-                        <p className="text-xs text-stone-600">
-                            {query.trim() || favoritesOnly || activeTagId
-                                ? `${visible?.length ?? 0} of ${documents.length}`
-                                : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                            {hasMore && !query.trim() && !favoritesOnly && !activeTagId
-                                ? ' · showing latest 100'
-                                : null}
+                {uploadLimit ? (
+                    <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" />
+                ) : null}
+                {statusError ? (
+                    isOfflineNotice && !uploadError && !actionError ? (
+                        <p className="mt-5 text-sm text-amber-800" role="status">
+                            {statusError}
                         </p>
-                    </div>
+                    ) : (
+                        <ErrorText className="mt-5">{statusError}</ErrorText>
+                    )
+                ) : null}
 
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <SortToggle sort={sort} onChange={setSort} />
-                        <FilterChip
-                            active={groupComposer}
-                            onClick={() => {
-                                setGroupComposer((v) => !v);
-                                setGroupTag(false);
-                            }}
-                        >
-                            Group by composer
-                        </FilterChip>
-                        {tags.length > 0 ? (
+                {documents === null ? (
+                    <LoadingText className="mt-10">Loading scores…</LoadingText>
+                ) : hasScores ? (
+                    <section className="mt-8">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <label className="sr-only" htmlFor="library-search">
+                                Search scores
+                            </label>
+                            <input
+                                id="library-search"
+                                type="search"
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                placeholder="Search by title…"
+                                className={fieldClassName('sm', 'sm:max-w-xs')}
+                            />
+                            <p className="text-xs text-stone-600">
+                                {query.trim() || favoritesOnly || activeTagId
+                                    ? `${visible?.length ?? 0} of ${documents.length}`
+                                    : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
+                                {hasMore && !query.trim() && !favoritesOnly && !activeTagId
+                                    ? ' · showing latest 100'
+                                    : null}
+                            </p>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <SortToggle sort={sort} onChange={setSort} />
                             <FilterChip
-                                active={groupTag}
+                                active={groupComposer}
                                 onClick={() => {
-                                    setGroupTag((v) => !v);
-                                    setGroupComposer(false);
+                                    setGroupComposer((v) => !v);
+                                    setGroupTag(false);
                                 }}
                             >
-                                Group by tag
+                                Group by composer
                             </FilterChip>
-                        ) : null}
-                    </div>
+                            {tags.length > 0 ? (
+                                <FilterChip
+                                    active={groupTag}
+                                    onClick={() => {
+                                        setGroupTag((v) => !v);
+                                        setGroupComposer(false);
+                                    }}
+                                >
+                                    Group by tag
+                                </FilterChip>
+                            ) : null}
+                        </div>
 
-                    <div className="no-scrollbar -mx-4 mt-2 flex items-center gap-2 overflow-x-auto px-4 py-0.5 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0">
-                        <FilterChip active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
-                            Favorites
-                        </FilterChip>
-                        <span className="shrink-0 text-xs text-stone-500">Tags</span>
-                        {tags.length === 0 ? (
-                            <button
-                                type="button"
-                                onClick={() => setManageTagsOpen(true)}
-                                className={chipClassName(false)}
-                            >
-                                Add a tag…
-                            </button>
-                        ) : (
-                            <>
-                                {useTagSelect ? (
-                                    <select
-                                        aria-label="Filter by tag"
-                                        value={activeTagId ?? ''}
-                                        onChange={(e) => setActiveTagId(e.target.value || null)}
-                                        className={fieldClassName('sm', 'h-8 w-auto max-w-[10rem] py-0 text-xs')}
-                                    >
-                                        <option value="">All tags</option>
-                                        {tags.map((tag) => (
-                                            <option key={tag.id} value={tag.id}>
-                                                {tag.name}
-                                            </option>
-                                        ))}
-                                    </select>
-                                ) : (
-                                    tags.map((tag) => (
-                                        <FilterChip
-                                            key={tag.id}
-                                            active={activeTagId === tag.id}
-                                            onClick={() => setActiveTagId((id) => (id === tag.id ? null : tag.id))}
-                                        >
-                                            {tag.name}
-                                        </FilterChip>
-                                    ))
-                                )}
+                        <div className="no-scrollbar -mx-4 mt-2 flex items-center gap-2 overflow-x-auto px-4 py-0.5 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0">
+                            <FilterChip active={favoritesOnly} onClick={() => setFavoritesOnly((v) => !v)}>
+                                Favorites
+                            </FilterChip>
+                            <span className="shrink-0 text-xs text-stone-500">Tags</span>
+                            {tags.length === 0 ? (
                                 <button
                                     type="button"
                                     onClick={() => setManageTagsOpen(true)}
                                     className={chipClassName(false)}
                                 >
-                                    <SettingsIcon size={14} />
-                                    Manage
+                                    Add a tag…
                                 </button>
-                            </>
+                            ) : (
+                                <>
+                                    {useTagSelect ? (
+                                        <select
+                                            aria-label="Filter by tag"
+                                            value={activeTagId ?? ''}
+                                            onChange={(e) => setActiveTagId(e.target.value || null)}
+                                            className={fieldClassName('sm', 'h-8 w-auto max-w-[10rem] py-0 text-xs')}
+                                        >
+                                            <option value="">All tags</option>
+                                            {tags.map((tag) => (
+                                                <option key={tag.id} value={tag.id}>
+                                                    {tag.name}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    ) : (
+                                        tags.map((tag) => (
+                                            <FilterChip
+                                                key={tag.id}
+                                                active={activeTagId === tag.id}
+                                                onClick={() => setActiveTagId((id) => (id === tag.id ? null : tag.id))}
+                                            >
+                                                {tag.name}
+                                            </FilterChip>
+                                        ))
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => setManageTagsOpen(true)}
+                                        className={chipClassName(false)}
+                                    >
+                                        <SettingsIcon size={14} />
+                                        Manage
+                                    </button>
+                                </>
+                            )}
+                        </div>
+
+                        {visible && visible.length === 0 ? (
+                            <p className="mt-8 text-sm text-stone-500">
+                                {activeTagId && !query.trim() && !favoritesOnly
+                                    ? 'No scores with this tag yet.'
+                                    : favoritesOnly && !query.trim()
+                                      ? 'No favorites yet — tap the star on a score to keep it handy.'
+                                      : `No scores match “${query.trim()}”.`}
+                            </p>
+                        ) : (
+                            groups?.map((group) => (
+                                <section key={group.label ?? 'all'}>
+                                    {group.label ? (
+                                        <h3 className="mt-7 border-b border-stone-300/50 pb-1.5 text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
+                                            {group.label}
+                                        </h3>
+                                    ) : null}
+                                    <ul className={group.label ? '' : 'mt-4'}>
+                                        {group.documents.map((doc) => (
+                                            <ScoreRow
+                                                key={`${group.label ?? 'all'}-${doc.id}`}
+                                                doc={doc}
+                                                index={rowIndex++}
+                                                stripComposer={groupComposer && group.label !== null}
+                                                assignedTags={docTags(doc.id)}
+                                                isFavorite={favorites.has(doc.id)}
+                                                isOwner={doc.owner_id === userId}
+                                                onToggleFavorite={() => toggleFavorite(doc)}
+                                                onTags={() => setTagTarget(doc)}
+                                                onFilterTag={(tagId) =>
+                                                    setActiveTagId((id) => (id === tagId ? null : tagId))
+                                                }
+                                                onRename={() => setRenameTarget(doc)}
+                                                onShare={() => setShareTarget(doc)}
+                                                onAssign={() => setAssignTarget(doc)}
+                                                onDelete={() => setDeleteTarget(doc)}
+                                            />
+                                        ))}
+                                    </ul>
+                                </section>
+                            ))
                         )}
-                    </div>
+                    </section>
+                ) : null}
 
-                    {visible && visible.length === 0 ? (
-                        <p className="mt-8 text-sm text-stone-500">
-                            {activeTagId && !query.trim() && !favoritesOnly
-                                ? 'No scores with this tag yet.'
-                                : favoritesOnly && !query.trim()
-                                  ? 'No favorites yet — tap the star on a score to keep it handy.'
-                                  : `No scores match “${query.trim()}”.`}
-                        </p>
-                    ) : (
-                        groups?.map((group) => (
-                            <section key={group.label ?? 'all'}>
-                                {group.label ? (
-                                    <h3 className="mt-7 border-b border-stone-300/50 pb-1.5 text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
-                                        {group.label}
-                                    </h3>
-                                ) : null}
-                                <ul className={group.label ? '' : 'mt-4'}>
-                                    {group.documents.map((doc) => (
-                                        <ScoreRow
-                                            key={`${group.label ?? 'all'}-${doc.id}`}
-                                            doc={doc}
-                                            index={rowIndex++}
-                                            stripComposer={groupComposer && group.label !== null}
-                                            assignedTags={docTags(doc.id)}
-                                            isFavorite={favorites.has(doc.id)}
-                                            isOwner={doc.owner_id === userId}
-                                            onToggleFavorite={() => toggleFavorite(doc)}
-                                            onTags={() => setTagTarget(doc)}
-                                            onFilterTag={(tagId) =>
-                                                setActiveTagId((id) => (id === tagId ? null : tagId))
-                                            }
-                                            onRename={() => setRenameTarget(doc)}
-                                            onShare={() => setShareTarget(doc)}
-                                            onAssign={() => setAssignTarget(doc)}
-                                            onDelete={() => setDeleteTarget(doc)}
-                                        />
-                                    ))}
-                                </ul>
-                            </section>
-                        ))
-                    )}
-                </section>
-            ) : null}
-
-            {renameTarget ? (
-                <RenameDialog
-                    doc={renameTarget}
-                    busy={busyAction}
-                    onClose={() => setRenameTarget(null)}
-                    onSave={saveRename}
-                />
-            ) : null}
-            {deleteTarget ? (
-                <ConfirmDialog
-                    title="Delete this score?"
-                    body={`“${deleteTarget.title}” and all of its annotations will be removed for everyone it's shared with. This can't be undone.`}
-                    confirmLabel="Delete"
-                    danger
-                    busy={busyAction}
-                    onConfirm={() => void confirmDelete()}
-                    onCancel={() => setDeleteTarget(null)}
-                />
-            ) : null}
-            {shareTarget ? (
-                <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
-            ) : null}
-            {assignTarget ? (
-                <AssignDialog
-                    documentId={assignTarget.id}
-                    documentTitle={assignTarget.title}
-                    onClose={() => setAssignTarget(null)}
-                />
-            ) : null}
-            {tagTarget ? (
-                <TagAssignDialog
-                    scoreTitle={tagTarget.title}
-                    tags={tags}
-                    assignedTagIds={new Set(assignments.get(tagTarget.id) ?? [])}
-                    busy={busyAction}
-                    onClose={() => setTagTarget(null)}
-                    onToggleTag={handleToggleTag}
-                    onCreateTag={handleCreateAndAssignTag}
-                />
-            ) : null}
-            {manageTagsOpen ? (
-                <TagManageDialog
-                    tags={tags}
-                    busy={busyAction}
-                    onClose={() => setManageTagsOpen(false)}
-                    onCreateTag={handleCreateTagOnly}
-                    onRenameTag={handleRenameTag}
-                    onDeleteTag={handleDeleteTag}
-                />
-            ) : null}
-        </div>
+                {renameTarget ? (
+                    <RenameDialog
+                        doc={renameTarget}
+                        busy={busyAction}
+                        onClose={() => setRenameTarget(null)}
+                        onSave={saveRename}
+                    />
+                ) : null}
+                {deleteTarget ? (
+                    <ConfirmDialog
+                        title="Delete this score?"
+                        body={`“${deleteTarget.title}” and all of its annotations will be removed for everyone it's shared with. This can't be undone.`}
+                        confirmLabel="Delete"
+                        danger
+                        busy={busyAction}
+                        onConfirm={() => void confirmDelete()}
+                        onCancel={() => setDeleteTarget(null)}
+                    />
+                ) : null}
+                {shareTarget ? (
+                    <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
+                ) : null}
+                {assignTarget ? (
+                    <AssignDialog
+                        documentId={assignTarget.id}
+                        documentTitle={assignTarget.title}
+                        onClose={() => setAssignTarget(null)}
+                    />
+                ) : null}
+                {tagTarget ? (
+                    <TagAssignDialog
+                        scoreTitle={tagTarget.title}
+                        tags={tags}
+                        assignedTagIds={new Set(assignments.get(tagTarget.id) ?? [])}
+                        busy={busyAction}
+                        onClose={() => setTagTarget(null)}
+                        onToggleTag={handleToggleTag}
+                        onCreateTag={handleCreateAndAssignTag}
+                    />
+                ) : null}
+                {manageTagsOpen ? (
+                    <TagManageDialog
+                        tags={tags}
+                        busy={busyAction}
+                        onClose={() => setManageTagsOpen(false)}
+                        onCreateTag={handleCreateTagOnly}
+                        onRenameTag={handleRenameTag}
+                        onDeleteTag={handleDeleteTag}
+                    />
+                ) : null}
+            </div>
+        </FileDropZone>
     );
 };
 
@@ -623,7 +631,13 @@ const ScoreRow = ({
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
             <div className="group relative flex items-center gap-0.5 border-b border-stone-300/50 transition hover:border-accent/40 hover:bg-ink/[0.03]">
-                <div className="flex min-w-0 flex-1 flex-col gap-1 py-3 sm:flex-row sm:items-center sm:gap-4 sm:py-3.5">
+                {/*
+                  Sibling of the text block, not a child of it: that block turns
+                  into a column on phones, which would stack the thumbnail above
+                  the title instead of beside it.
+                */}
+                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} />
+                <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
                     <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
                             <Link
