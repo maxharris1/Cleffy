@@ -11,20 +11,20 @@ the steps that need a human because no API exposes them — each one says why.
 
 ## Status
 
-| Piece | State |
-| --- | --- |
-| Billing schema (`billing`, `roster` migrations) | ✅ applied to production |
-| Edge Functions (checkout, portal, webhook, student ×2, metered imslp) | ✅ deployed, ACTIVE |
-| Stripe functions redeployed at v2 with the self-configuring catalogue | ✅ verified live |
-| Stripe sandbox catalogue (3 products, 7 prices) | ✅ created |
-| Stripe webhook endpoint → `stripe-webhook` | ✅ enabled, 5 events |
-| Price ids: client ↔ Edge Function | ✅ committed, drift-guarded by tests |
-| Stripe Customer portal configuration | ✅ created, `is_default: true` |
-| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set |
-| Vercel project, linked to `main`, auto-deploying | ✅ created and verified live |
-| `dev` branch deploy config (SPA rewrite + Supabase env) | ✅ pushed, preview verified live |
-| cleffy.io / dev.cleffy.io attached, certs issued | ✅ live |
-| Separate dev Supabase backend | ⛔ **§5 — blocked on the free-project limit** |
+| Piece                                                                  | State                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------- |
+| Billing schema (`billing`, `roster` migrations)                        | ✅ applied to production                                |
+| Edge Functions (checkout, portal, webhook, student ×2, metered imslp)  | ✅ deployed, ACTIVE                                     |
+| Stripe functions redeployed at v2 with the self-configuring catalogue  | ✅ verified live                                        |
+| Stripe sandbox catalogue (3 products, 7 prices)                        | ✅ created                                              |
+| Stripe webhook endpoint → `stripe-webhook`                             | ✅ enabled, 5 events                                    |
+| Price ids: client ↔ Edge Function                                      | ✅ committed, drift-guarded by tests                    |
+| Stripe Customer portal configuration                                   | ✅ created, `is_default: true`                          |
+| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set                                                  |
+| Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                            |
+| `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                        |
+| cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                 |
+| Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5) |
 
 ---
 
@@ -132,16 +132,16 @@ domain belongs to a project.
 
 In **Project cleffy → Settings → Domains**, add:
 
-| Domain | Assign to |
-| --- | --- |
-| `cleffy.io` | production (`main`) |
+| Domain          | Assign to                                                |
+| --------------- | -------------------------------------------------------- |
+| `cleffy.io`     | production (`main`)                                      |
 | `www.cleffy.io` | redirect to `cleffy.io` (Vercel offers this when adding) |
-| `dev.cleffy.io` | git branch **`dev`** |
+| `dev.cleffy.io` | git branch **`dev`**                                     |
 
 Because the nameservers are already Vercel's, the records are created
 automatically and certificates issue within a minute or two.
 
-There is no API for this: the Vercel connector exposes domain *purchase* tools
+There is no API for this: the Vercel connector exposes domain _purchase_ tools
 only (`buy_domain`, `check_domain_availability_and_price`, `get_domain_order`),
 with nothing to attach an existing domain to a project.
 
@@ -171,51 +171,93 @@ design, so the production build is self-configuring.
 Preview/dev only needs variables once `dev.cleffy.io` points at a different
 Supabase backend (§5). This was verified empirically rather than assumed: a real
 environment variable **does** beat `.env.production` under Vite 8, so setting
-these for the *Preview* environment is enough to repoint the dev deploy.
+these for the _Preview_ environment is enough to repoint the dev deploy.
 
 ```
 VITE_SUPABASE_URL       = https://<dev-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY  = sb_publishable_…
 ```
 
-## 5. A separate dev Supabase backend
+## 5. A separate dev Supabase backend — done
 
-Not created — the API refuses:
+`dev.cleffy.io` now runs on its own Supabase project: the persistent branch
+**`dev`** (`qdbnlrgylelelvwbkvnm`), a child of `jibgwgosihadbjgxdsfe`. Dev
+testing no longer writes production rows.
 
-> maxharris1 (2 project limit) … reached their maximum limits for the number of
-> active free projects
+|                    |                                                         |
+| ------------------ | ------------------------------------------------------- |
+| Branch project ref | `qdbnlrgylelelvwbkvnm`                                  |
+| URL                | `https://qdbnlrgylelelvwbkvnm.supabase.co`              |
+| Git branch         | `dev`                                                   |
+| Persistent         | yes — not auto-paused, not deleted when a PR closes     |
+| Data               | none cloned from production; **not seeded** (see below) |
+| Cost               | $0.01344/hr while running (~$9.80/mo), $0 while paused  |
 
-The `aut0` org is on the **team** plan, which is how it affords persistent
-`development` and `staging` branches. Cleffy's org (**Sheet Music Scraper**,
-`hgiyoueenqqdfhqgilsp`) is on **free**, where branching is unavailable and the
-second free project is one over the per-user cap.
+Branch compute is **not covered by the Spend Cap**, so a branch left running
+bills silently. Pausing is a deliberate act — see the release loop below.
 
-Three ways forward, cheapest first:
+### Configuration lives in `config.toml`
 
-1. **Pause or delete an unused free project** — frees the slot at $0. A second
-   free project can then be created and migrated in minutes.
-2. **Upgrade Cleffy's org to Pro** — $25/mo, then persistent branches at
-   ~$9.81/mo each, matching the `aut0` layout exactly.
-3. **Point `dev.cleffy.io` at production** — $0 and instant, but dev testing
-   writes production rows. Fine before launch, not after.
+The branch deploy applies `config.toml` to the branch, so the `[remotes.dev]`
+block at the bottom of that file is load-bearing: without it the branch would
+inherit `auth.site_url = http://localhost:5173` and every auth redirect on
+dev.cleffy.io would land on localhost.
 
-Until one is chosen, `dev.cleffy.io` shares the production backend (case 3 by
-default, since no Preview env vars are set).
+Seeding is **off** for the branch. `seed.sql` creates `teacher@cleffy.local`
+and `student@cleffy.local` with the password `cleffy-local-test`, which is
+written down in `.cursor/README.md` — fine on a local stack, not on an
+internet-facing host. Sign up a real account on dev.cleffy.io instead.
+
+Because the branch is unseeded, the `scores` bucket can no longer come from
+`seed.sql`; it is declared in `[storage.buckets.scores]` in `config.toml`, which
+creates it on any environment built from that config.
+
+### The release-test loop
+
+The branch is tied to git `dev`, so a push to `dev` triggers a branch deploy.
+That deploy's health step waits for branch services, so **a push while the
+branch is paused will fail** — cosmetic, but expect it. Unpausing does not
+retroactively apply migrations that landed while paused; a deploy has to run
+after it is up.
+
+```bash
+supabase branches unpause dev --project-ref jibgwgosihadbjgxdsfe   # ~1 min
+git push origin dev            # or re-run the deploy from the dashboard
+# ...test dev.cleffy.io...
+supabase branches pause dev --project-ref jibgwgosihadbjgxdsfe
+```
+
+### Edge Function secrets do not inherit
+
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`, `ANTHROPIC_API_KEY`
+and the `OMR_SERVICE_*` pair are set on production and are **not** copied to the
+branch. Until they are set, billing / AI / OMR paths on dev.cleffy.io fail:
+
+```bash
+supabase secrets set --project-ref qdbnlrgylelelvwbkvnm STRIPE_SECRET_KEY=... APP_URL=https://dev.cleffy.io
+```
+
+### GitHub integration
+
+Connected to `maxharris1/sheet_music_scribbler`, working directory `.`, with
+**automatic branching off** (otherwise every feature branch spawns its own
+billed Supabase branch) and **deploy-to-production off** (see the divergence
+section — auto-deploying `main` could re-apply work that is already live).
 
 ## 6. Smoke test — passed 2026-08-27
 
 Run end to end against the live stack, not simulated:
 
-| Step | Result |
-| --- | --- |
-| Sign up via the public auth API | user created, session returned |
-| `stripe-checkout` with a bogus price | `400 unknown_price` — the allowlist holds |
-| `stripe-checkout` with Teacher monthly | Checkout session created; Stripe customer carries `metadata.user_id` |
-| `stripe-portal` | returns a portal session URL |
-| Subscription created in Stripe | webhook wrote `tier=teacher`, `status=trialing`, correct `price_id` and period end |
-| Subscription cancelled | webhook wrote `tier=free`, `status=canceled` |
-| `get_entitlements` over PostgREST with the user's JWT | `tier=free` with the free ceilings |
-| `stripe_events` | both events recorded — idempotency table working |
+| Step                                                  | Result                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Sign up via the public auth API                       | user created, session returned                                                     |
+| `stripe-checkout` with a bogus price                  | `400 unknown_price` — the allowlist holds                                          |
+| `stripe-checkout` with Teacher monthly                | Checkout session created; Stripe customer carries `metadata.user_id`               |
+| `stripe-portal`                                       | returns a portal session URL                                                       |
+| Subscription created in Stripe                        | webhook wrote `tier=teacher`, `status=trialing`, correct `price_id` and period end |
+| Subscription cancelled                                | webhook wrote `tier=free`, `status=canceled`                                       |
+| `get_entitlements` over PostgREST with the user's JWT | `tier=free` with the free ceilings                                                 |
+| `stripe_events`                                       | both events recorded — idempotency table working                                   |
 
 The tier mapping is the load-bearing result: **no `STRIPE_PRICE_*` Edge secret is
 set**, so `teacher` was resolved purely from `PUBLISHED_PRICES` in
@@ -247,13 +289,44 @@ products.
 
 ## Known divergence — read before touching migrations
 
-The production database is **not reproducible from any single git branch**:
+Verified 2026-08-27 against the live migration history, superseding the earlier
+(and inaccurate) note here. `main` and `dev` are identical and carry the same 22
+migrations; the drift is between **the repo and production**, not between branches.
 
-- `main` carries 11 migrations, and the billing/roster line only.
-- `dev` carries 19, including the OMR/score-analysis line, under **different
-  version timestamps** than the ones actually applied.
-- Production has 25 applied, of which **16 exist in no branch at this version**.
+Production has 25 applied migrations. Against the repo's 22:
+
+- **4 exist only in production**, at versions in no branch:
+  `omr_job_rpcs`, `omr_enqueue_reap_first`,
+  `backfill_missing_migration_statements`,
+  `drop_duplicate_out_of_order_migration_records`.
+- **8 share a name but were applied under a different timestamp** than the file
+  in the repo: `annotation_snapshots`, `document_favorites`,
+  `score_cache_timings`, `omr_jobs`, `omr_cron`, `score_analyses_broadcast`,
+  `omr_enqueue_and_fail_policy`, `omr_enqueue_persist_backlog_full`.
+- **1 exists only in the repo**: `core_table_grants` (see below).
 
 So `supabase db push` from either branch would try to re-apply work that is
-already live. Reconciling this is its own task — do not run `db push` against
-production until it is done.
+already live. **Do not run `db push` against production until this is
+reconciled**, and leave the GitHub integration's "deploy to production" off.
+
+This does not affect the `dev` branch, which builds from the repo's migrations
+onto an empty database and therefore reflects _what the repo says_. That is the
+right target for testing a release — but it is not a faithful copy of
+production, so it will not catch a bug that depends on production's extra four.
+
+### Why `core_table_grants` exists
+
+The repo's migrations did not produce a working database. On the current
+Postgres image the default ACL depends on who creates the object: tables created
+by `supabase_admin` grant `arwdDxtm` to anon/authenticated, tables created by
+`postgres` grant only `Dxtm`. Migrations run as `postgres`, so every table
+`schema.sql` created had no SELECT/INSERT/UPDATE/DELETE and PostgREST answered
+`42501 permission denied for table documents` before RLS was ever consulted.
+The later migrations (`score_analyses`, `billing`, `roster`) grant explicitly,
+which is why only the original core tables were affected.
+
+`20260827140000_core_table_grants.sql` grants each table exactly the commands
+its RLS policies define. Production predates the image change and already works,
+so this is expected to be a no-op there — grants are idempotent — but it has not
+been applied to production and should be included whenever the reconciliation
+above happens.

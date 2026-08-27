@@ -337,7 +337,7 @@ supabase functions serve stripe-webhook --no-verify-jwt
 
 # Terminal 2 — forward live events. This prints the whsec_… signing secret to
 # use as STRIPE_WEBHOOK_SECRET locally; it differs from the dashboard one.
-stripe listen --forward-to http://127.0.0.1:54321/functions/v1/stripe-webhook
+stripe listen --forward-to http://127.0.0.1:54421/functions/v1/stripe-webhook
 
 # Terminal 3 — fire events at it.
 stripe trigger checkout.session.completed
