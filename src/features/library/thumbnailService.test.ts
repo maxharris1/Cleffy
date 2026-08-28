@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 import type { CachedPdf, CachedThumbnail } from '@/sync/db';
 
 // fake-indexeddb's structured clone strips jsdom Blob methods, so Dexie is
@@ -24,10 +25,10 @@ vi.mock('@/sync/db', () => ({
 }));
 
 const renderFirstPagePng = vi.hoisted(() => vi.fn());
-vi.mock('@/features/library/thumbnailRender', () => ({
-    THUMB_MAX_SIDE: 256,
-    renderFirstPagePng,
-}));
+// The service reads THUMB_MAX_SIDE from thumbnailSize (the real module, kept
+// separate precisely so importing it cannot drag pdf.js into the bundle); only
+// the renderer itself is mocked away here.
+vi.mock('@/features/library/thumbnailRender', () => ({ renderFirstPagePng }));
 
 const pngBlob = () => new Blob(['png-bytes'], { type: 'image/png' });
 
@@ -41,8 +42,16 @@ const cachePdf = (docId: string, contentRev: number | undefined) => {
     });
 };
 
-const cacheThumb = (docId: string, contentRev: number, blob = pngBlob()) => {
-    thumbnails.set(docId, { docId, contentRev, blob, width: 181, height: 256, createdAt: '2026-08-01T00:00:00Z' });
+const cacheThumb = (docId: string, contentRev: number, blob = pngBlob(), maxSide = THUMB_MAX_SIDE) => {
+    thumbnails.set(docId, {
+        docId,
+        contentRev,
+        maxSide,
+        blob,
+        width: 181,
+        height: 256,
+        createdAt: '2026-08-01T00:00:00Z',
+    });
 };
 
 /**
@@ -80,7 +89,12 @@ describe('getThumbnail', () => {
         expect(blob).toBeInstanceOf(Blob);
         expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
         // The revision stored is the one the BYTES carry, not the one asked for.
-        expect(thumbnails.get('d1')).toMatchObject({ contentRev: 3, width: 181, height: 256 });
+        expect(thumbnails.get('d1')).toMatchObject({
+            contentRev: 3,
+            maxSide: THUMB_MAX_SIDE,
+            width: 181,
+            height: 256,
+        });
     });
 
     it('never fetches: no cached bytes means no thumbnail and no render', async () => {
@@ -107,6 +121,37 @@ describe('getThumbnail', () => {
 
         expect(await getThumbnail('d1', 1)).toBe(stale);
         expect(renderFirstPagePng).not.toHaveBeenCalled();
+    });
+
+    it('re-renders a thumbnail cached at the old, smaller size', async () => {
+        // Covers are ~208px wide, so a 256px render is soft on a 2x display.
+        cacheThumb('d1', 2, pngBlob(), 256);
+        cachePdf('d1', 2);
+        const { getThumbnail } = await loadService();
+
+        await getThumbnail('d1', 2);
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(thumbnails.get('d1')?.maxSide).toBe(THUMB_MAX_SIDE);
+        expect(THUMB_MAX_SIDE).toBe(512);
+    });
+
+    it('re-renders a row written before maxSide existed, which undefined comparisons would keep', async () => {
+        const legacy = pngBlob();
+        // Deliberately shaped like a pre-shelf row: no maxSide at all.
+        thumbnails.set('d1', {
+            docId: 'd1',
+            contentRev: 2,
+            blob: legacy,
+            width: 181,
+            height: 256,
+            createdAt: '2026-08-01T00:00:00Z',
+        } as CachedThumbnail);
+        cachePdf('d1', 2);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 2)).not.toBe(legacy);
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(thumbnails.get('d1')?.maxSide).toBe(THUMB_MAX_SIDE);
     });
 
     it('collapses concurrent requests for one score into a single render', async () => {

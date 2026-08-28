@@ -52,6 +52,7 @@ describe('ScribblerDb v6 (thumbnails)', () => {
         await db.thumbnails.put({
             docId: 'doc-1',
             contentRev: 2,
+            maxSide: 512,
             blob: new Blob(['png'], { type: 'image/png' }),
             width: 181,
             height: 256,

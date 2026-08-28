@@ -2,9 +2,9 @@ import { getDocument } from 'pdfjs-dist';
 
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
+import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 
-/** Longest side of a library thumbnail, in device-independent pixels. */
-export const THUMB_MAX_SIDE = 256;
+export { THUMB_MAX_SIDE };
 
 /**
  * Render page 1 of a PDF as a small PNG for the library list.

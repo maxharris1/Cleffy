@@ -236,6 +236,28 @@ body {
     animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
 }
 
+/* Shelf cards: the same entrance as list rows, staggered by an inline delay. */
+.library-card {
+    animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+/* The cover lifts off the paper on hover. This lives here rather than in a
+   group-hover utility so the reduced-motion block at the end of this file can
+   out-specify it — a utility and its motion-reduce variant have equal
+   specificity, and which one wins would come down to Tailwind's output order. */
+.library-card-cover {
+    transition:
+        transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.library-card:hover .library-card-cover {
+    transform: translateY(-2px);
+    box-shadow:
+        0 4px 6px -1px rgb(28 25 23 / 0.1),
+        0 2px 4px -2px rgb(28 25 23 / 0.08);
+}
+
 /* Horizontal chip strips on phones: scroll instead of wrapping, no visible scrollbar. */
 .no-scrollbar {
     scrollbar-width: none;
@@ -352,5 +374,18 @@ body {
         transition: none;
         transform: none;
         box-shadow: none;
+    }
+
+    /* Shelf: no entrance stagger, and the cover stays flat on hover. The
+       :hover selector is repeated so this matches the lift's specificity and
+       wins on source order; the shadow still changes, which is not motion. */
+    .library-card {
+        animation: none;
+    }
+
+    .library-card-cover,
+    .library-card:hover .library-card-cover {
+        transition: none;
+        transform: none;
     }
 }
