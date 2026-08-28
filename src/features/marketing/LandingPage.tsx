@@ -4,7 +4,7 @@ import { RequireGuest } from '@/features/auth/AuthGates';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
 import { isSupabaseConfigured } from '@/lib/supabase';
-import { buttonClassName } from '@/ui/classNames';
+import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 const STEPS = [
     {
@@ -54,9 +54,17 @@ const CloudLanding = () => (
         <div className="mx-auto w-full max-w-6xl px-6 lg:px-10">
             <nav aria-label="Main" className="flex items-center justify-between pt-6">
                 <Wordmark />
-                <Link to="/login" className={buttonClassName('secondary', 'sm')}>
-                    Log in
-                </Link>
+                <div className="flex items-center gap-4">
+                    {/* Students arrive here too, sent by a teacher, and their door
+                        is not the one marked "Log in" — it takes a username, not
+                        an account. Quiet, because most visitors are teachers. */}
+                    <Link to="/student" className={linkClassName}>
+                        Student sign in
+                    </Link>
+                    <Link to="/login" className={buttonClassName('secondary', 'sm')}>
+                        Log in
+                    </Link>
+                </div>
             </nav>
 
             <section className="landing-hero flex flex-col gap-12 py-14 lg:grid lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] lg:items-center lg:gap-16 lg:py-20">
