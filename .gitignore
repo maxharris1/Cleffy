@@ -20,6 +20,8 @@ supabase/.branches
 # editor / os
 .DS_Store
 *.local
+# Claude Code writes per-user permission grants here; *.local does not catch it.
+.claude/settings.local.json
 
 # E2E artifacts
 live-*.png
