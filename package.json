@@ -5,7 +5,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "dev:local": "vite --host --port 5173",
+        "dev:local": "vite --host --port 5173 --strictPort",
         "local:up": "bash scripts/local-up.sh",
         "local:down": "bash scripts/local-down.sh",
         "local:status": "bash .cursor/health-check.sh",
