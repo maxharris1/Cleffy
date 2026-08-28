@@ -290,8 +290,11 @@ export const AccountPage = () => {
     const joined = formatJoined(session.user.created_at);
     const nothingCached = storage !== null && storage.scoreCount === 0 && storage.bytes === 0;
 
+    // Left-aligned, not centred: the wordmark, the nav and every other page's
+    // heading start at the container's left edge, and a centred column under a
+    // left-aligned bar reads as a different site.
     return (
-        <div className="mx-auto w-full max-w-3xl">
+        <div className="w-full max-w-3xl">
             <header>
                 <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Account</h1>
                 <p className="mt-1 text-sm text-stone-500">Your profile, plan, and what this device is holding.</p>
