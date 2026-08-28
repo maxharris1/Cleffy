@@ -56,8 +56,13 @@ So the account is chosen per request, from the **Origin** header
 | -------------------------------------------- | ------------------------------ |
 | `https://cleffy.io`, `https://www.cleffy.io` | live                           |
 | `https://dev.cleffy.io`                      | sandbox                        |
-| any `http://localhost:*` / `127.0.0.1`       | sandbox                        |
+| any plain-`http://` origin                   | sandbox                        |
 | anything else                                | refused — `400 unknown_origin` |
+
+Development is matched by scheme rather than hostname because `dev:local` binds
+every interface for iPad testing, so its origin is as often a LAN address as
+localhost. Both storefronts are https and Vercel serves them no other way, so
+nothing reachable over http can be the live shop.
 
 Nothing in a request body influences that choice, so no crafted payload moves a
 caller between accounts, and an origin we do not publish from is refused rather

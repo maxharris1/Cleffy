@@ -72,11 +72,18 @@ export const originsFor = (mode: StripeMode, env: EnvLookup): string[] => {
     return entries.map(normalizeOrigin).filter((entry): entry is string => entry !== null);
 };
 
-/** Any local dev server is sandbox, whatever port Vite happened to pick. */
-export const isLocalhost = (origin: string): boolean => {
+/**
+ * Any plain-http origin is a development one, and therefore sandbox.
+ *
+ * Both storefronts are https and Vercel will not serve them otherwise, so
+ * nothing reachable over http can be the live shop — which makes the scheme a
+ * sounder test than a hostname list. It has to be: `npm run dev:local` binds
+ * every interface so an iPad can reach it, so the dev origin is as often a LAN
+ * address as it is localhost, and neither is enumerable in advance.
+ */
+export const isDevelopmentOrigin = (origin: string): boolean => {
     try {
-        const { hostname, protocol } = new URL(origin);
-        return protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]');
+        return new URL(origin).protocol === 'http:';
     } catch {
         return false;
     }
@@ -97,7 +104,7 @@ export const modeForOrigin = (origin: string | null, env: EnvLookup): StripeMode
     if (originsFor('live', env).includes(normalized)) {
         return 'live';
     }
-    if (originsFor('test', env).includes(normalized) || isLocalhost(normalized)) {
+    if (originsFor('test', env).includes(normalized) || isDevelopmentOrigin(normalized)) {
         return 'test';
     }
     return null;

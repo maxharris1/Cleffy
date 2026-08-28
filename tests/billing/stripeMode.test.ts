@@ -42,6 +42,10 @@ describe('modeForOrigin', () => {
         ['http://localhost:5173', 'test'],
         ['http://localhost:4173', 'test'],
         ['http://127.0.0.1:5199', 'test'],
+        // dev:local binds every interface so an iPad can reach it; that LAN
+        // origin has to buy from the sandbox rather than be refused.
+        ['http://192.168.1.42:5173', 'test'],
+        ['http://cleffys-mbp.local:5173', 'test'],
     ])('routes %s to %s', (origin, expected) => {
         expect(modeForOrigin(origin, configured)).toBe(expected);
     });
@@ -57,6 +61,14 @@ describe('modeForOrigin', () => {
         [''],
     ])('refuses to place %s', (origin) => {
         expect(modeForOrigin(origin, configured)).toBeNull();
+    });
+
+    // Development is recognised by scheme, so a lookalike must not get there by
+    // dressing itself up as one — https is the only way into live, and the live
+    // list is exact.
+    it('never lets an https lookalike inherit the development rule', () => {
+        expect(modeForOrigin('https://cleffy.io.evil.example', configured)).toBeNull();
+        expect(modeForOrigin('http://cleffy.io.evil.example', configured)).toBe('test');
     });
 
     it('refuses a request that sent no Origin at all', () => {
