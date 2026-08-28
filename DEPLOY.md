@@ -1,8 +1,8 @@
 # Deploying Cleffy — cleffy.io (main) and dev.cleffy.io (dev)
 
 Target end state: `main` builds to **cleffy.io**, `dev` builds to
-**dev.cleffy.io**, both served by one Vercel project, with Stripe running in
-sandbox (test) mode until the live flip.
+**dev.cleffy.io**, both served by one Vercel project, with **cleffy.io selling
+against the live Stripe account and dev.cleffy.io against the sandbox**.
 
 Everything in this file that could be automated **has been**. What remains are
 the steps that need a human because no API exposes them — each one says why.
@@ -17,14 +17,115 @@ the steps that need a human because no API exposes them — each one says why.
 | Edge Functions (checkout, portal, webhook, student ×2, metered imslp) | ✅ deployed, ACTIVE |
 | Stripe functions redeployed at v2 with the self-configuring catalogue | ✅ verified live |
 | Stripe sandbox catalogue (3 products, 7 prices) | ✅ created |
-| Stripe webhook endpoint → `stripe-webhook` | ✅ enabled, 5 events |
-| Price ids: client ↔ Edge Function | ✅ committed, drift-guarded by tests |
-| Stripe Customer portal configuration | ✅ created, `is_default: true` |
+| Stripe **live** catalogue (3 products, 7 prices) | ✅ created |
+| Stripe webhook endpoint → `stripe-webhook` (sandbox) | ✅ enabled, 5 events |
+| Stripe webhook endpoint → `stripe-webhook` (live) | ✅ enabled, 5 events |
+| Price ids: client ↔ Edge Function, both modes | ✅ committed, drift-guarded by tests |
+| Stripe Customer portal configuration (sandbox) | ✅ created, `is_default: true` |
+| Stripe Customer portal configuration (live) | ⛔ **one dashboard save — see below** |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set |
+| Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` | ✅ set |
+| Edge secret `STRIPE_SECRET_KEY_LIVE` | ⛔ **no API mints one — see below** |
 | Vercel project, linked to `main`, auto-deploying | ✅ created and verified live |
 | `dev` branch deploy config (SPA rewrite + Supabase env) | ✅ pushed, preview verified live |
 | cleffy.io / dev.cleffy.io attached, certs issued | ✅ live |
 | Separate dev Supabase backend | ⛔ **§5 — blocked on the free-project limit** |
+
+---
+
+## 0. The live flip — cleffy.io on the real Stripe account
+
+cleffy.io transacts against Stripe account **Cleffy** (`acct_1U35FW4eZ6RX0W0g`,
+live). dev.cleffy.io and localhost stay on **Cleffy sandbox**
+(`acct_1U35Fc9EqxUjgZtn`).
+
+One Supabase project serves both deploys, so a single `STRIPE_SECRET_KEY` would
+put both storefronts on the same Stripe account — which is why buying on
+cleffy.io reached the sandbox. The Edge Functions now choose the account per
+request from the **Origin** header (`supabase/functions/_shared/stripeMode.ts`).
+Nothing in a request body influences that choice, and an origin that is not one
+of ours is refused rather than guessed.
+
+The webhook has no Origin to sort by — both accounts POST to this project's one
+URL — so it verifies the signature against each account's secret in turn, and
+whichever secret verifies *is* the account. Mode is a result of authentication
+there, never an input to it.
+
+### What is left, in this order
+
+These three land together. Between step 2 and step 3 the currently-deployed
+webhook cannot link a new customer (its `onConflict: 'user_id'` no longer matches
+the composite key), so do not stop half way.
+
+**1. Set the live secret key.** No API mints one — copy it from the live-mode
+dashboard → Developers → API keys.
+
+```bash
+npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe \
+  STRIPE_SECRET_KEY_LIVE='sk_live_…'
+```
+
+`STRIPE_WEBHOOK_SECRET_LIVE` is already set, from the live endpoint's own
+signing secret. `STRIPE_SECRET_KEY` keeps its sandbox value and from now on
+serves dev only — leave it as it is.
+
+A key pasted into the wrong slot is rejected rather than used: the mode infix
+(`sk_live_` / `sk_test_`) has to match the variable it is in.
+
+**2. Apply `supabase/migrations/20260828180000_billing_stripe_mode.sql`** through
+the SQL editor or the Management API — *not* `db push`, for the reason in "Known
+divergence" at the foot of this file.
+
+It tags `billing_customers` and `subscriptions` with the account that created
+them. Both are single-account assumptions that break the moment the two deploys
+differ: a Stripe customer id belongs to exactly one account, so the sandbox
+`cus_…` a teacher picked up testing on dev would make their live checkout fail
+with "No such customer".
+
+It also makes **only live subscriptions entitle**. auth users are shared between
+the two deploys, so without that filter anyone could subscribe on dev with
+Stripe's published test card and walk onto cleffy.io with a paid plan. The cost
+is that dev can no longer *grant* entitlements — it still exercises checkout, the
+webhook and the `subscriptions` row. Splitting dev onto its own Supabase project
+(§5) removes the trade-off; `public.entitling_billing_modes()` is then the single
+line to widen.
+
+**3. Deploy the functions, then merge `dev` → `main`.**
+
+```bash
+npx supabase functions deploy stripe-checkout stripe-portal stripe-webhook \
+  --project-ref jibgwgosihadbjgxdsfe
+```
+
+The frontend can follow at its own pace: the server re-prices whatever the
+client names into its own mode, so a bundle cached from before the flip still
+buys the right plan on the right account.
+
+### Then, in the **live** dashboard (one click, once)
+
+Settings → Billing → **Customer portal** → Save. `stripe-portal` 500s for every
+live caller until a default configuration exists, exactly as it did in the
+sandbox (§1). There is still no API for it — `POST
+/v1/billing_portal/configurations` is not exposed.
+
+### Verifying
+
+```bash
+# Live mode: cleffy.io must reach the live account.
+curl -sS -X POST https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/stripe-checkout \
+  -H 'Origin: https://cleffy.io' -H "Authorization: Bearer $JWT" \
+  -H 'Content-Type: application/json' -d '{"priceId":"price_1U9V7M4eZ6RX0W0glzzjnokr"}'
+# -> a checkout.stripe.com URL with no test-mode banner
+
+# An origin we do not publish from buys nothing at all.
+curl -sS -X POST … -H 'Origin: https://example.com' …
+# -> 400 {"error":"Unrecognised origin","code":"unknown_origin"}
+```
+
+The user who bought Personal in the sandbox on 2026-08-28
+(`sub_1U9SxH9EqxUjgZtnJvCo0viW`) keeps that row, now tagged `mode='test'`. It
+stops entitling at step 2 and should be re-bought on the live account; cancel the
+sandbox one so it does not keep renewing in test mode.
 
 ---
 
@@ -38,6 +139,8 @@ empty.
 1. Open the **test-mode** dashboard → Settings → Billing → **Customer portal**.
 2. Leave the defaults as they are; press **Save**.
 
+Done for the sandbox. The **live** dashboard needs the same single save — see §0.
+
 That single save creates the default configuration. Verify with:
 
 ```
@@ -50,22 +153,37 @@ itself is healthy, which you can confirm with an `OPTIONS` preflight returning
 
 ## 2. Edge Function secrets
 
-Only three values, and none of them can be committed:
+Five values, and none of them can be committed:
 
 ```bash
 npx supabase secrets set \
   --project-ref jibgwgosihadbjgxdsfe \
   STRIPE_SECRET_KEY='sk_test_…' \
   STRIPE_WEBHOOK_SECRET='whsec_…' \
+  STRIPE_SECRET_KEY_LIVE='sk_live_…' \
+  STRIPE_WEBHOOK_SECRET_LIVE='whsec_…' \
   APP_URL='https://cleffy.io'
 ```
 
-- `STRIPE_SECRET_KEY` — sandbox account **Cleffy sandbox**, test-mode secret key.
-- `STRIPE_WEBHOOK_SECRET` — the signing secret of endpoint
-  `we_1U8njJ9EqxUjgZtnfBK3y0XH`, shown once when the endpoint is created and
-  re-revealable in the dashboard.
-- `APP_URL` — where Checkout and the Portal return to. Without it the functions
-  fall back to the request `Origin`, which is fine locally and wrong in prod.
+Each mode reads its own pair, most specific name first:
+
+| Mode | Secret key | Webhook secret | Stripe account |
+| --- | --- | --- | --- |
+| live | `STRIPE_SECRET_KEY_LIVE` | `STRIPE_WEBHOOK_SECRET_LIVE` | Cleffy (`acct_1U35FW4eZ6RX0W0g`) |
+| test | `STRIPE_SECRET_KEY_TEST`, else `STRIPE_SECRET_KEY` | `STRIPE_WEBHOOK_SECRET_TEST`, else `STRIPE_WEBHOOK_SECRET` | Cleffy sandbox (`acct_1U35Fc9EqxUjgZtn`) |
+
+- The pre-split names fall through to test mode on purpose: they held the sandbox
+  key before there were two accounts, so **adding `STRIPE_SECRET_KEY_LIVE` is by
+  itself the whole live flip** and dev keeps the key it already had.
+- A key is rejected if its own mode infix (`sk_live_` / `sk_test_`, `rk_` too)
+  contradicts the variable holding it. That one paste is what charges a real card
+  from a test button, so it fails closed instead.
+- Webhook secrets: `we_1U8njJ9EqxUjgZtnfBK3y0XH` is the sandbox endpoint,
+  `we_1U9V8T4eZ6RX0W0glk3BZIOi` the live one. Both POST to the same URL — the
+  receiver tries each secret and the one that verifies names the account.
+- `APP_URL` — where Checkout and the Portal return to when a caller sent no
+  `Origin` at all. A recognised `Origin` now wins over it, so a dev.cleffy.io
+  tester is returned to dev.cleffy.io instead of being handed to production.
 
 To confirm the secrets landed, POST an unsigned body to the webhook:
 
@@ -80,17 +198,18 @@ unset — the state as of this writing. Once set, the same call returns
 success signal: the function booted, read the secret, and rejected an unsigned
 request exactly as it should.
 
-**The seven `STRIPE_PRICE_*` variables are no longer needed.** They are
-committed in `supabase/functions/_shared/stripe.ts` as `PUBLISHED_PRICES`,
-because a price id is configuration rather than a secret — the same seven values
-already ship in `.env.production` and therefore in every browser bundle.
-`tests/billing/priceCatalogInSync.test.ts` fails the build if the two copies
-ever disagree.
+**No `STRIPE_PRICE_*` variable is needed.** Both catalogues are committed in
+`supabase/functions/_shared/stripeMode.ts` as `PUBLISHED_PRICES`, because a price
+id is configuration rather than a secret — the same fourteen values already ship
+in `.env.production` and therefore in every browser bundle.
+`tests/billing/priceCatalogInSync.test.ts` fails the build if the copies ever
+disagree, or if an id ever appears in both catalogues at once.
 
-Setting any `STRIPE_PRICE_*` still overrides the catalogue, but
-**all-or-nothing**: one override replaces all seven. That is deliberate — a
-half-finished live-mode flip would otherwise serve live and sandbox ids from the
-same catalogue, which looks fine until a real card meets a test price.
+Overrides are per mode — `STRIPE_PRICE_*` for test, `STRIPE_PRICE_LIVE_*` for
+live — and **all-or-nothing within a mode**: one override replaces that whole
+catalogue. That is deliberate. A per-key merge would let a half-finished
+catalogue change serve two vintages of price from one account, which looks fine
+until someone is billed the wrong amount.
 
 ## 3. Vercel project
 

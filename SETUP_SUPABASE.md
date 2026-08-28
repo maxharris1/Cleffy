@@ -271,12 +271,20 @@ Those seven `STRIPE_PRICE_*` names are exactly the seven `priceCatalog()` reads
 in `supabase/functions/_shared/stripe.ts`. A name that is unset is simply a price
 that does not exist: it maps to no tier, and checkout refuses it.
 
-| Secret                  | Purpose                                                                    |
-| ----------------------- | -------------------------------------------------------------------------- |
-| `STRIPE_SECRET_KEY`     | Creating Checkout/Portal sessions and reading subscriptions                |
-| `STRIPE_WEBHOOK_SECRET` | Verifying the webhook signature — its own value, not the API key           |
-| `STRIPE_PRICE_*`        | The price→tier map. A price id absent from these is refused at checkout    |
-| `APP_URL`               | Where Checkout and the Portal return to (falls back to the request Origin) |
+| Secret                       | Purpose                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY`          | Sandbox: creating Checkout/Portal sessions and reading subscriptions        |
+| `STRIPE_WEBHOOK_SECRET`      | Sandbox: verifying the webhook signature — its own value, not the API key   |
+| `STRIPE_SECRET_KEY_LIVE`     | The same, for the live account. Setting it is what puts cleffy.io on live   |
+| `STRIPE_WEBHOOK_SECRET_LIVE` | The live endpoint's signing secret                                          |
+| `STRIPE_PRICE_*`             | The price→tier map. A price id absent from these is refused at checkout     |
+| `APP_URL`                    | Return URL when a caller sent no Origin (a known Origin wins over it)       |
+
+cleffy.io and dev.cleffy.io share this one project, so the Edge Functions pick
+the account per request from the `Origin` header — live for cleffy.io, sandbox
+for dev.cleffy.io and localhost. `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`
+keep their pre-split meaning as the **sandbox** pair. See
+`supabase/functions/_shared/stripeMode.ts` and DEPLOY.md §0.
 
 `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are provided
 by the platform — you do not set those.

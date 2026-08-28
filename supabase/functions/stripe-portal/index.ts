@@ -1,7 +1,7 @@
 import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
-import { appOrigin, stripeClient } from '../_shared/stripe.ts';
+import { appOrigin, modeForRequest, stripeClient } from '../_shared/stripe.ts';
 
 /**
  * Opens a Stripe Customer Portal session. Plan changes, card updates and
@@ -36,7 +36,15 @@ Deno.serve(async (req) => {
         return student;
     }
 
-    const stripe = stripeClient();
+    // The portal opens against the account the caller's site sells on, so a
+    // dev.cleffy.io tester manages their sandbox subscription and never sees a
+    // real customer's billing.
+    const mode = modeForRequest(req);
+    if (!mode) {
+        return jsonResponse({ error: 'Unrecognised origin', code: 'unknown_origin' }, 400);
+    }
+
+    const stripe = stripeClient(mode);
     const admin = serviceClient();
     if (!stripe || !admin) {
         return jsonResponse({ error: 'Billing is not configured' }, 500);
@@ -47,6 +55,7 @@ Deno.serve(async (req) => {
             .from('billing_customers')
             .select('stripe_customer_id')
             .eq('user_id', auth.caller.userId)
+            .eq('mode', mode)
             .maybeSingle();
 
         if (!customer?.stripe_customer_id) {

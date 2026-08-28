@@ -75,6 +75,8 @@ export interface StripeEventLike {
     id: string;
     type: string;
     data: { object: unknown };
+    /** Stripe stamps the sending account's mode on every event. */
+    livemode?: boolean;
 }
 
 export interface WebhookStore {

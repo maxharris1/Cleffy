@@ -1,7 +1,7 @@
 import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
-import { appOrigin, isKnownPrice, stripeClient } from '../_shared/stripe.ts';
+import { appOrigin, modeForRequest, resolvePrice, stripeClient } from '../_shared/stripe.ts';
 
 /**
  * Creates a Stripe Checkout session for a subscription price and maps
@@ -45,23 +45,40 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }
 
-    const priceId = typeof body.priceId === 'string' ? body.priceId.trim() : '';
-    // Only prices we published are checkout-able; a client-supplied id is never trusted.
-    if (!priceId || !isKnownPrice(priceId)) {
+    // Which Stripe account this buyer belongs to is decided by where they are
+    // browsing, never by anything they send: cleffy.io is the live account,
+    // dev.cleffy.io the sandbox. An origin we do not publish from gets no
+    // checkout at all rather than a guessed account.
+    const mode = modeForRequest(req);
+    if (!mode) {
+        return jsonResponse({ error: 'Unrecognised origin', code: 'unknown_origin' }, 400);
+    }
+
+    const requested = typeof body.priceId === 'string' ? body.priceId.trim() : '';
+    // Only prices we published are checkout-able; a client-supplied id is never
+    // trusted. The id names the plan, and this re-prices that plan in the
+    // caller's own mode, so a bundle cached from before the live flip still
+    // checks out against the right account.
+    const priceId = requested ? resolvePrice(requested, mode) : null;
+    if (!priceId) {
         return jsonResponse({ error: 'Unknown price', code: 'unknown_price' }, 400);
     }
 
-    const stripe = stripeClient();
+    const stripe = stripeClient(mode);
     const admin = serviceClient();
     if (!stripe || !admin) {
         return jsonResponse({ error: 'Billing is not configured' }, 500);
     }
 
     try {
+        // Scoped to the mode: a customer id belongs to one Stripe account, so the
+        // sandbox `cus_…` a teacher picked up testing on dev is not a customer
+        // the live account has ever heard of.
         const { data: existing } = await admin
             .from('billing_customers')
             .select('stripe_customer_id')
             .eq('user_id', auth.caller.userId)
+            .eq('mode', mode)
             .maybeSingle();
 
         let customerId = existing?.stripe_customer_id ?? null;
@@ -74,7 +91,10 @@ Deno.serve(async (req) => {
             customerId = customer.id;
             await admin
                 .from('billing_customers')
-                .upsert({ user_id: auth.caller.userId, stripe_customer_id: customerId });
+                .upsert(
+                    { user_id: auth.caller.userId, mode, stripe_customer_id: customerId },
+                    { onConflict: 'user_id,mode' },
+                );
         }
 
         const origin = appOrigin(req);

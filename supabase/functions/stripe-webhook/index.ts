@@ -1,14 +1,21 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
-import { priceTiers, stripeClient } from '../_shared/stripe.ts';
+import { MODES, priceTiers, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
 import { handleStripeEvent, type StripeEventLike, type WebhookStore } from '../_shared/stripeEvents.ts';
-import { verifyStripeSignature } from '../_shared/stripeSignature.ts';
+import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeSignature.ts';
 
 /**
  * Stripe webhook receiver. Deployed with `verify_jwt = false` (see
  * supabase/config.toml) because Stripe has no Supabase JWT to present — the
  * request is authenticated by its signature instead, against this endpoint's
- * own STRIPE_WEBHOOK_SECRET.
+ * own signing secret.
+ *
+ * Both Stripe accounts post here, to the one URL this project has, and an event
+ * carries no Origin to sort them by. The signature does that instead: each
+ * account signs with its own endpoint secret, so whichever secret verifies IS
+ * the account the event came from. That makes mode a *result* of authentication
+ * rather than an input to it — nothing an unsigned caller sends can pick which
+ * account its subscription lands in.
  *
  * Deliberately no rate limit: throttling here would drop Stripe's retries.
  *
@@ -23,24 +30,42 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
-    const secret = Deno.env.get('STRIPE_WEBHOOK_SECRET');
-    if (!secret) {
+    const secrets: Array<[StripeMode, string]> = [];
+    for (const candidate of MODES) {
+        const secret = webhookSecretFor(candidate);
+        if (secret) {
+            secrets.push([candidate, secret]);
+        }
+    }
+    if (secrets.length === 0) {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
     }
 
     // The RAW body — verification is over the exact bytes Stripe signed, so this
     // must be read before (and instead of) any JSON parsing.
     const rawBody = await req.text();
-    const check = await verifyStripeSignature(
-        rawBody,
-        req.headers.get('Stripe-Signature'),
-        secret,
-        Math.floor(Date.now() / 1000),
-    );
-    if (!check.ok) {
+    const signature = req.headers.get('Stripe-Signature');
+    const now = Math.floor(Date.now() / 1000);
+
+    let mode: StripeMode | null = null;
+    // A missing or malformed header fails identically against every secret, so
+    // keep that structural reason rather than the mismatch it degrades into —
+    // otherwise every misconfiguration reports as a bad signature.
+    let failure: SignatureFailure = 'signature_mismatch';
+    for (const [candidate, secret] of secrets) {
+        const check = await verifyStripeSignature(rawBody, signature, secret, now);
+        if (check.ok) {
+            mode = candidate;
+            break;
+        }
+        if (check.reason !== 'signature_mismatch') {
+            failure = check.reason;
+        }
+    }
+    if (!mode) {
         // 400, not 401: Stripe treats 4xx as "do not retry", which is right for a
         // signature that will never become valid.
-        return jsonResponse({ error: 'Invalid signature', code: check.reason }, 400);
+        return jsonResponse({ error: 'Invalid signature', code: failure }, 400);
     }
 
     let event: StripeEventLike;
@@ -52,9 +77,15 @@ Deno.serve(async (req) => {
     if (!event?.id || typeof event.type !== 'string') {
         return jsonResponse({ error: 'Malformed event' }, 400);
     }
+    // Belt and braces: the event's own livemode flag must agree with the secret
+    // that verified it. Disagreement should be impossible, and writing a live
+    // subscription row out of a sandbox event is not a way to find out.
+    if (typeof event.livemode === 'boolean' && event.livemode !== (mode === 'live')) {
+        return jsonResponse({ error: 'Event livemode disagrees with its signing secret' }, 400);
+    }
 
     const admin = serviceClient();
-    const stripe = stripeClient();
+    const stripe = stripeClient(mode);
     if (!admin || !stripe) {
         // 500 so Stripe retries once we are configured again.
         return jsonResponse({ error: 'Billing is not configured' }, 500);
@@ -84,7 +115,7 @@ Deno.serve(async (req) => {
         linkCustomer: async (customerId, userId) => {
             const { error } = await admin
                 .from('billing_customers')
-                .upsert({ user_id: userId, stripe_customer_id: customerId }, { onConflict: 'user_id' });
+                .upsert({ user_id: userId, mode, stripe_customer_id: customerId }, { onConflict: 'user_id,mode' });
             if (error) {
                 throw new Error(`could not link customer ${customerId}: ${error.message}`);
             }
@@ -92,7 +123,10 @@ Deno.serve(async (req) => {
         upsertSubscription: async (row) => {
             const { error } = await admin
                 .from('subscriptions')
-                .upsert({ ...row, updated_at: new Date().toISOString() }, { onConflict: 'stripe_subscription_id' });
+                .upsert(
+                    { ...row, mode, updated_at: new Date().toISOString() },
+                    { onConflict: 'stripe_subscription_id' },
+                );
             if (error) {
                 throw new Error(`could not upsert subscription ${row.stripe_subscription_id}: ${error.message}`);
             }
@@ -131,7 +165,7 @@ Deno.serve(async (req) => {
     };
 
     try {
-        const result = await handleStripeEvent(event, store, priceTiers());
+        const result = await handleStripeEvent(event, store, priceTiers(mode));
         return jsonResponse(result.body, result.status);
     } catch (err) {
         // The claim is committed the moment it succeeds, so a failure downstream

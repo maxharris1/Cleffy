@@ -8,25 +8,53 @@ import type { BillingTier } from '@/types/database';
  * Teacher is the same app plus a student roster, and Academy is Teacher for a
  * team of up to five instructors.
  *
+ * The same bundle serves cleffy.io and dev.cleffy.io, so it ships BOTH price
+ * catalogues and picks by hostname — one committed `.env.production` rather than
+ * a Vercel-only setting nobody can see from the repo. Price ids are not secrets
+ * (see `supabase/functions/_shared/stripe.ts`), so publishing both grants
+ * nothing. The Edge Functions decide the account for real, from the request
+ * Origin; if this ever disagreed the server would re-price into its own mode, so
+ * the worst case is a display quirk rather than a charge on the wrong account.
+ *
  * Env is read inside functions rather than at module scope so tests can
  * `vi.stubEnv` without having to re-import the module.
  */
 
 export type BillingInterval = 'monthly' | 'annual';
 
+export type StripeMode = 'live' | 'test';
+
 const env = (key: string): string | null => {
     const value = import.meta.env[key] as string | undefined;
     return value && value.length > 0 ? value : null;
 };
 
+/** Only the production storefront is live; previews and localhost are sandbox. */
+const LIVE_HOSTS = ['cleffy.io', 'www.cleffy.io'];
+
+export const stripeMode = (): StripeMode => {
+    if (typeof location === 'undefined') {
+        return 'test';
+    }
+    return LIVE_HOSTS.includes(location.hostname.toLowerCase()) ? 'live' : 'test';
+};
+
+/**
+ * An explicit `VITE_STRIPE_PRICE_*` wins — that is what a local `.env` sets, and
+ * what the tests stub. Otherwise the per-mode catalogue decides.
+ */
+const priceEnv = (suffix: string): string | null =>
+    env(`VITE_STRIPE_PRICE_${suffix}`) ??
+    env(stripeMode() === 'live' ? `VITE_STRIPE_LIVE_PRICE_${suffix}` : `VITE_STRIPE_TEST_PRICE_${suffix}`);
+
 export const stripePrices = () => ({
-    personalMonthly: env('VITE_STRIPE_PRICE_PERSONAL_MONTHLY'),
-    personalAnnual: env('VITE_STRIPE_PRICE_PERSONAL_ANNUAL'),
-    teacherMonthly: env('VITE_STRIPE_PRICE_TEACHER_MONTHLY'),
-    teacherAnnual: env('VITE_STRIPE_PRICE_TEACHER_ANNUAL'),
-    academyMonthly: env('VITE_STRIPE_PRICE_ACADEMY_MONTHLY'),
-    academyAnnual: env('VITE_STRIPE_PRICE_ACADEMY_ANNUAL'),
-    foundingAnnual: env('VITE_STRIPE_PRICE_FOUNDING_ANNUAL'),
+    personalMonthly: priceEnv('PERSONAL_MONTHLY'),
+    personalAnnual: priceEnv('PERSONAL_ANNUAL'),
+    teacherMonthly: priceEnv('TEACHER_MONTHLY'),
+    teacherAnnual: priceEnv('TEACHER_ANNUAL'),
+    academyMonthly: priceEnv('ACADEMY_MONTHLY'),
+    academyAnnual: priceEnv('ACADEMY_ANNUAL'),
+    foundingAnnual: priceEnv('FOUNDING_ANNUAL'),
 });
 
 /** Checkout cannot run without both individual plans — Academy is the extra, not the offer. */
