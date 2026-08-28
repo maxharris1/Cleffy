@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -13,11 +16,12 @@ import {
     normalizeLoginCode,
     normalizeUsername,
     RESERVED_USERNAMES,
-    STUDENT_PASSWORD_MAX,
+    STUDENT_PASSWORD_MAX_BYTES,
     STUDENT_PASSWORD_MIN,
     syntheticStudentEmail,
     USERNAME_MAX,
     USERNAME_MIN,
+    USERNAME_RE,
 } from '../../supabase/functions/_shared/studentCodes';
 
 /**
@@ -235,10 +239,25 @@ describe('isValidUsername', () => {
     });
 
     it('rejects every character outside the canonical alphabet', () => {
-        // Uppercase included: this function reads the NORMALIZED form, so a
-        // capital reaching it means the caller skipped normalizeUsername.
-        for (const name of ['Amelia', 'amelia k', 'amelia-k', 'amelia@k', 'amelia.k', 'améliá', 'am/k']) {
+        for (const name of ['amelia k', 'amelia-k', 'amelia@k', 'amelia.k', 'améliá', 'am/k', 'am\tk']) {
             expect(isValidUsername(name)).toBe(false);
+        }
+    });
+
+    it('normalizes before judging, so a caller that skipped it is not punished', () => {
+        // The function normalizes internally. A capital or a stray space is what
+        // a phone keyboard and a copy-paste produce, and neither is a reason to
+        // tell a child their name is illegal.
+        for (const name of ['Music_Kid', 'AMELIA', ' ada ', '\tada\n']) {
+            expect(isValidUsername(name)).toBe(true);
+        }
+    });
+
+    it('cannot be walked past by dressing a reserved name up', () => {
+        // The direction that would matter: a raw spelling that normalizes INTO a
+        // reserved name must still be refused, or the list would be decorative.
+        for (const dressed of ['Admin', 'ADMIN', ' support ', 'TeAcHeR', '  Root  ']) {
+            expect(isValidUsername(dressed)).toBe(false);
         }
     });
 
@@ -267,13 +286,33 @@ describe('isValidStudentPassword', () => {
         expect(STUDENT_PASSWORD_MIN).toBe(8);
     });
 
-    it('stops at bcrypt ceiling rather than silently truncating past it', () => {
-        // GoTrue hashes with bcrypt, which ignores everything past 72 bytes: a
-        // 73-character password would sign in with its first 72, which is a
-        // credential that is not the one the student thinks they set.
-        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX))).toBe(true);
-        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX + 1))).toBe(false);
-        expect(STUDENT_PASSWORD_MAX).toBe(72);
+    it('stops at the bcrypt ceiling, which Supabase Auth rejects rather than truncates', () => {
+        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX_BYTES))).toBe(true);
+        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX_BYTES + 1))).toBe(false);
+        expect(STUDENT_PASSWORD_MAX_BYTES).toBe(72);
+    });
+
+    it('measures the ceiling in BYTES, so a multi-byte password cannot slip past it', () => {
+        // The bug this pins: '.length' counts UTF-16 units, so 25 piano emoji
+        // read as 50 and sailed under a 72 "character" bound while actually
+        // being 100 bytes — a password the server would refuse outright, after
+        // the student had already typed it twice.
+        const emoji = '🎹'.repeat(25);
+        expect(emoji.length).toBe(50);
+        expect(new TextEncoder().encode(emoji).length).toBe(100);
+        expect(isValidStudentPassword(emoji)).toBe(false);
+
+        // Accents are the quieter version of the same thing: two bytes each.
+        expect(isValidStudentPassword('é'.repeat(36))).toBe(true);
+        expect(isValidStudentPassword('é'.repeat(37))).toBe(false);
+    });
+
+    it('measures the floor in characters, so an emoji counts as the one key it was', () => {
+        // The other half of the mixed units. Eight emoji is eight characters to
+        // the student and 32 bytes to bcrypt; counting UTF-16 units would call
+        // four of them "eight" and let a four-key password through.
+        expect(isValidStudentPassword('🎹'.repeat(STUDENT_PASSWORD_MIN))).toBe(true);
+        expect(isValidStudentPassword('🎹'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe(false);
     });
 
     it('takes the password exactly as typed, spaces and all', () => {
@@ -302,7 +341,39 @@ describe('generateProvisionPassword', () => {
 
     it('is a password no rule in this file would reject as too long', () => {
         // 64 characters, comfortably inside bcrypt's 72-byte ceiling, so GoTrue
-        // stores the whole scramble rather than a prefix of it.
+        // stores the whole scramble rather than refusing it.
         expect(isValidStudentPassword(generateProvisionPassword())).toBe(true);
+    });
+});
+
+/**
+ * Drift guard, in the shape limitsInSync.test.ts uses on tier_limits().
+ *
+ * The username shape lives in two places that cannot import each other:
+ * USERNAME_RE, which every runtime validates against, and the
+ * managed_students_username_shape CHECK, which is what the database will
+ * actually refuse. They were written to be the same pattern. Nothing but this
+ * test keeps them that way, and the failure they would hide is quiet: a
+ * username the form accepts and the INSERT then rejects, surfacing as a 502 at
+ * the end of a claim the student cannot retry.
+ */
+describe('username shape stays in step with the migration', () => {
+    // Resolved from the project root: the jsdom test environment gives
+    // import.meta a non-file URL, so fileURLToPath cannot be used here.
+    const MIGRATION = resolve(process.cwd(), 'supabase/migrations/20260827150000_student_credentials.sql');
+
+    it('re-states exactly the pattern the CHECK constraint enforces', () => {
+        const sql = readFileSync(MIGRATION, 'utf8');
+        const match =
+            /constraint managed_students_username_shape\s+check \(username is null or username ~ '([^']+)'\)/.exec(sql);
+        expect(match, 'managed_students_username_shape not found — was the constraint renamed?').not.toBeNull();
+        expect((match as RegExpExecArray)[1]).toBe(USERNAME_RE.source);
+    });
+
+    it('builds the pattern from the exported bounds rather than a literal', () => {
+        // student-claim's error copy and the claim page's hint both quote these
+        // constants, so a regex that ignored them would advertise one rule and
+        // enforce another.
+        expect(USERNAME_RE.source).toBe(`^[a-z0-9_]{${USERNAME_MIN},${USERNAME_MAX}}$`);
     });
 });
