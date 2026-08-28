@@ -412,3 +412,23 @@ body {
         transition: none;
     }
 }
+
+/*
+ * Account usage meters. The shared ProgressBar is a standalone grey pill, which
+ * floats on the paper wash; in a settings column it has to read as a line ruled
+ * into the page instead, so the track drops to ink at staff-line weight and
+ * loses a couple of pixels of height. The accent fill is left alone — it is the
+ * marking hand, and it is what the eye should find. Unlayered on purpose, same
+ * as .shell-progress: these have to outrank the component's own utilities.
+ */
+.account-meter {
+    height: 4px;
+    background-color: rgb(28 25 23 / 0.09);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    /* A meter that slides to its value is decoration; the number is the point. */
+    .account-meter > div {
+        transition: none;
+    }
+}

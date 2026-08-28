@@ -17,9 +17,9 @@ import { LoadingText } from '@/ui/Loading';
 // Lazy: keeps pdf.js (large, browser-only) out of the app-shell bundle.
 const ViewerPage = lazy(() => import('@/features/viewer/ViewerPage').then((m) => ({ default: m.ViewerPage })));
 
-// Lazy: billing is a rarely-visited surface — keep Stripe copy and the pricing
-// dialog out of the shell bundle that every session pays for.
-const SettingsPage = lazy(() => import('@/features/billing/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+// Lazy: the account surface is rarely visited — keep Stripe copy and the
+// pricing dialog out of the shell bundle that every session pays for.
+const AccountPage = lazy(() => import('@/features/account/AccountPage').then((m) => ({ default: m.AccountPage })));
 
 // Lazy: the student surfaces are the other half of the app — a teacher session never
 // mounts them, and a student loads only these, so neither side pays for the other.
@@ -94,7 +94,7 @@ export const AppRoutes = () => {
                     path="/account"
                     element={
                         <Suspense fallback={<LoadingText className="mt-10">Loading account…</LoadingText>}>
-                            <SettingsPage />
+                            <AccountPage />
                         </Suspense>
                     }
                 />
