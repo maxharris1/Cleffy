@@ -20,6 +20,8 @@ export interface MusicalScore {
     defaultBpm: number | null;
     totalTicks: number;
     warnings: string[];
+    /** Unresolved tie-starts still open at end of the lead part (shard seam risk). */
+    openTiesAtEnd: number;
 }
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -392,6 +394,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         defaultBpm: leadResult.defaultBpm,
         totalTicks,
         warnings: [...warnings],
+        openTiesAtEnd: leadResult.openTiesAtEnd,
     };
 };
 
@@ -523,6 +526,7 @@ interface PartResult {
     holds: ScoreHold[];
     repeats: MeasureRepeatMarks[];
     defaultBpm: number | null;
+    openTiesAtEnd: number;
 }
 
 /**
@@ -1836,6 +1840,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         holds: [...holdByTick.values()].sort((a, b) => a.tick - b.tick),
         repeats: raws.map((raw) => raw.repeat),
         defaultBpm: tempos[0]?.bpm ?? null,
+        openTiesAtEnd: openTies.size,
     };
 };
 
@@ -1890,6 +1895,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         defaultBpm: null,
         totalTicks: 0,
         warnings: [],
+        openTiesAtEnd: 0,
     };
     const warnings = new Set<string>();
     for (const file of files) {
@@ -1906,6 +1912,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         combined.repeats.push(...parsed.repeats);
         combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
         combined.totalTicks = parsed.totalTicks;
+        combined.openTiesAtEnd = parsed.openTiesAtEnd;
         parsed.warnings.forEach((warning) => warnings.add(warning));
     }
     if (files.length > 1) {

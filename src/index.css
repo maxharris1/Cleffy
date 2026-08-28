@@ -124,9 +124,9 @@ body {
 
 .landing-rule {
     width: 3rem;
-    height: 1px;
+    height: 2px;
     margin: 1.25rem auto 0;
-    background: color-mix(in srgb, var(--color-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 70%, transparent);
     animation: landing-rule-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s backwards;
 }
 
@@ -161,16 +161,26 @@ body {
     box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
-/* Hero demo: ink strokes draw themselves (pathLength=100), presence chips pop in. */
+/* Hero demo: ink strokes draw themselves (pathLength=100), presence chips pop in.
+   The animations wait for .is-inview, which HeroDemo latches on once the frame
+   scrolls into view. :where() contributes no specificity, so these stay at
+   (0,1,0) and the prefers-reduced-motion block below still wins on source
+   order — reduced motion keeps rendering the finished state. */
 .hero-ink {
     stroke-dasharray: 100;
     stroke-dashoffset: 100;
+}
+
+:where(.is-inview) .hero-ink {
     animation: hero-draw var(--dur, 0.9s) cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) forwards;
 }
 
 .hero-chip {
     opacity: 0;
     transform: scale(0.6);
+}
+
+:where(.is-inview) .hero-chip {
     animation: hero-chip-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) forwards;
 }
 
@@ -224,6 +234,90 @@ body {
 
 .library-empty {
     animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
+}
+
+/*
+ * Upload progress hugging the bottom edge of the top bar. The shared
+ * ProgressBar is a standalone pill (h-1.5, rounded, grey track); pinned to a
+ * hairline border it has to read as part of that border instead, so the track
+ * disappears and only the accent fill advances. Unlayered on purpose — these
+ * declarations must outrank the component's own Tailwind utilities.
+ */
+.shell-progress {
+    height: 2px;
+    border-radius: 0;
+    background-color: transparent;
+}
+
+.shell-progress > div {
+    border-radius: 0;
+}
+
+/*
+ * The top bar's upload control is a <label> around a screen-reader-only file
+ * input: the input keeps its place in the tab order, and the label wears the
+ * ring on its behalf, matching the global :focus-visible treatment. Relative so
+ * the offscreen input positions against the button rather than the bar.
+ */
+.shell-upload {
+    position: relative;
+}
+
+.shell-upload:has(:focus-visible) {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+}
+
+/*
+ * How much of the viewport the sticky top bar owns: one 4rem row, plus a
+ * second row for the nav strip below sm. Anything inside the shell that sticks
+ * to the top of the page has to start below it, or it parks itself out of
+ * sight behind the bar — the offset belongs to the bar, so it is published
+ * from here rather than hard-coded into each surface.
+ */
+.library-shell {
+    --shell-bar-height: 6.125rem;
+}
+
+@media (min-width: 40rem) {
+    .library-shell {
+        --shell-bar-height: 4rem;
+    }
+}
+
+.library-shell .imslp-search-sticky {
+    top: var(--shell-bar-height);
+}
+
+/* Shelf cards: the same entrance as list rows, staggered by an inline delay. */
+.library-card {
+    animation: library-row-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+/* The cover lifts off the paper on hover. This lives here rather than in a
+   group-hover utility so the reduced-motion block at the end of this file can
+   out-specify it — a utility and its motion-reduce variant have equal
+   specificity, and which one wins would come down to Tailwind's output order. */
+.library-card-cover {
+    transition:
+        transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.library-card:hover .library-card-cover {
+    transform: translateY(-2px);
+    box-shadow:
+        0 4px 6px -1px rgb(28 25 23 / 0.1),
+        0 2px 4px -2px rgb(28 25 23 / 0.08);
+}
+
+/* Horizontal chip strips on phones: scroll instead of wrapping, no visible scrollbar. */
+.no-scrollbar {
+    scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
 }
 
 @keyframes library-row-in {
@@ -333,5 +427,43 @@ body {
         transition: none;
         transform: none;
         box-shadow: none;
+    }
+
+    /* Upload progress in the top bar jumps to each reported percentage. */
+    .shell-progress > div {
+        transition: none;
+    }
+
+    /* Shelf: no entrance stagger, and the cover stays flat on hover. The
+       :hover selector is repeated so this matches the lift's specificity and
+       wins on source order; the shadow still changes, which is not motion. */
+    .library-card {
+        animation: none;
+    }
+
+    .library-card-cover,
+    .library-card:hover .library-card-cover {
+        transition: none;
+        transform: none;
+    }
+}
+
+/*
+ * Account usage meters. The shared ProgressBar is a standalone grey pill, which
+ * floats on the paper wash; in a settings column it has to read as a line ruled
+ * into the page instead, so the track drops to ink at staff-line weight and
+ * loses a couple of pixels of height. The accent fill is left alone — it is the
+ * marking hand, and it is what the eye should find. Unlayered on purpose, same
+ * as .shell-progress: these have to outrank the component's own utilities.
+ */
+.account-meter {
+    height: 4px;
+    background-color: rgb(28 25 23 / 0.09);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    /* A meter that slides to its value is decoration; the number is the point. */
+    .account-meter > div {
+        transition: none;
     }
 }

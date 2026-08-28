@@ -34,3 +34,37 @@ describe('ScribblerDb v3 (scoreCache)', () => {
         await db.delete();
     });
 });
+
+describe('ScribblerDb v6 (thumbnails)', () => {
+    it('adds the thumbnails store without disturbing the cached PDFs', async () => {
+        const name = `test-db-${crypto.randomUUID()}`;
+
+        const seed = new ScribblerDb(name);
+        await seed.open();
+        await seed.pdfCache.put({ docId: 'doc-1', bytes: new Blob(['x']), title: 'Sonata', cachedAt: '2026-01-01' });
+        seed.close();
+
+        const db = new ScribblerDb(name);
+        await db.open();
+        // v6 restates every store, so nothing that already existed is dropped.
+        expect((await db.pdfCache.get('doc-1'))?.title).toBe('Sonata');
+
+        await db.thumbnails.put({
+            docId: 'doc-1',
+            contentRev: 2,
+            maxSide: 512,
+            blob: new Blob(['png'], { type: 'image/png' }),
+            width: 181,
+            height: 256,
+            createdAt: '2026-01-02',
+        });
+        // Metadata only: fake-indexeddb's structured clone hands back a Blob
+        // stripped of jsdom's read methods, so the bytes are not asserted here.
+        const thumb = await db.thumbnails.get('doc-1');
+        expect(thumb?.contentRev).toBe(2);
+        expect(thumb?.width).toBe(181);
+        expect(thumb?.height).toBe(256);
+
+        await db.delete();
+    });
+});

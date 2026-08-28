@@ -2772,6 +2772,238 @@ revoke all on function public.unassign_score (uuid, uuid) from public;
 revoke all on function public.unassign_score (uuid, uuid) from anon;
 grant execute on function public.unassign_score (uuid, uuid) to authenticated;
 
+-- ===== supabase/migrations/20260827140000_core_table_grants.sql =====
+-- Table-level grants for the core schema.
+--
+-- Why this exists: on the current Supabase Postgres image, the default ACL for
+-- objects created by `postgres` in `public` gives anon/authenticated only
+-- Dxtm (TRUNCATE, REFERENCES, TRIGGER, MAINTAIN) — no SELECT/INSERT/UPDATE/DELETE.
+-- Only objects created by `supabase_admin` get the permissive arwdDxtm default.
+-- Migrations run as `postgres`, so every table 0001_schema.sql created is
+-- unreadable by the app: PostgREST returns 42501 "permission denied for table
+-- documents" before RLS is ever consulted.
+--
+-- The later migrations (score_analyses, billing, roster) already grant
+-- explicitly, which is why only the original core tables were affected.
+--
+-- Grants below mirror the RLS policies one-for-one — a table gets a privilege
+-- only where a policy for that command exists. RLS still decides which ROWS are
+-- visible; these grants only open the table-level gate. Tables with no
+-- user-facing policy (omr_jobs, score_cache, edge_rate_buckets) are deliberately
+-- absent: they stay service_role-only.
+--
+-- Idempotent: re-granting an existing privilege is a no-op, so this is safe to
+-- replay against an environment that already has them.
+
+grant select, insert, update, delete on table public.documents to authenticated;
+grant select, insert, update          on table public.annotations to authenticated;
+grant select, insert                  on table public.annotation_snapshots to authenticated;
+grant select                          on table public.document_members to authenticated;
+grant select, insert, update, delete on table public.share_links to authenticated;
+grant select, insert, delete         on table public.document_favorites to authenticated;
+grant select, insert, delete         on table public.document_tags to authenticated;
+grant select, insert, update, delete on table public.library_tags to authenticated;
+grant select, insert, update          on table public.document_imports to authenticated;
+
+-- service_role bypasses RLS but still needs the table-level grant.
+grant all on table public.documents,
+               public.annotations,
+               public.annotation_snapshots,
+               public.document_members,
+               public.share_links,
+               public.document_favorites,
+               public.document_tags,
+               public.library_tags,
+               public.document_imports
+    to service_role;
+
+-- ===== supabase/migrations/20260827150000_student_credentials.sql =====
+-- Student credentials: a code becomes a claim token, and email joins it.
+--
+-- The model this replaces: the login code was the whole credential — its hash
+-- selected the roster row AND it was the synthetic account's Supabase password,
+-- forever. That is a password a child reads off a card, cannot change, and
+-- shares with whoever picks the card up off the piano.
+--
+-- The model this establishes: the teacher picks a method per student, once, at
+-- creation, and `auth_method` is fixed for the life of the row.
+--
+--  * 'code' — the zero-email path, for a young child. The printed code is a
+--    ONE-TIME CLAIM TOKEN: student-claim spends it to choose a username and a
+--    password, and from then on student-login takes those. The synthetic
+--    st-<roster-id>@students.cleffy.app address stays, because Supabase needs
+--    something to key an auth user on and no inbox is ever asked for.
+--  * 'email' — the teacher supplies the student's real address and GoTrue
+--    invites it. There is no code, no username and no synthetic address: the
+--    student sets a password from the emailed link and signs in client-side,
+--    exactly as a teacher does.
+--
+-- Four states, and this file's CHECK constraint is what makes them the only
+-- four. "Invited" always means the same thing on both paths: the auth password
+-- is a scramble nobody has ever seen (generateProvisionPassword), so no sign-in
+-- path exists for the account at all.
+--
+--   code  + Invited : login_code_hash set, claimed_at null   -> student-claim
+--   code  + Active  : username set, login_code_hash NULL     -> student-login
+--   email + Invited : student_email set, claimed_at null     -> the invite link
+--   email + Active  : student_email set, claimed_at stamped  -> ordinary sign-in
+--
+-- A reset returns either row to Invited, and scrambles the password FIRST —
+-- that scramble is the actual revocation, exactly as the archive ban is.
+-- ---------------------------------------------------------------------------
+-- Columns
+-- ---------------------------------------------------------------------------
+alter table public.managed_students
+    add column auth_method text not null default 'code'
+        check (auth_method in ('code', 'email')),
+    -- Stored canonical-lowercase (normalizeUsername runs before every write and
+    -- every lookup), which is what makes the plain unique index below a
+    -- CASE-INSENSITIVE uniqueness guarantee without a functional index or a
+    -- citext column: two spellings that differ only in case are the same string
+    -- by the time either one reaches this table.
+    add column username text,
+    -- The student's REAL address, on the email path only. Never a synthetic one:
+    -- those are derived from the roster id and stored nowhere.
+    add column student_email text,
+    -- Setup-complete. On the code path the claim stamps it; on the email path
+    -- the student does, through mark_student_claimed() below.
+    add column claimed_at timestamptz,
+    -- Was NOT NULL when the code was a permanent password. It is now absent for
+    -- a claimed code student (spent) and for every email student (never minted).
+    alter column login_code_hash drop not null;
+
+-- The DB re-checks USERNAME_RE from _shared/studentCodes.ts. A service-role bug
+-- that stored an un-normalized spelling would store one student-login could
+-- never match — this refuses it at the table instead.
+alter table public.managed_students add constraint managed_students_username_shape
+    check (username is null or username ~ '^[a-z0-9_]{3,20}$');
+
+-- Plain unique index, not partial: NULLs are distinct in Postgres, so every
+-- email row and every unclaimed code row coexists freely.
+create unique index managed_students_username_key on public.managed_students (username);
+
+-- The state machine, enforced. Note what is deliberately NOT constrained: an
+-- Invited code row may carry a username left over from a previous claim. Reset
+-- does not clear it, because the next claim overwrites it and keeping-or-
+-- changing the name is the student's call, not the teacher's.
+--
+-- Existing rows all satisfy the first branch: auth_method defaults to 'code',
+-- student_email is null, claimed_at is null, and login_code_hash was NOT NULL.
+alter table public.managed_students add constraint managed_students_claim_state check (
+    (auth_method = 'code' and student_email is null and (
+        (claimed_at is null and login_code_hash is not null)
+        or (claimed_at is not null and username is not null and login_code_hash is null)))
+    or (auth_method = 'email' and student_email is not null
+        and login_code_hash is null and username is null));
+
+-- ---------------------------------------------------------------------------
+-- mark_student_claimed — the email student stamps their own setup-complete
+-- ---------------------------------------------------------------------------
+-- SECURITY DEFINER because managed_students has no client write policy at all,
+-- by design (see 20260826194426_roster.sql): every write is either a definer
+-- function or the service role. A code student's claim is stamped by
+-- student-claim under the service role, in the same UPDATE that sets the
+-- username; an email student never touches an Edge Function on their way in, so
+-- this is the one write they need.
+--
+-- Scoped to auth.uid(), so the caller can only ever stamp their own row — the
+-- function takes no arguments precisely so there is no row to aim it at.
+--
+-- The auth_method guard is not redundant. Without it, a code student calling
+-- this would set claimed_at on a row whose username is still null, the
+-- managed_students_claim_state CHECK would reject the UPDATE, and this function
+-- would RAISE rather than no-op. Refusing to match the row is the tolerant
+-- spelling of the same rule.
+create or replace function public.mark_student_claimed () returns void
+language sql security definer set search_path = public as $$
+    update public.managed_students
+    set claimed_at = now()
+    where student_user_id = auth.uid()
+      and auth_method = 'email'
+      and claimed_at is null;
+$$;
+
+revoke all on function public.mark_student_claimed () from public;
+
+revoke all on function public.mark_student_claimed () from anon;
+
+grant execute on function public.mark_student_claimed () to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Grants (same convention as roster.sql)
+-- ---------------------------------------------------------------------------
+-- Additive to roster.sql's column grant, and login_code_hash stays out of it for
+-- the same reason it was excluded there: managed_students_select has a student
+-- branch, so a table-wide grant would ship the hash of a live claim token down
+-- to a browser, for a value nothing on the client reads and that only
+-- student-claim ever compares, under the service role.
+--
+-- The four new columns are all things a client legitimately renders: the student
+-- app shows a claimed username on the account screen and the teacher's roster
+-- shows which method a student is on, whether they have finished setting up, and
+-- which address the invite went to.
+grant select (auth_method, username, student_email, claimed_at)
+on table public.managed_students to authenticated;
+
+-- roster.sql revoked from public/anon/authenticated but never granted to
+-- service_role, which is a no-op hosted (the default ACL is permissive there)
+-- and a 42501 locally — the same trap 20260827140000_core_table_grants.sql
+-- documents for the core tables. student-claim writes this table under the
+-- service role, so it has to hold locally too.
+grant all on table public.managed_students to service_role;
+
+-- ===== supabase/migrations/20260828120000_free_tier_no_students.sql =====
+-- Free becomes a taste of Personal, not a taste of Teacher.
+--
+-- Free previously carried students = 3, which made it a miniature teaching
+-- plan: a studio could run three students indefinitely without ever reaching
+-- the tier that sells the roster. Personal is the individual licence, and Free
+-- is the sample of it, so the roster now starts at Teacher.
+--
+-- Only the 'free' branch changes; every other tier is reproduced exactly as
+-- 20260826193902_billing.sql defined it, because create-or-replace rewrites the
+-- whole body. tier_limits() stays the single source of truth for the numbers,
+-- and the TS mirror in src/features/billing/entitlementsService.ts (FREE_LIMITS)
+-- moves with it.
+--
+-- Existing rows are untouched: a free account that already provisioned students
+-- keeps them, and those students keep signing in. What changes is that the
+-- account can no longer add more (student-provision returns 402) and the client
+-- hides the roster, since limits.students = 0 now reads as "no roster on this
+-- plan". Check for such accounts before deploying:
+--
+--   select ms.teacher_id, count(*)
+--   from public.managed_students ms
+--   left join public.subscriptions s
+--     on s.user_id = ms.teacher_id and s.status = 'active'
+--   where s.tier is null
+--   group by 1;
+create or replace function public.tier_limits (p_tier text) returns jsonb language sql immutable
+set search_path = public as $$
+    select case p_tier
+        -- students = 0 is what makes Personal a solo plan: no roster, no seats.
+        when 'personal' then jsonb_build_object(
+            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', 0
+        )
+        when 'teacher' then jsonb_build_object(
+            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', -1
+        )
+        when 'academy' then jsonb_build_object(
+            'cloud_scores', -1, 'omr_runs', -1, 'vision_reads', 500, 'smart_imports', -1, 'pdf_exports', -1, 'students', -1
+        )
+        -- Not purchasable: a provisioned student account. It creates nothing of
+        -- its own -- every score it can reach is one a teacher assigned -- and it
+        -- is never export-gated, because there is nobody to sell an upgrade to.
+        when 'student' then jsonb_build_object(
+            'cloud_scores', 0, 'omr_runs', 0, 'vision_reads', 0, 'smart_imports', 0, 'pdf_exports', -1, 'students', 0
+        )
+        -- Free: the whole practice tool in small amounts, for one player.
+        else jsonb_build_object(
+            'cloud_scores', 3, 'omr_runs', 3, 'vision_reads', 5, 'smart_imports', 2, 'pdf_exports', 1, 'students', 0
+        )
+    end;
+$$;
+
 -- ===== supabase/migrations/20260828180000_billing_stripe_mode.sql =====
 -- Split the billing tables by Stripe account.
 --

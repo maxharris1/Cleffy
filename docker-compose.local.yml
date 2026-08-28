@@ -1,0 +1,40 @@
+# Local development stack — the OMR (Audiveris) worker pointed at LOCAL Supabase.
+#
+#   npm run local:up      # starts this for you, with the right env
+#   npm run local:down
+#
+# Deliberately a separate compose project (-p cleffy-local) so it coexists with
+# the default docker-compose.yml `omr` service, which is wired to PRODUCTION via
+# .env and the ngrok tunnel. Nothing here touches that.
+#
+# Networking: this joins the Supabase stack's own network rather than talking
+# over the host. That is not a style choice — the edge runtime's SUPABASE_URL is
+# http://kong:8000, so the signed storage URLs score-analyze mints for OMR are
+# only fetchable from inside that network. In return the edge runtime reaches
+# this worker at http://cleffy-local-omr:8080.
+#
+# Values come from the shell (scripts/local-up.sh exports them). The
+# CLEFFY_LOCAL_ prefix stops Compose filling them in from the production ./.env.
+
+services:
+    omr:
+        platform: linux/amd64
+        # Reuse the already-built Audiveris image; it is an amd64-only .deb and
+        # rebuilding under qemu is slow. Compose builds only if the tag is absent.
+        image: cleffy-omr
+        build: services/omr-service
+        container_name: cleffy-local-omr
+        environment:
+            OMR_SERVICE_SECRET: ${CLEFFY_LOCAL_OMR_SECRET:?run scripts/local-up.sh}
+            SUPABASE_URL: http://kong:8000
+            SUPABASE_SERVICE_ROLE_KEY: ${CLEFFY_LOCAL_SERVICE_ROLE_KEY:?run scripts/local-up.sh}
+        ports:
+            - '${CLEFFY_LOCAL_OMR_PORT:-8091}:8080'
+        networks:
+            - supabase
+        restart: unless-stopped
+
+networks:
+    supabase:
+        external: true
+        name: ${CLEFFY_LOCAL_SUPABASE_NETWORK:?run scripts/local-up.sh}

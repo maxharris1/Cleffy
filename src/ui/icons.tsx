@@ -6,6 +6,8 @@ import {
     ChevronUp,
     EllipsisVertical,
     Hourglass,
+    LayoutGrid,
+    List,
     LocateFixed,
     Minus,
     Music,
@@ -16,12 +18,14 @@ import {
     Redo2,
     RefreshCw,
     Repeat,
+    Settings2,
     SkipBack,
     Square,
     Star,
     Tags,
     Timer,
     Undo2,
+    Upload,
     Volume2,
     VolumeX,
     X,
@@ -48,6 +52,10 @@ export const PointerIcon = withBrandStroke(Pointer);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);
+export const SettingsIcon = withBrandStroke(Settings2);
+export const UploadIcon = withBrandStroke(Upload);
+export const LayoutGridIcon = withBrandStroke(LayoutGrid);
+export const ListIcon = withBrandStroke(List);
 
 // Play-along transport.
 export const PlayIcon = withBrandStroke(Play);

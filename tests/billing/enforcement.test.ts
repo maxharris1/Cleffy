@@ -251,14 +251,14 @@ describe('the student roster is a stock, not a metered flow', () => {
         expect(billing.countOf('teacher', 'students')).toBe(0);
     });
 
-    it('gates the roster by tier instead: Personal gets none, Teacher and Academy no ceiling', () => {
+    it('gates the roster by tier instead: only Teacher and Academy carry one', () => {
         // The limits table those seats are checked against. The stock itself —
         // provisioning, archiving, the restore that must re-claim its seat — is
         // driven against FakeBilling in tests/billing/roster.test.ts.
         expect(TIER_LIMITS.personal.students).toBe(0);
         expect(TIER_LIMITS.teacher.students).toBe(-1);
         expect(TIER_LIMITS.academy.students).toBe(-1);
-        expect(TIER_LIMITS.free.students).toBe(3);
+        expect(TIER_LIMITS.free.students).toBe(0);
     });
 });
 

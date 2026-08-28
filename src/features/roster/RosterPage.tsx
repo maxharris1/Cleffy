@@ -12,9 +12,10 @@ import {
     listAssignmentsForStudents,
     listRoster,
     provisionStudent,
+    resetStudentAccess,
     restoreStudent,
-    rotateStudentCode,
     unassignScore,
+    type ProvisionOptions,
     type RosterAssignment,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
@@ -23,16 +24,68 @@ import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
+import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { TextField } from '@/ui/TextField';
+import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
 
 /** A code, held only long enough to show and print it. */
 interface CodeCard {
     displayName: string;
     loginCode: string;
+    /** Only on a reset for a student who already claimed one. */
+    username: string | null;
 }
+
+/**
+ * The identifier a student actually types, or null while there is nothing to
+ * type yet — an unclaimed code student has a card and no username.
+ */
+const identifierOf = (student: ManagedStudentRow): string | null => {
+    if (student.auth_method === 'email') {
+        return student.student_email;
+    }
+    return student.username ? `@${student.username}` : null;
+};
+
+/**
+ * What "fix their access" is called for this row.
+ *
+ * One action underneath, three names: replacing a card that never got used, and
+ * taking a password away from someone who has been signing in with it, are the
+ * same call and very different things to do to a child. The label has to say
+ * which one the teacher is about to do.
+ */
+const resetLabelFor = (student: ManagedStudentRow): string => {
+    if (student.auth_method === 'email') {
+        return 'Email a new sign-in link…';
+    }
+    return student.claimed_at === null ? 'New setup code…' : 'Reset access…';
+};
+
+const resetPromptFor = (student: ManagedStudentRow): { title: string; body: string; confirmLabel: string } => {
+    if (student.auth_method === 'email') {
+        return {
+            title: 'Email a new sign-in link?',
+            body: `${student.display_name}’s current password stops working straight away, and the link lets them choose a new one. Their scores, annotations and notes are untouched.`,
+            confirmLabel: 'Send link',
+        };
+    }
+    if (student.claimed_at === null) {
+        return {
+            title: 'Issue a new setup code?',
+            body: `${student.display_name} has not set up their account yet. The code on their old card stops working straight away, so the new card has to reach them before their next lesson.`,
+            confirmLabel: 'New code',
+        };
+    }
+    return {
+        title: 'Reset this student’s access?',
+        body: `${student.display_name}’s password stops working straight away, and the new setup code is how they choose another one. They keep their username, and their scores, annotations and notes are untouched.`,
+        confirmLabel: 'Reset access',
+    };
+};
 
 /**
  * The teacher's roster.
@@ -42,12 +95,18 @@ interface CodeCard {
  * ways this page fails are "the server said no" and "your plan is full", and
  * only the second one is worth showing an upgrade for.
  *
- * The page never checks the plan itself. A full roster is a 402 from
+ * The page never counts against the plan itself. A full roster is a 402 from
  * student-provision, arriving as LimitReachedError; anything the client decided
  * on its own would be a second, drifting copy of the limits.
+ *
+ * Whether the plan has a roster at all is a different question, and one the
+ * client may answer: canManageStudents reads the server's own students limit, so
+ * it cannot drift either. Personal and provisioned students get `students: 0`,
+ * and for them the nav drops this page and the body offers the upgrade instead
+ * of a form the server would refuse on every submission.
  */
 export const RosterPage = () => {
-    const { openPricing } = useOutletContext<LibraryOutletContext>();
+    const { canManageStudents, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
@@ -55,7 +114,8 @@ export const RosterPage = () => {
     const [actionError, setActionError] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
     const [codeCard, setCodeCard] = useState<CodeCard | null>(null);
-    const [rotateTarget, setRotateTarget] = useState<ManagedStudentRow | null>(null);
+    const [invitedEmail, setInvitedEmail] = useState<string | null>(null);
+    const [resetTarget, setResetTarget] = useState<ManagedStudentRow | null>(null);
     const [archiveTarget, setArchiveTarget] = useState<ManagedStudentRow | null>(null);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
@@ -123,13 +183,17 @@ export const RosterPage = () => {
      * form is the whole message, and the name the teacher typed has to survive
      * so that upgrading and pressing Add again costs them nothing.
      */
-    const addStudent = async (displayName: string, parentEmail: string): Promise<boolean> => {
+    const addStudent = async (displayName: string, opts: ProvisionOptions): Promise<boolean> => {
         setActionError(null);
         setLimit(null);
         setBusy(true);
         try {
-            const { student, loginCode } = await provisionStudent(displayName, parentEmail || undefined);
-            setCodeCard({ displayName: student.displayName, loginCode });
+            const result = await provisionStudent(displayName, opts);
+            if ('loginCode' in result) {
+                setCodeCard({ displayName: result.student.displayName, loginCode: result.loginCode, username: null });
+            } else {
+                setInvitedEmail(result.studentEmail);
+            }
             await reloadRoster();
             return true;
         } catch (err) {
@@ -143,16 +207,30 @@ export const RosterPage = () => {
         }
     };
 
-    const confirmRotate = async () => {
-        const target = rotateTarget;
+    /**
+     * Reload after a reset, not just after a create: the row that comes back is
+     * Invited again, and a badge still reading Active would be describing a
+     * password that stopped working a second ago.
+     */
+    const confirmReset = async () => {
+        const target = resetTarget;
         if (!target) {
             return;
         }
         await run(async () => {
-            const loginCode = await rotateStudentCode(target.id);
-            setCodeCard({ displayName: target.display_name, loginCode });
+            const result = await resetStudentAccess(target.id);
+            if ('loginCode' in result) {
+                setCodeCard({
+                    displayName: target.display_name,
+                    loginCode: result.loginCode,
+                    username: result.username,
+                });
+            } else {
+                setInvitedEmail(result.studentEmail);
+            }
+            await reloadRoster();
         });
-        setRotateTarget(null);
+        setResetTarget(null);
     };
 
     const confirmArchive = async () => {
@@ -201,60 +279,83 @@ export const RosterPage = () => {
     return (
         <div>
             <h1 className="font-display text-2xl font-semibold text-stone-800 sm:text-3xl">Students</h1>
-            <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
-                A student signs in with a printed code — no email address, no password. Assign scores from your library
-                and their markings stay theirs.
-            </p>
-
-            <AddStudentForm busy={busy} onAdd={addStudent} />
-
-            {limit ? <LimitReachedNotice limit={limit} onUpgrade={openPricing} className="mt-5" /> : null}
-            {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
-
-            {students === null ? (
-                <LoadingText className="mt-10">Loading your roster…</LoadingText>
-            ) : loadError ? (
-                <ErrorText className="mt-8">{loadError}</ErrorText>
-            ) : students.length === 0 ? (
-                <p className="mt-10 text-sm text-stone-500">
-                    No students yet — add one above and print the card that comes back.
+            {/* The upgrade state below explains the roster in its own words —
+                printing the pitch twice on the same screen just reads as noise. */}
+            {canManageStudents ? (
+                <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
+                    Each student gets their own sign-in: a printed setup code they turn into a username, or an email
+                    invite if they have an address. Assign scores from your library and their markings stay theirs.
                 </p>
+            ) : null}
+
+            {/*
+              The nav hides this page on a plan without a roster, but a bookmark
+              or a typed URL still lands here. Say so and offer the upgrade rather
+              than showing an add form whose every submission the server refuses.
+            */}
+            {!canManageStudents ? (
+                <EmptyState
+                    className="mt-10"
+                    title="Your plan doesn’t include students"
+                    body="Teacher and Academy add a roster: each student gets their own sign-in, and you assign scores straight from your library."
+                >
+                    <Button onClick={openPricing}>See plans</Button>
+                </EmptyState>
             ) : (
-                <section className="mt-8">
-                    <p className="text-xs text-stone-600">
-                        {activeCount} {activeCount === 1 ? 'student' : 'students'}
-                        {archivedCount > 0 ? ` · ${archivedCount} archived` : ''}
-                    </p>
-                    <ul className="mt-3">
-                        {students.map((student, index) => (
-                            <StudentRow
-                                key={student.id}
-                                student={student}
-                                index={index}
-                                assignments={assignments.get(student.student_user_id) ?? []}
-                                expanded={expandedId === student.id}
-                                busy={busy}
-                                onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
-                                onRotate={() => setRotateTarget(student)}
-                                onArchive={() => setArchiveTarget(student)}
-                                onRestore={() => void restore(student)}
-                                onSetAccess={setAccess}
-                                onUnassign={unassign}
-                            />
-                        ))}
-                    </ul>
-                </section>
+                <>
+                    <AddStudentForm busy={busy} onAdd={addStudent} />
+
+                    {limit ? <LimitReachedNotice limit={limit} onUpgrade={openPricing} className="mt-5" /> : null}
+                    {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
+
+                    {students === null ? (
+                        <LoadingText className="mt-10">Loading your roster…</LoadingText>
+                    ) : loadError ? (
+                        <ErrorText className="mt-8">{loadError}</ErrorText>
+                    ) : students.length === 0 ? (
+                        <p className="mt-10 text-sm text-stone-500">
+                            No students yet — add one above to print their setup card or send their invite.
+                        </p>
+                    ) : (
+                        <section className="mt-8">
+                            <p className="text-xs text-stone-600">
+                                {activeCount} {activeCount === 1 ? 'student' : 'students'}
+                                {archivedCount > 0 ? ` · ${archivedCount} archived` : ''}
+                            </p>
+                            <ul className="mt-3">
+                                {students.map((student, index) => (
+                                    <StudentRow
+                                        key={student.id}
+                                        student={student}
+                                        index={index}
+                                        assignments={assignments.get(student.student_user_id) ?? []}
+                                        expanded={expandedId === student.id}
+                                        busy={busy}
+                                        onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
+                                        onReset={() => setResetTarget(student)}
+                                        onArchive={() => setArchiveTarget(student)}
+                                        onRestore={() => void restore(student)}
+                                        onSetAccess={setAccess}
+                                        onUnassign={unassign}
+                                    />
+                                ))}
+                            </ul>
+                        </section>
+                    )}
+                </>
             )}
 
             {codeCard ? (
-                <Dialog label="Login card" onClose={() => setCodeCard(null)}>
+                <Dialog label="Setup card" onClose={() => setCodeCard(null)}>
                     <p className="text-sm leading-relaxed text-stone-600">
                         Print this now or write it down. The code is stored as a hash, so nothing can read it back — a
-                        lost card is replaced by rotating the code, never recovered.
+                        lost card is replaced by resetting their access, never recovered. It works once: the student
+                        spends it choosing their username and password.
                     </p>
                     <StudentCodeCard
                         displayName={codeCard.displayName}
                         loginCode={codeCard.loginCode}
+                        username={codeCard.username}
                         className="mt-4"
                     />
                     <div className="mt-5 flex justify-end gap-2">
@@ -268,21 +369,38 @@ export const RosterPage = () => {
                 </Dialog>
             ) : null}
 
-            {rotateTarget ? (
+            {invitedEmail ? (
+                <Dialog label="Invite sent" onClose={() => setInvitedEmail(null)}>
+                    <p className="text-sm leading-relaxed text-stone-600">Invite sent to</p>
+                    {/* Large on purpose. This is the teacher's second look at an
+                        address they typed once, and a typo here does not bounce
+                        back to them — it silently mails a stranger a link into a
+                        child's account, so the address gets read, not skimmed. */}
+                    <p className="mt-1 break-words font-display text-xl font-semibold text-stone-800">{invitedEmail}</p>
+                    <p className="mt-3 text-sm leading-relaxed text-stone-500">
+                        The link lets them choose a password. Wrong address? Archive this student and add them again.
+                    </p>
+                    <div className="mt-5 flex justify-end">
+                        <Button size="sm" onClick={() => setInvitedEmail(null)}>
+                            Done
+                        </Button>
+                    </div>
+                </Dialog>
+            ) : null}
+
+            {resetTarget ? (
                 <ConfirmDialog
-                    title="Rotate this login code?"
-                    body={`${rotateTarget.display_name}’s current code stops working straight away, and a new card has to reach them before their next lesson. Their scores, annotations and notes are untouched.`}
-                    confirmLabel="Rotate code"
+                    {...resetPromptFor(resetTarget)}
                     busy={busy}
-                    onConfirm={() => void confirmRotate()}
-                    onCancel={() => setRotateTarget(null)}
+                    onConfirm={() => void confirmReset()}
+                    onCancel={() => setResetTarget(null)}
                 />
             ) : null}
 
             {archiveTarget ? (
                 <ConfirmDialog
                     title={`Archive ${archiveTarget.display_name}?`}
-                    body="Their seat frees up for another student and their login code stops working. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
+                    body="Their seat frees up for another student and their sign-in stops working. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
                     confirmLabel="Archive"
                     busy={busy}
                     onConfirm={() => void confirmArchive()}
@@ -301,15 +419,22 @@ export const RosterPage = () => {
  * means the student exists and the form should reset, and throwing means
  * something went wrong that belongs under these fields rather than above them.
  */
+const SIGN_IN_METHODS: ReadonlyArray<{ value: 'code' | 'email'; label: string; hint: string }> = [
+    { value: 'code', label: 'Setup code', hint: 'No email needed — best for younger students' },
+    { value: 'email', label: 'Email invite', hint: 'They’ll get a link to set their password' },
+];
+
 const AddStudentForm = ({
     busy,
     onAdd,
 }: {
     busy: boolean;
-    onAdd: (displayName: string, parentEmail: string) => Promise<boolean>;
+    onAdd: (displayName: string, opts: ProvisionOptions) => Promise<boolean>;
 }) => {
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
+    const [method, setMethod] = useState<'code' | 'email'>('code');
+    const [studentEmail, setStudentEmail] = useState('');
     const [error, setError] = useState<string | null>(null);
 
     const submit = async () => {
@@ -318,11 +443,22 @@ const AddStudentForm = ({
             setError('Enter the student’s name.');
             return;
         }
+        const trimmedStudentEmail = studentEmail.trim();
+        if (method === 'email' && !trimmedStudentEmail.includes('@')) {
+            setError('Enter the student’s email address.');
+            return;
+        }
         setError(null);
+        const parentEmail = email.trim() || undefined;
         try {
-            if (await onAdd(displayName, email.trim())) {
+            const opts: ProvisionOptions =
+                method === 'email'
+                    ? { parentEmail, method: 'email', studentEmail: trimmedStudentEmail }
+                    : { parentEmail, method: 'code' };
+            if (await onAdd(displayName, opts)) {
                 setName('');
                 setEmail('');
+                setStudentEmail('');
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not add that student.');
@@ -363,9 +499,57 @@ const AddStudentForm = ({
                     />
                 </div>
             </div>
+
+            {/* Native radios: this is one choice out of two, the browser already
+                knows how to say that, and arrow keys move between them for free. */}
+            <fieldset className="mt-4">
+                <legend className={fieldLabelClassName}>How will they sign in?</legend>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    {SIGN_IN_METHODS.map((option) => (
+                        <label
+                            key={option.value}
+                            className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 transition ${
+                                method === option.value
+                                    ? 'border-accent/60 bg-accent-soft/50'
+                                    : 'border-stone-300/90 bg-white/70 hover:border-stone-400/90'
+                            }`}
+                        >
+                            <input
+                                type="radio"
+                                name="roster-method"
+                                value={option.value}
+                                checked={method === option.value}
+                                disabled={busy}
+                                onChange={() => setMethod(option.value)}
+                                className="mt-0.5 accent-accent"
+                            />
+                            <span>
+                                <span className="block text-sm font-medium text-stone-800">{option.label}</span>
+                                <span className="mt-0.5 block text-xs text-stone-500">{option.hint}</span>
+                            </span>
+                        </label>
+                    ))}
+                </div>
+            </fieldset>
+
+            {method === 'email' ? (
+                <div className="mt-4 sm:max-w-sm">
+                    <TextField
+                        id="roster-student-email"
+                        label="Student email"
+                        size="sm"
+                        type="email"
+                        value={studentEmail}
+                        placeholder="student@example.com"
+                        disabled={busy}
+                        onChange={(event) => setStudentEmail(event.target.value)}
+                    />
+                </div>
+            ) : null}
+
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-stone-500">
-                    The address is for your records and for sending the card home — never the student’s own.
+                    Parent email is for your records and for sending the card home — it is never a sign-in.
                 </p>
                 <Button type="submit" size="sm" disabled={busy}>
                     {busy ? 'Adding…' : 'Add student'}
@@ -383,7 +567,7 @@ const StudentRow = ({
     expanded,
     busy,
     onToggle,
-    onRotate,
+    onReset,
     onArchive,
     onRestore,
     onSetAccess,
@@ -395,7 +579,7 @@ const StudentRow = ({
     expanded: boolean;
     busy: boolean;
     onToggle: () => void;
-    onRotate: () => void;
+    onReset: () => void;
     onArchive: () => void;
     onRestore: () => void;
     onSetAccess: (assignment: AssignmentRow, access: AssignmentAccess) => void;
@@ -403,6 +587,7 @@ const StudentRow = ({
 }) => {
     const archived = student.archived_at !== null;
     const detailId = `student-detail-${student.id}`;
+    const identifier = identifierOf(student);
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
@@ -425,6 +610,10 @@ const StudentRow = ({
                         <span className="truncate font-medium text-stone-800 transition group-hover:text-accent-hover">
                             {student.display_name}
                         </span>
+                        {/* What they type to get in, beside the name the teacher
+                            typed — the two are different strings on both paths. */}
+                        {identifier ? <span className="truncate text-xs text-stone-500">{identifier}</span> : null}
+                        {student.claimed_at === null && !archived ? <Badge tone="warn">Invited</Badge> : null}
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
                     <span className="shrink-0 px-2 text-xs text-stone-500">
@@ -435,7 +624,8 @@ const StudentRow = ({
                     <RosterRowMenu
                         archived={archived}
                         busy={busy}
-                        onRotate={onRotate}
+                        resetLabel={resetLabelFor(student)}
+                        onReset={onReset}
                         onArchive={onArchive}
                         onRestore={onRestore}
                     />
@@ -606,13 +796,15 @@ const StudentTimeline = ({ studentUserId }: { studentUserId: string }) => {
 const RosterRowMenu = ({
     archived,
     busy,
-    onRotate,
+    resetLabel,
+    onReset,
     onArchive,
     onRestore,
 }: {
     archived: boolean;
     busy: boolean;
-    onRotate: () => void;
+    resetLabel: string;
+    onReset: () => void;
     onArchive: () => void;
     onRestore: () => void;
 }) => {
@@ -662,13 +854,13 @@ const RosterRowMenu = ({
             {open ? (
                 <div
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-40 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
                     {archived ? (
                         <MenuItem label="Restore" onClick={() => pick(onRestore)} />
                     ) : (
                         <>
-                            <MenuItem label="Rotate code…" onClick={() => pick(onRotate)} />
+                            <MenuItem label={resetLabel} onClick={() => pick(onReset)} />
                             <MenuItem label="Archive…" onClick={() => pick(onArchive)} />
                         </>
                     )}

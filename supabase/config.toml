@@ -2,12 +2,12 @@
 # https://supabase.com/docs/guides/local-development/cli/config
 # A string used to distinguish different Supabase projects on the same host. Defaults to the
 # working directory name when running `supabase init`.
-project_id = "sheet_music_scribbler"
+project_id = "cleffy"
 
 [api]
 enabled = true
 # Port to use for the API URL.
-port = 54321
+port = 54421
 # Schemas to expose in your API. Tables, views and stored procedures in this schema will get API
 # endpoints. `public` and `graphql_public` schemas are included by default.
 schemas = ["public", "graphql_public"]
@@ -32,9 +32,9 @@ enabled = false
 
 [db]
 # Port to use for the local database URL.
-port = 54322
+port = 54422
 # Port used by db diff command to initialize the shadow database.
-shadow_port = 54320
+shadow_port = 54420
 # Maximum amount of time to wait for health check when starting the local database.
 health_timeout = "2m"
 # The database major version to use. This has to be the same as your remote database's. Run `SHOW
@@ -44,7 +44,7 @@ major_version = 17
 [db.pooler]
 enabled = false
 # Port to use for the local connection pooler.
-port = 54329
+port = 54429
 # Specifies when a server connection can be reused by other clients.
 # Configure one of the supported pooler modes: `transaction`, `session`.
 pool_mode = "transaction"
@@ -94,7 +94,7 @@ enabled = true
 [studio]
 enabled = true
 # Port to use for Supabase Studio.
-port = 54323
+port = 54423
 # External URL of the API server that frontend connects to.
 api_url = "http://127.0.0.1"
 # OpenAI API Key to use for Supabase AI in the Supabase Studio.
@@ -105,10 +105,10 @@ openai_api_key = "env(OPENAI_API_KEY)"
 [local_smtp]
 enabled = true
 # Port to use for the email testing server web interface.
-port = 54324
+port = 54424
 # Uncomment to expose additional ports for testing user applications that send emails.
-# smtp_port = 54325
-# pop3_port = 54326
+# smtp_port = 54425
+# pop3_port = 54426
 # admin_email = "admin@email.com"
 # sender_name = "Admin"
 
@@ -117,12 +117,13 @@ enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
-# Uncomment to configure local storage buckets
-# [storage.buckets.images]
-# public = false
-# file_size_limit = "50MiB"
-# allowed_mime_types = ["image/png", "image/jpeg"]
-# objects_path = "./images"
+# The scores bucket. Declared here rather than only in seed.sql so it exists on
+# any environment built from this config — including branches, which we do not
+# seed. Must stay in sync with the insert in seed.sql.
+[storage.buckets.scores]
+public = false
+file_size_limit = "50MiB"
+allowed_mime_types = ["application/pdf"]
 
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
@@ -160,7 +161,16 @@ site_url = "http://localhost:5173"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["http://localhost:5173", "http://localhost:4173"]
+# /student/welcome is where an invited student lands from the emailed link to set
+# their password — GoTrue enforces this list against the redirectTo that
+# student-provision passes through, so an origin missing here is an invite that
+# cannot be completed.
+additional_redirect_urls = [
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://localhost:5173/student/welcome",
+  "http://localhost:4173/student/welcome",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -196,7 +206,12 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
-email_sent = 2
+# Raised for the student invite path: testing a roster means sending a handful of
+# invites in a row, and locally they all land in Inbucket (mail on :54424), so
+# there is nothing to throttle. Production does not read this — the ceiling there
+# is whatever the custom SMTP provider allows, and the email method REQUIRES one:
+# the built-in service sends ~2/hour and only to project team members.
+email_sent = 100
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
 sms_sent = 30
 # Number of anonymous sign-ins that can be made per hour per IP address. Requires enable_anonymous_sign_ins = true.
@@ -378,7 +393,7 @@ enabled = true
 # `oneshot` — fallback mode if hot reload causes issues (e.g. in large repos or with symlinks).
 policy = "per_worker"
 # Port to attach the Chrome inspector for debugging edge functions.
-inspector_port = 8083
+inspector_port = 8183
 # The Deno major version to use.
 deno_version = 2
 
@@ -423,19 +438,28 @@ verify_jwt = false
 [functions.student-provision]
 verify_jwt = true
 
-# The one other function that cannot require a JWT. A student typing the code
-# off their card has no session yet: the code IS the credential, and this is the
-# endpoint that trades it for one. Open is not the same as an oracle — the
-# endpoint is hard rate-limited (10/min per IP, against ~59-bit codes) and
-# answers every failure with the same indistinguishable 401. Deploy with
-# `supabase functions deploy student-login --no-verify-jwt`, as with
-# stripe-webhook above.
+# The two other functions that cannot require a JWT, for the same structural
+# reason as stripe-webhook: their caller has no Supabase JWT to present.
+#
+# A student typing the code off their card has no account they can reach yet.
+# The code is a ONE-TIME CLAIM TOKEN, not a password: student-claim spends it to
+# set a username and a password of the student's own, and student-login takes
+# those from then on. Open is not the same as an oracle — both are hard
+# rate-limited (60/min per IP; student-claim guards ~59-bit codes, student-login
+# a user-chosen password behind GoTrue's own per-account throttling) and both
+# answer every failure a guess can reach with one indistinguishable 401. Deploy
+# with the flag, as with stripe-webhook above:
+# `supabase functions deploy student-claim --no-verify-jwt`
+# `supabase functions deploy student-login --no-verify-jwt`
+[functions.student-claim]
+verify_jwt = false
+
 [functions.student-login]
 verify_jwt = false
 
 [analytics]
 enabled = true
-port = 54327
+port = 54427
 # Configure one of the supported backends: `postgres`, `bigquery`.
 backend = "postgres"
 
@@ -460,3 +484,28 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# -----------------------------------------------------------------------------
+# Persistent `dev` branch (git branch: dev) -> https://dev.cleffy.io
+#
+# The branch deploy applies this file to the branch, so without these overrides
+# the branch would inherit auth.site_url = http://localhost:5173 from above and
+# every auth redirect on dev.cleffy.io would land on localhost.
+# -----------------------------------------------------------------------------
+[remotes.dev]
+project_id = "qdbnlrgylelelvwbkvnm"
+
+[remotes.dev.auth]
+site_url = "https://dev.cleffy.io"
+additional_redirect_urls = [
+  "https://dev.cleffy.io",
+  "https://dev.cleffy.io/student/welcome",
+  "http://localhost:5173",
+]
+
+# Seeding is off on purpose. seed.sql creates teacher@cleffy.local and
+# student@cleffy.local with the password `cleffy-local-test`, which is written
+# down in .cursor/README.md. That is fine on a local stack and not fine on an
+# internet-facing host. Sign up a real account on dev.cleffy.io instead.
+[remotes.dev.db.seed]
+enabled = false

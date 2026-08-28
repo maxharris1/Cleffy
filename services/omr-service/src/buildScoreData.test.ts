@@ -23,6 +23,7 @@ const musical: MusicalScore = {
     defaultBpm: 88,
     totalTicks: 3840,
     warnings: ['repeats_ignored'],
+    openTiesAtEnd: 0,
 };
 
 const geometry: OmrGeometry = {

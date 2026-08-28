@@ -12,7 +12,11 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 > `20260826194426_roster.sql` are applied; `stripe-checkout`, `stripe-portal`,
 > `stripe-webhook`, `student-provision`, `student-login` and the metered
 > `imslp-download` are deployed (the webhook and student-login with
-> `--no-verify-jwt`). The Stripe SANDBOX catalogue exists — 3 products, 7
+> `--no-verify-jwt`). **`student-claim` is new and NOT yet deployed** — it ships
+> with `20260827150000_student_credentials.sql` and needs `--no-verify-jwt` too;
+> `student-login` and `student-provision` must be redeployed alongside it,
+> because a code is now a claim token rather than a password (§6f).
+> The Stripe SANDBOX catalogue exists — 3 products, 7
 > prices, webhook endpoint `we_1U8njJ9EqxUjgZtnfBK3y0XH` — the Customer portal
 > has a default configuration, and `STRIPE_SECRET_KEY`,
 > `STRIPE_WEBHOOK_SECRET` and `APP_URL` are set as Edge secrets.
@@ -21,7 +25,7 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 > a subscription created in Stripe arrives through the webhook as
 > `tier=teacher`, and cancelling it returns the account to `free`. The seven
 > `STRIPE_PRICE_*` secrets are deliberately NOT set — the Edge Functions read
-> `PUBLISHED_PRICES` in `_shared/stripe.ts`, guarded against drift by
+> `PUBLISHED_PRICES` in `_shared/stripeMode.ts`, guarded against drift by
 > `tests/billing/priceCatalogInSync.test.ts`.
 >
 > cleffy.io (main) and dev.cleffy.io (dev) both deploy from Vercel project
@@ -76,12 +80,15 @@ npx supabase db push
     - `http://localhost:5173`
     - `http://localhost:5173/auth/callback`
     - `http://localhost:5173/update-password`
+    - `http://localhost:5173/student/welcome`
     - `https://YOUR-SUBDOMAIN.ngrok-free.app`
     - `https://YOUR-SUBDOMAIN.ngrok-free.app/auth/callback`
     - `https://YOUR-SUBDOMAIN.ngrok-free.app/update-password`
+    - `https://YOUR-SUBDOMAIN.ngrok-free.app/student/welcome`
     - `https://YOUR-APP.vercel.app`
     - `https://YOUR-APP.vercel.app/auth/callback`
     - `https://YOUR-APP.vercel.app/update-password`
+    - `https://YOUR-APP.vercel.app/student/welcome`
 
 App routes that use these redirects:
 
@@ -89,11 +96,24 @@ App routes that use these redirects:
 | ------------------------- | ----------------------------- |
 | Email signup confirmation | `/auth/callback` → `/library` |
 | Password reset            | `/update-password`            |
+| Student invite / reset    | `/student/welcome`            |
 
-**Recommended:** the built-in email service allows only ~2–4 auth emails/hour — fine
-for real use, painful for testing. For test iteration either configure custom SMTP
-(Auth → SMTP, e.g. a free Resend account), or create a password test user under
-Auth → Users.
+`/student/welcome` is where an email-method student lands from their invitation
+(§6f). `student-provision` passes the teacher's origin through as `redirectTo`
+and GoTrue checks it against this list, so an origin missing here is an invite
+that cannot be completed — and the failure surfaces on the student's side, not
+the teacher's. `https://cleffy.io/student/welcome` and
+`https://dev.cleffy.io/student/welcome` both belong here; the localhost entries
+are in `supabase/config.toml` for the local stack.
+
+**Recommended locally, REQUIRED for the email method in production:** the built-in
+email service sends only ~2 auth emails/hour **and only to project team members**,
+so student invitations to real addresses simply never arrive on it. Configure
+custom SMTP (Auth → SMTP, e.g. a free Resend account) before offering the email
+method to teachers. Locally there is nothing to configure — every message lands in
+Inbucket (mail UI on :54424), and `config.toml` raises `auth.rate_limit.email_sent`
+to 100 so a test roster can be invited in one sitting. For plain sign-in test
+iteration you can also just create a password test user under Auth → Users.
 
 ## 4. Smart import (adopt pre-existing annotations)
 
@@ -236,7 +256,7 @@ stripe prices create --product="$ACADEMY" --currency=usd --unit-amount=49000 --r
 ```
 
 Founding Teacher is deliberately a _price_ on the Teacher product, not a tier or
-a product of its own: `priceTiers()` in `_shared/stripe.ts` maps it to `teacher`
+a product of its own: `priceTiers()` in `_shared/stripeMode.ts` maps it to `teacher`
 alongside the two full-price ids, so grandfathering needs no code at all —
 existing subscribers simply keep renewing at the price they bought, and switching
 the offer off only hides the card for new customers.
@@ -268,7 +288,7 @@ supabase secrets set \
 ```
 
 Those seven `STRIPE_PRICE_*` names are exactly the seven `priceCatalog()` reads
-in `supabase/functions/_shared/stripe.ts`. A name that is unset is simply a price
+in `supabase/functions/_shared/stripeMode.ts`. A name that is unset is simply a price
 that does not exist: it maps to no tier, and checkout refuses it.
 
 | Secret                       | Purpose                                                                     |
@@ -301,31 +321,48 @@ card is not rendered at all.
 
 ### 6c. Deploy the functions
 
-Two functions **must** be deployed with JWT verification disabled, for the same
+Three functions **must** be deployed with JWT verification disabled, for the same
 structural reason: their caller has no Supabase JWT to present. Stripe
 authenticates by signature; a student typing the code off their card is not
-signed in yet, and `student-login` is the endpoint that trades that code for a
-session. Both are already declared in `supabase/config.toml`, but pass the flag
+signed in yet, and neither is one signing in with the username they claimed. All
+three are already declared in `supabase/config.toml`, but pass the flag
 explicitly when deploying by hand:
 
 ```bash
 supabase functions deploy stripe-webhook --no-verify-jwt
+supabase functions deploy student-claim  --no-verify-jwt
 supabase functions deploy student-login  --no-verify-jwt
 supabase functions deploy stripe-checkout
 supabase functions deploy stripe-portal
-supabase functions deploy student-provision   # roster create/rotate/archive/restore
+supabase functions deploy student-provision   # roster create/reset/archive/restore
 supabase functions deploy score-analyze analyze-annotations analyze-notes
 supabase functions deploy imslp-download   # now meters smart imports
 ```
 
-Open is not the same as an oracle: `student-login` is hard rate-limited (60/min
+**Deploy the three student functions together**, after applying
+`20260827150000_student_credentials.sql`. They are one change: `student-claim` is
+new, `student-login` now takes a username and password instead of a code, and
+`student-provision` mints codes that are claim tokens rather than passwords. The
+migration is what makes the intermediate states impossible, so it goes first.
+
+**The email method also needs custom SMTP and a redirect entry** before it works
+in production — see §3. Without SMTP the invitation never reaches a real address;
+without `https://cleffy.io/student/welcome` (and the dev-branch equivalent) in the
+redirect allow-list GoTrue refuses the link `student-provision` asks it to send.
+The code method needs neither and is unaffected.
+
+Open is not the same as an oracle. `student-claim` is hard rate-limited (60/min
 per IP, against the ~59-bit code space of `_shared/studentCodes.ts`) and answers
-every failure — bad shape, no such code, archived student, refused password —
-with one indistinguishable 401. See §6f. The ceiling is sized for a classroom
-arriving behind one school NAT rather than for a person, which costs nothing
-against 59 bits; the bucket key is `cf-connecting-ip`, or the LAST
-`x-forwarded-for` hop, because proxies append to that header and only its last
-entry is one a caller cannot choose.
+every failure a guess can reach — bad shape, no such code, archived student,
+already-claimed code — with one indistinguishable 401; it distinguishes only the
+username/password rules printed on the form in front of the student, and "that
+username is taken", which is reachable only by someone already holding a valid
+code. `student-login` is rate-limited the same way and never varies its 401 at
+all: what stands behind a guess there is a user-chosen password plus GoTrue's own
+per-account throttling, not the code space. Both ceilings are sized for a
+classroom arriving behind one school NAT rather than for a person; the bucket key
+is `cf-connecting-ip`, or the LAST `x-forwarded-for` hop, because proxies append
+to that header and only its last entry is one a caller cannot choose.
 
 Register the endpoint in Stripe
 ([Developers → Webhooks](https://dashboard.stripe.com/test/webhooks)) pointing at
@@ -345,7 +382,7 @@ supabase functions serve stripe-webhook --no-verify-jwt
 
 # Terminal 2 — forward live events. This prints the whsec_… signing secret to
 # use as STRIPE_WEBHOOK_SECRET locally; it differs from the dashboard one.
-stripe listen --forward-to http://127.0.0.1:54321/functions/v1/stripe-webhook
+stripe listen --forward-to http://127.0.0.1:54421/functions/v1/stripe-webhook
 
 # Terminal 3 — fire events at it.
 stripe trigger checkout.session.completed
@@ -399,47 +436,113 @@ Students are never touched by a lapse at all; see the end of §6f.
 
 A provisioned student is a **real Supabase auth user** — not a share link, not a
 row pretending to be a login. `student-provision` (`action: 'create'`) creates it
-under the service role, because no client may create a user: a synthetic address
-`st-<roster-id>@students.cleffy.app` with **no inbox behind it**, marked
+under the service role, because no client may create a user, and marks it
 `app_metadata.user_type = 'student'`. That flag is admin-set and therefore not
 something the account can write, which is what lets `get_entitlements()` and the
 `documents_insert` policy trust it. Alongside it goes a `managed_students` row:
-the teacher's side of the account — display name, the hash of the login code, and
-the archive flag. The two share one uuid, so the roster id names the address.
+the teacher's side of the account — display name, method, the archive flag, and
+whichever credential state the method implies.
 
-**The code is the whole credential.** Twelve characters from a 31-symbol
-alphabet — ~59 bits, rejection-sampled so every code is uniform, with `0/O` and
-`1/I/L` dropped so a code read off a card over a music stand cannot be mistyped
-into ambiguity. It does two jobs at once: its SHA-256 selects the roster row, and
-it _is_ the password of the synthetic user. The teacher prints it on a card
-(`XXXX-XXXX-XXXX`; the dashes are cosmetic, and `student-login` normalizes
-whatever the child types). It is shown **exactly once**, at creation. Neither
-Supabase nor `managed_students` stores anything but a hash, so a lost code is
-never recovered — it is replaced with `action: 'rotate'`, which mints a new one
-and invalidates the old.
+**The teacher picks a method per student, at creation, and it is fixed for the
+life of the row** (`auth_method`, `check (auth_method in ('code','email'))`):
 
-**Archive frees the seat and revokes access, and deletes nothing.** Archiving
-does two things, because the roster row and the auth account are two halves of
-one student: it stamps `archived_at`, which is what frees the seat and stops
-`student-login` matching, and it **bans the account**, which is the actual
-revocation. The stamp alone would not be one — the code on the card is also the
-account's Supabase password, and the synthetic address is derived from the roster
-id the student can read off their own row, so they could sign straight back in at
-`/auth/v1/token` without ever touching `student-login`. The ban refuses that and
-every token refresh, so a session already open dies with its current access
-token. Nothing is deleted: assignments, annotations and practice notes all stay,
-and `action: 'restore'` lifts the ban and gives a student their history back. A
-restore re-runs the same stock check a create does, so a teacher at their cap
-cannot archive-and-restore their way past it.
+| Method    | Choose it for                                  | What the student gets                                                        |
+| --------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
+| `'code'`  | A young child, or anyone with no email of their own | A printed card. No address is collected, anywhere                        |
+| `'email'` | An older student with their own address, or one whose parent will manage it | An emailed invitation, then an ordinary sign-in |
 
-**COPPA posture: no student email address and no student-chosen password is ever
-collected.** There is no inbox to confirm, no address to mail, and no
-self-service reset to phish — the printed card is the entire enrolment, and
-replacing it is the teacher's `rotate`. The synthetic address is an
-implementation detail that never leaves the server and is never shown to anyone,
-teacher included. The one address that may exist is the **parent's**, optional,
-stored on the teacher's roster row (`managed_students.parent_email`) for the
-teacher's records and for sending the card home.
+On the **code** path the account is keyed on a synthetic address
+`st-<roster-id>@students.cleffy.app` with **no inbox behind it** — the roster id
+names the address, so the row and the account share one uuid. On the **email**
+path the account is keyed on the student's real address and there is no synthetic
+one, no code and no username at all.
+
+**The code is a one-time CLAIM TOKEN, not a password.** Twelve characters from a
+31-symbol alphabet — ~59 bits, rejection-sampled so every code is uniform, with
+`0/O` and `1/I/L` dropped so a code read off a card over a music stand cannot be
+mistyped into ambiguity. Its SHA-256 selects the roster row in `student-claim`
+exactly **once**: the student chooses a username (3–20 lowercase letters, digits
+and underscores) and a password there, and that one UPDATE stores the username,
+stamps `claimed_at` and **nulls the hash**. From then on they sign in with those
+through `student-login`, and the card is spent — losing it, or leaving it on the
+piano, costs nothing. Meanwhile the account's actual password is a 32-byte
+scramble that is generated, set and forgotten, so an unclaimed account has no
+sign-in path for anyone, the teacher included. The code is shown to the teacher
+**exactly once**, at creation; nothing stores the plaintext, so a lost code is
+replaced by `action: 'reset'`, never recovered.
+
+**Four states, and the database admits no others** (the
+`managed_students_claim_state` CHECK in `20260827150000_student_credentials.sql`):
+
+| State            | Row                                                        | Where the student goes  |
+| ---------------- | ---------------------------------------------------------- | ----------------------- |
+| code + Invited   | `login_code_hash` set, `claimed_at` null                    | `student-claim`         |
+| code + Active    | `username` set, `login_code_hash` **null**                  | `student-login`         |
+| email + Invited  | `student_email` set, `claimed_at` null                      | the emailed link        |
+| email + Active   | `student_email` set, `claimed_at` stamped                   | ordinary sign-in        |
+
+"Invited" means the same thing on both paths: the password is a scramble nobody
+has ever seen. Usernames are stored canonical-lowercase, so the plain unique index
+on them **is** case-insensitive uniqueness. An email student stamps their own
+`claimed_at` through `mark_student_claimed()`, a SECURITY DEFINER function scoped
+to `auth.uid()` — `managed_students` has no client write policy, so this is the
+one write a student ever makes to their own row.
+
+**`action: 'reset'`** (formerly `'rotate'`; there is no alias) is the single
+recovery path for a forgotten password, and on both methods it **scrambles the
+password first** — that is the actual revocation, and it means a reset that then
+fails halfway has already taken the old credential away. What follows differs:
+
+- **code** — mints a fresh code and returns the row to Invited. The old password
+  is dead, the new card is the only way back in, and the previous `username` is
+  deliberately left in place: the claim overwrites it, so keeping or changing the
+  name is the student's call. The response echoes it so the teacher can say which
+  name the student is claiming into again.
+- **email** — re-sends a magic link to `student_email` (via the anon client with
+  `shouldCreateUser: false`, so it can never conjure an account) and clears
+  `claimed_at`. Re-running it just re-sends. Restore an archived student before
+  resetting them: a banned account may not be mailable at all.
+
+**Archive frees the seat and revokes access, and deletes nothing.** Unchanged by
+any of the above, and more necessary than before. Archiving does two things,
+because the roster row and the auth account are two halves of one student: it
+stamps `archived_at`, which frees the seat and stops `student-login` and
+`student-claim` matching, and it **bans the account for `876000h`**, which is the
+actual revocation. The stamp alone would not be one — an active student now holds
+a password they chose themselves, against an address they either supplied or can
+derive from the roster id they read off their own row, so they would sign straight
+back in at `/auth/v1/token` without ever touching an Edge Function. The ban
+refuses that and every token refresh, so a session already open dies with its
+current access token. Nothing is deleted: assignments, annotations and practice
+notes all stay, and `action: 'restore'` lifts the ban and gives a student their
+history back. A restore re-runs the same stock check a create does, so a teacher
+at their cap cannot archive-and-restore their way past it.
+
+**COPPA posture, honestly.** The old promise — that no student email address and
+no student-chosen password is ever collected — held only while the code was the
+credential, and it no longer describes both paths. What is true now:
+
+- **The code method is still the zero-email option**, and it is the one to offer
+  for a young child. No address is collected, from the student or from anyone; the
+  synthetic address is derived from a uuid, never leaves the server, and is shown
+  to nobody, teacher included. There is no inbox to confirm and **no self-service
+  reset to phish** — a forgotten password is recovered only by the teacher, in
+  person, with a new printed card. The student does now choose their own password,
+  which is a change: it is tied to no email address and reveals nothing about
+  them, and it is what stops a card left on a music stand from being a login.
+- **The email method collects a student's real address, at the teacher's
+  discretion.** Consent for that sits with the teacher, who is the person with the
+  relationship to the family — the app cannot verify it and does not pretend to.
+  The honest risk is a typo: a mistyped address invites a **stranger**, not the
+  student. Three things bound it. The address is echoed back and shown
+  prominently on the confirmation panel, at the one moment it is still easy to
+  fix. An invited account contains **nothing at all** until the teacher assigns a
+  score to it, so the window between a bad invite and any exposure is entirely
+  under the teacher's control. And archive is the kill switch: it bans the
+  account outright, at any time, without touching the student's history.
+- **The parent's address** (`managed_students.parent_email`) is unchanged on both
+  paths: optional, the teacher's record of who to send the card home to, and never
+  a login for anything.
 
 **A lapse never locks a student out.** Nothing about a subscription is consulted
 when a student signs in or opens what they were assigned, so if a teacher's plan
@@ -500,15 +603,20 @@ environment settings). Without it, everything still works from your machine —
    for the tier you bought and the 4th score now uploads. **Manage subscription**
    opens the Customer Portal; cancel there → the account returns to free limits,
    and scores past the cap are archived but still open and export correctly.
-9. Roster, on a free teacher account: **Students** → **Add student** → a code
-   appears with a **Print card** button. Note it down — this is the only time it
-   is readable — then reload the page and confirm it is gone for good.
+9. Roster, on a free teacher account: **Students** → add a student on the **code**
+   method → a code appears with a **Print card** button. Note it down — this is
+   the only time it is readable — then reload the page and confirm it is gone for
+   good.
 10. Open a score's menu in the library → **Assign to student…** → pick that
     student, leave the access on **Edit**.
-11. In a private/incognito window open `/student`, type the code (dashes,
-    spaces and lower case are all fine) → **Open my music** lands on
-    `/assignments` with the assigned score listed. Open it and **draw** — the
-    strokes save, and rows appear in `annotations` with the student's user id.
+11. In a private/incognito window open `/student`, type the code (dashes, spaces
+    and lower case are all fine) and choose a username and password → the claim
+    lands on `/assignments` with the assigned score listed. Open it and **draw** —
+    the strokes save, and rows appear in `annotations` with the student's user id.
+    Then confirm the code is **spent**: the same code in a second incognito window
+    is refused with the same "that code did not work" as a made-up one, and the
+    row's `login_code_hash` is now null. Sign out and back in with the username
+    and password.
 12. Back in the teacher's window, flip that assignment's toggle to **View** →
     in the student's window the next stroke is refused (the toggle demoted their
     `document_members` row from editor to viewer, and RLS is what stops the
@@ -522,3 +630,15 @@ environment settings). Without it, everything still works from your machine —
 14. Still on free: add a 4th student → refused with the seat-limit notice. Buy
     **Teacher** with the test card → adding students is now uncapped, and every
     student provisioned before the upgrade signs in exactly as before.
+15. The email method, on the local stack: add a student with their address →
+    the invitation appears in Inbucket (http://127.0.0.1:54424). Follow the link
+    to `/student/welcome`, set a password, and land on `/assignments`. Confirm
+    the roster row has `auth_method = 'email'`, a null `username` and a null
+    `login_code_hash`, and that `claimed_at` was stamped by the student
+    themselves. Re-inviting the same address is refused with **409
+    `email_in_use`**, not a 502.
+16. Reset, on one student of each method: the code student gets a new card and
+    their **old password stops working immediately** — check that before typing
+    the new code. The email student gets a fresh link, and their old password is
+    equally dead. Both rows are back to Invited (`claimed_at` null), and neither
+    lost an assignment, an annotation or a practice note.

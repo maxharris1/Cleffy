@@ -5,10 +5,84 @@ description: Operate this project's Supabase backend (project jibgwgosihadbjgxds
 
 # Supabase operations — Cleffy
 
-Project ref: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe
-Current state: migrations 0001–0003 applied, `scores` bucket created (private, 50 MB,
-pdf-only), anonymous sign-ins enabled, site URL `http://localhost:5173`, redirect
-allowlist includes localhost + `*.ngrok-free.app`.
+## Environments
+
+| Environment | Ref | Notes |
+| --- | --- | --- |
+| Production (`cleffy.io`, git `main`) | `jibgwgosihadbjgxdsfe` | do not `db push` — see divergence below |
+| Persistent `dev` branch (`dev.cleffy.io`, git `dev`) | `qdbnlrgylelelvwbkvnm` | **paused most of the time**; unpause to test a release |
+| Local | — | `npm run local:up`, API on :54421 |
+
+Production dashboard: https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe
+
+## Local development — prefer this
+
+```bash
+npm run local:up          # Supabase + OMR worker; --no-omr to skip OMR
+npm run dev:local         # Vite :5173
+npm run functions:serve   # edge functions
+npm run local:status      # health check
+npm run local:down
+```
+
+Ports are a **+100 offset** from Supabase defaults (API 54421, db 54422, studio
+54423, mail 54424) so the stack coexists with the other Supabase projects on a
+dev machine, which all claim the default 5432x block. They are read from
+`supabase/config.toml` — never hardcode them. Everything is scoped to
+`project_id = "cleffy"`; a bare `docker ps --filter name=supabase_` would match
+other projects' containers, and `cleanup_supabase_state` would delete them.
+
+Accounts: `teacher@cleffy.local` / `student@cleffy.local`, password
+`cleffy-local-test`.
+
+Local OMR joins the Supabase docker network on purpose: the edge runtime's
+`SUPABASE_URL` is `http://kong:8000`, so the signed storage URLs `score-analyze`
+mints are only fetchable from inside that network. The edge runtime reaches the
+worker at `http://cleffy-local-omr:8080`. Note the CLI **refuses any
+`SUPABASE_*` name** in `supabase/functions/.env` and injects its own.
+
+## The dev branch
+
+```bash
+supabase branches unpause dev --project-ref jibgwgosihadbjgxdsfe
+git push origin dev          # a deploy must run; unpause alone applies nothing
+# ...test dev.cleffy.io...
+supabase branches pause dev --project-ref jibgwgosihadbjgxdsfe
+```
+
+A push to `dev` while the branch is paused fails at the health step — cosmetic,
+expected. Branch config lives in `[remotes.dev]` in `config.toml`; the branch is
+**not seeded** (seed.sql's accounts have a documented password and this host is
+public), so the `scores` bucket comes from `[storage.buckets.scores]`. Edge
+function secrets do **not** inherit from production.
+## Migration history — reconciled 2026-08-27
+
+Production and the `dev` branch were hard-reset and rebuilt from
+`supabase/migrations/`. Both now carry the same 22 migrations (identical
+fingerprints), so `db push` is safe again and the earlier divergence is gone.
+All data was intentionally discarded.
+
+Resetting a hosted database has two traps (CLI 2.115.0), both hit in practice:
+
+- `db reset --linked` drops tables but **not sequences**, so the re-apply fails
+  with `annotations_seq already exists (42P07)` and leaves the database empty
+  and half-built. Drop leftover sequences/enums in `public`, then re-run.
+- `supabase storage rm` **silently no-ops** (`{"deleted":[]}`). Delete via the
+  Storage API: `DELETE /storage/v1/object/<bucket>` with `{"prefixes":[...]}`
+  and a service key.
+
+`db reset --linked` clears `auth.users` but not storage. Always pass `--no-seed`
+against a hosted environment — `seed.sql`'s accounts use a password documented
+in `.cursor/README.md`.
+
+## Grants — do not rely on default privileges
+
+The **local** Docker image gives anon/authenticated only `Dxtm` on tables
+created by `postgres` (which is what migrations run as), so a table with no
+explicit grant answers `42501 permission denied` before RLS is consulted.
+Hosted images give the full `arwdDxtm` from the default ACL, so
+`20260827140000_core_table_grants.sql` is load-bearing locally and a no-op
+hosted. **Every new table needs an explicit grant** matching its RLS policies.
 
 ## Credentials — where they live (NEVER commit any of these)
 

@@ -48,7 +48,9 @@ export const UNLIMITED = -1;
 
 /** Mirrors public.tier_limits(). Drift-guarded by tests/billing/limitsInSync.test.ts. */
 export const TIER_LIMITS: Record<BillingTier, EntitlementLimits> = {
-    free: { cloud_scores: 3, omr_runs: 3, vision_reads: 5, smart_imports: 2, pdf_exports: 1, students: 3 },
+    // students: 0 — Free is a taste of Personal, the individual licence, so the
+    // roster starts at Teacher.
+    free: { cloud_scores: 3, omr_runs: 3, vision_reads: 5, smart_imports: 2, pdf_exports: 1, students: 0 },
     personal: {
         cloud_scores: UNLIMITED,
         omr_runs: UNLIMITED,

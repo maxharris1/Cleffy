@@ -15,6 +15,12 @@ vi.mock('@/lib/storageUpload', () => ({
 // fake-indexeddb's structured clone strips jsdom Blob methods, so the Dexie
 // layer is replaced by an in-memory map that keeps real Blobs readable.
 const memCache = vi.hoisted(() => new Map<string, unknown>());
+const memThumbs = vi.hoisted(() => new Map<string, unknown>());
+// The upload/replace paths kick off a thumbnail render; stubbed so these tests
+// never pull pdf.js in.
+vi.mock('@/features/library/thumbnailService', () => ({
+    getThumbnail: vi.fn(() => Promise.resolve(null)),
+}));
 vi.mock('@/sync/db', () => {
     const table = (impl: Record<string, unknown>) => impl;
     return {
@@ -43,6 +49,16 @@ vi.mock('@/sync/db', () => {
                 where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }),
             }),
             scoreCache: table({ delete: () => Promise.resolve() }),
+            thumbnails: table({
+                put: (row: { docId: string }) => {
+                    memThumbs.set(row.docId, row);
+                    return Promise.resolve(row.docId);
+                },
+                delete: (id: string) => {
+                    memThumbs.delete(id);
+                    return Promise.resolve();
+                },
+            }),
         }),
     };
 });
@@ -251,5 +267,21 @@ describe('deleteDocument', () => {
         const d = doc();
         await deleteDocument(d);
         expect(calls.remove).toHaveBeenCalledWith([`${d.id}/original.pdf`, `${d.id}/pre-import-original.pdf`]);
+    });
+
+    it('drops the cached thumbnail along with the other local caches', async () => {
+        makeStub();
+        const d = doc();
+        await getDb().thumbnails.put({
+            docId: d.id,
+            contentRev: 0,
+            maxSide: 512,
+            blob: new Blob(['png'], { type: 'image/png' }),
+            width: 181,
+            height: 256,
+            createdAt: '2026-08-01T00:00:00Z',
+        });
+        await deleteDocument(d);
+        expect(memThumbs.has(d.id)).toBe(false);
     });
 });

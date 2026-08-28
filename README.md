@@ -43,6 +43,43 @@ else.
 
 ## Development
 
+### Against a local Supabase stack (recommended)
+
+Needs Docker. Brings up Postgres, Auth, Storage, Realtime, the edge functions
+and an OMR worker, runs every migration, and seeds two test accounts:
+
+```bash
+npm run local:up
+npm run dev:local        # Vite on :5173
+npm run functions:serve  # edge functions
+```
+
+|                          |                                                           |
+| ------------------------ | --------------------------------------------------------- |
+| App                      | http://localhost:5173                                     |
+| Supabase API / functions | http://127.0.0.1:54421                                    |
+| Studio                   | http://127.0.0.1:54423                                    |
+| Mail (Mailpit)           | http://127.0.0.1:54424                                    |
+| Postgres                 | `postgresql://postgres:postgres@127.0.0.1:54422/postgres` |
+| OMR worker               | http://127.0.0.1:8091                                     |
+
+Sign in as `teacher@cleffy.local` or `student@cleffy.local`, password
+`cleffy-local-test`. The seeded documents carry library metadata only — there
+are no PDF bytes in the `scores` bucket, so upload a real file to exercise the
+viewer.
+
+These ports are a **+100 offset** from the Supabase defaults on purpose, so this
+stack coexists with other local Supabase projects on the same machine. They are
+read from `supabase/config.toml`, not hardcoded.
+
+```bash
+npm run local:status   # health check
+npm run local:down     # stop Supabase + the OMR worker
+npm run local:up -- --no-omr
+```
+
+### Against hosted Supabase
+
 ```bash
 npm install
 cp .env.example .env   # fill in the Supabase URL + anon/publishable key

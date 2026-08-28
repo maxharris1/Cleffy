@@ -63,6 +63,24 @@ export interface CachedScoreAnalysis {
     fetchedAt: string;
 }
 
+/** First-page render for the library row (local-only, never synced). */
+export interface CachedThumbnail {
+    docId: string;
+    /** documents.content_rev the render came from — mismatch regenerates. */
+    contentRev: number;
+    /**
+     * THUMB_MAX_SIDE this render was sized for. Rows written before the shelf
+     * existed carry no value at all, so every reader must treat a missing one
+     * as 0 (too small) rather than trusting the type — `undefined < 512` is
+     * false, which would pin those 256px renders forever.
+     */
+    maxSide: number;
+    blob: Blob; // image/png
+    width: number;
+    height: number;
+    createdAt: string;
+}
+
 /**
  * Cached note-reading for one selected region (local-only, never synced).
  * Recognition is the expensive step — cache the POST-REVIEW region (user
@@ -97,6 +115,7 @@ export class ScribblerDb extends Dexie {
     scoreCache!: Table<CachedScoreAnalysis, string>;
     fingeringRegions!: Table<FingeringRegionCache, string>;
     entitlements!: Table<CachedEntitlements, string>;
+    thumbnails!: Table<CachedThumbnail, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -144,6 +163,20 @@ export class ScribblerDb extends Dexie {
             scoreCache: 'docId',
             fingeringRegions: 'id, docId, createdAt',
             entitlements: 'userId',
+        });
+        // Every store is restated, same as v5 — Dexie treats each version's
+        // `stores()` as the complete schema for that version, so an omitted
+        // table would be DROPPED on upgrade rather than carried forward.
+        this.version(6).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
         });
     }
 }

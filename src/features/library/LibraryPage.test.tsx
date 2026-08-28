@@ -71,8 +71,35 @@ const outletContext: LibraryOutletContext = {
     clearUploadError: vi.fn(),
     uploadLimit: null,
     tier: 'free',
+    canManageStudents: true,
     openPricing: vi.fn(),
 };
+
+/**
+ * Node defines a `localStorage` global whose getter returns undefined unless
+ * the process was started with --localstorage-file, and under vitest's jsdom
+ * environment `window` IS globalThis — so that getter shadows the Storage jsdom
+ * built and `window.localStorage` reads as undefined.
+ *
+ * The page survives that on its own (libraryPrefs treats a throwing store as
+ * "nothing saved" and falls back to the shelf), but these tests need a store
+ * they can seed, so they bring their own.
+ */
+const memoryStorage = (): Storage => {
+    const entries = new Map<string, string>();
+    return {
+        get length() {
+            return entries.size;
+        },
+        key: (i: number) => [...entries.keys()][i] ?? null,
+        getItem: (k: string) => entries.get(k) ?? null,
+        setItem: (k: string, v: string) => void entries.set(k, String(v)),
+        removeItem: (k: string) => void entries.delete(k),
+        clear: () => entries.clear(),
+    };
+};
+
+vi.stubGlobal('localStorage', memoryStorage());
 
 const ContextFrame = () => <Outlet context={outletContext} />;
 
@@ -89,6 +116,11 @@ const renderLibrary = () =>
 
 beforeEach(() => {
     vi.clearAllMocks();
+    // The page now defaults to the shelf. Every assertion below is about the
+    // list — its rows, its stretched links, its per-row controls — so the tests
+    // pin the view rather than being rewritten around cards. The grid has its
+    // own describe block at the end of this file.
+    window.localStorage.setItem('cleffy:library-view', 'list');
     listDocuments.mockResolvedValue({
         documents: [
             doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
@@ -115,6 +147,17 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
         expect(screen.getByRole('button', { name: 'Add a tag…' })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 1, name: 'Library' })).toBeInTheDocument();
+    });
+
+    it('says “1 page”, not “1 pages”, for a single-page score', async () => {
+        listDocuments.mockResolvedValue({
+            documents: [{ ...doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), page_count: 1 }],
+            hasMore: false,
+        });
+        renderLibrary();
+        await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+        expect(screen.getByText(/1 page ·/)).toBeInTheDocument();
     });
 
     it('marks archived scores, which stay open but read-only', async () => {
@@ -127,7 +170,7 @@ describe('LibraryPage', () => {
         });
         renderLibrary();
 
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(screen.getAllByText('Archived')).toHaveLength(1);
         // Still a link — archived means read-only, never hidden or deleted.
         expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toHaveAttribute(
@@ -138,7 +181,7 @@ describe('LibraryPage', () => {
 
     it('does not mark anything archived when nothing is', async () => {
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(screen.queryByText('Archived')).not.toBeInTheDocument();
     });
 
@@ -200,7 +243,7 @@ describe('LibraryPage', () => {
             </MemoryRouter>,
         );
 
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
         await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
         await user.click(screen.getByRole('button', { name: 'Delete' }));
@@ -237,7 +280,7 @@ describe('LibraryPage', () => {
             </MemoryRouter>,
         );
 
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
         await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
         await user.click(screen.getByRole('button', { name: 'Delete' }));
@@ -248,7 +291,7 @@ describe('LibraryPage', () => {
     it('toggles a favorite through the service', async () => {
         const user = userEvent.setup();
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         const stars = screen.getAllByRole('button', { name: 'Add to favorites' });
         await user.click(stars[0] as HTMLElement);
         expect(setDocumentFavorite).toHaveBeenCalledWith('d1', 'teacher-1', true);
@@ -258,7 +301,7 @@ describe('LibraryPage', () => {
     it('groups by composer with headers when toggled', async () => {
         const user = userEvent.setup();
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getByRole('button', { name: 'Group by composer' }));
         expect(screen.getByRole('heading', { name: 'Bach, Johann Sebastian' })).toBeInTheDocument();
         expect(screen.getByRole('heading', { name: 'Mozart, Wolfgang Amadeus' })).toBeInTheDocument();
@@ -270,7 +313,7 @@ describe('LibraryPage', () => {
         const user = userEvent.setup();
         renameDocument.mockResolvedValue(undefined);
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
         await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
         const field = screen.getByLabelText('Title');
@@ -285,7 +328,7 @@ describe('LibraryPage', () => {
         const user = userEvent.setup();
         deleteDocument.mockResolvedValue(undefined);
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
         await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
         expect(screen.getByRole('dialog', { name: 'Delete this score?' })).toBeInTheDocument();
@@ -297,7 +340,7 @@ describe('LibraryPage', () => {
     it('opens the share dialog for a row', async () => {
         const user = userEvent.setup();
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
         await user.click(screen.getByRole('menuitem', { name: 'Share…' }));
         expect(screen.getByTestId('share-dialog')).toHaveTextContent('d1');
@@ -307,7 +350,7 @@ describe('LibraryPage', () => {
         const user = userEvent.setup();
         createLibraryTag.mockResolvedValue(tag('t-concert', 'Concert'));
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(screen.getByRole('button', { name: 'Add a tag…' }));
         expect(screen.getByRole('dialog', { name: 'Manage tags' })).toBeInTheDocument();
         await user.type(screen.getByLabelText('New tag name'), 'Concert');
@@ -321,7 +364,7 @@ describe('LibraryPage', () => {
         const concert = tag('t-concert', 'Concert');
         createLibraryTag.mockResolvedValue(concert);
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
 
         await user.click(screen.getAllByRole('button', { name: 'Add tags' })[0] as HTMLElement);
         expect(screen.getByRole('dialog', { name: 'Tags' })).toBeInTheDocument();
@@ -347,7 +390,7 @@ describe('LibraryPage', () => {
         listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
         listDocumentTagMap.mockResolvedValue(new Map());
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(await screen.findByRole('button', { name: 'Lesson', pressed: false })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
 
@@ -370,9 +413,116 @@ describe('LibraryPage', () => {
         listLibraryTags.mockResolvedValue([tag('t-concert', 'Concert')]);
         listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-concert']]]));
         renderLibrary();
-        await screen.findByText('An Chloe (Mozart, Wolfgang Amadeus)');
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(await screen.findByRole('button', { name: 'Group by tag' }));
         expect(screen.getByRole('heading', { name: 'Concert' })).toBeInTheDocument();
         expect(screen.getByRole('heading', { name: 'Untagged' })).toBeInTheDocument();
+    });
+});
+
+describe('grid view', () => {
+    // Nothing stored: these exercise the shipped default rather than a seed.
+    beforeEach(() => {
+        window.localStorage.removeItem('cleffy:library-view');
+    });
+
+    it('defaults to the shelf when nothing is stored', async () => {
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        expect(screen.getByRole('button', { name: 'Grid view' })).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.getByRole('button', { name: 'List view' })).toHaveAttribute('aria-pressed', 'false');
+        // Cards carry no inline tag button — that is the list row's job.
+        expect(screen.queryAllByRole('button', { name: 'Add tags' })).toHaveLength(0);
+    });
+
+    it('gives every card a link named by the score, with the star and menu still reachable', async () => {
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+        expect(screen.getByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' })).toHaveAttribute(
+            'href',
+            '/doc/d1',
+        );
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toHaveAttribute(
+            'href',
+            '/doc/d2',
+        );
+        // Faded out until hover, but never removed: keyboard users tab to them.
+        expect(screen.getAllByRole('button', { name: 'Add to favorites' })).toHaveLength(2);
+        expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
+    });
+
+    it('drops the composer suffix from cards under a composer heading', async () => {
+        const user = userEvent.setup();
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        await user.click(screen.getByRole('button', { name: 'Group by composer' }));
+
+        expect(screen.getByRole('heading', { name: 'Mozart, Wolfgang Amadeus' })).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'An Chloe' })).toBeInTheDocument();
+    });
+
+    it('offers the add-a-score tile only on an unfiltered, ungrouped shelf', async () => {
+        const user = userEvent.setup();
+        listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
+        listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-lesson']]]));
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        expect(screen.getByText('Add a score')).toBeInTheDocument();
+
+        // A tag filter turns the shelf into a result set — no tile.
+        await user.click(await screen.findByRole('button', { name: 'Lesson', pressed: false }));
+        expect(screen.queryByText('Add a score')).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'Lesson', pressed: true }));
+        expect(screen.getByText('Add a score')).toBeInTheDocument();
+
+        await user.type(screen.getByLabelText('Search scores'), 'chloe');
+        expect(screen.queryByText('Add a score')).not.toBeInTheDocument();
+    });
+
+    it('hides the tile under a grouping, where it would have to pick a group', async () => {
+        const user = userEvent.setup();
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        await user.click(screen.getByRole('button', { name: 'Group by composer' }));
+        expect(screen.queryByText('Add a score')).not.toBeInTheDocument();
+    });
+
+    it('swaps to rows and remembers the choice when List view is picked', async () => {
+        const user = userEvent.setup();
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+        await user.click(screen.getByRole('button', { name: 'List view' }));
+
+        expect(window.localStorage.getItem('cleffy:library-view')).toBe('list');
+        expect(screen.getByRole('button', { name: 'List view' })).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
+        expect(screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)').closest('li')).not.toBeNull();
+        expect(screen.queryByText('Add a score')).not.toBeInTheDocument();
+    });
+});
+
+describe('plans without a roster', () => {
+    beforeEach(() => {
+        window.localStorage.setItem('cleffy:library-view', 'list');
+        outletContext.canManageStudents = false;
+    });
+    afterEach(() => {
+        outletContext.canManageStudents = true;
+    });
+
+    it('drops the assign action from the score menu', async () => {
+        const user = userEvent.setup();
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0]!);
+
+        // The rest of the menu is untouched — only the roster action goes.
+        expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
+        expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+        expect(screen.queryByRole('menuitem', { name: 'Assign to student…' })).not.toBeInTheDocument();
     });
 });

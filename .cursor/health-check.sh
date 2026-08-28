@@ -4,7 +4,7 @@
 # Usage: bash .cursor/health-check.sh [--soft|--ready|--ready-infra|--ready-app]
 #   (default) infra-only required checks (docker + Supabase API + db + scores bucket).
 #   --soft        same required checks, plus app/port probes as WARNINGS.
-#   --ready-infra infra + edge functions probe (54321/functions/v1 non-000).
+#   --ready-infra infra + edge functions probe (<api-port>/functions/v1 non-000).
 #   --ready-app   infra + Vite port 5173.
 #   --ready       infra + edge functions + Vite (full app usable).
 
@@ -15,6 +15,9 @@ cd "$REPO_ROOT"
 BOOT_COMMON_REPO_ROOT="$REPO_ROOT"
 # shellcheck source=lib/boot-common.sh
 source "$REPO_ROOT/.cursor/lib/boot-common.sh"
+
+# Read from supabase/config.toml so this never drifts from the real stack.
+API_PORT="$(boot_common_api_port)"
 
 SOFT=false
 READY=false
@@ -62,24 +65,24 @@ check_supabase_api() {
     local anon_key api_host api_port
     anon_key="$(npx supabase status -o env 2>/dev/null | sed -n 's/^ANON_KEY="\(.*\)"$/\1/p' | head -1)"
     api_host="127.0.0.1"
-    api_port="54321"
+    api_port="${API_PORT}"
     if [ -n "${anon_key}" ] && curl -sf "http://${api_host}:${api_port}/rest/v1/" \
         -H "apikey: ${anon_key}" >/dev/null 2>&1; then
         return 0
     fi
-    npx supabase status 2>/dev/null | grep -qE '(API URL|Project URL).*54321'
+    npx supabase status 2>/dev/null | grep -qE "(API URL|Project URL).*${API_PORT}"
 }
 
 check_container_running() {
     local pattern="$1"
     local name
-    name="$(docker ps --filter "name=${pattern}" --format '{{.Names}}' | head -1 || true)"
-    [ -n "${name}" ] && docker ps --filter "name=${name}" --format '{{.Status}}' | grep -qi 'up'
+    name="$(docker ps --filter "name=^/${pattern}$" --format '{{.Names}}' | head -1 || true)"
+    [ -n "${name}" ] && docker ps --filter "name=^/${name}$" --format '{{.Status}}' | grep -qi 'up'
 }
 
 check_scores_bucket() {
     local db_container
-    db_container="$(docker ps --filter name=supabase_db --format '{{.Names}}' | head -1 || true)"
+    db_container="$(boot_common_db_container)"
     [ -n "${db_container}" ] || return 1
     docker exec "$db_container" psql -U postgres -d postgres -tAc \
         "select 1 from storage.buckets where id = 'scores'" 2>/dev/null | grep -q 1
@@ -100,17 +103,17 @@ log "Checking cloud dev stack..."
 
 ensure_docker_access >/dev/null 2>&1 || true
 require_step "docker daemon" check_docker
-require_step "supabase API (54321)" check_supabase_api
-require_step "container supabase_db" check_container_running supabase_db
+require_step "supabase API (${API_PORT})" check_supabase_api
+require_step "container $(boot_common_container db)" check_container_running "$(boot_common_container db)"
 require_step "scores storage bucket" check_scores_bucket
 
 if [ "$SOFT" = true ]; then
     warn_step "port 5173 (vite)" check_port_open 5173
-    warn_step "edge functions (54321/functions/v1)" check_functions_serving
+    warn_step "edge functions (${API_PORT}/functions/v1)" check_functions_serving
 fi
 
 if [ "$READY" = true ] || [ "$READY_INFRA" = true ]; then
-    require_step "edge functions (54321/functions/v1)" check_functions_serving
+    require_step "edge functions (${API_PORT}/functions/v1)" check_functions_serving
 fi
 
 if [ "$READY" = true ] || [ "$READY_APP" = true ]; then

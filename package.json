@@ -6,7 +6,10 @@
     "scripts": {
         "dev": "vite",
         "dev:local": "vite --host --port 5173",
-        "functions:serve": "npx supabase functions serve --env-file supabase/functions/.env --no-verify-jwt",
+        "local:up": "bash scripts/local-up.sh",
+        "local:down": "bash scripts/local-down.sh",
+        "local:status": "bash .cursor/health-check.sh",
+        "functions:serve": "bash scripts/supabase.sh functions serve --env-file supabase/functions/.env --no-verify-jwt",
         "build": "tsc --noEmit && vite build",
         "preview": "vite preview",
         "typecheck": "tsc --noEmit",

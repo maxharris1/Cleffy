@@ -11,7 +11,7 @@ import type { BillingTier } from '@/types/database';
  * The same bundle serves cleffy.io and dev.cleffy.io, so it ships BOTH price
  * catalogues and picks by hostname — one committed `.env.production` rather than
  * a Vercel-only setting nobody can see from the repo. Price ids are not secrets
- * (see `supabase/functions/_shared/stripe.ts`), so publishing both grants
+ * (see `supabase/functions/_shared/stripeMode.ts`), so publishing both grants
  * nothing. The Edge Functions decide the account for real, from the request
  * Origin; if this ever disagreed the server would re-price into its own mode, so
  * the worst case is a display quirk rather than a charge on the wrong account.
@@ -84,14 +84,13 @@ export const TIER_CARDS: TierCard[] = [
     {
         tier: 'free',
         name: 'Free',
-        tagline: 'Everything you need to try Cleffy with a few students.',
+        tagline: 'A taste of Personal — the whole practice tool for one player, in small amounts.',
         features: [
             '3 active cloud scores',
             '3 play-along analyses a month',
             '2 smart imports a month',
             '5 AI fingering reads a month',
             '1 PDF export a month',
-            '3 student seats',
             'Unlimited annotation and fingering tools',
         ],
     },
