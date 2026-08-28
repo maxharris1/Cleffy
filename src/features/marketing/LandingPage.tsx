@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
+import { ProductShowcase } from '@/features/marketing/ProductShowcase';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
@@ -54,15 +55,20 @@ const CloudLanding = () => (
         <div className="mx-auto w-full max-w-6xl px-6 lg:px-10">
             <nav aria-label="Main" className="flex items-center justify-between pt-6">
                 <Wordmark />
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3">
                     {/* Students arrive here too, sent by a teacher, and their door
                         is not the one marked "Log in" — it takes a username, not
                         an account. Quiet, because most visitors are teachers. */}
                     <Link to="/student" className={linkClassName}>
                         Student sign in
                     </Link>
-                    <Link to="/login" className={buttonClassName('secondary', 'sm')}>
+                    {/* Ghost against the primary: two bordered buttons side by side
+                        compete, and only one of these is the action we are selling. */}
+                    <Link to="/login" className={buttonClassName('ghost', 'sm')}>
                         Log in
+                    </Link>
+                    <Link to="/register" className={buttonClassName('primary', 'sm')}>
+                        Start free
                     </Link>
                 </div>
             </nav>
@@ -78,9 +84,14 @@ const CloudLanding = () => (
                         in the browser, no account needed.
                     </p>
                     <div className="mx-auto mt-8 flex w-full max-w-sm flex-col items-center gap-4 lg:mx-0 lg:items-start">
-                        <Link to="/register" className={buttonClassName('primary')}>
-                            Create account
-                        </Link>
+                        <div className="flex flex-col items-center gap-2 lg:items-start">
+                            <Link to="/register" className={buttonClassName('primary')}>
+                                Start free
+                            </Link>
+                            {/* Keep in sync with FREE_LIMITS.cloud_scores (billing/entitlementsService.ts)
+                                and priceFor() (billing/pricing.ts). */}
+                            <p className="text-xs text-stone-500">Free for 3 cloud scores · plans from $7/month</p>
+                        </div>
                         <LocalOpenControl label="Or open a PDF locally — no account" subtle />
                     </div>
                 </div>
@@ -109,11 +120,13 @@ const CloudLanding = () => (
                 </ol>
             </section>
 
+            <ProductShowcase />
+
             <section aria-labelledby="features-title" className="border-t border-line py-14 lg:py-16">
-                <h2 id="features-title" className="sr-only">
+                <h2 id="features-title" className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                     What Cleffy does
                 </h2>
-                <dl className="grid gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-5">
+                <dl className="mt-6 grid grid-cols-2 gap-x-8 gap-y-6 lg:grid-cols-5">
                     {FEATURES.map((feature) => (
                         <div key={feature.title}>
                             <dt className="text-sm font-medium text-stone-800">{feature.title}</dt>
@@ -133,7 +146,7 @@ const CloudLanding = () => (
                 </p>
                 <div className="mt-7 flex justify-center">
                     <Link to="/register" className={buttonClassName('primary')}>
-                        Create account
+                        Start free
                     </Link>
                 </div>
             </section>

@@ -40,6 +40,20 @@ const FIELD_SIZE_CLASSES: Record<FieldSize, string> = {
 export const fieldClassName = (size: FieldSize = 'md', extra = ''): string =>
     `landing-input w-full border border-stone-300/90 bg-white/70 text-stone-900 outline-none transition placeholder:text-stone-500 ${FIELD_SIZE_CLASSES[size]}${extra ? ` ${extra}` : ''}`;
 
+/**
+ * Filter/facet chip — pill toggle matching the transport bar's pill language.
+ * h-8 (32px) meets the minimum touch target. Callers add aria-pressed when the
+ * chip is a toggle rather than an action.
+ */
+export const chipClassName = (active: boolean, extra = ''): string =>
+    [
+        'inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-xs font-medium transition',
+        active ? 'border-accent bg-accent-soft text-accent' : 'border-stone-200 text-stone-600 hover:bg-ink/5',
+        extra,
+    ]
+        .filter(Boolean)
+        .join(' ');
+
 export const fieldLabelClassName = 'block text-xs font-medium uppercase tracking-[0.08em] text-stone-600';
 
 export const linkClassName =

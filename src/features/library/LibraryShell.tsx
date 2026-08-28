@@ -38,12 +38,12 @@ export type LibraryOutletContext = {
     openPricing: () => void;
 };
 
-const NAV_ITEMS = [
+const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean }[] = [
     { to: '/library', label: 'Library', end: true },
     { to: '/students', label: 'Students', end: true },
-    { to: '/search', label: 'Find on IMSLP', end: true },
+    { to: '/search', label: 'Find on IMSLP', shortLabel: 'IMSLP', end: true },
     { to: '/settings', label: 'Settings', end: true },
-] as const;
+];
 
 /** Authenticated app chrome: side nav + shared upload for library/search. */
 export const LibraryShell = () => {
@@ -173,10 +173,18 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                 <aside className="shrink-0 md:sticky md:top-8 md:w-44 md:self-start lg:w-48">
                     <div className="flex items-start justify-between gap-4 md:block">
                         <div>
-                            <p className="landing-brand font-display text-2xl font-semibold sm:text-3xl">Cleffy</p>
+                            <Link
+                                to="/library"
+                                className="landing-brand inline-block font-display text-2xl font-semibold sm:text-3xl"
+                            >
+                                Cleffy
+                            </Link>
                             <p className="mt-1 text-sm text-stone-500 md:mt-1.5">Your scores</p>
                         </div>
                         <div className="flex shrink-0 items-center gap-2 pt-1 md:hidden">
+                            <Link to="/settings" aria-label={`Plan: ${tier}`} className="shrink-0">
+                                <PlanBadge tier={tier} />
+                            </Link>
                             <span className="hidden max-w-[8rem] truncate text-sm text-stone-500 sm:inline">
                                 {userLabel}
                             </span>
@@ -205,7 +213,14 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                                     ].join(' ')
                                 }
                             >
-                                {item.label}
+                                {item.shortLabel ? (
+                                    <>
+                                        <span className="sm:hidden">{item.shortLabel}</span>
+                                        <span className="hidden sm:inline">{item.label}</span>
+                                    </>
+                                ) : (
+                                    item.label
+                                )}
                             </NavLink>
                         ))}
                     </nav>
