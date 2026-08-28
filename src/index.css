@@ -236,6 +236,59 @@ body {
     animation: landing-fade-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s backwards;
 }
 
+/*
+ * Upload progress hugging the bottom edge of the top bar. The shared
+ * ProgressBar is a standalone pill (h-1.5, rounded, grey track); pinned to a
+ * hairline border it has to read as part of that border instead, so the track
+ * disappears and only the accent fill advances. Unlayered on purpose — these
+ * declarations must outrank the component's own Tailwind utilities.
+ */
+.shell-progress {
+    height: 2px;
+    border-radius: 0;
+    background-color: transparent;
+}
+
+.shell-progress > div {
+    border-radius: 0;
+}
+
+/*
+ * The top bar's upload control is a <label> around a screen-reader-only file
+ * input: the input keeps its place in the tab order, and the label wears the
+ * ring on its behalf, matching the global :focus-visible treatment. Relative so
+ * the offscreen input positions against the button rather than the bar.
+ */
+.shell-upload {
+    position: relative;
+}
+
+.shell-upload:has(:focus-visible) {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+}
+
+/*
+ * How much of the viewport the sticky top bar owns: one 4rem row, plus a
+ * second row for the nav strip below sm. Anything inside the shell that sticks
+ * to the top of the page has to start below it, or it parks itself out of
+ * sight behind the bar — the offset belongs to the bar, so it is published
+ * from here rather than hard-coded into each surface.
+ */
+.library-shell {
+    --shell-bar-height: 6.125rem;
+}
+
+@media (min-width: 40rem) {
+    .library-shell {
+        --shell-bar-height: 4rem;
+    }
+}
+
+.library-shell .imslp-search-sticky {
+    top: var(--shell-bar-height);
+}
+
 /* Horizontal chip strips on phones: scroll instead of wrapping, no visible scrollbar. */
 .no-scrollbar {
     scrollbar-width: none;
@@ -352,5 +405,10 @@ body {
         transition: none;
         transform: none;
         box-shadow: none;
+    }
+
+    /* Upload progress in the top bar jumps to each reported percentage. */
+    .shell-progress > div {
+        transition: none;
     }
 }

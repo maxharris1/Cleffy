@@ -1,10 +1,11 @@
-import { Suspense, lazy, useState } from 'react';
-import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
+import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
@@ -15,8 +16,10 @@ import { clearCachedEntitlements } from '@/features/billing/entitlementsService'
 import { isLimitReachedError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
+import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
+import { ProgressBar } from '@/ui/ProgressBar';
 
-// Lazy for the same reason as the settings route: pricing copy is rarely needed.
+// Lazy for the same reason as the account route: pricing copy is rarely needed.
 const PricingDialog = lazy(() =>
     import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
 );
@@ -42,22 +45,39 @@ const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean 
     { to: '/library', label: 'Library', end: true },
     { to: '/students', label: 'Students', end: true },
     { to: '/search', label: 'Find on IMSLP', shortLabel: 'IMSLP', end: true },
-    { to: '/settings', label: 'Settings', end: true },
 ];
 
-/** Authenticated app chrome: side nav + shared upload for library/search. */
+/**
+ * One measure for the whole shell: the top bar's inner row and the content
+ * column share it so the wordmark, the nav and the page heading sit on the
+ * same left edge. 100rem (1600px) keeps ~160px gutters at 1920 instead of the
+ * 896px of dead space a max-w-5xl column left behind.
+ */
+const SHELL_CONTAINER = 'mx-auto w-full max-w-[100rem] px-4 sm:px-6 lg:px-10';
+
+const NAV_LINK_BASE = 'shrink-0 rounded-lg px-3 py-1.5 text-sm transition';
+const NAV_LINK_ACTIVE = 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50';
+const NAV_LINK_IDLE = 'text-stone-600 hover:bg-ink/5 hover:text-stone-900';
+
+/** Authenticated app chrome: top bar + shared upload for library/search. */
 export const LibraryShell = () => {
     if (!isSupabaseConfigured()) {
         return <Navigate to="/" replace />;
     }
     return (
         <RequireRegistered>
-            {(session) => <LibraryFrame userId={session.user.id} userLabel={displayNameOf(session)} />}
+            {(session) => (
+                <LibraryFrame
+                    userId={session.user.id}
+                    userLabel={displayNameOf(session)}
+                    userEmail={session.user.email ?? ''}
+                />
+            )}
         </RequireRegistered>
     );
 };
 
-const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string }) => {
+const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLabel: string; userEmail: string }) => {
     const [uploadPct, setUploadPct] = useState<number | null>(null);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
@@ -66,6 +86,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     const { entitlements } = useEntitlements(userId);
     const tier = entitlements?.tier ?? 'free';
     const navigate = useNavigate();
+    const uploading = uploadPct !== null;
 
     const clearErrors = () => {
         setUploadError(null);
@@ -157,7 +178,7 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
     const outlet: LibraryOutletContext = {
         userId,
         uploadPct,
-        uploading: uploadPct !== null,
+        uploading,
         onUpload,
         onImportImslp,
         uploadError,
@@ -169,48 +190,32 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
 
     return (
         <main className="paper-page min-h-full">
-            <div className="library-layout mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10 md:flex-row md:gap-8 lg:gap-10 lg:py-12">
-                <aside className="shrink-0 md:sticky md:top-8 md:w-44 md:self-start lg:w-48">
-                    <div className="flex items-start justify-between gap-4 md:block">
-                        <div>
-                            <Link
-                                to="/library"
-                                className="landing-brand inline-block font-display text-2xl font-semibold sm:text-3xl"
-                            >
-                                Cleffy
-                            </Link>
-                            <p className="mt-1 text-sm text-stone-500 md:mt-1.5">Your scores</p>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2 pt-1 md:hidden">
-                            <Link to="/settings" aria-label={`Plan: ${tier}`} className="shrink-0">
-                                <PlanBadge tier={tier} />
-                            </Link>
-                            <span className="hidden max-w-[8rem] truncate text-sm text-stone-500 sm:inline">
-                                {userLabel}
-                            </span>
-                            <button
-                                type="button"
-                                onClick={() => void handleSignOut()}
-                                className={buttonClassName('ghost', 'sm')}
-                            >
-                                Sign out
-                            </button>
-                        </div>
-                    </div>
+            {/* Translucent so the paper wash reads through; sticky so upload
+                progress and the account menu stay reachable from any page. */}
+            <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur">
+                <div
+                    className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
+                >
+                    <Link to="/library" className="landing-brand shrink-0 font-display text-2xl font-semibold">
+                        Cleffy
+                    </Link>
 
-                    <nav className="mt-5 flex gap-1 md:mt-8 md:flex-col md:gap-0.5" aria-label="Library">
+                    {/* Below sm the strip drops to its own row (order-last) and scrolls
+                        sideways rather than wrapping. The negative margin cancels the
+                        container's gutter so the strip runs edge to edge, and the
+                        matching width keeps it that wide — a plain w-full would stop
+                        one gutter short and strand the last link behind a dead margin. */}
+                    <nav
+                        aria-label="Main"
+                        className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
+                    >
                         {NAV_ITEMS.map((item) => (
                             <NavLink
                                 key={item.to}
                                 to={item.to}
                                 end={item.end}
                                 className={({ isActive }) =>
-                                    [
-                                        'rounded-lg px-3 py-2 text-sm transition',
-                                        isActive
-                                            ? 'bg-white/70 font-medium text-stone-900 shadow-sm ring-1 ring-stone-300/50'
-                                            : 'text-stone-600 hover:bg-ink/5 hover:text-stone-900',
-                                    ].join(' ')
+                                    `${NAV_LINK_BASE} ${isActive ? NAV_LINK_ACTIVE : NAV_LINK_IDLE}`
                                 }
                             >
                                 {item.shortLabel ? (
@@ -225,25 +230,31 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                         ))}
                     </nav>
 
-                    <div className="mt-8 hidden border-t border-stone-300/50 pt-5 md:block">
-                        <p className="truncate text-sm text-stone-500">{userLabel}</p>
-                        <Link to="/settings" className="mt-2 inline-block" aria-label={`Plan: ${tier}`}>
-                            <PlanBadge tier={tier} />
-                        </Link>
-                        <button
-                            type="button"
-                            onClick={() => void handleSignOut()}
-                            className={buttonClassName('ghost', 'sm', 'mt-2 block')}
-                        >
-                            Sign out
-                        </button>
+                    <div className="ml-auto flex shrink-0 items-center gap-2">
+                        <ShellUploadButton uploading={uploading} onUpload={onUpload} />
+                        <AccountMenu
+                            userLabel={userLabel}
+                            userEmail={userEmail}
+                            tier={tier}
+                            onSignOut={() => void handleSignOut()}
+                        />
                     </div>
-                </aside>
+                </div>
+                {uploadPct !== null ? (
+                    <ProgressBar
+                        value={uploadPct}
+                        label="Uploading score"
+                        className="shell-progress absolute inset-x-0 bottom-0"
+                    />
+                ) : null}
+            </header>
 
-                <div className="library-shell min-w-0 flex-1">
+            <div className={`library-layout ${SHELL_CONTAINER} py-8 lg:py-10`}>
+                <div className="library-shell min-w-0">
                     <Outlet context={outlet} />
                 </div>
             </div>
+
             {importOffer ? (
                 <ConfirmDialog
                     title="Existing marks found"
@@ -261,5 +272,166 @@ const LibraryFrame = ({ userId, userLabel }: { userId: string; userLabel: string
                 </Suspense>
             ) : null}
         </main>
+    );
+};
+
+/**
+ * Upload from anywhere in the shell: the same label-wraps-file-input shape the
+ * library page uses. Two deliberate differences, because this one is permanent
+ * chrome rather than a control on one page. The caption goes screen-reader-only
+ * below sm, which shrinks the button to its icon without unnaming the input.
+ * And the input is sr-only rather than display:none, so it stays in the tab
+ * order; the label borrows its focus ring, matching the global :focus-visible.
+ */
+const ShellUploadButton = ({
+    uploading,
+    onUpload,
+}: {
+    uploading: boolean;
+    onUpload: (file: File) => Promise<void>;
+}) => (
+    <label
+        className={buttonClassName(
+            'primary',
+            'sm',
+            `shell-upload${uploading ? ' pointer-events-none opacity-80' : ''}`,
+        )}
+    >
+        <UploadIcon size={16} />
+        <span className="sr-only sm:not-sr-only">{uploading ? 'Uploading…' : 'Upload score'}</span>
+        <input
+            type="file"
+            accept={UPLOAD_ACCEPT}
+            className="sr-only"
+            disabled={uploading}
+            onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                    void onUpload(file).catch(() => undefined);
+                }
+                e.target.value = '';
+            }}
+        />
+    </label>
+);
+
+/**
+ * Two letters standing in for a face: first initials of a two-word display
+ * name, else the opening of the local part of the email. Never empty — an
+ * avatar with nothing in it reads as a broken image.
+ */
+const initialsOf = (label: string): string => {
+    const words = label.trim().split(/\s+/).filter(Boolean);
+    const first = words[0] ?? '';
+    const second = words[1];
+    if (second) {
+        return `${first.slice(0, 1)}${second.slice(0, 1)}`.toUpperCase();
+    }
+    const localPart = first.split('@')[0] ?? '';
+    return localPart.slice(0, 2).toUpperCase() || '?';
+};
+
+/**
+ * Account cluster at the right end of the bar: identity, plan, and the two
+ * destinations that used to live in the sidebar. Closes on outside pointerdown,
+ * Escape and route change so it can never outlive the page it was opened from.
+ */
+const AccountMenu = ({
+    userLabel,
+    userEmail,
+    tier,
+    onSignOut,
+}: {
+    userLabel: string;
+    userEmail: string;
+    tier: EffectiveTier;
+    onSignOut: () => void;
+}) => {
+    // The route the menu was opened from, rather than a plain boolean: navigating
+    // away closes it during render, with no effect that resets state after paint.
+    const [openedAt, setOpenedAt] = useState<string | null>(null);
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    const { pathname } = useLocation();
+    const open = openedAt === pathname;
+    const close = () => setOpenedAt(null);
+
+    useEffect(() => {
+        if (!open) {
+            return;
+        }
+        const onPointerDown = (e: PointerEvent) => {
+            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+                close();
+            }
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                close();
+            }
+        };
+        window.addEventListener('pointerdown', onPointerDown);
+        window.addEventListener('keydown', onKey);
+        return () => {
+            window.removeEventListener('pointerdown', onPointerDown);
+            window.removeEventListener('keydown', onKey);
+        };
+    }, [open]);
+
+    // displayNameOf falls back to the email, so only show the second line when
+    // it would actually say something the first line does not.
+    const secondary = userEmail && userEmail !== userLabel ? userEmail : null;
+
+    return (
+        <div ref={rootRef} className="relative">
+            <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                aria-label={`Account menu (${userLabel})`}
+                onClick={() => setOpenedAt(open ? null : pathname)}
+                className="flex cursor-pointer items-center gap-1 rounded-full p-0.5 transition hover:bg-ink/5 sm:pr-1.5"
+            >
+                <span
+                    aria-hidden="true"
+                    className="grid h-8 w-8 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
+                >
+                    {initialsOf(userLabel)}
+                </span>
+                <ChevronDownIcon size={16} className="hidden text-stone-500 sm:block" />
+            </button>
+            {open ? (
+                <div
+                    role="menu"
+                    aria-label="Account"
+                    className="absolute right-0 z-40 mt-2 w-64 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                >
+                    <div className="px-3 py-2">
+                        <p className="truncate text-sm font-medium text-stone-800">{userLabel}</p>
+                        {secondary ? <p className="truncate text-xs text-stone-500">{secondary}</p> : null}
+                        <PlanBadge tier={tier} className="mt-2" />
+                    </div>
+                    <div className="my-1 border-t border-stone-200" />
+                    <Link
+                        role="menuitem"
+                        to="/account"
+                        onClick={close}
+                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
+                    >
+                        Account
+                    </Link>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                            close();
+                            onSignOut();
+                        }}
+                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5"
+                    >
+                        Sign out
+                    </button>
+                </div>
+            ) : null}
+        </div>
     );
 };
