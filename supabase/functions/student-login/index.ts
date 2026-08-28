@@ -2,41 +2,49 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
-import { hashLoginCode, isPlausibleLoginCode, normalizeLoginCode } from '../_shared/studentCodes.ts';
+import { normalizeUsername, USERNAME_RE } from '../_shared/studentCodes.ts';
 
 /**
- * Student sign-in by login code.
+ * Student sign-in by username and password.
  *
  * Deployed with `verify_jwt = false` (see supabase/config.toml) — the second
  * such function after stripe-webhook, and for the same structural reason: the
- * caller has no Supabase JWT to present. A student typing the code off their
- * card is not signed in yet; this is the endpoint that gets them a session.
+ * caller has no Supabase JWT to present. A student at the sign-in box is not
+ * signed in yet; this is the endpoint that gets them a session.
  *
- * The code IS the credential: it selects the roster row by hash AND is the
- * password of the synthetic student user, so whoever holds it needs nothing
- * else, and whoever does not gets nowhere. Two things keep an endpoint this
- * open from being a guessing machine:
+ * The function exists at all because a student's auth account is keyed on a
+ * SYNTHETIC address (st-<roster-id>@students.cleffy.app) that nobody, the
+ * student included, ever sees. The username is the public half of that identity
+ * and managed_students is the only thing that maps one to the other, so the
+ * lookup has to happen under the service role, here.
  *
- *  * The hard rate limit below, taken before any other work — per IP, against
- *    the ~59-bit code space of _shared/studentCodes.ts. That is the brute-force
- *    story: even at this ceiling an attacker exhausts a meaningful fraction of
- *    the space some millions of years from now, and checkRateLimit fails closed,
- *    so losing the RPC does not open it. The ceiling is a CLASSROOM rather than
- *    a person, because a whole studio arrives behind one school NAT at the top
- *    of a lesson — a limit tight enough to be interesting here would read as an
- *    outage for the 11th child to sign in, and buys nothing against 59 bits.
- *    clientKey() is what makes the bucket meaningful: see its note on why the
- *    first x-forwarded-for entry is the caller's to choose.
- *  * One indistinguishable failure. Wrong shape, no such code, archived
- *    student, unreadable auth user, refused password — every path answers with
- *    exactly REJECTED, so this is never an oracle for which codes exist. Only
- *    the "no such code" path is reachable by guessing at all; the rest are
- *    internal inconsistencies a caller cannot provoke, so the fact that they
- *    return later in the function leaks nothing either.
+ * The credential is now the student's own password, chosen when they spent their
+ * code in student-claim. That changes the brute-force story from the one this
+ * function used to tell: the ~59-bit code space is no longer what stands behind
+ * a guess, a user-chosen password is, and it is guarded by the per-IP ceiling
+ * below PLUS GoTrue's own throttling on the sign-in it forwards to. The ceiling
+ * here is a CLASSROOM rather than a person, because a whole studio arrives
+ * behind one school NAT at the top of a lesson — a limit tight enough to be
+ * interesting against one account would read as an outage for the 11th child to
+ * sign in, and the per-account rate limiting is GoTrue's job either way.
+ * checkRateLimit fails closed, so losing the RPC does not open the endpoint.
+ * clientKey() is what makes the bucket meaningful: see its note on why the first
+ * x-forwarded-for entry is the caller's to choose.
+ *
+ * One indistinguishable failure, unchanged in spirit and more load-bearing than
+ * before: bad username shape, no such username, an unclaimed or archived row, an
+ * unreadable auth user, a refused password — every path answers with exactly
+ * REJECTED. Whether a username exists is not something this endpoint confirms,
+ * which matters now that a username is the thing an attacker would enumerate
+ * first. student-claim may say "that username is taken" because a caller there
+ * already holds a valid code; nothing here holds anything.
+ *
+ * Email-method students never touch this function. They have a real address, no
+ * username at all, and sign in client-side exactly as a teacher does.
  */
 
 /** The only failure this endpoint has. Never varied — see the note above. */
-const REJECTED = { error: 'That code did not work', code: 'invalid_code' };
+const REJECTED = { error: 'That username and password did not work', code: 'invalid_credentials' };
 
 const reject = (): Response => jsonResponse(REJECTED, 401);
 
@@ -55,18 +63,29 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { code?: string };
+    let body: { username?: string; password?: string };
     try {
         body = await req.json();
     } catch {
         return jsonResponse({ error: 'Invalid JSON body' }, 400);
     }
 
-    // Cards print XXXX-XXXX-XXXX, so normalizing first means the dashes, spaces
-    // and lower case a child types are not a way to fail. A missing or non-string
-    // `code` normalizes to '' and falls into the same single rejection below.
-    const normalized = normalizeLoginCode(typeof body.code === 'string' ? body.code : '');
-    if (!isPlausibleLoginCode(normalized)) {
+    // Stored usernames are canonical-lowercase, so normalizing here means the
+    // capital a phone keyboard adds is not a way to fail. Shape only, and never
+    // isValidUsername: the reserved list is a rule about what may be CLAIMED, and
+    // a reserved name simply has no row to match. The sign-in side explains
+    // nothing anyway — a missing or non-string field normalizes to '' and falls
+    // into the same single rejection as everything else.
+    const username = normalizeUsername(typeof body.username === 'string' ? body.username : '');
+    if (!USERNAME_RE.test(username)) {
+        return reject();
+    }
+
+    // Taken exactly as sent: never trimmed, never normalized. The student chose
+    // it, GoTrue stored the bcrypt of those exact bytes, and anything done to it
+    // here is a password that silently stops working.
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!password) {
         return reject();
     }
 
@@ -77,23 +96,25 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
     }
 
-    // The hash is all the roster stores, so this is the entire lookup. An archived
-    // row no longer matches, which is what makes archiving a student a real
-    // revocation of their code and not just of their seat.
-    const hash = await hashLoginCode(normalized);
+    // Three filters, one rejection. An archived row no longer matches, which is
+    // what makes archiving a student a revocation of their sign-in and not just
+    // of their seat; an unclaimed row is one whose password is a scramble nobody
+    // has ever seen, so matching it could only ever produce a refused sign-in.
+    // An email-method row can never match at all — its username is NULL.
     const { data: student, error: lookupError } = await admin
         .from('managed_students')
         .select('id, student_user_id, display_name')
-        .eq('login_code_hash', hash)
+        .eq('username', username)
         .is('archived_at', null)
+        .not('claimed_at', 'is', null)
         .maybeSingle();
     if (lookupError || !student) {
         return reject();
     }
 
     // The synthetic address comes from the auth user the roster row points at,
-    // never from the request: an email the caller supplied would let a known code
-    // be aimed at somebody else's account.
+    // never from the request: an email the caller supplied would let a known
+    // password be aimed at somebody else's account.
     const { data: userData, error: userError } = await admin.auth.admin.getUserById(student.student_user_id);
     const studentUser = userData?.user;
     const email = studentUser?.email;
@@ -119,13 +140,13 @@ Deno.serve(async (req) => {
 
     const { data: signIn, error: signInError } = await anonClient.auth.signInWithPassword({
         email,
-        password: normalized,
+        password,
     });
     if (signInError || !signIn.session) {
         return reject();
     }
 
-    // The token pair and the name, nothing else: the client calls
+    // The token pair and the names, nothing else: the client calls
     // supabase.auth.setSession with the pair. The synthetic email is an
     // implementation detail of provisioning and never leaves the server, and no
     // user object is echoed back for a caller to mine.
@@ -133,5 +154,6 @@ Deno.serve(async (req) => {
         accessToken: signIn.session.access_token,
         refreshToken: signIn.session.refresh_token,
         displayName: student.display_name,
+        username,
     });
 });

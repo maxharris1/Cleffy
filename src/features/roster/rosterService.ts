@@ -8,7 +8,7 @@ import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRo
  *
  * Two very different write paths meet here, and the split is deliberate:
  *  - Provisioning creates a real auth user, which no client may do, so
- *    create/rotate/archive/restore all go through the student-provision Edge
+ *    create/reset/archive/restore all go through the student-provision Edge
  *    Function under the service role. managed_students has no client write
  *    policy at all.
  *  - Assigning writes document_members, which also has no client write policy,
@@ -31,7 +31,7 @@ import type { AssignmentAccess, AssignmentRow, ManagedStudentRow, PracticeNoteRo
  * from each other, when a column is added.
  */
 export const MANAGED_STUDENT_COLUMNS =
-    'id, teacher_id, student_user_id, display_name, parent_email, archived_at, created_at, updated_at';
+    'id, teacher_id, student_user_id, display_name, parent_email, auth_method, username, student_email, claimed_at, archived_at, created_at, updated_at';
 
 export interface ProvisionedStudent {
     id: string;
@@ -39,11 +39,34 @@ export interface ProvisionedStudent {
     displayName: string;
 }
 
-export interface ProvisionResult {
-    student: ProvisionedStudent;
-    /** Readable exactly once. Nothing can look it up again — only 'rotate' replaces it. */
-    loginCode: string;
-}
+/**
+ * How a new student will get in, and therefore what comes back.
+ *
+ * `parentEmail` is the PARENT's on both paths — for the teacher's records and
+ * for sending the card home — and stays independent of `studentEmail`, which is
+ * the student's own and exists only on the invite path. Conflating them would
+ * mean a parent's address could be turned into a child's sign-in.
+ */
+export type ProvisionOptions =
+    { parentEmail?: string; method: 'code' } | { parentEmail?: string; method: 'email'; studentEmail: string };
+
+/** A printed card, or an invite already in flight — never both. */
+export type ProvisionResult =
+    | {
+          student: ProvisionedStudent;
+          /** Readable exactly once. Nothing can look it up again — only 'reset' replaces it. */
+          loginCode: string;
+      }
+    | { student: ProvisionedStudent; invited: true; studentEmail: string };
+
+/** The same two shapes after a reset, minus the row itself, which is unchanged. */
+export type ResetResult =
+    | {
+          loginCode: string;
+          /** The username the student already claimed, kept across the reset; null if they never did. */
+          username: string | null;
+      }
+    | { invited: true; studentEmail: string };
 
 /** An assignment paired with the score's title, joined client-side. */
 export interface RosterAssignment {
@@ -85,43 +108,85 @@ const provision = (payload: Record<string, unknown>): Promise<Response> =>
     callEdgeFunction('student-provision', payload);
 
 /**
+ * Where the invite and reset emails have to land. The function cannot work this
+ * out for itself — it has no idea which origin the teacher is on — so every call
+ * that could send mail carries it.
+ */
+const welcomeRedirect = (): string => `${window.location.origin}/student/welcome`;
+
+interface ProvisionBody {
+    student?: ProvisionedStudent;
+    loginCode?: string;
+    username?: string | null;
+    invited?: boolean;
+    studentEmail?: string;
+}
+
+/**
  * Creates the student account and the roster row that names it.
  *
- * Throws LimitReachedError when the seat would exceed the plan's roster.
- * `parentEmail` is optional and is the PARENT's — no address is ever collected
- * from the student, whose whole credential is the printed code.
+ * Throws LimitReachedError when the seat would exceed the plan's roster, and a
+ * plain Error carrying the server's own words for the rest — including the 409
+ * that says this address is already somebody's sign-in, which is a sentence the
+ * teacher has to read rather than a state the UI can resolve for them.
  */
-export const provisionStudent = async (displayName: string, parentEmail?: string): Promise<ProvisionResult> => {
-    const trimmedEmail = parentEmail?.trim();
+export const provisionStudent = async (displayName: string, opts: ProvisionOptions): Promise<ProvisionResult> => {
+    const trimmedEmail = opts.parentEmail?.trim();
     const response = await provision({
         action: 'create',
         displayName: displayName.trim(),
+        method: opts.method,
         ...(trimmedEmail ? { parentEmail: trimmedEmail } : {}),
+        ...(opts.method === 'email' ? { studentEmail: opts.studentEmail.trim(), redirectTo: welcomeRedirect() } : {}),
     });
     if (!response.ok) {
         return failFrom(response, 'Could not add that student.');
     }
 
-    const body = (await response.json()) as Partial<ProvisionResult>;
-    if (!body.student || !body.loginCode) {
-        // The seat may well have been claimed, so this is not a retry prompt:
-        // reload the roster and rotate the code for whoever appeared.
-        throw new Error('The student was created but no login code came back — rotate their code to get one.');
+    const body = (await response.json()) as ProvisionBody;
+    if (!body.student) {
+        throw new Error('The student was created but the server did not say who — reload your roster.');
+    }
+    if (opts.method === 'email') {
+        if (!body.invited || !body.studentEmail) {
+            // The seat is spent either way, so this is not a retry prompt.
+            throw new Error('The student was created but the invite did not go out — reset their access to send it.');
+        }
+        return { student: body.student, invited: true, studentEmail: body.studentEmail };
+    }
+    if (!body.loginCode) {
+        // Same: reload the roster and reset access for whoever appeared.
+        throw new Error('The student was created but no setup code came back — reset their access to get one.');
     }
     return { student: body.student, loginCode: body.loginCode };
 };
 
-/** Replaces the login code and returns the new one — the old one stops working at once. */
-export const rotateStudentCode = async (studentId: string): Promise<string> => {
-    const response = await provision({ action: 'rotate', studentId });
+/**
+ * Cuts off however the student gets in today and issues the replacement.
+ *
+ * One action for both paths because it is one intent — "they cannot get in, fix
+ * it" — and the roster row already knows which door they use. A code student
+ * gets a fresh card (keeping the username they claimed, if they ever did); an
+ * invited student gets another link. Either way whatever they had stops working
+ * the moment this returns, which is what makes it the answer to a lost card AND
+ * to a password someone else now knows.
+ */
+export const resetStudentAccess = async (studentId: string): Promise<ResetResult> => {
+    const response = await provision({ action: 'reset', studentId, redirectTo: welcomeRedirect() });
     if (!response.ok) {
-        return failFrom(response, 'Could not rotate that login code.');
+        return failFrom(response, 'Could not reset that student’s access.');
     }
-    const body = (await response.json()) as { loginCode?: string };
+    const body = (await response.json()) as ProvisionBody;
+    if (body.invited) {
+        if (!body.studentEmail) {
+            throw new Error('The server did not say where the link was sent.');
+        }
+        return { invited: true, studentEmail: body.studentEmail };
+    }
     if (!body.loginCode) {
-        throw new Error('The server did not return a new login code.');
+        throw new Error('The server did not return a new setup code.');
     }
-    return body.loginCode;
+    return { loginCode: body.loginCode, username: body.username ?? null };
 };
 
 /** Frees the seat and revokes the code. Deletes nothing — restore brings it all back. */
