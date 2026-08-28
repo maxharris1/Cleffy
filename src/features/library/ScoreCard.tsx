@@ -31,7 +31,9 @@ const REVEAL =
  * enclosing cover is aria-hidden and the title link already names the score.
  */
 const CoverFallback = ({ title, composer }: { title: string; composer: string | null }) => (
-    <div className="flex h-full w-full flex-col justify-between bg-white px-3 pb-3 pt-5 text-center">
+    /* pt-10 clears the favourite star pinned to the cover's top-right corner —
+       on a favourited score it is always lit, and a centred title ran under it. */
+    <div className="flex h-full w-full flex-col justify-between bg-white px-3 pb-3 pt-10 text-center">
         <div className="min-h-0">
             <p className="font-display text-sm font-semibold leading-snug text-stone-800 line-clamp-4">{title}</p>
             {composer ? (

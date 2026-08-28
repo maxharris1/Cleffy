@@ -381,13 +381,7 @@ export const LibraryPage = () => {
                 {documents === null ? (
                     <LoadingText className="mt-10">Loading scores…</LoadingText>
                 ) : hasScores ? (
-                    /*
-                      The shell is 1600px wide for the shelf's sake. Rows are not
-                      shelves: stretched that far, a title sits a full screen away
-                      from its own page count and date, so list view keeps a
-                      reading width and only the grid spends the whole container.
-                    */
-                    <section className={`mt-8${view === 'list' ? ' max-w-5xl' : ''}`}>
+                    <section className="mt-8">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <label className="sr-only" htmlFor="library-search">
                                 Search scores
