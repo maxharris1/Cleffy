@@ -1,3 +1,4 @@
+import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 import { getDb } from '@/sync/db';
 
 /**
@@ -45,7 +46,11 @@ export const getThumbnail = (docId: string, contentRev: number): Promise<Blob | 
 const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob | null> => {
     const db = getDb();
     const thumb = await db.thumbnails.get(docId);
-    if (thumb && thumb.contentRev >= contentRev) {
+    // `?? 0` is load-bearing: rows cached before the shelf existed have no
+    // maxSide at all, and `undefined < THUMB_MAX_SIDE` is false — reading the
+    // field raw would keep serving 256px renders into a 208px cover forever.
+    const tooSmall = (thumb?.maxSide ?? 0) < THUMB_MAX_SIDE;
+    if (thumb && thumb.contentRev >= contentRev && !tooSmall) {
         return thumb.blob;
     }
 
@@ -71,6 +76,8 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
                 // asked for — otherwise a stale cache would mint a thumbnail
                 // claiming to be current and never regenerate.
                 contentRev: cached.contentRev ?? 0,
+                // Stamped so a future bump to THUMB_MAX_SIDE invalidates this row.
+                maxSide: THUMB_MAX_SIDE,
                 blob,
                 width,
                 height,

@@ -275,6 +275,7 @@ describe('deleteDocument', () => {
         await getDb().thumbnails.put({
             docId: d.id,
             contentRev: 0,
+            maxSide: 512,
             blob: new Blob(['png'], { type: 'image/png' }),
             width: 181,
             height: 256,

@@ -1,0 +1,154 @@
+import { Link } from 'react-router';
+
+import { composerOf, displayTitleOf } from '@/features/library/libraryView';
+import { formatUpdated } from '@/features/library/libraryFormat';
+import { RowMenu } from '@/features/library/RowMenu';
+import { StaffPlaceholder } from '@/features/library/StaffPlaceholder';
+import { useScoreThumbnail } from '@/features/library/useScoreThumbnail';
+import type { DocumentRow, LibraryTagRow } from '@/types/database';
+import { Badge } from '@/ui/Badge';
+import { StarIcon } from '@/ui/icons';
+
+/**
+ * Overlay controls on a cover: always in the DOM and always focusable, faded
+ * out until the card is hovered or something inside it takes focus.
+ *
+ * Never `hidden` and never conditionally rendered — a keyboard user tabbing the
+ * shelf has to reach the star and the menu, and the tests find them by role.
+ * Touch has no hover at all, so there they stay visible rather than sitting
+ * over the cover as invisible tap targets.
+ */
+const REVEAL =
+    'opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100';
+
+/**
+ * One score on the shelf: its engraved first page as the cover, with title,
+ * composer and meta beneath.
+ *
+ * The title is the only link — its `after:` pseudo-element stretches across the
+ * whole card, so every other control has to paint above it. `relative` alone is
+ * not enough here (unlike the list row): the cover and its controls come BEFORE
+ * the link in DOM order, where a later positioned sibling would win, hence the
+ * explicit `z-10`.
+ *
+ * Tags are deliberately not shown — five to six cards per row cannot carry chip
+ * rows without turning into noise. They survive in the card's tooltip, and the
+ * list view remains the place to see and filter them.
+ */
+export const ScoreCard = ({
+    doc,
+    index,
+    stripComposer,
+    assignedTags,
+    isFavorite,
+    isOwner,
+    onToggleFavorite,
+    onRename,
+    onShare,
+    onAssign,
+    onDelete,
+}: {
+    doc: DocumentRow;
+    index: number;
+    stripComposer: boolean;
+    assignedTags: LibraryTagRow[];
+    isFavorite: boolean;
+    isOwner: boolean;
+    onToggleFavorite: () => void;
+    onRename: () => void;
+    onShare: () => void;
+    onAssign: () => void;
+    onDelete: () => void;
+}) => {
+    const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0);
+    const title = stripComposer ? displayTitleOf(doc.title) : doc.title;
+    // Suppressed under a composer group header, which already says it — five
+    // cards in a row repeating "Bach, Johann Sebastian" is noise, not context.
+    const composer = stripComposer ? null : composerOf(doc.title);
+    const pages = doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : '';
+    const tagNames = assignedTags.map((t) => t.name);
+
+    return (
+        <div
+            className="library-card group relative has-[[aria-expanded=true]]:z-20"
+            style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
+            // Titles clamp to two lines and tags have no room on a cover, so the
+            // tooltip carries the parts the card had to drop.
+            title={tagNames.length > 0 ? `${doc.title} · ${tagNames.join(' · ')}` : doc.title}
+        >
+            {/*
+              The clipped cover and the controls are siblings on purpose: the
+              action menu opens downward past the cover's bottom edge, and
+              `overflow-hidden` would slice it in half.
+            */}
+            <div className="relative">
+                <div
+                    aria-hidden="true"
+                    className="library-card-cover aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
+                >
+                    {url ? (
+                        <img src={url} alt="" className="h-full w-full object-cover object-top" />
+                    ) : (
+                        <StaffPlaceholder strokeWidth={0.35} />
+                    )}
+                </div>
+
+                <div className={`absolute right-1.5 top-1.5 z-10 ${isFavorite ? '' : REVEAL}`}>
+                    <button
+                        type="button"
+                        aria-pressed={isFavorite}
+                        aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                        onClick={onToggleFavorite}
+                        className={`rounded-full bg-white/85 p-1.5 backdrop-blur transition hover:bg-white ${
+                            isFavorite ? 'text-amber-500' : 'text-stone-500 hover:text-stone-700'
+                        }`}
+                    >
+                        <StarIcon size={16} fill={isFavorite ? 'currentColor' : 'none'} />
+                    </button>
+                </div>
+
+                {isOwner ? (
+                    // `has-[[aria-expanded=true]]` keeps the pill lit while its
+                    // own menu is open — otherwise moving the pointer onto the
+                    // menu fades out the menu with it.
+                    <div
+                        className={`absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/85 backdrop-blur has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
+                    >
+                        <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                    </div>
+                ) : null}
+
+                {/* Past the free cap: still readable and exportable, just not writable. */}
+                {doc.archived_at ? (
+                    <span
+                        className="absolute bottom-1.5 left-1.5 z-10"
+                        title="Read-only — over your plan’s score limit"
+                    >
+                        <Badge tone="warn">Archived</Badge>
+                    </span>
+                ) : null}
+            </div>
+
+            <div className="mt-2.5">
+                {/*
+                  No `block` here: line-clamp-2 needs `display: -webkit-box`,
+                  and the two utilities set the same property — whichever
+                  Tailwind emits last wins, which is how a three-line title got
+                  through.
+                */}
+                <Link
+                    to={`/doc/${doc.id}`}
+                    className="text-sm font-medium text-stone-800 transition line-clamp-2 group-hover:text-accent-hover after:absolute after:inset-0 after:content-['']"
+                >
+                    {title}
+                </Link>
+                {composer ? <p className="mt-0.5 truncate text-xs text-stone-500">{composer}</p> : null}
+                <p className="mt-0.5 text-xs text-stone-400">
+                    {pages}
+                    {formatUpdated(doc.updated_at)}
+                </p>
+            </div>
+        </div>
+    );
+};
