@@ -287,46 +287,68 @@ customers can cancel and update cards there, but cannot switch plans — despite
 that gap, enable "Switch plans" in the portal settings and add the three
 products.
 
-## Known divergence — read before touching migrations
+## Migration history — reconciled 2026-08-27
 
-Verified 2026-08-27 against the live migration history, superseding the earlier
-(and inaccurate) note here. `main` and `dev` are identical and carry the same 22
-migrations; the drift is between **the repo and production**, not between branches.
+Production and the `dev` branch were both hard-reset and rebuilt from
+`supabase/migrations/`. They now carry the **same 22 migrations** — verified by
+identical fingerprints (`md5` over the ordered version list):
 
-Production has 25 applied migrations. Against the repo's 22:
+|                                     | migrations | tables | users | storage objects | fingerprint |
+| ----------------------------------- | ---------- | ------ | ----- | --------------- | ----------- |
+| production `jibgwgosihadbjgxdsfe`   | 22         | 22     | 0     | 0               | `4f0bca6b…` |
+| `dev` branch `qdbnlrgylelelvwbkvnm` | 22         | 22     | 0     | 0               | `4f0bca6b…` |
 
-- **4 exist only in production**, at versions in no branch:
-  `omr_job_rpcs`, `omr_enqueue_reap_first`,
-  `backfill_missing_migration_statements`,
-  `drop_duplicate_out_of_order_migration_records`.
-- **8 share a name but were applied under a different timestamp** than the file
-  in the repo: `annotation_snapshots`, `document_favorites`,
-  `score_cache_timings`, `omr_jobs`, `omr_cron`, `score_analyses_broadcast`,
-  `omr_enqueue_and_fail_policy`, `omr_enqueue_persist_backlog_full`.
-- **1 exists only in the repo**: `core_table_grants` (see below).
+The previous divergence (25 applied in production, 4 at versions in no branch, 8
+under different timestamps) is gone. `supabase db push` is safe again, and the
+GitHub integration's "deploy to production" can be turned on when wanted.
 
-So `supabase db push` from either branch would try to re-apply work that is
-already live. **Do not run `db push` against production until this is
-reconciled**, and leave the GitHub integration's "deploy to production" off.
+All prior data was intentionally discarded in the reset: 40 users, 46 documents,
+1,063 annotations and 47 uploaded PDFs. The Stripe sandbox subscription that
+existed was **not** cancelled — it lives in Stripe, and the database row backing
+it is gone, so clean it up in the Stripe dashboard if it still matters.
 
-This does not affect the `dev` branch, which builds from the repo's migrations
-onto an empty database and therefore reflects _what the repo says_. That is the
-right target for testing a release — but it is not a faithful copy of
-production, so it will not catch a bug that depends on production's extra four.
+### Resetting a remote database — two traps
+
+`supabase db reset --linked --project-ref <ref>` is the tool, but as of CLI
+2.115.0:
+
+1. **It drops tables but not sequences**, so the re-apply dies on
+   `relation "annotations_seq" already exists (SQLSTATE 42P07)` — leaving the
+   database empty and half-built. Drop the leftovers first, then re-run:
+
+    ```sql
+    do $$ declare r record; begin
+      for r in select sequencename from pg_sequences where schemaname='public' loop
+        execute format('drop sequence if exists public.%I cascade', r.sequencename);
+      end loop;
+    end $$;
+    ```
+
+2. **`supabase storage rm` silently no-ops** — it returns `{"deleted":[]}` and
+   removes nothing, for a bucket path or a single explicit object. Use the
+   Storage API instead:
+
+    ```bash
+    curl -X DELETE "$URL/storage/v1/object/scores" -H "Authorization: Bearer $SERVICE_KEY" \
+         -H 'Content-Type: application/json' -d '{"prefixes":["<path>","<path>"]}'
+    ```
+
+Note `db reset --linked` **does** clear `auth.users`, but does **not** touch
+storage. Pass `--no-seed` against any hosted environment: `seed.sql` creates
+accounts whose password is documented in `.cursor/README.md`.
 
 ### Why `core_table_grants` exists
 
-The repo's migrations did not produce a working database. On the current
-Postgres image the default ACL depends on who creates the object: tables created
-by `supabase_admin` grant `arwdDxtm` to anon/authenticated, tables created by
-`postgres` grant only `Dxtm`. Migrations run as `postgres`, so every table
-`schema.sql` created had no SELECT/INSERT/UPDATE/DELETE and PostgREST answered
-`42501 permission denied for table documents` before RLS was ever consulted.
-The later migrations (`score_analyses`, `billing`, `roster`) grant explicitly,
-which is why only the original core tables were affected.
+On the **local** Docker Postgres image, the default ACL depends on who creates
+the object: tables created by `supabase_admin` grant `arwdDxtm` to
+anon/authenticated, tables created by `postgres` grant only `Dxtm`. Migrations
+run as `postgres`, so every table `schema.sql` created was unreadable and
+PostgREST answered `42501 permission denied for table documents` before RLS was
+ever consulted.
 
-`20260827140000_core_table_grants.sql` grants each table exactly the commands
-its RLS policies define. Production predates the image change and already works,
-so this is expected to be a no-op there — grants are idempotent — but it has not
-been applied to production and should be included whenever the reconciliation
-above happens.
+The hosted images do **not** behave that way — a rebuilt branch shows
+`authenticated=arwdDxtm` on every table from the default ACL alone. So
+`20260827140000_core_table_grants.sql` is load-bearing locally and a no-op
+hosted, which the rebuild confirmed. Keep it: it makes the grant explicit rather
+than dependent on which image an environment happens to run, and any new table
+should grant explicitly for the same reason.
