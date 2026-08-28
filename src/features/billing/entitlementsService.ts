@@ -11,13 +11,18 @@ import type { EffectiveTier, Entitlements, EntitlementLimits, UsageMetric } from
  * Dexie so an offline start still shows the right plan.
  */
 
+/**
+ * Mirrors the `else` branch of tier_limits() in the billing migration — keep the
+ * two in step. students: 0 is deliberate: Free is a taste of Personal, the
+ * individual licence, so the roster starts at Teacher.
+ */
 export const FREE_LIMITS: EntitlementLimits = {
     cloud_scores: 3,
     omr_runs: 3,
     vision_reads: 5,
     smart_imports: 2,
     pdf_exports: 1,
-    students: 3,
+    students: 0,
 };
 
 export const freeEntitlements = (userId: string): Entitlements => ({

@@ -40,6 +40,18 @@ import type { AssignmentAccess, MemberRole } from '../../src/types/database';
 
 export interface FakeBillingOptions {
     now?: Date;
+    /**
+     * Stands in for a plan that sells a finite roster, overriding the tier's own
+     * students limit.
+     *
+     * No purchasable tier carries a positive finite cap any more — Teacher and
+     * Academy are unlimited, Free and Personal are 0 — but the seat arithmetic
+     * (archive frees one, restore re-claims one, neither may exceed the cap)
+     * still runs in SQL and would be the first thing to break if a future tier
+     * introduced one. Tests that exercise that arithmetic set this rather than
+     * borrowing whichever tier happened to have the number.
+     */
+    seatLimit?: number;
 }
 
 /** One managed_students row, reduced to what the stock rules turn on. */
@@ -111,8 +123,12 @@ export class FakeBilling implements QuotaBackend {
 
     private nextRosterId = 1;
 
+    /** See FakeBillingOptions.seatLimit — undefined means "use the tier's". */
+    private readonly seatLimit: number | undefined;
+
     constructor(options: FakeBillingOptions = {}) {
         this.now = options.now ?? new Date('2026-08-11T12:00:00Z');
+        this.seatLimit = options.seatLimit;
     }
 
     private counterKey(userId: string, metric: UsageMetric): string {
@@ -231,12 +247,12 @@ export class FakeBilling implements QuotaBackend {
         const entitlements = await this.getEntitlements(teacherId);
         // Fail closed on an unresolvable tier, as the function does: an unreadable
         // plan must never be read as an open roster.
-        const limit = entitlements?.limits.students ?? 0;
+        const limit = this.seatLimit ?? entitlements?.limits.students ?? 0;
         if (isUnlimited(limit)) {
             return;
         }
-        // limit === 0 is Personal, refused without ever counting: the solo
-        // practice plan has no roster to be at the bottom of.
+        // limit === 0 is Free and Personal alike, refused without ever counting:
+        // a plan with no roster has no bottom of one to sit at.
         if (limit === 0 || this.activeStudents(teacherId).length >= limit) {
             const error: FakeProvisionError = {
                 status: LIMIT_REACHED_STATUS,

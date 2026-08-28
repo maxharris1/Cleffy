@@ -134,17 +134,19 @@ describe('RosterPage', () => {
         expect(screen.getByLabelText('Student name')).toHaveValue('');
     });
 
-    it('offers an upgrade instead of an error when the plan’s seats are full', async () => {
+    it('offers an upgrade instead of an error when the server refuses the roster', async () => {
+        // A teacher whose plan lapsed mid-session still has the page open: the
+        // refusal arrives from the server, not from a client-side check.
         const user = userEvent.setup();
         provisionStudent.mockRejectedValue(
-            new LimitReachedError({ code: 'limit_reached', metric: 'students', limit: 3, tier: 'free' }),
+            new LimitReachedError({ code: 'limit_reached', metric: 'students', limit: 0, tier: 'free' }),
         );
         renderRoster();
 
         await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
         await user.click(screen.getByRole('button', { name: 'Add student' }));
 
-        expect(await screen.findByText(/filled your 3 free student seats/)).toBeInTheDocument();
+        expect(await screen.findByText(/doesn’t include a student roster/)).toBeInTheDocument();
         // The typed name survives, so upgrading and pressing Add again costs nothing.
         expect(screen.getByLabelText('Student name')).toHaveValue('Ada Lovelace');
 

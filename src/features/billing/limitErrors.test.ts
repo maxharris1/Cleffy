@@ -117,10 +117,13 @@ describe('limit copy', () => {
         );
     });
 
-    it('names the roster and its number when a free teacher runs out of student seats', () => {
-        const payload = { code: 'limit_reached', metric: 'students', limit: 3, tier: 'free' } as const;
-        expect(limitHeadline(payload)).toContain('3');
+    it('names the roster and points at Teacher when the plan has none', () => {
+        // The only reachable students refusal now: Teacher and Academy are
+        // unlimited and everyone else is 0, so there is no "you have used N of
+        // your M seats" case left to word.
+        const payload = { code: 'limit_reached', metric: 'students', limit: 0, tier: 'free' } as const;
         expect(limitHeadline(payload)).toMatch(/student/i);
+        expect(limitHeadline(payload)).not.toContain('0');
         expect(limitAction(payload)).toContain('Upgrade');
     });
 });

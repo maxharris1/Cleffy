@@ -186,14 +186,16 @@ describe('provisioned students', () => {
 });
 
 describe('the limits table', () => {
-    it('gives free a small allowance of everything, students included', () => {
+    it('gives free a small allowance of everything it has, and no roster', () => {
+        // Free is a taste of Personal, the individual licence: the whole practice
+        // tool in small amounts, with the roster starting at Teacher.
         expect(TIER_LIMITS.free).toEqual({
             cloud_scores: 3,
             omr_runs: 3,
             vision_reads: 5,
             smart_imports: 2,
             pdf_exports: 1,
-            students: 3,
+            students: 0,
         });
     });
 
