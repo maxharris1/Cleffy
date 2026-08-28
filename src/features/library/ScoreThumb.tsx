@@ -1,34 +1,17 @@
-import { useEffect, useState } from 'react';
-
-import { getThumbnail } from '@/features/library/thumbnailService';
+import { StaffPlaceholder } from '@/features/library/StaffPlaceholder';
+import { useScoreThumbnail } from '@/features/library/useScoreThumbnail';
 
 /**
  * First-page preview for a library row. Purely decorative — the row's
  * stretched title link covers it, so it is `aria-hidden` and never focusable.
  * Falls back to a drawn staff whenever no render exists yet (score not cached
  * on this device, render still queued, or a PDF pdf.js could not open).
+ *
+ * The shelf card draws the same render at full A4 size; both go through
+ * useScoreThumbnail so there is one single-flight path into the cache.
  */
 export const ScoreThumb = ({ docId, contentRev }: { docId: string; contentRev: number }) => {
-    const [url, setUrl] = useState<string | null>(null);
-
-    useEffect(() => {
-        let cancelled = false;
-        let objectUrl: string | null = null;
-        getThumbnail(docId, contentRev)
-            .then((blob) => {
-                if (blob && !cancelled) {
-                    objectUrl = URL.createObjectURL(blob);
-                    setUrl(objectUrl);
-                }
-            })
-            .catch(() => undefined);
-        return () => {
-            cancelled = true;
-            if (objectUrl) {
-                URL.revokeObjectURL(objectUrl);
-            }
-        };
-    }, [docId, contentRev]);
+    const url = useScoreThumbnail(docId, contentRev);
 
     return (
         <span
@@ -39,11 +22,3 @@ export const ScoreThumb = ({ docId, contentRev }: { docId: string; contentRev: n
         </span>
     );
 };
-
-const StaffPlaceholder = () => (
-    <svg viewBox="0 0 36 48" className="h-full w-full text-stone-300" aria-hidden="true">
-        {[15, 19.5, 24, 28.5, 33].map((y) => (
-            <line key={y} x1={5} x2={31} y1={y} y2={y} stroke="currentColor" strokeWidth={1} />
-        ))}
-    </svg>
-);

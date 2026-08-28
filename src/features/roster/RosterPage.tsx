@@ -24,6 +24,7 @@ import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
+import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { TextField } from '@/ui/TextField';
@@ -94,12 +95,18 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
  * ways this page fails are "the server said no" and "your plan is full", and
  * only the second one is worth showing an upgrade for.
  *
- * The page never checks the plan itself. A full roster is a 402 from
+ * The page never counts against the plan itself. A full roster is a 402 from
  * student-provision, arriving as LimitReachedError; anything the client decided
  * on its own would be a second, drifting copy of the limits.
+ *
+ * Whether the plan has a roster at all is a different question, and one the
+ * client may answer: canManageStudents reads the server's own students limit, so
+ * it cannot drift either. Personal and provisioned students get `students: 0`,
+ * and for them the nav drops this page and the body offers the upgrade instead
+ * of a form the server would refuse on every submission.
  */
 export const RosterPage = () => {
-    const { openPricing } = useOutletContext<LibraryOutletContext>();
+    const { canManageStudents, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
@@ -272,49 +279,70 @@ export const RosterPage = () => {
     return (
         <div>
             <h1 className="font-display text-2xl font-semibold text-stone-800 sm:text-3xl">Students</h1>
-            <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
-                Each student gets their own sign-in: a printed setup code they turn into a username, or an email invite
-                if they have an address. Assign scores from your library and their markings stay theirs.
-            </p>
-
-            <AddStudentForm busy={busy} onAdd={addStudent} />
-
-            {limit ? <LimitReachedNotice limit={limit} onUpgrade={openPricing} className="mt-5" /> : null}
-            {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
-
-            {students === null ? (
-                <LoadingText className="mt-10">Loading your roster…</LoadingText>
-            ) : loadError ? (
-                <ErrorText className="mt-8">{loadError}</ErrorText>
-            ) : students.length === 0 ? (
-                <p className="mt-10 text-sm text-stone-500">
-                    No students yet — add one above to print their setup card or send their invite.
+            {/* The upgrade state below explains the roster in its own words —
+                printing the pitch twice on the same screen just reads as noise. */}
+            {canManageStudents ? (
+                <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
+                    Each student gets their own sign-in: a printed setup code they turn into a username, or an email
+                    invite if they have an address. Assign scores from your library and their markings stay theirs.
                 </p>
+            ) : null}
+
+            {/*
+              The nav hides this page on a plan without a roster, but a bookmark
+              or a typed URL still lands here. Say so and offer the upgrade rather
+              than showing an add form whose every submission the server refuses.
+            */}
+            {!canManageStudents ? (
+                <EmptyState
+                    className="mt-10"
+                    title="Your plan doesn’t include students"
+                    body="Teacher and Academy add a roster: each student gets their own sign-in, and you assign scores straight from your library."
+                >
+                    <Button onClick={openPricing}>See plans</Button>
+                </EmptyState>
             ) : (
-                <section className="mt-8">
-                    <p className="text-xs text-stone-600">
-                        {activeCount} {activeCount === 1 ? 'student' : 'students'}
-                        {archivedCount > 0 ? ` · ${archivedCount} archived` : ''}
-                    </p>
-                    <ul className="mt-3">
-                        {students.map((student, index) => (
-                            <StudentRow
-                                key={student.id}
-                                student={student}
-                                index={index}
-                                assignments={assignments.get(student.student_user_id) ?? []}
-                                expanded={expandedId === student.id}
-                                busy={busy}
-                                onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
-                                onReset={() => setResetTarget(student)}
-                                onArchive={() => setArchiveTarget(student)}
-                                onRestore={() => void restore(student)}
-                                onSetAccess={setAccess}
-                                onUnassign={unassign}
-                            />
-                        ))}
-                    </ul>
-                </section>
+                <>
+                    <AddStudentForm busy={busy} onAdd={addStudent} />
+
+                    {limit ? <LimitReachedNotice limit={limit} onUpgrade={openPricing} className="mt-5" /> : null}
+                    {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
+
+                    {students === null ? (
+                        <LoadingText className="mt-10">Loading your roster…</LoadingText>
+                    ) : loadError ? (
+                        <ErrorText className="mt-8">{loadError}</ErrorText>
+                    ) : students.length === 0 ? (
+                        <p className="mt-10 text-sm text-stone-500">
+                            No students yet — add one above to print their setup card or send their invite.
+                        </p>
+                    ) : (
+                        <section className="mt-8">
+                            <p className="text-xs text-stone-600">
+                                {activeCount} {activeCount === 1 ? 'student' : 'students'}
+                                {archivedCount > 0 ? ` · ${archivedCount} archived` : ''}
+                            </p>
+                            <ul className="mt-3">
+                                {students.map((student, index) => (
+                                    <StudentRow
+                                        key={student.id}
+                                        student={student}
+                                        index={index}
+                                        assignments={assignments.get(student.student_user_id) ?? []}
+                                        expanded={expandedId === student.id}
+                                        busy={busy}
+                                        onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
+                                        onReset={() => setResetTarget(student)}
+                                        onArchive={() => setArchiveTarget(student)}
+                                        onRestore={() => void restore(student)}
+                                        onSetAccess={setAccess}
+                                        onUnassign={unassign}
+                                    />
+                                ))}
+                            </ul>
+                        </section>
+                    )}
+                </>
             )}
 
             {codeCard ? (

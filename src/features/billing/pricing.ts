@@ -56,14 +56,13 @@ export const TIER_CARDS: TierCard[] = [
     {
         tier: 'free',
         name: 'Free',
-        tagline: 'Everything you need to try Cleffy with a few students.',
+        tagline: 'A taste of Personal — the whole practice tool for one player, in small amounts.',
         features: [
             '3 active cloud scores',
             '3 play-along analyses a month',
             '2 smart imports a month',
             '5 AI fingering reads a month',
             '1 PDF export a month',
-            '3 student seats',
             'Unlimited annotation and fingering tools',
         ],
     },

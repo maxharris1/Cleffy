@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { TIER_LIMITS } from '../../supabase/functions/_shared/entitlements';
 import type { AssignmentAccess, MemberRole } from '../../src/types/database';
 import { assignRole, FakeBilling, unassignRole, type FakeProvisionError, type FakeRosterRow } from './fakeBilling';
 
@@ -16,7 +15,18 @@ import { assignRole, FakeBilling, unassignRole, type FakeProvisionError, type Fa
  * migration rather than one implementation against another.
  */
 
-const FREE_SEATS = TIER_LIMITS.free.students;
+/**
+ * The cap the seat-arithmetic tests run against.
+ *
+ * Not a tier's number any more: Free and Personal carry 0 and Teacher/Academy
+ * are unlimited, so nothing purchasable has a finite roster. The rules for one
+ * still run in SQL, so they are exercised against an explicit cap via
+ * FakeBilling's seatLimit rather than whichever tier used to supply it.
+ */
+const SEATS = 3;
+
+/** A plan that sells exactly SEATS of roster. */
+const cappedBilling = () => new FakeBilling({ seatLimit: SEATS });
 
 /** Unlimited is unlimited; this is just a number big enough to be convincing. */
 const MANY = 12;
@@ -40,22 +50,33 @@ const fill = async (billing: FakeBilling, teacherId: string, count: number): Pro
 };
 
 describe('the roster stock', () => {
-    it('lets a free teacher fill three seats and refuses the fourth with the typed error', async () => {
+    it('refuses a free teacher the very first seat, with the typed error', async () => {
+        // Free is a taste of Personal, the individual licence: no roster at all,
+        // so the refusal lands before any counting rather than on the fourth.
         const billing = new FakeBilling();
-        await fill(billing, 'teacher', FREE_SEATS);
 
         const refusal = await refusalFrom(billing.provisionStudent('teacher'));
         expect(refusal.status).toBe(402);
         expect(refusal.body).toEqual({
             code: 'limit_reached',
             metric: 'students',
-            limit: FREE_SEATS,
+            limit: 0,
             tier: 'free',
         });
 
         // The refused create wrote nothing — no roster row, and (upstream of this
         // fake) no orphaned auth user either.
-        expect(billing.activeStudents('teacher')).toHaveLength(FREE_SEATS);
+        expect(billing.activeStudents('teacher')).toHaveLength(0);
+    });
+
+    it('fills a finite roster to its cap and refuses the next one', async () => {
+        const billing = cappedBilling();
+        await fill(billing, 'teacher', SEATS);
+
+        const refusal = await refusalFrom(billing.provisionStudent('teacher'));
+        expect(refusal.status).toBe(402);
+        expect(refusal.body).toMatchObject({ code: 'limit_reached', metric: 'students', limit: SEATS });
+        expect(billing.activeStudents('teacher')).toHaveLength(SEATS);
     });
 
     it('refuses Personal at the very first student — the practice plan has no roster at all', async () => {
@@ -104,46 +125,46 @@ describe('the roster stock', () => {
     });
 
     it('never moves a usage counter, because a seat is occupancy rather than activity', async () => {
-        const billing = new FakeBilling();
-        await fill(billing, 'teacher', FREE_SEATS);
+        const billing = cappedBilling();
+        await fill(billing, 'teacher', SEATS);
         await refusalFrom(billing.provisionStudent('teacher'));
 
         expect(billing.countOf('teacher', 'students')).toBe(0);
     });
 
     it('keeps each teacher on their own roster', async () => {
-        const billing = new FakeBilling();
-        await fill(billing, 'teacher-a', FREE_SEATS);
+        const billing = cappedBilling();
+        await fill(billing, 'teacher-a', SEATS);
 
         await expect(billing.provisionStudent('teacher-b')).resolves.toMatchObject({ archived: false });
     });
 });
 
 describe('archiving and restoring a student', () => {
-    /** A free teacher at exactly three, with `first` the one the test will archive. */
-    const fullFreeRoster = async (): Promise<{ billing: FakeBilling; first: FakeRosterRow }> => {
-        const billing = new FakeBilling();
+    /** A teacher at exactly their cap, with `first` the one the test will archive. */
+    const fullRoster = async (): Promise<{ billing: FakeBilling; first: FakeRosterRow }> => {
+        const billing = cappedBilling();
         const first = await billing.provisionStudent('teacher');
-        await fill(billing, 'teacher', FREE_SEATS - 1);
+        await fill(billing, 'teacher', SEATS - 1);
         return { billing, first };
     };
 
     it('frees a seat, and deletes nothing while doing it', async () => {
-        const { billing, first } = await fullFreeRoster();
+        const { billing, first } = await fullRoster();
 
         billing.archiveStudent('teacher', first.id);
         await expect(billing.provisionStudent('teacher')).resolves.toMatchObject({ archived: false });
 
         // The archived student keeps their row — and with it their assignments,
         // annotations and practice notes. Only the seat went back.
-        expect(billing.roster.get('teacher')).toHaveLength(FREE_SEATS + 1);
-        expect(billing.activeStudents('teacher')).toHaveLength(FREE_SEATS);
+        expect(billing.roster.get('teacher')).toHaveLength(SEATS + 1);
+        expect(billing.activeStudents('teacher')).toHaveLength(SEATS);
     });
 
     it('refuses a restore that would put the teacher back over the cap', async () => {
         // The cap-laundering guard: without the stock check on restore, archive +
         // restore turns three free seats into as many as you like.
-        const { billing, first } = await fullFreeRoster();
+        const { billing, first } = await fullRoster();
         billing.archiveStudent('teacher', first.id);
         await billing.provisionStudent('teacher');
 
@@ -152,36 +173,36 @@ describe('archiving and restoring a student', () => {
         expect(refusal.body).toEqual({
             code: 'limit_reached',
             metric: 'students',
-            limit: FREE_SEATS,
+            limit: SEATS,
             tier: 'free',
         });
 
         // Refused, not deleted: the row is still there to restore later.
-        expect(billing.activeStudents('teacher')).toHaveLength(FREE_SEATS);
-        expect(billing.roster.get('teacher')).toHaveLength(FREE_SEATS + 1);
+        expect(billing.activeStudents('teacher')).toHaveLength(SEATS);
+        expect(billing.roster.get('teacher')).toHaveLength(SEATS + 1);
     });
 
     it('allows a restore back into a seat that is actually free', async () => {
-        const { billing, first } = await fullFreeRoster();
+        const { billing, first } = await fullRoster();
         billing.archiveStudent('teacher', first.id);
 
         await expect(billing.restoreStudent('teacher', first.id)).resolves.toBeUndefined();
-        expect(billing.activeStudents('teacher')).toHaveLength(FREE_SEATS);
+        expect(billing.activeStudents('teacher')).toHaveLength(SEATS);
     });
 
     it('treats restoring an active student as a no-op, even at exactly the limit', async () => {
         // Re-running restore on a row that never left must not 402 a teacher who
         // sits on their last seat: it is asking for a state they are already in.
-        const { billing, first } = await fullFreeRoster();
+        const { billing, first } = await fullRoster();
 
         await expect(billing.restoreStudent('teacher', first.id)).resolves.toBeUndefined();
-        expect(billing.activeStudents('teacher')).toHaveLength(FREE_SEATS);
+        expect(billing.activeStudents('teacher')).toHaveLength(SEATS);
     });
 
     it('answers one flat 404 for a student on somebody else’s roster', async () => {
         // Whether that id exists on another teacher's roster is not the caller's
         // business, so "no such row" and "not yours" are the same answer.
-        const billing = new FakeBilling();
+        const billing = cappedBilling();
         const mine = await billing.provisionStudent('teacher-a');
 
         const refusal = await refusalFrom(billing.restoreStudent('teacher-b', mine.id));
@@ -203,11 +224,13 @@ describe('a teacher whose plan has lapsed', () => {
     it('falls back to free limits for new students while the roster they built stays put', async () => {
         const billing = await lapsedRoster();
 
+        // Free carries no roster at all now, so the fallback refuses the next
+        // student outright rather than leaving a few seats to grow into.
         const refusal = await refusalFrom(billing.provisionStudent('teacher'));
         expect(refusal.body).toEqual({
             code: 'limit_reached',
             metric: 'students',
-            limit: FREE_SEATS,
+            limit: 0,
             tier: 'free',
         });
 
@@ -218,7 +241,7 @@ describe('a teacher whose plan has lapsed', () => {
         expect(billing.roster.get('teacher')).toHaveLength(10);
     });
 
-    it('cannot restore an archived student while still over the free cap', async () => {
+    it('cannot restore an archived student, because the fallback plan has no roster', async () => {
         const billing = await lapsedRoster();
         const rows = billing.roster.get('teacher') ?? [];
         const archived = rows[0];
@@ -230,7 +253,8 @@ describe('a teacher whose plan has lapsed', () => {
         const refusal = await refusalFrom(billing.restoreStudent('teacher', archived.id));
 
         expect(refusal.status).toBe(402);
-        expect(refusal.body).toMatchObject({ metric: 'students', limit: FREE_SEATS, tier: 'free' });
+        expect(refusal.body).toMatchObject({ metric: 'students', limit: 0, tier: 'free' });
+        // The nine still active are untouched, and the archived one keeps its row.
         expect(billing.activeStudents('teacher')).toHaveLength(9);
     });
 });

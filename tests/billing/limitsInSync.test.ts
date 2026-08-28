@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -24,9 +24,31 @@ import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
  * and proves they agree.
  */
 
-// Resolved from the project root: the jsdom test environment gives import.meta
-// a non-file URL, so fileURLToPath cannot be used here.
-const MIGRATION = resolve(process.cwd(), 'supabase/migrations/20260826193902_billing.sql');
+/**
+ * The migration that most recently defined tier_limits(), not a fixed filename.
+ *
+ * The function is redefined by create-or-replace whenever the ceilings move, so
+ * the last definition in timestamp order is the one the database is actually
+ * running. Pinning this to the original billing migration would have quietly
+ * gone on asserting superseded numbers.
+ *
+ * Resolved from the project root: the jsdom test environment gives import.meta a
+ * non-file URL, so fileURLToPath cannot be used here.
+ */
+const MIGRATIONS_DIR = resolve(process.cwd(), 'supabase/migrations');
+
+const latestTierLimitsMigration = (): string => {
+    const defining = readdirSync(MIGRATIONS_DIR)
+        .filter((name) => name.endsWith('.sql'))
+        .sort()
+        .filter((name) => /function\s+public\.tier_limits/i.test(readFileSync(resolve(MIGRATIONS_DIR, name), 'utf8')));
+
+    const latest = defining.at(-1);
+    if (!latest) {
+        throw new Error('no migration defines tier_limits()');
+    }
+    return readFileSync(resolve(MIGRATIONS_DIR, latest), 'utf8');
+};
 
 const TIERS: BillingTier[] = ['free', 'personal', 'teacher', 'academy'];
 const PAID_TIERS = ['personal', 'teacher', 'academy'] as const;
@@ -65,7 +87,7 @@ const limitsFromSql = (sql: string, tier: EffectiveTier): Record<string, number>
 };
 
 describe('tier limits stay in sync with the migration', () => {
-    const sql = readFileSync(MIGRATION, 'utf8');
+    const sql = latestTierLimitsMigration();
 
     it.each(SQL_TIERS)('%s matches tier_limits() in SQL', (tier) => {
         expect(limitsFromSql(sql, tier)).toEqual(LIMITS_BY_TIER[tier]);
@@ -115,13 +137,13 @@ describe('tier limits stay in sync with the migration', () => {
         }
     });
 
-    it('deliberately gives Personal fewer student seats than free, and Teacher no ceiling', () => {
-        // The exception, spelled out so it cannot be "fixed" by mistake: buying the
-        // personal practice tool is not buying a smaller studio, it is buying no
-        // studio, so its roster is 0 while free still gets 3 to try the feature on.
+    it('starts the roster at Teacher, with Free and Personal carrying none', () => {
+        // Spelled out so it cannot be "fixed" by mistake: Free is a taste of
+        // Personal, the individual licence, not a miniature studio. A free
+        // account that could run three students indefinitely never reaches the
+        // tier the roster is sold on, so both sit at 0 and Teacher is the step up.
+        expect(TIER_LIMITS.free.students).toBe(0);
         expect(TIER_LIMITS.personal.students).toBe(0);
-        expect(TIER_LIMITS.free.students).toBe(3);
-        expect(TIER_LIMITS.personal.students).toBeLessThan(TIER_LIMITS.free.students);
 
         expect(TIER_LIMITS.teacher.students).toBe(UNLIMITED);
         expect(TIER_LIMITS.academy.students).toBe(UNLIMITED);
@@ -139,7 +161,10 @@ describe('the pricing page describes the limits it actually enforces', () => {
         expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} smart imports a month`);
         expect(copy).toContain(`${TIER_LIMITS.free.pdf_exports} PDF export a month`);
         expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI fingering reads a month`);
-        expect(copy).toContain(`${TIER_LIMITS.free.students} student seats`);
+        // Nothing on this card may advertise a roster it does not have, the same
+        // rule the Personal card is held to below.
+        expect(copy).not.toMatch(/student/i);
+        expect(TIER_LIMITS.free.students).toBe(0);
         // Export left the unlimited line when it became a metered free allowance.
         expect(copy).toContain('Unlimited annotation and fingering tools');
     });

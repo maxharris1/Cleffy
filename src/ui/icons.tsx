@@ -6,6 +6,8 @@ import {
     ChevronUp,
     EllipsisVertical,
     Hourglass,
+    LayoutGrid,
+    List,
     LocateFixed,
     Minus,
     Music,
@@ -52,6 +54,8 @@ export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);
 export const SettingsIcon = withBrandStroke(Settings2);
 export const UploadIcon = withBrandStroke(Upload);
+export const LayoutGridIcon = withBrandStroke(LayoutGrid);
+export const ListIcon = withBrandStroke(List);
 
 // Play-along transport.
 export const PlayIcon = withBrandStroke(Play);

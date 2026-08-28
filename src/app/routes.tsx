@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { Route, Routes } from 'react-router';
+import { Navigate, Route, Routes, useLocation } from 'react-router';
 
 import { AuthCallbackPage } from '@/features/auth/AuthCallbackPage';
 import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage';
@@ -17,9 +17,9 @@ import { LoadingText } from '@/ui/Loading';
 // Lazy: keeps pdf.js (large, browser-only) out of the app-shell bundle.
 const ViewerPage = lazy(() => import('@/features/viewer/ViewerPage').then((m) => ({ default: m.ViewerPage })));
 
-// Lazy: billing is a rarely-visited surface — keep Stripe copy and the pricing
-// dialog out of the shell bundle that every session pays for.
-const SettingsPage = lazy(() => import('@/features/billing/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+// Lazy: the account surface is rarely visited — keep Stripe copy and the
+// pricing dialog out of the shell bundle that every session pays for.
+const AccountPage = lazy(() => import('@/features/account/AccountPage').then((m) => ({ default: m.AccountPage })));
 
 // Lazy: the student surfaces are the other half of the app — a teacher session never
 // mounts them, and a student loads only these, so neither side pays for the other.
@@ -38,6 +38,18 @@ const AssignmentsPage = lazy(() =>
 
 // Lazy: the roster is a Teacher/Academy-only surface — personal accounts never open it.
 const RosterPage = lazy(() => import('@/features/roster/RosterPage').then((m) => ({ default: m.RosterPage })));
+
+/**
+ * The billing surface moved to /account, but Stripe returns users to /settings:
+ * the checkout and portal Edge Functions build those URLs server-side
+ * (`/settings?checkout=success|cancelled`, `/settings`) and deploy on their own
+ * cadence, so the old path has to keep resolving no matter what the frontend
+ * does. The query string carries the checkout outcome — forward it verbatim.
+ */
+const SettingsRedirect = () => {
+    const { search } = useLocation();
+    return <Navigate to={{ pathname: '/account', search }} replace />;
+};
 
 /** Full-page loading frame for standalone routes that render outside the shell. */
 const PageFallback = ({ label }: { label: string }) => (
@@ -104,13 +116,15 @@ export const AppRoutes = () => {
                     }
                 />
                 <Route
-                    path="/settings"
+                    path="/account"
                     element={
-                        <Suspense fallback={<LoadingText className="mt-10">Loading settings…</LoadingText>}>
-                            <SettingsPage />
+                        <Suspense fallback={<LoadingText className="mt-10">Loading account…</LoadingText>}>
+                            <AccountPage />
                         </Suspense>
                     }
                 />
+                {/* Inside the shell group so the redirect still sits behind RequireRegistered. */}
+                <Route path="/settings" element={<SettingsRedirect />} />
             </Route>
             <Route
                 path="/doc/:documentId"

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
@@ -21,8 +21,12 @@ import {
 } from '@/features/library/libraryView';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { FileDropZone } from '@/features/library/FileDropZone';
+import { formatUpdated } from '@/features/library/libraryFormat';
+import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
+import { RowMenu } from '@/features/library/RowMenu';
+import { ScoreCard } from '@/features/library/ScoreCard';
 import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
 import { TagManageDialog } from '@/features/library/TagManageDialog';
@@ -47,7 +51,7 @@ import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { TextField } from '@/ui/TextField';
 import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
-import { MoreVerticalIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
+import { LayoutGridIcon, ListIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 
 /** Above this count, tag filters switch from chips to a select. */
 const TAG_CHIP_LIMIT = 8;
@@ -55,8 +59,17 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 
 export const LibraryPage = () => {
-    const { userId, uploading, uploadPct, onUpload, uploadError, uploadLimit, clearUploadError, openPricing } =
-        useOutletContext<LibraryOutletContext>();
+    const {
+        userId,
+        uploading,
+        uploadPct,
+        onUpload,
+        uploadError,
+        uploadLimit,
+        clearUploadError,
+        canManageStudents,
+        openPricing,
+    } = useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
     const [favorites, setFavorites] = useState<Set<string>>(new Set());
     const [tags, setTags] = useState<LibraryTagRow[]>([]);
@@ -65,6 +78,9 @@ export const LibraryPage = () => {
     const [error, setError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
+    // Read once on mount: a stored preference that throws (private mode) falls
+    // back to the shelf rather than taking the page down with it.
+    const [view, setView] = useState<LibraryView>(readLibraryView);
     const [sort, setSort] = useState<LibrarySort>('recent');
     const [groupComposer, setGroupComposer] = useState(false);
     const [groupTag, setGroupTag] = useState(false);
@@ -157,6 +173,17 @@ export const LibraryPage = () => {
     const isOfflineNotice = error?.startsWith('Offline') ?? false;
     const statusError = uploadError ?? actionError ?? error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
+    /**
+     * The upload tile is the last cell of the shelf, so it only makes sense
+     * when the shelf is the whole library: under a filter it would look like a
+     * result, and under a grouping it would have to pick a group to live in.
+     */
+    const showAddTile = view === 'grid' && !q && !activeTagId && !favoritesOnly && !groupComposer && !groupTag;
+
+    const changeView = (next: LibraryView) => {
+        setView(next);
+        writeLibraryView(next);
+    };
 
     const toggleFavorite = (doc: DocumentRow) => {
         const next = !favorites.has(doc.id);
@@ -320,23 +347,22 @@ export const LibraryPage = () => {
     return (
         <FileDropZone disabled={uploading} onFile={(file) => void onUpload(file).catch(() => undefined)}>
             <div>
-                <header>
+                {/*
+                  No upload button in the header: the shell's top bar carries a
+                  persistent one and the shelf ends in an "Add a score" tile. The
+                  local-only path has no other home, so it rides alongside the
+                  subtitle rather than standing alone where the button used to be.
+                */}
+                <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                     <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Library</h1>
-                    <p className="mt-1 text-sm text-stone-500">
-                        Upload, organize, and share the scores you teach from.
-                    </p>
+                    <p className="text-sm text-stone-500">Upload, organize, and share the scores you teach from.</p>
+                    {hasScores ? <LocalOpenControl label="Open locally without uploading" subtle /> : null}
                 </header>
 
                 {hasScores ? (
-                    <>
-                        <div className="mt-5 flex flex-wrap items-center gap-3">
-                            <UploadButton uploading={uploading} onUpload={onUpload} />
-                            <LocalOpenControl label="Open locally without uploading" subtle />
-                        </div>
-                        {uploading && uploadPct !== null ? (
-                            <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
-                        ) : null}
-                    </>
+                    uploading && uploadPct !== null ? (
+                        <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
+                    ) : null
                 ) : documents !== null ? (
                     <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
                 ) : null}
@@ -377,14 +403,17 @@ export const LibraryPage = () => {
                                 placeholder="Search by title…"
                                 className={fieldClassName('sm', 'sm:max-w-xs')}
                             />
-                            <p className="text-xs text-stone-600">
-                                {query.trim() || favoritesOnly || activeTagId
-                                    ? `${visible?.length ?? 0} of ${documents.length}`
-                                    : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                                {hasMore && !query.trim() && !favoritesOnly && !activeTagId
-                                    ? ' · showing latest 100'
-                                    : null}
-                            </p>
+                            <div className="flex items-center gap-3">
+                                <p className="text-xs text-stone-600">
+                                    {query.trim() || favoritesOnly || activeTagId
+                                        ? `${visible?.length ?? 0} of ${documents.length}`
+                                        : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
+                                    {hasMore && !query.trim() && !favoritesOnly && !activeTagId
+                                        ? ' · showing latest 100'
+                                        : null}
+                                </p>
+                                <ViewToggle view={view} onChange={changeView} />
+                            </div>
                         </div>
 
                         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -479,28 +508,56 @@ export const LibraryPage = () => {
                                             {group.label}
                                         </h3>
                                     ) : null}
-                                    <ul className={group.label ? '' : 'mt-4'}>
-                                        {group.documents.map((doc) => (
-                                            <ScoreRow
-                                                key={`${group.label ?? 'all'}-${doc.id}`}
-                                                doc={doc}
-                                                index={rowIndex++}
-                                                stripComposer={groupComposer && group.label !== null}
-                                                assignedTags={docTags(doc.id)}
-                                                isFavorite={favorites.has(doc.id)}
-                                                isOwner={doc.owner_id === userId}
-                                                onToggleFavorite={() => toggleFavorite(doc)}
-                                                onTags={() => setTagTarget(doc)}
-                                                onFilterTag={(tagId) =>
-                                                    setActiveTagId((id) => (id === tagId ? null : tagId))
-                                                }
-                                                onRename={() => setRenameTarget(doc)}
-                                                onShare={() => setShareTarget(doc)}
-                                                onAssign={() => setAssignTarget(doc)}
-                                                onDelete={() => setDeleteTarget(doc)}
-                                            />
-                                        ))}
-                                    </ul>
+                                    {view === 'grid' ? (
+                                        <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                                            {group.documents.map((doc) => (
+                                                <ScoreCard
+                                                    key={`${group.label ?? 'all'}-${doc.id}`}
+                                                    doc={doc}
+                                                    index={rowIndex++}
+                                                    stripComposer={groupComposer && group.label !== null}
+                                                    assignedTags={docTags(doc.id)}
+                                                    isFavorite={favorites.has(doc.id)}
+                                                    isOwner={doc.owner_id === userId}
+                                                    onToggleFavorite={() => toggleFavorite(doc)}
+                                                    onRename={() => setRenameTarget(doc)}
+                                                    onShare={() => setShareTarget(doc)}
+                                                    onAssign={
+                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
+                                                    }
+                                                    onDelete={() => setDeleteTarget(doc)}
+                                                />
+                                            ))}
+                                            {showAddTile ? (
+                                                <AddScoreTile uploading={uploading} onUpload={onUpload} />
+                                            ) : null}
+                                        </div>
+                                    ) : (
+                                        <ul className={group.label ? '' : 'mt-4'}>
+                                            {group.documents.map((doc) => (
+                                                <ScoreRow
+                                                    key={`${group.label ?? 'all'}-${doc.id}`}
+                                                    doc={doc}
+                                                    index={rowIndex++}
+                                                    stripComposer={groupComposer && group.label !== null}
+                                                    assignedTags={docTags(doc.id)}
+                                                    isFavorite={favorites.has(doc.id)}
+                                                    isOwner={doc.owner_id === userId}
+                                                    onToggleFavorite={() => toggleFavorite(doc)}
+                                                    onTags={() => setTagTarget(doc)}
+                                                    onFilterTag={(tagId) =>
+                                                        setActiveTagId((id) => (id === tagId ? null : tagId))
+                                                    }
+                                                    onRename={() => setRenameTarget(doc)}
+                                                    onShare={() => setShareTarget(doc)}
+                                                    onAssign={
+                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
+                                                    }
+                                                    onDelete={() => setDeleteTarget(doc)}
+                                                />
+                                            ))}
+                                        </ul>
+                                    )}
                                 </section>
                             ))
                         )}
@@ -595,6 +652,74 @@ const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: Libra
     </div>
 );
 
+/**
+ * Shelf or list. Two icon buttons rather than a select: it is a two-state
+ * choice made rarely, and the icons say what the words would.
+ */
+const ViewToggle = ({ view, onChange }: { view: LibraryView; onChange: (v: LibraryView) => void }) => (
+    <div
+        role="group"
+        aria-label="View"
+        className="flex h-8 shrink-0 items-center rounded-lg border border-stone-200 p-0.5"
+    >
+        {(
+            [
+                ['grid', 'Grid view', LayoutGridIcon],
+                ['list', 'List view', ListIcon],
+            ] as const
+        ).map(([value, label, Icon]) => (
+            <button
+                key={value}
+                type="button"
+                aria-pressed={view === value}
+                aria-label={label}
+                title={label}
+                onClick={() => onChange(value)}
+                className={`flex h-full items-center rounded-md px-2 transition ${
+                    view === value ? 'bg-accent-soft text-accent' : 'text-stone-500 hover:text-stone-800'
+                }`}
+            >
+                <Icon size={15} />
+            </button>
+        ))}
+    </div>
+);
+
+/**
+ * Last cell of the shelf. A <label> around a file input rather than a button,
+ * for the same reason UploadButton is one — a file picker cannot be opened
+ * programmatically without a user gesture on the input itself.
+ *
+ * The input is `sr-only` rather than `hidden` so it stays focusable: a tile
+ * only reachable with a mouse would be the one upload path a keyboard user
+ * cannot take.
+ */
+const AddScoreTile = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
+    <label
+        className={`flex aspect-[1/1.414] cursor-pointer flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-stone-300 text-stone-500 transition hover:border-accent hover:text-accent focus-within:border-accent focus-within:text-accent ${
+            uploading ? 'pointer-events-none opacity-60' : ''
+        }`}
+    >
+        <span aria-hidden="true" className="text-3xl font-light leading-none">
+            +
+        </span>
+        <span className="px-2 text-center text-xs font-medium">Add a score</span>
+        <input
+            type="file"
+            accept={UPLOAD_ACCEPT}
+            className="sr-only"
+            disabled={uploading}
+            onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                    void onUpload(file).catch(() => undefined);
+                }
+                e.target.value = '';
+            }}
+        />
+    </label>
+);
+
 const ScoreRow = ({
     doc,
     index,
@@ -621,7 +746,7 @@ const ScoreRow = ({
     onFilterTag: (tagId: string) => void;
     onRename: () => void;
     onShare: () => void;
-    onAssign: () => void;
+    onAssign?: () => void;
     onDelete: () => void;
 }) => {
     const hasTags = assignedTags.length > 0;
@@ -720,87 +845,6 @@ const ScoreRow = ({
         </li>
     );
 };
-
-const RowMenu = ({
-    onRename,
-    onShare,
-    onAssign,
-    onDelete,
-}: {
-    onRename: () => void;
-    onShare: () => void;
-    onAssign: () => void;
-    onDelete: () => void;
-}) => {
-    const [open, setOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement | null>(null);
-
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-        const onPointerDown = (e: PointerEvent) => {
-            if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-                setOpen(false);
-            }
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                setOpen(false);
-            }
-        };
-        window.addEventListener('pointerdown', onPointerDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('pointerdown', onPointerDown);
-            window.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
-
-    const pick = (action: () => void) => {
-        setOpen(false);
-        action();
-    };
-
-    return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={open}
-                aria-label="Score actions"
-                onClick={() => setOpen((v) => !v)}
-                className="rounded-lg p-1.5 text-stone-400 transition hover:bg-ink/5 hover:text-stone-600"
-            >
-                <MoreVerticalIcon size={16} />
-            </button>
-            {open ? (
-                <div
-                    role="menu"
-                    className="absolute right-0 z-20 mt-1 w-44 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
-                >
-                    <MenuItem label="Rename" onClick={() => pick(onRename)} />
-                    <MenuItem label="Share…" onClick={() => pick(onShare)} />
-                    <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} />
-                    <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
-                </div>
-            ) : null}
-        </div>
-    );
-};
-
-const MenuItem = ({ label, danger = false, onClick }: { label: string; danger?: boolean; onClick: () => void }) => (
-    <button
-        type="button"
-        role="menuitem"
-        onClick={onClick}
-        className={`w-full px-3 py-2 text-left text-sm transition hover:bg-ink/5 ${
-            danger ? 'text-danger' : 'text-stone-800'
-        }`}
-    >
-        {label}
-    </button>
-);
 
 const RenameDialog = ({
     doc,
@@ -902,28 +946,3 @@ const EmptyLibrary = ({
         <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
     </EmptyState>
 );
-
-const formatUpdated = (iso: string): string => {
-    const date = new Date(iso);
-    if (Number.isNaN(date.getTime())) {
-        return '';
-    }
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    const dayMs = 86_400_000;
-    if (diffMs < dayMs && date.toDateString() === new Date().toDateString()) {
-        return 'Today';
-    }
-    if (diffMs < dayMs * 2) {
-        const yesterday = new Date(now - dayMs);
-        if (date.toDateString() === yesterday.toDateString()) {
-            return 'Yesterday';
-        }
-    }
-    const sameYear = date.getFullYear() === new Date(now).getFullYear();
-    return date.toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        ...(sameYear ? {} : { year: 'numeric' as const }),
-    });
-};

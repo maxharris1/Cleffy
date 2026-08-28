@@ -39,7 +39,14 @@ export class LimitReachedError extends Error {
 
 export const isLimitReachedError = (err: unknown): err is LimitReachedError => err instanceof LimitReachedError;
 
-const KNOWN_METRICS: UsageMetric[] = ['cloud_scores', 'omr_runs', 'vision_reads', 'smart_imports', 'pdf_exports', 'students'];
+const KNOWN_METRICS: UsageMetric[] = [
+    'cloud_scores',
+    'omr_runs',
+    'vision_reads',
+    'smart_imports',
+    'pdf_exports',
+    'students',
+];
 
 const isBillingTier = (value: unknown): value is BillingTier =>
     value === 'free' || value === 'personal' || value === 'teacher' || value === 'academy';
@@ -126,8 +133,12 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; upgrade: string }> = {
         upgrade: 'Upgrade for unlimited PDF exports.',
     },
     students: {
-        spent: 'You have filled your {limit} free student seats',
-        upgrade: 'Upgrade to Teacher for unlimited students.',
+        // No plan carries a positive finite student cap any more — Teacher and
+        // Academy are unlimited, everyone else is 0 — so the only way to reach
+        // this is a plan with no roster at all. "Filled your 0 seats" was the
+        // sentence that fell out of the old {limit} template.
+        spent: 'Your plan doesn’t include a student roster',
+        upgrade: 'Upgrade to Teacher to add students.',
     },
 };
 
