@@ -116,7 +116,9 @@ export const signOut = async (): Promise<void> => {
     await getSupabase().auth.signOut();
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
-    await getDb().scoreCache.clear().catch(() => undefined);
+    await getDb()
+        .scoreCache.clear()
+        .catch(() => undefined);
 };
 
 /** Display name for presence/attribution: metadata name, else email, else Guest. */
@@ -124,4 +126,30 @@ export const displayNameOf = (session: Session | null): string => {
     const meta = session?.user.user_metadata as Record<string, unknown> | undefined;
     const name = typeof meta?.['display_name'] === 'string' ? (meta['display_name'] as string) : null;
     return name ?? session?.user.email ?? 'Guest';
+};
+
+/**
+ * The stored display name with no fallback — '' when the account never set one.
+ *
+ * displayNameOf() substitutes the email, which is right for presence and wrong
+ * for a form field: seeding the input with an address the user never typed
+ * would turn "leave it blank" into "save my email as my name".
+ */
+export const storedDisplayNameOf = (session: Session | null): string => {
+    const meta = session?.user.user_metadata as Record<string, unknown> | undefined;
+    return typeof meta?.['display_name'] === 'string' ? (meta['display_name'] as string) : '';
+};
+
+/**
+ * Set the name that appears on this account.
+ *
+ * Supabase notifies every onAuthStateChange subscriber with USER_UPDATED and the
+ * refreshed session, so useSession — and through it the top bar's avatar and
+ * label — pick this up without a reload.
+ */
+export const updateDisplayName = async (displayName: string): Promise<void> => {
+    const { error } = await getSupabase().auth.updateUser({ data: { display_name: displayName.trim() } });
+    if (error) {
+        throw error;
+    }
 };
