@@ -5,16 +5,27 @@ import {
     CODE_LENGTH,
     formatLoginCode,
     generateLoginCode,
+    generateProvisionPassword,
     hashLoginCode,
     isPlausibleLoginCode,
+    isValidStudentPassword,
+    isValidUsername,
     normalizeLoginCode,
+    normalizeUsername,
+    RESERVED_USERNAMES,
+    STUDENT_PASSWORD_MAX,
+    STUDENT_PASSWORD_MIN,
     syntheticStudentEmail,
+    USERNAME_MAX,
+    USERNAME_MIN,
 } from '../../supabase/functions/_shared/studentCodes';
 
 /**
- * Login codes are the whole credential a provisioned student has: the code
- * selects their roster row by hash AND is the password of their synthetic auth
- * user, so nothing here is cosmetic. Three properties are worth a test:
+ * A login code is a ONE-TIME CLAIM TOKEN: its hash selects the roster row in
+ * student-claim exactly once, and the student picks a username and a password
+ * there. It is never the account's password, but it is still the whole of what
+ * stands between a stranger and a claim, so nothing here is cosmetic. Three
+ * properties are worth a test:
  *
  *  - the code carries real entropy and no ambiguous glyphs, because it is read
  *    off a printed card and typed by a child at a music stand;
@@ -177,5 +188,121 @@ describe('syntheticStudentEmail', () => {
         const address = syntheticStudentEmail('11111111-2222-3333-4444-555555555555');
         expect(address.endsWith('@students.cleffy.app')).toBe(true);
         expect(address.startsWith('st-')).toBe(true);
+    });
+});
+
+/**
+ * Usernames and passwords: what a code student claims INTO, and what they type
+ * every lesson afterwards. The pipeline is always normalize-then-validate, in
+ * that order, in all three runtimes — the claim page, student-claim, and the
+ * `username ~ '^[a-z0-9_]{3,20}$'` CHECK in
+ * 20260827150000_student_credentials.sql. The tests below pin the pipeline, not
+ * either half on its own, because the stored form being canonical is what makes
+ * a plain unique index a case-insensitive uniqueness guarantee.
+ */
+describe('normalizeUsername', () => {
+    it('lowercases what a phone keyboard capitalizes', () => {
+        expect(normalizeUsername('Amelia_K')).toBe('amelia_k');
+        expect(normalizeUsername('AMELIA')).toBe('amelia');
+    });
+
+    it('trims the whitespace a copy-paste brings with it', () => {
+        expect(normalizeUsername('  amelia  ')).toBe('amelia');
+        expect(normalizeUsername('\tamelia\n')).toBe('amelia');
+    });
+
+    it('leaves an already-canonical name exactly as it is', () => {
+        // The stored value is always normalized, so this is the identity that
+        // makes the login lookup an equality match rather than a search.
+        expect(normalizeUsername('amelia_k2')).toBe('amelia_k2');
+        expect(normalizeUsername(normalizeUsername(' Amelia_K2 '))).toBe('amelia_k2');
+    });
+});
+
+describe('isValidUsername', () => {
+    it('accepts the shapes a student would actually pick', () => {
+        for (const name of ['ada', 'amelia_k', 'player_1', 'x_9', '___', 'a'.repeat(USERNAME_MAX)]) {
+            expect(isValidUsername(name)).toBe(true);
+        }
+    });
+
+    it('rejects anything shorter than the minimum or longer than the maximum', () => {
+        expect(isValidUsername('a'.repeat(USERNAME_MIN - 1))).toBe(false);
+        expect(isValidUsername('a'.repeat(USERNAME_MIN))).toBe(true);
+        expect(isValidUsername('a'.repeat(USERNAME_MAX))).toBe(true);
+        expect(isValidUsername('a'.repeat(USERNAME_MAX + 1))).toBe(false);
+        expect(isValidUsername('')).toBe(false);
+    });
+
+    it('rejects every character outside the canonical alphabet', () => {
+        // Uppercase included: this function reads the NORMALIZED form, so a
+        // capital reaching it means the caller skipped normalizeUsername.
+        for (const name of ['Amelia', 'amelia k', 'amelia-k', 'amelia@k', 'amelia.k', 'améliá', 'am/k']) {
+            expect(isValidUsername(name)).toBe(false);
+        }
+    });
+
+    it('rejects every reserved name', () => {
+        for (const reserved of RESERVED_USERNAMES) {
+            expect(isValidUsername(reserved)).toBe(false);
+        }
+    });
+
+    it('rejects a reserved name dressed up in capitals, once normalized', () => {
+        // The whole point of normalize-then-validate. 'Admin' fails the shape
+        // check on its own, which would hide a reserved list that never ran; what
+        // matters is that the pipeline the server actually uses refuses it.
+        for (const dressed of ['Admin', 'ADMIN', ' Support ', 'Teacher']) {
+            expect(isValidUsername(normalizeUsername(dressed))).toBe(false);
+        }
+        // And that the same pipeline still admits an ordinary name.
+        expect(isValidUsername(normalizeUsername(' Amelia_K '))).toBe(true);
+    });
+});
+
+describe('isValidStudentPassword', () => {
+    it('refuses one character below the minimum and accepts the minimum', () => {
+        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe(false);
+        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MIN))).toBe(true);
+        expect(STUDENT_PASSWORD_MIN).toBe(8);
+    });
+
+    it('stops at bcrypt ceiling rather than silently truncating past it', () => {
+        // GoTrue hashes with bcrypt, which ignores everything past 72 bytes: a
+        // 73-character password would sign in with its first 72, which is a
+        // credential that is not the one the student thinks they set.
+        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX))).toBe(true);
+        expect(isValidStudentPassword('a'.repeat(STUDENT_PASSWORD_MAX + 1))).toBe(false);
+        expect(STUDENT_PASSWORD_MAX).toBe(72);
+    });
+
+    it('takes the password exactly as typed, spaces and all', () => {
+        // Never trimmed anywhere in the stack — a password whose spaces are eaten
+        // on the way in is one the student cannot type on the way back.
+        expect(isValidStudentPassword('  pass  ')).toBe(true);
+        expect(isValidStudentPassword('')).toBe(false);
+    });
+});
+
+describe('generateProvisionPassword', () => {
+    it('is 32 random bytes as lowercase hex', () => {
+        const password = generateProvisionPassword();
+        expect(password).toHaveLength(64);
+        expect(password).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('gives two calls two different scrambles', () => {
+        // This value is set and forgotten — it is what makes "no sign-in path
+        // exists for an Invited account" true. A generator that repeated itself
+        // would make one scramble the password of every unclaimed student.
+        expect(generateProvisionPassword()).not.toBe(generateProvisionPassword());
+        const drawn = new Set(Array.from({ length: SAMPLES }, () => generateProvisionPassword()));
+        expect(drawn.size).toBe(SAMPLES);
+    });
+
+    it('is a password no rule in this file would reject as too long', () => {
+        // 64 characters, comfortably inside bcrypt's 72-byte ceiling, so GoTrue
+        // stores the whole scramble rather than a prefix of it.
+        expect(isValidStudentPassword(generateProvisionPassword())).toBe(true);
     });
 });
