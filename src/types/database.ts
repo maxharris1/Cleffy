@@ -276,11 +276,19 @@ export type StudioMemberRow = {
  * is a real auth user — this is the teaching side of it, and archiving a row is
  * what frees the seat it holds against the `students` limit.
  *
+ * `auth_method` decides which of the two doors the student came through, and the
+ * columns beside it are that door's state: a 'code' student claims a printed
+ * setup code once and thereafter signs in with `username`; an 'email' student was
+ * invited at `student_email` and signs in with it. `claimed_at` is null until the
+ * credential is actually chosen, which is the whole of "Invited" vs "Active" —
+ * before it is set no sign-in path exists for the account at all.
+ *
  * `login_code_hash` is deliberately absent: the table has it, but `authenticated`
  * holds no SELECT grant on that column (see 20260826194426_roster.sql), because
- * the select policy has a student branch and the hash is of the code that is also
- * the account's password. Only student-login reads it, under the service role.
- * That is also why the queries below name their columns instead of `*`.
+ * the select policy has a student branch and the hash is of the one-time token
+ * that claims the account. Only the student-facing functions read it, under the
+ * service role. That is also why the queries below name their columns instead
+ * of `*`.
  */
 export type ManagedStudentRow = {
     id: string;
@@ -288,6 +296,13 @@ export type ManagedStudentRow = {
     student_user_id: string;
     display_name: string;
     parent_email: string | null;
+    auth_method: 'code' | 'email';
+    /** The credential a 'code' student chose; null until they claim. */
+    username: string | null;
+    /** The student's own address on the 'email' path; null on the code path. */
+    student_email: string | null;
+    /** Null while Invited; set the moment the student chooses their password. */
+    claimed_at: string | null;
     archived_at: string | null;
     created_at: string;
     updated_at: string;
@@ -544,6 +559,14 @@ export type Database = {
             };
             unassign_score: {
                 Args: { p_document: string; p_student: string };
+                Returns: undefined;
+            };
+            // Stamps claimed_at on the caller's own roster row — the student is
+            // the only one who can say they finished choosing a password, and
+            // they hold no write policy on managed_students to say it directly.
+            // Takes no arguments: the row is resolved from auth.uid().
+            mark_student_claimed: {
+                Args: Record<string, never>;
                 Returns: undefined;
             };
             document_is_archived: {

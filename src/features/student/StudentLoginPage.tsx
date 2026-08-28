@@ -2,20 +2,24 @@ import { useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
-import { loginWithCode } from '@/features/student/studentApi';
+import { loginStudent } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
-import { fieldClassName, fieldLabelClassName, linkClassName } from '@/ui/classNames';
+import { TextField } from '@/ui/TextField';
+import { linkClassName } from '@/ui/classNames';
 
 /**
- * The student front door: one field, one button, no account to make.
+ * The student front door: the credential they chose, not the card they were given.
  *
- * Public by design — a student arriving here has no session, because this is
- * the page that gets them one. Everything a teacher's sign-in offers (register,
- * forgot password, providers) is absent on purpose: there is no email behind a
- * provisioned student, so every one of those choices would be a dead end for
- * the child holding the card.
+ * Public by design — a student arriving here has no session, because this is the
+ * page that gets them one. One field takes either half of the roster: a username
+ * claimed off a setup code, or the address a teacher invited them at. The page
+ * never asks which they are, because a student does not know the word for it;
+ * loginStudent reads the '@' and routes accordingly.
+ *
+ * Registration is still absent, and always will be: a student account exists
+ * because a teacher provisioned it, so "create one" would lead nowhere.
  */
 export const StudentLoginPage = () => {
     const { session, loading } = useSession();
@@ -27,65 +31,84 @@ export const StudentLoginPage = () => {
     if (userTypeOf(session) === 'student') {
         return <Navigate to="/assignments" replace />;
     }
-    return <CodeEntry />;
+    return <CredentialEntry />;
 };
 
-/** Big, centred, monospaced: a code read off paper, one glyph at a time. */
-const CODE_INPUT_CLASS = fieldClassName('md', 'mt-1.5 text-center font-mono text-xl uppercase tracking-wide');
-
-const CodeEntry = () => {
+const CredentialEntry = () => {
     const navigate = useNavigate();
-    const [code, setCode] = useState('');
+    const [identifier, setIdentifier] = useState('');
+    const [password, setPassword] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const submit = async (e: FormEvent) => {
         e.preventDefault();
-        if (code.trim().length === 0) {
-            setError('Type the code your teacher gave you.');
+        if (identifier.trim().length === 0 || password.length === 0) {
+            setError('Type your username and password.');
             return;
         }
         setError(null);
         setBusy(true);
         try {
-            // Sent exactly as typed. The function normalizes case, dashes and
-            // spaces itself, so trimming or reshaping it here could only ever
-            // turn a code that would have worked into one that does not.
-            await loginWithCode(code);
+            // Sent exactly as typed. The server folds case and space itself, so
+            // reshaping it here could only ever turn a sign-in that would have
+            // worked into one that does not.
+            await loginStudent(identifier, password);
             navigate('/assignments', { replace: true });
         } catch (err) {
             setBusy(false);
-            setError(err instanceof Error ? err.message : 'That code did not work');
+            setError(err instanceof Error ? err.message : 'That did not work');
         }
     };
 
     return (
-        <BrandShell title="Your music" subtitle="Type the code your teacher gave you.">
+        <BrandShell title="Your music" subtitle="Sign in with the username or email you use for Cleffy.">
             <form onSubmit={(e) => void submit(e)}>
-                <label htmlFor="student-code" className={fieldLabelClassName}>
-                    Your code
-                </label>
-                <input
-                    id="student-code"
-                    value={code}
-                    onChange={(e) => setCode(e.target.value)}
+                <TextField
+                    id="student-identifier"
+                    label="Username or email"
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
                     disabled={busy}
                     autoFocus
-                    // The code is not a password and lives on paper, not in a
-                    // keychain: autofill has nothing useful to offer, and a
-                    // suggestion strip over the field only gets in the way.
-                    autoComplete="off"
-                    autoCapitalize="characters"
+                    // Real credentials now, not a code off a card: a password
+                    // manager that offers to fill and remember these is doing a
+                    // student a favour, so nothing here waves it away.
+                    autoComplete="username"
+                    autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
-                    placeholder="ABCD-EFGH-JKLM"
-                    className={CODE_INPUT_CLASS}
+                />
+                <TextField
+                    id="student-password"
+                    label="Password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={busy}
+                    autoComplete="current-password"
+                    spaced
                 />
                 <Button type="submit" disabled={busy} className="mt-4 w-full">
                     {busy ? 'Opening…' : 'Open my music'}
                 </Button>
                 {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}
             </form>
+            <p className="mt-6 text-center text-sm text-stone-600">
+                <Link to="/student/claim" className={linkClassName}>
+                    Have a setup code from your teacher?
+                </Link>
+            </p>
+            <p className="mt-4 text-center text-sm text-stone-600">
+                <Link to="/forgot-password" className={linkClassName}>
+                    Forgot your password?
+                </Link>
+            </p>
+            {/* A username has no inbox behind it, so the reset email above cannot
+                reach that half of the roster — their teacher is the reset. */}
+            <p className="mt-1 text-center text-xs text-stone-500">
+                Sign in with a username? Ask your teacher to reset your access.
+            </p>
             <p className="mt-6 text-center text-sm text-stone-600">
                 <Link to="/login" className={linkClassName}>
                     I am a teacher
