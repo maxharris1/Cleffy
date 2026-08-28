@@ -54,6 +54,18 @@ npm run dev:local        # Vite on :5173
 npm run functions:serve  # edge functions
 ```
 
+`dev:local` pins 5173 with `--strictPort`. Without it vite treats `--port` as a
+preference and slides to 5174 on one `info` line — while `local:status`,
+`.cursor/health-check.sh` and `.claude/launch.json` all keep watching 5173. The
+trap is that 5173 is rarely empty when that happens: `docker compose up` below
+publishes the _previously built_ `dist/` on that port, so what you are watching
+answers, serves the same app, and looks healthy while every edit goes to a server
+nobody is pointed at. Failing to start is the cheaper outcome — if it reports the
+port in use, find what holds it rather than letting the server move.
+
+`.claude/launch.json` runs this one command. It assumes `local:up` has already
+brought the backend up, and it does not start `functions:serve`.
+
 |                          |                                                           |
 | ------------------------ | --------------------------------------------------------- |
 | App                      | http://localhost:5173                                     |
@@ -106,15 +118,16 @@ Test on a real iPad via a tunnel: `npm run dev -- --host` then `ngrok http 5173`
 
 ## Commands
 
-| Command              | What                         |
-| -------------------- | ---------------------------- |
-| `npm run dev`        | Dev server                   |
-| `npm run build`      | Typecheck + production build |
-| `npm run preview`    | Serve the production build   |
-| `npm run test`       | Vitest (unit + integration)  |
-| `npm run lint`       | ESLint with autofix          |
-| `npm run lint:check` | ESLint check only            |
-| `npm run typecheck`  | TypeScript check             |
+| Command              | What                                |
+| -------------------- | ----------------------------------- |
+| `npm run dev`        | Dev server                          |
+| `npm run dev:local`  | Dev server on :5173, all interfaces |
+| `npm run build`      | Typecheck + production build        |
+| `npm run preview`    | Serve the production build          |
+| `npm run test`       | Vitest (unit + integration)         |
+| `npm run lint`       | ESLint with autofix                 |
+| `npm run lint:check` | ESLint check only                   |
+| `npm run typecheck`  | TypeScript check                    |
 
 Database migrations live in `supabase/migrations/` and are applied with the Supabase CLI
 (`npx supabase link --project-ref <ref>` once, then `npx supabase db push`).

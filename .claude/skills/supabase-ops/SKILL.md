@@ -25,6 +25,12 @@ npm run local:status      # health check
 npm run local:down
 ```
 
+`.claude/launch.json` is not a shortcut around this list: it runs `dev:local`
+alone, so the backend must already be up, and edge functions are still served by
+`functions:serve` — which passes `--no-verify-jwt`, unlike the runtime
+`supabase start` boots. `dev:local` pins 5173 with `--strictPort`, so it fails
+loudly rather than sliding to 5174 while the health check still watches 5173.
+
 Ports are a **+100 offset** from Supabase defaults (API 54421, db 54422, studio
 54423, mail 54424) so the stack coexists with the other Supabase projects on a
 dev machine, which all claim the default 5432x block. They are read from
