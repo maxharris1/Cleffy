@@ -5,7 +5,7 @@ import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
 import { ProductShowcase } from '@/features/marketing/ProductShowcase';
 import { isSupabaseConfigured } from '@/lib/supabase';
-import { buttonClassName } from '@/ui/classNames';
+import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 const STEPS = [
     {
@@ -55,7 +55,15 @@ const CloudLanding = () => (
         <div className="mx-auto w-full max-w-6xl px-6 lg:px-10">
             <nav aria-label="Main" className="flex items-center justify-between pt-6">
                 <Wordmark />
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
+                    {/* Students arrive here too, sent by a teacher, and their door
+                        is not the one marked "Log in" — it takes a username, not
+                        an account. Quiet, because most visitors are teachers. */}
+                    <Link to="/student" className={linkClassName}>
+                        Student sign in
+                    </Link>
+                    {/* Ghost against the primary: two bordered buttons side by side
+                        compete, and only one of these is the action we are selling. */}
                     <Link to="/login" className={buttonClassName('ghost', 'sm')}>
                         Log in
                     </Link>

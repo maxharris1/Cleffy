@@ -6,10 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as sessionModule from '@/features/auth/session';
 import { StudentLoginPage } from '@/features/student/StudentLoginPage';
 
-const loginWithCode = vi.fn();
+const loginStudent = vi.fn();
 
 vi.mock('@/features/student/studentApi', () => ({
-    loginWithCode: (...args: unknown[]) => loginWithCode(...args),
+    loginStudent: (...args: unknown[]) => loginStudent(...args),
 }));
 
 // Nobody is signed in on this page by definition — it is the page that gets a
@@ -31,7 +31,7 @@ const renderLogin = () =>
 
 beforeEach(() => {
     vi.clearAllMocks();
-    loginWithCode.mockResolvedValue('Ada Lovelace');
+    loginStudent.mockResolvedValue('Ada Lovelace');
 });
 
 afterEach(() => {
@@ -39,59 +39,66 @@ afterEach(() => {
 });
 
 describe('StudentLoginPage', () => {
-    it('offers one field and one button, and no teacher account controls', () => {
+    it('takes one identifier and a password, and points at the ways in it does not own', () => {
         renderLogin();
-        expect(screen.getByLabelText('Your code')).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Open my music' })).toBeInTheDocument();
+        expect(screen.getByLabelText('Username or email')).toBeInTheDocument();
+        expect(screen.getByLabelText('Password')).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /setup code/ })).toHaveAttribute('href', '/student/claim');
+        expect(screen.getByRole('link', { name: /Forgot your password/ })).toHaveAttribute('href', '/forgot-password');
+        expect(screen.getByRole('link', { name: 'I am a teacher' })).toHaveAttribute('href', '/login');
+        // A student account exists because a teacher made it; there is nothing to register.
         expect(screen.queryByRole('link', { name: /Create one/ })).not.toBeInTheDocument();
-        expect(screen.queryByRole('link', { name: /Forgot password/ })).not.toBeInTheDocument();
     });
 
-    it('sends the code exactly as typed and opens the assignments', async () => {
+    it('sends the identifier exactly as typed and opens the assignments', async () => {
         const user = userEvent.setup();
         renderLogin();
 
-        await user.type(screen.getByLabelText('Your code'), 'abcd-efgh-jklm');
+        await user.type(screen.getByLabelText('Username or email'), '  Ada_Lovelace ');
+        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
-        // Unnormalized on purpose: the function folds case and dashes itself.
-        expect(loginWithCode).toHaveBeenCalledWith('abcd-efgh-jklm');
+        // Unnormalized on purpose: the server folds case and space itself.
+        expect(loginStudent).toHaveBeenCalledWith('  Ada_Lovelace ', 'hunter2hunter2');
         expect(await screen.findByText('your pieces')).toBeInTheDocument();
     });
 
-    it('asks for a code instead of calling the server with nothing', async () => {
+    it('asks for both fields instead of calling the server with nothing', async () => {
         const user = userEvent.setup();
         renderLogin();
 
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
-        // Same words as the page's subtitle, so match the announced error itself.
-        expect(screen.getByRole('status')).toHaveTextContent('Type the code your teacher gave you.');
-        expect(loginWithCode).not.toHaveBeenCalled();
+        expect(screen.getByRole('status')).toHaveTextContent('Type your username and password.');
+        expect(loginStudent).not.toHaveBeenCalled();
     });
 
     it('shows the failure verbatim and stays on the page', async () => {
         const user = userEvent.setup();
-        loginWithCode.mockRejectedValue(new Error('Could not reach Cleffy. Check the internet connection.'));
+        loginStudent.mockRejectedValue(new Error('That username and password did not work'));
         renderLogin();
 
-        await user.type(screen.getByLabelText('Your code'), 'ABCD-EFGH-JKLM');
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
+        await user.type(screen.getByLabelText('Password'), 'wrongpassword');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
-        expect(await screen.findByText('Could not reach Cleffy. Check the internet connection.')).toBeInTheDocument();
+        expect(await screen.findByText('That username and password did not work')).toBeInTheDocument();
         expect(screen.queryByText('your pieces')).not.toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Open my music' })).toBeEnabled();
     });
 
-    it('disables the button while the code is in flight', async () => {
+    it('disables the form while the sign-in is in flight', async () => {
         const user = userEvent.setup();
-        loginWithCode.mockReturnValue(new Promise(() => undefined));
+        loginStudent.mockReturnValue(new Promise(() => undefined));
         renderLogin();
 
-        await user.type(screen.getByLabelText('Your code'), 'ABCD-EFGH-JKLM');
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
+        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Open my music' }));
 
         expect(screen.getByRole('button', { name: 'Opening…' })).toBeDisabled();
-        expect(screen.getByLabelText('Your code')).toBeDisabled();
+        expect(screen.getByLabelText('Username or email')).toBeDisabled();
+        expect(screen.getByLabelText('Password')).toBeDisabled();
     });
 });

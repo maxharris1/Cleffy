@@ -26,6 +26,12 @@ const AccountPage = lazy(() => import('@/features/account/AccountPage').then((m)
 const StudentLoginPage = lazy(() =>
     import('@/features/student/StudentLoginPage').then((m) => ({ default: m.StudentLoginPage })),
 );
+const StudentClaimPage = lazy(() =>
+    import('@/features/student/StudentClaimPage').then((m) => ({ default: m.StudentClaimPage })),
+);
+const StudentWelcomePage = lazy(() =>
+    import('@/features/student/StudentWelcomePage').then((m) => ({ default: m.StudentWelcomePage })),
+);
 const AssignmentsPage = lazy(() =>
     import('@/features/student/AssignmentsPage').then((m) => ({ default: m.AssignmentsPage })),
 );
@@ -60,12 +66,31 @@ export const AppRoutes = () => {
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/update-password" element={<UpdatePasswordPage />} />
-            {/* Public: a student arrives with a login code and no session yet. */}
+            {/* Public: a student arrives with a username or email and no session yet. */}
             <Route
                 path="/student"
                 element={
                     <Suspense fallback={<PageFallback label="Loading sign-in…" />}>
                         <StudentLoginPage />
+                    </Suspense>
+                }
+            />
+            {/* Public: the printed setup code is spent here, before any session exists. */}
+            <Route
+                path="/student/claim"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading setup…" />}>
+                        <StudentClaimPage />
+                    </Suspense>
+                }
+            />
+            {/* Public by necessity: the invite link's session is hydrated out of the
+                URL fragment on this page, so no gate can run ahead of it. */}
+            <Route
+                path="/student/welcome"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading setup…" />}>
+                        <StudentWelcomePage />
                     </Suspense>
                 }
             />

@@ -13,7 +13,7 @@ const listRoster = vi.fn();
 const listAssignmentsForStudents = vi.fn();
 const fetchStudentTimeline = vi.fn();
 const provisionStudent = vi.fn();
-const rotateStudentCode = vi.fn();
+const resetStudentAccess = vi.fn();
 const archiveStudent = vi.fn();
 const restoreStudent = vi.fn();
 const assignScore = vi.fn();
@@ -24,22 +24,28 @@ vi.mock('@/features/roster/rosterService', () => ({
     listAssignmentsForStudents: (...args: unknown[]) => listAssignmentsForStudents(...args),
     fetchStudentTimeline: (...args: unknown[]) => fetchStudentTimeline(...args),
     provisionStudent: (...args: unknown[]) => provisionStudent(...args),
-    rotateStudentCode: (...args: unknown[]) => rotateStudentCode(...args),
+    resetStudentAccess: (...args: unknown[]) => resetStudentAccess(...args),
     archiveStudent: (...args: unknown[]) => archiveStudent(...args),
     restoreStudent: (...args: unknown[]) => restoreStudent(...args),
     assignScore: (...args: unknown[]) => assignScore(...args),
     unassignScore: (...args: unknown[]) => unassignScore(...args),
 }));
 
-const student = (id: string, displayName: string, archivedAt: string | null = null): ManagedStudentRow => ({
+/** A freshly provisioned code student: a card printed, nothing claimed yet. */
+const student = (id: string, displayName: string, overrides: Partial<ManagedStudentRow> = {}): ManagedStudentRow => ({
     id,
     teacher_id: 'teacher-1',
     student_user_id: `${id}-user`,
     display_name: displayName,
     parent_email: null,
-    archived_at: archivedAt,
+    auth_method: 'code',
+    username: null,
+    student_email: null,
+    claimed_at: null,
+    archived_at: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
+    ...overrides,
 });
 
 const rosterAssignment = (documentId: string, documentTitle: string, studentUserId: string): RosterAssignment => ({
@@ -86,6 +92,12 @@ const renderRoster = () =>
         </MemoryRouter>,
     );
 
+/** Opens the only row's action menu and picks the item with this label. */
+const pickRowAction = async (user: ReturnType<typeof userEvent.setup>, label: string) => {
+    await user.click(await screen.findByRole('button', { name: 'Student actions' }));
+    await user.click(screen.getByRole('menuitem', { name: label }));
+};
+
 beforeEach(() => {
     vi.clearAllMocks();
     listRoster.mockResolvedValue([]);
@@ -100,8 +112,8 @@ afterEach(() => {
 describe('RosterPage', () => {
     it('lists the roster with its assignment counts, archived students included', async () => {
         listRoster.mockResolvedValue([
-            student('s1', 'Ada Lovelace'),
-            student('s2', 'Bo Diddley', '2026-08-20T00:00:00Z'),
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+            student('s2', 'Bo Diddley', { archived_at: '2026-08-20T00:00:00Z' }),
         ]);
         listAssignmentsForStudents.mockResolvedValue(
             new Map([['s1-user', [rosterAssignment('doc-1', 'Prelude and Fugue', 's1-user')]]]),
@@ -116,11 +128,11 @@ describe('RosterPage', () => {
         expect(screen.getByText('No scores')).toBeInTheDocument();
     });
 
-    it('provisions a student and shows the code once, on a printable card', async () => {
+    it('provisions a code student and shows the setup code once, on a printable card', async () => {
         const user = userEvent.setup();
         provisionStudent.mockResolvedValue({
             student: { id: 's1', studentUserId: 's1-user', displayName: 'Ada Lovelace' },
-            loginCode: 'ABCD-EFGH-JKLM',
+            loginCode: 'ABCD-EFGH-JKMN',
         });
         renderRoster();
 
@@ -128,10 +140,127 @@ describe('RosterPage', () => {
         await user.type(screen.getByLabelText('Parent email (optional)'), 'parent@example.com');
         await user.click(screen.getByRole('button', { name: 'Add student' }));
 
-        expect(provisionStudent).toHaveBeenCalledWith('Ada Lovelace', 'parent@example.com');
-        const card = await screen.findByRole('dialog', { name: 'Login card' });
-        expect(within(card).getByText('ABCD-EFGH-JKLM')).toBeInTheDocument();
+        expect(provisionStudent).toHaveBeenCalledWith('Ada Lovelace', {
+            parentEmail: 'parent@example.com',
+            method: 'code',
+        });
+        const card = await screen.findByRole('dialog', { name: 'Setup card' });
+        expect(within(card).getByText('ABCD-EFGH-JKMN')).toBeInTheDocument();
         expect(screen.getByLabelText('Student name')).toHaveValue('');
+    });
+
+    it('asks for the student’s own address only once the invite method is chosen', async () => {
+        const user = userEvent.setup();
+        provisionStudent.mockResolvedValue({
+            student: { id: 's1', studentUserId: 's1-user', displayName: 'Ada Lovelace' },
+            invited: true,
+            studentEmail: 'ada@example.com',
+        });
+        renderRoster();
+
+        await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
+        expect(screen.queryByLabelText('Student email')).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('radio', { name: /Email invite/ }));
+        await user.type(screen.getByLabelText('Student email'), 'ada@example.com');
+        await user.click(screen.getByRole('button', { name: 'Add student' }));
+
+        // The parent's address stays independent of the student's own.
+        expect(provisionStudent).toHaveBeenCalledWith('Ada Lovelace', {
+            parentEmail: undefined,
+            method: 'email',
+            studentEmail: 'ada@example.com',
+        });
+        const sent = await screen.findByRole('dialog', { name: 'Invite sent' });
+        expect(within(sent).getByText('ada@example.com')).toBeInTheDocument();
+        expect(within(sent).getByText(/Archive this student and add them again/)).toBeInTheDocument();
+    });
+
+    it('will not send an invite without an address to send it to', async () => {
+        const user = userEvent.setup();
+        renderRoster();
+
+        await user.type(await screen.findByLabelText('Student name'), 'Ada Lovelace');
+        await user.click(screen.getByRole('radio', { name: /Email invite/ }));
+        await user.click(screen.getByRole('button', { name: 'Add student' }));
+
+        expect(screen.getByRole('status')).toHaveTextContent('Enter the student’s email address.');
+        expect(provisionStudent).not.toHaveBeenCalled();
+    });
+
+    it('says who has not set up their account yet, and what everyone else types to sign in', async () => {
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+            student('s2', 'Bo Diddley'),
+            student('s3', 'Clara Schumann', {
+                auth_method: 'email',
+                student_email: 'clara@example.com',
+                claimed_at: '2026-08-03T00:00:00Z',
+            }),
+        ]);
+        renderRoster();
+
+        const claimed = await screen.findByRole('button', { name: /Ada Lovelace/ });
+        expect(claimed).toHaveTextContent('@ada_lovelace');
+        expect(claimed).not.toHaveTextContent('Invited');
+        // Nothing to type yet: the card is out but the code has not been spent.
+        expect(screen.getByRole('button', { name: /Bo Diddley/ })).toHaveTextContent('Invited');
+        expect(screen.getByRole('button', { name: /Clara Schumann/ })).toHaveTextContent('clara@example.com');
+    });
+
+    it('names the reset after what it does to this particular student', async () => {
+        const user = userEvent.setup();
+        listRoster.mockResolvedValue([student('s1', 'Bo Diddley')]);
+        renderRoster();
+
+        await user.click(await screen.findByRole('button', { name: 'Student actions' }));
+        expect(screen.getByRole('menuitem', { name: 'New setup code…' })).toBeInTheDocument();
+        expect(screen.queryByRole('menuitem', { name: 'Reset access…' })).not.toBeInTheDocument();
+    });
+
+    it('resets a claimed code student and prints a card carrying the username they keep', async () => {
+        const user = userEvent.setup();
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+        ]);
+        resetStudentAccess.mockResolvedValue({ loginCode: 'PQRS-TUVW-XYZ2', username: 'ada_lovelace' });
+        renderRoster();
+
+        await pickRowAction(user, 'Reset access…');
+        // The confirmation has to say the password stops working, not just the code.
+        const confirm = await screen.findByRole('dialog', { name: 'Reset this student’s access?' });
+        expect(within(confirm).getByText(/password stops working straight away/)).toBeInTheDocument();
+        await user.click(within(confirm).getByRole('button', { name: 'Reset access' }));
+
+        expect(resetStudentAccess).toHaveBeenCalledWith('s1');
+        const card = await screen.findByRole('dialog', { name: 'Setup card' });
+        expect(within(card).getByText('PQRS-TUVW-XYZ2')).toBeInTheDocument();
+        expect(within(card).getByText('ada_lovelace')).toBeInTheDocument();
+    });
+
+    it('resets an email student by sending another link, and says where it went', async () => {
+        const user = userEvent.setup();
+        listRoster.mockResolvedValue([
+            student('s1', 'Clara Schumann', {
+                auth_method: 'email',
+                student_email: 'clara@example.com',
+                claimed_at: '2026-08-03T00:00:00Z',
+            }),
+        ]);
+        resetStudentAccess.mockResolvedValue({ invited: true, studentEmail: 'clara@example.com' });
+        renderRoster();
+
+        await pickRowAction(user, 'Email a new sign-in link…');
+        await user.click(
+            within(await screen.findByRole('dialog', { name: 'Email a new sign-in link?' })).getByRole('button', {
+                name: 'Send link',
+            }),
+        );
+
+        expect(resetStudentAccess).toHaveBeenCalledWith('s1');
+        const sent = await screen.findByRole('dialog', { name: 'Invite sent' });
+        expect(within(sent).getByText('clara@example.com')).toBeInTheDocument();
+        expect(screen.queryByRole('dialog', { name: 'Setup card' })).not.toBeInTheDocument();
     });
 
     it('offers an upgrade instead of an error when the server refuses the roster', async () => {
