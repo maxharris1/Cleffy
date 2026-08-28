@@ -338,28 +338,22 @@ export const LibraryPage = () => {
     return (
         <FileDropZone disabled={uploading} onFile={(file) => void onUpload(file).catch(() => undefined)}>
             <div>
-                <header>
+                {/*
+                  No upload button in the header: the shell's top bar carries a
+                  persistent one and the shelf ends in an "Add a score" tile. The
+                  local-only path has no other home, so it rides alongside the
+                  subtitle rather than standing alone where the button used to be.
+                */}
+                <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                     <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-800">Library</h1>
-                    <p className="mt-1 text-sm text-stone-500">
-                        Upload, organize, and share the scores you teach from.
-                    </p>
+                    <p className="text-sm text-stone-500">Upload, organize, and share the scores you teach from.</p>
+                    {hasScores ? <LocalOpenControl label="Open locally without uploading" subtle /> : null}
                 </header>
 
                 {hasScores ? (
-                    <>
-                        {/*
-                          No upload button here: the shell's top bar carries a
-                          persistent one, and the shelf ends in an "Add a score"
-                          tile. What stays is the local-only path, which has no
-                          other home.
-                        */}
-                        <div className="mt-5 flex flex-wrap items-center gap-3">
-                            <LocalOpenControl label="Open locally without uploading" subtle />
-                        </div>
-                        {uploading && uploadPct !== null ? (
-                            <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
-                        ) : null}
-                    </>
+                    uploading && uploadPct !== null ? (
+                        <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
+                    ) : null
                 ) : documents !== null ? (
                     <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
                 ) : null}
@@ -387,7 +381,13 @@ export const LibraryPage = () => {
                 {documents === null ? (
                     <LoadingText className="mt-10">Loading scores…</LoadingText>
                 ) : hasScores ? (
-                    <section className="mt-8">
+                    /*
+                      The shell is 1600px wide for the shelf's sake. Rows are not
+                      shelves: stretched that far, a title sits a full screen away
+                      from its own page count and date, so list view keeps a
+                      reading width and only the grid spends the whole container.
+                    */
+                    <section className={`mt-8${view === 'list' ? ' max-w-5xl' : ''}`}>
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <label className="sr-only" htmlFor="library-search">
                                 Search scores
