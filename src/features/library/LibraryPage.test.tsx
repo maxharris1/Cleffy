@@ -71,6 +71,7 @@ const outletContext: LibraryOutletContext = {
     clearUploadError: vi.fn(),
     uploadLimit: null,
     tier: 'free',
+    canManageStudents: true,
     openPricing: vi.fn(),
 };
 
@@ -500,5 +501,28 @@ describe('grid view', () => {
         expect(screen.getAllByRole('button', { name: 'Add tags' })).toHaveLength(2);
         expect(screen.getByText('An Chloe (Mozart, Wolfgang Amadeus)').closest('li')).not.toBeNull();
         expect(screen.queryByText('Add a score')).not.toBeInTheDocument();
+    });
+});
+
+describe('plans without a roster', () => {
+    beforeEach(() => {
+        window.localStorage.setItem('cleffy:library-view', 'list');
+        outletContext.canManageStudents = false;
+    });
+    afterEach(() => {
+        outletContext.canManageStudents = true;
+    });
+
+    it('drops the assign action from the score menu', async () => {
+        const user = userEvent.setup();
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0]!);
+
+        // The rest of the menu is untouched — only the roster action goes.
+        expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
+        expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+        expect(screen.queryByRole('menuitem', { name: 'Assign to student…' })).not.toBeInTheDocument();
     });
 });

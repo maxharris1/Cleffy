@@ -101,6 +101,7 @@ const sessionFor = (displayName?: string) => ({
 });
 
 const outletContext: LibraryOutletContext = {
+    canManageStudents: true,
     userId: 'teacher-1',
     uploadPct: null,
     uploading: false,

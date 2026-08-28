@@ -21,7 +21,8 @@ export const RowMenu = ({
 }: {
     onRename: () => void;
     onShare: () => void;
-    onAssign: () => void;
+    /** Omitted when the plan has no roster — the item disappears with it. */
+    onAssign?: () => void;
     onDelete: () => void;
 }) => {
     const [open, setOpen] = useState(false);
@@ -73,7 +74,7 @@ export const RowMenu = ({
                 >
                     <MenuItem label="Rename" onClick={() => pick(onRename)} />
                     <MenuItem label="Share…" onClick={() => pick(onShare)} />
-                    <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} />
+                    {onAssign ? <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} /> : null}
                     <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
                 </div>
             ) : null}

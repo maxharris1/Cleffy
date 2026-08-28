@@ -38,12 +38,22 @@ export type LibraryOutletContext = {
     /** Set when the server refused for quota reasons rather than a real failure. */
     uploadLimit: LimitReachedError | null;
     tier: EffectiveTier;
+    /**
+     * Whether this plan includes a student roster at all.
+     *
+     * Not a quota — a full roster is still the server's 402 to raise. This is the
+     * capability itself: Personal is a solo plan and a provisioned student has
+     * nobody to teach, so both get `students: 0` from tier_limits() and never see
+     * the roster or the assign action. Read straight off the server's limits so
+     * it cannot drift from the tiers.
+     */
+    canManageStudents: boolean;
     openPricing: () => void;
 };
 
-const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean }[] = [
+const NAV_ITEMS: { to: string; label: string; shortLabel?: string; end: boolean; needsStudents?: boolean }[] = [
     { to: '/library', label: 'Library', end: true },
-    { to: '/students', label: 'Students', end: true },
+    { to: '/students', label: 'Students', end: true, needsStudents: true },
     { to: '/search', label: 'Find on IMSLP', shortLabel: 'IMSLP', end: true },
 ];
 
@@ -85,6 +95,11 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const [pricingOpen, setPricingOpen] = useState(false);
     const { entitlements } = useEntitlements(userId);
     const tier = entitlements?.tier ?? 'free';
+    // Hidden until the plan is known rather than shown and withdrawn: entitlements
+    // come back from the Dexie cache on any repeat visit, so the wait is a frame,
+    // and offering a roster only to retract it is the worse of the two flickers.
+    const canManageStudents = entitlements !== null && entitlements.limits.students !== 0;
+    const navItems = NAV_ITEMS.filter((item) => !item.needsStudents || canManageStudents);
     const navigate = useNavigate();
     const uploading = uploadPct !== null;
 
@@ -185,6 +200,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         clearUploadError: clearErrors,
         uploadLimit,
         tier,
+        canManageStudents,
         openPricing: () => setPricingOpen(true),
     };
 
@@ -209,7 +225,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                         aria-label="Main"
                         className="no-scrollbar order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-1 overflow-x-auto px-4 sm:order-none sm:mx-0 sm:w-auto sm:overflow-x-visible sm:px-0"
                     >
-                        {NAV_ITEMS.map((item) => (
+                        {navItems.map((item) => (
                             <NavLink
                                 key={item.to}
                                 to={item.to}

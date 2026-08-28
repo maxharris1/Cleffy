@@ -59,8 +59,17 @@ const TAG_CHIP_LIMIT = 8;
 const INLINE_TAG_LIMIT = 3;
 
 export const LibraryPage = () => {
-    const { userId, uploading, uploadPct, onUpload, uploadError, uploadLimit, clearUploadError, openPricing } =
-        useOutletContext<LibraryOutletContext>();
+    const {
+        userId,
+        uploading,
+        uploadPct,
+        onUpload,
+        uploadError,
+        uploadLimit,
+        clearUploadError,
+        canManageStudents,
+        openPricing,
+    } = useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
     const [favorites, setFavorites] = useState<Set<string>>(new Set());
     const [tags, setTags] = useState<LibraryTagRow[]>([]);
@@ -513,7 +522,9 @@ export const LibraryPage = () => {
                                                     onToggleFavorite={() => toggleFavorite(doc)}
                                                     onRename={() => setRenameTarget(doc)}
                                                     onShare={() => setShareTarget(doc)}
-                                                    onAssign={() => setAssignTarget(doc)}
+                                                    onAssign={
+                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
+                                                    }
                                                     onDelete={() => setDeleteTarget(doc)}
                                                 />
                                             ))}
@@ -539,7 +550,9 @@ export const LibraryPage = () => {
                                                     }
                                                     onRename={() => setRenameTarget(doc)}
                                                     onShare={() => setShareTarget(doc)}
-                                                    onAssign={() => setAssignTarget(doc)}
+                                                    onAssign={
+                                                        canManageStudents ? () => setAssignTarget(doc) : undefined
+                                                    }
                                                     onDelete={() => setDeleteTarget(doc)}
                                                 />
                                             ))}
@@ -733,7 +746,7 @@ const ScoreRow = ({
     onFilterTag: (tagId: string) => void;
     onRename: () => void;
     onShare: () => void;
-    onAssign: () => void;
+    onAssign?: () => void;
     onDelete: () => void;
 }) => {
     const hasTags = assignedTags.length > 0;

@@ -69,6 +69,7 @@ const outletContext: LibraryOutletContext = {
     clearUploadError: vi.fn(),
     uploadLimit: null,
     tier: 'free',
+    canManageStudents: true,
     openPricing,
 };
 
@@ -149,5 +150,22 @@ describe('RosterPage', () => {
 
         await user.click(screen.getByRole('button', { name: 'See plans' }));
         expect(openPricing).toHaveBeenCalled();
+    });
+
+    it('offers the upgrade instead of the roster when the plan has no students', async () => {
+        // Personal and provisioned students get students: 0 from tier_limits().
+        outletContext.canManageStudents = false;
+        try {
+            renderRoster();
+
+            expect(await screen.findByText('Your plan doesn’t include students')).toBeInTheDocument();
+            // No add form, so nothing can be submitted for the server to refuse.
+            expect(screen.queryByLabelText('Student name')).not.toBeInTheDocument();
+
+            await userEvent.click(screen.getByRole('button', { name: 'See plans' }));
+            expect(openPricing).toHaveBeenCalledOnce();
+        } finally {
+            outletContext.canManageStudents = true;
+        }
     });
 });
