@@ -182,8 +182,27 @@ const characterCount = (value: string): number => [...value].length;
 
 const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).length;
 
-export const isValidStudentPassword = (password: string): boolean =>
-    characterCount(password) >= STUDENT_PASSWORD_MIN && utf8ByteLength(password) <= STUDENT_PASSWORD_MAX_BYTES;
+/**
+ * Which bound a password missed, or null when it clears both.
+ *
+ * Split out of the predicate because the two bounds count different things (see
+ * above) and so cannot share one sentence. A refusal that names the minimum for
+ * a password that was too LONG contradicts the field the student is looking at,
+ * and the claim form is spent once — there is no second attempt to work it out
+ * on. Both callers word their own refusal from this; the bounds themselves stay
+ * in exactly one place.
+ */
+export const studentPasswordProblem = (password: string): 'too_short' | 'too_long' | null => {
+    if (characterCount(password) < STUDENT_PASSWORD_MIN) {
+        return 'too_short';
+    }
+    if (utf8ByteLength(password) > STUDENT_PASSWORD_MAX_BYTES) {
+        return 'too_long';
+    }
+    return null;
+};
+
+export const isValidStudentPassword = (password: string): boolean => studentPasswordProblem(password) === null;
 
 /**
  * The scramble set as an Invited account's auth password: 32 random bytes as

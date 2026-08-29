@@ -23,9 +23,20 @@ vi.mock('@/lib/supabase', () => ({
 }));
 
 // What supabase-js has already hydrated out of the invite link's fragment by the
-// time this page renders — display_name is set by student-provision.
+// time this page renders — display_name is set by student-provision, and so is
+// the app_metadata flag, on the invited auth user before the mail goes out.
 const invitedSession = {
-    user: { id: 'student-1', user_metadata: { display_name: 'Ada Lovelace' } },
+    user: {
+        id: 'student-1',
+        app_metadata: { user_type: 'student' },
+        user_metadata: { display_name: 'Ada Lovelace' },
+    },
+} as unknown as Session;
+
+// Whoever was already signed in on this browser when the link was opened. Not a
+// hypothetical: a dead invite link leaves the stored session exactly as it was.
+const teacherSession = {
+    user: { id: 'teacher-1', app_metadata: {}, user_metadata: { display_name: 'Ms Teacher' } },
 } as unknown as Session;
 
 const renderWelcome = () =>
@@ -68,6 +79,20 @@ describe('StudentWelcomePage', () => {
         ).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Go to sign in' })).toHaveAttribute('href', '/student');
         expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+    });
+
+    it('refuses to set a password on a session the invite link did not create', () => {
+        // The form below writes onto the CURRENT session, so a link that failed
+        // to hydrate must not fall through to whoever this browser already had:
+        // that is the teacher's password being replaced by their pupil.
+        session = teacherSession;
+        renderWelcome();
+
+        expect(
+            screen.getByText('That link has expired or was already used — ask your teacher to send a new one.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+        expect(updatePassword).not.toHaveBeenCalled();
     });
 
     it('greets the student by the name their teacher gave them', () => {

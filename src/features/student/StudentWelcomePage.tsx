@@ -1,7 +1,7 @@
 import { Link, useNavigate } from 'react-router';
 
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
-import { updatePassword, useSession } from '@/features/auth/session';
+import { updatePassword, useSession, userTypeOf } from '@/features/auth/session';
 import { getSupabase } from '@/lib/supabase';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
@@ -27,7 +27,16 @@ export const StudentWelcomePage = () => {
     if (loading) {
         return <BrandLoading />;
     }
-    if (!session) {
+    // Not "is anybody signed in" but "could an invite link have produced this
+    // account". A dead link does not clear the session this browser already
+    // held — auth-js keeps it on purpose, so a spent magic link cannot sign
+    // somebody out — and the form below writes its password onto whatever
+    // session is current. Without this clause a teacher signed in on the family
+    // iPad has their own password silently replaced by the child typing into a
+    // link that never hydrated. app_metadata is admin-set by student-provision
+    // before the invitation goes out, so a genuine invitee always carries the
+    // flag and nobody can forge one.
+    if (!session || userTypeOf(session) !== 'student') {
         return <DeadLink />;
     }
     const meta = session.user.user_metadata as Record<string, unknown> | undefined;
