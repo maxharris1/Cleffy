@@ -341,6 +341,37 @@ describe('RosterPage', () => {
         }
     });
 
+    it('does not caption the Add button "Adding…" while an unrelated action runs', async () => {
+        // `busy` is one flag for every roster action, and it rightly disables this
+        // form — two mutations should not overlap. The caption is the part that
+        // must not be shared: a teacher archiving a student was told the page was
+        // adding one.
+        const user = userEvent.setup();
+        let releaseArchive: () => void = () => {};
+        listRoster.mockResolvedValue([student('s1', 'Ada Lovelace')]);
+        archiveStudent.mockImplementationOnce(
+            () =>
+                new Promise<void>((resolve) => {
+                    releaseArchive = resolve;
+                }),
+        );
+        renderRoster();
+
+        expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+        await pickRowAction(user, 'Archive…');
+        await user.click(screen.getByRole('button', { name: 'Archive' }));
+
+        // The archive is still in flight: the form is disabled, but it is not the
+        // thing that is running.
+        const add = screen.getByRole('button', { name: 'Add student' });
+        expect(add).toBeDisabled();
+        expect(screen.queryByRole('button', { name: 'Adding…' })).not.toBeInTheDocument();
+
+        await act(async () => {
+            releaseArchive();
+        });
+    });
+
     it('offers the upgrade instead of the roster when the plan has no students', async () => {
         // Personal and provisioned students get students: 0 from tier_limits().
         outletContext.canManageStudents = false;

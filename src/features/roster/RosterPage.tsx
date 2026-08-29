@@ -476,6 +476,11 @@ const AddStudentForm = ({
     const [method, setMethod] = useState<'code' | 'email'>('code');
     const [studentEmail, setStudentEmail] = useState('');
     const [error, setError] = useState<string | null>(null);
+    // Separate from `busy`, which is every roster action at once. Disabling this
+    // form while an archive runs is right — two mutations should not overlap —
+    // but captioning the button "Adding…" for one is a plain lie about what the
+    // page is doing. The disable stays shared; only the word is ours.
+    const [submitting, setSubmitting] = useState(false);
 
     const submit = async () => {
         const displayName = name.trim();
@@ -490,6 +495,7 @@ const AddStudentForm = ({
         }
         setError(null);
         const parentEmail = email.trim() || undefined;
+        setSubmitting(true);
         try {
             const opts: ProvisionOptions =
                 method === 'email'
@@ -502,6 +508,8 @@ const AddStudentForm = ({
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not add that student.');
+        } finally {
+            setSubmitting(false);
         }
     };
 
@@ -592,7 +600,7 @@ const AddStudentForm = ({
                     Parent email is for your records and for sending the card home — it is never a sign-in.
                 </p>
                 <Button type="submit" size="sm" disabled={busy}>
-                    {busy ? 'Adding…' : 'Add student'}
+                    {submitting ? 'Adding…' : 'Add student'}
                 </Button>
             </div>
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
