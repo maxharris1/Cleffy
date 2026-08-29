@@ -9,6 +9,9 @@ import { StudentWelcomePage } from '@/features/student/StudentWelcomePage';
 
 const updatePassword = vi.fn();
 const rpc = vi.fn();
+/** The `managed_students` row the page reads back for whoever is signed in. */
+const rosterRow = vi.fn();
+let queriedUserId: string | null = null;
 
 let session: Session | null = null;
 
@@ -19,7 +22,17 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
 }));
 
 vi.mock('@/lib/supabase', () => ({
-    getSupabase: () => ({ rpc: (...args: unknown[]) => rpc(...args) }),
+    getSupabase: () => ({
+        rpc: (...args: unknown[]) => rpc(...args),
+        from: () => ({
+            select: () => ({
+                eq: (_column: string, value: string) => {
+                    queriedUserId = value;
+                    return { is: () => ({ maybeSingle: () => rosterRow() }) };
+                },
+            }),
+        }),
+    }),
 }));
 
 // What supabase-js has already hydrated out of the invite link's fragment by the
@@ -39,6 +52,17 @@ const teacherSession = {
     user: { id: 'teacher-1', app_metadata: {}, user_metadata: { display_name: 'Ms Teacher' } },
 } as unknown as Session;
 
+// The harder half of the same hazard: an elder sibling, taught by the same
+// teacher, signed in on the same iPad. `user_type` cannot tell them apart —
+// only their roster row can.
+const siblingSession = {
+    user: {
+        id: 'student-2',
+        app_metadata: { user_type: 'student' },
+        user_metadata: { display_name: 'Byron Lovelace' },
+    },
+} as unknown as Session;
+
 const renderWelcome = () =>
     render(
         <MemoryRouter initialEntries={['/student/welcome']}>
@@ -56,6 +80,10 @@ beforeEach(() => {
     vi.clearAllMocks();
     order.length = 0;
     session = invitedSession;
+    queriedUserId = null;
+    // Provisioned and invited, no password chosen yet — the one state this page
+    // is for.
+    rosterRow.mockResolvedValue({ data: { claimed_at: null }, error: null });
     updatePassword.mockImplementation(async () => {
         order.push('password');
     });
@@ -95,9 +123,40 @@ describe('StudentWelcomePage', () => {
         expect(updatePassword).not.toHaveBeenCalled();
     });
 
-    it('greets the student by the name their teacher gave them', () => {
+    it('refuses to set a password on a sibling who is already signed in here', async () => {
+        // The teacher case above is the easy half. This one carries user_type
+        // 'student' and would pass any check the flag can make, so what has to
+        // separate them is that Byron already chose a password: his row is
+        // claimed, and this page is only ever for a row that is not.
+        session = siblingSession;
+        rosterRow.mockResolvedValue({ data: { claimed_at: '2026-08-02T00:00:00Z' }, error: null });
         renderWelcome();
-        expect(screen.getByText(/Hi Ada Lovelace/)).toBeInTheDocument();
+
+        expect(
+            await screen.findByText('That link has expired or was already used — ask your teacher to send a new one.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+        expect(updatePassword).not.toHaveBeenCalled();
+        // Read for whoever is actually signed in, never for the invitee the link
+        // named — that identity is the whole thing in question.
+        expect(queriedUserId).toBe('student-2');
+    });
+
+    it('refuses rather than guesses when the roster row cannot be read', async () => {
+        // Failing open here would be the same password overwrite, reached by a
+        // dropped request instead of a stale session. A reload is the cost.
+        rosterRow.mockResolvedValue({ data: null, error: { message: 'network down' } });
+        renderWelcome();
+
+        expect(
+            await screen.findByText('That link has expired or was already used — ask your teacher to send a new one.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+    });
+
+    it('greets the student by the name their teacher gave them', async () => {
+        renderWelcome();
+        expect(await screen.findByText(/Hi Ada Lovelace/)).toBeInTheDocument();
         expect(screen.getByRole('heading', { name: 'Choose your password' })).toBeInTheDocument();
     });
 
@@ -105,7 +164,7 @@ describe('StudentWelcomePage', () => {
         const user = userEvent.setup();
         renderWelcome();
 
-        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.type(await screen.findByLabelText('Password'), 'hunter2hunter2');
         await user.type(screen.getByLabelText('Confirm password'), 'hunter2hunter3');
         await user.click(screen.getByRole('button', { name: 'Save password' }));
 
@@ -117,7 +176,7 @@ describe('StudentWelcomePage', () => {
         const user = userEvent.setup();
         renderWelcome();
 
-        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.type(await screen.findByLabelText('Password'), 'hunter2hunter2');
         await user.type(screen.getByLabelText('Confirm password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Save password' }));
 
@@ -133,7 +192,7 @@ describe('StudentWelcomePage', () => {
         rpc.mockRejectedValue(new Error('network down'));
         renderWelcome();
 
-        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.type(await screen.findByLabelText('Password'), 'hunter2hunter2');
         await user.type(screen.getByLabelText('Confirm password'), 'hunter2hunter2');
         await user.click(screen.getByRole('button', { name: 'Save password' }));
 

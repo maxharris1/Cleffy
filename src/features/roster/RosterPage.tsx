@@ -356,8 +356,16 @@ export const RosterPage = () => {
                 <section className="mt-8">
                     {/* Nothing in the list is taken away with the form: archive and
                         reset ask student-provision for no seat, and restore — which
-                        does — comes back 402 into the notice above. */}
-                    {canManageStudents ? null : (
+                        does — comes back 402 into the notice above.
+
+                        Which is why `limit` stands this one down. METRIC_COPY.students
+                        interpolates neither the limit nor the tier, so the refusal
+                        renders the same sentence this notice already shows: leaving
+                        both up stacks two identical amber boxes, announces two
+                        `status` regions, and makes a refused Restore look like a
+                        button that did nothing. One notice at a time, and the 402
+                        moving it is the evidence the click landed. */}
+                    {canManageStudents || limit ? null : (
                         <LimitReachedNotice limit={noRosterOnThisPlan(tier)} onUpgrade={openPricing} className="mb-6" />
                     )}
                     <p className="text-xs text-stone-600">

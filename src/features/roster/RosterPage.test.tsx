@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -336,6 +336,33 @@ describe('RosterPage', () => {
             await pickRowAction(user, 'Archive…');
             await user.click(screen.getByRole('button', { name: 'Archive' }));
             expect(archiveStudent).toHaveBeenCalledWith('s1');
+        } finally {
+            outletContext.canManageStudents = true;
+        }
+    });
+
+    it('answers a refused Restore with one notice, not a second copy of the one already up', async () => {
+        // METRIC_COPY.students interpolates neither the limit nor the tier, so the
+        // 402 renders the same sentence the standing notice already shows. Two of
+        // them stacks two amber boxes and two `status` regions, and makes the
+        // refusal invisible: the only feedback was on screen before the click.
+        const user = userEvent.setup();
+        outletContext.canManageStudents = false;
+        listRoster.mockResolvedValue([student('s1', 'Ada Lovelace', { archived_at: '2026-08-02T00:00:00Z' })]);
+        restoreStudent.mockRejectedValue(
+            new LimitReachedError({ code: 'limit_reached', metric: 'students', limit: 0, tier: 'free' }),
+        );
+        try {
+            renderRoster();
+
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            expect(screen.getAllByRole('status')).toHaveLength(1);
+
+            await pickRowAction(user, 'Restore');
+            await waitFor(() => expect(restoreStudent).toHaveBeenCalledWith('s1'));
+
+            expect(screen.getAllByRole('status')).toHaveLength(1);
+            expect(screen.getAllByRole('button', { name: 'See plans' })).toHaveLength(1);
         } finally {
             outletContext.canManageStudents = true;
         }
