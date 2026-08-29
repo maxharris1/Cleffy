@@ -25,7 +25,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe Customer portal configuration (live)                            | ⛔ **one dashboard save — §0**                                          |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
-| Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ⛔ **no API mints one — §0**                                            |
+| Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ✅ set 2026-08-28                                                       |
 | Stripe secrets on the `dev` branch project                             | ⛔ **key + webhook secret still needed — §0 step 5**                    |
 | Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                                            |
 | `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                                        |
@@ -34,6 +34,10 @@ the steps that need a human because no API exposes them — each one says why.
 | dev.cleffy.io actually pointed at that backend                         | ✅ by hostname in the bundle — **was production until 2026-08-28 (§5)** |
 | Edge secret `STRIPE_MODES` (both projects)                             | ⛔ **§0 — what refuses a sandbox caller on production**                 |
 | Sandbox webhook endpoint retargeted to the branch                      | ✅ now posts to `qdbnlrgylelelvwbkvnm`                                  |
+| Billing migration `20260828180000` applied to production               | ✅ applied and recorded                                                 |
+| `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
+| Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
+| Migrations `20260827150000` + `20260828120000` on production           | ⛔ **not applied — blocks the dev → main merge (§0)**                   |
 
 ---
 
@@ -86,64 +90,34 @@ The webhook has no Origin to sort by — both accounts POST to one URL per proje
 whichever secret verifies _is_ the account. Mode is a result of authentication
 there, never an input to it.
 
-### What is left, in this order
+### Done — production is on the live account (2026-08-28)
 
-**1. Set the live secret key on production.** No API mints one; copy it from the
-live-mode dashboard → Developers → API keys.
+| Step                                                            | State                                                                  |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY_LIVE` on `jibgwgosihadbjgxdsfe`              | ✅ set; Stripe accepts it and it returns the live catalogue            |
+| `20260828180000_billing_stripe_mode.sql` applied                | ✅ `mode` on both tables, `billing_customers` PK now `(user_id, mode)` |
+| `entitling_billing_modes()` narrowed on production              | ✅ returns `{live}`                                                    |
+| `stripe-checkout` / `stripe-portal` / `stripe-webhook` deployed | ✅ ACTIVE at v7, `verify_jwt` preserved (webhook `false`)              |
 
-```bash
-npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe \
-  STRIPE_SECRET_KEY_LIVE='sk_live_…'
-```
+Verified after deploying: the deployed bundles carry `modeForRequest`,
+`servedModes`, `resolvePrice`, both price catalogues and the dual webhook
+secrets; `stripe-checkout` answers `401` without a JWT; the webhook answers
+`400 {"code":"missing_header"}` to an unsigned POST, which is the signal that it
+booted and read a secret.
 
-This is the only secret still missing. `STRIPE_MODES=live` and
-`STRIPE_WEBHOOK_SECRET_LIVE` are already set — the first is what makes "only
-cleffy.io writes to production" true on the server rather than only in the
-bundle, so production's billing functions refuse a sandbox caller outright (dev,
-a preview, a laptop) instead of writing a test-mode row into the production
-database.
+**Not exercised: a signed-in checkout against the live account.** That needs a
+real user, and creating one on production was out of scope for the flip. Do it
+once from cleffy.io after §0's remaining work — buy Personal, confirm the
+Checkout page carries no test-mode banner, and confirm the webhook writes a
+`subscriptions` row with `mode = 'live'`.
 
-`STRIPE_WEBHOOK_SECRET_LIVE` is already set from the live endpoint's own signing
-secret. Production's existing `STRIPE_SECRET_KEY` keeps its sandbox value and
-from now on serves only localhost — leave it as it is. A key whose own mode infix
-contradicts the variable holding it is refused rather than used.
+### What is left
 
-**2. Apply `supabase/migrations/20260828180000_billing_stripe_mode.sql`** through
-the SQL editor or the Management API — _not_ `db push`, for the reason in "Known
-divergence" at the foot of this file.
+**1. Merge `dev` → `main`** for the frontend — but see the blocker below first.
+Until it merges, cleffy.io still ships the old bundle naming sandbox price ids;
+checkout re-prices those into live mode, so it sells correctly either way.
 
-It tags `billing_customers` and `subscriptions` with the account that created
-them. A Stripe customer id belongs to exactly one account, so without the split a
-sandbox `cus_…` picked up locally would make that user's live checkout fail with
-"No such customer".
-
-**3. Narrow entitlements on production only.**
-
-```sql
-create or replace function public.entitling_billing_modes () returns text[]
-language sql immutable set search_path = public as $$
-select array['live']::text[] $$;
-```
-
-The migration ships `array['live', 'test']`, which is correct for the `dev`
-branch project — it only ever sees sandbox subscriptions, and narrowing it there
-would drop every dev tester to the free tier. Production is the exception: after
-this, a sandbox checkout made against production's backend from localhost still
-records its subscription but grants nothing.
-
-**4. Deploy the functions.**
-
-```bash
-npx supabase functions deploy stripe-checkout stripe-portal stripe-webhook \
-  --project-ref jibgwgosihadbjgxdsfe
-```
-
-Then merge `dev` → `main` for the frontend. The frontend can follow at its own
-pace: the server re-prices whatever the client names into its own mode, so a
-bundle cached from before the flip still buys the right plan on the right
-account.
-
-**5. Give the `dev` branch project its sandbox secrets.** It has only
+**2. Give the `dev` branch project its sandbox secrets.** It has only
 `STRIPE_MODES` so far, so billing on dev.cleffy.io fails until the key and the
 webhook secret land (§5).
 
@@ -156,14 +130,30 @@ npx supabase secrets set --project-ref qdbnlrgylelelvwbkvnm \
 
 `STRIPE_WEBHOOK_SECRET` here is the **sandbox** endpoint's signing secret
 (`we_1U8njJ9EqxUjgZtnfBK3y0XH`), which now posts to this project. `STRIPE_MODES`
-is already set to `test`, the mirror of production's: the branch refuses a
-cleffy.io caller, so the two backends cannot serve each other's storefront even
-if a build or a DNS entry is wrong.
+is already `test`, the mirror of production's: the branch refuses a cleffy.io
+caller, so the two backends cannot serve each other's storefront even if a build
+or a DNS entry is wrong.
 
-**6. Create the live Customer portal configuration.** Live dashboard → Settings →
+**3. Create the live Customer portal configuration.** Live dashboard → Settings →
 Billing → **Customer portal** → Save. `stripe-portal` 500s for every live caller
 until a default configuration exists, exactly as it did in the sandbox (§1).
 There is still no API for it.
+
+**4. Rotate `sk_live_…`** if it has been pasted anywhere it should not persist.
+
+### ⛔ Blocker for merging `dev` → `main`
+
+Two migrations `dev` carries have **not** been applied to production, and both
+back features in that merge:
+
+| Migration                                  | What breaks without it                                                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `20260827150000_student_credentials.sql`   | Student sign-in. `mark_student_claimed()` and the `managed_students` credential columns do not exist on production — verified, not assumed. |
+| `20260828120000_free_tier_no_students.sql` | Free-tier roster gating. Production's `tier_limits('free')` still reports `students: 3` while the merged client hides the roster.           |
+
+Apply both before merging, the same way §0 step 2 was applied — SQL editor or
+the Management API, not `db push`. The Stripe flip above does not depend on
+either; they are the rest of the release.
 
 ### Webhook endpoints — already retargeted
 
