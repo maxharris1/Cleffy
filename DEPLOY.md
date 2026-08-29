@@ -1,8 +1,9 @@
 # Deploying Cleffy — cleffy.io (main) and dev.cleffy.io (dev)
 
-Target end state: `main` builds to **cleffy.io**, `dev` builds to
-**dev.cleffy.io**, both served by one Vercel project, with Stripe running in
-sandbox (test) mode until the live flip.
+`main` builds to **cleffy.io**, `dev` builds to **dev.cleffy.io**, both served by
+one Vercel project over two Supabase projects. **The live flip is done:**
+cleffy.io sells from the real Stripe account and dev.cleffy.io from the sandbox,
+each against its own database.
 
 Everything in this file that could be automated **has been**. What remains are
 the steps that need a human because no API exposes them — each one says why.
@@ -32,12 +33,12 @@ the steps that need a human because no API exposes them — each one says why.
 | cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                                 |
 | Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5)                 |
 | dev.cleffy.io actually pointed at that backend                         | ✅ by hostname in the bundle — **was production until 2026-08-28 (§5)** |
-| Edge secret `STRIPE_MODES` (both projects)                             | ⛔ **§0 — what refuses a sandbox caller on production**                 |
-| Sandbox webhook endpoint retargeted to the branch                      | ✅ now posts to `qdbnlrgylelelvwbkvnm`                                  |
+| Edge secret `STRIPE_MODES` (both projects)                             | ✅ `live` on production, `test` on the branch                           |
+| Sandbox webhook endpoint retargeted to the branch                      | ✅ `we_1U9fnx9EqxUjgZtnXnAvtJH3`; the superseded one is disabled        |
 | Billing migration `20260828180000` applied to production               | ✅ applied and recorded                                                 |
 | `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
 | Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
-| Migrations `20260827150000` + `20260828120000` on production           | ⛔ **not applied — blocks the dev → main merge (§0)**                   |
+| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29; repo and production now have zero drift          |
 
 ---
 
@@ -144,30 +145,47 @@ There is still no API for it.
 
 **4. Rotate `sk_live_…`** if it has been pasted anywhere it should not persist.
 
-### ⛔ Blocker for merging `dev` → `main`
+### ~~Blocker for merging `dev` → `main`~~ — cleared 2026-08-29
 
-Two migrations `dev` carries have **not** been applied to production, and both
-back features in that merge:
+Two migrations `dev` carried were missing from production. Both are now applied,
+and `supabase/migrations/` and production's history match exactly — no version in
+the repo is missing from `schema_migrations`.
+
+**A trap worth knowing.** These went in through the Supabase MCP's
+`apply_migration`, which records the migration under a **fresh timestamp of its
+own** rather than the repo filename's version. Left alone that reads as two
+unapplied migrations, and the next `db push` would try to re-run them and fail on
+a duplicate column. The history rows were renamed to `20260827150000` and
+`20260828120000` afterwards to match the repo. Check `schema_migrations` after
+any `apply_migration`, not just that the DDL succeeded.
+
+What each one did:
 
 | Migration                                  | What breaks without it                                                                                                                      |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `20260827150000_student_credentials.sql`   | Student sign-in. `mark_student_claimed()` and the `managed_students` credential columns do not exist on production — verified, not assumed. |
 | `20260828120000_free_tier_no_students.sql` | Free-tier roster gating. Production's `tier_limits('free')` still reports `students: 3` while the merged client hides the roster.           |
 
-Apply both before merging, the same way §0 step 2 was applied — SQL editor or
-the Management API, not `db push`. The Stripe flip above does not depend on
-either; they are the rest of the release.
+Neither touched the Stripe flip; they were the rest of the release.
 
 ### Webhook endpoints — already retargeted
 
 | Endpoint                      | Account | Posts to                            |
 | ----------------------------- | ------- | ----------------------------------- |
 | `we_1U9V8T4eZ6RX0W0glk3BZIOi` | live    | `jibgwgosihadbjgxdsfe` (production) |
-| `we_1U8njJ9EqxUjgZtnfBK3y0XH` | sandbox | `qdbnlrgylelelvwbkvnm` (dev branch) |
+| `we_1U9fnx9EqxUjgZtnXnAvtJH3` | sandbox | `qdbnlrgylelelvwbkvnm` (dev branch) |
 
 The sandbox endpoint posted to production until 2026-08-28, from when dev shared
 that backend — so a purchase on dev.cleffy.io wrote its subscription row into
 production. It now posts to the branch.
+
+The sandbox row is a **replacement**. Stripe reveals a signing secret only at
+creation and the original (`we_1U8njJ9EqxUjgZtnfBK3y0XH`) predated this work, so
+a new endpoint was created to obtain one. The original is now **disabled** and
+labelled `SUPERSEDED` — disabled rather than deleted because no DELETE is exposed
+through the connector; remove it from the sandbox dashboard whenever convenient.
+While it was enabled nothing was double-processed: both deliveries carried the
+same event id and `stripe_events` dropped the replay.
 
 One consequence to expect: the branch is paused most of the time and Stripe gives
 up after retrying a dead endpoint, so sandbox events raised while it is paused
