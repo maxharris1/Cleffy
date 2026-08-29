@@ -1,4 +1,5 @@
 import { getDb } from '@/sync/db';
+import { cachedPdfSize } from '@/sync/pdfCache';
 
 export interface OfflineStorageUsage {
     /** Scores whose PDF bytes are held on this device. */
@@ -12,8 +13,8 @@ export interface OfflineStorageUsage {
  *
  * Read with Dexie's cursor walk rather than `toArray()`: a teacher with fifty
  * cached scores would otherwise hold every PDF in memory at once just to add up
- * their sizes. `each` hands back one row at a time and lets the previous one go.
- * Blob.size is a property of the handle, so no bytes are actually read.
+ * their sizes. `each` hands back one row at a time and lets the previous one go,
+ * so peak memory is one score rather than the whole library.
  */
 export const readOfflineStorage = async (): Promise<OfflineStorageUsage> => {
     const db = getDb();
@@ -21,7 +22,7 @@ export const readOfflineStorage = async (): Promise<OfflineStorageUsage> => {
     let bytes = 0;
     await db.pdfCache.each((row) => {
         scoreCount += 1;
-        bytes += row.bytes?.size ?? 0;
+        bytes += cachedPdfSize(row.bytes);
     });
     await db.thumbnails.each((row) => {
         bytes += row.blob?.size ?? 0;
