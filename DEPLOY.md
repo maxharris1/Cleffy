@@ -23,7 +23,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                    |
 | Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                    |
 | Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`                                          |
-| Stripe Customer portal configuration (live)                            | ⛔ **one dashboard save — §0**                                          |
+| Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on  |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
 | Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ✅ set 2026-08-28                                                       |
@@ -216,27 +216,49 @@ it does not keep renewing in test mode.
 
 ---
 
-## 1. Stripe Customer portal (one click, once)
+## 1. Stripe Customer portal — configured in both modes
 
 `stripe-portal` returns 500 for every caller until a **default portal
-configuration** exists. There is no API for creating one — the Stripe connector
-exposes only `GET /v1/billing_portal/configurations`, and that list is currently
-empty.
+configuration** exists for that mode. Both modes now have one; live is
+`bpc_1U9juu4eZ6RX0W0gPrUkrH6S` (default, active), verified by creating a real
+live portal session against a throwaway customer and then deleting it.
 
-1. Open the **test-mode** dashboard → Settings → Billing → **Customer portal**.
-2. Leave the defaults as they are; press **Save**.
+Intended shape, live and sandbox alike:
 
-Done for the sandbox; the **live** dashboard needs the same single save (§0).
+| Feature                              | Setting                                                              |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| Cancel subscription                  | on                                                                   |
+| Update payment method                | on                                                                   |
+| Invoice history                      | on                                                                   |
+| Switch plans (`subscription_update`) | on, `default_allowed_updates: ['price']`                             |
+| Proration                            | `always_invoice` — charge the difference at the moment of the switch |
+| Switchable products                  | Personal, Teacher, Academy — monthly and annual each                 |
+| **Excluded**                         | **the $99 Founding Teacher annual price**                            |
 
-That single save creates the default configuration. Verify with:
+`always_invoice` is what makes an upgrade bill correctly mid-cycle: Stripe
+credits the unused remainder of the old plan and charges the new one only from
+the switch forward, then invoices the net difference immediately. Nobody pays the
+upgraded rate for days already elapsed. Its cost is that a failing card surfaces
+as a failed invoice during the upgrade rather than quietly on the next cycle.
 
-```
-GET /v1/billing_portal/configurations   # should return exactly one object
-```
+Two things the UI does not warn about:
 
-Until then `stripe-portal` reaches Stripe and Stripe refuses — the function
-itself is healthy, which you can confirm with an `OPTIONS` preflight returning
-`200 ok`.
+- **Founding Teacher is a second annual price on the Teacher product**, so it sits
+  next to the $190 one in the product picker. Listing it would let anyone switch
+  _into_ a grandfathered launch price and keep it indefinitely.
+- **The portal has no direction control.** Listing the products enables downgrades
+  as well as upgrades; under `always_invoice` a downgrade yields a credit balance
+  against future invoices, not a refund.
+
+### This is dashboard-only — the API cannot do it
+
+There is no create endpoint exposed here, and **`features[subscription_update][products]`
+is silently ignored on write and absent on read**, at every API version this
+account accepts (2020-08-27 through 2025-03-31.basil were all tried). A write can
+therefore turn `subscription_update` _on_ while leaving the product list null —
+switching enabled with an unverifiable scope, which is worse than off. Do it in
+**Settings → Billing → Customer portal**, in each mode, and treat the dashboard as
+the only source of truth for which prices are switchable.
 
 ## 2. Edge Function secrets
 
