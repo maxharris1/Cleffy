@@ -21,8 +21,28 @@ const failed = new Set<string>();
  * WebKit private browsing cannot back an IndexedDB Blob with a file, and a
  * denied quota fails the same way — would otherwise re-run pdf.js every time
  * a row scrolls back into view, since nothing was ever persisted to find.
+ *
+ * Capped, and evicted oldest-first: this stands in for a store that refused
+ * us, so it must not become the unbounded one. A teacher scrolling a library
+ * of fifty scores would otherwise pin every cover in memory for the life of
+ * the tab — on iOS, the same budget the render queue below exists to protect.
  */
 const unstored = new Map<string, Blob>();
+
+/** Roughly two screens of covers — enough that scrolling back is free. */
+const UNSTORED_LIMIT = 24;
+
+const rememberUnstored = (key: string, blob: Blob): void => {
+    unstored.set(key, blob);
+    while (unstored.size > UNSTORED_LIMIT) {
+        // Map iterates in insertion order, so the first key is the oldest.
+        const oldest = unstored.keys().next();
+        if (oldest.done) {
+            return;
+        }
+        unstored.delete(oldest.value);
+    }
+};
 
 /**
  * Renders run one at a time. Each render spins up its own pdf.js worker and
@@ -125,7 +145,7 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
             // decoration — show it. Discarding it here left private browsing
             // with a library of blank covers.
             console.warn('Could not cache the thumbnail', err);
-            unstored.set(`${docId}:${bytesRev}:${THUMB_MAX_SIDE}`, png.blob);
+            rememberUnstored(`${docId}:${bytesRev}:${THUMB_MAX_SIDE}`, png.blob);
         }
         return png.blob;
     });

@@ -126,6 +126,28 @@ describe('getThumbnail', () => {
         expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
     });
 
+    // The memo stands in for a store that refused us, so it must not become the
+    // unbounded one: a long library scroll would otherwise pin every cover in
+    // memory for the life of the tab.
+    it('caps the renders it holds for a browser that cannot store them', async () => {
+        storeFailure.put = new Error('Error preparing Blob/File data to be stored in object store');
+        const { getThumbnail } = await loadService();
+        // 25 distinct scores against a limit of 24 — the first is evicted.
+        for (let i = 0; i < 25; i += 1) {
+            cachePdf(`d${i}`, 1);
+            await getThumbnail(`d${i}`, 1);
+        }
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(25);
+
+        // Still held: asking again is free.
+        await getThumbnail('d24', 1);
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(25);
+
+        // Evicted: asking again pays for another render rather than growing.
+        await getThumbnail('d0', 1);
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(26);
+    });
+
     it('never fetches: no cached bytes means no thumbnail and no render', async () => {
         const { getThumbnail } = await loadService();
 
