@@ -26,7 +26,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
 | Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ✅ set 2026-08-28                                                       |
-| Stripe secrets on the `dev` branch project                             | ⛔ **key + webhook secret still needed — §0 step 5**                    |
+| Stripe secrets on the `dev` branch project                             | ✅ key, webhook secret and `APP_URL` set 2026-08-29                     |
 | Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                                            |
 | `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                                        |
 | cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                                 |
@@ -117,22 +117,25 @@ Checkout page carries no test-mode banner, and confirm the webhook writes a
 Until it merges, cleffy.io still ships the old bundle naming sandbox price ids;
 checkout re-prices those into live mode, so it sells correctly either way.
 
-**2. Give the `dev` branch project its sandbox secrets.** It has only
-`STRIPE_MODES` so far, so billing on dev.cleffy.io fails until the key and the
-webhook secret land (§5).
+**2. ~~Give the `dev` branch project its sandbox secrets.~~ Done 2026-08-29.**
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and `APP_URL=https://dev.cleffy.io`
+are set on `qdbnlrgylelelvwbkvnm`, alongside the `STRIPE_MODES=test` that was
+already there. Verified: the branch webhook answers `400 missing_header` to an
+unsigned POST rather than `500 Server misconfigured`, and `stripe-checkout`
+answers `401` without a JWT.
 
-```bash
-supabase branches unpause dev --project-ref jibgwgosihadbjgxdsfe
-npx supabase secrets set --project-ref qdbnlrgylelelvwbkvnm \
-  STRIPE_SECRET_KEY='sk_test_…' STRIPE_WEBHOOK_SECRET='whsec_…' \
-  APP_URL='https://dev.cleffy.io'
-```
+`STRIPE_MODES=test` is the mirror of production's: the branch refuses a
+cleffy.io caller, so the two backends cannot serve each other's storefront even
+if a build or a DNS entry is wrong.
 
-`STRIPE_WEBHOOK_SECRET` here is the **sandbox** endpoint's signing secret
-(`we_1U8njJ9EqxUjgZtnfBK3y0XH`), which now posts to this project. `STRIPE_MODES`
-is already `test`, the mirror of production's: the branch refuses a cleffy.io
-caller, so the two backends cannot serve each other's storefront even if a build
-or a DNS entry is wrong.
+**Loose end — two sandbox webhook endpoints now point at the branch.** The
+original (`we_1U8njJ9EqxUjgZtnfBK3y0XH`) only reveals its signing secret at
+creation, so a replacement (`we_1U9fnx9EqxUjgZtnXnAvtJH3`) was created to obtain
+one. Only the replacement's secret is configured, so the original's deliveries
+fail signature verification and Stripe will eventually disable it and email about
+it. **Delete `we_1U8njJ9EqxUjgZtnfBK3y0XH`** in the sandbox dashboard. Nothing is
+double-processed meanwhile: both deliveries carry the same event id and
+`stripe_events` drops the replay.
 
 **3. Create the live Customer portal configuration.** Live dashboard → Settings →
 Billing → **Customer portal** → Save. `stripe-portal` 500s for every live caller
@@ -328,6 +331,13 @@ In **Project cleffy → Settings → Domains**, add:
 | `cleffy.io`     | production (`main`)                                      |
 | `www.cleffy.io` | redirect to `cleffy.io` (Vercel offers this when adding) |
 | `dev.cleffy.io` | git branch **`dev`**                                     |
+
+**The redirect runs the other way in practice.** `https://cleffy.io/` answers
+`308` to `https://www.cleffy.io/`, so **www is the canonical production origin**,
+not the apex. Both are in the live-origin list in
+`supabase/functions/_shared/stripeMode.ts` and in `PRODUCTION_HOSTS` in
+`src/lib/supabase.ts`, so billing and the backend choice are correct either way —
+but anything that assumes the apex is what a buyer's browser sends is wrong.
 
 Because the nameservers are already Vercel's, the records are created
 automatically and certificates issue within a minute or two.
