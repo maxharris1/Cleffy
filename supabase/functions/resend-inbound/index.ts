@@ -1,5 +1,6 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
+import { isOwnForward } from '../_shared/supportMail.ts';
 import { type SvixFailure, verifySvixSignature } from '../_shared/svixSignature.ts';
 
 /**
@@ -151,16 +152,22 @@ Deno.serve(async (req) => {
 
     // The body lives behind a second call; the webhook carries metadata only.
     let email: FetchedEmail = {};
+    let bodyError: string | null = null;
     try {
-        const res = await fetch(`${RESEND_API}/emails/received/${emailId}`, {
+        const res = await fetch(`${RESEND_API}/emails/receiving/${emailId}`, {
             headers: { Authorization: `Bearer ${apiKey}` },
         });
         if (res.ok) {
             email = (await res.json()) as FetchedEmail;
         } else {
+            // Recorded, not just logged: an unfetchable body is why a forward
+            // fails with "Missing `html` or `text` field", and the reason should
+            // be on the row rather than only in a log nobody is tailing.
+            bodyError = `fetch ${res.status}`;
             console.error(`fetching inbound email ${emailId} returned ${res.status}`);
         }
     } catch (err) {
+        bodyError = String(err).slice(0, 200);
         console.error(`fetching inbound email ${emailId} failed: ${String(err)}`);
     }
 
@@ -168,6 +175,13 @@ Deno.serve(async (req) => {
     const html = truncate(email.html);
     if (text || html) {
         await admin.from('support_messages').update({ text_body: text, html_body: html }).eq('id', rowId);
+    }
+
+    if (!text && !html) {
+        const detail = `no body to forward${bodyError ? ` (${bodyError})` : ''}`;
+        await admin.from('support_messages').update({ forward_error: detail }).eq('id', rowId);
+        console.error(`${emailId}: ${detail}`);
+        return jsonResponse({ stored: rowId, forwarded: false, reason: 'no_body' }, 200);
     }
 
     const to = forwardTo();
@@ -178,6 +192,17 @@ Deno.serve(async (req) => {
 
     const from = event.data?.from ?? 'unknown sender';
     const subject = event.data?.subject ?? '(no subject)';
+
+    if (isOwnForward(from, forwardFrom())) {
+        // Stored, so the loop is still visible in the table, but not re-sent.
+        await admin
+            .from('support_messages')
+            .update({ forward_error: 'not forwarded: message is from our own forwarding address (loop guard)' })
+            .eq('id', rowId);
+        console.log(`loop guard: not forwarding ${emailId}, from is our own forward address`);
+        return jsonResponse({ stored: rowId, forwarded: false, reason: 'loop_guard' }, 200);
+    }
+
     try {
         const res = await fetch(`${RESEND_API}/emails`, {
             method: 'POST',
