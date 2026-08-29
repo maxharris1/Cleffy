@@ -370,6 +370,15 @@ const AccountMenu = ({
     const { pathname } = useLocation();
     const open = openedAt === pathname;
     const close = () => setOpenedAt(null);
+    // Forget the route the moment it stops being the one we are on. The listeners
+    // below see pointerdown and Escape only, so a link taken from the keyboard —
+    // or Back, or a navigate() — leaves the old pathname sitting there, and
+    // returning to that page would re-derive `open` and put the menu up again with
+    // nobody having touched it. During render, so still no effect resetting state
+    // after paint.
+    if (openedAt !== null && !open) {
+        setOpenedAt(null);
+    }
 
     useEffect(() => {
         if (!open) {

@@ -11,5 +11,22 @@ export const createPdfWorker = (): PDFWorker => {
     const port = new Worker(new URL('./pdfWorkerEntry.ts', import.meta.url), { type: 'module' });
     // PDFWorker.create, not `new PDFWorker(...)`: the constructor's generated
     // .d.ts mistypes `port` as `null`, while the factory takes PDFWorkerParameters.
-    return PDFWorker.create({ port });
+    const worker = PDFWorker.create({ port });
+
+    // pdf.js only terminates threads it spawned itself. Handed a `port` it takes
+    // the #initializeFromPort branch, which leaves its internal #webWorker null,
+    // so destroy() — `this.#webWorker?.terminate()` — terminates nothing. Its
+    // "Terminate" message tears down the worker's pdfManager but never calls
+    // self.close(), and getDocument only adopts a worker it created itself
+    // (`if (!worker) { ... task._worker = worker }`), so loadingTask.destroy()
+    // is no help either. We are the only holder of the handle, and a thread left
+    // running keeps its isolate, the pdf.js module graph and the loaded wasm
+    // decoders resident for the life of the tab — the library shelf now opens
+    // one document per score, so that is a leak per row, not per user action.
+    const destroyPdfWorker = worker.destroy.bind(worker);
+    worker.destroy = () => {
+        destroyPdfWorker();
+        port.terminate();
+    };
+    return worker;
 };

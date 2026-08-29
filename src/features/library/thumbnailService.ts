@@ -65,6 +65,19 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
         return thumb?.blob ?? null;
     }
 
+    // The bytes on this device can lag the revision the row asks for: a replace
+    // (smart-import cleanup) on another device bumps content_rev long before
+    // those bytes are ever downloaded here, and rows seeded by uploadDocument
+    // carry no contentRev at all. Rendering them again would reproduce, byte for
+    // byte, the PNG already stored — and because the write below stamps the
+    // BYTES' revision, the check above could never be satisfied, so every single
+    // library visit paid another pdf.js document open. Serve what we have; the
+    // check above takes over as soon as ensureLocalPdf caches the newer bytes.
+    const bytesRev = cached.contentRev ?? 0;
+    if (thumb && thumb.contentRev >= bytesRev && !tooSmall) {
+        return thumb.blob;
+    }
+
     const render = queue.then(async (): Promise<Blob | null> => {
         try {
             // Dynamic: this is the boundary that keeps pdf.js out of the shell.

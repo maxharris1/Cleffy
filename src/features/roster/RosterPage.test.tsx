@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -238,6 +238,38 @@ describe('RosterPage', () => {
         expect(within(card).getByText('ada_lovelace')).toBeInTheDocument();
     });
 
+    it('takes the confirmation down before the code goes up, however slow the reload is', async () => {
+        // The code is shown once and stored as a hash, so the window between
+        // issuing it and the roster coming back must not leave a second dialog
+        // over it — Escape there would land on the card and destroy the code.
+        const user = userEvent.setup();
+        let releaseReload: (rows: ManagedStudentRow[]) => void = () => {};
+        listRoster.mockResolvedValueOnce([student('s1', 'Bo Diddley')]).mockImplementationOnce(
+            () =>
+                new Promise<ManagedStudentRow[]>((resolve) => {
+                    releaseReload = resolve;
+                }),
+        );
+        resetStudentAccess.mockResolvedValue({ loginCode: 'PQRS-TUVW-XYZ2', username: null });
+        renderRoster();
+
+        await pickRowAction(user, 'New setup code…');
+        await user.click(
+            within(await screen.findByRole('dialog', { name: 'Issue a new setup code?' })).getByRole('button', {
+                name: 'New code',
+            }),
+        );
+
+        const card = await screen.findByRole('dialog', { name: 'Setup card' });
+        expect(within(card).getByText('PQRS-TUVW-XYZ2')).toBeInTheDocument();
+        expect(screen.queryByRole('dialog', { name: 'Issue a new setup code?' })).not.toBeInTheDocument();
+
+        // Let the held reload land rather than ending the test mid-update.
+        await act(async () => {
+            releaseReload([student('s1', 'Bo Diddley')]);
+        });
+    });
+
     it('resets an email student by sending another link, and says where it went', async () => {
         const user = userEvent.setup();
         listRoster.mockResolvedValue([
@@ -281,6 +313,90 @@ describe('RosterPage', () => {
 
         await user.click(screen.getByRole('button', { name: 'See plans' }));
         expect(openPricing).toHaveBeenCalled();
+    });
+
+    it('keeps the roster and its archive action on a plan that no longer includes students', async () => {
+        // Downgrading bans nobody: the students already provisioned keep signing
+        // in, and archiving is the only thing that stops one — so the rows have
+        // to outlive the plan that paid for them.
+        const user = userEvent.setup();
+        outletContext.canManageStudents = false;
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+        ]);
+        archiveStudent.mockResolvedValue(undefined);
+        try {
+            renderRoster();
+
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            // The add form still goes: the server refuses every submission.
+            expect(screen.queryByLabelText('Student name')).not.toBeInTheDocument();
+            expect(screen.getByRole('status')).toHaveTextContent('Your plan doesn’t include a student roster');
+
+            await pickRowAction(user, 'Archive…');
+            await user.click(screen.getByRole('button', { name: 'Archive' }));
+            expect(archiveStudent).toHaveBeenCalledWith('s1');
+        } finally {
+            outletContext.canManageStudents = true;
+        }
+    });
+
+    it('answers a refused Restore with one notice, not a second copy of the one already up', async () => {
+        // METRIC_COPY.students interpolates neither the limit nor the tier, so the
+        // 402 renders the same sentence the standing notice already shows. Two of
+        // them stacks two amber boxes and two `status` regions, and makes the
+        // refusal invisible: the only feedback was on screen before the click.
+        const user = userEvent.setup();
+        outletContext.canManageStudents = false;
+        listRoster.mockResolvedValue([student('s1', 'Ada Lovelace', { archived_at: '2026-08-02T00:00:00Z' })]);
+        restoreStudent.mockRejectedValue(
+            new LimitReachedError({ code: 'limit_reached', metric: 'students', limit: 0, tier: 'free' }),
+        );
+        try {
+            renderRoster();
+
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            expect(screen.getAllByRole('status')).toHaveLength(1);
+
+            await pickRowAction(user, 'Restore');
+            await waitFor(() => expect(restoreStudent).toHaveBeenCalledWith('s1'));
+
+            expect(screen.getAllByRole('status')).toHaveLength(1);
+            expect(screen.getAllByRole('button', { name: 'See plans' })).toHaveLength(1);
+        } finally {
+            outletContext.canManageStudents = true;
+        }
+    });
+
+    it('does not caption the Add button "Adding…" while an unrelated action runs', async () => {
+        // `busy` is one flag for every roster action, and it rightly disables this
+        // form — two mutations should not overlap. The caption is the part that
+        // must not be shared: a teacher archiving a student was told the page was
+        // adding one.
+        const user = userEvent.setup();
+        let releaseArchive: () => void = () => {};
+        listRoster.mockResolvedValue([student('s1', 'Ada Lovelace')]);
+        archiveStudent.mockImplementationOnce(
+            () =>
+                new Promise<void>((resolve) => {
+                    releaseArchive = resolve;
+                }),
+        );
+        renderRoster();
+
+        expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+        await pickRowAction(user, 'Archive…');
+        await user.click(screen.getByRole('button', { name: 'Archive' }));
+
+        // The archive is still in flight: the form is disabled, but it is not the
+        // thing that is running.
+        const add = screen.getByRole('button', { name: 'Add student' });
+        expect(add).toBeDisabled();
+        expect(screen.queryByRole('button', { name: 'Adding…' })).not.toBeInTheDocument();
+
+        await act(async () => {
+            releaseArchive();
+        });
     });
 
     it('offers the upgrade instead of the roster when the plan has no students', async () => {

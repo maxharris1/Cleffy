@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
-import { isLimitReachedError, type LimitReachedError } from '@/features/billing/limitErrors';
+import { LimitReachedError, isLimitReachedError } from '@/features/billing/limitErrors';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { StudentCodeCard } from '@/features/roster/StudentCodeCard';
 import {
@@ -19,7 +19,7 @@ import {
     type RosterAssignment,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
-import type { AssignmentAccess, AssignmentRow, ManagedStudentRow } from '@/types/database';
+import type { AssignmentAccess, AssignmentRow, EffectiveTier, ManagedStudentRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -88,6 +88,24 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
 };
 
 /**
+ * The refusal the server would give, said before it is asked.
+ *
+ * A teacher who downgrades keeps every student they provisioned, so the rows stay
+ * reachable — but the plan behind them no longer carries a roster, and the
+ * sentence saying so is already written, for the 402 an add comes back with.
+ * Borrowing it leaves one wording where two could drift apart.
+ */
+const noRosterOnThisPlan = (tier: EffectiveTier): LimitReachedError =>
+    new LimitReachedError({
+        code: 'limit_reached',
+        metric: 'students',
+        limit: 0,
+        // 'student' is provisioned rather than bought, so it is no BillingTier;
+        // one who lands here is spending the free plan's limits.
+        tier: tier === 'student' ? 'free' : tier,
+    });
+
+/**
  * The teacher's roster.
  *
  * Renders inside LibraryShell, so it inherits the RequireRegistered gate and can
@@ -102,11 +120,17 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
  * Whether the plan has a roster at all is a different question, and one the
  * client may answer: canManageStudents reads the server's own students limit, so
  * it cannot drift either. Personal and provisioned students get `students: 0`,
- * and for them the nav drops this page and the body offers the upgrade instead
- * of a form the server would refuse on every submission.
+ * and for them the nav drops this page and the add form goes with it, because
+ * the server would refuse every submission.
+ *
+ * It does not take the roster itself away. A downgrade bans nobody: the students
+ * already provisioned keep signing in, and archiving one is how a teacher stops
+ * that — which student-provision allows on any plan, archiving being what hands a
+ * seat back rather than claims one. Hiding those rows would leave live student
+ * sign-ins with no control left anywhere that could turn them off.
  */
 export const RosterPage = () => {
-    const { canManageStudents, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
@@ -219,6 +243,14 @@ export const RosterPage = () => {
         }
         await run(async () => {
             const result = await resetStudentAccess(target.id);
+            // Take the confirmation down in the same commit the card goes up,
+            // rather than after the reload below. Dialog neither portals nor
+            // ranks its scrims, so while both are mounted the confirmation is
+            // painted over the code — and Escape, which Dialog routes to the
+            // last dialog pushed, reaches the card the teacher cannot see and
+            // discards a code nothing can read back. React batches this with the
+            // setState below, so there is no frame in which both are open.
+            setResetTarget(null);
             if ('loginCode' in result) {
                 setCodeCard({
                     displayName: target.display_name,
@@ -230,6 +262,8 @@ export const RosterPage = () => {
             }
             await reloadRoster();
         });
+        // Still the close for the throw path: run() turns a failure into red text
+        // on the page behind, which the confirmation would otherwise cover.
         setResetTarget(null);
     };
 
@@ -290,59 +324,73 @@ export const RosterPage = () => {
 
             {/*
               The nav hides this page on a plan without a roster, but a bookmark
-              or a typed URL still lands here. Say so and offer the upgrade rather
-              than showing an add form whose every submission the server refuses.
+              or a typed URL still lands here. The add form goes — the server
+              refuses every submission — while the rows stay, because they are the
+              only place a teacher can archive a student, and archiving is what
+              stops that student signing in.
             */}
-            {!canManageStudents ? (
-                <EmptyState
-                    className="mt-10"
-                    title="Your plan doesn’t include students"
-                    body="Teacher and Academy add a roster: each student gets their own sign-in, and you assign scores straight from your library."
-                >
-                    <Button onClick={openPricing}>See plans</Button>
-                </EmptyState>
+            {canManageStudents ? <AddStudentForm busy={busy} onAdd={addStudent} /> : null}
+
+            {limit ? <LimitReachedNotice limit={limit} onUpgrade={openPricing} className="mt-5" /> : null}
+            {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
+
+            {students === null ? (
+                <LoadingText className="mt-10">Loading your roster…</LoadingText>
+            ) : loadError ? (
+                <ErrorText className="mt-8">{loadError}</ErrorText>
+            ) : students.length === 0 ? (
+                canManageStudents ? (
+                    <p className="mt-10 text-sm text-stone-500">
+                        No students yet — add one above to print their setup card or send their invite.
+                    </p>
+                ) : (
+                    <EmptyState
+                        className="mt-10"
+                        title="Your plan doesn’t include students"
+                        body="Teacher and Academy add a roster: each student gets their own sign-in, and you assign scores straight from your library."
+                    >
+                        <Button onClick={openPricing}>See plans</Button>
+                    </EmptyState>
+                )
             ) : (
-                <>
-                    <AddStudentForm busy={busy} onAdd={addStudent} />
+                <section className="mt-8">
+                    {/* Nothing in the list is taken away with the form: archive and
+                        reset ask student-provision for no seat, and restore — which
+                        does — comes back 402 into the notice above.
 
-                    {limit ? <LimitReachedNotice limit={limit} onUpgrade={openPricing} className="mt-5" /> : null}
-                    {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
-
-                    {students === null ? (
-                        <LoadingText className="mt-10">Loading your roster…</LoadingText>
-                    ) : loadError ? (
-                        <ErrorText className="mt-8">{loadError}</ErrorText>
-                    ) : students.length === 0 ? (
-                        <p className="mt-10 text-sm text-stone-500">
-                            No students yet — add one above to print their setup card or send their invite.
-                        </p>
-                    ) : (
-                        <section className="mt-8">
-                            <p className="text-xs text-stone-600">
-                                {activeCount} {activeCount === 1 ? 'student' : 'students'}
-                                {archivedCount > 0 ? ` · ${archivedCount} archived` : ''}
-                            </p>
-                            <ul className="mt-3">
-                                {students.map((student, index) => (
-                                    <StudentRow
-                                        key={student.id}
-                                        student={student}
-                                        index={index}
-                                        assignments={assignments.get(student.student_user_id) ?? []}
-                                        expanded={expandedId === student.id}
-                                        busy={busy}
-                                        onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
-                                        onReset={() => setResetTarget(student)}
-                                        onArchive={() => setArchiveTarget(student)}
-                                        onRestore={() => void restore(student)}
-                                        onSetAccess={setAccess}
-                                        onUnassign={unassign}
-                                    />
-                                ))}
-                            </ul>
-                        </section>
+                        Which is why `limit` stands this one down. METRIC_COPY.students
+                        interpolates neither the limit nor the tier, so the refusal
+                        renders the same sentence this notice already shows: leaving
+                        both up stacks two identical amber boxes, announces two
+                        `status` regions, and makes a refused Restore look like a
+                        button that did nothing. One notice at a time, and the 402
+                        moving it is the evidence the click landed. */}
+                    {canManageStudents || limit ? null : (
+                        <LimitReachedNotice limit={noRosterOnThisPlan(tier)} onUpgrade={openPricing} className="mb-6" />
                     )}
-                </>
+                    <p className="text-xs text-stone-600">
+                        {activeCount} {activeCount === 1 ? 'student' : 'students'}
+                        {archivedCount > 0 ? ` · ${archivedCount} archived` : ''}
+                    </p>
+                    <ul className="mt-3">
+                        {students.map((student, index) => (
+                            <StudentRow
+                                key={student.id}
+                                student={student}
+                                index={index}
+                                assignments={assignments.get(student.student_user_id) ?? []}
+                                expanded={expandedId === student.id}
+                                busy={busy}
+                                onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
+                                onReset={() => setResetTarget(student)}
+                                onArchive={() => setArchiveTarget(student)}
+                                onRestore={() => void restore(student)}
+                                onSetAccess={setAccess}
+                                onUnassign={unassign}
+                            />
+                        ))}
+                    </ul>
+                </section>
             )}
 
             {codeCard ? (
@@ -436,6 +484,11 @@ const AddStudentForm = ({
     const [method, setMethod] = useState<'code' | 'email'>('code');
     const [studentEmail, setStudentEmail] = useState('');
     const [error, setError] = useState<string | null>(null);
+    // Separate from `busy`, which is every roster action at once. Disabling this
+    // form while an archive runs is right — two mutations should not overlap —
+    // but captioning the button "Adding…" for one is a plain lie about what the
+    // page is doing. The disable stays shared; only the word is ours.
+    const [submitting, setSubmitting] = useState(false);
 
     const submit = async () => {
         const displayName = name.trim();
@@ -450,6 +503,7 @@ const AddStudentForm = ({
         }
         setError(null);
         const parentEmail = email.trim() || undefined;
+        setSubmitting(true);
         try {
             const opts: ProvisionOptions =
                 method === 'email'
@@ -462,6 +516,8 @@ const AddStudentForm = ({
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not add that student.');
+        } finally {
+            setSubmitting(false);
         }
     };
 
@@ -552,7 +608,7 @@ const AddStudentForm = ({
                     Parent email is for your records and for sending the card home — it is never a sign-in.
                 </p>
                 <Button type="submit" size="sm" disabled={busy}>
-                    {busy ? 'Adding…' : 'Add student'}
+                    {submitting ? 'Adding…' : 'Add student'}
                 </Button>
             </div>
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}

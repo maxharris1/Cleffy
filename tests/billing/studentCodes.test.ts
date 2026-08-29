@@ -18,6 +18,7 @@ import {
     RESERVED_USERNAMES,
     STUDENT_PASSWORD_MAX_BYTES,
     STUDENT_PASSWORD_MIN,
+    studentPasswordProblem,
     syntheticStudentEmail,
     USERNAME_MAX,
     USERNAME_MIN,
@@ -313,6 +314,17 @@ describe('isValidStudentPassword', () => {
         // four of them "eight" and let a four-key password through.
         expect(isValidStudentPassword('🎹'.repeat(STUDENT_PASSWORD_MIN))).toBe(true);
         expect(isValidStudentPassword('🎹'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe(false);
+    });
+
+    it('says WHICH of the two bounds a password missed', () => {
+        // The bug this pins: both bounds answered with one sentence, so a
+        // student who typed 25 emoji was told "passwords are at least 8
+        // characters" under a password of 25 characters — the one refusal they
+        // cannot act on, on a form that is spent once.
+        expect(studentPasswordProblem('a'.repeat(STUDENT_PASSWORD_MIN - 1))).toBe('too_short');
+        expect(studentPasswordProblem('🎹'.repeat(25))).toBe('too_long'); // 25 characters, 100 bytes
+        expect(studentPasswordProblem('é'.repeat(37))).toBe('too_long'); // 37 characters, 74 bytes
+        expect(studentPasswordProblem('hunter2hunter2')).toBeNull();
     });
 
     it('takes the password exactly as typed, spaces and all', () => {

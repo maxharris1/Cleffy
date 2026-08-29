@@ -5,11 +5,11 @@ import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import {
     hashLoginCode,
     isPlausibleLoginCode,
-    isValidStudentPassword,
     isValidUsername,
     normalizeLoginCode,
     normalizeUsername,
     STUDENT_PASSWORD_MIN,
+    studentPasswordProblem,
     USERNAME_MAX,
     USERNAME_MIN,
 } from '../_shared/studentCodes.ts';
@@ -105,9 +105,19 @@ Deno.serve(async (req) => {
     // spaces are silently eaten here is one the student cannot type at
     // /auth/v1/token afterwards.
     const password = typeof body.password === 'string' ? body.password : '';
-    if (!isValidStudentPassword(password)) {
+    const passwordProblem = studentPasswordProblem(password);
+    if (passwordProblem) {
+        // Two bounds, so two sentences. Naming the minimum to a student who
+        // typed too MUCH is the one answer they cannot act on, and this form is
+        // spent once.
         return jsonResponse(
-            { error: `Passwords are at least ${STUDENT_PASSWORD_MIN} characters`, code: 'weak_password' },
+            {
+                error:
+                    passwordProblem === 'too_long'
+                        ? 'That password is too long — pick a shorter one'
+                        : `Passwords are at least ${STUDENT_PASSWORD_MIN} characters`,
+                code: 'weak_password',
+            },
             422,
         );
     }
@@ -181,10 +191,17 @@ Deno.serve(async (req) => {
     }
 
     // The commit: one UPDATE that stores the name, stamps the claim and spends
-    // the code. Guarded on claimed_at still being null so two claims racing the
-    // same card cannot both win, and the CHECK constraint refuses any two of
-    // these three landing without the third.
-    const { error: claimError } = await admin
+    // the code. Filtered on the same three conditions the lookup selected on, so
+    // a row claimed or archived in the meantime is refused here as well, and the
+    // CHECK constraint refuses any two of these three landing without the third.
+    //
+    // The row is read BACK on purpose, and that is the whole reason those filters
+    // are load-bearing: PostgREST answers an UPDATE that matched nothing with a
+    // bare 204, which supabase-js reports as a plain success. Without the
+    // .select() the request that LOST a race reads exactly like the one that won
+    // and falls through to the sign-in below — a session handed out against a
+    // card somebody else has already spent.
+    const { data: claimed, error: claimError } = await admin
         .from('managed_students')
         .update({
             username,
@@ -192,7 +209,10 @@ Deno.serve(async (req) => {
             login_code_hash: null,
         })
         .eq('id', student.id)
-        .is('claimed_at', null);
+        .is('archived_at', null)
+        .is('claimed_at', null)
+        .select('id')
+        .maybeSingle();
     if (claimError) {
         // The unique index fired between the pre-check and here. Nothing was
         // written, so the code is still live and the student simply picks
@@ -202,6 +222,16 @@ Deno.serve(async (req) => {
         }
         console.error(`could not claim roster row ${student.id}: ${claimError.message}`);
         return jsonResponse({ error: 'Could not set up the account' }, 502);
+    }
+    if (!claimed) {
+        // Another claim spent this card between our lookup and this statement, or
+        // the teacher archived the row in that gap. REJECTED rather than a
+        // session, because the card really is spent by now: that is the same
+        // answer the lookup above would give a moment later, and an already
+        // claimed code is one of the paths the note at the top of this file
+        // counts among the single indistinguishable refusal.
+        console.error(`roster row ${student.id} was already claimed when this request tried to commit`);
+        return reject();
     }
 
     // A FRESH anon-key client, deliberately carrying no Authorization header:

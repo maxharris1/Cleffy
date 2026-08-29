@@ -22,6 +22,7 @@ import {
     isValidUsername,
     normalizeLoginCode,
     normalizeUsername,
+    studentPasswordProblem,
 } from '../../../supabase/functions/_shared/studentCodes';
 
 /**
@@ -92,8 +93,18 @@ const ClaimFlow = () => {
             setUsernameError(`Pick a username of ${USERNAME_HINT}.`);
             return;
         }
-        if (password.length < STUDENT_PASSWORD_MIN) {
+        // The shared helper rather than `.length`, which is the wrong unit for
+        // both bounds: the function counts characters against the floor and
+        // BYTES against the ceiling, so five emoji are ten here and five there.
+        // A page whose job is to pre-empt the 422 has to ask the same question,
+        // including the ceiling this line never mirrored at all.
+        const passwordProblem = studentPasswordProblem(password);
+        if (passwordProblem === 'too_short') {
             setError(`Password must be at least ${STUDENT_PASSWORD_MIN} characters.`);
+            return;
+        }
+        if (passwordProblem === 'too_long') {
+            setError('That password is too long — pick a shorter one.');
             return;
         }
         if (password !== confirm) {

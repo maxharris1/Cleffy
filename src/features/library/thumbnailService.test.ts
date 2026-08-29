@@ -123,6 +123,23 @@ describe('getThumbnail', () => {
         expect(renderFirstPagePng).not.toHaveBeenCalled();
     });
 
+    it('renders bytes that lag the requested revision once, not on every library visit', async () => {
+        // Shaped like a row uploadDocument wrote: bytes cached with no contentRev.
+        // A replace on another device bumped documents.content_rev to 1, but
+        // those newer bytes have never been downloaded here.
+        cachePdf('d1', undefined);
+        const { getThumbnail } = await loadService();
+
+        const first = await getThumbnail('d1', 1);
+        const second = await getThumbnail('d1', 1);
+
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(second).toBe(first);
+        // Still stamped with the BYTES' revision, so the render regenerates as
+        // soon as ensureLocalPdf caches the replacement.
+        expect(thumbnails.get('d1')?.contentRev).toBe(0);
+    });
+
     it('re-renders a thumbnail cached at the old, smaller size', async () => {
         // Covers are ~208px wide, so a 256px render is soft on a 2x display.
         cacheThumb('d1', 2, pngBlob(), 256);

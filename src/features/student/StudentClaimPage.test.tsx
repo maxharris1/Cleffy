@@ -127,6 +127,21 @@ describe('StudentClaimPage', () => {
         expect(claimStudentAccount).not.toHaveBeenCalled();
     });
 
+    it('blocks a password over the byte ceiling client-side', async () => {
+        const user = userEvent.setup();
+        renderClaim();
+
+        await enterCode(user);
+        // 40 characters and 80 UTF-8 bytes: far over the floor that used to be
+        // the only thing checked here, and over the ceiling bcrypt imposes — the
+        // function would refuse this while naming the MINIMUM.
+        await fillCredentials(user, 'ada_lovelace', 'é'.repeat(40));
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        expect(screen.getByRole('status')).toHaveTextContent('too long');
+        expect(claimStudentAccount).not.toHaveBeenCalled();
+    });
+
     it('keeps everything typed when the server says the username is taken', async () => {
         const user = userEvent.setup();
         claimStudentAccount.mockRejectedValue(new StudentAuthError('That username is taken', 'username_taken'));

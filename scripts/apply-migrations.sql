@@ -3019,10 +3019,12 @@ $$;
 --    would fail with "No such customer". A user now gets one customer row per
 --    mode.
 --
--- 2. auth users are shared between the two deploys, so a subscription bought on
---    dev with a published test card would otherwise grant paid features on
---    production. Subscriptions are now tagged with the account that created
---    them, and only live ones entitle.
+-- 2. A subscription row now records which account created it, so "who is paying"
+--    can be answered per account rather than per user. dev.cleffy.io has its own
+--    Supabase project, so the two populations are already separate; what this
+--    guards is the remaining overlap, where a developer running locally against
+--    THIS database checks out in sandbox mode and leaves a test-mode
+--    subscription among the real ones.
 --
 -- Every existing row predates the flip and is therefore sandbox, which is what
 -- the 'test' default backfills.
@@ -3042,14 +3044,26 @@ create index if not exists subscriptions_user_mode on public.subscriptions (user
 
 -- Which Stripe account's subscriptions actually entitle.
 --
--- 'live' only, because dev.cleffy.io is a public hostname over this same
--- database: without the filter, anyone could subscribe there with Stripe's
--- published test card and walk onto cleffy.io with a paid plan. Split dev onto
--- its own Supabase project and this can safely widen to
--- array['live', 'test'] — that is the single line to change.
+-- Both by default, which is the right answer for every database except one. The
+-- `dev` branch project (qdbnlrgylelelvwbkvnm) only ever sees sandbox
+-- subscriptions, so narrowing this there would silently drop every dev tester to
+-- the free tier — and since that project has its own auth users, a test-mode
+-- subscription in it grants nothing on cleffy.io.
+--
+-- PRODUCTION is the exception, and narrowing it is a step of the live flip
+-- (DEPLOY.md §0), run once against jibgwgosihadbjgxdsfe only:
+--
+--   create or replace function public.entitling_billing_modes () returns text[]
+--   language sql immutable set search_path = public as $$
+--   select array['live']::text[] $$;
+--
+-- After that, a sandbox checkout made against production's backend from a
+-- non-production origin — localhost, most plausibly — records its subscription
+-- but grants nothing, which is what stops a published test card buying a real
+-- plan.
 create or replace function public.entitling_billing_modes () returns text[] language sql immutable
 set search_path = public as $$
-select array['live']::text[]
+select array['live', 'test']::text[]
 $$;
 
 revoke all on function public.entitling_billing_modes () from public;
@@ -3151,3 +3165,64 @@ begin
     );
 end;
 $$;
+
+-- ===== supabase/migrations/20260829130000_support_messages.sql =====
+-- Inbound support mail, as received by Resend.
+--
+-- The endpoint that fills this table (`resend-inbound`) forwards each message on
+-- to a human mailbox, but forwarding is delivery, not storage: a forward that
+-- bounces is gone, and a mailbox is a poor thing to query. This table is the
+-- durable record — the one an agentic triage pass reads from later, rather than
+-- re-parsing email.
+--
+-- `resend_email_id` is UNIQUE and that is load-bearing, exactly as
+-- `stripe_events.id` is: Svix retries a delivery until it gets a 2xx, so the
+-- same message arrives more than once as a matter of routine, and the insert is
+-- what makes the second arrival a no-op instead of a second forwarded email.
+--
+-- No RLS policy is declared, deliberately. RLS is enabled and every grant is
+-- revoked, so the table is reachable only by the service role — i.e. only from
+-- an Edge Function. Support mail is written by strangers and can contain
+-- anything a customer chose to type: an account number, a password they should
+-- not have sent, a complaint about another user. None of it belongs in a
+-- browser, so no client role can read it at all.
+create table public.support_messages (
+    id uuid primary key default gen_random_uuid(),
+    -- Resend's id for the received email; the idempotency key.
+    resend_email_id text not null unique,
+    -- The sending mail system's Message-ID, kept for threading a reply later.
+    message_id text,
+    from_address text not null,
+    to_addresses text[] not null default '{}',
+    -- Which of our addresses actually accepted it. With a catch-all domain this
+    -- is how triage tells support@ from billing@ without parsing `to`.
+    received_for text[] not null default '{}',
+    subject text,
+    text_body text,
+    html_body text,
+    -- Metadata only. Attachment bytes stay in Resend; storing them here would
+    -- put unscanned stranger-supplied files in our own bucket.
+    attachments jsonb not null default '[]'::jsonb,
+    -- Null until the forward succeeds. A row with received_at set and
+    -- forwarded_at null is precisely the "arrived but nobody was told" case,
+    -- which is the one worth alerting on.
+    forwarded_at timestamptz,
+    forward_error text,
+    received_at timestamptz not null,
+    created_at timestamptz not null default now()
+);
+
+create index support_messages_received on public.support_messages (received_at desc);
+
+-- Finds the arrived-but-not-forwarded rows without scanning the table.
+create index support_messages_unforwarded on public.support_messages (received_at desc) where forwarded_at is null;
+
+alter table public.support_messages enable row level security;
+
+revoke all on table public.support_messages from public;
+
+revoke all on table public.support_messages from anon;
+
+revoke all on table public.support_messages from authenticated;
+
+grant all on table public.support_messages to service_role;

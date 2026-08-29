@@ -37,6 +37,24 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 Open [SQL Editor](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/sql/new),
 paste the contents of **`scripts/apply-migrations.sql`**, run it once.
 
+> **Bootstrapping an empty database only — never as a re-run.** The mirror is
+> not idempotent: every `create table` and `create policy` in it is bare, with
+> no `if not exists`, and the first one is ten lines in. Pasted over a database
+> that already has them it stops at `42P07 relation "documents" already exists`,
+> and the SQL editor submits the file as one batch, so what you get is a hard
+> error partway with nothing to say how far it went. Use **Option B** against an
+> existing database: it runs only the migrations that project has not already
+> recorded.
+>
+> Rebuilding **production** from this file needs one step afterwards. The mirror
+> carries the repo's `entitling_billing_modes()`, which returns
+> `array['live', 'test']` — right for every database except production, which is
+> narrowed to `array['live']` by hand as part of the live flip (DEPLOY.md §0, the
+> `entitling_billing_modes()` row of "Done — production is on the live account").
+> Anything that re-runs that definition, this file or a hand-run of its tail,
+> restores the wider value, and a published Stripe test card buys a real plan
+> again. Re-apply the narrowing.
+
 **Option B — CLI (repeatable, preferred long-term):**
 Add these two env vars to the Claude environment (or your shell):
 
