@@ -51,9 +51,13 @@ if [[ -z "${GH_TOKEN:-}" ]]; then
 fi
 
 api() {
+    # Content-Type matters: `curl -d` defaults to form encoding, and the ruleset
+    # endpoint takes JSON only. Without this the POST is rejected for a reason
+    # that has nothing to do with the payload being wrong.
     curl -sS --fail-with-body \
         -H "Authorization: Bearer ${GH_TOKEN}" \
         -H "Accept: application/vnd.github+json" \
+        -H "Content-Type: application/json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "$@"
 }

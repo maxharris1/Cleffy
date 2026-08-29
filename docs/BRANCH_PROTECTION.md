@@ -45,6 +45,11 @@ single-owner repo that would protect `main` from everyone except the only
 person who pushes to it. The ruleset's bypass list is empty, so it applies to
 the owner too.
 
+Run it from your own machine. A Claude Code session cannot: its egress proxy
+permits reads of the GitHub API but refuses writes to the rulesets path, so the
+`POST` comes back `403 Write access to this GitHub API path is not permitted
+through this proxy` no matter how well-scoped the token is.
+
 By hand instead: **Settings → Rules → Rulesets → New branch ruleset**, target
 `refs/heads/main`, enforcement Active, tick **Restrict deletions** and **Block
 force pushes**.
