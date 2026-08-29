@@ -433,6 +433,11 @@ verify_jwt = true
 [functions.stripe-webhook]
 verify_jwt = false
 
+# Inbound support mail. Resend has no Supabase JWT to present; the request is
+# authenticated by its Svix signature instead, against RESEND_WEBHOOK_SECRET.
+[functions.resend-inbound]
+verify_jwt = false
+
 # Roster — provisioning a student is a teacher action like any other, so it
 # takes the teacher's JWT and meters the `students` stock against their plan.
 [functions.student-provision]

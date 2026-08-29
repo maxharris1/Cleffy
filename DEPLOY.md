@@ -554,6 +554,64 @@ customers can cancel and update cards there, but cannot switch plans — despite
 that gap, enable "Switch plans" in the portal settings and add the three
 products.
 
+## 7. Inbound support mail (Resend) — built, NOT deployed
+
+`support@cleffy.io` is meant to reach a human and, later, feed agentic triage.
+Resend can receive on a custom domain, but **it cannot forward** — its own
+[forwarding guide](https://resend.com/docs/knowledge-base/forward-emails-with-resend-inbound)
+is webhook-plus-code, because the `email.received` webhook carries metadata only
+and the body must be fetched from the Received Emails API. So forwarding is ours
+to write, which is fine: the same endpoint is the triage entry point later.
+
+What exists in the repo, passing CI, deployed nowhere:
+
+| Piece                                 | What it does                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_shared/svixSignature.ts`            | Svix HMAC verification, import-free like `stripeSignature.ts` so vitest and Deno load the same file. Resend signs with Svix: `svix-id` / `svix-timestamp` / `svix-signature`, signed content `id.timestamp.body`, base64 digests, and the secret is the **base64-decoded** body of `whsec_…` — not its ASCII. |
+| `resend-inbound/index.ts`             | Verifies, claims by `resend_email_id`, fetches the body, stores, then forwards. `verify_jwt = false`, like `stripe-webhook`.                                                                                                                                                                                  |
+| `20260829130000_support_messages.sql` | The durable record. RLS on with no policy and every grant revoked — support mail is stranger-written and never belongs in a browser.                                                                                                                                                                          |
+| `tests/support/svixSignature.test.ts` | 18 cases: round-trip, rotation, replay window, tampered body, wrong secret, wrong id.                                                                                                                                                                                                                         |
+
+Order inside the handler is deliberate: **persist, then forward.** A forward that
+fails leaves `forwarded_at` null — visible and replayable. Forwarding first and
+failing to store would lose the message on the retry that then no-ops.
+
+### ⚠️ Never call `POST /domains/{id}/verify` on a working domain
+
+This cost a live outage on 2026-08-29. Enabling receiving adds a required MX
+record, which moves the domain to `pending`; calling `/verify` then reset
+**DKIM and SPF to pending as well**, and those had been verified for months.
+Resend refuses to send from a domain that is not `verified`, so:
+
+```
+The cleffy.io domain is not verified.
+```
+
+**Supabase Auth sends through `smtp.resend.com` as `noreply@cleffy.io`** — check
+`GET /v1/projects/{ref}/config/auth` before touching this domain. Password resets
+and student email invites stop working while it is pending. Signups survive only
+because `mailer_autoconfirm` is on.
+
+Every DNS record was verified byte-for-byte against Resend's expected values
+throughout; nothing in DNS was wrong, and no pre-existing record was altered.
+Recovery is Resend's async re-check, which the dashboard's **Verify DNS Records**
+button drives harder than the API does. Receiving was rolled back to `disabled`
+to return the required set to its original three records.
+
+The apex `MX inbound-smtp.us-east-1.amazonaws.com` (priority 10) is still in
+Vercel DNS and inert while receiving is off. Re-enabling receiving is what makes
+it live — and note Resend requires it to be the **lowest-priority** MX on the
+domain.
+
+### To finish, once the domain is verified again
+
+1. Re-enable receiving: `PATCH /domains/{id}` with `{"capabilities":{"receiving":"enabled"}}` — and then **wait**, do not call `/verify`.
+2. Apply `20260829130000_support_messages.sql`.
+3. Deploy `resend-inbound`.
+4. Register the webhook in Resend at `https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/resend-inbound` for `email.received`, and keep its signing secret.
+5. Set `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `SUPPORT_FORWARD_TO` (and optionally `SUPPORT_FORWARD_FROM`) as Edge secrets.
+6. Only then set `support_email` on the live Stripe account.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from
