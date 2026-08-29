@@ -26,14 +26,14 @@ the steps that need a human because no API exposes them — each one says why.
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
 | Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ⛔ **no API mints one — §0**                                            |
-| Stripe secrets on the `dev` branch project                             | ⛔ **none set — §0, billing on dev fails until they are**               |
+| Stripe secrets on the `dev` branch project                             | ⛔ **key + webhook secret still needed — §0 step 5**                    |
 | Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                                            |
 | `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                                        |
 | cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                                 |
 | Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5)                 |
 | dev.cleffy.io actually pointed at that backend                         | ✅ by hostname in the bundle — **was production until 2026-08-28 (§5)** |
 | Edge secret `STRIPE_MODES` (both projects)                             | ⛔ **§0 — what refuses a sandbox caller on production**                 |
-| Sandbox webhook endpoint retargeted to the branch                      | ⛔ **§0 step 7 — still posts to production**                            |
+| Sandbox webhook endpoint retargeted to the branch                      | ✅ now posts to `qdbnlrgylelelvwbkvnm`                                  |
 
 ---
 
@@ -93,15 +93,15 @@ live-mode dashboard → Developers → API keys.
 
 ```bash
 npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe \
-  STRIPE_SECRET_KEY_LIVE='sk_live_…' \
-  STRIPE_MODES='live'
+  STRIPE_SECRET_KEY_LIVE='sk_live_…'
 ```
 
-`STRIPE_MODES=live` is what makes "only cleffy.io writes to production" true on
-the server rather than only in the bundle: production's billing functions then
-refuse a sandbox caller outright — dev, a preview, a laptop — instead of writing
-a test-mode row into the production database. It also means a sandbox webhook
-that still arrives here verifies against nothing and is rejected.
+This is the only secret still missing. `STRIPE_MODES=live` and
+`STRIPE_WEBHOOK_SECRET_LIVE` are already set — the first is what makes "only
+cleffy.io writes to production" true on the server rather than only in the
+bundle, so production's billing functions refuse a sandbox caller outright (dev,
+a preview, a laptop) instead of writing a test-mode row into the production
+database.
 
 `STRIPE_WEBHOOK_SECRET_LIVE` is already set from the live endpoint's own signing
 secret. Production's existing `STRIPE_SECRET_KEY` keeps its sandbox value and
@@ -143,17 +143,20 @@ pace: the server re-prices whatever the client names into its own mode, so a
 bundle cached from before the flip still buys the right plan on the right
 account.
 
-**5. Give the `dev` branch project its sandbox secrets.** It has none, so billing
-on dev.cleffy.io fails until it does (§5).
+**5. Give the `dev` branch project its sandbox secrets.** It has only
+`STRIPE_MODES` so far, so billing on dev.cleffy.io fails until the key and the
+webhook secret land (§5).
 
 ```bash
 supabase branches unpause dev --project-ref jibgwgosihadbjgxdsfe
 npx supabase secrets set --project-ref qdbnlrgylelelvwbkvnm \
   STRIPE_SECRET_KEY='sk_test_…' STRIPE_WEBHOOK_SECRET='whsec_…' \
-  STRIPE_MODES='test' APP_URL='https://dev.cleffy.io'
+  APP_URL='https://dev.cleffy.io'
 ```
 
-`STRIPE_MODES=test` is the mirror of production's: the branch refuses a
+`STRIPE_WEBHOOK_SECRET` here is the **sandbox** endpoint's signing secret
+(`we_1U8njJ9EqxUjgZtnfBK3y0XH`), which now posts to this project. `STRIPE_MODES`
+is already set to `test`, the mirror of production's: the branch refuses a
 cleffy.io caller, so the two backends cannot serve each other's storefront even
 if a build or a DNS entry is wrong.
 
@@ -162,23 +165,21 @@ Billing → **Customer portal** → Save. `stripe-portal` 500s for every live ca
 until a default configuration exists, exactly as it did in the sandbox (§1).
 There is still no API for it.
 
-**7. Repoint the sandbox webhook endpoint.** `we_1U8njJ9EqxUjgZtnfBK3y0XH` still
-posts to **production**, from when dev shared that backend:
+### Webhook endpoints — already retargeted
 
-```
-https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/stripe-webhook   # change to
-https://qdbnlrgylelelvwbkvnm.supabase.co/functions/v1/stripe-webhook
-```
+| Endpoint                      | Account | Posts to                            |
+| ----------------------------- | ------- | ----------------------------------- |
+| `we_1U9V8T4eZ6RX0W0glk3BZIOi` | live    | `jibgwgosihadbjgxdsfe` (production) |
+| `we_1U8njJ9EqxUjgZtnfBK3y0XH` | sandbox | `qdbnlrgylelelvwbkvnm` (dev branch) |
 
-Until it moves, a purchase on dev.cleffy.io tries to write its subscription row
-into production. `STRIPE_MODES=live` already refuses those deliveries, so nothing
-lands in the wrong place from step 1 onwards — but they are then simply lost
-rather than recorded in dev, so move the endpoint to complete the loop.
+The sandbox endpoint posted to production until 2026-08-28, from when dev shared
+that backend — so a purchase on dev.cleffy.io wrote its subscription row into
+production. It now posts to the branch.
 
-Note the branch is paused most of the time and Stripe gives up after retrying a
-dead endpoint, so sandbox events raised while it is paused will be dropped. That
-is the cost of a paused dev backend, not of this change. The live endpoint
-(`we_1U9V8T4eZ6RX0W0glk3BZIOi`) correctly targets production either way.
+One consequence to expect: the branch is paused most of the time and Stripe gives
+up after retrying a dead endpoint, so sandbox events raised while it is paused
+are dropped. That is the cost of a paused dev backend, and it is the right side
+of the trade — a lost test event beats a real one in the wrong database.
 
 ### Verifying
 
