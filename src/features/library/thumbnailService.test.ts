@@ -8,6 +8,8 @@ import type { CachedPdf, CachedThumbnail } from '@/sync/db';
 // documentsService.test.ts).
 const pdfCache = vi.hoisted(() => new Map<string, CachedPdf>());
 const thumbnails = vi.hoisted(() => new Map<string, CachedThumbnail>());
+// Flipped on to simulate WebKit refusing an IndexedDB write (private browsing).
+const storeFailure = vi.hoisted(() => ({ put: null as Error | null }));
 
 vi.mock('@/sync/db', () => ({
     getDb: () => ({
@@ -17,6 +19,9 @@ vi.mock('@/sync/db', () => ({
         thumbnails: {
             get: (docId: string) => Promise.resolve(thumbnails.get(docId)),
             put: (row: CachedThumbnail) => {
+                if (storeFailure.put) {
+                    return Promise.reject(storeFailure.put);
+                }
                 thumbnails.set(row.docId, row);
                 return Promise.resolve(row.docId);
             },
@@ -66,6 +71,7 @@ const loadService = async () => {
 beforeEach(() => {
     pdfCache.clear();
     thumbnails.clear();
+    storeFailure.put = null;
     renderFirstPagePng.mockReset();
     renderFirstPagePng.mockResolvedValue({ blob: pngBlob(), width: 181, height: 256 });
 });
@@ -95,6 +101,29 @@ describe('getThumbnail', () => {
             width: 181,
             height: 256,
         });
+    });
+
+    // WebKit cannot back an IndexedDB Blob with a file in a private-browsing
+    // origin, so the store rejects. Only the write failed — discarding the PNG
+    // left the library showing blank covers for scores that rendered fine.
+    it('shows a render the browser refused to store', async () => {
+        cachePdf('d1', 1);
+        storeFailure.put = new Error('Error preparing Blob/File data to be stored in object store');
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 1)).toBeInstanceOf(Blob);
+        expect(thumbnails.has('d1')).toBe(false);
+    });
+
+    it('does not re-render a score whose thumbnail could not be stored', async () => {
+        cachePdf('d1', 1);
+        storeFailure.put = new Error('Error preparing Blob/File data to be stored in object store');
+        const { getThumbnail } = await loadService();
+
+        const first = await getThumbnail('d1', 1);
+        const second = await getThumbnail('d1', 1);
+        expect(second).toBe(first);
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
     });
 
     it('never fetches: no cached bytes means no thumbnail and no render', async () => {

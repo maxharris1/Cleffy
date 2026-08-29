@@ -30,6 +30,10 @@ export const getCachedPdf = async (docId: string): Promise<CachedPdf | null> => 
 export const readCachedPdfBytes = async (bytes: CachedPdfBytes): Promise<ArrayBuffer> =>
     bytes instanceof Blob ? bytes.arrayBuffer() : bytes;
 
+/** Size of a cached row's bytes, without reading them. */
+export const cachedPdfSize = (bytes: CachedPdfBytes | undefined): number =>
+    bytes instanceof Blob ? bytes.size : (bytes?.byteLength ?? 0);
+
 /**
  * Cache a document's bytes, returning whether they actually landed. Legacy
  * Blob rows are normalized on the way through, so any write path also
