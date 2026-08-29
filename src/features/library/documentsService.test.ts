@@ -16,6 +16,8 @@ vi.mock('@/lib/storageUpload', () => ({
 // layer is replaced by an in-memory map that keeps real Blobs readable.
 const memCache = vi.hoisted(() => new Map<string, unknown>());
 const memThumbs = vi.hoisted(() => new Map<string, unknown>());
+// Flipped on to simulate WebKit refusing an IndexedDB write (private browsing).
+const cacheFailure = vi.hoisted(() => ({ put: null as Error | null, get: null as Error | null }));
 // The upload/replace paths kick off a thumbnail render; stubbed so these tests
 // never pull pdf.js in.
 vi.mock('@/features/library/thumbnailService', () => ({
@@ -26,8 +28,12 @@ vi.mock('@/sync/db', () => {
     return {
         getDb: () => ({
             pdfCache: table({
-                get: (id: string) => Promise.resolve(memCache.get(id)),
+                get: (id: string) =>
+                    cacheFailure.get ? Promise.reject(cacheFailure.get) : Promise.resolve(memCache.get(id)),
                 put: (row: { docId: string }) => {
+                    if (cacheFailure.put) {
+                        return Promise.reject(cacheFailure.put);
+                    }
                     memCache.set(row.docId, row);
                     return Promise.resolve(row.docId);
                 },
@@ -165,6 +171,8 @@ const makeStub = (options: StubOptions = {}) => {
 
 beforeEach(async () => {
     vi.mocked(uploadPdfToStorage).mockClear();
+    cacheFailure.put = null;
+    cacheFailure.get = null;
     await getDb().pdfCache.clear();
 });
 
@@ -201,6 +209,53 @@ describe('loadDocumentBytes content_rev staleness', () => {
         expect(cached?.contentRev).toBe(2);
     });
 
+    // Safari in private browsing has no disk to back an IndexedDB Blob and
+    // rejects the write. The bytes are already downloaded by then, so the
+    // score must still open — this used to surface as
+    // "Error preparing Blob/File data to be stored in object store".
+    it('returns downloaded bytes when the browser refuses to cache them', async () => {
+        const calls = makeStub({ downloadBytes: 'fresh-bytes' });
+        cacheFailure.put = new Error('Error preparing Blob/File data to be stored in object store');
+        const bytes = await loadDocumentBytes(doc({ content_rev: 1 }));
+        expect(new TextDecoder().decode(bytes)).toBe('fresh-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(1);
+    });
+
+    // A browser with IndexedDB switched off entirely (Safari, all cookies
+    // blocked) throws on the read — that is a cache miss, not a failed open.
+    it('downloads when the cache cannot even be read', async () => {
+        const calls = makeStub({ downloadBytes: 'fresh-bytes' });
+        cacheFailure.get = new Error('UnknownError: IndexedDB is unavailable');
+        cacheFailure.put = new Error('UnknownError: IndexedDB is unavailable');
+        const bytes = await loadDocumentBytes(doc({ content_rev: 1 }));
+        expect(new TextDecoder().decode(bytes)).toBe('fresh-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(1);
+    });
+
+    // Cache hits still work when the row predates the ArrayBuffer switch.
+    it('reads a legacy Blob row written by an earlier build', async () => {
+        const calls = makeStub();
+        const d = doc({ content_rev: 1 });
+        await putCache({
+            docId: d.id,
+            bytes: new Blob(['legacy-bytes']),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+        });
+        const bytes = await loadDocumentBytes(d);
+        expect(new TextDecoder().decode(bytes)).toBe('legacy-bytes');
+        expect(calls.download).not.toHaveBeenCalled();
+    });
+
+    it('stores downloaded bytes as an ArrayBuffer, never a Blob', async () => {
+        makeStub({ downloadBytes: 'fresh-bytes' });
+        const d = doc({ content_rev: 1 });
+        await loadDocumentBytes(d);
+        const cached = await getDb().pdfCache.get(d.id);
+        expect(cached?.bytes).toBeInstanceOf(ArrayBuffer);
+    });
+
     it('falls back to a stale cache when offline', async () => {
         makeStub({ downloadError: 'network down' });
         const d = doc({ content_rev: 2 });
@@ -233,7 +288,7 @@ describe('replaceDocumentPdf', () => {
 
         const cached = await getDb().pdfCache.get(d.id);
         expect(cached?.contentRev).toBe(1);
-        expect(await cached?.bytes.text()).toBe('cleaned');
+        expect(new TextDecoder().decode(cached?.bytes as ArrayBuffer)).toBe('cleaned');
 
         expect(calls.upsert).toHaveBeenCalledWith(
             'document_imports',

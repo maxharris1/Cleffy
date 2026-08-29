@@ -32,10 +32,18 @@ export interface SyncState {
     watermarkSeq: number;
 }
 
+/** Bytes as read back from Dexie: ArrayBuffer now, Blob in rows written before. */
+export type CachedPdfBytes = Blob | ArrayBuffer;
+
 /** Offline copy of a document's PDF bytes (M5). */
 export interface CachedPdf {
     docId: string;
-    bytes: Blob;
+    /**
+     * Written as an ArrayBuffer — WebKit cannot store a Blob in a private
+     * browsing origin (see sync/pdfCache.ts). Blob stays in the union for
+     * rows written by earlier builds; read via `readCachedPdfBytes`.
+     */
+    bytes: CachedPdfBytes;
     title: string;
     cachedAt: string;
     /** Last-known membership role — lets the viewer open offline with the right mode. */
