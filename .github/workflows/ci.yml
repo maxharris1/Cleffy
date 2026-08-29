@@ -42,3 +42,40 @@ jobs:
             - run: npm run typecheck
             - run: npm run test
             - run: npm run build
+
+    # Does the branch still describe the live project?
+    #
+    # Added after migrations were applied straight to production ahead of the
+    # merge that carried them: `main` stopped describing production and nothing
+    # said so. Supabase's GitHub integration deploys on merge but never checks
+    # that the branch was the source of what is already live, so this is the only
+    # thing standing between "someone ran it from the dashboard" and a `main` that
+    # quietly lies about production.
+    #
+    # Reads only — it never applies or deploys anything; the integration does
+    # that.
+    supabase-drift:
+        runs-on: ubuntu-latest
+        # Fork PRs get no secrets, so the check could only ever fail there for a
+        # reason that is not about the code.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+            # Without the token this job cannot answer its question. It warns
+            # rather than fails ONLY for that case, so adding the guard does not
+            # redden every branch before the secret exists — but it says so
+            # loudly, because a guard nobody notices is off is worse than none.
+            # Once SUPABASE_ACCESS_TOKEN is set, drift is a hard failure.
+            - name: Check for drift against the live project
+              env:
+                  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+                  SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF || 'jibgwgosihadbjgxdsfe' }}
+              run: |
+                  if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+                      echo "::warning title=Supabase drift check is INERT::SUPABASE_ACCESS_TOKEN is not set on this repository, so nothing verified that this branch matches the live project. Add it under Settings -> Secrets and variables -> Actions."
+                      exit 0
+                  fi
+                  node scripts/check-supabase-drift.mjs
