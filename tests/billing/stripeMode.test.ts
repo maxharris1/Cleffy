@@ -116,6 +116,21 @@ describe('modeForOrigin', () => {
         expect(modeForOrigin('https://preview.cleffy.io', withPreview)).toBe('test');
         expect(modeForOrigin('https://cleffy.io', withPreview)).toBe('live');
     });
+
+    // DEPLOY.md offers these variables as the way to add a preview host without a
+    // deploy, so they have to add: naming one host must not be how production
+    // quietly loses `www` — the storefront half its buyers arrive on.
+    it('adds an env origin without dropping the storefront it ships with', () => {
+        const onlyPreview = env({ STRIPE_TEST_ORIGINS: 'https://preview.cleffy.io' });
+        expect(modeForOrigin('https://preview.cleffy.io', onlyPreview)).toBe('test');
+        expect(modeForOrigin('https://dev.cleffy.io', onlyPreview)).toBe('test');
+
+        const onlyApex = env({ STRIPE_LIVE_ORIGINS: 'https://cleffy.io' });
+        expect(modeForOrigin('https://www.cleffy.io', onlyApex)).toBe('live');
+
+        // Still fails closed for anything on neither list.
+        expect(modeForOrigin('https://notcleffy.io', onlyApex)).toBeNull();
+    });
 });
 
 describe('secret key selection', () => {
@@ -235,5 +250,28 @@ describe('appOriginFrom', () => {
         expect(appOriginFrom('https://elsewhere.example', env({ APP_URL: 'https://cleffy.io' }))).toBe(
             'https://cleffy.io',
         );
+    });
+
+    // The Origin header is written by the caller and every http origin counts as a
+    // development one, so without a second gate a stranger's host would be echoed
+    // straight into Stripe's success_url. A dev box is loopback, LAN or mDNS;
+    // phish.example is none of them, whatever scheme it arrives under.
+    it('never returns to an arbitrary http origin the caller named', () => {
+        const branch = env({ APP_URL: 'https://dev.cleffy.io', STRIPE_MODES: 'test' });
+        expect(appOriginFrom('http://phish.example', branch)).toBe('https://dev.cleffy.io');
+        expect(appOriginFrom('http://attacker.tld:8080/x', branch)).toBe('https://dev.cleffy.io');
+        // A lookalike must not reach a dev box's exemption by wearing its prefix.
+        expect(appOriginFrom('http://127.evil.example', branch)).toBe('https://dev.cleffy.io');
+        // ...while the dev boxes that rule exists for still come back to themselves.
+        expect(appOriginFrom('http://localhost:5173', branch)).toBe('http://localhost:5173');
+        expect(appOriginFrom('http://192.168.1.42:5173', branch)).toBe('http://192.168.1.42:5173');
+        expect(appOriginFrom('http://cleffys-mbp.local:5173', branch)).toBe('http://cleffys-mbp.local:5173');
+    });
+
+    // Narrowing the redirect must not cost the env escape hatch: a preview host
+    // added without a deploy still gets its own users back.
+    it('returns a preview host added by env to itself', () => {
+        const withPreview = env({ STRIPE_TEST_ORIGINS: 'https://preview.cleffy.io', APP_URL: 'https://cleffy.io' });
+        expect(appOriginFrom('https://preview.cleffy.io', withPreview)).toBe('https://preview.cleffy.io');
     });
 });

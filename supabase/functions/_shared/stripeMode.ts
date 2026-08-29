@@ -60,15 +60,27 @@ const DEFAULT_ORIGINS: Record<StripeMode, string[]> = {
     test: ['https://dev.cleffy.io'],
 };
 
-/** Comma-separated overrides, so a new preview hostname needs no code deploy. */
+/** Comma-separated additions, so a new preview hostname needs no code deploy. */
 const ORIGIN_ENV_KEYS: Record<StripeMode, string> = {
     live: 'STRIPE_LIVE_ORIGINS',
     test: 'STRIPE_TEST_ORIGINS',
 };
 
+/**
+ * The storefronts above always count; env only ever adds to them.
+ *
+ * Replacing them would make `STRIPE_LIVE_ORIGINS='https://cleffy.io'` — the
+ * obvious way to add one host — silently drop `https://www.cleffy.io`, and
+ * nothing downstream catches that: the development rule rescues plain-http
+ * origins only, so a dropped https storefront resolves to no mode at all and
+ * every buyer arriving over `www` gets `400 unknown_origin` on the upgrade
+ * button while cleffy.io keeps working. Adding is the direction that cannot
+ * break a shop by omission, and it is what DEPLOY.md has always promised these
+ * variables do. A repeated entry is inert — the lists are only ever searched.
+ */
 export const originsFor = (mode: StripeMode, env: EnvLookup): string[] => {
     const configured = nonEmpty(env(ORIGIN_ENV_KEYS[mode]));
-    const entries = configured ? configured.split(',') : DEFAULT_ORIGINS[mode];
+    const entries = [...DEFAULT_ORIGINS[mode], ...(configured ? configured.split(',') : [])];
     return entries.map(normalizeOrigin).filter((entry): entry is string => entry !== null);
 };
 
@@ -324,16 +336,49 @@ export const priceTiers = (mode: StripeMode, env: EnvLookup): Record<string, Bil
 };
 
 /**
+ * The addresses a `dev:local` box can actually answer on: loopback, a private
+ * LAN range, or the mDNS `.local` name the iPad reaches it by.
+ *
+ * `isDevelopmentOrigin` takes any http origin on purpose, and for choosing the
+ * *account* that is fail-safe — the worst an unknown http caller gets is a
+ * sandbox checkout against a test key. Choosing where Stripe returns the browser
+ * afterwards is not fail-safe in the same way: the browser sends Origin on every
+ * cross-origin POST to these functions, so echoing an unrecognised one back would
+ * let any caller name the page their own checkout lands on. `http://phish.example`
+ * is a development origin by scheme and nobody's dev box by address, and that is
+ * the distinction this draws. Anchored, because `127.evil.example` is a hostname
+ * anyone can buy.
+ */
+const DEV_HOSTNAME =
+    /^(?:localhost|\[::1\]|127(?:\.\d+){3}|10(?:\.\d+){3}|192\.168(?:\.\d+){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d+){2}|[a-z0-9-]+\.local)$/;
+
+const isLocalDevelopmentOrigin = (origin: string): boolean => {
+    try {
+        const url = new URL(origin);
+        return url.protocol === 'http:' && DEV_HOSTNAME.test(url.hostname);
+    } catch {
+        return false;
+    }
+};
+
+/**
  * Where Checkout and the Portal send the user back to.
  *
  * The caller's own origin wins, so a dev.cleffy.io tester is returned to
- * dev.cleffy.io rather than handed off to production mid-flow. APP_URL remains
- * the fallback for a caller that sent no Origin header at all.
+ * dev.cleffy.io rather than handed off to production mid-flow — but only an
+ * origin we publish from, or a dev box, may win that way. `modeForOrigin` is
+ * deliberately not the gate here: it is the right answer to "whose money is
+ * this", and the wrong one to "where may Stripe send this browser". APP_URL
+ * remains the fallback for a caller that sent no Origin header, or one we do not
+ * recognise.
  */
 export const appOriginFrom = (origin: string | null, env: EnvLookup): string => {
     const normalized = normalizeOrigin(origin);
-    if (normalized && modeForOrigin(normalized, env) !== null) {
-        return normalized;
+    if (normalized !== null) {
+        const published = originsFor('live', env).includes(normalized) || originsFor('test', env).includes(normalized);
+        if (published || isLocalDevelopmentOrigin(normalized)) {
+            return normalized;
+        }
     }
     const configured = nonEmpty(env('APP_URL'));
     if (configured) {
