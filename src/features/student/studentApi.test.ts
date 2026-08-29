@@ -12,6 +12,7 @@ vi.mock('@/lib/supabase', () => ({
             setSession: (...args: unknown[]) => setSession(...args),
         },
     }),
+    requireSupabaseConfig: () => ({ url: 'https://test.supabase.co', anonKey: 'test-anon-key' }),
 }));
 
 const fetchMock = vi.fn();

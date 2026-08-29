@@ -1,6 +1,6 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
-import { MODES, priceTiers, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
+import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
 import { handleStripeEvent, type StripeEventLike, type WebhookStore } from '../_shared/stripeEvents.ts';
 import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeSignature.ts';
 
@@ -30,8 +30,12 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
+    // Only the accounts this deployment serves. Production serves live alone, so
+    // a sandbox event that still reaches it — the sandbox endpoint pointed here
+    // for as long as dev shared this backend — verifies against nothing and is
+    // refused rather than writing a test-mode row into the production database.
     const secrets: Array<[StripeMode, string]> = [];
-    for (const candidate of MODES) {
+    for (const candidate of servedModes()) {
         const secret = webhookSecretFor(candidate);
         if (secret) {
             secrets.push([candidate, secret]);

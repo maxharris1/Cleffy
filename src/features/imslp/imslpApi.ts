@@ -1,6 +1,6 @@
 import { parseLimitResponse } from '@/features/billing/limitErrors';
 import type { SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 export interface ImslpSearchHit {
     title: string;
@@ -136,8 +136,7 @@ export const importImslpPdfToStorage = async (
         throw new Error('Not signed in');
     }
 
-    const projectUrl = import.meta.env.VITE_SUPABASE_URL as string;
-    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
     const response = await fetch(`${projectUrl}/functions/v1/imslp-download`, {
         method: 'POST',
         headers: {

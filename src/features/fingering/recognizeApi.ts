@@ -11,7 +11,7 @@ import {
     type RecognizedRegion,
 } from '@/features/fingering/model';
 import type { RegionImages } from '@/features/fingering/regionCrop';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 /**
  * Client for the analyze-notes edge function. Raw fetch (analyzeApi
@@ -124,8 +124,7 @@ export const makeRecognizeNotesFn = (docId: string): RecognizeNotesFn => {
                 return null;
             }
 
-            const projectUrl = import.meta.env.VITE_SUPABASE_URL as string;
-            const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+            const { url: projectUrl, anonKey } = requireSupabaseConfig();
             const response = await fetch(`${projectUrl}/functions/v1/analyze-notes`, {
                 method: 'POST',
                 signal,

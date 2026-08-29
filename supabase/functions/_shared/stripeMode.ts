@@ -90,7 +90,30 @@ export const isDevelopmentOrigin = (origin: string): boolean => {
 };
 
 /**
- * Which Stripe account this caller belongs to, or null if we cannot tell.
+ * Which modes this deployment is allowed to serve, from `STRIPE_MODES`.
+ *
+ * Production sets `live`, so its own Edge Functions refuse a sandbox caller
+ * outright rather than writing a test-mode row into the production database.
+ * That is the backstop for the rule the client also follows: only cleffy.io
+ * touches production. A client build can be wrong — dev.cleffy.io shipped
+ * pointing at production for its whole existence — and this does not depend on
+ * one being right.
+ *
+ * Unset means both, which is what a database serving one project's own dev and
+ * local work wants.
+ */
+export const servedModes = (env: EnvLookup): StripeMode[] => {
+    const configured = nonEmpty(env('STRIPE_MODES'));
+    if (!configured) {
+        return [...MODES];
+    }
+    const wanted = configured.split(',').map((entry) => entry.trim().toLowerCase());
+    return MODES.filter((mode) => wanted.includes(mode));
+};
+
+/**
+ * Which Stripe account this caller belongs to, or null if we cannot tell — or if
+ * this deployment does not serve that account at all.
  *
  * Live is matched first and never degrades to the sandbox: if the live key is
  * missing, cleffy.io fails loudly rather than quietly serving test checkouts,
@@ -101,13 +124,13 @@ export const modeForOrigin = (origin: string | null, env: EnvLookup): StripeMode
     if (!normalized) {
         return null;
     }
-    if (originsFor('live', env).includes(normalized)) {
-        return 'live';
-    }
-    if (originsFor('test', env).includes(normalized) || isDevelopmentOrigin(normalized)) {
-        return 'test';
-    }
-    return null;
+    const served = servedModes(env);
+    const resolved = originsFor('live', env).includes(normalized)
+        ? 'live'
+        : originsFor('test', env).includes(normalized) || isDevelopmentOrigin(normalized)
+          ? 'test'
+          : null;
+    return resolved && served.includes(resolved) ? resolved : null;
 };
 
 /**

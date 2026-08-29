@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { encodeCropJpeg, encodePageJpeg } from '@/features/import/pageRaster';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 import type { ClassifyFn, ClassifyResult } from '@/features/import/importTypes';
 
 /**
@@ -75,8 +75,7 @@ export const makeCloudClassifyFn = (docId: string): ClassifyFn => {
                 .filter(([, ids]) => ids.every((id) => chosenIds.has(id)))
                 .map(([id, clusterIds]) => ({ id, clusterIds }));
 
-            const projectUrl = import.meta.env.VITE_SUPABASE_URL as string;
-            const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+            const { url: projectUrl, anonKey } = requireSupabaseConfig();
             const response = await fetch(`${projectUrl}/functions/v1/analyze-annotations`, {
                 method: 'POST',
                 signal,

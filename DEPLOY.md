@@ -11,26 +11,29 @@ the steps that need a human because no API exposes them — each one says why.
 
 ## Status
 
-| Piece                                                                  | State                                                     |
-| ---------------------------------------------------------------------- | --------------------------------------------------------- |
-| Billing schema (`billing`, `roster` migrations)                        | ✅ applied to production                                  |
-| Edge Functions (checkout, portal, webhook, student ×2, metered imslp)  | ✅ deployed, ACTIVE                                       |
-| Stripe functions redeployed at v2 with the self-configuring catalogue  | ✅ verified live                                          |
-| Stripe sandbox catalogue (3 products, 7 prices)                        | ✅ created                                                |
-| Stripe **live** catalogue (3 products, 7 prices)                       | ✅ created                                                |
-| Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                      |
-| Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                      |
-| Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                      |
-| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`                            |
-| Stripe Customer portal configuration (live)                            | ⛔ **one dashboard save — §0**                            |
-| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                      |
-| Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                    |
-| Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ⛔ **no API mints one — §0**                              |
-| Stripe secrets on the `dev` branch project                             | ⛔ **none set — §0, billing on dev fails until they are** |
-| Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                              |
-| `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                          |
-| cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                   |
-| Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5)   |
+| Piece                                                                  | State                                                                   |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Billing schema (`billing`, `roster` migrations)                        | ✅ applied to production                                                |
+| Edge Functions (checkout, portal, webhook, student ×2, metered imslp)  | ✅ deployed, ACTIVE                                                     |
+| Stripe functions redeployed at v2 with the self-configuring catalogue  | ✅ verified live                                                        |
+| Stripe sandbox catalogue (3 products, 7 prices)                        | ✅ created                                                              |
+| Stripe **live** catalogue (3 products, 7 prices)                       | ✅ created                                                              |
+| Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                                    |
+| Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                    |
+| Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                    |
+| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`                                          |
+| Stripe Customer portal configuration (live)                            | ⛔ **one dashboard save — §0**                                          |
+| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
+| Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
+| Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ⛔ **no API mints one — §0**                                            |
+| Stripe secrets on the `dev` branch project                             | ⛔ **none set — §0, billing on dev fails until they are**               |
+| Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                                            |
+| `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                                        |
+| cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                                 |
+| Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5)                 |
+| dev.cleffy.io actually pointed at that backend                         | ✅ by hostname in the bundle — **was production until 2026-08-28 (§5)** |
+| Edge secret `STRIPE_MODES` (both projects)                             | ⛔ **§0 — what refuses a sandbox caller on production**                 |
+| Sandbox webhook endpoint retargeted to the branch                      | ⛔ **§0 step 7 — still posts to production**                            |
 
 ---
 
@@ -41,16 +44,19 @@ live). dev.cleffy.io and localhost stay on **Cleffy sandbox**
 (`acct_1U35Fc9EqxUjgZtn`).
 
 Which account a checkout reaches is decided by `STRIPE_SECRET_KEY` — an Edge
-Function secret. Since §5 the two deploys have separate Supabase projects, so
-that could in principle be one live key on production and one test key on the
-`dev` branch, and nothing else. It is not enough on its own: `.env.production`
-is committed pointing at **production**, so anyone running the app locally — or
-any preview that has not had its Preview env vars applied — reaches production's
-Edge Functions, and a live key there would put a real card behind a local test
-button.
+Function secret. The two deploys have separate Supabase projects (§5), so in
+principle that is one live key on production, one test key on the `dev` branch,
+and nothing else to say.
+
+It is not enough on its own, because "which project a deploy talks to" is itself
+just configuration, and §5 records what happened the last time that was the only
+safeguard: dev.cleffy.io was believed to be on the branch project and was in fact
+on production for its entire existence. A live key alone would have meant real
+cards behind dev's buttons for exactly as long as nobody checked.
 
 So the account is chosen per request, from the **Origin** header
-(`supabase/functions/_shared/stripeMode.ts`):
+(`supabase/functions/_shared/stripeMode.ts`), and `STRIPE_MODES` lets each
+backend refuse the origins that are not its own:
 
 | Origin                                       | Account                        |
 | -------------------------------------------- | ------------------------------ |
@@ -69,6 +75,12 @@ caller between accounts, and an origin we do not publish from is refused rather
 than guessed. `STRIPE_LIVE_ORIGINS` / `STRIPE_TEST_ORIGINS` (comma-separated)
 extend the lists without a deploy.
 
+`STRIPE_MODES` then narrows it per backend: production serves `live` only, so a
+sandbox caller reaching it — dev, a preview, a laptop with the wrong `.env` —
+gets `400 unknown_origin` rather than a test-mode row in the production
+database. The `dev` branch serves `test` only, the mirror of it. Unset means
+both, which is what a single-project setup wants.
+
 The webhook has no Origin to sort by — both accounts POST to one URL per project
 — so it verifies the signature against each account's secret in turn, and
 whichever secret verifies _is_ the account. Mode is a result of authentication
@@ -81,8 +93,15 @@ live-mode dashboard → Developers → API keys.
 
 ```bash
 npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe \
-  STRIPE_SECRET_KEY_LIVE='sk_live_…'
+  STRIPE_SECRET_KEY_LIVE='sk_live_…' \
+  STRIPE_MODES='live'
 ```
+
+`STRIPE_MODES=live` is what makes "only cleffy.io writes to production" true on
+the server rather than only in the bundle: production's billing functions then
+refuse a sandbox caller outright — dev, a preview, a laptop — instead of writing
+a test-mode row into the production database. It also means a sandbox webhook
+that still arrives here verifies against nothing and is rejected.
 
 `STRIPE_WEBHOOK_SECRET_LIVE` is already set from the live endpoint's own signing
 secret. Production's existing `STRIPE_SECRET_KEY` keeps its sandbox value and
@@ -131,34 +150,34 @@ on dev.cleffy.io fails until it does (§5).
 supabase branches unpause dev --project-ref jibgwgosihadbjgxdsfe
 npx supabase secrets set --project-ref qdbnlrgylelelvwbkvnm \
   STRIPE_SECRET_KEY='sk_test_…' STRIPE_WEBHOOK_SECRET='whsec_…' \
-  APP_URL='https://dev.cleffy.io'
+  STRIPE_MODES='test' APP_URL='https://dev.cleffy.io'
 ```
+
+`STRIPE_MODES=test` is the mirror of production's: the branch refuses a
+cleffy.io caller, so the two backends cannot serve each other's storefront even
+if a build or a DNS entry is wrong.
 
 **6. Create the live Customer portal configuration.** Live dashboard → Settings →
 Billing → **Customer portal** → Save. `stripe-portal` 500s for every live caller
 until a default configuration exists, exactly as it did in the sandbox (§1).
 There is still no API for it.
 
-### One decision left: where sandbox webhooks land
-
-The **sandbox** endpoint (`we_1U8njJ9EqxUjgZtnfBK3y0XH`) still posts to
-**production**, from when dev shared that backend:
+**7. Repoint the sandbox webhook endpoint.** `we_1U8njJ9EqxUjgZtnfBK3y0XH` still
+posts to **production**, from when dev shared that backend:
 
 ```
-https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/stripe-webhook
-```
-
-So a purchase made on dev.cleffy.io creates its subscription row in production's
-database. Point it at the branch to finish the separation:
-
-```
+https://jibgwgosihadbjgxdsfe.supabase.co/functions/v1/stripe-webhook   # change to
 https://qdbnlrgylelelvwbkvnm.supabase.co/functions/v1/stripe-webhook
 ```
 
-The trade-off is that the branch is paused most of the time, and Stripe gives up
-after retrying a dead endpoint — so sandbox events raised while it is paused are
-lost, including any raised from localhost. Left as it is because that is a choice
-about how you use localhost, not a detail of the flip. The live endpoint
+Until it moves, a purchase on dev.cleffy.io tries to write its subscription row
+into production. `STRIPE_MODES=live` already refuses those deliveries, so nothing
+lands in the wrong place from step 1 onwards — but they are then simply lost
+rather than recorded in dev, so move the endpoint to complete the loop.
+
+Note the branch is paused most of the time and Stripe gives up after retrying a
+dead endpoint, so sandbox events raised while it is paused will be dropped. That
+is the cost of a paused dev backend, not of this change. The live endpoint
 (`we_1U9V8T4eZ6RX0W0glk3BZIOi`) correctly targets production either way.
 
 ### Verifying
@@ -361,9 +380,35 @@ VITE_SUPABASE_ANON_KEY  = sb_publishable_…
 
 ## 5. A separate dev Supabase backend — done
 
-`dev.cleffy.io` now runs on its own Supabase project: the persistent branch
-**`dev`** (`qdbnlrgylelelvwbkvnm`), a child of `jibgwgosihadbjgxdsfe`. Dev
-testing no longer writes production rows.
+`dev.cleffy.io` runs on its own Supabase project: the persistent branch **`dev`**
+(`qdbnlrgylelelvwbkvnm`), a child of `jibgwgosihadbjgxdsfe`.
+
+### It was not actually pointed there until 2026-08-28
+
+This section previously said dev testing no longer wrote production rows. It
+did. The repoint was supposed to come from `VITE_SUPABASE_*` overrides in the
+Vercel **Preview** environment (§4), and those were never set — every
+dev.cleffy.io deploy, up to and including the one built minutes before this was
+written, shipped `https://jibgwgosihadbjgxdsfe.supabase.co` in its bundle.
+Verify the claim rather than trusting it:
+
+```bash
+curl -s https://dev.cleffy.io/ | grep -o '/assets/index-[A-Za-z0-9_-]*\.js'
+curl -s "https://dev.cleffy.io/assets/index-<hash>.js" | grep -o 'https://[a-z]\{20\}\.supabase\.co' | sort -u
+```
+
+Nothing failed while it was wrong, which is the point: a rule kept in a
+dashboard is invisible to review, to CI, and to the repo. So the choice now
+lives in the bundle — `supabaseConfig()` in `src/lib/supabase.ts` picks the
+project from the hostname, cleffy.io and www.cleffy.io get production and every
+other host gets the branch, with `src/lib/supabaseConfig.test.ts` holding it
+there. An explicit `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` still wins,
+which is what a local `.env` and the local stack set — and what a Vercel
+environment variable would set if one is ever added.
+
+The Edge Functions enforce the same rule independently, so it does not rest on
+the client being right: production sets `STRIPE_MODES=live`, and its billing
+functions refuse a sandbox caller outright (§0).
 
 |                    |                                                         |
 | ------------------ | ------------------------------------------------------- |

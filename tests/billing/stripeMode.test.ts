@@ -9,6 +9,7 @@ import {
     PUBLISHED_PRICES,
     resolvePrice,
     secretKeyFor,
+    servedModes,
     slotForPrice,
     webhookSecretFor,
     type EnvLookup,
@@ -79,6 +80,35 @@ describe('modeForOrigin', () => {
         // Serving test mode on cleffy.io would let anyone buy a plan with Stripe's
         // published test card, so this must stay 'live' and fail later instead.
         expect(modeForOrigin('https://cleffy.io', env({ STRIPE_SECRET_KEY: TEST_KEY }))).toBe('live');
+    });
+
+    // Production serves live alone, so its own backend refuses every sandbox
+    // caller. This is what stops dev, a preview or a laptop writing a row into
+    // the production database even when a client build points at it by mistake.
+    it('refuses a sandbox caller where only live is served', () => {
+        const productionOnly = env({ STRIPE_SECRET_KEY_LIVE: LIVE_KEY, STRIPE_MODES: 'live' });
+        expect(modeForOrigin('https://cleffy.io', productionOnly)).toBe('live');
+        expect(modeForOrigin('https://dev.cleffy.io', productionOnly)).toBeNull();
+        expect(modeForOrigin('http://localhost:5173', productionOnly)).toBeNull();
+    });
+
+    it('refuses a live caller where only sandbox is served', () => {
+        const branchOnly = env({ STRIPE_SECRET_KEY: TEST_KEY, STRIPE_MODES: 'test' });
+        expect(modeForOrigin('https://cleffy.io', branchOnly)).toBeNull();
+        expect(modeForOrigin('https://dev.cleffy.io', branchOnly)).toBe('test');
+    });
+
+    it('serves both when STRIPE_MODES is unset', () => {
+        expect(servedModes(env({}))).toEqual(['live', 'test']);
+        expect(servedModes(env({ STRIPE_MODES: 'live' }))).toEqual(['live']);
+        expect(servedModes(env({ STRIPE_MODES: ' TEST , live ' }))).toEqual(['live', 'test']);
+    });
+
+    // A typo must not silently widen to "everything"; an unrecognised list
+    // serves nothing, and every caller is refused.
+    it('serves nothing when STRIPE_MODES names nothing we know', () => {
+        expect(servedModes(env({ STRIPE_MODES: 'production' }))).toEqual([]);
+        expect(modeForOrigin('https://cleffy.io', env({ STRIPE_MODES: 'production' }))).toBeNull();
     });
 
     it('takes an added origin from env without a code change', () => {

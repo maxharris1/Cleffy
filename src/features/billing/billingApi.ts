@@ -1,5 +1,5 @@
 import { parseLimitResponse, type LimitReachedError } from '@/features/billing/limitErrors';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 /**
  * Calls into the billing Edge Functions.
@@ -27,8 +27,7 @@ export const callEdgeFunction = async (name: string, payload: unknown): Promise<
         throw new Error('Not signed in');
     }
 
-    const projectUrl = import.meta.env.VITE_SUPABASE_URL as string;
-    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
     return fetch(`${projectUrl}/functions/v1/${name}`, {
         method: 'POST',
         headers: {

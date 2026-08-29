@@ -1,6 +1,6 @@
 import * as tus from 'tus-js-client';
 
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 /** Above this size, use the resumable (TUS) endpoint per Supabase guidance. */
 const TUS_THRESHOLD_BYTES = 6 * 1024 * 1024;
@@ -38,7 +38,7 @@ export const uploadPdfToStorage = async (
     if (!accessToken) {
         throw new Error('Not signed in');
     }
-    const projectUrl = import.meta.env.VITE_SUPABASE_URL as string;
+    const { url: projectUrl } = requireSupabaseConfig();
 
     await new Promise<void>((resolve, reject) => {
         const upload = new tus.Upload(file, {

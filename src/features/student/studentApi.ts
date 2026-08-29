@@ -1,6 +1,6 @@
 import { mapAuthError } from '@/features/auth/authErrors';
 import { MANAGED_STUDENT_COLUMNS } from '@/features/roster/rosterService';
-import { getSupabase } from '@/lib/supabase';
+import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 import type { AssignmentRow, DocumentRow, ManagedStudentRow } from '@/types/database';
 
 /**
@@ -71,8 +71,7 @@ const rejectionFrom = async (response: Response): Promise<StudentAuthError> => {
  * a child staring at a correct card deserves to be told which it is.
  */
 const openStudentSession = async (fn: 'student-login' | 'student-claim', payload: object): Promise<string> => {
-    const projectUrl = import.meta.env.VITE_SUPABASE_URL as string;
-    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
 
     let response: Response;
     try {

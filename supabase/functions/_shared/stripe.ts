@@ -6,6 +6,7 @@ import {
     priceTiers as priceTiersWith,
     resolvePrice as resolvePriceWith,
     secretKeyFor as secretKeyForWith,
+    servedModes as servedModesWith,
     webhookSecretFor as webhookSecretForWith,
     type StripeMode,
 } from './stripeMode.ts';
@@ -26,6 +27,9 @@ const env = (name: string): string | undefined => Deno.env.get(name);
 export const modeForOrigin = (origin: string | null): StripeMode | null => modeForOriginWith(origin, env);
 
 export const modeForRequest = (req: Request): StripeMode | null => modeForOrigin(req.headers.get('Origin'));
+
+/** The Stripe accounts this deployment serves at all — production serves only live. */
+export const servedModes = (): StripeMode[] => servedModesWith(env);
 
 export const secretKeyFor = (mode: StripeMode): string | null => secretKeyForWith(mode, env);
 

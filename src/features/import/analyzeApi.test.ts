@@ -9,6 +9,7 @@ vi.mock('@/lib/supabase', () => ({
             getSession: () => Promise.resolve({ data: { session: { access_token: 'test-token' } } }),
         },
     }),
+    requireSupabaseConfig: () => ({ url: 'https://test.supabase.co', anonKey: 'test-anon-key' }),
 }));
 
 // jsdom canvases can't encode JPEGs — stub the encoders (their own logic is canvas glue).
