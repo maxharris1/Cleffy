@@ -216,8 +216,15 @@ export type Entitlements = {
     limits: EntitlementLimits;
 };
 
+/**
+ * One row per user PER STRIPE ACCOUNT — `mode` is half the primary key since
+ * 20260828180000_billing_stripe_mode.sql. A `cus_…` belongs to exactly one
+ * account, so the sandbox customer a teacher picked up on localhost is a second
+ * row rather than their live one overwritten.
+ */
 export type BillingCustomerRow = {
     user_id: string;
+    mode: 'live' | 'test';
     stripe_customer_id: string;
     created_at: string;
 };
@@ -225,6 +232,8 @@ export type BillingCustomerRow = {
 export type SubscriptionRow = {
     stripe_subscription_id: string;
     user_id: string;
+    /** The account that sold it. Only the modes `entitling_billing_modes()` names grant a tier. */
+    mode: 'live' | 'test';
     tier: BillingTier;
     status: string;
     price_id: string | null;
