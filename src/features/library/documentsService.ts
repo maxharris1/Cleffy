@@ -5,6 +5,7 @@ import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
+import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
 import type { DocumentRow, MemberRole } from '@/types/database';
 
 /** Cloud document ids are plain UUIDs; local-only docs use the 'local-' prefix. */
@@ -48,9 +49,9 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
     const role = data?.role ?? null;
     if (role) {
         // Remember the role so an offline open gets the right editing mode.
-        const cached = await getDb().pdfCache.get(docId);
+        const cached = await getCachedPdf(docId);
         if (cached && cached.myRole !== role) {
-            await getDb().pdfCache.put({ ...cached, myRole: role });
+            await putCachedPdf({ ...cached, myRole: role });
         }
     }
     return role;
@@ -87,7 +88,7 @@ export const documentRowFromCache = (cached: {
  * flush time by RLS).
  */
 export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFallback | null> => {
-    const cached = await getDb().pdfCache.get(docId);
+    const cached = await getCachedPdf(docId);
     if (!cached) {
         return null;
     }
@@ -99,7 +100,7 @@ export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFall
             archivedAt: cached.archivedAt,
         }),
         role: cached.myRole ?? 'editor',
-        bytes: await cached.bytes.arrayBuffer(),
+        bytes: await readCachedPdfBytes(cached.bytes),
     };
 };
 
@@ -214,9 +215,9 @@ export const uploadDocument = async (
     }
 
     // Seed the offline cache immediately — no need to re-download what we just sent.
-    await getDb().pdfCache.put({
+    await putCachedPdf({
         docId: id,
-        bytes: new Blob([bytes], { type: 'application/pdf' }),
+        bytes,
         title,
         cachedAt: new Date().toISOString(),
     });
@@ -319,10 +320,9 @@ export const renameDocument = async (docId: string, title: string): Promise<void
     if (error) {
         throw new Error(`Could not rename: ${error.message}`);
     }
-    const db = getDb();
-    const cached = await db.pdfCache.get(docId);
+    const cached = await getCachedPdf(docId);
     if (cached) {
-        await db.pdfCache.put({ ...cached, title });
+        await putCachedPdf({ ...cached, title });
     }
 };
 
@@ -362,37 +362,42 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
  * PDF bytes for a cloud doc: Dexie cache first, else storage download (then
  * cache). A cache holding an older content_rev than the fetched row means the
  * file was replaced (smart-import cleanup) — re-download.
+ *
+ * Every cache touch here is best-effort. We already hold the bytes the caller
+ * asked for by the time we try to store them, so a browser that refuses the
+ * write (private browsing, no quota) gets the score without an offline copy
+ * rather than an unopenable score — which is what a bare `put` cost us.
  */
 export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> => {
-    const db = getDb();
-    const cached = await db.pdfCache.get(doc.id);
+    const cached = await getCachedPdf(doc.id);
     const wantRev = doc.content_rev ?? 0;
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
         // Refresh the archive flag from the row we were handed, same as fetchMyRole
         // does for the role — an offline open must know the score is read-only.
         if (cached.archivedAt !== doc.archived_at) {
-            await db.pdfCache.put({ ...cached, archivedAt: doc.archived_at });
+            await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
         }
-        return cached.bytes.arrayBuffer();
+        return readCachedPdfBytes(cached.bytes);
     }
     const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
     if (error || !data) {
         if (cached) {
             // Offline with a stale cache beats no score at all.
-            return cached.bytes.arrayBuffer();
+            return readCachedPdfBytes(cached.bytes);
         }
         throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
     }
-    await db.pdfCache.put({
+    const bytes = await data.arrayBuffer();
+    await putCachedPdf({
         docId: doc.id,
-        bytes: data,
+        bytes,
         title: doc.title,
         cachedAt: new Date().toISOString(),
         myRole: cached?.myRole,
         contentRev: wantRev,
         archivedAt: doc.archived_at,
     });
-    return data.arrayBuffer();
+    return bytes;
 };
 
 /** Object name (within `{docId}/`) that preserves the pre-import original. */
@@ -439,11 +444,10 @@ export const replaceDocumentPdf = async (
         throw new Error(`The cleaned file was saved but the document could not be updated: ${updateError.message}`);
     }
 
-    const db = getDb();
-    const cached = await db.pdfCache.get(doc.id);
-    await db.pdfCache.put({
+    const cached = await getCachedPdf(doc.id);
+    await putCachedPdf({
         docId: doc.id,
-        bytes: new Blob([newBytes as unknown as BlobPart], { type: 'application/pdf' }),
+        bytes: newBytes.slice().buffer,
         title: updated.title,
         cachedAt: new Date().toISOString(),
         myRole: cached?.myRole ?? 'owner',

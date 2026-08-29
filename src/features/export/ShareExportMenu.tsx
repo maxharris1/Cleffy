@@ -8,7 +8,7 @@ import { isBillingConfigured } from '@/features/billing/pricing';
 import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { exportAnnotatedPdf } from '@/features/export/exportPdf';
 import { getSupabase } from '@/lib/supabase';
-import { getDb } from '@/sync/db';
+import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
 import { useViewerStore } from '@/state/store';
 import { buttonClassName } from '@/ui/classNames';
 
@@ -103,11 +103,11 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
         if (bytes && bytes.byteLength > 0) {
             return bytes;
         }
-        const cached = await getDb().pdfCache.get(docId);
+        const cached = await getCachedPdf(docId);
         if (!cached) {
             throw new Error('PDF is not cached on this device yet');
         }
-        return cached.bytes.arrayBuffer();
+        return readCachedPdfBytes(cached.bytes);
     };
 
     /**
