@@ -38,13 +38,13 @@ Open [SQL Editor](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/sq
 paste the contents of **`scripts/apply-migrations.sql`**, run it once.
 
 > **Bootstrapping an empty database only — never as a re-run.** The mirror is
-> not idempotent: 22 bare `create table public.…` (none with `if not exists`)
-> and 58 bare `create policy`, the first of them ten lines in. Pasted over a
-> database that already has them it stops at `42P07 relation "documents"
-> already exists`, and the SQL editor submits the file as one batch, so what you
-> get is a hard error partway with nothing to say how far it went. Use **Option
-> B** against an existing database: it runs only the migrations that project has
-> not already recorded.
+> not idempotent: every `create table` and `create policy` in it is bare, with
+> no `if not exists`, and the first one is ten lines in. Pasted over a database
+> that already has them it stops at `42P07 relation "documents" already exists`,
+> and the SQL editor submits the file as one batch, so what you get is a hard
+> error partway with nothing to say how far it went. Use **Option B** against an
+> existing database: it runs only the migrations that project has not already
+> recorded.
 >
 > Rebuilding **production** from this file needs one step afterwards. The mirror
 > carries the repo's `entitling_billing_modes()`, which returns
