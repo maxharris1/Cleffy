@@ -37,6 +37,16 @@ Project: `jibgwgosihadbjgxdsfe` · https://supabase.com/dashboard/project/jibgwg
 Open [SQL Editor](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/sql/new),
 paste the contents of **`scripts/apply-migrations.sql`**, run it once.
 
+> **Bootstrapping only — never as a re-run against a live production.** The
+> mirror carries the repo's `entitling_billing_modes()`, which returns
+> `array['live', 'test']` because that is right for every database except one.
+> Production is narrowed to `array['live']` by hand as a step of the live flip
+> (DEPLOY.md §0 step 3), and every statement here is `create or replace`, so
+> pasting this file over a production that has already been flipped silently
+> restores the wider value — and a published Stripe test card buys a real plan
+> again. Re-apply the narrowing afterwards, or use Option B, which only runs
+> migrations production has not already recorded.
+
 **Option B — CLI (repeatable, preferred long-term):**
 Add these two env vars to the Claude environment (or your shell):
 
