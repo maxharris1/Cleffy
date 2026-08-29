@@ -23,7 +23,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                    |
 | Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                    |
 | Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`                                          |
-| Stripe Customer portal configuration (live)                            | ⛔ **one dashboard save — §0**                                          |
+| Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on  |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
 | Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ✅ set 2026-08-28                                                       |
@@ -216,27 +216,49 @@ it does not keep renewing in test mode.
 
 ---
 
-## 1. Stripe Customer portal (one click, once)
+## 1. Stripe Customer portal — configured in both modes
 
 `stripe-portal` returns 500 for every caller until a **default portal
-configuration** exists. There is no API for creating one — the Stripe connector
-exposes only `GET /v1/billing_portal/configurations`, and that list is currently
-empty.
+configuration** exists for that mode. Both modes now have one; live is
+`bpc_1U9juu4eZ6RX0W0gPrUkrH6S` (default, active), verified by creating a real
+live portal session against a throwaway customer and then deleting it.
 
-1. Open the **test-mode** dashboard → Settings → Billing → **Customer portal**.
-2. Leave the defaults as they are; press **Save**.
+Intended shape, live and sandbox alike:
 
-Done for the sandbox; the **live** dashboard needs the same single save (§0).
+| Feature                              | Setting                                                              |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| Cancel subscription                  | on                                                                   |
+| Update payment method                | on                                                                   |
+| Invoice history                      | on                                                                   |
+| Switch plans (`subscription_update`) | on, `default_allowed_updates: ['price']`                             |
+| Proration                            | `always_invoice` — charge the difference at the moment of the switch |
+| Switchable products                  | Personal, Teacher, Academy — monthly and annual each                 |
+| **Excluded**                         | **the $99 Founding Teacher annual price**                            |
 
-That single save creates the default configuration. Verify with:
+`always_invoice` is what makes an upgrade bill correctly mid-cycle: Stripe
+credits the unused remainder of the old plan and charges the new one only from
+the switch forward, then invoices the net difference immediately. Nobody pays the
+upgraded rate for days already elapsed. Its cost is that a failing card surfaces
+as a failed invoice during the upgrade rather than quietly on the next cycle.
 
-```
-GET /v1/billing_portal/configurations   # should return exactly one object
-```
+Two things the UI does not warn about:
 
-Until then `stripe-portal` reaches Stripe and Stripe refuses — the function
-itself is healthy, which you can confirm with an `OPTIONS` preflight returning
-`200 ok`.
+- **Founding Teacher is a second annual price on the Teacher product**, so it sits
+  next to the $190 one in the product picker. Listing it would let anyone switch
+  _into_ a grandfathered launch price and keep it indefinitely.
+- **The portal has no direction control.** Listing the products enables downgrades
+  as well as upgrades; under `always_invoice` a downgrade yields a credit balance
+  against future invoices, not a refund.
+
+### This is dashboard-only — the API cannot do it
+
+There is no create endpoint exposed here, and **`features[subscription_update][products]`
+is silently ignored on write and absent on read**, at every API version this
+account accepts (2020-08-27 through 2025-03-31.basil were all tried). A write can
+therefore turn `subscription_update` _on_ while leaving the product list null —
+switching enabled with an unverifiable scope, which is worse than off. Do it in
+**Settings → Billing → Customer portal**, in each mode, and treat the dashboard as
+the only source of truth for which prices are switchable.
 
 ## 2. Edge Function secrets
 
@@ -531,6 +553,91 @@ customers can cancel and update cards there, but cannot switch plans — despite
 `stripe-portal`'s own comment saying plan changes happen in the portal. To close
 that gap, enable "Switch plans" in the portal settings and add the three
 products.
+
+## 7. Inbound support mail (Resend) — live
+
+`support@cleffy.io` is meant to reach a human and, later, feed agentic triage.
+Resend can receive on a custom domain, but **it cannot forward** — its own
+[forwarding guide](https://resend.com/docs/knowledge-base/forward-emails-with-resend-inbound)
+is webhook-plus-code, because the `email.received` webhook carries metadata only
+and the body must be fetched from the Received Emails API. So forwarding is ours
+to write, which is fine: the same endpoint is the triage entry point later.
+
+Live as of 2026-08-29 and proven end to end: an email to `support@cleffy.io` is
+received by Resend, signed with Svix, verified here, stored in
+`support_messages` with its body, and forwarded to the mailbox in
+`SUPPORT_FORWARD_TO`. Verified by sending a real message through it and reading
+the resulting row (`has_body: true, forwarded: true, forward_error: null`); the
+test rows were then deleted.
+
+What exists:
+
+| Piece                                 | What it does                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_shared/svixSignature.ts`            | Svix HMAC verification, import-free like `stripeSignature.ts` so vitest and Deno load the same file. Resend signs with Svix: `svix-id` / `svix-timestamp` / `svix-signature`, signed content `id.timestamp.body`, base64 digests, and the secret is the **base64-decoded** body of `whsec_…` — not its ASCII. |
+| `resend-inbound/index.ts`             | Verifies, claims by `resend_email_id`, fetches the body, stores, then forwards. `verify_jwt = false`, like `stripe-webhook`.                                                                                                                                                                                  |
+| `20260829130000_support_messages.sql` | The durable record. RLS on with no policy and every grant revoked — support mail is stranger-written and never belongs in a browser.                                                                                                                                                                          |
+| `tests/support/svixSignature.test.ts` | 18 cases: round-trip, rotation, replay window, tampered body, wrong secret, wrong id.                                                                                                                                                                                                                         |
+
+Order inside the handler is deliberate: **persist, then forward.** A forward that
+fails leaves `forwarded_at` null — visible and replayable. Forwarding first and
+failing to store would lose the message on the retry that then no-ops.
+
+### ⚠️ Never call `POST /domains/{id}/verify` on a working domain
+
+This cost a live outage on 2026-08-29. Enabling receiving adds a required MX
+record, which moves the domain to `pending`; calling `/verify` then reset
+**DKIM and SPF to pending as well**, and those had been verified for months.
+Resend refuses to send from a domain that is not `verified`, so:
+
+```
+The cleffy.io domain is not verified.
+```
+
+**Supabase Auth sends through `smtp.resend.com` as `noreply@cleffy.io`** — check
+`GET /v1/projects/{ref}/config/auth` before touching this domain. Password resets
+and student email invites stop working while it is pending. Signups survive only
+because `mailer_autoconfirm` is on.
+
+Every DNS record was verified byte-for-byte against Resend's expected values
+throughout; nothing in DNS was wrong, and no pre-existing record was altered.
+Recovery is Resend's async re-check, which the dashboard's **Verify DNS Records**
+button drives harder than the API does. Receiving was rolled back to `disabled`
+to return the required set to its original three records.
+
+The apex `MX inbound-smtp.us-east-1.amazonaws.com` (priority 10) is still in
+Vercel DNS and inert while receiving is off. Re-enabling receiving is what makes
+it live — and note Resend requires it to be the **lowest-priority** MX on the
+domain.
+
+### Two API traps this cost, both worth remembering
+
+**The receive endpoint is `GET /emails/receiving/{id}`, not `/emails/received/{id}`.**
+The wrong spelling returns `405`, not `404`, so it reads like a method problem
+rather than a wrong path. With no body fetched, the forward then fails
+`422 Missing \`html\` or \`text\` field` — a message that blames the send when the
+fault is upstream. The handler now records the fetch failure on the row and
+refuses to attempt a bodyless forward, so the row names the real cause.
+
+**`support_email` cannot be set through the Stripe API.** `POST /v1/accounts/{id}`
+answers _"You cannot use this method on your own account: you may only use it on
+connected accounts."_ It is a dashboard field, like the portal configuration —
+live dashboard → Settings → Business → Public business information.
+
+### State
+
+| Piece                     | Where                                                                                     |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| Resend domain `cleffy.io` | verified, sending **and** receiving enabled                                               |
+| Inbound MX (apex)         | `inbound-smtp.us-east-1.amazonaws.com` priority 10, in Vercel DNS                         |
+| Webhook                   | `ea73d8be-19ec-45f9-9cd8-ebf4a2ff681f` → `/functions/v1/resend-inbound`, `email.received` |
+| Edge secrets              | `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `SUPPORT_FORWARD_TO`, `SUPPORT_FORWARD_FROM`   |
+| `resend-inbound`          | ACTIVE on production, `verify_jwt = false`                                                |
+| `support_messages`        | applied to production and the `dev` branch                                                |
+
+The signature gate was checked against the deployed endpoint, not only in tests:
+unsigned → `missing_header`, forged → `signature_mismatch`, stale timestamp →
+`timestamp_out_of_tolerance`, and no row was written by any of them.
 
 ## Migration history — reconciled 2026-08-27
 

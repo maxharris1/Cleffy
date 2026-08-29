@@ -7,6 +7,16 @@ import { appOrigin, modeForRequest, stripeClient } from '../_shared/stripe.ts';
  * Opens a Stripe Customer Portal session. Plan changes, card updates and
  * cancellations all happen there rather than in Cleffy — the webhook is what
  * brings the result back into `subscriptions`.
+ *
+ * What the portal actually offers is not decided here: it comes from the
+ * account's default portal configuration, per mode, and this function only
+ * hands Stripe a customer. So "plan changes happen there" is true only while
+ * `subscription_update` is enabled on that configuration with the switchable
+ * products listed — a dashboard setting, invisible from this file and from the
+ * API (no version this account accepts serialises
+ * `features.subscription_update.products`). DEPLOY.md §1 records the intended
+ * shape; if plan switching ever silently stops working, that configuration is
+ * the first thing to look at, not this code.
  */
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
