@@ -21,6 +21,7 @@ import {
     buildSearchVariants,
     correctTokens,
     foldAccents,
+    isWorkTitle,
     mergeAndRank,
     tokenizeQuery,
     type RankBatch,
@@ -164,6 +165,8 @@ interface TitleResolution {
     resolvedPageIds: Map<string, number>;
     /** folded resolved title → hard-filter categories the page belongs to */
     categoryHits: Map<string, Set<string>>;
+    /** folded titles of chunks whose category lookup failed — unknown, not non-members */
+    unverified: Set<string>;
 }
 
 /**
@@ -175,6 +178,7 @@ const resolveTitles = async (titles: string[], hardCategories: string[]): Promis
         resolvedTitles: new Map(),
         resolvedPageIds: new Map(),
         categoryHits: new Map(),
+        unverified: new Set(),
     };
     if (titles.length === 0) {
         return resolution;
@@ -234,17 +238,33 @@ const resolveTitles = async (titles: string[], hardCategories: string[]): Promis
                     }
                 }
             } catch {
-                // keep unresolved titles
+                // Keep unresolved titles. When a category check was requested,
+                // the whole chunk is "unknown" rather than "not a member" — a
+                // transient MW failure must not silently delete 40 hits.
+                if (hardCategories.length > 0) {
+                    for (const title of chunk) {
+                        resolution.unverified.add(foldAccents(title));
+                    }
+                }
             }
         }),
     );
     return resolution;
 };
 
-/** Folded titles (of `titles`) that belong to at least one of the categories. */
-const verifyCategoryMembership = async (titles: string[], categories: string[]): Promise<Set<string>> => {
+/**
+ * Folded titles (of `titles`) that belong to at least one of the categories,
+ * plus the ones whose lookup failed — those are unknown, not non-members.
+ */
+const verifyCategoryMembership = async (
+    titles: string[],
+    categories: string[],
+): Promise<{ members: Set<string>; unverified: Set<string> }> => {
     const resolution = await resolveTitles(titles, categories);
-    return new Set(resolution.categoryHits.keys());
+    return {
+        members: new Set([...resolution.categoryHits.keys(), ...resolution.unverified]),
+        unverified: resolution.unverified,
+    };
 };
 
 const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
@@ -272,7 +292,7 @@ const browseByFilters = async (
         let verified = false;
         let filterRelaxed = false;
         if (hardCategories.length > 0 && !instrumentIsPrimary) {
-            const membership = await verifyCategoryMembership(
+            const { members: membership, unverified } = await verifyCategoryMembership(
                 members.map((m) => m.title),
                 hardCategories,
             );
@@ -281,6 +301,10 @@ const browseByFilters = async (
                 kept = matching;
                 verified = true;
             } else {
+                filterRelaxed = true;
+            }
+            if (unverified.size > 0) {
+                // Some members were kept without a completed check — say so.
                 filterRelaxed = true;
             }
         }
@@ -292,10 +316,14 @@ const browseByFilters = async (
             delete residualFilters.instrument;
         }
 
-        const filtered = kept
-            .filter((m) => titleMatchesFilters(m.title, residualFilters))
-            .slice(0, limit)
-            .map((m) => toHit(m.title, m.pageid));
+        let matched = kept.filter((m) => titleMatchesFilters(m.title, residualFilters));
+        if (matched.length === 0 && filterRelaxed) {
+            // Relaxing means we stopped enforcing the instrument at all — the
+            // token proxy must not re-impose it and blank the panel.
+            const { instrument: _instrument, ...withoutInstrument } = residualFilters;
+            matched = kept.filter((m) => titleMatchesFilters(m.title, withoutInstrument));
+        }
+        const filtered = matched.slice(0, limit).map((m) => toHit(m.title, m.pageid));
         if (sort === 'relevance') {
             // Mild preference for shorter / more specific titles when browsing.
             return {
@@ -317,7 +345,7 @@ const browseByFilters = async (
     const hits = await mwSearch(seedQuery, limit);
     return {
         results: hits
-            .filter((h) => titleMatchesFilters(h.title, filters))
+            .filter((h) => isWorkTitle(h.title) && titleMatchesFilters(h.title, filters))
             .slice(0, limit)
             .map((h) => toHit(h.title, h.pageid, (h.snippet ?? '').replace(/<[^>]+>/g, ''))),
         filterRelaxed: false,
@@ -412,6 +440,7 @@ Deno.serve(async (req) => {
                 resolvedTitles: resolution.resolvedTitles,
                 resolvedPageIds: resolution.resolvedPageIds,
                 categoryHits: resolution.categoryHits,
+                unverifiedTitles: resolution.unverified,
                 requireCategories,
                 extraScore: (title) => facetBoost(title, filters),
             });
@@ -439,7 +468,9 @@ Deno.serve(async (req) => {
                 );
                 pushAliasBatch(correctedAliases);
                 aliasTitles = [...aliasTitles, ...correctedAliases];
-                tokens = corrected;
+                // Union, not replace: a guessed spelling must not cost hits
+                // that match what the user actually typed.
+                tokens = [...new Set([...tokens, ...corrected])];
 
                 const unresolved = collectTitles().filter(
                     (t) => !resolution.resolvedPageIds.has(t) && !resolution.resolvedTitles.has(t),
@@ -454,13 +485,17 @@ Deno.serve(async (req) => {
                 for (const [title, cats] of extra.categoryHits) {
                     resolution.categoryHits.set(title, cats);
                 }
+                for (const title of extra.unverified) {
+                    resolution.unverified.add(title);
+                }
                 ranked = rank(hardCategories.length > 0);
             }
         }
 
         // Instrument hard filter emptied the pool → fall back to boost-only so
         // the panel never blanks; the client shows a "close matches" hint.
-        let filterRelaxed = false;
+        // Hits whose category lookup failed were kept unchecked — same hint.
+        let filterRelaxed = resolution.unverified.size > 0;
         if (hardCategories.length > 0 && ranked.length < 5) {
             const relaxed = rank(false);
             if (relaxed.length > ranked.length) {

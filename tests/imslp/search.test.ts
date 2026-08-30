@@ -174,6 +174,15 @@ describe('scoreTitleMatch', () => {
         expect(scoreTitleMatch(moonlight, ['beethovn'])).toBeGreaterThan(0);
     });
 
+    it('matches space-form catalog numbers — IMSLP dots K./D. but spaces BWV/WoO/RV', () => {
+        const tokens = tokenizeQuery('Bach BWV 565');
+        expect(tokens).toEqual(['bach', 'bwv.565']);
+        expect(scoreTitleMatch('Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)', tokens)).toBeGreaterThan(
+            scoreTitleMatch('Cello Suite No.1 in G major, BWV 1007 (Bach, Johann Sebastian)', tokens),
+        );
+        expect(scoreTitleMatch('Für Elise, WoO 59 (Beethoven, Ludwig van)', tokenizeQuery('WoO 59'))).toBeGreaterThan(0);
+    });
+
     it('matches accent-folded non-decomposable letters', () => {
         expect(scoreTitleMatch('Symphony No.3 (Lutosławski, Witold)', ['lutoslawski'])).toBeGreaterThan(0);
     });

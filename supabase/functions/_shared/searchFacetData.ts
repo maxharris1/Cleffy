@@ -105,8 +105,10 @@ export const ERA_COMPOSER_SEEDS: Record<EraId, string[]> = {
     modern: ['Debussy', 'Ravel', 'Satie', 'Rachmaninoff', 'Joplin'],
 };
 
+// Prototype-free: these maps are read by untrusted ids, so "constructor" or
+// "toString" must miss rather than resolve to an Object.prototype member.
 const byId = (values: FacetValueData[]): Record<string, FacetValueData> => {
-    const out: Record<string, FacetValueData> = {};
+    const out = Object.create(null) as Record<string, FacetValueData>;
     for (const v of values) {
         out[v.id] = v;
     }

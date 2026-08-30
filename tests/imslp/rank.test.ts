@@ -112,6 +112,21 @@ describe('mergeAndRank', () => {
         expect(ranked[0]?.title).toBe(original);
     });
 
+    it('keeps hits whose category lookup failed rather than treating them as non-members', () => {
+        const member = 'Nocturnes, Op.9 (Chopin, Frédéric)';
+        const unknown = 'Nocturne in C-sharp minor, B.49 (Chopin, Frédéric)';
+        const nonMember = 'Symphony No.5, Op.64 (Tchaikovsky, Pyotr)';
+        const batches = [batch('nocturne', 1, [member, unknown, nonMember])];
+        const ranked = mergeAndRank(batches, {
+            query: 'nocturne',
+            tokens: ['nocturne'],
+            categoryHits: new Map([[foldAccents(member), new Set(['For piano'])]]),
+            unverifiedTitles: new Set([foldAccents(unknown)]),
+            requireCategories: true,
+        });
+        expect(ranked.map((h) => h.title)).toEqual([member, unknown]);
+    });
+
     it('keeps everything when requireCategories is false (relaxed mode)', () => {
         const titles = ['A (Composer, One)', 'B (Composer, Two)'];
         const batches = [batch('q', 1, titles)];

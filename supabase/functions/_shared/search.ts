@@ -203,7 +203,8 @@ export const scoreTitleMatch = (title: string, tokens: string[]): number => {
     for (const t of scorable) {
         if (UNIT_TOKEN_RE.test(t)) {
             // "op.27" matching the title is a much stronger signal than a word.
-            if (foldedTitle.includes(t)) {
+            // IMSLP dots K./D./Hob. but spaces BWV/WoO/RV — accept both forms.
+            if (foldedTitle.includes(t) || foldedTitle.includes(t.replace('.', ' '))) {
                 score += 6;
                 hits += 1;
             }
@@ -339,6 +340,12 @@ export interface RankOptions {
     categoryHits?: Map<string, Set<string>>;
     /** When true, drop hits with no categoryHits entry (instrument hard filter). */
     requireCategories?: boolean;
+    /**
+     * Folded titles whose category lookup never completed. Under
+     * requireCategories they mean "unknown", not "not a member" — an upstream
+     * failure must not be indistinguishable from a genuine non-match.
+     */
+    unverifiedTitles?: Set<string>;
     /** Facet boosts etc., supplied by the caller so this stays data-free. */
     extraScore?: (title: string) => number;
 }
@@ -387,7 +394,7 @@ export const mergeAndRank = (batches: RankBatch[], opts: RankOptions): RankedHit
     for (const hit of merged.values()) {
         const folded = foldAccents(hit.title);
         const categories = opts.categoryHits?.get(folded);
-        if (opts.requireCategories && (!categories || categories.size === 0)) {
+        if (opts.requireCategories && !opts.unverifiedTitles?.has(folded) && (!categories || categories.size === 0)) {
             continue;
         }
         let score = hit.score + scoreTitleMatch(hit.title, opts.tokens);
