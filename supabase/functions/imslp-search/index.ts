@@ -299,7 +299,10 @@ const browseByFilters = async (
             const matching = members.filter((m) => membership.has(foldAccents(m.title)));
             if (matching.length > 0) {
                 kept = matching;
-                verified = true;
+                // A wholly-unverified match list confirms nothing — the token
+                // proxy below must stay in force rather than being dropped as
+                // "already answered" when every lookup chunk failed.
+                verified = matching.some((m) => !unverified.has(foldAccents(m.title)));
             } else {
                 filterRelaxed = true;
             }
@@ -476,6 +479,11 @@ Deno.serve(async (req) => {
                     (t) => !resolution.resolvedPageIds.has(t) && !resolution.resolvedTitles.has(t),
                 );
                 const extra = await resolveTitles(unresolved, hardCategories);
+                // The retry supersedes the first attempt's verdict: a title
+                // whose chunk failed then may be confirmed (or refuted) now.
+                for (const t of unresolved) {
+                    resolution.unverified.delete(foldAccents(t));
+                }
                 for (const [from, to] of extra.resolvedTitles) {
                     resolution.resolvedTitles.set(from, to);
                 }
@@ -494,8 +502,9 @@ Deno.serve(async (req) => {
 
         // Instrument hard filter emptied the pool → fall back to boost-only so
         // the panel never blanks; the client shows a "close matches" hint.
-        // Hits whose category lookup failed were kept unchecked — same hint.
-        let filterRelaxed = resolution.unverified.size > 0;
+        // Same hint when an unchecked hit is actually shown — but only then:
+        // an unverified title that ranked below the cut relaxed nothing.
+        let filterRelaxed = ranked.slice(0, limit).some((h) => resolution.unverified.has(foldAccents(h.title)));
         if (hardCategories.length > 0 && ranked.length < 5) {
             const relaxed = rank(false);
             if (relaxed.length > ranked.length) {

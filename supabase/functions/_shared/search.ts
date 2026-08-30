@@ -96,6 +96,13 @@ export const normalizeQuery = (q: string): string => {
 const UNIT_TOKEN_RE = /^(?:op|no|nr|bwv|woo|hob|rv|kv|k|d|s)\.\d+[a-z]?$/;
 
 /**
+ * Catalogs IMSLP writes with a space ("BWV 565", "WoO 59") — the only unit
+ * tokens whose space form may match a title. "no 4" or "k 331" as substrings
+ * would false-hit inside "piano 4 hands" or "polka 331".
+ */
+const SPACED_CATALOG_RE = /^(?:bwv|woo|hob|rv|kv)\.\d+[a-z]?$/;
+
+/**
  * Normalized tokens with opus/number/catalog units kept atomic ("Op.27 No.2"
  * → ["op.27", "no.2"], never ["op", "27", "no"]).
  */
@@ -203,8 +210,7 @@ export const scoreTitleMatch = (title: string, tokens: string[]): number => {
     for (const t of scorable) {
         if (UNIT_TOKEN_RE.test(t)) {
             // "op.27" matching the title is a much stronger signal than a word.
-            // IMSLP dots K./D./Hob. but spaces BWV/WoO/RV — accept both forms.
-            if (foldedTitle.includes(t) || foldedTitle.includes(t.replace('.', ' '))) {
+            if (foldedTitle.includes(t) || (SPACED_CATALOG_RE.test(t) && foldedTitle.includes(t.replace('.', ' ')))) {
                 score += 6;
                 hits += 1;
             }

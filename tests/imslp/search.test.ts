@@ -183,6 +183,14 @@ describe('scoreTitleMatch', () => {
         expect(scoreTitleMatch('Für Elise, WoO 59 (Beethoven, Ludwig van)', tokenizeQuery('WoO 59'))).toBeGreaterThan(0);
     });
 
+    it('never space-forms "no.N" — it hides inside "piano 4 hands"-style titles', () => {
+        const tokens = tokenizeQuery('sonata no 4');
+        expect(tokens).toEqual(['sonata', 'no.4']);
+        expect(scoreTitleMatch('Piano Sonata No.4, Op.7 (Beethoven, Ludwig van)', tokens)).toBeGreaterThan(
+            scoreTitleMatch('Sonata for Piano 4 hands (Diabelli, Anton)', tokens),
+        );
+    });
+
     it('matches accent-folded non-decomposable letters', () => {
         expect(scoreTitleMatch('Symphony No.3 (Lutosławski, Witold)', ['lutoslawski'])).toBeGreaterThan(0);
     });
