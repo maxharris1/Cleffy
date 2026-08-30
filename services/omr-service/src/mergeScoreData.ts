@@ -43,6 +43,14 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
     const warnings = new Set<string>();
     let defaultBpm: number | null = null;
     /**
+     * Whether the part that supplied the surviving `defaultBpm` was the one
+     * guessing it from the meter. `tempo_defaulted` is a statement about the
+     * opening of the finished score, not about one shard: a heading is printed
+     * on page 1 only, so the second shard of any score is normally tempo-less
+     * and would otherwise tell the reader that nothing was printed anywhere.
+     */
+    let defaultedAtOpening = false;
+    /**
      * How far this part's engraved-bar identities must be pushed to clear every
      * identity the earlier parts already claimed. Each part numbered its own
      * bars from zero, and three client consumers — pass ordinals, loop-seam
@@ -55,10 +63,17 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
     for (const part of sorted) {
         const { score, sheets } = part;
         for (const w of score.warnings) {
+            // Travels with the guess it describes, re-added after the loop, or
+            // not at all: a later part's guess is discarded here, so its
+            // disclosure has nothing left to disclose.
+            if (w === 'tempo_defaulted') {
+                continue;
+            }
             warnings.add(w);
         }
         if (defaultBpm === null && score.defaultBpm !== null) {
             defaultBpm = score.defaultBpm;
+            defaultedAtOpening = score.warnings.includes('tempo_defaulted');
         }
 
         const overlapPage0 =
@@ -192,6 +207,9 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
 
     if (timeSignatures.length === 0) {
         warnings.add('merged_missing_time_signature');
+    }
+    if (defaultedAtOpening) {
+        warnings.add('tempo_defaulted');
     }
 
     // Two parts that each fit the schema comfortably can breach it once joined,
@@ -365,12 +383,17 @@ const dropPageFromScore = (
     const tempos = (score.tempos ?? []).filter((t) => !inDropped(t.tick));
     const holds = (score.holds ?? []).filter((h) => !inDropped(h.tick));
     const pedals = (score.pedals ?? []).filter((p) => !inDropped(p.tick));
+    // The dropped page is always this shard's first, so what survives starts a
+    // page's worth of ticks in. Pull it back to zero: the caller concatenates
+    // parts by adding the running length of everything before, and a remainder
+    // left where it stood would open a hole of exactly the dropped page's
+    // duration at the seam. An empty array must not vote here — a literal 0
+    // among the candidates would make the minimum 0 and the rebase a no-op.
     const minTick = Math.min(
-        ...measures.map((m) => m.tick),
-        ...(notes.length > 0 ? notes.map((n) => n.t) : [0]),
-        0,
+        ...(measures.length > 0 ? measures.map((m) => m.tick) : [Number.POSITIVE_INFINITY]),
+        ...(notes.length > 0 ? notes.map((n) => n.t) : [Number.POSITIVE_INFINITY]),
     );
-    const shift = minTick > 0 ? minTick : 0;
+    const shift = Number.isFinite(minTick) && minTick > 0 ? minTick : 0;
 
     const rebasedMeasures = measures.map((m) => ({ ...m, tick: m.tick - shift }));
     const totalTicks =

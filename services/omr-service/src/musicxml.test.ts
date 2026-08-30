@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 
+import AdmZip from 'adm-zip';
 import { describe, expect, it } from 'vitest';
 
-import { parseMusicXmlString } from './musicxml.js';
+import { buildScoreData } from './buildScoreData.js';
+import { parseMusicXmlString, parseMxlFiles } from './musicxml.js';
 import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
 
 const wrap = (measures: string, extraParts = ''): string => `<?xml version="1.0"?>
@@ -887,6 +889,8 @@ describe('tempo', () => {
         expect(bpmOf('Langsam')).toBe(54);
         expect(bpmOf('Lebhaft')).toBe(132);
         expect(bpmOf('Mässig')).toBe(96);
+        // The spelling German editions actually print; ß survives NFD intact.
+        expect(bpmOf('Mäßig')).toBe(96);
         expect(bpmOf('Modéré')).toBe(108);
         expect(bpmOf('Animé')).toBe(120);
     });
@@ -942,6 +946,47 @@ describe('tempo', () => {
         });
     });
 
+});
+
+describe('parseMxlFiles warning aggregation', () => {
+    /** Audiveris writes one .mxl per movement; no container.xml in these. */
+    const mxl = (xml: string): Buffer => {
+        const zip = new AdmZip();
+        zip.addFile('score.xml', Buffer.from(xml, 'utf8'));
+        return zip.toBuffer();
+    };
+    const soundTempo = (bpm: number): string =>
+        `<direction><direction-type><words>x</words></direction-type><sound tempo="${bpm}"/></direction>`;
+    const bar = (lead = ''): string => `<measure>${lead}${note('C', 4, 16)}</measure>`;
+
+    const marked = mxl(wrap(bar(`${ATTRS_44}${soundTempo(132)}`) + bar()));
+    const unmarked = mxl(wrap(bar(ATTRS_44) + bar()));
+
+    it('does not report a defaulted tempo for a later movement whose guess is discarded', () => {
+        // Only the first movement's guess can survive as defaultBpm, so only the
+        // first movement's disclosure describes anything the reader will hear.
+        const score = parseMxlFiles([marked, unmarked]);
+        expect(score.defaultBpm).toBe(132);
+        expect(score.warnings).not.toContain('tempo_defaulted');
+        expect(score.warnings).toContain('multiple_movements_concatenated');
+    });
+
+    it('keeps the disclosure when the opening movement is the one that guessed', () => {
+        const score = parseMxlFiles([unmarked, marked]);
+        expect(score.defaultBpm).toBe(96);
+        expect(score.warnings).toContain('tempo_defaulted');
+        // The second movement's printed 132 still travels, at its own offset.
+        expect(score.tempos.map((t) => t.bpm)).toEqual([132]);
+    });
+
+    it('still unions every other warning a later movement raises', () => {
+        const short = mxl(
+            wrap(`<measure>${ATTRS_44}${note('C', 4, 4)}</measure>` + bar()),
+        );
+        const score = parseMxlFiles([marked, short]);
+        expect(score.warnings).toContain('measure_underfull');
+        expect(score.warnings).not.toContain('tempo_defaulted');
+    });
 });
 
 describe('repeat structure', () => {
@@ -1116,7 +1161,31 @@ describe('sustain pedal', () => {
             { tick: 0, k: 'down' },
             { tick: 960, k: 'up' },
             { tick: 960, k: 'down' },
-            { tick: 3840, k: 'up' },
+            // Engraved after bar 2's last note, so it lands on the bar line and
+            // is pulled one tick back inside the bar it was written in.
+            { tick: 3839, k: 'up' },
+        ]);
+    });
+
+    it('keeps a release at the closing bar line inside the repeat it damps', () => {
+        // The pedal is taken on the downbeat and lifted at the double bar. Each
+        // pass has to get its own down and up: a release that drifted onto the
+        // next bar's tick belongs to whatever follows the repeat, and the two
+        // passes would ring together as one undamped wash.
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}<barline location="left"><repeat direction="forward"/></barline>` +
+                `${pedal('start')}${note('C', 4, 16)}</measure>` +
+                `<measure number="2">${note('E', 4, 16)}${pedal('stop')}` +
+                `<barline location="right"><repeat direction="backward"/></barline></measure>` +
+                `<measure number="3">${note('G', 4, 16)}</measure>`,
+        );
+        const score = buildScoreData(parseMusicXmlString(xml), null);
+        expect(score.warnings).toContain('repeats_unrolled');
+        expect(score.pedals).toEqual([
+            { tick: 0, k: 'down' },
+            { tick: 3839, k: 'up' },
+            { tick: 3840, k: 'down' },
+            { tick: 7679, k: 'up' },
         ]);
     });
 

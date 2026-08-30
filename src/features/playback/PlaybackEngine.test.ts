@@ -25,7 +25,18 @@ class MockParam implements AudioParamLike {
     setTargetAtTime(target: number, time: number, tau: number): void {
         this.targets.push({ target, time, tau });
     }
-    cancelScheduledValues(): void {}
+    /**
+     * Web Audio evaluates automation in time order, so cancelling drops every
+     * event scheduled at or after the cancel time — that is the whole point of
+     * calling it before a ramp, and a no-op stub here would hide the bug.
+     */
+    cancelScheduledValues(time: number): void {
+        for (let i = this.targets.length - 1; i >= 0; i--) {
+            if ((this.targets[i]?.time ?? 0) >= time) {
+                this.targets.splice(i, 1);
+            }
+        }
+    }
 }
 
 /** Every mock node records what it was wired to, so tests can walk the graph. */
@@ -315,6 +326,25 @@ describe('PlaybackEngine', () => {
         const pickupStarts = ctx.sources.filter((s) => s.buffer && s.startedAt !== null).length;
         expect(pickupStarts).toBeGreaterThan(sourcesBefore);
         expect(engine.getPositionTicks()).toBeLessThan(1500);
+    });
+
+    it('drops a voice’s own release before the pause declick, so nothing snaps back', async () => {
+        const { ctx, engine, buffers } = makeEngine();
+        await engine.play();
+        await advance(ctx, 0.3); // mid-pickup: its key release is still ahead
+        const held = voiceGainNodeOf(ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72)));
+        const cancelAt = ctx.currentTime;
+        expect(held?.gain.targets.some((t) => t.time > cancelAt)).toBe(true);
+
+        engine.pause();
+        // The 20 ms ramp to silence must be the only automation left ahead of
+        // the pause: the note's own release, still scheduled inside the ramp,
+        // would otherwise restore full gain and the source would be cut there.
+        const ahead = held?.gain.targets.filter((t) => t.time >= cancelAt) ?? [];
+        expect(ahead).toHaveLength(1);
+        expect(ahead[0]?.target).toBe(0);
+        expect(ahead[0]?.time).toBe(cancelAt);
+        expect(ahead[0]?.tau).toBe(0.02);
     });
 
     it('mute and volume route to the correct hand bus while scheduling continues', async () => {
@@ -681,6 +711,36 @@ describe('sustain pedal', () => {
         await advance(ctx, 1);
         expect(ctx.sources).toHaveLength(1);
         expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + PEDAL_TAIL_S, 9);
+    });
+
+    it('revives only the key still down when a seek lands inside a held pedal', async () => {
+        // A bar of eighths under one unbroken take. At the landing tick every
+        // one of them is still ringing on the damper, but only the last has a
+        // key down: the rest are decaying strings, and re-striking them would
+        // be a chord the pianist never played.
+        const eighths = Array.from({ length: 8 }, (_, i): ScoreNote => ({ t: i * 240, d: 240, p: 48 + i * 6, h: 0 }));
+        const { ctx, engine, buffers } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 2880, k: 'up' },
+                ],
+                eighths,
+            ),
+        });
+        await engine.play();
+        await advance(ctx, 1.9);
+        expect(ctx.sources).toHaveLength(8);
+
+        engine.seek(1900); // inside the last eighth, written 1680–1920
+        await advance(ctx, 0.05);
+        expect(ctx.sources).toHaveLength(9);
+        const revived = ctx.sources[8];
+        expect(revived?.buffer).toBe(sampleOf(buffers, 90));
+        expect(revived?.startedAt).toBeCloseTo(1.95, 9);
+        // Its ring still runs to the lift at 2880 — the pedal decides how long
+        // the resumed voice holds, it just no longer decides what is resumed.
+        expect(lifespanOf(revived)).toBeCloseTo(980 * SPT_120 + PEDAL_TAIL_S, 9);
     });
 
     it('silences a ringing note when its own key is struck again', async () => {

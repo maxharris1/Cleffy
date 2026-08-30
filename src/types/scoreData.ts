@@ -281,8 +281,13 @@ export const tempoAt = (score: ScoreData, tick: number, fallback: number): numbe
  * `tempos[0]` to look at: a shard-merged score whose map was dropped, and a
  * tempo derived from the meter alone, which is deliberately carried as
  * `defaultBpm` + a warning rather than as a tempo entry with a new `src`.
+ *
+ * They only get a say when there is no opening tempo, though: warnings are
+ * score-wide (the shard merge unions them), so a later half that prints no
+ * tempo of its own must not turn the metronome mark at the top of page 1 into
+ * a guess.
  */
 export const tempoIsInferred = (score: ScoreData): boolean =>
     score.tempos?.[0]?.src === 'word' ||
-    score.warnings.includes('tempo_inferred') ||
-    score.warnings.includes('tempo_defaulted');
+    (score.tempos?.[0] === undefined &&
+        (score.warnings.includes('tempo_inferred') || score.warnings.includes('tempo_defaulted')));

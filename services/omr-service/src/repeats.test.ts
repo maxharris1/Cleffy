@@ -268,6 +268,61 @@ describe('planRepeats jumps', () => {
         expect(result.degraded).toBe(false);
     });
 
+    it('reads a bare D.S. over a To Coda / coda pair as D.S. al Coda', () => {
+        // <sound dalsegno>/<sound tocoda>/<sound coda>: MusicXML has no attribute
+        // for the words, so the pair itself is the second half of the phrase.
+        const result = plan([
+            bar({ segno: true }),
+            bar({ toCoda: true }),
+            bar({ jump: ds() }),
+            bar({ codaTarget: true }),
+            bar(),
+        ]);
+        expect(result.order).toEqual([0, 1, 2, 0, 1, 3, 4]);
+        expect(result.degraded).toBe(false);
+        expect(result.performsJumps).toBe(true);
+    });
+
+    it('reads a bare D.C. over two bare coda glyphs as D.C. al Coda', () => {
+        // "D.C. al 𝄌", where the sign stands in for words no OCR pass can read.
+        const result = plan([bar(), bar({ codaGlyph: true }), bar({ jump: dc() }), bar({ codaGlyph: true }), bar()]);
+        expect(result.order).toEqual([0, 1, 2, 0, 1, 3, 4]);
+        expect(result.degraded).toBe(false);
+    });
+
+    it('lets a printed Fine outrank a coda pair under a bare jump', () => {
+        // Neither half of the phrase is written, and a bare "D.C." over both
+        // signs is "D.C. al Fine" far more often than it is "al Coda". Reading
+        // it that way strands the coda section, so the contradiction costs the
+        // score its structure — which is the right price for a guess this thin.
+        const result = plan([
+            bar(),
+            bar({ toCoda: true }),
+            bar({ fine: true }),
+            bar({ jump: dc() }),
+            bar({ codaTarget: true }),
+        ]);
+        expect(result.order).toEqual([0, 1, 2, 3, 0, 1, 2]);
+        expect(result.degraded).toBe(true);
+    });
+
+    it('falls back to a plain jump when an inferred coda pair sits wrong', () => {
+        // A stray 𝄌 sighting beside a bare D.C. must not cost the score a jump
+        // it performs correctly today; only printed "al Coda" words degrade it.
+        const result = plan([bar(), bar(), bar({ jump: dc() }), bar({ toCoda: true }), bar({ codaTarget: true })]);
+        expect(result.order).toEqual([0, 1, 2, 0, 1, 2, 3, 4]);
+        expect(result.degraded).toBe(false);
+        expect(result.performsJumps).toBe(true);
+    });
+
+    it('stops at a Fine printed on the segno bar itself', () => {
+        // The post-jump pass plays that bar before it reads the Fine, so a Fine
+        // exactly ON the target is reachable — unlike one above it.
+        const result = plan([bar(), bar({ segno: true, fine: true }), bar(), bar({ jump: ds('fine') })]);
+        expect(result.order).toEqual([0, 1, 2, 3, 1]);
+        expect(result.degraded).toBe(false);
+    });
+
     it('ignores a segno, Fine or coda sign that no jump refers to', () => {
         // A misread "Fine" must not cost the score its repeats.
         const result = plan([
@@ -296,8 +351,11 @@ describe('planRepeats jump validation', () => {
         ['a segno at the jump itself', withRepeat({}, {}, {}, { segno: true, jump: ds() })],
         ['a segno below the jump', withRepeat({}, {}, { jump: ds() }, { segno: true })],
         ['two segni', withRepeat({ segno: true }, { segno: true }, {}, { jump: ds() })],
+        ['a D.C. on the head measure', withRepeat({ jump: dc() })],
         ['al Fine with no Fine', withRepeat({}, {}, {}, { jump: dc('fine') })],
         ['a Fine below the jump', withRepeat({}, {}, { jump: dc('fine') }, { fine: true })],
+        // Not `withRepeat`: the Fine has to sit on bar 0, above the segno.
+        ['a Fine above the segno', [bar({ fine: true }), bar({ segno: true }), bar(), bar({ jump: ds('fine') })]],
         ['two Fines', withRepeat({ fine: true }, { fine: true }, {}, { jump: dc('fine') })],
         ['al Coda with no coda at all', withRepeat({}, {}, {}, { jump: dc('coda') })],
         ['al Coda with no To Coda', withRepeat({}, {}, { jump: dc('coda') }, { codaTarget: true })],
@@ -504,6 +562,22 @@ describe('unrollRepeats', () => {
         expect(out.holds).toEqual([
             { tick: 480, beats: 2 },
             { tick: 1440, beats: 2 },
+        ]);
+    });
+
+    it('gives every pass its release when the pedal lifts on the repeat bar line', () => {
+        const out = unrollRepeats(
+            { ...linear, pedals: [{ tick: 0, k: 'down' as const }, { tick: 960, k: 'up' as const }] },
+            [0, 1, 0, 1, 2],
+        );
+        // The 'up' sits on the bar line the repeat jumps from. Each pass must
+        // release before the span replays — and the second pass's fresh 'down'
+        // lands on the same tick as the first pass's 'up', in re-catch order.
+        expect(out.pedals).toEqual([
+            { tick: 0, k: 'down' },
+            { tick: 960, k: 'up' },
+            { tick: 960, k: 'down' },
+            { tick: 1920, k: 'up' },
         ]);
     });
 

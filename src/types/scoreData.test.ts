@@ -109,4 +109,15 @@ describe('tempoIsInferred', () => {
     it('stays quiet about a printed metronome mark', () => {
         expect(tempoIsInferred(score({ tempos: [{ tick: 0, bpm: 132, src: 'metronome' }], warnings: [] }))).toBe(false);
     });
+
+    /**
+     * Warnings are score-wide — the merge unions them across shards — so a
+     * second half that prints no tempo of its own must not turn the metronome
+     * mark at the top of page 1 into a guess.
+     */
+    it('stays quiet when a printed opening tempo outranks a warning from later in the score', () => {
+        const printed: ScoreData['tempos'] = [{ tick: 0, bpm: 96, src: 'metronome' }];
+        expect(tempoIsInferred(score({ tempos: printed, warnings: ['tempo_defaulted'] }))).toBe(false);
+        expect(tempoIsInferred(score({ tempos: printed, warnings: ['tempo_inferred'] }))).toBe(false);
+    });
 });

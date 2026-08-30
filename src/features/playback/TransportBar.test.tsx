@@ -307,6 +307,26 @@ describe('tempo disclosure and stale analyses', () => {
         expect(screen.queryByText('est.')).toBeNull();
     });
 
+    /**
+     * Warnings are score-wide: a shard covering the second half prints no tempo
+     * of its own and says so, which must not cast doubt on the metronome mark
+     * engraved at the top of the first page.
+     */
+    it('leaves a printed tempo alone when a later part of the score guessed one', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 0, bpm: 94, src: 'metronome' }], warnings: ['tempo_defaulted'] });
+        expect(screen.queryByText('est.')).toBeNull();
+    });
+
+    it('says the tempo came from the meter when the score prints none at all', () => {
+        ready({}, { ...tinyScore, tempos: undefined, warnings: ['tempo_defaulted'] });
+        expect(screen.getByText('est.').getAttribute('title')).toMatch(/time signature/i);
+    });
+
+    it('says the tempo came off a tempo word when one was printed without a number', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 0, bpm: 94, src: 'word' }] });
+        expect(screen.getByText('est.').getAttribute('title')).toMatch(/tempo marking/i);
+    });
+
     it('offers to regenerate an analysis made by an older engine', async () => {
         const onGenerate = vi.fn();
         ready({ onGenerate }, tinyScore, 'audiveris-5.6.1+svc-2');
@@ -359,5 +379,33 @@ describe('repeated bars in the measure counter', () => {
         renderWith(tinyScore);
         act(() => useViewerStore.getState().setLoopRange({ a: 0, b: 2 }));
         expect(document.body.textContent).not.toMatch(/\(1st\)|\(2nd\)/);
+    });
+
+    /**
+     * "D.C. al Fine": bars 1–24, then 1–12 again, and the playthrough stops on
+     * the Fine bar. The last bar performed is m. 12, but the score is still 24
+     * bars long — counting against the performance would print "m. 21 / 12".
+     */
+    it('counts against the printed extent when a jump ends the playthrough early', () => {
+        const printed = Array.from({ length: 24 }, (_, i) => ({
+            n: i + 1,
+            tick: i * 1920,
+            dTicks: 1920,
+            page: 0,
+            sys: 0,
+            x0: 0.08,
+            x1: 0.92,
+            srcIndex: i,
+        }));
+        const alFine = {
+            ...tinyScore,
+            measures: [...printed, ...printed.slice(0, 12).map((m, i) => ({ ...m, tick: (24 + i) * 1920 }))],
+            totalTicks: 36 * 1920,
+            warnings: ['jumps_performed'],
+        };
+
+        setStore(() => useViewerStore.getState().setCurrentMeasureIndex(20)); // m. 21, first pass
+        renderWith(alFine);
+        expect(screen.getByText('m. 21 / 24')).toBeInTheDocument();
     });
 });

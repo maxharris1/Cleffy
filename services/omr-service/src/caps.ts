@@ -12,14 +12,37 @@ export const MAX_HOLDS = 128;
 export const MAX_PEDAL_EDGES = 256;
 
 /**
+ * Where a ramp arrives rather than where it passes through: the last point
+ * before a printed mark, and every point at which the curve turns — the floor a
+ * rit. bends down to, and the "a tempo" that turns it back up. resolveTempos
+ * stamps that restoration 'ramp' too, and it is the only event that ever
+ * restates the steady tempo, so thinning it leaves the score at the ritardando
+ * floor for however long the next surviving point takes to arrive. Everything
+ * between two points on the same slope is the discretization proper.
+ */
+const isRampLanding = (events: readonly ScoreTempo[], i: number): boolean => {
+    const here = events[i];
+    const next = events[i + 1];
+    const prev = events[i - 1];
+    if (!here || !next || next.src !== 'ramp') {
+        return true;
+    }
+    if (!prev) {
+        return false;
+    }
+    return Math.sign(here.bpm - prev.bpm) !== Math.sign(next.bpm - here.bpm);
+};
+
+/**
  * Bring a tempo map under the schema ceiling, spending the cheapest events first.
  *
- * `src: 'ramp'` points are a per-beat discretization of a rit./accel. (or the
- * return an "a tempo" makes), not tempos anyone wrote down: halving their
- * density leaves the curve landing within one beat of where it did, which is
- * inaudible. Printed marks — 'sound', 'metronome', 'word' — are irreplaceable
- * and only ever dropped by the truncation of last resort, which needs more than
- * `max` printed tempos in one score to trigger at all.
+ * `src: 'ramp'` points are a per-beat discretization of a rit./accel., not
+ * tempos anyone wrote down: halving the density of the points along one slope
+ * leaves the curve landing within one beat of where it did, which is inaudible.
+ * The points the curve turns on are not among them (see `isRampLanding`), and
+ * printed marks — 'sound', 'metronome', 'word' — are irreplaceable and only ever
+ * dropped by the truncation of last resort, which needs more than `max` printed
+ * tempos in one score to trigger at all.
  */
 export const capTempoEvents = (
     tempos: readonly ScoreTempo[],
@@ -28,14 +51,18 @@ export const capTempoEvents = (
     let kept: ScoreTempo[] = [...tempos];
     while (kept.length > max) {
         let seen = 0;
-        const thinned = kept.filter((tempo) => {
+        const thinned = kept.filter((tempo, i) => {
             if (tempo.src !== 'ramp') {
+                return true;
+            }
+            if (isRampLanding(kept, i)) {
                 return true;
             }
             return seen++ % 2 === 0;
         });
-        // A single surviving ramp point (or none) cannot be halved again;
-        // without this the loop would spin on an array it can no longer shrink.
+        // A map whose ramps are all landings (or a single surviving point, or
+        // none) cannot be halved again; without this the loop would spin on an
+        // array it can no longer shrink, and the truncation below takes over.
         if (thinned.length === kept.length) {
             break;
         }

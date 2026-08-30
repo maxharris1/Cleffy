@@ -828,6 +828,14 @@ export class PlaybackEngine {
             if (note.t < regionStart) {
                 continue;
             }
+            // The key decides what is resumed, the pedal only how long it then
+            // rings. A note whose written end has passed is a string the damper
+            // is merely letting decay — striking it again here would be a
+            // hammer blow the score does not contain, and under a long take
+            // that is every note since the foot went down at once.
+            if (note.t + note.d <= tick) {
+                continue;
+            }
             const noteEnd = this.effectiveEndTick(index, note, regionEnd);
             if (noteEnd <= tick) {
                 continue;
@@ -974,6 +982,11 @@ export class PlaybackEngine {
     private cancelActiveNotes(): void {
         const now = this.ctx?.currentTime ?? 0;
         for (const { source, gain } of this.active) {
+            // Clear the voice's own release first: automation runs in time
+            // order, so a key release falling inside the ramp would restore
+            // full gain and the source would be cut there — the very pop the
+            // ramp exists to prevent.
+            gain.gain.cancelScheduledValues(now);
             gain.gain.setTargetAtTime(0, now, 0.02); // declick
             try {
                 source.stop(now + 0.08);

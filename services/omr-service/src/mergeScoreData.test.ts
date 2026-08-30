@@ -116,6 +116,89 @@ describe('mergeScoreDataParts', () => {
         expect(merged.notes).toHaveLength(3);
         expect(merged.timeSignatures.some((s) => s.num === 3 && s.den === 4)).toBe(true);
     });
+
+    it('leaves no silence at the seam where the overlap page was dropped', () => {
+        /** `pages` engraved pages of four 4/4 bars each, one system per page. */
+        const shard = (pages: number, pitch: number, overrides: Partial<ScoreData> = {}): ScoreData => {
+            const measures: ScoreData['measures'] = [];
+            const notes: ScoreData['notes'] = [];
+            const systems: ScoreData['systems'] = [];
+            let tick = 0;
+            for (let page = 0; page < pages; page++) {
+                systems.push({ page, y0: 0.1, y1: 0.9 });
+                for (let bar = 0; bar < 4; bar++) {
+                    measures.push({
+                        n: measures.length + 1,
+                        tick,
+                        dTicks: 1920,
+                        page,
+                        sys: page,
+                        x0: 0,
+                        x1: 1,
+                    });
+                    notes.push({ t: tick, d: 480, p: pitch, h: 0 });
+                    tick += 1920;
+                }
+            }
+            return basePart({ totalTicks: tick, measures, notes, systems, ...overrides });
+        };
+        // The production split of a 5-page score: sheets 1-3 and 3-5, sharing
+        // page 3, which B drops.
+        const merged = mergeScoreDataParts([
+            { score: shard(3, 60), sheets: { from: 1, to: 3 } },
+            { score: shard(3, 62, { timeSignatures: [] }), sheets: { from: 3, to: 5 } },
+        ]);
+        expect(merged.warnings).toContain('merged_dropped_overlap_page');
+        expect(merged.measures).toHaveLength(20);
+        // Every bar abuts the one before it: a shard whose first page was cut
+        // away must be pulled back to zero before the merge offsets it, or the
+        // score plays a whole page of nothing at the seam.
+        for (const [i, measure] of merged.measures.entries()) {
+            const prev = merged.measures[i - 1];
+            expect(measure.tick).toBe(prev ? prev.tick + prev.dTicks : 0);
+        }
+        expect(merged.totalTicks).toBe(merged.measures.reduce((sum, m) => sum + m.dTicks, 0));
+        expect(merged.notes.map((n) => n.t)).toEqual(merged.measures.map((m) => m.tick));
+    });
+});
+
+describe('mergeScoreDataParts tempo disclosure', () => {
+    it('does not report a defaulted tempo when only the later shard is tempo-less', () => {
+        // A heading is printed on page 1 and nowhere else, so the second shard
+        // of nearly every score guesses its own opening from the meter. That
+        // guess is discarded here; saying it out loud would tell a reader
+        // looking at "♩=132" that nothing was printed at all.
+        const a = basePart({ defaultBpm: 132, tempos: [{ tick: 0, bpm: 132, src: 'sound' }] });
+        const b = basePart({
+            timeSignatures: [],
+            defaultBpm: 96,
+            warnings: ['tempo_defaulted'],
+        });
+        const merged = mergeScoreDataParts([
+            { score: a, sheets: { from: 1, to: 2 } },
+            { score: b, sheets: { from: 3, to: 4 } },
+        ]);
+        expect(merged.defaultBpm).toBe(132);
+        expect(merged.warnings).not.toContain('tempo_defaulted');
+    });
+
+    it('keeps the disclosure when the opening itself was guessed', () => {
+        // The mirror case: page 1 prints nothing and the tempo only appears
+        // later, so the pulse the reader starts on really is a guess.
+        const a = basePart({ defaultBpm: 96, warnings: ['tempo_defaulted'] });
+        const b = basePart({
+            timeSignatures: [],
+            defaultBpm: 132,
+            tempos: [{ tick: 0, bpm: 132, src: 'sound' }],
+        });
+        const merged = mergeScoreDataParts([
+            { score: a, sheets: { from: 1, to: 2 } },
+            { score: b, sheets: { from: 3, to: 4 } },
+        ]);
+        expect(merged.defaultBpm).toBe(96);
+        expect(merged.warnings).toContain('tempo_defaulted');
+        expect(merged.tempos).toEqual([{ tick: 1920, bpm: 132, src: 'sound' }]);
+    });
 });
 
 describe('mergeScoreDataParts tempo map and fermatas', () => {
@@ -195,16 +278,17 @@ describe('mergeScoreDataParts tempo map and fermatas', () => {
             { score: b, sheets: { from: 2, to: 3 } },
         ]);
         expect(merged.warnings).toContain('merged_dropped_overlap_page');
-        // B's surviving events keep their local ticks (dropPageFromScore leaves
-        // the remainder where it stands) and take A's 3840-tick offset, exactly
-        // as B's surviving measures and notes do.
+        // B's surviving events are rebased with the page that was dropped out
+        // from under them and then take A's 3840-tick offset, exactly as B's
+        // surviving measures and notes do — the word tempo B engraved on its
+        // second page lands on the bar that follows A's last, not a page later.
         expect(merged.tempos).toEqual([
             { tick: 0, bpm: 100, src: 'metronome' },
-            { tick: 5760, bpm: 72, src: 'word' },
+            { tick: 3840, bpm: 72, src: 'word' },
         ]);
         expect(merged.holds).toEqual([
             { tick: 3000, beats: 2 },
-            { tick: 6240, beats: 1 },
+            { tick: 4320, beats: 1 },
         ]);
         // B re-read the same metronome mark A already reported; the copy that
         // came in on the dropped page is gone rather than restated at the seam.
@@ -368,6 +452,30 @@ describe('capTempoEvents', () => {
         ]);
         // Thinning must not reshuffle the map the reader prefix-sums.
         expect(capped.map((t) => t.tick)).toEqual([...capped.map((t) => t.tick)].sort((x, y) => x - y));
+    });
+
+    it('never thins away the "a tempo" that returns a ritardando to the printed pulse', () => {
+        // What resolveTempos emits for a rubato-heavy page: one printed mark,
+        // then rit. after rit. discretized per beat, each closed by an "a tempo"
+        // point back at 120. Those closing points wear 'ramp' like the rest, but
+        // nothing else ever restates 120 — drop one and the score stays at the
+        // ritardando floor until the next surviving event.
+        const tempos: ScoreTempo[] = [{ tick: 0, bpm: 120, src: 'metronome' }];
+        for (let block = 0; block < 70; block++) {
+            const start = 1 + block * 8;
+            for (let step = 0; step < 7; step++) {
+                tempos.push({ tick: start + step, bpm: 116 - step * 4, src: 'ramp' });
+            }
+            tempos.push({ tick: start + 7, bpm: 120, src: 'ramp' });
+        }
+        expect(tempos.length).toBeGreaterThan(MAX_TEMPO_EVENTS);
+
+        const capped = capTempoEvents(tempos);
+        expect(capped.length).toBeLessThanOrEqual(MAX_TEMPO_EVENTS);
+        expect(capped.filter((t) => t.src === 'ramp' && t.bpm === 120)).toHaveLength(70);
+        // The floor each rit. reaches is kept for the same reason: it is where
+        // the curve arrives, not a point it passes through.
+        expect(capped.filter((t) => t.src === 'ramp' && t.bpm === 92)).toHaveLength(70);
     });
 
     it('truncates as a last resort when nothing is a ramp', () => {

@@ -266,7 +266,6 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
     const running = playbackStatus === 'playing' || playbackStatus === 'counting';
     const loading = playbackStatus === 'loading';
     const lhAvailable = hasLeftHand(score);
-    const lastMeasure = score.measures[score.measures.length - 1];
     const lastIndex = score.measures.length - 1;
 
     const play = () => {
@@ -336,6 +335,10 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
             return nth;
         });
     }, [score]);
+    // How long the score is on the page, which is not where the playthrough
+    // ends: a D.C. al Fine stops on the Fine bar, so the last performed entry
+    // carries a smaller number than bars already visited ("m. 21 / 12").
+    const printedLast = useMemo(() => score.measures.reduce((max, m) => Math.max(max, m.n), 0), [score]);
     const repeatedPrinted = useMemo(() => {
         const counts = new Map<number, number>();
         score.measures.forEach((m, i) => {
@@ -461,7 +464,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                         <ChevronLeftIcon size={16} />
                     </button>
                     <span className="min-w-[4.5rem] text-center text-sm tabular-nums text-stone-700 sm:min-w-[5.5rem]">
-                        m. {measureLabel(currentMeasureIndex)} / {lastMeasure ? lastMeasure.n : '–'}
+                        m. {measureLabel(currentMeasureIndex)} / {score.measures.length > 0 ? printedLast : '–'}
                     </span>
                     <button
                         type="button"
@@ -494,7 +497,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} inferred={tempoIsInferred(score)} />
+                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} estimate={tempoEstimate(score)} />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
@@ -609,6 +612,25 @@ const LoopEdge = ({
 );
 
 /**
+ * Where a guessed opening tempo came from. Reading a number off an Italian word
+ * and picking one out of the meter are different admissions — the second score
+ * prints no tempo at all — so they get different words rather than one blanket
+ * "estimated".
+ */
+type TempoEstimate = 'word' | 'meter';
+
+const TEMPO_ESTIMATE_COPY: Record<TempoEstimate, { control: string; badge: string }> = {
+    word: {
+        control: 'Tempo (quarter note BPM) — estimated from the tempo marking, which prints no number',
+        badge: 'Estimated from the printed tempo marking, which gives no number',
+    },
+    meter: {
+        control: 'Tempo (quarter note BPM) — no tempo is printed, so this one was chosen from the time signature',
+        badge: 'No tempo is printed at all — this one was chosen from the time signature',
+    },
+};
+
+/**
  * Tempo to the nearest BPM: −/+ step by one, and the number itself is typable
  * for a big jump. The draft state lets "1…0…5" exist mid-keystroke without the
  * clamp snapping it to 40 on the way.
@@ -617,12 +639,12 @@ const TempoControl = ({
     bpm,
     onBpm,
     compound,
-    inferred,
+    estimate,
 }: {
     bpm: number;
     onBpm: (bpm: number) => void;
     compound: boolean;
-    inferred: boolean;
+    estimate: TempoEstimate | null;
 }) => {
     const [draft, setDraft] = useState<string | null>(null);
 
@@ -637,11 +659,7 @@ const TempoControl = ({
     return (
         <div
             className="flex items-center gap-0.5"
-            title={
-                inferred
-                    ? 'Tempo (quarter note BPM) — estimated from the tempo marking, which prints no number'
-                    : 'Tempo (quarter note BPM)'
-            }
+            title={estimate ? TEMPO_ESTIMATE_COPY[estimate].control : 'Tempo (quarter note BPM)'}
         >
             <span className="text-sm text-stone-500">♩=</span>
             <button type="button" aria-label="Slower" onClick={() => onBpm(bpm - 1)} className={squareButton(false)}>
@@ -675,11 +693,8 @@ const TempoControl = ({
                 +
             </button>
             {compound ? <span className="ml-0.5 text-xs text-stone-400">(♩· = {Math.round(bpm / 1.5)})</span> : null}
-            {inferred ? (
-                <span
-                    className="ml-0.5 text-xs text-stone-400"
-                    title="Estimated from the printed tempo marking, which gives no number"
-                >
+            {estimate ? (
+                <span className="ml-0.5 text-xs text-stone-400" title={TEMPO_ESTIMATE_COPY[estimate].badge}>
                     est.
                 </span>
             ) : null}
@@ -729,6 +744,18 @@ const HandControl = ({
         />
     </div>
 );
+
+/**
+ * Which admission the guessed tempo warrants. A tempo word beats the meter as
+ * an explanation whenever one was read, since the meter is only ever the last
+ * resort for a score that marks nothing.
+ */
+const tempoEstimate = (score: ScoreData): TempoEstimate | null => {
+    if (!tempoIsInferred(score)) {
+        return null;
+    }
+    return score.tempos?.[0]?.src === 'word' || score.warnings.includes('tempo_inferred') ? 'word' : 'meter';
+};
 
 /** 6/8, 9/8, 12/8… — musicians read those tempos in dotted-quarter beats. */
 const isCompoundMeter = (score: ScoreData): boolean => {

@@ -150,9 +150,15 @@ const TEMPO_MAX = 200;
 
 /**
  * Fold diacritics before matching, so the ASCII patterns above meet the page as
- * it is actually printed — "Modéré", "mässig" — and as OCR reproduces it.
+ * it is actually printed — "Modéré", "mässig" — and as OCR reproduces it. ß is
+ * spelled out on its own, since it has no decomposition for NFD to strip and
+ * "Mäßig" is what a German edition actually prints.
  */
-const foldDiacritics = (text: string): string => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const foldDiacritics = (text: string): string =>
+    text
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\u00df/g, 'ss');
 
 /**
  * Shade a term average by the character words around it.
@@ -1930,7 +1936,12 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     break;
                 }
                 case 'pedal': {
-                    const tick = measureStart + ev.rel;
+                    // A release written after the bar's last note sits exactly on
+                    // the next bar's downbeat, which hands it to whatever follows
+                    // — so a performed repeat leaves the pedal down for both
+                    // passes. Hold the edge inside the bar it was engraved in;
+                    // one tick at 480 per quarter is nothing to the ear.
+                    const tick = measureStart + Math.min(ev.rel, Math.max(0, place.dTicks - 1));
                     if (ev.kind === 'change') {
                         // A re-catch: the dampers drop and the pedal is taken
                         // again on the same beat, which is the whole point of the
@@ -2191,6 +2202,12 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         openTiesAtEnd: 0,
     };
     const warnings = new Set<string>();
+    // Whether the movement whose `defaultBpm` survives is the one that guessed
+    // it from the meter. `tempo_defaulted` describes the opening of the whole
+    // score: a second movement that prints no heading of its own has its guess
+    // thrown away below, so its disclosure would only contradict the first
+    // movement's printed tempo.
+    let defaultedAtOpening = false;
     for (const file of files) {
         const parsed = parseMusicXmlString(extractMxl(file), combined.totalTicks);
         combined.notes.push(...parsed.notes);
@@ -2204,10 +2221,20 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         combined.holds.push(...parsed.holds);
         combined.pedals = [...(combined.pedals ?? []), ...(parsed.pedals ?? [])];
         combined.repeats.push(...parsed.repeats);
-        combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
+        if (combined.defaultBpm === null && parsed.defaultBpm !== null) {
+            combined.defaultBpm = parsed.defaultBpm;
+            defaultedAtOpening = parsed.warnings.includes('tempo_defaulted');
+        }
         combined.totalTicks = parsed.totalTicks;
         combined.openTiesAtEnd = parsed.openTiesAtEnd;
-        parsed.warnings.forEach((warning) => warnings.add(warning));
+        parsed.warnings.forEach((warning) => {
+            if (warning !== 'tempo_defaulted') {
+                warnings.add(warning);
+            }
+        });
+    }
+    if (defaultedAtOpening) {
+        warnings.add('tempo_defaulted');
     }
     if (files.length > 1) {
         warnings.add('multiple_movements_concatenated');

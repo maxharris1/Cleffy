@@ -15,8 +15,8 @@ import type { MeasureRepeatMarks } from './musicxml.js';
  * misplaces eight bars, a wrong D.S. reorders pages. So the marks are validated
  * as a set before a single measure is planned, and anything that does not add up
  * (a second jump, a D.S. with no segno above it, a coda on the wrong side of the
- * instruction) degrades the WHOLE plan to linear rather than being patched over.
- * Half-understood structure is the one outcome worse than none.
+ * words that call for it) degrades the WHOLE plan to linear rather than being
+ * patched over. Half-understood structure is the one outcome worse than none.
  *
  * The converse matters just as much: a segno, a Fine or a coda sign with no jump
  * anywhere to send the player back to it is decoration or a misread, and must
@@ -115,27 +115,40 @@ export const resolveJump = (marks: readonly MeasureRepeatMarks[]): ResolvedJump 
     let target = 0;
     if (instruction.kind === 'ds') {
         const segno = segnos[0];
-        // A D.S. that would land on or after its own instruction is not a
-        // reading of the page, it is a loop.
-        if (segno === undefined || segno >= at) {
+        if (segno === undefined) {
             return 'invalid';
         }
         target = segno;
     }
+    // A jump that would land on or after its own instruction is not a reading of
+    // the page, it is a loop: a segno under its own D.S., or a "D.C." OCR hung
+    // on the head measure, which would replay that measure and nothing else.
+    if (target >= at) {
+        return 'invalid';
+    }
     const resolved: ResolvedJump = { at, kind: instruction.kind, target };
 
-    if (instruction.al === 'coda') {
+    // A To Coda / coda pair is itself the second half of the phrase. MusicXML
+    // has no attribute for the words — <sound tocoda>/<sound coda> IS the
+    // instruction — and engravers often let the 𝄌 stand in for "al Coda", so one
+    // clean pair with no Fine to contradict it reads a bare jump that way too.
+    const inferredCoda =
+        instruction.al === null && toCodas.length === 1 && codaTargets.length === 1 && fines.length === 0;
+    if (instruction.al === 'coda' || inferredCoda) {
         const toCoda = toCodas[0];
         const codaTarget = codaTargets[0];
-        if (toCoda === undefined || codaTarget === undefined) {
-            return 'invalid';
-        }
         // The diversion has to lie inside the stretch the jump replays, and the
         // coda itself after the instruction — that is what makes it a coda.
-        if (toCoda < target || toCoda >= at || codaTarget <= at) {
+        if (toCoda !== undefined && codaTarget !== undefined && toCoda >= target && toCoda < at && codaTarget > at) {
+            return { ...resolved, toCoda, codaTarget };
+        }
+        // Words that say "al Coda" over a pair on the wrong side of them are a
+        // mark set we refuse whole. A pair we only inferred is likelier a stray
+        // 𝄌 sighting beside a plain jump that performs correctly as it stands,
+        // so that one falls back to the plain reading instead.
+        if (instruction.al === 'coda') {
             return 'invalid';
         }
-        return { ...resolved, toCoda, codaTarget };
     }
 
     const fine = fines[0];
@@ -143,9 +156,15 @@ export const resolveJump = (marks: readonly MeasureRepeatMarks[]): ResolvedJump 
         return 'invalid';
     }
     // A printed Fine binds a bare "D.C." too: that is how much of the literature
-    // writes "D.C. al Fine", leaving the second half of the phrase to the sign.
+    // writes "D.C. al Fine", leaving the second half of the phrase to the sign —
+    // and it is what a bare jump over BOTH a Fine and a coda pair reads as,
+    // which is why the inference above stands down whenever a Fine is printed.
     if (fine !== undefined) {
-        if (fine >= at) {
+        // The post-jump pass starts at the target, so a Fine above it is never
+        // reached: that pass would run to the final barline with the "al Fine"
+        // silently dropped. A Fine exactly ON the target is reachable — the bar
+        // is played, then the Fine ends the performance.
+        if (fine >= at || fine < target) {
             return 'invalid';
         }
         return { ...resolved, fine };
@@ -524,14 +543,23 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
         }
     }
 
-    const point = <T extends { tick: number }>(events: readonly T[] | undefined): T[] | undefined => {
+    const point = <T extends { tick: number; k?: 'down' | 'up' }>(events: readonly T[] | undefined): T[] | undefined => {
         if (!events) {
             return undefined;
         }
         const out: T[] = [];
         for (const seg of segments) {
             for (const e of events) {
-                if (e.tick >= seg.srcTick && e.tick < seg.srcTick + seg.dTicks) {
+                // A pedal release engraved on a bar line — some engravers put
+                // the stop at the top of the next measure — damps the music
+                // before it, so an 'up' takes the left-open, right-closed bar.
+                // Handing it to the bar after would let a performed repeat
+                // replay the span with the release stranded past the jump.
+                const inSeg =
+                    e.k === 'up'
+                        ? e.tick > seg.srcTick && e.tick <= seg.srcTick + seg.dTicks
+                        : e.tick >= seg.srcTick && e.tick < seg.srcTick + seg.dTicks;
+                if (inSeg) {
                     out.push({ ...e, tick: seg.destTick + (e.tick - seg.srcTick) });
                 }
             }

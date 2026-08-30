@@ -201,6 +201,39 @@ describe('buildScoreData structure', () => {
         expect(score.warnings).not.toContain('repeats_unrolled');
     });
 
+    it('performs the coda diversion a <sound>-only export leaves the words off', () => {
+        // <sound dalsegno>/<sound tocoda>/<sound coda> carry no "al Coda" text —
+        // MusicXML has no attribute for it — so the pair is the whole instruction.
+        const fourBar: MusicalScore = {
+            ...musical,
+            notes: [
+                { t: 0, d: 480, p: 60, h: 0 },
+                { t: 1920, d: 480, p: 62, h: 0 },
+                { t: 3840, d: 480, p: 64, h: 0 },
+                { t: 5760, d: 480, p: 65, h: 0 },
+            ],
+            measures: [
+                { n: 1, tick: 0, dTicks: 1920 },
+                { n: 2, tick: 1920, dTicks: 1920 },
+                { n: 3, tick: 3840, dTicks: 1920 },
+                { n: 4, tick: 5760, dTicks: 1920 },
+            ],
+            totalTicks: 7680,
+            repeats: [
+                { ...plainMarks, segno: true },
+                { ...plainMarks, toCoda: true },
+                { ...plainMarks, jump: { kind: 'ds', al: null } },
+                { ...plainMarks, codaTarget: true },
+            ],
+        };
+        const score = buildScoreData(fourBar, null);
+        // Back to the segno, out at the To Coda, into the coda section — not the
+        // straight replay a jump with no target would have given.
+        expect(score.measures.map((m) => m.srcIndex)).toEqual([0, 1, 2, 0, 1, 3]);
+        expect(score.warnings).toContain('jumps_performed');
+        expect(score.warnings).not.toContain('jumps_ignored');
+    });
+
     it('plays straight through, and says so, when a jump does not add up', () => {
         const score = buildScoreData(
             { ...musical, repeats: [plainMarks, { ...plainMarks, jump: { kind: 'ds', al: null } }] },
