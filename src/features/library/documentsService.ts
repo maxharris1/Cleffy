@@ -3,6 +3,7 @@ import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
+import { noteLibraryMutation } from '@/features/library/libraryCache';
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -97,6 +98,9 @@ export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFall
             id: docId,
             title: cached.title,
             cachedAt: cached.cachedAt,
+            // The real revision, so a warm open can tell whether the server's
+            // answer is the same bytes it already painted.
+            contentRev: cached.contentRev,
             archivedAt: cached.archivedAt,
         }),
         role: cached.myRole ?? 'editor',
@@ -180,6 +184,7 @@ export const uploadDocument = async (
     ownerId: string,
     onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadResult> => {
+    noteLibraryMutation();
     const { file } = await prepareUploadFile(pickedFile);
     const supabase = getSupabase();
     const id = crypto.randomUUID();
@@ -238,6 +243,7 @@ export const importDocumentFromImslp = async (
     workTitle: string,
     ownerId: string,
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     const id = crypto.randomUUID();
     const storagePath = `${id}/original.pdf`;
@@ -296,6 +302,7 @@ export const listFavoriteDocumentIds = async (): Promise<Set<string>> => {
 };
 
 export const setDocumentFavorite = async (docId: string, userId: string, favorite: boolean): Promise<void> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     if (favorite) {
         const { error } = await supabase
@@ -316,6 +323,7 @@ export const setDocumentFavorite = async (docId: string, userId: string, favorit
 };
 
 export const renameDocument = async (docId: string, title: string): Promise<void> => {
+    noteLibraryMutation();
     const { error } = await getSupabase().from('documents').update({ title }).eq('id', docId);
     if (error) {
         throw new Error(`Could not rename: ${error.message}`);
@@ -333,6 +341,7 @@ export const renameDocument = async (docId: string, title: string): Promise<void
  * The whole `{id}/` folder is listed so import backups don't leak.
  */
 export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     const { data: objects } = await supabase.storage.from('scores').list(doc.id);
     const paths = (objects ?? []).map((o) => `${doc.id}/${o.name}`);
@@ -416,6 +425,7 @@ export const replaceDocumentPdf = async (
     newBytes: Uint8Array,
     onProgress?: (progress: UploadProgress) => void,
 ): Promise<DocumentRow> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     const backupPath = `${doc.id}/${BACKUP_OBJECT_NAME}`;
     const { error: backupError } = await supabase.storage

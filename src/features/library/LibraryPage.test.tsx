@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { noteLibraryMutation } from '@/features/library/libraryCache';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
@@ -339,6 +340,57 @@ describe('LibraryPage', () => {
         const stars = screen.getAllByRole('button', { name: 'Add to favorites' });
         await user.click(stars[0] as HTMLElement);
         expect(setDocumentFavorite).toHaveBeenCalledWith('d1', 'teacher-1', true);
+        expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
+    });
+
+    it('keeps a favorite toggled against the cache paint when a slower bootstrap lands', async () => {
+        const user = userEvent.setup();
+        // The Dexie snapshot paints an interactive grid while the network is out.
+        readCachedLibraryList.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+        let resolveBootstrap: (boot: unknown) => void = () => undefined;
+        fetchLibraryBootstrap.mockReturnValue(
+            new Promise((resolve) => {
+                resolveBootstrap = resolve;
+            }),
+        );
+        // The real service bumps the mutation epoch before its write; the mock
+        // must mirror that, or the page cannot tell the response is stale.
+        setDocumentFavorite.mockImplementation(async () => {
+            noteLibraryMutation();
+        });
+
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        const stars = screen.getAllByRole('button', { name: 'Add to favorites' });
+        await user.click(stars[0] as HTMLElement);
+        expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
+
+        // The response — a snapshot taken before the click — arrives late. It
+        // must stand down, not turn the star back off.
+        resolveBootstrap({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+        });
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
         expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
     });
 

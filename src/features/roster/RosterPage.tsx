@@ -135,6 +135,12 @@ export const RosterPage = () => {
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
+    /**
+     * Counts from the Dexie snapshot, shown until the network's assignments
+     * arrive (then null). Without them every cached row would read "No scores"
+     * — an affirmative claim the cache can't back.
+     */
+    const [cachedCounts, setCachedCounts] = useState<Map<string, number> | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
@@ -152,6 +158,7 @@ export const RosterPage = () => {
             const cached = await getDb().rosterCache.get(userId).catch(() => undefined);
             if (mounted && cached && cached.students.length > 0) {
                 setStudents(cached.students);
+                setCachedCounts(new Map(cached.assignmentCounts));
             }
 
             try {
@@ -164,6 +171,7 @@ export const RosterPage = () => {
                 }
                 setStudents(roster);
                 setAssignments(grouped);
+                setCachedCounts(null);
                 setLoadError(null);
                 const assignmentCounts: Array<[string, number]> = [...grouped.entries()].map(([id, rows]) => [
                     id,
@@ -349,7 +357,7 @@ export const RosterPage = () => {
 
             {students === null ? (
                 <LoadingText className="mt-10">Loading your roster…</LoadingText>
-            ) : loadError ? (
+            ) : loadError && students.length === 0 ? (
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
                 canManageStudents ? (
@@ -367,6 +375,10 @@ export const RosterPage = () => {
                 )
             ) : (
                 <section className="mt-8">
+                    {/* Above the list, not instead of it: the cached roster the
+                        effect just painted is exactly what a teacher on a bad
+                        connection came for. */}
+                    {loadError ? <ErrorText className="mb-4">{loadError}</ErrorText> : null}
                     {/* Nothing in the list is taken away with the form: archive and
                         reset ask student-provision for no seat, and restore — which
                         does — comes back 402 into the notice above.
@@ -392,6 +404,7 @@ export const RosterPage = () => {
                                 student={student}
                                 index={index}
                                 assignments={assignments.get(student.student_user_id) ?? []}
+                                cachedCount={cachedCounts?.get(student.student_user_id)}
                                 expanded={expandedId === student.id}
                                 busy={busy}
                                 onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
@@ -633,6 +646,7 @@ const StudentRow = ({
     student,
     index,
     assignments,
+    cachedCount,
     expanded,
     busy,
     onToggle,
@@ -645,6 +659,8 @@ const StudentRow = ({
     student: ManagedStudentRow;
     index: number;
     assignments: RosterAssignment[];
+    /** Snapshot count while the network's assignments are still out (else undefined). */
+    cachedCount?: number;
     expanded: boolean;
     busy: boolean;
     onToggle: () => void;
@@ -657,6 +673,9 @@ const StudentRow = ({
     const archived = student.archived_at !== null;
     const detailId = `student-detail-${student.id}`;
     const identifier = identifierOf(student);
+    const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
+    /** True while the badge shows a snapshot count whose rows haven't arrived. */
+    const detailsPending = assignments.length === 0 && (cachedCount ?? 0) > 0;
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
@@ -686,9 +705,7 @@ const StudentRow = ({
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
                     <span className="shrink-0 px-2 text-xs text-stone-500">
-                        {assignments.length === 0
-                            ? 'No scores'
-                            : `${assignments.length} ${assignments.length === 1 ? 'score' : 'scores'}`}
+                        {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu
                         archived={archived}
@@ -705,7 +722,9 @@ const StudentRow = ({
                         <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                             Assigned scores
                         </h3>
-                        {assignments.length === 0 ? (
+                        {detailsPending ? (
+                            <LoadingText className="mt-2">Loading assignments…</LoadingText>
+                        ) : assignments.length === 0 ? (
                             <p className="mt-2 text-sm text-stone-500">
                                 Nothing assigned yet — open a score’s menu in your library and pick “Assign to
                                 student…”.

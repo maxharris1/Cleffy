@@ -3,6 +3,7 @@ import { getDb } from '@/sync/db';
 import type { DocumentRow, Entitlements, LibraryTagRow } from '@/types/database';
 
 import { LIBRARY_PAGE_SIZE } from '@/features/library/documentsService';
+import { libraryMutationEpoch } from '@/features/library/libraryCache';
 
 export interface LibraryBootstrap {
     documents: DocumentRow[];
@@ -22,8 +23,13 @@ interface BootstrapRpc {
     entitlements: Entitlements;
 }
 
-/** Coalesce concurrent LibraryShell + LibraryPage mounts onto one HTTP call. */
-let inflight: Promise<LibraryBootstrap> | null = null;
+/**
+ * Coalesce concurrent LibraryShell + LibraryPage mounts onto one HTTP call.
+ * Keyed by user: a request that left under the previous account must never be
+ * handed to the next one (the RPC answers for whoever the auth session was
+ * when it executed, not for the caller's argument).
+ */
+let inflight: { userId: string; promise: Promise<LibraryBootstrap> } | null = null;
 
 const tagMapFrom = (rows: Array<{ document_id: string; tag_id: string }>): Map<string, string[]> => {
     const map = new Map<string, string[]>();
@@ -75,6 +81,7 @@ export const readCachedLibraryList = async (
 };
 
 const fetchBootstrap = async (userId: string): Promise<LibraryBootstrap> => {
+    const epochAtFetch = libraryMutationEpoch();
     const { data, error } = await getSupabase().rpc('library_bootstrap');
     if (error || !data) {
         throw new Error(error?.message ?? 'library_bootstrap returned nothing');
@@ -93,19 +100,28 @@ const fetchBootstrap = async (userId: string): Promise<LibraryBootstrap> => {
         documentTags: tagMapFrom(raw.document_tags ?? []),
         entitlements: { ...raw.entitlements, user_id: userId },
     };
-    await cacheBootstrap(userId, boot);
+    // A mutation (or sign-out) since this request left means the payload
+    // predates local edits: hand it to the caller — which re-checks the epoch
+    // before applying — but do not persist it over their newer state.
+    if (libraryMutationEpoch() === epochAtFetch) {
+        await cacheBootstrap(userId, boot);
+    }
     return boot;
 };
 
 /**
  * One round-trip for documents + favorites + tags + entitlements.
- * Concurrent callers share the in-flight promise.
+ * Concurrent callers for the same user share the in-flight promise.
  */
 export const fetchLibraryBootstrap = (userId: string): Promise<LibraryBootstrap> => {
-    if (!inflight) {
-        inflight = fetchBootstrap(userId).finally(() => {
-            inflight = null;
-        });
+    if (inflight && inflight.userId === userId) {
+        return inflight.promise;
     }
-    return inflight;
+    const promise = fetchBootstrap(userId).finally(() => {
+        if (inflight?.promise === promise) {
+            inflight = null;
+        }
+    });
+    inflight = { userId, promise };
+    return promise;
 };

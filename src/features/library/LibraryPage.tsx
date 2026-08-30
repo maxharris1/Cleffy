@@ -11,6 +11,7 @@ import {
     setDocumentFavorite,
 } from '@/features/library/documentsService';
 import { fetchLibraryBootstrap, readCachedLibraryList } from '@/features/library/libraryBootstrap';
+import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import {
     displayTitleOf,
     filterByTag,
@@ -98,7 +99,10 @@ export const LibraryPage = () => {
     useEffect(() => {
         let cancelled = false;
         void (async () => {
-            // Instant paint from the last bootstrap (or opened PDFs) before the network.
+            // Instant paint from the last bootstrap before the network. Only the
+            // user-scoped snapshot qualifies: pdfCache (opened PDFs) is shared by
+            // every account on this browser, so it stays out of the happy path
+            // and appears only under the labelled offline fallback below.
             const cachedList = await readCachedLibraryList(userId).catch(() => null);
             if (!cancelled && cachedList && cachedList.documents.length > 0) {
                 setDocuments(cachedList.documents);
@@ -106,17 +110,15 @@ export const LibraryPage = () => {
                 setFavorites(cachedList.favoriteIds);
                 setTags(cachedList.tags);
                 setAssignments(cachedList.documentTags);
-            } else {
-                const opened = await listCachedDocuments().catch(() => []);
-                if (!cancelled && opened.length > 0) {
-                    setDocuments((prev) => prev ?? opened);
-                    setHasMore(false);
-                }
             }
 
+            // The painted list is interactive while the network is out, so edits
+            // made in that window outrank the response: every wholesale setState
+            // below stands down if the epoch moved after its request left.
+            const epochAtFetch = libraryMutationEpoch();
             try {
                 const boot = await fetchLibraryBootstrap(userId);
-                if (cancelled) {
+                if (cancelled || libraryMutationEpoch() !== epochAtFetch) {
                     return;
                 }
                 setDocuments(boot.documents);
@@ -128,13 +130,14 @@ export const LibraryPage = () => {
             } catch (err: unknown) {
                 // Fallback: four parallel GETs if the bootstrap RPC is unavailable.
                 try {
+                    const epochAtRetry = libraryMutationEpoch();
                     const [{ documents: docs, hasMore: more }, ids, tagRows, tagMap] = await Promise.all([
                         listDocuments(),
                         listFavoriteDocumentIds().catch(() => new Set<string>()),
                         listLibraryTags().catch(() => [] as LibraryTagRow[]),
                         listDocumentTagMap().catch(() => new Map<string, string[]>()),
                     ]);
-                    if (cancelled) {
+                    if (cancelled || libraryMutationEpoch() !== epochAtRetry) {
                         return;
                     }
                     setDocuments(docs);

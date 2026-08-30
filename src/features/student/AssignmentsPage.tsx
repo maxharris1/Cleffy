@@ -59,6 +59,10 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                 // Leave `scores` null so the empty state cannot claim nothing is
                 // assigned when the truth is that nothing loaded.
                 setNotice('Could not load your pieces. Check the internet connection and try again.');
+            } else {
+                // The cached paint stays up, but say it is a snapshot — a new
+                // assignment made since the last sync would be missing from it.
+                setNotice('Could not refresh — showing your pieces from the last sync.');
             }
             // Best effort: the name from the session is already a fine answer.
             if (profile.status === 'fulfilled' && profile.value) {

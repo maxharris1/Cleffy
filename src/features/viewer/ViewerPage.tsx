@@ -53,6 +53,14 @@ interface CloudDocState {
     doc: DocumentRow;
     role: MemberRole | null;
     bytes: ArrayBuffer;
+    /**
+     * A warm Dexie paint the server hasn't confirmed yet. The cached role may
+     * overstate today's access, and RLS discards (not retries) an annotation
+     * flushed under a role that turned out read-only — so writes and sync wait
+     * until the fetch settles. Cleared by the server response, or by the
+     * offline fallback, where the last-known role is the best truth available.
+     */
+    provisional?: boolean;
 }
 
 const CloudViewer = ({ docId }: { docId: string }) => {
@@ -97,14 +105,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     useEffect(() => {
         let cancelled = false;
         (async () => {
-            // Warm open: paint from Dexie immediately, then refresh in the background.
-            const offline = await loadDocumentOffline(docId).catch(() => null);
-            if (!cancelled && offline) {
-                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
-            }
-
+            // No session yet: on an SPA navigation the session is known
+            // synchronously, and a cold start resolves it from local storage in
+            // milliseconds — the effect re-runs then. Painting earlier would
+            // show cached scores to a browser that turns out to be signed out.
             if (!userId) {
                 return;
+            }
+
+            // Warm open: paint from Dexie immediately (provisionally — see
+            // CloudDocState), then refresh in the background.
+            const offline = await loadDocumentOffline(docId).catch(() => null);
+            if (!cancelled && offline) {
+                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes, provisional: true });
             }
 
             try {
@@ -115,7 +128,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 const bytes = await loadDocumentBytes(doc);
                 const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
                 if (!cancelled) {
-                    setState({ doc: withPages, role, bytes });
+                    // Same document at the same content revision as the warm
+                    // paint → keep the old buffer: PdfProvider re-parses (and
+                    // blanks every page) on buffer identity, not content.
+                    setState((prev) => ({
+                        doc: withPages,
+                        role,
+                        bytes:
+                            prev &&
+                            prev.doc.id === withPages.id &&
+                            (prev.doc.content_rev ?? 0) >= (withPages.content_rev ?? 0)
+                                ? prev.bytes
+                                : bytes,
+                    }));
                     setLoadError(null);
                 }
             } catch (err) {
@@ -195,7 +220,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // CachedPdf.archivedAt current for exactly this, so the offline open (which
     // synthesizes its row from the cache) reads it too.
     const archived = state.doc.archived_at !== null;
-    const readOnly = archived || (state.role !== 'owner' && state.role !== 'editor') || !resolvedUserId;
+    const readOnly =
+        archived ||
+        (state.role !== 'owner' && state.role !== 'editor') ||
+        !resolvedUserId ||
+        state.provisional === true;
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
 
@@ -271,7 +300,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         onStoreReady={onStoreReady}
                         playback={playbackFeature}
                         sync={
-                            resolvedUserId
+                            // Not while provisional: the engine would start,
+                            // then tear down and restart when the confirmed
+                            // role lands a beat later.
+                            resolvedUserId && !state.provisional
                                 ? {
                                       userId: resolvedUserId,
                                       name: displayNameOf(session),
