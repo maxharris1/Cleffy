@@ -3227,7 +3227,7 @@ revoke all on table public.support_messages from authenticated;
 
 grant all on table public.support_messages to service_role;
 
--- ===== supabase/migrations/20260830130000_imslp_file_licenses.sql =====
+-- ===== supabase/migrations/20260830101624_imslp_file_licenses.sql =====
 -- Per-file IMSLP license cache: which editions can be downloaded directly.
 -- Filled by imslp-work from the rendered work page (the only place IMSLP
 -- exposes the regional Non-PD flags); read by imslp-download as a server-side
