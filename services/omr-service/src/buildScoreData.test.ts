@@ -22,7 +22,9 @@ const musical: MusicalScore = {
     repeats: [],
     defaultBpm: 88,
     totalTicks: 3840,
-    warnings: ['repeats_ignored'],
+    // Whatever the parser could not do. Nothing structural: what a score's
+    // repeats and jumps cost the reader is decided here, not upstream.
+    warnings: ['grace_notes_skipped'],
     openTiesAtEnd: 0,
 };
 
@@ -70,8 +72,8 @@ describe('buildScoreData', () => {
             },
         ]);
         expect(score.defaultBpm).toBe(88);
-        expect(score.warnings).toContain('repeats_ignored');
-        expect(score.version).toBe(3);
+        expect(score.warnings).toContain('grace_notes_skipped');
+        expect(score.version).toBe(4);
     });
 
     it('degrades to geometry-less measures when the .omr is unusable', () => {
@@ -102,7 +104,7 @@ describe('buildScoreData', () => {
     });
 });
 
-describe('buildScoreData repeats', () => {
+describe('buildScoreData structure', () => {
     const plainMarks = { repeatForward: false, repeatBackward: false, repeatTimes: 2, endingStart: null, endingStop: false };
 
     it('unrolls a repeat into performed measures that reuse the printed geometry', () => {
@@ -131,21 +133,128 @@ describe('buildScoreData repeats', () => {
         expect(withMarks.totalTicks).toBe(without.totalTicks);
     });
 
-    it('keeps repeats_ignored when the structure could not be resolved', () => {
+    it('says nothing about a `|:` with no `:|` to send anyone back to it', () => {
+        // The old false positive: a forward repeat alone is performed exactly as
+        // a linear read performs it, so the reader has lost nothing to warn about.
+        const score = buildScoreData(
+            { ...musical, repeats: [{ ...plainMarks, repeatForward: true }, plainMarks] },
+            geometry,
+        );
+        expect(score.measures).toHaveLength(2);
+        expect(score.warnings).not.toContain('repeats_ignored');
+        expect(score.warnings).not.toContain('repeats_unrolled');
+    });
+
+    it('discloses a printed repeat whose structure did not resolve', () => {
         const score = buildScoreData(
             {
                 ...musical,
-                warnings: [...musical.warnings, 'repeats_ignored'],
                 repeats: [
-                    { ...plainMarks, repeatForward: true, repeatBackward: true, repeatTimes: 16 },
-                    { ...plainMarks, repeatForward: true, repeatBackward: true, repeatTimes: 16 },
+                    { ...plainMarks, repeatForward: true },
+                    // A volta that belongs to a third pass this repeat never makes.
+                    { ...plainMarks, repeatBackward: true, endingStart: [3] },
                 ],
             },
             geometry,
         );
-        // 16 passes of two bars is 32 measures — fine here, so it DOES unroll;
-        // what matters is that it never silently half-unrolls.
-        expect(score.measures.length % 2).toBe(0);
-        expect(score.measures.every((m) => m.srcIndex === 0 || m.srcIndex === 1)).toBe(true);
+        expect(score.measures).toHaveLength(2);
+        expect(score.warnings).toContain('repeats_ignored');
+    });
+
+    it('does not claim a repeat it went on to decline', () => {
+        // The `:|` IS retaken on the way through, and then a volta belonging to
+        // a pass that never comes leaves a bar unplayed. Half-understood, so
+        // nothing is performed — and the disclosure has to agree with that.
+        const threeBar = {
+            ...musical,
+            measures: [...musical.measures, { n: 3, tick: 3840, dTicks: 1920 }],
+            totalTicks: 5760,
+            repeats: [
+                { ...plainMarks, repeatForward: true },
+                { ...plainMarks, repeatBackward: true },
+                { ...plainMarks, endingStart: [3] },
+            ],
+        };
+        const score = buildScoreData(threeBar, null);
+        expect(score.measures).toHaveLength(3);
+        expect(score.warnings).toContain('repeats_ignored');
+        expect(score.warnings).not.toContain('repeats_unrolled');
+    });
+
+    it('performs a D.C. al Fine, sweeping the engraved bars again on the way back', () => {
+        const score = buildScoreData(
+            {
+                ...musical,
+                repeats: [
+                    { ...plainMarks, fine: true },
+                    { ...plainMarks, jump: { kind: 'dc', al: 'fine' } },
+                ],
+            },
+            geometry,
+        );
+        expect(score.measures.map((m) => m.srcIndex)).toEqual([0, 1, 0]);
+        expect(score.measures.map((m) => m.tick)).toEqual([0, 1920, 3840]);
+        expect(score.measures[2]!.x0).toBe(score.measures[0]!.x0);
+        expect(score.measures[2]!.sys).toBe(score.measures[0]!.sys);
+        expect(score.warnings).toContain('jumps_performed');
+        expect(score.warnings).not.toContain('jumps_ignored');
+        expect(score.warnings).not.toContain('repeats_unrolled');
+    });
+
+    it('plays straight through, and says so, when a jump does not add up', () => {
+        const score = buildScoreData(
+            { ...musical, repeats: [plainMarks, { ...plainMarks, jump: { kind: 'ds', al: null } }] },
+            geometry,
+        );
+        // A D.S. with no segno above it: refused whole rather than guessed at.
+        expect(score.measures.map((m) => m.srcIndex)).toEqual([0, 1]);
+        expect(score.warnings).toContain('jumps_ignored');
+        expect(score.warnings).not.toContain('repeats_ignored');
+    });
+
+    it('holds its tongue about a segno with no jump to use it', () => {
+        const score = buildScoreData({ ...musical, repeats: [{ ...plainMarks, segno: true }, plainMarks] }, geometry);
+        expect(score.warnings).not.toContain('jumps_ignored');
+        expect(score.warnings).not.toContain('jumps_performed');
+    });
+
+    it('carries pedal edges to the client, re-timed for every pass of a repeat', () => {
+        const score = buildScoreData(
+            {
+                ...musical,
+                pedals: [
+                    { tick: 0, k: 'down' },
+                    { tick: 1900, k: 'up' },
+                ],
+                repeats: [{ ...plainMarks, repeatForward: true }, { ...plainMarks, repeatBackward: true }],
+            },
+            geometry,
+        );
+        // Moments, not state in force: both halves of the span come back on the
+        // second pass rather than the release being inherited from the first.
+        expect(score.pedals).toEqual([
+            { tick: 0, k: 'down' },
+            { tick: 1900, k: 'up' },
+            { tick: 3840, k: 'down' },
+            { tick: 5740, k: 'up' },
+        ]);
+    });
+
+    it('thins a tempo map the repeat multiplied past the schema ceiling', () => {
+        const ramp = Array.from({ length: 300 }, (_, i) => ({ tick: i, bpm: 100 + (i % 20), src: 'ramp' as const }));
+        const score = buildScoreData(
+            {
+                ...musical,
+                tempos: ramp,
+                repeats: [{ ...plainMarks, repeatForward: true }, { ...plainMarks, repeatBackward: true }],
+            },
+            geometry,
+        );
+        // Both passes carry the ramp, which alone would breach the cap of 512
+        // and throw the whole score away in the self-check.
+        expect(score.measures).toHaveLength(4);
+        expect(score.tempos!.length).toBeLessThanOrEqual(512);
+        // Thinned across the whole performance, not truncated at the front.
+        expect(score.tempos!.at(-1)!.tick).toBeGreaterThan(score.totalTicks / 2);
     });
 });

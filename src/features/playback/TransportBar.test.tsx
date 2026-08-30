@@ -269,6 +269,20 @@ describe('analysis warnings', () => {
         expect(items[0]).toMatch(/repeats/i);
     });
 
+    it('warns before the bar count starts revisiting bars', async () => {
+        withWarnings(['jumps_performed']);
+        await userEvent.click(screen.getByRole('button', { name: /1 thing to know/i }));
+        expect(screen.getByText(/playhead jumps back/i)).toBeInTheDocument();
+    });
+
+    it('explains a roadmap it could not follow and a tempo nobody printed', async () => {
+        withWarnings(['jumps_ignored', 'tempo_defaulted', 'tempo_inferred']);
+        await userEvent.click(screen.getByRole('button', { name: /3 things to know/i }));
+        expect(screen.getByText(/plays straight through in page order/i)).toBeInTheDocument();
+        expect(screen.getByText(/chosen from the time signature/i)).toBeInTheDocument();
+        expect(screen.getByText(/estimated from the tempo word/i)).toBeInTheDocument();
+    });
+
     it('ignores codes it has no copy for rather than leaking them raw', () => {
         withWarnings(['something_new_from_the_service']);
         expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
@@ -277,7 +291,7 @@ describe('analysis warnings', () => {
 });
 
 describe('tempo disclosure and stale analyses', () => {
-    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine: string | null = 'audiveris-5.6.1+svc-5') =>
+    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine: string | null = 'audiveris-5.6.1+svc-7') =>
         renderBar({
             state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },
             ...over,

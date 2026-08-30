@@ -23,12 +23,15 @@ import {
 import { mergeScoreDataParts, seamIsUnsafe, splitSheetRangesOverlapping } from './mergeScoreData.js';
 import { parseMxlFiles } from './musicxml.js';
 import { parseOmrGeometry } from './omrGeometry.js';
+import { summarizeStructure, type StructureSummary } from './repeats.js';
 import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
 import type { ScoreData } from './scoreData.js';
 
 /**
- * Bump svc-<n> when musicxml/omrGeometry/buildScoreData/scoreData/flags/tessdata change.
+ * Bump svc-<n> when anything that changes the ScoreData a given PDF produces
+ * changes: musicxml/omrGeometry/buildScoreData/repeats/mergeScoreData/caps/
+ * scoreData/flags/tessdata. `scripts/check-engine-version.mjs` enforces it.
  *
  * Jumped 2 → 5 deliberately. Analyses in production report `svc-4`, a value that
  * has never existed in this repository's history — the deployed service was built
@@ -37,7 +40,7 @@ import type { ScoreData } from './scoreData.js';
  * comparing that integer: naming this svc-3 would make every production-analyzed
  * document look NEWER than the current engine and never offer to regenerate.
  */
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-6';
+export const ENGINE_VERSION = 'audiveris-5.6.1+svc-7';
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;
@@ -296,7 +299,7 @@ const transcribeParallel = async (
     const parts = await Promise.all(
         ranges.map(async (sheets, index) => {
             const outDir = join(workDir, `out-${sheets.from}-${sheets.to}`);
-            const { score, openTiesAtEnd } = await transcribeRangeDetailed(
+            const { score, openTiesAtEnd, structure } = await transcribeRangeDetailed(
                 pdfPath,
                 outDir,
                 timings,
@@ -310,7 +313,7 @@ const transcribeParallel = async (
                 sheets,
                 /* aggregateTimings */ index === 0,
             );
-            return { score, sheets, openTiesAtEnd };
+            return { score, sheets, openTiesAtEnd, structure };
         }),
     );
 
@@ -356,7 +359,7 @@ const transcribeRangeDetailed = async (
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
     aggregateTimings = true,
-): Promise<{ score: ScoreData; openTiesAtEnd: number }> => {
+): Promise<{ score: ScoreData; openTiesAtEnd: number; structure: StructureSummary }> => {
     await mkdir(outDir, { recursive: true });
     const result = await runAudiveris(pdfPath, outDir, {
         timeoutMs: timeoutForPages(timings.pageCount ?? null),
@@ -386,7 +389,10 @@ const transcribeRangeDetailed = async (
     } else {
         timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
     }
-    return { score, openTiesAtEnd: musical.openTiesAtEnd };
+    // Summarized from the marks rather than the built score: buildScoreData has
+    // already decided what this range alone can perform, and the merge needs to
+    // know what reaches past it.
+    return { score, openTiesAtEnd: musical.openTiesAtEnd, structure: summarizeStructure(musical.repeats) };
 };
 
 const downloadPdf = async (url: string, destination: string): Promise<void> => {

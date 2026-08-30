@@ -17,11 +17,19 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  * ScoreData schema is watched too: it is kept in lockstep with the service copy,
  * and a change there is just as much a contract change — editing it alone used to
  * slip past this guard entirely.
+ *
+ * The test is "could this change what a given PDF turns into", not "does this
+ * parse anything". Structure planning, shard merging and the schema-cap thinning
+ * all rewrite the score after the parse, and all three shipped silently before
+ * they were listed here.
  */
 const WATCHED = [
     'services/omr-service/src/musicxml.ts',
     'services/omr-service/src/omrGeometry.ts',
     'services/omr-service/src/buildScoreData.ts',
+    'services/omr-service/src/repeats.ts',
+    'services/omr-service/src/mergeScoreData.ts',
+    'services/omr-service/src/caps.ts',
     'services/omr-service/src/scoreData.ts',
     'services/omr-service/src/audiveris.ts',
     'src/types/scoreData.ts',

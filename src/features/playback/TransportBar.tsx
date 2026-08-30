@@ -75,8 +75,16 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'Repeats are played straight through once. First and second endings will both be played, in order.',
     },
     {
+        code: 'jumps_ignored',
+        text: 'A D.C., D.S. or Coda mark could not be followed reliably, so the score plays straight through in page order.',
+    },
+    {
         code: 'repeats_unrolled',
         text: 'Repeats and endings are played as written, so bar numbers go back on each repeat.',
+    },
+    {
+        code: 'jumps_performed',
+        text: 'D.C., D.S. and Coda marks are played as written, so the playhead jumps back and the bar count revisits earlier bars.',
     },
     {
         code: 'meter_corrected',
@@ -93,6 +101,14 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
     {
         code: 'measure_underfull',
         text: 'Some bars came out short and were padded, so notes there may fall early.',
+    },
+    {
+        code: 'tempo_defaulted',
+        text: 'No tempo is printed at all — a starting tempo was chosen from the time signature. Adjust it to taste.',
+    },
+    {
+        code: 'tempo_inferred',
+        text: 'No metronome mark is printed — the starting tempo was estimated from the tempo word. Adjust it to taste.',
     },
     {
         code: 'multiple_movements_concatenated',

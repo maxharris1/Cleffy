@@ -1,9 +1,18 @@
+import { capHolds, capPedals, capTempoEvents } from './caps.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import type { MusicalScore } from './musicxml.js';
 import type { OmrGeometry } from './omrGeometry.js';
-import { planRepeats, unrollRepeats } from './repeats.js';
+import { planRepeats, resolveJump, unrollRepeats } from './repeats.js';
 import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
 import type { ScoreData, ScoreMeasure, ScoreSystem } from './scoreData.js';
+
+/**
+ * Disclosures about structure, decided here and nowhere else. The parser records
+ * what is engraved; only at this point are the marks paired with real measures
+ * and a plan either resolved or refused, so anything a caller arrived with is
+ * discarded rather than trusted.
+ */
+const STRUCTURE_WARNINGS = ['repeats_unrolled', 'repeats_ignored', 'jumps_performed', 'jumps_ignored'];
 
 /**
  * Zip musical content (MusicXML) with measure geometry (.omr) into the final
@@ -79,10 +88,35 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         marks.length === measures.length
             ? planRepeats(marks, { maxMeasures: MAX_MEASURES }, (i) => musical.measures[i]?.n === 0)
             : null;
-    const performsRepeats = plan !== null && !plan.degraded && plan.order.length > measures.length;
+    // A degraded plan is never performed, so its flags describe a performance
+    // that does not happen — they cannot be read without this filter.
+    const performing = plan && !plan.degraded ? plan : null;
+    const performsRepeats = performing?.performsRepeats ?? false;
+    const performsJumps = performing?.performsJumps ?? false;
+    const structureLost = performing === null;
+
+    // Each disclosure is keyed to what the reader would MISS, not to what was
+    // printed: a `:|` that was never retaken, or a D.C./D.S. that was never
+    // taken. A lone forward `|:` is performed identically by a linear read, so
+    // it costs the reader nothing and earns no warning — claiming otherwise was
+    // the old false positive, and it fired on ordinary unrepeated scores.
+    for (const code of STRUCTURE_WARNINGS) {
+        warnings.delete(code);
+    }
     if (performsRepeats) {
-        warnings.delete('repeats_ignored');
         warnings.add('repeats_unrolled');
+    }
+    if (performsJumps) {
+        warnings.add('jumps_performed');
+    }
+    if (structureLost && marks.some((mark) => mark.repeatBackward)) {
+        warnings.add('repeats_ignored');
+    }
+    // A segno or Fine with no instruction to send the player back to it is
+    // decoration, and `resolveJump` says so by returning null; only a real
+    // D.C./D.S. that went unperformed is worth a reader's attention.
+    if (!performsJumps && resolveJump(marks) !== null) {
+        warnings.add('jumps_ignored');
     }
 
     const linearScore = {
@@ -91,11 +125,20 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         ...((musical.clefs?.length ?? 0) > 0 ? { clefs: musical.clefs } : {}),
         ...((musical.tempos?.length ?? 0) > 0 ? { tempos: musical.tempos } : {}),
         ...((musical.holds?.length ?? 0) > 0 ? { holds: musical.holds } : {}),
+        ...((musical.pedals?.length ?? 0) > 0 ? { pedals: musical.pedals } : {}),
         notes: musical.notes,
         measures,
         totalTicks: Math.max(1, musical.totalTicks),
     };
-    const performed = performsRepeats && plan ? unrollRepeats(linearScore, plan.order) : linearScore;
+    const performed =
+        performing && (performsRepeats || performsJumps) ? unrollRepeats(linearScore, performing.order) : linearScore;
+
+    // Unrolling clones every event it sweeps, so a repeat-heavy score can breach
+    // ceilings the printed page came nowhere near — and a breach fails the
+    // self-check below, throwing away a score that is otherwise perfectly good.
+    const tempos = performed.tempos ? capTempoEvents(performed.tempos) : undefined;
+    const holds = performed.holds ? capHolds(performed.holds) : undefined;
+    const pedals = performed.pedals ? capPedals(performed.pedals) : undefined;
 
     const candidate: ScoreData = {
         version: SCORE_DATA_VERSION,
@@ -104,8 +147,9 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
         timeSignatures: performed.timeSignatures,
         ...(performed.keySignatures ? { keySignatures: performed.keySignatures } : {}),
         ...(performed.clefs ? { clefs: performed.clefs } : {}),
-        ...(performed.tempos ? { tempos: performed.tempos } : {}),
-        ...(performed.holds ? { holds: performed.holds } : {}),
+        ...(tempos ? { tempos } : {}),
+        ...(holds ? { holds } : {}),
+        ...(pedals && pedals.length > 0 ? { pedals } : {}),
         totalTicks: performed.totalTicks,
         notes: performed.notes,
         measures: performed.measures,

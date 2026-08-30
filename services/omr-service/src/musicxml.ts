@@ -2,7 +2,15 @@ import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
 import { DEFAULT_VELOCITY, TICKS_PER_QUARTER } from './scoreData.js';
-import type { ScoreClef, ScoreHold, ScoreKeySig, ScoreNote, ScoreTempo, ScoreTimeSig } from './scoreData.js';
+import type {
+    ScoreClef,
+    ScoreHold,
+    ScoreKeySig,
+    ScoreNote,
+    ScorePedal,
+    ScoreTempo,
+    ScoreTimeSig,
+} from './scoreData.js';
 import { ERROR_CODES, JobError } from './errors.js';
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
@@ -15,6 +23,12 @@ export interface MusicalScore {
     clefs: ScoreClef[];
     tempos: ScoreTempo[];
     holds: ScoreHold[];
+    /**
+     * Sustain-pedal edges. Optional because every other producer of a
+     * MusicalScore predates v4, and "no pedal engraved" is exactly what their
+     * silence means; this parser always emits the array.
+     */
+    pedals?: ScorePedal[];
     /** Repeat structure per measure, aligned with `measures`. Never enters ScoreData. */
     repeats: MeasureRepeatMarks[];
     defaultBpm: number | null;
@@ -86,18 +100,81 @@ const TEMPO_TERMS: Record<string, number> = {
     allegro: 132,
     vivace: 152,
     vivo: 152,
+    vivacissimo: 168,
     presto: 172,
     prestissimo: 190,
+
+    // German and French headings, for the editions that print no Italian at all
+    // (Schumann and Debussy mark in their own languages throughout). Kept
+    // deliberately short and blunt: only terms that name a speed rather than a
+    // mood, and the ones that do both — ruhig, bewegt — sit near the middle
+    // where being wrong costs least.
+    langsam: 54,
+    ruhig: 66,
+    massig: 96,
+    maessig: 96,
+    bewegt: 116,
+    munter: 120,
+    lebhaft: 132,
+    rasch: 140,
+    schnell: 144,
+    lent: 54,
+    modere: 108,
+    anime: 120,
+    vif: 152,
+    vite: 160,
 };
 
 const TEMPO_TERM_SOURCE =
-    'larghissimo|grave|larghetto|largo|lento|adagietto|adagio|andantino|andante|moderato|allegretto|allegro|vivacissimo|vivace|vivo|prestissimo|presto';
+    'larghissimo|grave|larghetto|largo|lento|lent|adagietto|adagio|andantino|andante|moderato|modere|allegretto|allegro|vivacissimo|vivace|vivo|prestissimo|presto|langsam|ruhig|maessig|massig|bewegt|munter|lebhaft|rasch|schnell|anime|vif|vite';
 /** Anchored: a heading starts with its tempo term. "dolce" is not a tempo. */
 const TEMPO_HEADING_RE = new RegExp(
-    `^\\s*(?:molto\\s+|assai\\s+|poco\\s+|non\\s+troppo\\s+)?(?:${TEMPO_TERM_SOURCE})\\b`,
+    `^\\s*(?:molto\\s+|assai\\s+|poco\\s+|un\\s+poco\\s+|non\\s+troppo\\s+|sehr\\s+|tres\\s+|assez\\s+)?(?:${TEMPO_TERM_SOURCE})\\b`,
     'i',
 );
 const TEMPO_TERM_RE = new RegExp(`\\b(${TEMPO_TERM_SOURCE})\\b`, 'gi');
+
+/**
+ * Character words, which shade a term without naming a different one.
+ * `non troppo` is tested first: "Allegro molto, ma non troppo" is a limit on the
+ * molto, not two independent pushes.
+ */
+const TEMPO_MOD_STRONG_RE = /\b(?:molto|assai|sehr|tres)\b/i;
+const TEMPO_MOD_SLIGHT_RE = /\b(?:un\s+poco|poco|assez)\b/i;
+const TEMPO_MOD_NON_TROPPO_RE = /\bnon\s+troppo\b/i;
+
+/** The pulse a qualifier pulls toward: neither fast nor slow. */
+const TEMPO_NEUTRAL = 108;
+const TEMPO_MIN = 24;
+const TEMPO_MAX = 200;
+
+/**
+ * Fold diacritics before matching, so the ASCII patterns above meet the page as
+ * it is actually printed — "Modéré", "mässig" — and as OCR reproduces it.
+ */
+const foldDiacritics = (text: string): string => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+/**
+ * Shade a term average by the character words around it.
+ *
+ * The two directions are deliberately not symmetric. "Away" scales the tempo
+ * itself, because there is no bounded distance to spend and a molto Presto
+ * should keep gaining; "toward" instead spends a fraction of what remains to the
+ * neutral pulse, so a qualifier can never overshoot the middle it is pulling to
+ * and turn Allegro non troppo into an Andante.
+ */
+const shadeTempo = (bpm: number, text: string): number => {
+    if (TEMPO_MOD_NON_TROPPO_RE.test(text)) {
+        return bpm + (TEMPO_NEUTRAL - bpm) * 0.15;
+    }
+    if (TEMPO_MOD_STRONG_RE.test(text)) {
+        return bpm === TEMPO_NEUTRAL ? bpm : bpm * (bpm > TEMPO_NEUTRAL ? 1.1 : 0.9);
+    }
+    if (TEMPO_MOD_SLIGHT_RE.test(text)) {
+        return bpm + (TEMPO_NEUTRAL - bpm) * 0.1;
+    }
+    return bpm;
+};
 
 /** Gradual tempo changes, which arrive as words and never as numbers. */
 const RITARDANDO_RE = /^\s*(rit\b|rit\.|ritard|rall|allarg|slentando|calando\s+e)/i;
@@ -111,9 +188,11 @@ const GRADUAL_TEMPO_BARS = 4;
 
 /**
  * Quarter-BPM for a tempo heading, or null. A compound heading averages its two
- * terms — "Allegro moderato" reads as neither Allegro nor Moderato.
+ * terms — "Allegro moderato" reads as neither Allegro nor Moderato — and the
+ * character words around them then shade the average.
  */
-const tempoFromWords = (text: string): number | null => {
+const tempoFromWords = (raw: string): number | null => {
+    const text = foldDiacritics(raw);
     if (!TEMPO_HEADING_RE.test(text)) {
         return null;
     }
@@ -130,7 +209,123 @@ const tempoFromWords = (text: string): number | null => {
     if (found.length === 0) {
         return null;
     }
-    return Math.round(found.reduce((sum, bpm) => sum + bpm, 0) / found.length);
+    const average = found.reduce((sum, bpm) => sum + bpm, 0) / found.length;
+    return Math.round(Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, shadeTempo(average, text))));
+};
+
+/**
+ * Opening pulse for a score that prints no tempo anywhere — a lead sheet, or an
+ * OMR pass whose heading never survived. The meter is the only evidence left:
+ * compound bars are counted in dotted beats and want a slower quarter, a cut-time
+ * bar a faster one. Every branch sits under its idiomatic tempo, because a
+ * practice tempo that is too slow is a nuisance and one that is too fast is
+ * useless.
+ */
+const meterDefaultBpm = (sig: { num: number; den: number }): number => {
+    if (sig.den === 8) {
+        return sig.num === 6 || sig.num === 9 || sig.num === 12 ? 84 : 96;
+    }
+    if (sig.den === 2) {
+        return 112;
+    }
+    if (sig.den === 4 && sig.num === 3) {
+        return 108;
+    }
+    if (sig.den === 4 && sig.num === 2) {
+        return 100;
+    }
+    return 96;
+};
+
+/**
+ * The jump vocabulary as OCR delivers it. Audiveris reads "D.C. al Fine" as
+ * <words>; the <sound> attributes a native export would carry are the lucky
+ * case, so text is the path that has to work.
+ *
+ * Two orderings matter. Jumps are tested before Fine and Coda, or "D.C. al Fine"
+ * would be consumed as a Fine and the piece would stop where it should turn
+ * back. And Fine and Coda match the WHOLE string only: "fine" is an ordinary
+ * Italian word, and a substring match would end the movement inside a phrase.
+ */
+const JUMP_DC_RE = /^\s*(?:d\.?\s?c\.?|da\s+capo)\b/i;
+const JUMP_DS_RE = /^\s*(?:d\.?\s?s\.?|dal\s+segno)\b/i;
+const AL_FINE_RE = /\bal\s+fine\b/i;
+const AL_CODA_RE = /\bal(?:la)?\s+coda\b/i;
+const FINE_RE = /^\s*fine\s*[.!]?\s*$/i;
+const TO_CODA_RE = /^\s*to\s+coda\b/i;
+const CODA_WORD_RE = /^\s*coda\s*$/i;
+
+/** Where a jump ends, when the words say so at all. */
+const jumpTargetOf = (text: string): 'fine' | 'coda' | null =>
+    AL_FINE_RE.test(text) ? 'fine' : AL_CODA_RE.test(text) ? 'coda' : null;
+
+/**
+ * Record a jump without discarding what another encoding already said about it:
+ * a <sound dacapo> carries the kind and the <words> beside it carry "al Fine",
+ * and the two are one printed instruction.
+ */
+const noteJump = (repeat: MeasureRepeatMarks, kind: 'dc' | 'ds', al: 'fine' | 'coda' | null): void => {
+    repeat.jump = { kind, al: al ?? repeat.jump?.al ?? null };
+};
+
+/**
+ * Structure carried by <sound> attributes. `dacapo` and `fine` are yes/no, while
+ * `segno`, `dalsegno`, `coda` and `tocoda` carry a label naming which sign is
+ * meant — so for those the presence of the attribute IS the instruction.
+ */
+const applySoundStructure = (sound: Elem, repeat: MeasureRepeatMarks): void => {
+    const isYes = (name: string): boolean => (sound.getAttribute(name) ?? '').trim().toLowerCase() === 'yes';
+    const isNamed = (name: string): boolean => (sound.getAttribute(name) ?? '').trim() !== '';
+    if (isYes('dacapo')) {
+        noteJump(repeat, 'dc', null);
+    }
+    if (isNamed('dalsegno')) {
+        noteJump(repeat, 'ds', null);
+    }
+    if (isNamed('tocoda')) {
+        repeat.toCoda = true;
+    }
+    if (isNamed('coda')) {
+        repeat.codaTarget = true;
+    }
+    if (isNamed('segno')) {
+        repeat.segno = true;
+    }
+    if (isYes('fine')) {
+        repeat.fine = true;
+    }
+};
+
+/**
+ * Engraved signs. A segno says exactly one thing, but a coda glyph is printed
+ * both at "To Coda" and over the coda section itself, so a bare sighting is
+ * recorded as nothing more than a sighting — the planner tells the two apart by
+ * position, which is the only thing that distinguishes them.
+ */
+const applyGlyphStructure = (host: Elem, repeat: MeasureRepeatMarks): void => {
+    if (host.getElementsByTagName('segno').length > 0) {
+        repeat.segno = true;
+    }
+    if (host.getElementsByTagName('coda').length > 0) {
+        repeat.codaGlyph = true;
+    }
+};
+
+/** Structure printed as plain text, the path OMR actually produces. */
+const applyWordStructure = (text: string, repeat: MeasureRepeatMarks): void => {
+    if (JUMP_DC_RE.test(text)) {
+        noteJump(repeat, 'dc', jumpTargetOf(text));
+    } else if (JUMP_DS_RE.test(text)) {
+        noteJump(repeat, 'ds', jumpTargetOf(text));
+    } else if (TO_CODA_RE.test(text)) {
+        repeat.toCoda = true;
+    } else if (FINE_RE.test(text)) {
+        repeat.fine = true;
+    } else if (CODA_WORD_RE.test(text)) {
+        // Spelled out, "Coda" labels the section — it is the bare GLYPH that is
+        // ambiguous, never the word.
+        repeat.codaTarget = true;
+    }
 };
 
 /**
@@ -329,8 +524,10 @@ interface PartCandidate {
 /**
  * Parse one exported MusicXML document (score-partwise) into musical content.
  * Time base: everything is normalized to 480 ticks/quarter regardless of the
- * file's <divisions>. Ties are merged; grace notes are skipped; repeats are
- * ignored (linear playthrough) with a warning.
+ * file's <divisions>. Ties are merged and grace notes crushed in ahead of their
+ * principal. Repeat and jump structure is RECORDED per measure and never acted
+ * on here: the timeline this returns is always linear, and buildScoreData is
+ * what decides whether the structure can be performed or must be disclosed.
  *
  * Part selection is piano-primary: prefer a grand-staff / Piano-named part over
  * document order so Audiveris "Voice" dummy parts (and art-song vocal lines)
@@ -390,6 +587,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         clefs: leadResult.clefs,
         tempos: leadResult.tempos,
         holds: leadResult.holds,
+        pedals: leadResult.pedals,
         repeats: leadResult.repeats,
         defaultBpm: leadResult.defaultBpm,
         totalTicks,
@@ -524,6 +722,7 @@ interface PartResult {
     clefs: ScoreClef[];
     tempos: ScoreTempo[];
     holds: ScoreHold[];
+    pedals: ScorePedal[];
     repeats: MeasureRepeatMarks[];
     defaultBpm: number | null;
     openTiesAtEnd: number;
@@ -563,6 +762,7 @@ type RawEvent =
     | { k: 'wedge'; rel: number; staff: EventStaff; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }
     | { k: 'tempo'; rel: number; qbpm: number; src: 'sound' | 'metronome' | 'word' }
     | { k: 'gradual'; rel: number; kind: 'rit' | 'accel' | 'atempo' }
+    | { k: 'pedal'; rel: number; kind: 'down' | 'up' | 'change' }
     | { k: 'time'; rel: number; num: number; den: number }
     | { k: 'key'; rel: number; fifths: number }
     | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number };
@@ -570,6 +770,11 @@ type RawEvent =
 /**
  * Repeat structure engraved on a measure's barlines. Service-side only — this
  * never reaches ScoreData, which stores the performance, not the notation.
+ *
+ * Position is part of the vocabulary, and the two halves differ: `segno` and
+ * `codaTarget` name a place a jump ARRIVES at, so they bind to the measure's
+ * START, while `toCoda`, `fine` and `jump` are instructions obeyed once the bar
+ * has been played, so they take effect at its END.
  */
 export interface MeasureRepeatMarks {
     /** `|:` — where a backward repeat returns to. */
@@ -582,6 +787,22 @@ export interface MeasureRepeatMarks {
     endingStart: number[] | null;
     /** A volta bracket closes here. */
     endingStop: boolean;
+    /** 𝄋 — a D.S. jump lands at this measure's START. */
+    segno?: boolean;
+    /** 𝄌 section begins at this measure's START. */
+    codaTarget?: boolean;
+    /** "To Coda" — divert to the coda at this measure's END, post-jump pass only. */
+    toCoda?: boolean;
+    /**
+     * A bare 𝄌 glyph with nothing saying which role it plays. The same sign is
+     * engraved both at "To Coda" and at the coda itself, so the parser records
+     * the sighting and the planner disambiguates by position.
+     */
+    codaGlyph?: boolean;
+    /** "Fine" — stop at this measure's END, post-jump pass only. */
+    fine?: boolean;
+    /** D.C./D.S. instruction taking effect at this measure's END. */
+    jump?: { kind: 'dc' | 'ds'; al: 'fine' | 'coda' | null } | null;
 }
 
 const NO_REPEAT_MARKS: MeasureRepeatMarks = {
@@ -616,7 +837,7 @@ const directionStaff = (direction: Elem): EventStaff => childInt(direction, 'sta
  * onsets: absolute ticks depend on padding, padding depends on the signature, and
  * the signature is exactly what meter reconciliation wants to change.
  */
-const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
+const scanPart = (part: Elem): RawMeasure[] => {
     const raws: RawMeasure[] = [];
     let divisions = 1;
     let currentSig = { num: 4, den: 4 };
@@ -700,6 +921,34 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                         events.push({ k: 'tempo', rel: cursor, qbpm, src: tempoSrc });
                     }
 
+                    if (sound) {
+                        applySoundStructure(sound, repeat);
+                    }
+                    applyGlyphStructure(child, repeat);
+                    // Structure is read from EVERY <words> in the direction, not
+                    // just the first: Audiveris splits one printed line into
+                    // several text items, and "D.C. al Fine" routinely arrives
+                    // behind a heading that got there first.
+                    const allWords = child.getElementsByTagName('words');
+                    for (let w = 0; w < allWords.length; w++) {
+                        const text = (allWords.item(w) as Elem | null)?.textContent ?? '';
+                        if (text) {
+                            applyWordStructure(text, repeat);
+                        }
+                    }
+
+                    const pedalEl = child.getElementsByTagName('pedal').item(0) as Elem | null;
+                    if (pedalEl) {
+                        const type = (pedalEl.getAttribute('type') ?? '').toLowerCase();
+                        if (type === 'start' || type === 'stop' || type === 'change') {
+                            events.push({
+                                k: 'pedal',
+                                rel: cursor,
+                                kind: type === 'start' ? 'down' : type === 'stop' ? 'up' : 'change',
+                            });
+                        }
+                    }
+
                     const wordsForTempo = child.getElementsByTagName('words').item(0) as Elem | null;
                     const wordText = wordsForTempo ? (wordsForTempo.textContent ?? '') : '';
                     if (wordText) {
@@ -774,6 +1023,19 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                     }
                     break;
                 }
+                case 'sound': {
+                    // A <sound> hung straight on the measure rather than inside a
+                    // <direction> — where an exporter puts a jump's own
+                    // instruction, and, until now, the one tempo mark nothing in
+                    // this parser ever looked at.
+                    const tempoAttr = child.getAttribute('tempo');
+                    const parsed = tempoAttr ? Number.parseFloat(tempoAttr) : NaN;
+                    if (Number.isFinite(parsed) && parsed > 0) {
+                        events.push({ k: 'tempo', rel: cursor, qbpm: Math.round(parsed), src: 'sound' });
+                    }
+                    applySoundStructure(child, repeat);
+                    break;
+                }
                 case 'backup': {
                     const dur = childInt(child, 'duration') ?? 0;
                     cursor = Math.max(0, cursor - ticksOf(dur, divisions));
@@ -786,9 +1048,12 @@ const scanPart = (part: Elem, ctx: PartContext): RawMeasure[] => {
                     break;
                 }
                 case 'barline': {
+                    const barlineSound = firstChild(child, 'sound');
+                    if (barlineSound) {
+                        applySoundStructure(barlineSound, repeat);
+                    }
                     const repeatEl = firstChild(child, 'repeat');
                     if (repeatEl) {
-                        ctx.warnings.add('repeats_ignored');
                         const direction = (repeatEl.getAttribute('direction') ?? '').toLowerCase();
                         if (direction === 'forward') {
                             repeat.repeatForward = true;
@@ -1591,6 +1856,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const clefs: ScoreClef[] = [];
     const tempoMarks: TempoMark[] = [];
     const holds: ScoreHold[] = [];
+    const pedals: ScorePedal[] = [];
 
     /** Grace notes buffered until their principal note arrives. */
     let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
@@ -1661,6 +1927,18 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                 }
                 case 'gradual': {
                     tempoMarks.push({ tick: measureStart + ev.rel, kind: ev.kind });
+                    break;
+                }
+                case 'pedal': {
+                    const tick = measureStart + ev.rel;
+                    if (ev.kind === 'change') {
+                        // A re-catch: the dampers drop and the pedal is taken
+                        // again on the same beat, which is the whole point of the
+                        // marking — it is what clears the previous harmony.
+                        pedals.push({ tick, k: 'up' }, { tick, k: 'down' });
+                    } else {
+                        pedals.push({ tick, k: ev.kind });
+                    }
                     break;
                 }
                 case 'dyn':
@@ -1821,6 +2099,17 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
               ctx.warnings,
           );
 
+    // Nothing printed a number, nothing printed a word: the meter is the last
+    // evidence there is. Deliberately NOT a tempos[] entry — deployed clients
+    // validate that array against a closed `src` enum and would reject the whole
+    // score over a new value, so a guess this weak travels as defaultBpm plus a
+    // warning, which every version of the client already tolerates.
+    let defaultBpm = tempos[0]?.bpm ?? null;
+    if (defaultBpm === null && !ctx.timeline) {
+        defaultBpm = meterDefaultBpm(timeSignatures[0] ?? sigs[0] ?? { num: 4, den: 4 });
+        ctx.warnings.add('tempo_defaulted');
+    }
+
     // Dedupe holds: a fermata over a chord is one pause, not one per note.
     const holdByTick = new Map<number, ScoreHold>();
     for (const hold of holds) {
@@ -1838,13 +2127,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         clefs,
         tempos,
         holds: [...holdByTick.values()].sort((a, b) => a.tick - b.tick),
+        // Pedal, like tempo, is state the lead part owns: a secondary part snaps
+        // to the lead's timeline and would only ever restate it.
+        pedals: ctx.timeline ? [] : pedals,
         repeats: raws.map((raw) => raw.repeat),
-        defaultBpm: tempos[0]?.bpm ?? null,
+        defaultBpm,
         openTiesAtEnd: openTies.size,
     };
 };
 
-const parsePart = (part: Elem, ctx: PartContext): PartResult => placeAndEmit(scanPart(part, ctx), ctx);
+const parsePart = (part: Elem, ctx: PartContext): PartResult => placeAndEmit(scanPart(part), ctx);
 
 const ticksOf = (duration: number, divisions: number): number =>
     Math.max(0, Math.round((duration * TICKS_PER_QUARTER) / Math.max(1, divisions)));
@@ -1891,6 +2183,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         clefs: [],
         tempos: [],
         holds: [],
+        pedals: [],
         repeats: [],
         defaultBpm: null,
         totalTicks: 0,
@@ -1909,6 +2202,7 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         // vivace and an Andantino playing at identical speeds.
         combined.tempos.push(...parsed.tempos);
         combined.holds.push(...parsed.holds);
+        combined.pedals = [...(combined.pedals ?? []), ...(parsed.pedals ?? [])];
         combined.repeats.push(...parsed.repeats);
         combined.defaultBpm = combined.defaultBpm ?? parsed.defaultBpm;
         combined.totalTicks = parsed.totalTicks;
