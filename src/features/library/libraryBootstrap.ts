@@ -12,6 +12,13 @@ export interface LibraryBootstrap {
     tags: LibraryTagRow[];
     documentTags: Map<string, string[]>;
     entitlements: Entitlements;
+    /**
+     * libraryMutationEpoch() when the request LEFT — not when a caller joined
+     * the coalesced promise. A consumer that compares the current epoch to a
+     * capture of its own could join a request dispatched before an earlier
+     * mutation and wrongly conclude the payload is fresh.
+     */
+    fetchedAtEpoch: number;
 }
 
 interface BootstrapRpc {
@@ -99,6 +106,7 @@ const fetchBootstrap = async (userId: string): Promise<LibraryBootstrap> => {
         tags: raw.tags ?? [],
         documentTags: tagMapFrom(raw.document_tags ?? []),
         entitlements: { ...raw.entitlements, user_id: userId },
+        fetchedAtEpoch: epochAtFetch,
     };
     // A mutation (or sign-out) since this request left means the payload
     // predates local edits: hand it to the caller — which re-checks the epoch

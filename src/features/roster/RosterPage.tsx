@@ -141,6 +141,12 @@ export const RosterPage = () => {
      * — an affirmative claim the cache can't back.
      */
     const [cachedCounts, setCachedCounts] = useState<Map<string, number> | null>(null);
+    /**
+     * Whether `assignments` reflects the server. While 'loading' a row with a
+     * snapshot count shows a spinner in its panel; after 'failed' it must show
+     * a terminal notice instead — nothing on this mount will fill the panel.
+     */
+    const [assignmentsStatus, setAssignmentsStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
     const [loadError, setLoadError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
@@ -162,21 +168,25 @@ export const RosterPage = () => {
             }
 
             try {
+                // null, not an empty map, on failure: an empty map is a claim
+                // ("no assignments") the page would repeat in every row.
                 const [roster, grouped] = await Promise.all([
                     listRoster(),
-                    listAssignmentsForStudents().catch(() => new Map<string, RosterAssignment[]>()),
+                    listAssignmentsForStudents().catch(() => null),
                 ]);
                 if (!mounted) {
                     return;
                 }
                 setStudents(roster);
-                setAssignments(grouped);
-                setCachedCounts(null);
+                setAssignments(grouped ?? new Map());
+                setAssignmentsStatus(grouped ? 'ready' : 'failed');
+                if (grouped) {
+                    setCachedCounts(null);
+                }
                 setLoadError(null);
-                const assignmentCounts: Array<[string, number]> = [...grouped.entries()].map(([id, rows]) => [
-                    id,
-                    rows.length,
-                ]);
+                const assignmentCounts: Array<[string, number]> = grouped
+                    ? [...grouped.entries()].map(([id, rows]) => [id, rows.length])
+                    : (cached?.assignmentCounts ?? []);
                 void getDb()
                     .rosterCache.put({
                         userId,
@@ -188,6 +198,7 @@ export const RosterPage = () => {
             } catch (err) {
                 if (mounted) {
                     setStudents((prev) => prev ?? []);
+                    setAssignmentsStatus('failed');
                     setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
                 }
             }
@@ -198,7 +209,11 @@ export const RosterPage = () => {
     }, [userId]);
 
     const reloadRoster = async () => setStudents(await listRoster());
-    const reloadAssignments = async () => setAssignments(await listAssignmentsForStudents());
+    const reloadAssignments = async () => {
+        setAssignments(await listAssignmentsForStudents());
+        setAssignmentsStatus('ready');
+        setCachedCounts(null);
+    };
 
     /**
      * The three ways a roster action ends: it worked, the plan refused it, or it
@@ -405,6 +420,7 @@ export const RosterPage = () => {
                                 index={index}
                                 assignments={assignments.get(student.student_user_id) ?? []}
                                 cachedCount={cachedCounts?.get(student.student_user_id)}
+                                assignmentsStatus={assignmentsStatus}
                                 expanded={expandedId === student.id}
                                 busy={busy}
                                 onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
@@ -647,6 +663,7 @@ const StudentRow = ({
     index,
     assignments,
     cachedCount,
+    assignmentsStatus,
     expanded,
     busy,
     onToggle,
@@ -661,6 +678,7 @@ const StudentRow = ({
     assignments: RosterAssignment[];
     /** Snapshot count while the network's assignments are still out (else undefined). */
     cachedCount?: number;
+    assignmentsStatus: 'loading' | 'ready' | 'failed';
     expanded: boolean;
     busy: boolean;
     onToggle: () => void;
@@ -674,8 +692,8 @@ const StudentRow = ({
     const detailId = `student-detail-${student.id}`;
     const identifier = identifierOf(student);
     const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
-    /** True while the badge shows a snapshot count whose rows haven't arrived. */
-    const detailsPending = assignments.length === 0 && (cachedCount ?? 0) > 0;
+    /** The badge shows a snapshot count whose rows haven't arrived (yet, or at all). */
+    const detailsMissing = assignments.length === 0 && (cachedCount ?? 0) > 0;
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
@@ -722,8 +740,14 @@ const StudentRow = ({
                         <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                             Assigned scores
                         </h3>
-                        {detailsPending ? (
+                        {detailsMissing && assignmentsStatus === 'loading' ? (
                             <LoadingText className="mt-2">Loading assignments…</LoadingText>
+                        ) : detailsMissing ? (
+                            // Terminal, not a spinner: nothing on this mount will
+                            // fill the panel once the load has failed.
+                            <p className="mt-2 text-sm text-stone-500">
+                                The assignment list couldn’t be loaded — the count is from the last sync.
+                            </p>
                         ) : assignments.length === 0 ? (
                             <p className="mt-2 text-sm text-stone-500">
                                 Nothing assigned yet — open a score’s menu in your library and pick “Assign to

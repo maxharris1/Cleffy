@@ -16,6 +16,7 @@ vi.mock('@/lib/storageUpload', () => ({
 // layer is replaced by an in-memory map that keeps real Blobs readable.
 const memCache = vi.hoisted(() => new Map<string, unknown>());
 const memThumbs = vi.hoisted(() => new Map<string, unknown>());
+const libraryListClear = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 // Flipped on to simulate WebKit refusing an IndexedDB write (private browsing).
 const cacheFailure = vi.hoisted(() => ({ put: null as Error | null, get: null as Error | null }));
 // The upload/replace paths kick off a thumbnail render; stubbed so these tests
@@ -65,11 +66,13 @@ vi.mock('@/sync/db', () => {
                     return Promise.resolve();
                 },
             }),
+            libraryList: table({ clear: libraryListClear }),
         }),
     };
 });
 
 import { deleteDocument, loadDocumentBytes, replaceDocumentPdf } from '@/features/library/documentsService';
+import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 
@@ -94,6 +97,7 @@ interface StubOptions {
     backupError?: string | null;
     listNames?: string[];
     updatedRow?: DocumentRow;
+    deleteError?: string;
 }
 
 const makeStub = (options: StubOptions = {}) => {
@@ -160,7 +164,10 @@ const makeStub = (options: StubOptions = {}) => {
             delete: () => ({
                 eq: () => {
                     calls.delete(table);
-                    return Promise.resolve({ data: null, error: null });
+                    return Promise.resolve({
+                        data: null,
+                        error: options.deleteError ? { message: options.deleteError } : null,
+                    });
                 },
             }),
         }),
@@ -171,6 +178,7 @@ const makeStub = (options: StubOptions = {}) => {
 
 beforeEach(async () => {
     vi.mocked(uploadPdfToStorage).mockClear();
+    libraryListClear.mockClear();
     cacheFailure.put = null;
     cacheFailure.get = null;
     await getDb().pdfCache.clear();
@@ -322,6 +330,28 @@ describe('deleteDocument', () => {
         const d = doc();
         await deleteDocument(d);
         expect(calls.remove).toHaveBeenCalledWith([`${d.id}/original.pdf`, `${d.id}/pre-import-original.pdf`]);
+    });
+
+    /**
+     * The producer half of the library-cache contract: the epoch moves BEFORE
+     * the server write (so a bootstrap racing it is outranked), and the Dexie
+     * snapshot is dropped only once the write SUCCEEDS (a refused delete must
+     * not cost an offline library its list).
+     */
+    it('bumps the mutation epoch and drops the library snapshots on success', async () => {
+        makeStub();
+        const before = libraryMutationEpoch();
+        await deleteDocument(doc());
+        expect(libraryMutationEpoch()).toBe(before + 1);
+        expect(libraryListClear).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the library snapshots when the delete is refused', async () => {
+        makeStub({ deleteError: 'permission denied' });
+        const before = libraryMutationEpoch();
+        await expect(deleteDocument(doc())).rejects.toThrow('Could not delete');
+        expect(libraryMutationEpoch()).toBe(before + 1);
+        expect(libraryListClear).not.toHaveBeenCalled();
     });
 
     it('drops the cached thumbnail along with the other local caches', async () => {

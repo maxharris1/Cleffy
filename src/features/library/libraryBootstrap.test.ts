@@ -96,4 +96,22 @@ describe('fetchLibraryBootstrap', () => {
         const row = await getDb().libraryList.get('user-fresh');
         expect(row?.documents[0]?.title).toBe('Aria');
     });
+
+    it('coalesces only requests in flight — a sequential call fetches anew', async () => {
+        rpc.mockResolvedValueOnce({ data: payload('Aria'), error: null });
+        rpc.mockResolvedValueOnce({ data: payload('Bourrée'), error: null });
+        const first = await fetchLibraryBootstrap('user-seq');
+        const second = await fetchLibraryBootstrap('user-seq');
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(first.documents[0]?.title).toBe('Aria');
+        expect(second.documents[0]?.title).toBe('Bourrée');
+    });
+
+    it('does not memoize a failed request', async () => {
+        rpc.mockRejectedValueOnce(new Error('offline'));
+        rpc.mockResolvedValueOnce({ data: payload('Aria'), error: null });
+        await expect(fetchLibraryBootstrap('user-retry')).rejects.toThrow('offline');
+        const retry = await fetchLibraryBootstrap('user-retry');
+        expect(retry.documents[0]?.title).toBe('Aria');
+    });
 });

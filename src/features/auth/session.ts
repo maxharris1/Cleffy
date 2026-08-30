@@ -131,13 +131,14 @@ export const signInAnonymouslyWithName = async (displayName: string): Promise<vo
 };
 
 export const signOut = async (): Promise<void> => {
-    await getSupabase().auth.signOut();
-    rememberSession(null);
-    // Bump the library mutation epoch BEFORE clearing: a library_bootstrap
-    // response still in flight for the old account checks it and stands down
-    // instead of re-populating the rows removed below.
+    // Bump the library mutation epoch FIRST — before the auth round-trip, and
+    // so before the entitlements delete the callers do just ahead of us: a
+    // library_bootstrap response landing anywhere in the sign-out window must
+    // stand down instead of re-populating the rows being removed.
     const { noteLibraryMutation } = await import('@/features/library/libraryCache');
     noteLibraryMutation();
+    await getSupabase().auth.signOut();
+    rememberSession(null);
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const db = getDb();

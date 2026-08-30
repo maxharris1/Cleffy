@@ -49,6 +49,9 @@ export const ViewerPage = () => {
 // ---------------------------------------------------------------------------
 // Cloud documents: auth-gated, role-aware, synced.
 
+/** How long a warm open waits for the server to confirm the cached role. */
+const PROVISIONAL_ROLE_TIMEOUT_MS = 4000;
+
 interface CloudDocState {
     doc: DocumentRow;
     role: MemberRole | null;
@@ -104,6 +107,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
     useEffect(() => {
         let cancelled = false;
+        let provisionalTimer: ReturnType<typeof setTimeout> | undefined;
         (async () => {
             // No session yet: on an SPA navigation the session is known
             // synchronously, and a cold start resolves it from local storage in
@@ -118,6 +122,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             const offline = await loadDocumentOffline(docId).catch(() => null);
             if (!cancelled && offline) {
                 setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes, provisional: true });
+                // A confirm request that stalls without failing (captive portal,
+                // half-open TCP) would otherwise hold the score read-only for as
+                // long as the tab lives. Past this window the open degrades to
+                // the offline contract: last-known role, edits repaired at flush.
+                provisionalTimer = setTimeout(() => {
+                    setState((prev) => (prev?.provisional ? { ...prev, provisional: false } : prev));
+                }, PROVISIONAL_ROLE_TIMEOUT_MS);
             }
 
             try {
@@ -127,6 +138,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 }
                 const bytes = await loadDocumentBytes(doc);
                 const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
+                clearTimeout(provisionalTimer);
                 if (!cancelled) {
                     // Same document at the same content revision as the warm
                     // paint → keep the old buffer: PdfProvider re-parses (and
@@ -144,6 +156,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     setLoadError(null);
                 }
             } catch (err) {
+                clearTimeout(provisionalTimer);
                 if (cancelled) {
                     return;
                 }
@@ -167,6 +180,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
         return () => {
             cancelled = true;
+            clearTimeout(provisionalTimer);
         };
     }, [docId, userId]);
 

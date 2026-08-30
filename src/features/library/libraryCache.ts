@@ -5,22 +5,32 @@ import { getDb } from '@/sync/db';
  * favorite, tag changes, sign-out). A library_bootstrap payload is a snapshot
  * of the server taken when the request executed, so a response whose request
  * left before a mutation landed describes a library that no longer exists:
- * callers capture the epoch before fetching and stand down — neither applying
- * nor persisting the payload — if it moved while the request was in flight.
+ * consumers compare the epoch a payload was fetched under against the current
+ * one and refetch (or stand down) instead of applying or persisting it.
  */
 let epoch = 0;
 
 export const libraryMutationEpoch = (): number => epoch;
 
 /**
- * Record a library-affecting mutation. Called at the top of every service
- * mutation (before the server write, so a response racing the write is already
- * outranked) and from signOut. Also drops the Dexie snapshot: it predates the
- * mutation, and the next mount must not resurrect a deleted score or hide a
- * new one. The next successful bootstrap rebuilds it.
+ * Record that a library-affecting mutation is being ATTEMPTED. Called at the
+ * top of every service mutation — before the server write, so a response
+ * racing the write is already outranked — and from signOut. Only the counter
+ * moves here: the Dexie snapshot survives, because the mutation may yet fail
+ * (an offline favorite tap must not cost the offline library its list).
  */
 export const noteLibraryMutation = (): void => {
     epoch += 1;
+};
+
+/**
+ * Drop the persisted library snapshots after a mutation SUCCEEDS. The rows
+ * now describe a library that no longer exists, and an offline mount must not
+ * resurrect a deleted score or hide a new one; the next successful bootstrap
+ * rebuilds them. All accounts' rows go: they are only instant-paint hints,
+ * and the write sites mostly don't know a user id to scope the delete by.
+ */
+export const dropLibraryListSnapshots = (): void => {
     try {
         void getDb()
             .libraryList.clear()
