@@ -269,6 +269,16 @@ body {
 }
 
 /*
+ * fieldClassName sets outline-none (its resting look carries the border), which
+ * also suppressed the global :focus-visible ring — leaving only a 10%-opacity
+ * glow. Class+pseudo beats the utility, so keyboard focus gets a real ring.
+ */
+.landing-input:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+}
+
+/*
  * Same label-wraps-sr-only-input pattern for any other file picker (e.g. the
  * IMSLP hand-off): the input stays tabbable, the label wears the ring.
  */

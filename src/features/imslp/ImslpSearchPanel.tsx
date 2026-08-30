@@ -205,7 +205,10 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         ? `${facetPrefix}Searching IMSLP…`
         : isLiveQuery && results
           ? `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
-          : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
+          : isLiveQuery
+            ? // Live query with nothing to show yet (first response failed).
+              `${facetPrefix}Search unavailable`
+            : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
 
     const toggleValue = (id: string) => {
         switch (dimension) {
