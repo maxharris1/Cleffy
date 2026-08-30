@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LimitReachedError } from '@/features/billing/limitErrors';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { getDb } from '@/sync/db';
 import { RosterPage } from '@/features/roster/RosterPage';
 import type { RosterAssignment } from '@/features/roster/rosterService';
 import type { ManagedStudentRow } from '@/types/database';
@@ -126,6 +127,35 @@ describe('RosterPage', () => {
         expect(screen.getByText('1 student · 1 archived')).toBeInTheDocument();
         expect(await screen.findByText('1 score')).toBeInTheDocument();
         expect(screen.getByText('No scores')).toBeInTheDocument();
+    });
+
+    it('serves the cached roster with its counts when the network fails, error beside it', async () => {
+        await getDb().rosterCache.put({
+            userId: 'teacher-1',
+            students: [student('s1', 'Ada Lovelace', { claimed_at: '2026-08-02T00:00:00Z' })],
+            assignmentCounts: [['s1-user', 3]],
+            cachedAt: '2026-08-29T00:00:00Z',
+        });
+        listRoster.mockRejectedValue(new Error('network down'));
+        listAssignmentsForStudents.mockRejectedValue(new Error('network down'));
+        try {
+            const user = userEvent.setup();
+            renderRoster();
+
+            // The cached roster stays up, with the error beside it, not instead of it.
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            expect(await screen.findByText('network down')).toBeInTheDocument();
+            // Counts come from the snapshot rather than an affirmative "No scores".
+            expect(screen.getByText('3 scores')).toBeInTheDocument();
+            // The panel is terminal about the missing rows — never an eternal spinner.
+            await user.click(screen.getByRole('button', { name: /Ada Lovelace/ }));
+            expect(
+                await screen.findByText('The assignment list couldn’t be loaded — the count is from the last sync.'),
+            ).toBeInTheDocument();
+            expect(screen.queryByText('Loading assignments…')).not.toBeInTheDocument();
+        } finally {
+            await getDb().rosterCache.clear();
+        }
     });
 
     it('provisions a code student and shows the setup code once, on a printable card', async () => {

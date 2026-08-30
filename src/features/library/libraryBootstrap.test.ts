@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fetchLibraryBootstrap } from '@/features/library/libraryBootstrap';
-import { noteLibraryMutation } from '@/features/library/libraryCache';
+import { libraryMutationEpoch, noteLibraryMutation } from '@/features/library/libraryCache';
 import { getDb } from '@/sync/db';
 
 const rpc = vi.hoisted(() => vi.fn());
@@ -105,6 +105,29 @@ describe('fetchLibraryBootstrap', () => {
         expect(rpc).toHaveBeenCalledTimes(2);
         expect(first.documents[0]?.title).toBe('Aria');
         expect(second.documents[0]?.title).toBe('Bourrée');
+    });
+
+    it('stamps a joined request with its dispatch-time epoch, not the joiner’s', async () => {
+        let release: (value: unknown) => void = () => undefined;
+        rpc.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    release = resolve;
+                }),
+        );
+        const epochAtDispatch = libraryMutationEpoch();
+        const first = fetchLibraryBootstrap('user-join');
+        // A mutation lands, THEN a second caller joins the in-flight request.
+        // The payload must carry the dispatch-time epoch so the joiner can
+        // tell it predates the mutation — a joiner-side capture could not.
+        noteLibraryMutation();
+        const second = fetchLibraryBootstrap('user-join');
+        expect(rpc).toHaveBeenCalledTimes(1);
+        release({ data: payload('Aria'), error: null });
+        const [a, b] = await Promise.all([first, second]);
+        expect(a.fetchedAtEpoch).toBe(epochAtDispatch);
+        expect(b.fetchedAtEpoch).toBe(epochAtDispatch);
+        expect(libraryMutationEpoch()).not.toBe(epochAtDispatch);
     });
 
     it('does not memoize a failed request', async () => {

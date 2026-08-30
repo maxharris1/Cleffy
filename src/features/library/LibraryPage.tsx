@@ -104,22 +104,26 @@ export const LibraryPage = () => {
             // every account on this browser, so it stays out of the happy path
             // and appears only under the labelled offline fallback below.
             const cachedList = await readCachedLibraryList(userId).catch(() => null);
+            let painted = false;
             if (!cancelled && cachedList && cachedList.documents.length > 0) {
                 setDocuments(cachedList.documents);
                 setHasMore(cachedList.hasMore);
                 setFavorites(cachedList.favoriteIds);
                 setTags(cachedList.tags);
                 setAssignments(cachedList.documentTags);
+                painted = true;
             }
 
             // The painted list is interactive while the network is out, so an
             // edit made in that window outranks a response whose request left
-            // before it. A stale response is not just dropped, though — that
-            // could strand a nothing-painted page on "Loading scores…" forever
-            // and freeze a painted one on the snapshot — it is refetched: the
-            // new request sees the post-edit server state. The last pass
-            // applies regardless; after two refetches a near-fresh list beats
-            // an unpainted page.
+            // before it (the epoch moves on the edit's start AND commit, so a
+            // request dispatched mid-write is outranked too). A stale response
+            // is not just dropped — that could strand a nothing-painted page
+            // on "Loading scores…" forever — it is refetched: the new request
+            // sees the post-edit server state. If the refetches are also
+            // outrun, the painted state (which already reflects the edits)
+            // wins over any of the payloads; only an unpainted page takes the
+            // last payload regardless, because anything beats no list at all.
             for (let pass = 0; pass < 3; pass++) {
                 const lastPass = pass === 2;
                 try {
@@ -127,8 +131,13 @@ export const LibraryPage = () => {
                     if (cancelled) {
                         return;
                     }
-                    if (!lastPass && libraryMutationEpoch() !== boot.fetchedAtEpoch) {
-                        continue;
+                    if (libraryMutationEpoch() !== boot.fetchedAtEpoch) {
+                        if (!lastPass) {
+                            continue;
+                        }
+                        if (painted) {
+                            return;
+                        }
                     }
                     setDocuments(boot.documents);
                     setHasMore(boot.hasMore);
@@ -150,8 +159,13 @@ export const LibraryPage = () => {
                         if (cancelled) {
                             return;
                         }
-                        if (!lastPass && libraryMutationEpoch() !== epochAtRetry) {
-                            continue;
+                        if (libraryMutationEpoch() !== epochAtRetry) {
+                            if (!lastPass) {
+                                continue;
+                            }
+                            if (painted) {
+                                return;
+                            }
                         }
                         setDocuments(docs);
                         setHasMore(more);

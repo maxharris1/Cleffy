@@ -419,6 +419,41 @@ describe('LibraryPage', () => {
         expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
     });
 
+    it('keeps the painted, edit-bearing list when every refetch is outrun too', async () => {
+        readCachedLibraryList.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+        // Every payload is permanently one epoch behind — the pathological
+        // mutations-keep-racing case. The painted list already reflects the
+        // user's edits, so the loop must exhaust WITHOUT applying any of them.
+        fetchLibraryBootstrap.mockImplementation(async () => ({
+            documents: [doc('d3', 'Etude (Chopin, Frederic)')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+            fetchedAtEpoch: libraryMutationEpoch() - 1,
+        }));
+
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        await waitFor(() => expect(fetchLibraryBootstrap).toHaveBeenCalledTimes(3));
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: 'Etude (Chopin, Frederic)' })).not.toBeInTheDocument();
+    });
+
     it('still paints when a mutation raced the very first load and nothing was cached', async () => {
         // First visit / private mode: no snapshot, nothing painted yet — a
         // shell upload bumping the epoch mid-flight must not strand the page

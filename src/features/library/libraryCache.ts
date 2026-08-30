@@ -1,36 +1,42 @@
 import { getDb } from '@/sync/db';
 
 /**
- * Monotonic counter over library-affecting mutations (upload, rename, delete,
- * favorite, tag changes, sign-out). A library_bootstrap payload is a snapshot
- * of the server taken when the request executed, so a response whose request
- * left before a mutation landed describes a library that no longer exists:
- * consumers compare the epoch a payload was fetched under against the current
- * one and refetch (or stand down) instead of applying or persisting it.
+ * Monotonic counter over library-affecting mutation EDGES. Every mutation
+ * (upload, rename, delete, favorite, tag changes, sign-out) bumps it twice:
+ * once when the attempt starts — so a response already in flight is outranked
+ * before the write can land — and once when the write commits — so a request
+ * dispatched DURING the write cannot read pre-commit state and still look
+ * fresh at resolve time. "Epoch unchanged since my request left" therefore
+ * means: no mutation started after dispatch AND every mutation that had
+ * started had already committed (or failed, which changes nothing) before
+ * dispatch. Consumers compare a payload's dispatch-time epoch against the
+ * current one and refetch (or stand down) instead of applying or persisting.
  */
 let epoch = 0;
 
 export const libraryMutationEpoch = (): number => epoch;
 
 /**
- * Record that a library-affecting mutation is being ATTEMPTED. Called at the
- * top of every service mutation — before the server write, so a response
- * racing the write is already outranked — and from signOut. Only the counter
- * moves here: the Dexie snapshot survives, because the mutation may yet fail
- * (an offline favorite tap must not cost the offline library its list).
+ * The attempt edge. Called at the top of every service mutation, before the
+ * server write. Only the counter moves: the Dexie snapshot survives, because
+ * the mutation may yet fail (an offline favorite tap must not cost the
+ * offline library its list).
  */
 export const noteLibraryMutation = (): void => {
     epoch += 1;
 };
 
 /**
- * Drop the persisted library snapshots after a mutation SUCCEEDS. The rows
- * now describe a library that no longer exists, and an offline mount must not
- * resurrect a deleted score or hide a new one; the next successful bootstrap
- * rebuilds them. All accounts' rows go: they are only instant-paint hints,
- * and the write sites mostly don't know a user id to scope the delete by.
+ * The commit edge. Called by every service mutation right after its server
+ * write succeeds — never on failure, which changed nothing. Also drops the
+ * persisted snapshots: they now describe a library that no longer exists,
+ * and an offline mount must not resurrect a deleted score or hide a new one;
+ * the next successful bootstrap rebuilds them. All accounts' rows go — they
+ * are only instant-paint hints, and the write sites mostly don't know a user
+ * id to scope the delete by.
  */
-export const dropLibraryListSnapshots = (): void => {
+export const noteLibraryMutationCommitted = (): void => {
+    epoch += 1;
     try {
         void getDb()
             .libraryList.clear()

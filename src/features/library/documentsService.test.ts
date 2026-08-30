@@ -333,16 +333,18 @@ describe('deleteDocument', () => {
     });
 
     /**
-     * The producer half of the library-cache contract: the epoch moves BEFORE
-     * the server write (so a bootstrap racing it is outranked), and the Dexie
-     * snapshot is dropped only once the write SUCCEEDS (a refused delete must
-     * not cost an offline library its list).
+     * The producer half of the library-cache contract: the epoch moves at
+     * the attempt edge, BEFORE the server write (so a bootstrap racing it is
+     * outranked), and again at the commit edge (so a bootstrap dispatched
+     * mid-write is outranked too) — where the Dexie snapshot is also dropped.
+     * A refused delete takes only the attempt edge and keeps the snapshot:
+     * it must not cost an offline library its list.
      */
-    it('bumps the mutation epoch and drops the library snapshots on success', async () => {
+    it('bumps the epoch on both edges and drops the library snapshots on success', async () => {
         makeStub();
         const before = libraryMutationEpoch();
         await deleteDocument(doc());
-        expect(libraryMutationEpoch()).toBe(before + 1);
+        expect(libraryMutationEpoch()).toBe(before + 2);
         expect(libraryListClear).toHaveBeenCalledTimes(1);
     });
 

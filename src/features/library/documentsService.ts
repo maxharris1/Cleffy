@@ -3,7 +3,7 @@ import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
-import { dropLibraryListSnapshots, noteLibraryMutation } from '@/features/library/libraryCache';
+import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -206,7 +206,7 @@ export const uploadDocument = async (
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
-    dropLibraryListSnapshots();
+    noteLibraryMutationCommitted();
 
     try {
         await uploadPdfToStorage(storagePath, file, onProgress);
@@ -266,7 +266,7 @@ export const importDocumentFromImslp = async (
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
-    dropLibraryListSnapshots();
+    noteLibraryMutationCommitted();
 
     const rollback = async () => {
         await supabase.storage
@@ -318,14 +318,14 @@ export const setDocumentFavorite = async (docId: string, userId: string, favorit
         if (error) {
             throw new Error(`Could not add favorite: ${error.message}`);
         }
-        dropLibraryListSnapshots();
+        noteLibraryMutationCommitted();
         return;
     }
     const { error } = await supabase.from('document_favorites').delete().eq('document_id', docId).eq('user_id', userId);
     if (error) {
         throw new Error(`Could not remove favorite: ${error.message}`);
     }
-    dropLibraryListSnapshots();
+    noteLibraryMutationCommitted();
 };
 
 export const renameDocument = async (docId: string, title: string): Promise<void> => {
@@ -334,7 +334,7 @@ export const renameDocument = async (docId: string, title: string): Promise<void
     if (error) {
         throw new Error(`Could not rename: ${error.message}`);
     }
-    dropLibraryListSnapshots();
+    noteLibraryMutationCommitted();
     const cached = await getCachedPdf(docId);
     if (cached) {
         await putCachedPdf({ ...cached, title });
@@ -362,7 +362,7 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     if (error) {
         throw new Error(`Could not delete: ${error.message}`);
     }
-    dropLibraryListSnapshots();
+    noteLibraryMutationCommitted();
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(doc.id),
@@ -461,7 +461,7 @@ export const replaceDocumentPdf = async (
     if (updateError) {
         throw new Error(`The cleaned file was saved but the document could not be updated: ${updateError.message}`);
     }
-    dropLibraryListSnapshots();
+    noteLibraryMutationCommitted();
 
     const cached = await getCachedPdf(doc.id);
     await putCachedPdf({

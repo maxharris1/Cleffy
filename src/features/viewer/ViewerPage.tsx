@@ -133,12 +133,20 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
             try {
                 const [doc, role] = await Promise.all([fetchDocument(docId), fetchMyRole(docId, userId)]);
+                // The role is truth from here — confirm the warm paint now
+                // rather than holding the pen hostage to the bytes download
+                // and page-count parse still ahead (which can take seconds on
+                // a replaced PDF, long enough for the timer to promote the
+                // cached role instead of this one).
+                clearTimeout(provisionalTimer);
                 if (!doc) {
                     throw new Error('Score not found — it may have been deleted, or your access was revoked.');
                 }
+                if (!cancelled) {
+                    setState((prev) => (prev?.provisional ? { ...prev, role, provisional: false } : prev));
+                }
                 const bytes = await loadDocumentBytes(doc);
                 const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
-                clearTimeout(provisionalTimer);
                 if (!cancelled) {
                     // Same document at the same content revision as the warm
                     // paint → keep the old buffer: PdfProvider re-parses (and
