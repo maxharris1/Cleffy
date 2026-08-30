@@ -228,6 +228,67 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText((_, el) => el?.textContent === 'Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
     });
 
+    it('says it is searching — never "unavailable" — while the debounce is still armed', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockImplementation(() => new Promise(() => {}));
+
+        await renderBrowser();
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'be');
+
+        // Still inside the 280 ms debounce: nothing has failed, so the
+        // aria-live status must not announce a failure.
+        expect(searchSpy).not.toHaveBeenCalled();
+        expect(screen.getByText('Piano · Searching IMSLP…')).toBeInTheDocument();
+        expect(screen.queryByText(/Search unavailable/)).not.toBeInTheDocument();
+    });
+
+    it('names the selected instrument in the relaxed-filter hint', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue({
+            results: [hit('Violin Sonata No.9, Op.47 (Beethoven, Ludwig van)', 47)],
+            filterRelaxed: true,
+        });
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Violin' }));
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'sonata');
+
+        expect(await screen.findByText(/few violin-tagged scores were found/)).toBeInTheDocument();
+        expect(screen.queryByText(/piano-tagged/)).not.toBeInTheDocument();
+    });
+
+    it('hides the sort chips for an era-only browse the server cannot sort', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue({
+            results: [hit('Toccata and Fugue in D minor (Bach, Johann Sebastian)', 565)],
+            filterRelaxed: false,
+        });
+
+        await renderBrowser();
+        // Drop the default piano scope, then browse by era alone.
+        await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Piano' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Era' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Baroque' }));
+
+        expect(await screen.findByText('Best matches')).toBeInTheDocument();
+        expect(screen.queryByRole('group', { name: 'Sort results' })).not.toBeInTheDocument();
+
+        // A typed query takes the sortable text path, so the chips come back.
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'bach');
+        expect(await screen.findByRole('group', { name: 'Sort results' })).toBeInTheDocument();
+    });
+
     it('keeps prior results and shows an error — not the empty state — when a search fails', async () => {
         const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;

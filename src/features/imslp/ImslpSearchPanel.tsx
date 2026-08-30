@@ -5,10 +5,12 @@ import { searchImslp, type ImslpSearchHit } from '@/features/imslp/imslpApi';
 import { filterPopularWorks, groupPopularByComposer, POPULAR_WORKS, type PopularWork } from '@/features/imslp/popularWorks';
 import {
     buildSearchFilters,
+    categoryBackedFilters,
     FACET_DIMENSIONS,
     facetValuesFor,
     filtersToStatusParts,
     hasActiveFilters,
+    INSTRUMENT_FACETS,
     type EraId,
     type FacetDimension,
     type SearchSort,
@@ -206,9 +208,15 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         : isLiveQuery && results
           ? `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
           : isLiveQuery
-            ? // Live query with nothing to show yet (first response failed).
-              `${facetPrefix}Search unavailable`
+            ? // Nothing to show yet: either the debounce is still armed or the
+              // first response failed.
+              `${facetPrefix}${searchError ? 'Search unavailable' : 'Searching IMSLP…'}`
             : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
+
+    // The server relaxes the instrument hard filter, whichever one is selected.
+    const relaxedInstrument = instrumentId
+        ? (INSTRUMENT_FACETS.find((i) => i.id === instrumentId)?.label.toLowerCase() ?? null)
+        : null;
 
     const toggleValue = (id: string) => {
         switch (dimension) {
@@ -362,7 +370,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 ))}
             </div>
 
-            {showResults ? (
+            {showResults && (q.length >= 2 || categoryBackedFilters(filters)) ? (
                 <div role="group" aria-label="Sort results" className={`${CHIP_ROW_CLASS} mt-1.5`}>
                     {(
                         [
@@ -396,7 +404,8 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
             {isLiveQuery && filterRelaxed && (results?.length ?? 0) > 0 ? (
                 <p className="mt-2 text-xs text-stone-500">
-                    Showing close matches — few piano-tagged scores were found for this search.
+                    Showing close matches — few {relaxedInstrument ? `${relaxedInstrument}-tagged` : 'matching'} scores
+                    were found for this search.
                 </p>
             ) : null}
 
