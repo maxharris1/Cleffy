@@ -137,13 +137,23 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 // rather than holding the pen hostage to the bytes download
                 // and page-count parse still ahead (which can take seconds on
                 // a replaced PDF, long enough for the timer to promote the
-                // cached role instead of this one).
+                // cached role instead of this one). The fresh archived_at
+                // rides along: readOnly derives from it, and confirming an
+                // owner role against the CACHED flag would open a just-
+                // archived score for writes RLS then silently discards. Only
+                // that field — the cached content_rev must survive so the
+                // bytes reuse below can still tell whether the buffer it
+                // painted matches the server's revision.
                 clearTimeout(provisionalTimer);
                 if (!doc) {
                     throw new Error('Score not found — it may have been deleted, or your access was revoked.');
                 }
                 if (!cancelled) {
-                    setState((prev) => (prev?.provisional ? { ...prev, role, provisional: false } : prev));
+                    setState((prev) =>
+                        prev?.provisional
+                            ? { ...prev, doc: { ...prev.doc, archived_at: doc.archived_at }, role, provisional: false }
+                            : prev,
+                    );
                 }
                 const bytes = await loadDocumentBytes(doc);
                 const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);

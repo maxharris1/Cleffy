@@ -454,6 +454,26 @@ describe('LibraryPage', () => {
         expect(screen.queryByRole('link', { name: 'Etude (Chopin, Frederic)' })).not.toBeInTheDocument();
     });
 
+    it('takes the last payload on an unpainted page even when every pass was outrun', async () => {
+        // Nothing cached AND payloads permanently one epoch behind: the loop
+        // must exhaust and still paint — anything beats no list at all.
+        readCachedLibraryList.mockResolvedValue(null);
+        fetchLibraryBootstrap.mockImplementation(async () => ({
+            documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+            fetchedAtEpoch: libraryMutationEpoch() - 1,
+        }));
+
+        renderLibrary();
+        expect(await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)')).toBeInTheDocument();
+        expect(fetchLibraryBootstrap).toHaveBeenCalledTimes(3);
+        expect(screen.queryByText('Loading scores…')).not.toBeInTheDocument();
+    });
+
     it('still paints when a mutation raced the very first load and nothing was cached', async () => {
         // First visit / private mode: no snapshot, nothing painted yet — a
         // shell upload bumping the epoch mid-flight must not strand the page
