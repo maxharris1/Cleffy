@@ -502,9 +502,7 @@ Deno.serve(async (req) => {
 
         // Instrument hard filter emptied the pool → fall back to boost-only so
         // the panel never blanks; the client shows a "close matches" hint.
-        // Same hint when an unchecked hit is actually shown — but only then:
-        // an unverified title that ranked below the cut relaxed nothing.
-        let filterRelaxed = ranked.slice(0, limit).some((h) => resolution.unverified.has(foldAccents(h.title)));
+        let filterRelaxed = false;
         if (hardCategories.length > 0 && ranked.length < 5) {
             const relaxed = rank(false);
             if (relaxed.length > ranked.length) {
@@ -520,7 +518,13 @@ Deno.serve(async (req) => {
             ranked.sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? '') || b.score - a.score);
         }
 
-        const results = ranked.slice(0, limit).map((h) => toHit(h.title, h.pageid, h.snippet));
+        const page = ranked.slice(0, limit);
+        if (!filterRelaxed) {
+            // Same hint when an unchecked hit is actually returned — but only
+            // then: an unverified title outside the page relaxed nothing.
+            filterRelaxed = page.some((h) => resolution.unverified.has(foldAccents(h.title)));
+        }
+        const results = page.map((h) => toHit(h.title, h.pageid, h.snippet));
 
         return jsonResponse({ results, total: results.length, mode: 'search', filterRelaxed });
     } catch (err) {
