@@ -8,7 +8,6 @@ import {
     categoryBackedFilters,
     FACET_DIMENSIONS,
     facetValuesFor,
-    filterSearchTokens,
     filtersToStatusParts,
     hasActiveFilters,
     type EraId,
@@ -97,13 +96,12 @@ export const ImslpSearchPanel = ({
         setSearching(true);
         onError?.(null);
         try {
-            setResults(
-                await searchImslp(trimmed, {
-                    limit: DEFAULT_SEARCH_LIMIT,
-                    filters: withFilters ? nextFilters : undefined,
-                    sort: nextSort,
-                }),
-            );
+            const response = await searchImslp(trimmed, {
+                limit: DEFAULT_SEARCH_LIMIT,
+                filters: withFilters ? nextFilters : undefined,
+                sort: nextSort,
+            });
+            setResults(response.results);
         } catch (err) {
             setResults([]);
             onError?.(err instanceof Error ? err.message : 'Search failed');
@@ -128,11 +126,9 @@ export const ImslpSearchPanel = ({
     const isLiveQuery = q.length >= 2 || filtersActive;
     const showCurated = !isLiveQuery;
     const showResults = isLiveQuery && results !== null;
-    const tokens = useMemo(() => {
-        const fromQuery = searchTokens(q);
-        const fromFilters = filterSearchTokens(filters);
-        return [...new Set([...fromQuery, ...fromFilters])];
-    }, [q, filters]);
+    // Highlight only what the user typed — with a default instrument filter,
+    // highlighting filter tokens would <mark> "Piano" on every row.
+    const tokens = useMemo(() => searchTokens(q), [q]);
     const { best, more } = useMemo(() => splitSearchResults(results ?? []), [results]);
 
     const curatedWorks = useMemo(

@@ -1,7 +1,11 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
+    COMPOSER_FACETS,
+    FORM_FACETS,
+    INSTRUMENT_BY_ID,
     facetBoost,
     facetTokens,
+    hardFilterCategories,
     hasActiveFilters,
     parseFilters,
     parseSort,
@@ -9,9 +13,20 @@ import {
     titleMatchesFilters,
     type SearchFilters,
     type SearchSort,
-} from '../_shared/facets.ts';
+} from '../_shared/searchFacetData.ts';
 import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, workPageUrl } from '../_shared/imslp.ts';
-import { aliasTitlesForQuery, buildSearchVariants, scoreTitleMatch, tokenizeQuery } from '../_shared/search.ts';
+import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
+import {
+    aliasTitlesForQuery,
+    buildSearchVariants,
+    correctTokens,
+    foldAccents,
+    mergeAndRank,
+    tokenizeQuery,
+    type RankBatch,
+    type RankedHit,
+    type SearchVariant,
+} from '../_shared/search.ts';
 
 interface SearchHit {
     title: string;
@@ -25,12 +40,45 @@ interface MwSearchHit {
     title: string;
     pageid: number;
     snippet?: string;
+    timestamp?: string;
 }
 
 interface MwCategoryMember {
     title: string;
     pageid: number;
 }
+
+/** Folded titles of the curated list — the ranking's popularity prior. */
+const POPULAR_TITLES = new Set(POPULAR_WORKS.map((w) => foldAccents(w.title)));
+
+/** Vocabulary the typo corrector snaps near-miss tokens to. */
+const CORRECTION_VOCAB: Set<string> = (() => {
+    const vocab = new Set<string>();
+    const add = (word: string) => {
+        const folded = foldAccents(word);
+        if (folded.length >= 4) {
+            vocab.add(folded);
+        }
+    };
+    for (const work of POPULAR_WORKS) {
+        add(work.composer);
+    }
+    for (const facet of COMPOSER_FACETS) {
+        facet.tokens.forEach(add);
+    }
+    for (const facet of FORM_FACETS) {
+        facet.tokens.forEach(add);
+    }
+    for (const alias of WORK_ALIASES) {
+        for (const key of alias.keys) {
+            key.split(' ').forEach(add);
+        }
+    }
+    for (const word of ['major', 'minor', 'piano', 'violin', 'cello', 'orchestra', 'quartet', 'quintet', 'variations']) {
+        add(word);
+    }
+    return vocab;
+})();
 
 /** MediaWiki caps srlimit at 50 — page with sroffset to fill larger limits. */
 const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
@@ -42,6 +90,10 @@ const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
             action: 'query',
             list: 'search',
             srsearch: q,
+            // Body-text search: MW 1.18 defaults to title-only, which misses
+            // nicknames and multi-word queries; text mode also returns MW's own
+            // relevance order, which the ranker blends in via rankBonus.
+            srwhat: 'text',
             srnamespace: '0',
             srlimit: String(batch),
             sroffset: String(offset),
@@ -107,6 +159,94 @@ const mwCategoryMembers = async (
     return members;
 };
 
+interface TitleResolution {
+    resolvedTitles: Map<string, string>;
+    resolvedPageIds: Map<string, number>;
+    /** folded resolved title → hard-filter categories the page belongs to */
+    categoryHits: Map<string, Set<string>>;
+}
+
+/**
+ * Resolve redirects and (when an instrument filter is active) check membership
+ * in its "For X" categories — one batched call per 40 titles, in parallel.
+ */
+const resolveTitles = async (titles: string[], hardCategories: string[]): Promise<TitleResolution> => {
+    const resolution: TitleResolution = {
+        resolvedTitles: new Map(),
+        resolvedPageIds: new Map(),
+        categoryHits: new Map(),
+    };
+    if (titles.length === 0) {
+        return resolution;
+    }
+    const chunks: string[][] = [];
+    for (let i = 0; i < titles.length; i += 40) {
+        chunks.push(titles.slice(i, i + 40));
+    }
+    await Promise.all(
+        chunks.map(async (chunk) => {
+            try {
+                const params: Record<string, string> = {
+                    action: 'query',
+                    titles: chunk.join('|'),
+                    redirects: '1',
+                };
+                if (hardCategories.length > 0) {
+                    params['prop'] = 'categories';
+                    params['clcategories'] = hardCategories.map((c) => `Category:${c}`).join('|');
+                    params['cllimit'] = 'max';
+                }
+                const data = (await mwFetch(params)) as {
+                    query?: {
+                        redirects?: Array<{ from: string; to: string }>;
+                        pages?: Record<
+                            string,
+                            {
+                                title?: string;
+                                pageid?: number;
+                                missing?: boolean;
+                                categories?: Array<{ title?: string }>;
+                            }
+                        >;
+                    };
+                };
+                for (const r of data.query?.redirects ?? []) {
+                    resolution.resolvedTitles.set(r.from, r.to);
+                }
+                for (const page of Object.values(data.query?.pages ?? {})) {
+                    if (page.missing || !page.title) {
+                        continue;
+                    }
+                    if (typeof page.pageid === 'number') {
+                        resolution.resolvedPageIds.set(page.title, page.pageid);
+                    }
+                    if (page.categories?.length) {
+                        const names = new Set<string>();
+                        for (const cat of page.categories) {
+                            const name = cat.title?.replace(/^Category:/i, '').trim();
+                            if (name) {
+                                names.add(name);
+                            }
+                        }
+                        if (names.size > 0) {
+                            resolution.categoryHits.set(foldAccents(page.title), names);
+                        }
+                    }
+                }
+            } catch {
+                // keep unresolved titles
+            }
+        }),
+    );
+    return resolution;
+};
+
+/** Folded titles (of `titles`) that belong to at least one of the categories. */
+const verifyCategoryMembership = async (titles: string[], categories: string[]): Promise<Set<string>> => {
+    const resolution = await resolveTitles(titles, categories);
+    return new Set(resolution.categoryHits.keys());
+};
+
 const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     title,
     pageid,
@@ -115,32 +255,73 @@ const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     imslpUrl: workPageUrl(title),
 });
 
-const browseByFilters = async (filters: SearchFilters, limit: number, sort: SearchSort): Promise<SearchHit[]> => {
+const browseByFilters = async (
+    filters: SearchFilters,
+    limit: number,
+    sort: SearchSort,
+): Promise<{ results: SearchHit[]; filterRelaxed: boolean }> => {
     const category = primaryBrowseCategory(filters);
     if (category) {
-        const members = await mwCategoryMembers(category, Math.max(limit * 2, 100), sort);
-        const filtered = members
-            .filter((m) => titleMatchesFilters(m.title, filters))
+        const members = await mwCategoryMembers(category, Math.min(Math.max(limit * 2, 100), 160), sort);
+        const hardCategories = hardFilterCategories(filters);
+        const instrumentIsPrimary = Boolean(
+            filters.instrument && INSTRUMENT_BY_ID[filters.instrument]?.category === category,
+        );
+
+        let kept = members;
+        let verified = false;
+        let filterRelaxed = false;
+        if (hardCategories.length > 0 && !instrumentIsPrimary) {
+            const membership = await verifyCategoryMembership(
+                members.map((m) => m.title),
+                hardCategories,
+            );
+            const matching = members.filter((m) => membership.has(foldAccents(m.title)));
+            if (matching.length > 0) {
+                kept = matching;
+                verified = true;
+            } else {
+                filterRelaxed = true;
+            }
+        }
+
+        // Category membership already answered the instrument question — the
+        // token fallback would wrongly drop titles that don't say "piano".
+        const residualFilters: SearchFilters = { ...filters };
+        if (verified || instrumentIsPrimary) {
+            delete residualFilters.instrument;
+        }
+
+        const filtered = kept
+            .filter((m) => titleMatchesFilters(m.title, residualFilters))
             .slice(0, limit)
             .map((m) => toHit(m.title, m.pageid));
         if (sort === 'relevance') {
             // Mild preference for shorter / more specific titles when browsing.
-            return [...filtered].sort((a, b) => a.title.length - b.title.length || a.title.localeCompare(b.title));
+            return {
+                results: [...filtered].sort(
+                    (a, b) => a.title.length - b.title.length || a.title.localeCompare(b.title),
+                ),
+                filterRelaxed,
+            };
         }
-        return filtered;
+        return { results: filtered, filterRelaxed };
     }
 
     // Era / key-only: seed search with facet tokens.
     const tokens = facetTokens(filters);
     if (tokens.length === 0) {
-        return [];
+        return { results: [], filterRelaxed: false };
     }
     const seedQuery = tokens.slice(0, 2).join(' ');
     const hits = await mwSearch(seedQuery, limit);
-    return hits
-        .filter((h) => titleMatchesFilters(h.title, filters))
-        .slice(0, limit)
-        .map((h) => toHit(h.title, h.pageid, (h.snippet ?? '').replace(/<[^>]+>/g, '')));
+    return {
+        results: hits
+            .filter((h) => titleMatchesFilters(h.title, filters))
+            .slice(0, limit)
+            .map((h) => toHit(h.title, h.pageid, (h.snippet ?? '').replace(/<[^>]+>/g, ''))),
+        filterRelaxed: false,
+    };
 };
 
 Deno.serve(async (req) => {
@@ -178,152 +359,127 @@ Deno.serve(async (req) => {
     try {
         // Empty / short query with filters → category browse or seeded search.
         if (q.length < 2 && activeFilters) {
-            const results = await browseByFilters(filters, limit, sort);
-            return jsonResponse({ results, total: results.length, mode: 'browse' });
+            const { results, filterRelaxed } = await browseByFilters(filters, limit, sort);
+            return jsonResponse({ results, total: results.length, mode: 'browse', filterRelaxed });
         }
 
-        const tokens = tokenizeQuery(q);
-        const variants = buildSearchVariants(q);
-        for (const tok of facetTokens(filters)) {
-            if (tok.length >= 2 && variants.length < 8) {
-                variants.push(q.length >= 2 ? `${tok} ${q}` : tok);
-                variants.push(tok);
-            }
-        }
-        // Dedupe variants
-        const seenVariant = new Set<string>();
-        const uniqueVariants: string[] = [];
-        for (const v of variants) {
-            const key = v.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-            if (!key || seenVariant.has(key)) {
-                continue;
-            }
-            seenVariant.add(key);
-            uniqueVariants.push(v);
-            if (uniqueVariants.length >= 8) {
-                break;
-            }
-        }
+        const hardCategories = hardFilterCategories(filters);
+        const composerSurname = foldAccents(filters.composerCategory?.split(',')[0]?.trim() ?? '');
+
+        let tokens = tokenizeQuery(q);
+        let aliasTitles = aliasTitlesForQuery(q, WORK_ALIASES);
+        const variants = buildSearchVariants(q, { aliasTitles, facetTokens: facetTokens(filters) });
 
         const perQuery = Math.min(50, Math.max(limit, 30));
-        const batches = await Promise.all(
-            uniqueVariants.map(async (variant) => {
+        const batches: RankBatch[] = await Promise.all(
+            variants.map(async (variant: SearchVariant) => {
                 try {
-                    return await mwSearch(variant, perQuery);
+                    return { variant, hits: await mwSearch(variant.q, perQuery) };
                 } catch {
-                    return [] as MwSearchHit[];
+                    return { variant, hits: [] as MwSearchHit[] };
                 }
             }),
         );
-
-        const rawByTitle = new Map<string, MwSearchHit>();
-        for (const batch of batches) {
-            for (const hit of batch) {
-                if (!rawByTitle.has(hit.title)) {
-                    rawByTitle.set(hit.title, hit);
-                }
-            }
-        }
-
-        for (const title of aliasTitlesForQuery(q)) {
-            if (!rawByTitle.has(title)) {
-                rawByTitle.set(title, { title, pageid: 0, snippet: '' });
-            }
-        }
-
-        const rawHits = [...rawByTitle.values()];
-
-        const resolvedTitles = new Map<string, string>();
-        const resolvedPageIds = new Map<string, number>();
-        if (rawHits.length > 0) {
-            try {
-                const titles = rawHits.map((h) => h.title);
-                for (let i = 0; i < titles.length; i += 40) {
-                    const chunk = titles.slice(i, i + 40);
-                    const redirectData = (await mwFetch({
-                        action: 'query',
-                        titles: chunk.join('|'),
-                        redirects: '1',
-                    })) as {
-                        query?: {
-                            redirects?: Array<{ from: string; to: string }>;
-                            pages?: Record<string, { title?: string; pageid?: number; missing?: boolean }>;
-                        };
-                    };
-                    for (const r of redirectData.query?.redirects ?? []) {
-                        resolvedTitles.set(r.from, r.to);
-                    }
-                    for (const page of Object.values(redirectData.query?.pages ?? {})) {
-                        if (page.missing || !page.title) {
-                            continue;
-                        }
-                        if (typeof page.pageid === 'number') {
-                            resolvedPageIds.set(page.title, page.pageid);
-                        }
-                    }
-                }
-            } catch {
-                // keep unresolved titles
-            }
-        }
-
-        const aliasBoost = new Set(aliasTitlesForQuery(q));
-        const scoreTokens = [...tokens, ...facetTokens(filters)];
-        const merged = new Map<string, SearchHit & { score: number }>();
-
-        for (const hit of rawHits) {
-            const title = resolvedTitles.get(hit.title) ?? hit.title;
-            if (activeFilters && !titleMatchesFilters(title, filters)) {
-                // Soft filter: still allow but don't skip entirely when query is strong —
-                // only hard-filter when composer category is set.
-                if (filters.composerCategory) {
-                    const surname = filters.composerCategory.split(',')[0]?.trim().toLowerCase() ?? '';
-                    const folded = title.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-                    if (surname && !folded.includes(surname)) {
-                        continue;
-                    }
-                }
-            }
-            const pageid = resolvedPageIds.get(title) ?? hit.pageid;
-            let score = scoreTitleMatch(title, scoreTokens);
-            score += facetBoost(title, filters);
-            if (aliasBoost.has(title)) {
-                score += 50;
-            }
-            if (foldEquals(hit.title, q) || foldEquals(title, q)) {
-                score += 5;
-            }
-
-            const existing = merged.get(title);
-            if (!existing || score > existing.score) {
-                merged.set(title, {
-                    title,
-                    pageid,
-                    snippet: (hit.snippet ?? '').replace(/<[^>]+>/g, ''),
-                    composer: parseComposerFromTitle(title),
-                    imslpUrl: workPageUrl(title),
-                    score,
+        const pushAliasBatch = (titles: string[]) => {
+            if (titles.length > 0) {
+                // Zero weight: aliases earn their +50 in scoring, not from rank.
+                batches.push({
+                    variant: { q: '__alias__', weight: 0 },
+                    hits: titles.map((title) => ({ title, pageid: 0 })),
                 });
             }
+        };
+        pushAliasBatch(aliasTitles);
+
+        const collectTitles = (): string[] => {
+            const seen = new Set<string>();
+            for (const batch of batches) {
+                for (const hit of batch.hits) {
+                    seen.add(hit.title);
+                }
+            }
+            return [...seen];
+        };
+
+        const resolution = await resolveTitles(collectTitles(), hardCategories);
+
+        const rank = (requireCategories: boolean): RankedHit[] => {
+            const ranked = mergeAndRank(batches, {
+                query: q,
+                tokens,
+                aliasTitles,
+                popularTitles: POPULAR_TITLES,
+                resolvedTitles: resolution.resolvedTitles,
+                resolvedPageIds: resolution.resolvedPageIds,
+                categoryHits: resolution.categoryHits,
+                requireCategories,
+                extraScore: (title) => facetBoost(title, filters),
+            });
+            if (!composerSurname) {
+                return ranked;
+            }
+            return ranked.filter((h) => foldAccents(h.title).includes(composerSurname));
+        };
+
+        let ranked = rank(hardCategories.length > 0);
+
+        // One corrective re-query when results are thin and a token looks like
+        // a near-miss of a known composer/work word ("beethovn", "moonlite").
+        if (ranked.length < 5) {
+            const corrected = correctTokens(tokens, CORRECTION_VOCAB);
+            if (corrected) {
+                const correctedQ = corrected.join(' ');
+                try {
+                    batches.push({ variant: { q: correctedQ, weight: 0.9 }, hits: await mwSearch(correctedQ, perQuery) });
+                } catch {
+                    // corrected query is best-effort
+                }
+                const correctedAliases = aliasTitlesForQuery(correctedQ, WORK_ALIASES).filter(
+                    (t) => !aliasTitles.includes(t),
+                );
+                pushAliasBatch(correctedAliases);
+                aliasTitles = [...aliasTitles, ...correctedAliases];
+                tokens = corrected;
+
+                const unresolved = collectTitles().filter(
+                    (t) => !resolution.resolvedPageIds.has(t) && !resolution.resolvedTitles.has(t),
+                );
+                const extra = await resolveTitles(unresolved, hardCategories);
+                for (const [from, to] of extra.resolvedTitles) {
+                    resolution.resolvedTitles.set(from, to);
+                }
+                for (const [title, id] of extra.resolvedPageIds) {
+                    resolution.resolvedPageIds.set(title, id);
+                }
+                for (const [title, cats] of extra.categoryHits) {
+                    resolution.categoryHits.set(title, cats);
+                }
+                ranked = rank(hardCategories.length > 0);
+            }
         }
 
-        const ranked = [...merged.values()];
+        // Instrument hard filter emptied the pool → fall back to boost-only so
+        // the panel never blanks; the client shows a "close matches" hint.
+        let filterRelaxed = false;
+        if (hardCategories.length > 0 && ranked.length < 5) {
+            const relaxed = rank(false);
+            if (relaxed.length > ranked.length) {
+                ranked = relaxed;
+                filterRelaxed = true;
+            }
+        }
+
         if (sort === 'title') {
             ranked.sort((a, b) => a.title.localeCompare(b.title));
         } else if (sort === 'recent') {
-            // Search API doesn't give reliable add dates; fall back to relevance.
-            ranked.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
-        } else {
-            ranked.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+            // Last-edit timestamp from srprop — a proxy for recency.
+            ranked.sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? '') || b.score - a.score);
         }
 
-        const results = ranked.slice(0, limit).map(({ score: _score, ...rest }) => rest);
+        const results = ranked.slice(0, limit).map((h) => toHit(h.title, h.pageid, h.snippet));
 
-        return jsonResponse({ results, total: results.length, mode: 'search' });
+        return jsonResponse({ results, total: results.length, mode: 'search', filterRelaxed });
     } catch (err) {
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP search failed' }, 502);
     }
 });
-
-const foldEquals = (a: string, b: string): boolean =>
-    a.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase() === b.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();

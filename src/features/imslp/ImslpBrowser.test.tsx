@@ -10,7 +10,7 @@ import {
     suggestedPdfName,
 } from '@/features/imslp/imslpDisplay';
 import { groupPopularByComposer, POPULAR_WORKS } from '@/features/imslp/popularWorks';
-import { buildSearchFilters, filterSearchTokens, hasActiveFilters } from '@/features/imslp/searchFacets';
+import { buildSearchFilters, hasActiveFilters } from '@/features/imslp/searchFacets';
 
 describe('imslp display helpers', () => {
     it('formats byte sizes', () => {
@@ -88,7 +88,6 @@ describe('search facets', () => {
         expect(filters.instrument).toBe('piano');
         expect(filters.form).toBe('sonata');
         expect(hasActiveFilters(filters)).toBe(true);
-        expect(filterSearchTokens(filters)).toEqual(expect.arrayContaining(['Beethoven', 'piano', 'sonata']));
     });
 });
 
@@ -121,8 +120,8 @@ describe('ImslpBrowser', () => {
         const api = await import('@/features/imslp/imslpApi');
         const { ImslpBrowser } = await import('@/features/imslp/ImslpBrowser');
 
-        vi.spyOn(api, 'searchImslp').mockResolvedValue(
-            Array.from({ length: 10 }, (_, i) => ({
+        vi.spyOn(api, 'searchImslp').mockResolvedValue({
+            results: Array.from({ length: 10 }, (_, i) => ({
                 title:
                     i === 0
                         ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
@@ -132,7 +131,8 @@ describe('ImslpBrowser', () => {
                 composer: i === 0 ? 'Beethoven, Ludwig van' : 'Composer, Name',
                 imslpUrl: `https://imslp.org/wiki/Work_${i}`,
             })),
-        );
+            filterRelaxed: false,
+        });
 
         render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
 
@@ -155,15 +155,18 @@ describe('ImslpBrowser', () => {
         const api = await import('@/features/imslp/imslpApi');
         const { ImslpBrowser } = await import('@/features/imslp/ImslpBrowser');
 
-        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue([
-            {
-                title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
-                pageid: 1458,
-                snippet: '',
-                composer: 'Beethoven, Ludwig van',
-                imslpUrl: 'https://imslp.org/wiki/Moonlight',
-            },
-        ]);
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue({
+            results: [
+                {
+                    title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
+                    pageid: 1458,
+                    snippet: '',
+                    composer: 'Beethoven, Ludwig van',
+                    imslpUrl: 'https://imslp.org/wiki/Moonlight',
+                },
+            ],
+            filterRelaxed: false,
+        });
 
         render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
 

@@ -14,6 +14,14 @@ export interface ImslpSearchOptions {
     limit?: number;
     filters?: SearchFilters;
     sort?: SearchSort;
+    /** Cancels the request (the panel aborts superseded searches). */
+    signal?: AbortSignal;
+}
+
+export interface ImslpSearchResponse {
+    results: ImslpSearchHit[];
+    /** True when the instrument filter matched too little and was relaxed to a boost. */
+    filterRelaxed: boolean;
 }
 
 export interface ImslpEdition {
@@ -89,21 +97,75 @@ const parseDownloadFallback = (body: unknown): ImslpDownloadFallback | null => {
     return { ok: false, code: code as FallbackCode, message, openUrl, filename };
 };
 
-export const searchImslp = async (q: string, options: ImslpSearchOptions | number = 100): Promise<ImslpSearchHit[]> => {
+/** Completed searches, so repeated queries don't re-fan-out against IMSLP. */
+const SEARCH_CACHE = new Map<string, { at: number; response: ImslpSearchResponse }>();
+const SEARCH_CACHE_MAX = 30;
+const SEARCH_CACHE_TTL_MS = 5 * 60_000;
+const SEARCH_TIMEOUT_MS = 15_000;
+
+const searchCacheKey = (q: string, limit: number, filters: SearchFilters | undefined, sort: SearchSort | undefined) =>
+    JSON.stringify([
+        q.trim().toLowerCase(),
+        limit,
+        filters?.composerCategory ?? null,
+        filters?.instrument ?? null,
+        filters?.form ?? null,
+        filters?.key ?? null,
+        filters?.era ?? null,
+        sort ?? 'relevance',
+    ]);
+
+export const searchImslp = async (
+    q: string,
+    options: ImslpSearchOptions | number = 100,
+): Promise<ImslpSearchResponse> => {
     const opts: ImslpSearchOptions = typeof options === 'number' ? { limit: options } : options;
     const limit = opts.limit ?? 100;
-    const { data, error } = await getSupabase().functions.invoke<{ results: ImslpSearchHit[] }>('imslp-search', {
-        body: {
-            q,
-            limit,
-            filters: opts.filters,
-            sort: opts.sort,
-        },
-    });
-    if (error) {
-        throw new Error(await functionErrorMessage(error));
+
+    const key = searchCacheKey(q, limit, opts.filters, opts.sort);
+    const cached = SEARCH_CACHE.get(key);
+    if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) {
+        // Re-insert to keep recently used entries alive under the size cap.
+        SEARCH_CACHE.delete(key);
+        SEARCH_CACHE.set(key, cached);
+        return cached.response;
     }
-    return data?.results ?? [];
+
+    const supabase = getSupabase();
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    if (!accessToken) {
+        throw new Error('Not signed in');
+    }
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
+
+    const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+    const response = await fetch(`${projectUrl}/functions/v1/imslp-search`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            apikey: anonKey,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ q, limit, filters: opts.filters, sort: opts.sort }),
+        signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
+    });
+    if (!response.ok) {
+        throw new Error(await messageFromJsonBody(response));
+    }
+    const body = (await response.json()) as { results?: ImslpSearchHit[]; filterRelaxed?: boolean };
+    const result: ImslpSearchResponse = {
+        results: body.results ?? [],
+        filterRelaxed: body.filterRelaxed === true,
+    };
+    SEARCH_CACHE.set(key, { at: Date.now(), response: result });
+    if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
+        const oldest = SEARCH_CACHE.keys().next().value;
+        if (oldest !== undefined) {
+            SEARCH_CACHE.delete(oldest);
+        }
+    }
+    return result;
 };
 
 export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> => {
