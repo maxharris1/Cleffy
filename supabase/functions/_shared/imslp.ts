@@ -37,7 +37,7 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
         });
     } catch (err) {
         if (err instanceof DOMException && err.name === 'TimeoutError') {
-            throw new Error('IMSLP API timeout');
+            throw new Error('IMSLP API timeout', { cause: err });
         }
         throw err;
     }
@@ -49,6 +49,22 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
 
 export const workPageUrl = (title: string): string =>
     `${IMSLP_ORIGIN}/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`;
+
+/**
+ * Rendered work page HTML via action=parse — the only place IMSLP exposes
+ * per-file license tags with their regional Non-PD flags. Null on any failure
+ * so callers degrade to license-unknown instead of failing the lookup.
+ */
+export const fetchWorkPageHtml = async (title: string): Promise<string | null> => {
+    try {
+        const data = (await mwFetch({ action: 'parse', page: title, prop: 'text' })) as {
+            parse?: { text?: { '*'?: string } };
+        };
+        return data.parse?.text?.['*'] ?? null;
+    } catch {
+        return null;
+    }
+};
 
 export const imagefromIndexUrl = (filename: string): string =>
     `${IMSLP_ORIGIN}/wiki/Special:ImagefromIndex/${encodeURIComponent(filename)}`;

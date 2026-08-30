@@ -1,8 +1,12 @@
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ImslpBrowserProps } from '@/features/imslp/ImslpBrowser';
+import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import {
     displayEditionName,
     displayWorkTitle,
+    editionAvailability,
     formatBytes,
     recommendEdition,
     searchTokens,
@@ -11,6 +15,26 @@ import {
 } from '@/features/imslp/imslpDisplay';
 import { groupPopularByComposer, POPULAR_WORKS } from '@/features/imslp/popularWorks';
 import { buildSearchFilters, hasActiveFilters } from '@/features/imslp/searchFacets';
+
+const hit = (title: string, pageid: number) => ({
+    title,
+    pageid,
+    snippet: '',
+    composer: title.match(/\(([^)]+)\)\s*$/)?.[1] ?? null,
+    imslpUrl: `https://imslp.org/wiki/${pageid}`,
+});
+
+const edition = (filename: string, overrides: Partial<ImslpEdition> = {}): ImslpEdition => ({
+    filename,
+    size: 1_800_000,
+    mime: 'application/pdf',
+    openUrl: `https://imslp.org/wiki/Special:ImagefromIndex/${filename}`,
+    license: 'pd',
+    licenseLabel: 'Public Domain',
+    restriction: null,
+    downloadable: true,
+    ...overrides,
+});
 
 describe('imslp display helpers', () => {
     it('formats byte sizes', () => {
@@ -46,6 +70,38 @@ describe('imslp display helpers', () => {
             { filename: 'huge-complete.pdf', size: 40_000_000 },
         ]);
         expect(pick?.filename).toBe('good-urtext.pdf');
+    });
+
+    it('never recommends a restricted or license-unknown edition', () => {
+        const pick = recommendEdition([
+            edition('henle-urtext.pdf', { downloadable: false, license: 'pd', restriction: 'Non-PD US' }),
+            edition('mystery.pdf', { license: 'unknown' }),
+            edition('plain-scan.pdf', { size: 900_000 }),
+        ]);
+        expect(pick?.filename).toBe('plain-scan.pdf');
+    });
+
+    it('returns null when nothing is downloadable — no auto-selection', () => {
+        expect(
+            recommendEdition([
+                edition('a.pdf', { downloadable: false, restriction: 'Non-PD US' }),
+                edition('b.pdf', { downloadable: false, restriction: 'Non-PD EU' }),
+            ]),
+        ).toBeNull();
+    });
+
+    it('describes edition availability for the row badges', () => {
+        expect(editionAvailability(edition('a.pdf'))).toEqual({ kind: 'downloadable', label: 'Public domain' });
+        expect(editionAvailability(edition('b.pdf', { downloadable: false, restriction: 'Non-PD US' }))).toEqual({
+            kind: 'restricted',
+            label: 'Non-PD US',
+        });
+        expect(editionAvailability(edition('c.pdf', { license: 'unknown', licenseLabel: null }))).toEqual({
+            kind: 'unknown',
+            label: 'License unknown',
+        });
+        // Pre-license data (older responses, plain fixtures) shows nothing.
+        expect(editionAvailability({ filename: 'd.pdf', size: null } as ImslpEdition)).toBeNull();
     });
 
     it('splits search results into best + more', () => {
@@ -104,85 +160,202 @@ describe('ImslpBrowser', () => {
         vi.restoreAllMocks();
     });
 
-    it('shows popular works by default', async () => {
-        const { render, screen } = await import('@testing-library/react');
+    const renderBrowser = async (props: Partial<ImslpBrowserProps> = {}, initialEntry = '/search') => {
+        const { render } = await import('@testing-library/react');
         const { ImslpBrowser } = await import('@/features/imslp/ImslpBrowser');
+        return render(
+            <MemoryRouter initialEntries={[initialEntry]}>
+                <ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} {...props} />
+            </MemoryRouter>,
+        );
+    };
 
-        render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
+    it('starts piano-scoped with the curated list and no network call', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+        const searchSpy = vi.spyOn(api, 'searchImslp');
+
+        await renderBrowser();
+
         expect(screen.getByRole('heading', { name: 'Popular' })).toBeInTheDocument();
         expect(screen.getByText('Moonlight Sonata')).toBeInTheDocument();
-        expect(screen.getByText('Für Elise')).toBeInTheDocument();
+        // Piano default: pre-pressed chip, piano-only curated list, status says so.
+        const instrumentTab = screen.getByRole('button', { name: 'Instrument' });
+        instrumentTab.click();
+        expect(await screen.findByRole('button', { name: 'Piano' })).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.queryByText('Swan Lake')).not.toBeInTheDocument();
+        expect(screen.getByText(/Piano · Popular ·/)).toBeInTheDocument();
+        // No fake ARIA widgets remain.
+        expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+        expect(screen.queryByRole('option')).not.toBeInTheDocument();
+        // The default state must not fan out to IMSLP.
+        await new Promise((r) => setTimeout(r, 350));
+        expect(searchSpy).not.toHaveBeenCalled();
     });
 
-    it('runs a debounced search and groups best matches', async () => {
-        const { render, screen, waitFor } = await import('@testing-library/react');
+    it('runs a debounced search with the piano filter and groups best matches', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
-        const { ImslpBrowser } = await import('@/features/imslp/ImslpBrowser');
 
-        vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: Array.from({ length: 10 }, (_, i) => ({
-                title:
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue({
+            results: Array.from({ length: 10 }, (_, i) =>
+                hit(
                     i === 0
                         ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
                         : `Other Work ${i} (Composer, Name)`,
-                pageid: 1458 + i,
-                snippet: '',
-                composer: i === 0 ? 'Beethoven, Ludwig van' : 'Composer, Name',
-                imslpUrl: `https://imslp.org/wiki/Work_${i}`,
-            })),
+                    1458 + i,
+                ),
+            ),
             filterRelaxed: false,
         });
 
-        render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
-
+        await renderBrowser();
         await userEvent.type(
             screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'),
             'beethoven sonata',
         );
 
         await waitFor(() => {
-            expect(api.searchImslp).toHaveBeenCalled();
+            expect(searchSpy).toHaveBeenCalled();
         });
+        const lastCall = searchSpy.mock.calls.at(-1);
+        expect(lastCall?.[1]).toEqual(
+            expect.objectContaining({ filters: expect.objectContaining({ instrument: 'piano' }) }),
+        );
         expect(await screen.findByText('Best matches')).toBeInTheDocument();
         expect(screen.getByText('More from IMSLP')).toBeInTheDocument();
         expect(screen.getByText((_, el) => el?.textContent === 'Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
     });
 
-    it('sends facet filters when a tag is selected', async () => {
-        const { render, screen, waitFor } = await import('@testing-library/react');
+    it('keeps prior results and shows an error — not the empty state — when a search fails', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
-        const { ImslpBrowser } = await import('@/features/imslp/ImslpBrowser');
 
-        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: [
-                {
-                    title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
-                    pageid: 1458,
-                    snippet: '',
-                    composer: 'Beethoven, Ludwig van',
-                    imslpUrl: 'https://imslp.org/wiki/Moonlight',
-                },
-            ],
-            filterRelaxed: false,
-        });
+        const searchSpy = vi
+            .spyOn(api, 'searchImslp')
+            .mockResolvedValueOnce({ results: [hit('Nocturnes, Op.9 (Chopin, Frédéric)', 7)], filterRelaxed: false })
+            .mockRejectedValueOnce(new Error('IMSLP is down'));
 
-        render(<ImslpBrowser onImportFile={vi.fn()} onImportImslp={vi.fn()} autoFocus={false} />);
+        await renderBrowser();
+        const input = screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…');
+        await userEvent.type(input, 'chopin');
+        await screen.findByText('Best matches');
 
-        await userEvent.click(screen.getByRole('tab', { name: 'Instrument' }));
-        await userEvent.click(screen.getByRole('option', { name: 'Piano' }));
-
+        await userEvent.type(input, ' nocturne');
         await waitFor(() => {
-            expect(searchSpy).toHaveBeenCalled();
+            expect(searchSpy).toHaveBeenCalledTimes(2);
         });
-        const lastCall = searchSpy.mock.calls.at(-1);
-        expect(lastCall?.[0]).toBe('');
-        expect(lastCall?.[1]).toEqual(
-            expect.objectContaining({
-                filters: expect.objectContaining({ instrument: 'piano' }),
-            }),
-        );
-        expect(await screen.findByText('Best matches')).toBeInTheDocument();
+
+        expect(await screen.findByText('IMSLP is down')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+        // Prior results stay; the "No matches" empty state must not appear.
+        expect(screen.getByText('Best matches')).toBeInTheDocument();
+        expect(screen.queryByText('No matches')).not.toBeInTheDocument();
+    });
+
+    it('ignores a stale response that resolves after a newer one', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        let releaseFirst: (() => void) | undefined;
+        const searchSpy = vi
+            .spyOn(api, 'searchImslp')
+            .mockImplementationOnce(
+                () =>
+                    new Promise((resolve) => {
+                        releaseFirst = () =>
+                            resolve({ results: [hit('Stale Result (Old, Query)', 1)], filterRelaxed: false });
+                    }),
+            )
+            .mockResolvedValueOnce({ results: [hit('Fresh Result (New, Query)', 2)], filterRelaxed: false });
+
+        await renderBrowser();
+        const input = screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…');
+        await userEvent.type(input, 'chopin');
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalledTimes(1);
+        });
+        await userEvent.type(input, ' ballade');
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalledTimes(2);
+        });
+        await screen.findByText('Fresh Result');
+
+        releaseFirst?.();
+        await new Promise((r) => setTimeout(r, 20));
+        expect(screen.queryByText('Stale Result')).not.toBeInTheDocument();
+        expect(screen.getByText('Fresh Result')).toBeInTheDocument();
+    });
+
+    it('opens a work from ?work=, orders restricted editions last, and gates import on consent', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Moonlight',
+            editions: [
+                edition('restricted-henle.pdf', {
+                    downloadable: false,
+                    restriction: 'Non-PD US',
+                }),
+                edition('clean-scan.pdf'),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText('Choose a PDF edition');
+        expect(screen.getByText('2 available — 1 downloadable directly. Recommended edition selected.')).toBeInTheDocument();
+
+        // The clean scan is recommended + auto-selected; the restricted row is
+        // disabled, badged, and sorted after it.
+        const radios = screen.getAllByRole('radio');
+        expect(radios).toHaveLength(2);
+        expect(radios[0]).toBeChecked();
+        expect(radios[1]).toBeDisabled();
+        expect(screen.getByText('Non-PD US')).toBeInTheDocument();
+
+        // Import is held until the disclaimer is actually acknowledged.
+        const importButton = screen.getByRole('button', { name: 'Add to my library' });
+        expect(importButton).toBeDisabled();
+        await userEvent.click(screen.getByRole('checkbox'));
+        expect(importButton).toBeEnabled();
+        await userEvent.click(importButton);
+        await waitFor(() => {
+            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true);
+        });
+    });
+
+    it('shows the guidance state when every edition is restricted', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Second Rhapsody (Gershwin, George)',
+            composer: 'Gershwin, George',
+            imslpUrl: 'https://imslp.org/wiki/SecondRhapsody',
+            editions: [
+                edition('eu-only.pdf', { downloadable: false, restriction: 'Non-PD US' }),
+                edition('eu-only-2.pdf', { downloadable: false, restriction: 'Non-PD US' }),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText('Choose a PDF edition');
+        expect(screen.getByText(/None of these editions can be imported automatically/)).toBeInTheDocument();
+        expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
+        // No import button, no consent checkbox — there is nothing to import.
+        expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     });
 });

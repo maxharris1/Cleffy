@@ -1,7 +1,8 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey, serviceClient, tryDownloadPdf } from '../_shared/imslp.ts';
+import { checkRateLimit, clientKey, imagefromIndexUrl, serviceClient, tryDownloadPdf } from '../_shared/imslp.ts';
+import { LICENSE_TTL_MS } from '../_shared/imslpLicense.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -91,6 +92,36 @@ Deno.serve(async (req) => {
     const admin = serviceClient();
     if (!admin) {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
+    }
+
+    // License backstop, checked BEFORE the quota so a restricted file never
+    // costs a smart_imports credit. The edition picker is the primary gate;
+    // this catches direct calls. Missing or stale cache rows fail open — every
+    // UI path warms the cache through imslp-work first.
+    const { data: licenseRow } = await admin
+        .from('imslp_file_licenses')
+        .select('restriction, downloadable, fetched_at')
+        .eq('filename', filename)
+        .maybeSingle();
+    if (
+        licenseRow &&
+        licenseRow.downloadable === false &&
+        Date.now() - new Date(licenseRow.fetched_at as string).getTime() < LICENSE_TTL_MS
+    ) {
+        const restriction = typeof licenseRow.restriction === 'string' ? licenseRow.restriction : null;
+        return jsonResponse(
+            {
+                ok: false,
+                code: 'non_pd',
+                message: restriction
+                    ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
+                    : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically.",
+                openUrl: imagefromIndexUrl(filename),
+                filename,
+            },
+            // 409 signals hybrid fallback to the client, like download failures.
+            409,
+        );
     }
 
     // Metered as smart_imports, and gated BEFORE the IMSLP fetch — the expensive

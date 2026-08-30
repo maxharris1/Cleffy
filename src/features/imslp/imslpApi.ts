@@ -24,11 +24,21 @@ export interface ImslpSearchResponse {
     filterRelaxed: boolean;
 }
 
+export type ImslpEditionLicense = 'pd' | 'cc' | 'non-pd' | 'unknown';
+
 export interface ImslpEdition {
     filename: string;
     size: number | null;
     mime: string | null;
     openUrl: string;
+    /** License fields are optional so older function responses still parse. */
+    license?: ImslpEditionLicense;
+    /** Verbatim IMSLP tag, e.g. "Creative Commons Attribution 4.0". */
+    licenseLabel?: string | null;
+    /** Verbatim regional flag, e.g. "Non-PD US". */
+    restriction?: string | null;
+    /** Server verdict: Cleffy can fetch this file directly. */
+    downloadable?: boolean;
 }
 
 export interface ImslpWorkDetail {
@@ -38,7 +48,7 @@ export interface ImslpWorkDetail {
     editions: ImslpEdition[];
 }
 
-const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream'] as const;
+const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream', 'non_pd'] as const;
 type FallbackCode = (typeof FALLBACK_CODES)[number];
 
 export type ImslpDownloadFallback = {
