@@ -554,10 +554,14 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
                 // the stop at the top of the next measure — damps the music
                 // before it, so an 'up' takes the left-open, right-closed bar.
                 // Handing it to the bar after would let a performed repeat
-                // replay the span with the release stranded past the jump.
+                // replay the span with the release stranded past the jump. The
+                // one tick with no bar before it is the score's head, which
+                // bar 0 claims so an edge there (OMR losing the start of a
+                // pedal line leaves an orphan release) is not dropped.
                 const inSeg =
                     e.k === 'up'
-                        ? e.tick > seg.srcTick && e.tick <= seg.srcTick + seg.dTicks
+                        ? (e.tick > seg.srcTick || (e.tick === 0 && seg.srcTick === 0)) &&
+                          e.tick <= seg.srcTick + seg.dTicks
                         : e.tick >= seg.srcTick && e.tick < seg.srcTick + seg.dTicks;
                 if (inSeg) {
                     out.push({ ...e, tick: seg.destTick + (e.tick - seg.srcTick) });

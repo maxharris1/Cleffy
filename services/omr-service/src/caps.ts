@@ -14,11 +14,8 @@ export const MAX_PEDAL_EDGES = 256;
 /**
  * Where a ramp arrives rather than where it passes through: the last point
  * before a printed mark, and every point at which the curve turns — the floor a
- * rit. bends down to, and the "a tempo" that turns it back up. resolveTempos
- * stamps that restoration 'ramp' too, and it is the only event that ever
- * restates the steady tempo, so thinning it leaves the score at the ritardando
- * floor for however long the next surviving point takes to arrive. Everything
- * between two points on the same slope is the discretization proper.
+ * rit. bends down to, and the ceiling an accel. climbs to. Everything between
+ * two points on the same slope is the discretization proper.
  */
 const isRampLanding = (events: readonly ScoreTempo[], i: number): boolean => {
     const here = events[i];
@@ -39,10 +36,16 @@ const isRampLanding = (events: readonly ScoreTempo[], i: number): boolean => {
  * `src: 'ramp'` points are a per-beat discretization of a rit./accel., not
  * tempos anyone wrote down: halving the density of the points along one slope
  * leaves the curve landing within one beat of where it did, which is inaudible.
- * The points the curve turns on are not among them (see `isRampLanding`), and
- * printed marks — 'sound', 'metronome', 'word' — are irreplaceable and only ever
- * dropped by the truncation of last resort, which needs more than `max` printed
- * tempos in one score to trigger at all.
+ * Two kinds of ramp point are not along a slope, and are kept. A landing (see
+ * `isRampLanding`) is where a curve arrives or turns. A restoration is the
+ * "a tempo" that restates the last printed pulse — resolveTempos stamps it
+ * 'ramp' too, and it is the only event that ever does the restating, so
+ * thinning it leaves the score at the ritardando floor; it cannot be told from
+ * its shape (an accel. into a rit. passes straight through it, same slope
+ * sign on both sides), only from its bpm being the printed one. Printed marks
+ * themselves — 'sound', 'metronome', 'word' — are irreplaceable and only ever
+ * dropped by the truncation of last resort, which needs more than `max`
+ * printed tempos in one score to trigger at all.
  */
 export const capTempoEvents = (
     tempos: readonly ScoreTempo[],
@@ -51,11 +54,13 @@ export const capTempoEvents = (
     let kept: ScoreTempo[] = [...tempos];
     while (kept.length > max) {
         let seen = 0;
+        let printedBpm: number | null = null;
         const thinned = kept.filter((tempo, i) => {
             if (tempo.src !== 'ramp') {
+                printedBpm = tempo.bpm;
                 return true;
             }
-            if (isRampLanding(kept, i)) {
+            if (tempo.bpm === printedBpm || isRampLanding(kept, i)) {
                 return true;
             }
             return seen++ % 2 === 0;

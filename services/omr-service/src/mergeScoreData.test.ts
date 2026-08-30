@@ -478,6 +478,30 @@ describe('capTempoEvents', () => {
         expect(capped.filter((t) => t.src === 'ramp' && t.bpm === 92)).toHaveLength(70);
     });
 
+    it('keeps the "a tempo" an accel. runs straight through on its way to a rit.', () => {
+        // Between an accelerando's ceiling and the next ritardando, the
+        // "a tempo" is not a turn in the curve — the slope falls on both sides
+        // of it — so no shape test can find it. It is the only point restating
+        // the printed 120, and it must survive on that ground alone.
+        const tempos: ScoreTempo[] = [{ tick: 0, bpm: 120, src: 'metronome' }];
+        for (let block = 0; block < 40; block++) {
+            const start = 1 + block * 16;
+            for (let step = 0; step < 7; step++) {
+                tempos.push({ tick: start + step, bpm: 124 + step * 4, src: 'ramp' }); // accel.
+            }
+            tempos.push({ tick: start + 7, bpm: 120, src: 'ramp' }); // a tempo
+            for (let step = 0; step < 7; step++) {
+                tempos.push({ tick: start + 8 + step, bpm: 116 - step * 4, src: 'ramp' }); // rit.
+            }
+            tempos.push({ tick: start + 15, bpm: 120, src: 'ramp' }); // a tempo
+        }
+        expect(tempos.length).toBeGreaterThan(MAX_TEMPO_EVENTS);
+
+        const capped = capTempoEvents(tempos);
+        expect(capped.length).toBeLessThanOrEqual(MAX_TEMPO_EVENTS);
+        expect(capped.filter((t) => t.src === 'ramp' && t.bpm === 120)).toHaveLength(80);
+    });
+
     it('truncates as a last resort when nothing is a ramp', () => {
         const tempos: ScoreTempo[] = Array.from({ length: MAX_TEMPO_EVENTS + 8 }, (_, i) => ({
             tick: i,

@@ -1939,16 +1939,22 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     // A release written after the bar's last note sits exactly on
                     // the next bar's downbeat, which hands it to whatever follows
                     // — so a performed repeat leaves the pedal down for both
-                    // passes. Hold the edge inside the bar it was engraved in;
-                    // one tick at 480 per quarter is nothing to the ear.
-                    const tick = measureStart + Math.min(ev.rel, Math.max(0, place.dTicks - 1));
+                    // passes. Hold the RELEASE inside the bar it was engraved
+                    // in; one tick at 480 per quarter is nothing to the ear.
+                    // Only the release: a depression or re-catch taken at the
+                    // bar line belongs to the exact beat it names — the engine
+                    // reads a damper drop on the very tick a note ends as the
+                    // pedal falling with the key, and pulling it a tick early
+                    // would catch the note the change exists to clear.
+                    const raw = measureStart + ev.rel;
+                    const clamped = measureStart + Math.min(ev.rel, Math.max(0, place.dTicks - 1));
                     if (ev.kind === 'change') {
                         // A re-catch: the dampers drop and the pedal is taken
                         // again on the same beat, which is the whole point of the
                         // marking — it is what clears the previous harmony.
-                        pedals.push({ tick, k: 'up' }, { tick, k: 'down' });
+                        pedals.push({ tick: raw, k: 'up' }, { tick: raw, k: 'down' });
                     } else {
-                        pedals.push({ tick, k: ev.kind });
+                        pedals.push({ tick: ev.kind === 'up' ? clamped : raw, k: ev.kind });
                     }
                     break;
                 }

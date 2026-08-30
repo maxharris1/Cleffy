@@ -282,12 +282,14 @@ export const tempoAt = (score: ScoreData, tick: number, fallback: number): numbe
  * tempo derived from the meter alone, which is deliberately carried as
  * `defaultBpm` + a warning rather than as a tempo entry with a new `src`.
  *
- * They only get a say when there is no opening tempo, though: warnings are
- * score-wide (the shard merge unions them), so a later half that prints no
- * tempo of its own must not turn the metronome mark at the top of page 1 into
- * a guess.
+ * They only get a say when no tempo entry sits at tick 0, though: a metronome
+ * mark at the top of page 1 must not read as a guess because some later,
+ * unmarked stretch of the score carried a warning. The converse is a score
+ * whose first printed tempo arrives pages in — its opening really is the
+ * guessed `defaultBpm`, and the map having entries further along must not
+ * hide that.
  */
 export const tempoIsInferred = (score: ScoreData): boolean =>
     score.tempos?.[0]?.src === 'word' ||
-    (score.tempos?.[0] === undefined &&
+    ((score.tempos?.[0]?.tick ?? Number.POSITIVE_INFINITY) > 0 &&
         (score.warnings.includes('tempo_inferred') || score.warnings.includes('tempo_defaulted')));

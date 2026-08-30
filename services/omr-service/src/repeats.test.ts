@@ -302,6 +302,9 @@ describe('planRepeats jumps', () => {
             bar({ jump: dc() }),
             bar({ codaTarget: true }),
         ]);
+        // A degraded plan's order is never performed — buildScoreData checks
+        // the flag before it looks — so the al-Fine shape here is fine to pin:
+        // what matters is that degraded is true and the score plays linear.
         expect(result.order).toEqual([0, 1, 2, 3, 0, 1, 2]);
         expect(result.degraded).toBe(true);
     });
@@ -562,6 +565,22 @@ describe('unrollRepeats', () => {
         expect(out.holds).toEqual([
             { tick: 480, beats: 2 },
             { tick: 1440, beats: 2 },
+        ]);
+    });
+
+    it('keeps an orphan release at the score head instead of dropping it', () => {
+        // OMR losing the start of a pedal line leaves a lone 'up' — here on
+        // tick 0, the one tick with no bar before it to claim it. Bar 0 takes
+        // it, on each pass, so the down that follows still alternates.
+        const out = unrollRepeats(
+            { ...linear, pedals: [{ tick: 0, k: 'up' as const }, { tick: 479, k: 'down' as const }] },
+            [0, 1, 0, 1, 2],
+        );
+        expect(out.pedals).toEqual([
+            { tick: 0, k: 'up' },
+            { tick: 479, k: 'down' },
+            { tick: 960, k: 'up' },
+            { tick: 1439, k: 'down' },
         ]);
     });
 

@@ -1189,6 +1189,24 @@ describe('sustain pedal', () => {
         ]);
     });
 
+    it('keeps a bar-line re-catch and depression on the beat they name', () => {
+        // Only the release is pulled inside its bar. A change or a fresh start
+        // written at the bar line lands on the downbeat it belongs to: the
+        // engine reads a damper drop on the exact tick a note ends as the
+        // pedal falling with the key, and an edge one tick early would catch
+        // the very note the change exists to clear.
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${pedal('start')}${note('C', 4, 16)}${pedal('change')}</measure>` +
+                `<measure number="2">${note('E', 4, 16)}${pedal('stop')}</measure>`,
+        );
+        expect(parseMusicXmlString(xml).pedals).toEqual([
+            { tick: 0, k: 'down' },
+            { tick: 1920, k: 'up' },
+            { tick: 1920, k: 'down' },
+            { tick: 3839, k: 'up' },
+        ]);
+    });
+
     it('ignores pedal types there is nothing to do about', () => {
         const xml = wrap(`<measure number="1">${ATTRS_44}${pedal('continue')}${note('C', 4, 16)}</measure>`);
         expect(parseMusicXmlString(xml).pedals).toEqual([]);

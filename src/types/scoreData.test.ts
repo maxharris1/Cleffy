@@ -120,4 +120,16 @@ describe('tempoIsInferred', () => {
         expect(tempoIsInferred(score({ tempos: printed, warnings: ['tempo_defaulted'] }))).toBe(false);
         expect(tempoIsInferred(score({ tempos: printed, warnings: ['tempo_inferred'] }))).toBe(false);
     });
+
+    /**
+     * The converse must hold too: the service ships `tempo_defaulted` precisely
+     * when the opening itself was guessed, and a score whose first printed
+     * tempo arrives pages in still opens on that guess. A map with entries is
+     * not a map with an opening.
+     */
+    it('owns up to a guessed opening even when a tempo is printed later in the score', () => {
+        const later: ScoreData['tempos'] = [{ tick: 1920, bpm: 132, src: 'sound' }];
+        expect(tempoIsInferred(score({ tempos: later, warnings: ['tempo_defaulted'] }))).toBe(true);
+        expect(tempoIsInferred(score({ tempos: later, warnings: [] }))).toBe(false);
+    });
 });
