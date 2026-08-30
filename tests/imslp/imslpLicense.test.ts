@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { editionAvailability } from '@/features/imslp/imslpDisplay';
+
 import {
     classifyLicense,
     isDownloadable,
@@ -73,5 +75,50 @@ describe('parseWorkPageLicenses', () => {
 
     it('returns an empty map for HTML without file entries', () => {
         expect(parseWorkPageLicenses('<html><body>nothing here</body></html>').size).toBe(0);
+    });
+});
+
+describe('editionAvailability', () => {
+    it('claims a restriction only where IMSLP stated one', () => {
+        // A red regional flag is IMSLP's own wording — quote it.
+        expect(
+            editionAvailability({
+                license: 'pd',
+                licenseLabel: 'Public Domain',
+                restriction: 'Non-PD US',
+                downloadable: false,
+            }),
+        ).toEqual({ kind: 'restricted', label: 'Non-PD US' });
+
+        // A Non-PD license tag is a real restriction even without a separate flag.
+        expect(
+            editionAvailability({
+                license: 'non-pd',
+                licenseLabel: 'Non-PD US',
+                restriction: null,
+                downloadable: false,
+            }),
+        ).toEqual({ kind: 'restricted', label: 'Non-PD US' });
+
+        // Clean PD tag held back only by EU-mirror hosting: IMSLP said the
+        // opposite of restricted, so the panel must not assert one.
+        expect(
+            editionAvailability({
+                license: 'pd',
+                licenseLabel: 'Public Domain',
+                restriction: null,
+                downloadable: false,
+            }),
+        ).toEqual({ kind: 'unknown', label: 'License unverified' });
+
+        // Page parsed, but this file was never bound to a Copyright cell.
+        expect(
+            editionAvailability({
+                license: 'unknown',
+                licenseLabel: null,
+                restriction: null,
+                downloadable: false,
+            }),
+        ).toEqual({ kind: 'unknown', label: 'License unverified' });
     });
 });

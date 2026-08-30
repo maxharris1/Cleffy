@@ -55,7 +55,17 @@ export const editionAvailability = (edition: EditionLicenseFields): EditionAvail
         return null;
     }
     if (edition.downloadable === false) {
-        return { kind: 'restricted', label: edition.restriction ?? 'Copyright restricted' };
+        // Claim a restriction only where IMSLP stated one (a red regional flag,
+        // or a Non-PD license tag). Everything else that merely failed the
+        // downloadable check — EU-mirror hosting, an unparsed Copyright cell —
+        // is unverified, not restricted.
+        if (edition.restriction) {
+            return { kind: 'restricted', label: edition.restriction };
+        }
+        if (edition.license === 'non-pd') {
+            return { kind: 'restricted', label: edition.licenseLabel ?? 'Copyright restricted' };
+        }
+        return { kind: 'unknown', label: 'License unverified' };
     }
     if (edition.license === 'pd') {
         return { kind: 'downloadable', label: 'Public domain' };

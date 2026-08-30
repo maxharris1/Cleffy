@@ -182,8 +182,8 @@ export const ImslpWorkPanel = ({
             {noneImportable ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
                     <p className="text-sm text-amber-950">
-                        None of these editions can be imported automatically — IMSLP lists them as
-                        copyright-restricted in some regions.
+                        None of these editions can be imported automatically — Cleffy could not confirm they
+                        are cleared for direct download here.
                     </p>
                     <p className="mt-1 text-xs text-amber-900/80">
                         Open the work on IMSLP to review your options there, or choose a PDF you already own.

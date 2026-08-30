@@ -40,8 +40,9 @@ interface LicenseRow {
 }
 
 /**
- * Per-file licenses for the work's PDFs: fresh cache rows when they cover
- * every file, otherwise one action=parse of the rendered page (then cached).
+ * Per-file licenses for the work's PDFs: fresh cache rows, plus one
+ * action=parse of the rendered page (then cached) when they don't cover
+ * every file.
  * `source` distinguishes "IMSLP was parsed and this file wasn't cleared"
  * (conservative: not downloadable) from "license lookup unavailable"
  * (fail-open: downloadable, but never recommended).
@@ -64,14 +65,17 @@ const resolveLicenses = async (
                 .in('filename', pdfTitles);
             const rows = (data ?? []) as LicenseRow[];
             const fresh = rows.filter((r) => Date.now() - new Date(r.fetched_at).getTime() < LICENSE_TTL_MS);
+            // Seeded before the coverage check so a known restriction is never
+            // dropped just because a sibling file has no row — otherwise a
+            // failed live parse below would report it as downloadable.
+            for (const row of fresh) {
+                licenses.set(row.filename, {
+                    licenseLabel: row.license_label,
+                    restriction: row.restriction,
+                    euHosted: row.eu_hosted,
+                });
+            }
             if (fresh.length === pdfTitles.length) {
-                for (const row of fresh) {
-                    licenses.set(row.filename, {
-                        licenseLabel: row.license_label,
-                        restriction: row.restriction,
-                        euHosted: row.eu_hosted,
-                    });
-                }
                 return { licenses, source: 'cache' };
             }
         } catch {
@@ -84,16 +88,20 @@ const resolveLicenses = async (
         return { licenses, source: 'unavailable' };
     }
     const parsed = parseWorkPageLicenses(html);
+    // Only what this parse actually re-verified is written back — upserting the
+    // seeded cache rows too would keep renewing their TTL without rechecking.
+    const freshlyParsed = new Map<string, FileLicense>();
     for (const filename of pdfTitles) {
         const license = parsed.get(filename);
         if (license) {
             licenses.set(filename, license);
+            freshlyParsed.set(filename, license);
         }
     }
 
-    if (admin && licenses.size > 0) {
+    if (admin && freshlyParsed.size > 0) {
         const fetchedAt = new Date().toISOString();
-        const upserts = [...licenses.entries()].map(([filename, license]) => ({
+        const upserts = [...freshlyParsed.entries()].map(([filename, license]) => ({
             filename,
             work_title: workTitle,
             license: classifyLicense(license.licenseLabel),

@@ -51,6 +51,14 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Invalid filename' }, 400);
     }
 
+    // MediaWiki treats "_" as " " and upper-cases a title's first letter, so an
+    // equivalent-but-different spelling resolves to the same file while missing
+    // the cache row (always written in the canonical space form) — which would
+    // fail the license gate below open. Lossless: a title cannot hold a literal
+    // underscore distinct from a space.
+    const spaced = filename.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+    const canonicalFilename = spaced.charAt(0).toUpperCase() + spaced.slice(1);
+
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {
         return jsonResponse({ error: 'documentId must be a UUID' }, 400);
@@ -101,7 +109,7 @@ Deno.serve(async (req) => {
     const { data: licenseRow } = await admin
         .from('imslp_file_licenses')
         .select('restriction, downloadable, fetched_at')
-        .eq('filename', filename)
+        .eq('filename', canonicalFilename)
         .maybeSingle();
     if (
         licenseRow &&
@@ -116,8 +124,8 @@ Deno.serve(async (req) => {
                 message: restriction
                     ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
                     : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically.",
-                openUrl: imagefromIndexUrl(filename),
-                filename,
+                openUrl: imagefromIndexUrl(canonicalFilename),
+                filename: canonicalFilename,
             },
             // 409 signals hybrid fallback to the client, like download failures.
             409,
@@ -143,7 +151,7 @@ Deno.serve(async (req) => {
     };
 
     try {
-        const result = await tryDownloadPdf(filename);
+        const result = await tryDownloadPdf(canonicalFilename);
         if (!result.ok) {
             await giveBack();
             return jsonResponse(
