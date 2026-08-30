@@ -2,8 +2,14 @@ import Dexie, { type Table } from 'dexie';
 
 import type { RecognizedRegion } from '@/features/fingering/model';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
-import type { ScoreAnalysisStatus } from '@/types/database';
-import type { Entitlements } from '@/types/database';
+import type {
+    AssignmentRow,
+    DocumentRow,
+    Entitlements,
+    LibraryTagRow,
+    ManagedStudentRow,
+    ScoreAnalysisStatus,
+} from '@/types/database';
 import type { Annotation } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 
@@ -114,6 +120,37 @@ export interface CachedEntitlements {
     cachedAt: string;
 }
 
+/** Last library bootstrap payload for an instant grid on remount. */
+export interface CachedLibraryList {
+    userId: string;
+    documents: DocumentRow[];
+    hasMore: boolean;
+    favoriteIds: string[];
+    tags: LibraryTagRow[];
+    /** document_id → tag ids */
+    documentTags: Array<[string, string[]]>;
+    cachedAt: string;
+}
+
+/** Last roster snapshot for Library ↔ Students navigations. */
+export interface CachedRoster {
+    userId: string;
+    students: ManagedStudentRow[];
+    /** student_user_id → assignment count (titles filled on network refresh). */
+    assignmentCounts: Array<[string, number]>;
+    cachedAt: string;
+}
+
+/** Last student assignment list for an instant /assignments paint. */
+export interface CachedAssignments {
+    userId: string;
+    scores: Array<{
+        assignment: AssignmentRow;
+        document: DocumentRow;
+    }>;
+    cachedAt: string;
+}
+
 export class ScribblerDb extends Dexie {
     annotations!: Table<LocalAnnotation, string>;
     ops!: Table<PendingOp, number>;
@@ -124,6 +161,9 @@ export class ScribblerDb extends Dexie {
     fingeringRegions!: Table<FingeringRegionCache, string>;
     entitlements!: Table<CachedEntitlements, string>;
     thumbnails!: Table<CachedThumbnail, string>;
+    libraryList!: Table<CachedLibraryList, string>;
+    rosterCache!: Table<CachedRoster, string>;
+    assignmentsCache!: Table<CachedAssignments, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -185,6 +225,21 @@ export class ScribblerDb extends Dexie {
             fingeringRegions: 'id, docId, createdAt',
             entitlements: 'userId',
             thumbnails: 'docId',
+        });
+        // Instant paint caches for library / roster / student assignments.
+        this.version(7).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
         });
     }
 }

@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { loadEntitlements, readCachedEntitlements } from '@/features/billing/entitlementsService';
+import { fetchLibraryBootstrap } from '@/features/library/libraryBootstrap';
 import type { Entitlements } from '@/types/database';
 
 export interface EntitlementsState {
     entitlements: Entitlements | null;
     loading: boolean;
     refresh: () => Promise<void>;
+}
+
+export interface UseEntitlementsOptions {
+    /**
+     * When true (library shell), load via library_bootstrap so the page and
+     * plan badge share one HTTP round-trip. Account and other surfaces keep
+     * the lean get_entitlements RPC.
+     */
+    viaLibraryBootstrap?: boolean;
 }
 
 /**
@@ -17,7 +27,11 @@ export interface EntitlementsState {
  * for very little gain. The Dexie cache means repeat mounts are cheap and the
  * first paint is instant even offline.
  */
-export const useEntitlements = (userId: string | null): EntitlementsState => {
+export const useEntitlements = (
+    userId: string | null,
+    options: UseEntitlementsOptions = {},
+): EntitlementsState => {
+    const viaBootstrap = options.viaLibraryBootstrap === true;
     const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
     const [loading, setLoading] = useState(userId !== null);
 
@@ -25,8 +39,16 @@ export const useEntitlements = (userId: string | null): EntitlementsState => {
         if (!userId) {
             return;
         }
+        if (viaBootstrap) {
+            try {
+                setEntitlements((await fetchLibraryBootstrap(userId)).entitlements);
+                return;
+            } catch {
+                // Fall through to the lean RPC.
+            }
+        }
         setEntitlements(await loadEntitlements(userId));
-    }, [userId]);
+    }, [userId, viaBootstrap]);
 
     useEffect(() => {
         if (!userId) {
@@ -46,12 +68,28 @@ export const useEntitlements = (userId: string | null): EntitlementsState => {
                 // Cache miss is not worth surfacing — the server read follows.
             }
             try {
-                const fresh = await loadEntitlements(userId);
-                if (mounted) {
-                    setEntitlements(fresh);
+                if (viaBootstrap) {
+                    const boot = await fetchLibraryBootstrap(userId);
+                    if (mounted) {
+                        setEntitlements(boot.entitlements);
+                    }
+                } else {
+                    const fresh = await loadEntitlements(userId);
+                    if (mounted) {
+                        setEntitlements(fresh);
+                    }
                 }
             } catch {
-                // loadEntitlements already falls back to cache, then to free.
+                if (viaBootstrap) {
+                    try {
+                        const fresh = await loadEntitlements(userId);
+                        if (mounted) {
+                            setEntitlements(fresh);
+                        }
+                    } catch {
+                        // loadEntitlements already falls back to cache, then to free.
+                    }
+                }
             }
             if (mounted) {
                 setLoading(false);
@@ -61,7 +99,7 @@ export const useEntitlements = (userId: string | null): EntitlementsState => {
         return () => {
             mounted = false;
         };
-    }, [userId]);
+    }, [userId, viaBootstrap]);
 
     // Derived rather than stored, so signing out needs no effect-driven reset.
     if (!userId) {

@@ -95,30 +95,43 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
 
     useEffect(() => {
-        if (!userId) {
-            return;
-        }
         let cancelled = false;
         (async () => {
+            // Warm open: paint from Dexie immediately, then refresh in the background.
+            const offline = await loadDocumentOffline(docId).catch(() => null);
+            if (!cancelled && offline) {
+                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
+            }
+
+            if (!userId) {
+                return;
+            }
+
             try {
-                const doc = await fetchDocument(docId);
+                const [doc, role] = await Promise.all([fetchDocument(docId), fetchMyRole(docId, userId)]);
                 if (!doc) {
                     throw new Error('Score not found — it may have been deleted, or your access was revoked.');
                 }
-                const [role, bytes] = await Promise.all([fetchMyRole(docId, userId), loadDocumentBytes(doc)]);
+                const bytes = await loadDocumentBytes(doc);
                 const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
                 if (!cancelled) {
                     setState({ doc: withPages, role, bytes });
+                    setLoadError(null);
                 }
             } catch (err) {
+                if (cancelled) {
+                    return;
+                }
                 // No network? A previously-cached score still opens (plan §offline).
+                if (offline) {
+                    setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
+                    return;
+                }
                 const fallback = await loadDocumentOffline(docId).catch(() => null);
-                if (!cancelled) {
-                    if (fallback) {
-                        setState({ doc: fallback.doc, role: fallback.role, bytes: fallback.bytes });
-                    } else {
-                        setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
-                    }
+                if (fallback) {
+                    setState({ doc: fallback.doc, role: fallback.role, bytes: fallback.bytes });
+                } else {
+                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
                 }
             }
         })();
@@ -164,7 +177,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             </main>
         );
     }
-    if (!state || !userId) {
+    if (!state) {
         return (
             <main className="flex min-h-full items-center justify-center p-8">
                 <LoadingText>Opening score…</LoadingText>
@@ -172,6 +185,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         );
     }
 
+    // Session may still be resolving on a warm Dexie open — paint the PDF anyway.
+    const resolvedUserId = userId ?? session?.user.id ?? '';
     // Past the plan's score cap. RLS refuses every annotation write on an archived
     // score (annotations_insert/annotations_update both test document_is_archived),
     // and a refusal is not transient, so the sync engine discards the op — a whole
@@ -180,14 +195,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // CachedPdf.archivedAt current for exactly this, so the offline open (which
     // synthesizes its row from the cache) reads it too.
     const archived = state.doc.archived_at !== null;
-    const readOnly = archived || (state.role !== 'owner' && state.role !== 'editor');
+    const readOnly = archived || (state.role !== 'owner' && state.role !== 'editor') || !resolvedUserId;
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
 
     return (
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
-                <PresenceBar peers={peers} selfUserId={userId} />
+                <PresenceBar peers={peers} selfUserId={resolvedUserId} />
                 <SyncDot status={syncStatus} />
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
@@ -255,16 +270,20 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         readOnly={readOnly}
                         onStoreReady={onStoreReady}
                         playback={playbackFeature}
-                        sync={{
-                            userId,
-                            name: displayNameOf(session),
-                            isAnonymous: Boolean(session?.user.is_anonymous),
-                            canWrite: !readOnly,
-                            onStatus,
-                            onPeers,
-                            onDocReplaced,
-                            onScoreAnalysis: applyBroadcast,
-                        }}
+                        sync={
+                            resolvedUserId
+                                ? {
+                                      userId: resolvedUserId,
+                                      name: displayNameOf(session),
+                                      isAnonymous: Boolean(session?.user.is_anonymous),
+                                      canWrite: !readOnly,
+                                      onStatus,
+                                      onPeers,
+                                      onDocReplaced,
+                                      onScoreAnalysis: applyBroadcast,
+                                  }
+                                : undefined
+                        }
                     />
                 </PdfProvider>
             </div>
@@ -277,7 +296,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 warning={warning}
                 onDismissWarning={dismissWarning}
             />
-            {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
+            {shareOpen && resolvedUserId ? (
+                <ShareDialog docId={docId} userId={resolvedUserId} onClose={() => setShareOpen(false)} />
+            ) : null}
             {notesOpen ? (
                 <NotesPanel
                     documentId={docId}

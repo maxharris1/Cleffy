@@ -17,7 +17,9 @@ export const RequireRegistered = ({
     fallback?: string;
 }) => {
     const { session, loading } = useSession();
-    if (loading) {
+    // Paint chrome from a known session immediately; BrandLoading only on a true
+    // cold start where nothing has resolved yet.
+    if (loading && !session) {
         return <BrandLoading />;
     }
     if (!isRegisteredSession(session)) {
@@ -34,7 +36,7 @@ export const RequireRegistered = ({
 /** Blocks until session bootstrap finishes; registered users go to their own home. */
 export const RequireGuest = ({ children }: { children: ReactNode }) => {
     const { session, loading } = useSession();
-    if (loading) {
+    if (loading && !session) {
         return <BrandLoading />;
     }
     if (isRegisteredSession(session)) {
@@ -50,7 +52,7 @@ export const RequireGuest = ({ children }: { children: ReactNode }) => {
  */
 export const RequireStudent = ({ children }: { children: (session: Session) => ReactNode }) => {
     const { session, loading } = useSession();
-    if (loading) {
+    if (loading && !session) {
         return <BrandLoading />;
     }
     if (!isRegisteredSession(session)) {

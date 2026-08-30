@@ -19,6 +19,7 @@ import {
     type RosterAssignment,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
+import { getDb } from '@/sync/db';
 import type { AssignmentAccess, AssignmentRow, EffectiveTier, ManagedStudentRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -130,7 +131,7 @@ const noRosterOnThisPlan = (tier: EffectiveTier): LimitReachedError =>
  * sign-ins with no control left anywhere that could turn them off.
  */
 export const RosterPage = () => {
-    const { canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { userId, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
@@ -147,34 +148,46 @@ export const RosterPage = () => {
     useEffect(() => {
         let mounted = true;
         void (async () => {
+            // Names first — assignment counts fill in with the network response.
+            const cached = await getDb().rosterCache.get(userId).catch(() => undefined);
+            if (mounted && cached && cached.students.length > 0) {
+                setStudents(cached.students);
+            }
+
             try {
-                const roster = await listRoster();
+                const [roster, grouped] = await Promise.all([
+                    listRoster(),
+                    listAssignmentsForStudents().catch(() => new Map<string, RosterAssignment[]>()),
+                ]);
                 if (!mounted) {
                     return;
                 }
                 setStudents(roster);
+                setAssignments(grouped);
+                setLoadError(null);
+                const assignmentCounts: Array<[string, number]> = [...grouped.entries()].map(([id, rows]) => [
+                    id,
+                    rows.length,
+                ]);
+                void getDb()
+                    .rosterCache.put({
+                        userId,
+                        students: roster,
+                        assignmentCounts,
+                        cachedAt: new Date().toISOString(),
+                    })
+                    .catch(() => undefined);
             } catch (err) {
                 if (mounted) {
-                    setStudents([]);
+                    setStudents((prev) => prev ?? []);
                     setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
                 }
-                return;
-            }
-            // Best-effort, like the library's favourites and tags: a roster with
-            // no counts beside it is still a usable roster.
-            try {
-                const grouped = await listAssignmentsForStudents();
-                if (mounted) {
-                    setAssignments(grouped);
-                }
-            } catch {
-                // Counts stay at zero; the per-student panel says so too.
             }
         })();
         return () => {
             mounted = false;
         };
-    }, []);
+    }, [userId]);
 
     const reloadRoster = async () => setStudents(await listRoster());
     const reloadAssignments = async () => setAssignments(await listAssignmentsForStudents());

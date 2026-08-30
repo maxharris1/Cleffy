@@ -5,6 +5,7 @@ import { Link, useNavigate } from 'react-router';
 import { RequireStudent } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { fetchMyAssignments, fetchMyRosterProfile, type AssignedScore } from '@/features/student/studentApi';
+import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
 import { EmptyState } from '@/ui/EmptyState';
 import { LoadingText } from '@/ui/Loading';
@@ -35,13 +36,26 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     useEffect(() => {
         let mounted = true;
         void (async () => {
+            const cached = await getDb().assignmentsCache.get(session.user.id).catch(() => undefined);
+            if (mounted && cached && cached.scores.length > 0) {
+                setScores(cached.scores);
+                setLoading(false);
+            }
+
             const [assigned, profile] = await Promise.allSettled([fetchMyAssignments(), fetchMyRosterProfile()]);
             if (!mounted) {
                 return;
             }
             if (assigned.status === 'fulfilled') {
                 setScores(assigned.value);
-            } else {
+                void getDb()
+                    .assignmentsCache.put({
+                        userId: session.user.id,
+                        scores: assigned.value,
+                        cachedAt: new Date().toISOString(),
+                    })
+                    .catch(() => undefined);
+            } else if (!cached?.scores.length) {
                 // Leave `scores` null so the empty state cannot claim nothing is
                 // assigned when the truth is that nothing loaded.
                 setNotice('Could not load your pieces. Check the internet connection and try again.');
@@ -55,7 +69,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
         return () => {
             mounted = false;
         };
-    }, []);
+    }, [session.user.id]);
 
     const handleSignOut = async () => {
         await signOut();
@@ -89,7 +103,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     </p>
                 ) : null}
 
-                {loading ? <LoadingText className="mt-6">Finding your pieces…</LoadingText> : null}
+                {loading && scores === null ? <LoadingText className="mt-6">Finding your pieces…</LoadingText> : null}
 
                 {scores && scores.length > 0 ? (
                     <ul className="mt-6 space-y-3">

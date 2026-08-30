@@ -543,6 +543,18 @@ export type Database = {
                 Args: { p_user?: string };
                 Returns: Entitlements;
             };
+            /** One round-trip for library page + shell entitlements. */
+            library_bootstrap: {
+                Args: Record<string, never>;
+                Returns: {
+                    documents: DocumentRow[];
+                    has_more: boolean;
+                    favorite_ids: string[];
+                    tags: LibraryTagRow[];
+                    document_tags: Array<{ document_id: string; tag_id: string }>;
+                    entitlements: Entitlements;
+                };
+            };
             tier_limits: {
                 // Answers for 'student' too, which is why this is EffectiveTier.
                 Args: { p_tier: EffectiveTier };

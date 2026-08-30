@@ -93,7 +93,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
     const [uploadLimit, setUploadLimit] = useState<LimitReachedError | null>(null);
     const [pricingOpen, setPricingOpen] = useState(false);
-    const { entitlements } = useEntitlements(userId);
+    const { entitlements } = useEntitlements(userId, { viaLibraryBootstrap: true });
     const tier = entitlements?.tier ?? 'free';
     // Hidden until the plan is known rather than shown and withdrawn: entitlements
     // come back from the Dexie cache on any repeat visit, so the wait is a frame,

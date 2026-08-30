@@ -10,6 +10,7 @@ import {
     renameDocument,
     setDocumentFavorite,
 } from '@/features/library/documentsService';
+import { fetchLibraryBootstrap, readCachedLibraryList } from '@/features/library/libraryBootstrap';
 import {
     displayTitleOf,
     filterByTag,
@@ -96,54 +97,81 @@ export const LibraryPage = () => {
 
     useEffect(() => {
         let cancelled = false;
-        listDocuments()
-            .then(({ documents: docs, hasMore: more }) => {
-                if (!cancelled) {
-                    setDocuments(docs);
-                    setHasMore(more);
-                    setError(null);
+        void (async () => {
+            // Instant paint from the last bootstrap (or opened PDFs) before the network.
+            const cachedList = await readCachedLibraryList(userId).catch(() => null);
+            if (!cancelled && cachedList && cachedList.documents.length > 0) {
+                setDocuments(cachedList.documents);
+                setHasMore(cachedList.hasMore);
+                setFavorites(cachedList.favoriteIds);
+                setTags(cachedList.tags);
+                setAssignments(cachedList.documentTags);
+            } else {
+                const opened = await listCachedDocuments().catch(() => []);
+                if (!cancelled && opened.length > 0) {
+                    setDocuments((prev) => prev ?? opened);
+                    setHasMore(false);
                 }
-            })
-            .catch(async (err: unknown) => {
-                const cached = await listCachedDocuments().catch(() => []);
+            }
+
+            try {
+                const boot = await fetchLibraryBootstrap(userId);
                 if (cancelled) {
                     return;
                 }
-                setHasMore(false);
-                if (cached.length > 0) {
-                    setDocuments(cached);
-                    setError('Offline — showing scores cached on this device.');
-                } else {
-                    setDocuments([]);
-                    setError(err instanceof Error ? err.message : 'Could not load your scores.');
-                }
-            });
-        // Favorites and tags are best-effort — an offline library still renders without them.
-        listFavoriteDocumentIds()
-            .then((ids) => {
-                if (!cancelled) {
+                setDocuments(boot.documents);
+                setHasMore(boot.hasMore);
+                setFavorites(boot.favoriteIds);
+                setTags(boot.tags);
+                setAssignments(boot.documentTags);
+                setError(null);
+            } catch (err: unknown) {
+                // Fallback: four parallel GETs if the bootstrap RPC is unavailable.
+                try {
+                    const [{ documents: docs, hasMore: more }, ids, tagRows, tagMap] = await Promise.all([
+                        listDocuments(),
+                        listFavoriteDocumentIds().catch(() => new Set<string>()),
+                        listLibraryTags().catch(() => [] as LibraryTagRow[]),
+                        listDocumentTagMap().catch(() => new Map<string, string[]>()),
+                    ]);
+                    if (cancelled) {
+                        return;
+                    }
+                    setDocuments(docs);
+                    setHasMore(more);
                     setFavorites(ids);
+                    setTags(tagRows);
+                    setAssignments(tagMap);
+                    setError(null);
+                } catch {
+                    if (cancelled) {
+                        return;
+                    }
+                    // Prefer the bootstrap Dexie snapshot already painted above —
+                    // listCachedDocuments() is only opened PDFs and would shrink the grid.
+                    if (cachedList && cachedList.documents.length > 0) {
+                        setError('Offline — showing scores cached on this device.');
+                        return;
+                    }
+                    const opened = await listCachedDocuments().catch(() => []);
+                    if (cancelled) {
+                        return;
+                    }
+                    setHasMore(false);
+                    if (opened.length > 0) {
+                        setDocuments(opened);
+                        setError('Offline — showing scores cached on this device.');
+                    } else {
+                        setDocuments((prev) => prev ?? []);
+                        setError(err instanceof Error ? err.message : 'Could not load your scores.');
+                    }
                 }
-            })
-            .catch(() => undefined);
-        listLibraryTags()
-            .then((rows) => {
-                if (!cancelled) {
-                    setTags(rows);
-                }
-            })
-            .catch(() => undefined);
-        listDocumentTagMap()
-            .then((map) => {
-                if (!cancelled) {
-                    setAssignments(map);
-                }
-            })
-            .catch(() => undefined);
+            }
+        })();
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [userId]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
 

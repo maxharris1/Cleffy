@@ -19,6 +19,8 @@ const createLibraryTag = vi.fn();
 const renameLibraryTag = vi.fn();
 const deleteLibraryTag = vi.fn();
 const setDocumentTag = vi.fn();
+const fetchLibraryBootstrap = vi.fn();
+const readCachedLibraryList = vi.fn();
 
 vi.mock('@/features/library/documentsService', () => ({
     listDocuments: (...args: unknown[]) => listDocuments(...args),
@@ -27,6 +29,11 @@ vi.mock('@/features/library/documentsService', () => ({
     setDocumentFavorite: (...args: unknown[]) => setDocumentFavorite(...args),
     renameDocument: (...args: unknown[]) => renameDocument(...args),
     deleteDocument: (...args: unknown[]) => deleteDocument(...args),
+}));
+
+vi.mock('@/features/library/libraryBootstrap', () => ({
+    fetchLibraryBootstrap: (...args: unknown[]) => fetchLibraryBootstrap(...args),
+    readCachedLibraryList: (...args: unknown[]) => readCachedLibraryList(...args),
 }));
 
 vi.mock('@/features/library/tagsService', () => ({
@@ -60,6 +67,42 @@ const tag = (id: string, name: string): LibraryTagRow => ({
     name,
     created_at: '2026-08-01T00:00:00Z',
 });
+
+const FREE_ENTITLEMENTS = {
+    user_id: 'teacher-1',
+    tier: 'free' as const,
+    status: null,
+    source: 'none' as const,
+    current_period_end: null,
+    limits: {
+        cloud_scores: 3,
+        omr_runs: 3,
+        vision_reads: 5,
+        smart_imports: 2,
+        pdf_exports: 1,
+        students: 0,
+    },
+};
+
+const mockBootstrap = (overrides: {
+    documents?: DocumentRow[];
+    hasMore?: boolean;
+    favoriteIds?: Set<string>;
+    tags?: LibraryTagRow[];
+    documentTags?: Map<string, string[]>;
+} = {}) => {
+    fetchLibraryBootstrap.mockResolvedValue({
+        documents: overrides.documents ?? [
+            doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+            doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+        ],
+        hasMore: overrides.hasMore ?? false,
+        favoriteIds: overrides.favoriteIds ?? new Set(),
+        tags: overrides.tags ?? [],
+        documentTags: overrides.documentTags ?? new Map(),
+        entitlements: FREE_ENTITLEMENTS,
+    });
+};
 
 const outletContext: LibraryOutletContext = {
     userId: 'teacher-1',
@@ -128,6 +171,9 @@ beforeEach(() => {
         ],
         hasMore: false,
     });
+    listCachedDocuments.mockResolvedValue([]);
+    readCachedLibraryList.mockResolvedValue(null);
+    mockBootstrap();
     listFavoriteDocumentIds.mockResolvedValue(new Set());
     setDocumentFavorite.mockResolvedValue(undefined);
     listLibraryTags.mockResolvedValue([]);
@@ -151,23 +197,21 @@ describe('LibraryPage', () => {
     });
 
     it('says “1 page”, not “1 pages”, for a single-page score', async () => {
-        listDocuments.mockResolvedValue({
-            documents: [{ ...doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), page_count: 1 }],
-            hasMore: false,
-        });
+        const docs = [{ ...doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), page_count: 1 }];
+        listDocuments.mockResolvedValue({ documents: docs, hasMore: false });
+        mockBootstrap({ documents: docs });
         renderLibrary();
         await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
         expect(screen.getByText(/1 page ·/)).toBeInTheDocument();
     });
 
     it('marks archived scores, which stay open but read-only', async () => {
-        listDocuments.mockResolvedValue({
-            documents: [
-                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
-                { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), archived_at: '2026-08-01T00:00:00Z' },
-            ],
-            hasMore: false,
-        });
+        const docs = [
+            doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+            { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), archived_at: '2026-08-01T00:00:00Z' },
+        ];
+        listDocuments.mockResolvedValue({ documents: docs, hasMore: false });
+        mockBootstrap({ documents: docs });
         renderLibrary();
 
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
@@ -387,8 +431,10 @@ describe('LibraryPage', () => {
 
     it('assigns an existing tag from the row dialog and filters via the inline label', async () => {
         const user = userEvent.setup();
-        listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
+        const tags = [tag('t-lesson', 'Lesson')];
+        listLibraryTags.mockResolvedValue(tags);
         listDocumentTagMap.mockResolvedValue(new Map());
+        mockBootstrap({ tags, documentTags: new Map() });
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(await screen.findByRole('button', { name: 'Lesson', pressed: false })).toBeInTheDocument();
@@ -410,8 +456,11 @@ describe('LibraryPage', () => {
 
     it('groups by tag when toggled', async () => {
         const user = userEvent.setup();
-        listLibraryTags.mockResolvedValue([tag('t-concert', 'Concert')]);
-        listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-concert']]]));
+        const tags = [tag('t-concert', 'Concert')];
+        const documentTags = new Map([['d1', ['t-concert']]]);
+        listLibraryTags.mockResolvedValue(tags);
+        listDocumentTagMap.mockResolvedValue(documentTags);
+        mockBootstrap({ tags, documentTags });
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(await screen.findByRole('button', { name: 'Group by tag' }));
@@ -464,8 +513,11 @@ describe('grid view', () => {
 
     it('offers the add-a-score tile only on an unfiltered, ungrouped shelf', async () => {
         const user = userEvent.setup();
-        listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
-        listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-lesson']]]));
+        const tags = [tag('t-lesson', 'Lesson')];
+        const documentTags = new Map([['d1', ['t-lesson']]]);
+        listLibraryTags.mockResolvedValue(tags);
+        listDocumentTagMap.mockResolvedValue(documentTags);
+        mockBootstrap({ tags, documentTags });
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(screen.getByText('Add a score')).toBeInTheDocument();
