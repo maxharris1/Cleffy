@@ -1,3 +1,18 @@
+import {
+    buildNoteShapes,
+    buildPedalEnds,
+    buildReverbImpulse,
+    buildSoftClipCurve,
+    clampVelocity,
+    filterCutoffHz,
+    noteJitter,
+    panForMidi,
+    PEDAL_RELEASE_TAU_S,
+    releaseTauFor,
+    REVERB_WET,
+    velocityToGain,
+} from '@/features/playback/expression';
+import type { NoteShape } from '@/features/playback/expression';
 import { loadPianoBuffers, nearestAnchor, playbackRateFor } from '@/features/playback/pianoSampler';
 import type { PianoBuffers } from '@/features/playback/pianoSampler';
 import {
@@ -13,7 +28,7 @@ import type { BeatTick, TempoMap } from '@/features/playback/scoreTime';
 import { getSharedAudioContext } from '@/features/playback/sharedAudioContext';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
-import type { ScoreData } from '@/types/scoreData';
+import type { ScoreData, ScoreNote } from '@/types/scoreData';
 
 /**
  * Web Audio playback of a ScoreData: classic lookahead scheduler (25 ms tick,
@@ -22,23 +37,48 @@ import type { ScoreData } from '@/types/scoreData';
  * mechanism that makes BPM changes, seeks, count-in, and seamless A-B loop
  * wraps all the same operation. DOM/React-free; the caller owns AudioContext
  * creation timing (iOS requires it inside the user's tap).
+ *
+ * Everything that decides how a note should *sound* lives in expression.ts;
+ * this file decides only when notes happen and where their audio is routed.
  */
 
 const SCHEDULER_INTERVAL_MS = 25;
 const HORIZON_S = 0.12;
 const START_DELAY_S = 0.08;
-const RELEASE_TAU_S = 0.06;
-const RELEASE_STOP_S = 0.35;
-const MAX_ACTIVE_SOURCES = 64;
+/**
+ * Voice ceiling. Held higher than the notated polyphony of any piano writing
+ * because the pedal keeps notes alive long past their written ends; the
+ * same-pitch stealing below is what stops that from becoming unbounded.
+ */
+const MAX_ACTIVE_SOURCES = 96;
+/** Damping time when a key is struck again — fast, but not a click. */
+const STEAL_TAU_S = 0.01;
+
+const MASTER_GAIN = 0.8;
+const CLICK_BUS_GAIN = 0.5;
+/** Butterworth Q — a lowpass with no resonant bump at the corner. */
+const VOICE_FILTER_Q = 0.7071;
+/** Shortest envelope a staccato may get, however brief the notated value. */
+const MIN_HOLD_S = 0.05;
+/** Release tails are cut here: five time constants is −43 dB, inaudible. */
+const RELEASE_STOP_TAUS = 5;
+const RELEASE_STOP_MIN_S = 0.3;
 
 /** Structural subset of AudioContext used by the engine — mockable in tests. */
 export interface AudioContextLike {
     readonly currentTime: number;
     readonly state: string;
     readonly destination: unknown;
+    readonly sampleRate: number;
     createGain(): GainNodeLike;
     createBufferSource(): AudioBufferSourceLike;
     createOscillator(): OscillatorLike;
+    createBiquadFilter(): BiquadFilterLike;
+    createStereoPanner(): StereoPannerLike;
+    createDynamicsCompressor(): DynamicsCompressorLike;
+    createWaveShaper(): WaveShaperLike;
+    createConvolver(): ConvolverLike;
+    createBuffer(numberOfChannels: number, length: number, sampleRate: number): AudioBuffer;
     decodeAudioData(data: ArrayBuffer): Promise<AudioBuffer>;
     resume(): Promise<void>;
     close(): Promise<void>;
@@ -49,18 +89,48 @@ export interface AudioParamLike {
     value: number;
     setValueAtTime(value: number, time: number): unknown;
     setTargetAtTime(target: number, time: number, timeConstant: number): unknown;
+    cancelScheduledValues(time: number): unknown;
 }
 
-export interface GainNodeLike {
-    gain: AudioParamLike;
+export interface AudioNodeLike {
     connect(target: unknown): unknown;
     disconnect(): void;
 }
 
-export interface AudioBufferSourceLike {
+export interface GainNodeLike extends AudioNodeLike {
+    gain: AudioParamLike;
+}
+
+export interface BiquadFilterLike extends AudioNodeLike {
+    type: string;
+    frequency: AudioParamLike;
+    Q: AudioParamLike;
+}
+
+export interface StereoPannerLike extends AudioNodeLike {
+    pan: AudioParamLike;
+}
+
+export interface DynamicsCompressorLike extends AudioNodeLike {
+    threshold: AudioParamLike;
+    knee: AudioParamLike;
+    ratio: AudioParamLike;
+    attack: AudioParamLike;
+    release: AudioParamLike;
+}
+
+export interface ConvolverLike extends AudioNodeLike {
+    buffer: AudioBuffer | null;
+}
+
+export interface WaveShaperLike extends AudioNodeLike {
+    curve: Float32Array | null;
+    oversample: string;
+}
+
+export interface AudioBufferSourceLike extends AudioNodeLike {
     buffer: AudioBuffer | null;
     playbackRate: AudioParamLike;
-    connect(target: unknown): unknown;
     start(when?: number, offset?: number): void;
     stop(when?: number): void;
     onended: (() => void) | null;
@@ -72,6 +142,138 @@ export interface OscillatorLike {
     start(when?: number): void;
     stop(when?: number): void;
 }
+
+/**
+ * Ceiling shared by score playback and the one-shot audition. This is a safety
+ * limiter, not a colour: velocityToGain deliberately exceeds unity at ff, and
+ * a dense chord stacks dozens of those, so something has to hold the top —
+ * and holding it here costs far less than trimming the dynamic range back to
+ * whatever always fits.
+ */
+export const applyLimiterSettings = (compressor: DynamicsCompressorLike): void => {
+    compressor.threshold.value = -12;
+    compressor.knee.value = 20;
+    compressor.ratio.value = 6;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.25;
+};
+
+/**
+ * The limiter alone does not hold the ceiling: its 3 ms attack passes a
+ * piano's transient before any gain reduction lands — an OfflineAudioContext
+ * render of a ten-voice ff chord peaked at 1.39× full scale through it. The
+ * soft clip after it is memoryless, so it cannot be outrun; below its knee it
+ * is a straight wire (see buildSoftClipCurve).
+ */
+export const applySoftClip = (shaper: WaveShaperLike): void => {
+    shaper.curve = buildSoftClipCurve();
+    shaper.oversample = '2x';
+};
+
+export interface PianoVoiceRequest {
+    ctx: AudioContextLike;
+    buffers: PianoBuffers;
+    midi: number;
+    /** Struck velocity, before clamping — expression may have pushed it out of range. */
+    velocity: number;
+    /** Context time the attack should be *heard* at. */
+    startAt: number;
+    /** Seconds the key stays down; the release tail rings on past it. */
+    holdSec: number;
+    /** Where the voice lands: a hand bus, or the audition chain's own input. */
+    destination: unknown;
+    /**
+     * Overrides the pitch-and-velocity release curve. The sustain pedal is the
+     * caller that needs it: a note it is still holding decays as a free string,
+     * not as one a damper has landed on.
+     */
+    releaseTauSec?: number;
+}
+
+export interface ScheduledVoice {
+    source: AudioBufferSourceLike;
+    /** The voice's own level — cancel and ramp this to cut a note short. */
+    gain: GainNodeLike;
+    /** Pitch, so a re-strike can find the voice it is silencing. */
+    midi: number;
+    /** Context time the source stops; nothing of this voice sounds past it. */
+    stopsAt: number;
+    /** Release the voice's nodes once it has ended. */
+    dispose: () => void;
+}
+
+/**
+ * The one place a sampled piano note is built: source → lowpass → gain →
+ * panner → destination. Score playback and the fingering audition both go
+ * through here, so a chord auditioned in the margin is the same instrument,
+ * at the same loudness, as the same chord in the score.
+ *
+ * Returns null when no anchor sample covers the pitch. The caller owns the
+ * lifetime: wire `dispose` into `source.onended`.
+ */
+export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice | null => {
+    const { ctx, midi, destination } = request;
+    const anchor = nearestAnchor(midi);
+    const sample = request.buffers.get(anchor);
+    if (!sample) {
+        return null;
+    }
+    const velocity = clampVelocity(request.velocity);
+    // Start early by the sample's own rise time so the note is *heard* on the
+    // beat rather than just beginning there — otherwise every attack trails the
+    // click, which reads as the click rushing (pianoSampler: detectAttackLagSec).
+    // Never schedule into the past.
+    const at = Math.max(ctx.currentTime, request.startAt - sample.attackLagSec);
+
+    const source = ctx.createBufferSource();
+    source.buffer = sample.buffer;
+    source.playbackRate.value = playbackRateFor(midi, anchor);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = filterCutoffHz(velocity);
+    filter.Q.value = VOICE_FILTER_Q;
+    const gain = ctx.createGain();
+    const gainValue = velocityToGain(velocity);
+    gain.gain.value = gainValue;
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = panForMidi(midi);
+
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(panner);
+    panner.connect(destination);
+
+    // The whole envelope shifts with the attack, so note lengths stay exact.
+    const endAt = at + Math.max(MIN_HOLD_S, request.holdSec);
+    const tau = request.releaseTauSec ?? releaseTauFor(midi, velocity);
+    gain.gain.setValueAtTime(gainValue, endAt);
+    gain.gain.setTargetAtTime(0, endAt, tau);
+    // Start from the measured onset so no codec padding is heard —
+    // decoded mp3s carry ~50 ms of it at the front.
+    source.start(at, sample.onsetSec);
+    const stopsAt = endAt + Math.max(RELEASE_STOP_MIN_S, RELEASE_STOP_TAUS * tau);
+    source.stop(stopsAt);
+
+    const dispose = (): void => {
+        for (const node of [source, filter, gain, panner]) {
+            try {
+                node.disconnect();
+            } catch {
+                // already disconnected
+            }
+        }
+    };
+    return { source, gain, midi, stopsAt, dispose };
+};
+
+/**
+ * The release a note gets, given where it really stops. Ringing past its
+ * notated end can only mean the pedal is holding it, so it decays as a free
+ * string; anything else is a damper landing, which {@link releaseTauFor}
+ * already describes better than a single constant could.
+ */
+const releaseTauOverrideFor = (note: ScoreNote, endTick: number): number | undefined =>
+    endTick > note.t + note.d ? PEDAL_RELEASE_TAU_S : undefined;
 
 export interface LoopRegion {
     startTick: number;
@@ -97,11 +299,6 @@ interface Anchor {
     baseSeconds: number;
 }
 
-interface ActiveNote {
-    source: AudioBufferSourceLike;
-    gain: GainNodeLike;
-}
-
 export class PlaybackEngine {
     private readonly score: ScoreData;
     private readonly onStatus: (status: PlaybackStatus) => void;
@@ -112,9 +309,18 @@ export class PlaybackEngine {
 
     private ctx: AudioContextLike | null = null;
     private buffers: PianoBuffers | null = null;
+    private limiter: DynamicsCompressorLike | null = null;
+    private softClip: WaveShaperLike | null = null;
     private master: GainNodeLike | null = null;
     private handBuses: [GainNodeLike, GainNodeLike] | null = null;
+    private reverbSend: GainNodeLike | null = null;
+    private convolver: ConvolverLike | null = null;
     private clickBus: GainNodeLike | null = null;
+
+    /** Chord/melody/downbeat shaping, index-aligned with `score.notes`. */
+    private readonly shapes: readonly NoteShape[];
+    /** Pedal-lengthened end ticks, index-aligned with `score.notes`. */
+    private readonly pedalEnds: readonly number[];
 
     private status: PlaybackStatus = 'idle';
     /** The score's tempo map, scaled to the practice tempo. */
@@ -130,13 +336,19 @@ export class PlaybackEngine {
     private volumes: [number, number] = [1, 1];
     private metronome = false;
     private timer: ReturnType<typeof setInterval> | null = null;
-    private readonly active = new Set<ActiveNote>();
+    private readonly active = new Set<ScheduledVoice>();
     private warnedSourceCap = false;
     private destroyed = false;
 
     constructor(options: PlaybackEngineOptions) {
         this.score = options.score;
         this.bpmValue = options.bpm;
+        // One pass over the score, up front: the scheduler re-walks notes from
+        // arbitrary positions and must never re-decide their shaping — and the
+        // pedal, being state integrated from edges, cannot be resolved for one
+        // note in isolation at the moment that note is scheduled.
+        this.shapes = buildNoteShapes(options.score);
+        this.pedalEnds = buildPedalEnds(options.score.notes, options.score.pedals);
         this.map = buildTempoMap(options.score, this.scaleFor(options.bpm), options.bpm);
         this.onStatus = options.onStatus;
         this.onPositionJump = options.onPositionJump;
@@ -155,7 +367,13 @@ export class PlaybackEngine {
 
     /** Current musical position in ticks (drives the playhead each frame). */
     getPositionTicks(): number {
-        if (!this.ctx || this.status === 'idle' || this.status === 'paused' || this.status === 'ended' || this.status === 'loading') {
+        if (
+            !this.ctx ||
+            this.status === 'idle' ||
+            this.status === 'paused' ||
+            this.status === 'ended' ||
+            this.status === 'loading'
+        ) {
             return this.pausedTick;
         }
         this.promotePendingAnchor(this.ctx.currentTime);
@@ -349,40 +567,78 @@ export class PlaybackEngine {
     }
 
     private teardownGraph(): void {
-        for (const bus of this.handBuses ?? []) {
+        const nodes: Array<AudioNodeLike | null> = [
+            ...(this.handBuses ?? []),
+            this.clickBus,
+            this.reverbSend,
+            this.convolver,
+            this.master,
+            this.limiter,
+            this.softClip,
+        ];
+        for (const node of nodes) {
             try {
-                bus.disconnect();
+                node?.disconnect();
             } catch {
                 // already disconnected
             }
         }
-        try {
-            this.clickBus?.disconnect();
-        } catch {
-            // already disconnected
-        }
-        try {
-            this.master?.disconnect();
-        } catch {
-            // already disconnected
-        }
         this.handBuses = null;
         this.clickBus = null;
+        this.reverbSend = null;
+        this.convolver = null;
         this.master = null;
+        this.limiter = null;
+        this.softClip = null;
     }
 
+    /**
+     * Signal path: voices → hand bus → master → limiter → soft clip →
+     * speakers, with a parallel send off each hand bus into one shared
+     * reverb. The reverb is a send rather than an insert so muting a hand
+     * takes its reflections with it, and the metronome deliberately misses
+     * the send — a click smeared by a room stops being the sharp reference
+     * the player is following.
+     */
     private buildGraph(ctx: AudioContextLike): void {
-        this.master = ctx.createGain();
-        this.master.gain.value = 0.9;
-        this.master.connect(ctx.destination);
+        const softClip = ctx.createWaveShaper();
+        applySoftClip(softClip);
+        softClip.connect(ctx.destination);
+        this.softClip = softClip;
+
+        const limiter = ctx.createDynamicsCompressor();
+        applyLimiterSettings(limiter);
+        limiter.connect(softClip);
+        this.limiter = limiter;
+
+        const master = ctx.createGain();
+        master.gain.value = MASTER_GAIN;
+        master.connect(limiter);
+        this.master = master;
+
         const rh = ctx.createGain();
         const lh = ctx.createGain();
-        rh.connect(this.master);
-        lh.connect(this.master);
+        rh.connect(master);
+        lh.connect(master);
         this.handBuses = [rh, lh];
+
+        // One convolver for the whole engine: the send level sets the depth, and
+        // a second instance would only spend CPU rendering the same room twice.
+        const send = ctx.createGain();
+        send.gain.value = REVERB_WET;
+        const convolver = ctx.createConvolver();
+        convolver.buffer = buildReverbImpulse(ctx);
+        send.connect(convolver);
+        convolver.connect(master);
+        rh.connect(send);
+        lh.connect(send);
+        this.reverbSend = send;
+        this.convolver = convolver;
+
         this.clickBus = ctx.createGain();
-        this.clickBus.gain.value = 0.5;
-        this.clickBus.connect(this.master);
+        this.clickBus.gain.value = CLICK_BUS_GAIN;
+        this.clickBus.connect(master);
+
         this.applyBusGain(HAND_RH);
         this.applyBusGain(HAND_LH);
     }
@@ -493,6 +749,37 @@ export class PlaybackEngine {
         }
     }
 
+    /**
+     * The tick a note actually stops sounding at: its pedal-aware end, clamped
+     * into the region being played. Looping is why the clamp lives in exactly
+     * one place — a pedal held past the B point must still be cut there, or the
+     * wrap would carry the previous pass's harmony over the new one.
+     */
+    private effectiveEndTick(index: number, note: ScoreNote, regionEnd: number): number {
+        return Math.min(this.pedalEnds[index] ?? note.t + note.d, regionEnd);
+    }
+
+    /**
+     * How hard a note is struck: its own dynamic, plus the shaping decided at
+     * construction and its deterministic jitter. Deliberately separate from
+     * {@link attackOffsetFor} — a note resumed mid-ring has to match the
+     * loudness its attack had, but must not be nudged in time a second time.
+     */
+    private velocityFor(index: number, note: ScoreNote): number {
+        const shape = this.shapes[index];
+        return (
+            (note.v ?? DEFAULT_VELOCITY) +
+            noteJitter(note.t, note.p, note.h).dv +
+            (shape?.lift ?? 0) +
+            (shape?.accent ?? 0)
+        );
+    }
+
+    /** Seconds a note's attack is pushed late: its chord roll plus its jitter. */
+    private attackOffsetFor(index: number, note: ScoreNote): number {
+        return (this.shapes[index]?.roll ?? 0) + noteJitter(note.t, note.p, note.h).dt;
+    }
+
     private scheduleNotesUpTo(regionEnd: number, horizon: number): void {
         const notes = this.score.notes;
         while (this.nextNoteIndex < notes.length) {
@@ -504,11 +791,21 @@ export class PlaybackEngine {
             if (startAt >= horizon) {
                 break;
             }
+            const index = this.nextNoteIndex;
             this.nextNoteIndex += 1;
             // Durations convert through the map, so a note sounding across a
-            // fermata rings through the hold instead of being cut at it.
-            const endTick = Math.min(note.t + note.d, regionEnd);
-            this.scheduleNote(note.p, note.h, startAt, this.timeOfTick(endTick) - startAt, note.v ?? DEFAULT_VELOCITY);
+            // fermata rings through the hold instead of being cut at it. The
+            // hold is measured from the unshifted onset, so a rolled chord's
+            // notes all ring for their written length.
+            const endTick = this.effectiveEndTick(index, note, regionEnd);
+            this.scheduleNote(
+                note.p,
+                note.h,
+                startAt + this.attackOffsetFor(index, note),
+                this.timeOfTick(endTick) - startAt,
+                this.velocityFor(index, note),
+                releaseTauOverrideFor(note, endTick),
+            );
         }
     }
 
@@ -522,18 +819,30 @@ export class PlaybackEngine {
         const regionStart = this.loop ? this.loop.startTick : 0;
         const regionEnd = this.loop ? this.loop.endTick : this.score.totalTicks;
         const startAt = this.timeOfTick(tick);
-        for (const note of this.score.notes) {
-            if (note.t >= tick) {
+        const notes = this.score.notes;
+        for (let index = 0; index < notes.length; index++) {
+            const note = notes[index];
+            if (!note || note.t >= tick) {
                 break;
             }
             if (note.t < regionStart) {
                 continue;
             }
-            const noteEnd = Math.min(note.t + note.d, regionEnd);
+            const noteEnd = this.effectiveEndTick(index, note, regionEnd);
             if (noteEnd <= tick) {
                 continue;
             }
-            this.scheduleNote(note.p, note.h, startAt, this.timeOfTick(noteEnd) - startAt, note.v ?? DEFAULT_VELOCITY);
+            // No attack offset here: the roll and the timing jitter belong to an
+            // onset that already happened, and this tail starts wherever the
+            // transport landed.
+            this.scheduleNote(
+                note.p,
+                note.h,
+                startAt,
+                this.timeOfTick(noteEnd) - startAt,
+                this.velocityFor(index, note),
+                releaseTauOverrideFor(note, noteEnd),
+            );
         }
     }
 
@@ -578,13 +887,45 @@ export class PlaybackEngine {
         return null;
     }
 
-    private scheduleNote(midi: number, hand: 0 | 1, startAt: number, durationSec: number, velocity: number): void {
+    /**
+     * A piano has one set of strings per key: striking a note that is still
+     * ringing stops that ring, it does not lay a second copy over it. Honouring
+     * that is also the only thing keeping a pedalled passage bounded — under a
+     * held pedal a repeated note would otherwise stack a voice per strike until
+     * the cap cut the music off — so stealing runs before the cap is consulted.
+     */
+    private stealSamePitch(midi: number, startAt: number): void {
+        for (const voice of this.active) {
+            if (voice.midi !== midi || voice.stopsAt <= startAt) {
+                continue;
+            }
+            try {
+                voice.gain.gain.cancelScheduledValues(startAt);
+                voice.gain.gain.setTargetAtTime(0, startAt, STEAL_TAU_S);
+                voice.source.stop(startAt + STEAL_TAU_S * RELEASE_STOP_TAUS);
+            } catch {
+                // never started / already stopped
+            }
+            // Its nodes go in onended; the slot is free from here.
+            this.active.delete(voice);
+        }
+    }
+
+    private scheduleNote(
+        midi: number,
+        hand: 0 | 1,
+        startAt: number,
+        durationSec: number,
+        velocity: number,
+        releaseTauSec?: number,
+    ): void {
         const ctx = this.ctx;
         const buffers = this.buffers;
         const bus = this.handBuses?.[hand];
         if (!ctx || !buffers || !bus) {
             return;
         }
+        this.stealSamePitch(midi, startAt);
         if (this.active.size >= MAX_ACTIVE_SOURCES) {
             if (!this.warnedSourceCap) {
                 this.warnedSourceCap = true;
@@ -592,41 +933,23 @@ export class PlaybackEngine {
             }
             return;
         }
-        const anchor = nearestAnchor(midi);
-        const voice = buffers.get(anchor);
-        if (!voice) {
+        const entry = schedulePianoVoice({
+            ctx,
+            buffers,
+            midi,
+            velocity,
+            startAt,
+            holdSec: durationSec,
+            destination: bus,
+            releaseTauSec,
+        });
+        if (!entry) {
             return;
         }
-        // Start early by the sample's own rise time so the note is *heard* on
-        // the beat rather than just beginning there — otherwise every attack
-        // trails the click, which reads as the click rushing (pianoSampler:
-        // detectAttackLagSec). Never schedule into the past.
-        const at = Math.max(ctx.currentTime, startAt - voice.attackLagSec);
-        const source = ctx.createBufferSource();
-        source.buffer = voice.buffer;
-        source.playbackRate.value = playbackRateFor(midi, anchor);
-        const gain = ctx.createGain();
-        // Perceptual curve: linear gain flattens dynamics — squaring-ish the
-        // velocity makes pp genuinely whisper and ff genuinely ring.
-        const gainValue = Math.pow(velocity, 1.6);
-        gain.gain.value = gainValue;
-        source.connect(gain);
-        gain.connect(bus);
-
-        // The whole envelope shifts with the attack, so note lengths stay exact.
-        const endAt = at + Math.max(0.05, durationSec);
-        gain.gain.setValueAtTime(gainValue, endAt);
-        gain.gain.setTargetAtTime(0, endAt, RELEASE_TAU_S);
-        // Start from the measured onset so no codec padding is heard —
-        // decoded mp3s carry ~50 ms of it at the front.
-        source.start(at, voice.onsetSec);
-        source.stop(endAt + RELEASE_STOP_S);
-
-        const entry: ActiveNote = { source, gain };
         this.active.add(entry);
-        source.onended = () => {
+        entry.source.onended = () => {
             this.active.delete(entry);
-            gain.disconnect();
+            entry.dispose();
         };
     }
 

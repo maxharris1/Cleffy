@@ -1,0 +1,350 @@
+import { beatsForMeasure } from '@/features/playback/scoreTime';
+import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
+import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
+
+/**
+ * The pure half of expressive playback: every curve that turns a velocity, a
+ * pitch, or a note's place in a chord into something the audio graph can apply.
+ * DOM-free and side-effect free (scoreTime.ts discipline), so the engine and the
+ * one-shot audition share one definition of "how loud is mezzo-forte" and so
+ * each curve can be pinned to exact numbers in tests without an AudioContext.
+ */
+
+/** Span from the quietest playable velocity to the loudest, in decibels. */
+export const DYN_RANGE_DB = 36;
+/** Linear gain a note carrying the score's default velocity plays at. */
+export const DYN_REF_GAIN = 0.5;
+
+/** Fraction of each hand bus fed to the reverb; the dry path is untouched. */
+export const REVERB_WET = 0.22;
+/** T60 of the synthesized impulse: a small hall, not a cathedral. */
+export const REVERB_SECONDS = 1.8;
+/** Silence before the tail begins — the ear reads this as room size. */
+export const REVERB_PREDELAY_MS = 15;
+
+/**
+ * Humanization amounts. The timing figure is deliberately far below the 25 ms
+ * attack-lag ceiling the sampler corrects for: this is a practice app, and a
+ * player following the metronome must never be able to hear the engine drift.
+ */
+export const JITTER_TIME_S = 0.005;
+export const JITTER_VEL = 0.03;
+
+/** Per-note delay inside a chord, lowest sounding note first. */
+export const CHORD_ROLL_S = 0.004;
+/** Ceiling on a roll — a ten-note chord must still land as one event. */
+export const CHORD_ROLL_MAX_S = 0.012;
+/** Velocity added to the top note of a right-hand chord, so the tune sings. */
+export const MELODY_LIFT = 0.06;
+/** Velocity added on a full bar's downbeat. */
+export const DOWNBEAT_ACCENT = 0.025;
+
+/** Floor for a humanized velocity: below this a note is inaudible, not quiet. */
+export const MIN_VELOCITY = 0.05;
+
+const clamp = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value));
+
+/** Keep a velocity that jitter and accents have moved inside the playable range. */
+export const clampVelocity = (velocity: number): number => clamp(velocity, MIN_VELOCITY, 1);
+
+/**
+ * Velocity → linear gain across a fixed dB range, pinned so a note carrying the
+ * score's default velocity plays at DYN_REF_GAIN.
+ *
+ * Working in decibels rather than in a power curve is what makes dynamics read
+ * as dynamics: hairpins are interpolated linearly in velocity, so linear-in-dB
+ * is a perceptually even crescendo, and pp lands ~15 dB under mf instead of the
+ * ~5 dB a `v^1.6` curve gave it. ff and fff exceed unity gain on purpose — the
+ * limiter at the end of the chain is what makes that safe, and clipping the
+ * curve here instead would just flatten the top of the range again.
+ */
+export const velocityToGain = (velocity: number): number =>
+    DYN_REF_GAIN * Math.pow(10, (DYN_RANGE_DB * (velocity - DEFAULT_VELOCITY)) / 20);
+
+/**
+ * Brightness proxy for a single sampled velocity layer. Real piano strings get
+ * brighter as they are struck harder; with one flat-velocity sample per anchor,
+ * rolling the top off at low velocities is the closest honest approximation.
+ * Default velocity lands at 6.4 kHz — nearly transparent — so this darkens
+ * quiet playing rather than dulling everything.
+ */
+export const filterCutoffHz = (velocity: number): number => 800 * Math.pow(2, 4 * clamp(velocity, 0, 1));
+
+/**
+ * Release time constant after the key lifts. Bass strings carry far more energy
+ * and keep ringing under the damper; treble notes stop almost at once. Velocity
+ * scales it because a note struck hard has more left to shed.
+ */
+export const releaseTauFor = (midi: number, velocity: number): number =>
+    (0.045 + 0.1 * clamp((60 - midi) / 36, 0, 1)) * (0.8 + 0.4 * clamp(velocity, 0, 1));
+
+/**
+ * Release time constant for a note the pedal is still holding when it ends.
+ * Nothing touches the string here, so what is heard is the string's own decay
+ * rather than a damper landing on it — far longer than any {@link releaseTauFor}
+ * value, and flat across the keyboard because the pedal lifts every damper at
+ * once. This is what makes a pedalled phrase pool instead of ending in a row
+ * of clipped notes.
+ */
+export const PEDAL_RELEASE_TAU_S = 0.25;
+
+/**
+ * Stereo position from the keyboard's own geometry, heard from the bench:
+ * bass to the left, treble to the right, middle C dead centre. Held to half
+ * width because the samples are mono — panning them is a placement cue, and
+ * pushing it further starts to sound like two pianos.
+ */
+export const panForMidi = (midi: number): number => clamp((midi - 60) / 30, -0.5, 0.5);
+
+const splitmix32 = (seed: number): number => {
+    let z = (seed + 0x9e3779b9) >>> 0;
+    z = Math.imul(z ^ (z >>> 16), 0x21f0aaad) >>> 0;
+    z = Math.imul(z ^ (z >>> 15), 0x735a2d97) >>> 0;
+    return (z ^ (z >>> 15)) >>> 0;
+};
+
+/** Hash word → [0, 1). */
+const unitFrom = (hash: number): number => hash / 0x1_0000_0000;
+
+export interface NoteJitter {
+    /** Seconds to shift the attack by, within ±JITTER_TIME_S. */
+    dt: number;
+    /** Velocity offset, within ±JITTER_VEL. */
+    dv: number;
+}
+
+/**
+ * Per-note timing and loudness jitter, derived only from the note's identity.
+ *
+ * Purity here is a correctness requirement, not a style preference: the
+ * scheduler re-walks the score from wherever the transport lands — a seek, a
+ * resumed sustain, every loop wrap — and a note that jittered differently on
+ * the second pass would flam against its own still-ringing tail and make the
+ * loop seam audible. A random source, however well seeded, cannot survive that.
+ */
+export const noteJitter = (tick: number, pitch: number, hand: number): NoteJitter => {
+    const seed =
+        (Math.imul(tick | 0, 0x9e3779b1) ^ Math.imul(pitch | 0, 0x85ebca6b) ^ Math.imul((hand | 0) + 1, 0xc2b2ae35)) >>>
+        0;
+    const first = splitmix32(seed);
+    const second = splitmix32(first);
+    return {
+        dt: (unitFrom(first) * 2 - 1) * JITTER_TIME_S,
+        dv: (unitFrom(second) * 2 - 1) * JITTER_VEL,
+    };
+};
+
+/** Minimal slice of AudioContext {@link buildReverbImpulse} needs (mockable). */
+export interface ImpulseFactory {
+    readonly sampleRate: number;
+    createBuffer(numberOfChannels: number, length: number, sampleRate: number): AudioBuffer;
+}
+
+export interface ReverbOptions {
+    /** T60 — seconds to decay by 60 dB. */
+    seconds?: number;
+    predelayMs?: number;
+    /** Injectable noise source; tests need a reproducible tail. */
+    rng?: () => number;
+}
+
+/**
+ * A stereo impulse response synthesized at runtime: decaying noise, lowpassed
+ * with a filter that closes as the tail develops, because air absorbs the high
+ * end of a room's reflections faster than the low. Independent noise per
+ * channel is what gives the result width from mono sources.
+ *
+ * Synthesizing beats shipping an IR file — no asset, no cache-busting, no
+ * download on a connection that already paid for 0.85 MB of piano samples —
+ * and the shape only has to be plausible, not any particular real hall.
+ */
+export const buildReverbImpulse = (ctx: ImpulseFactory, options: ReverbOptions = {}): AudioBuffer => {
+    const seconds = options.seconds ?? REVERB_SECONDS;
+    const predelayMs = options.predelayMs ?? REVERB_PREDELAY_MS;
+    const rng = options.rng ?? Math.random;
+    const rate = ctx.sampleRate;
+    const length = Math.max(1, Math.round(seconds * rate));
+    const predelay = Math.min(length, Math.max(0, Math.round((predelayMs / 1000) * rate)));
+    const buffer = ctx.createBuffer(2, length, rate);
+    const span = Math.max(1, length - predelay);
+
+    for (let channel = 0; channel < 2; channel++) {
+        const data = buffer.getChannelData(channel);
+        let lowpassed = 0;
+        for (let i = predelay; i < length; i++) {
+            const progress = (i - predelay) / span;
+            const elapsed = (i - predelay) / rate;
+            const white = rng() * 2 - 1;
+            // One-pole coefficient easing from open to nearly closed.
+            lowpassed += (0.6 + (0.15 - 0.6) * progress) * (white - lowpassed);
+            data[i] = lowpassed * Math.pow(10, (-3 * elapsed) / seconds);
+        }
+    }
+    return buffer;
+};
+
+/** Below this the soft clip is a straight wire; above it the knee bends. */
+export const SOFTCLIP_KNEE = 0.8;
+/** Hard ceiling after the knee — just under full scale so oversampling
+ * interpolation cannot overshoot into the DAC's clamp. */
+export const SOFTCLIP_CEILING = 0.995;
+
+/**
+ * Transfer curve for the output soft clip: identity up to the knee, then a
+ * tanh that saturates below the ceiling. The limiter ahead of it is a
+ * compressor whose 3 ms attack lets a piano's transient through untouched —
+ * measured at 1.39× full scale for a ten-voice ff chord — so the true
+ * ceiling has to be held by a memoryless stage that cannot be outrun.
+ * Below the knee the curve is exactly linear (times the ceiling), so normal
+ * material passes uncoloured.
+ */
+export const buildSoftClipCurve = (samples = 4096): Float32Array => {
+    const curve = new Float32Array(samples);
+    for (let i = 0; i < samples; i++) {
+        const x = (i / (samples - 1)) * 2 - 1;
+        const a = Math.abs(x);
+        const shaped = a <= SOFTCLIP_KNEE ? a : SOFTCLIP_KNEE + (1 - SOFTCLIP_KNEE) * Math.tanh((a - SOFTCLIP_KNEE) / (1 - SOFTCLIP_KNEE));
+        curve[i] = Math.sign(x) * shaped * SOFTCLIP_CEILING;
+    }
+    return curve;
+};
+
+export interface NoteShape {
+    /** Seconds to delay this note's attack so its chord rolls upward. */
+    roll: number;
+    /** Velocity added because this note carries the melody. */
+    lift: number;
+    /** Velocity added because this note falls on a full bar's downbeat. */
+    accent: number;
+}
+
+const emptyShape = (): NoteShape => ({ roll: 0, lift: 0, accent: 0 });
+
+/**
+ * One pass over the score at engine construction, deciding what each note owes
+ * to its neighbours: a chord is rolled from the bottom up the way a hand
+ * actually lands on it, the top note of a right-hand chord is voiced above the
+ * ones under it, and notes on a real downbeat get the weight a player gives
+ * them. All of it is a function of the score alone, so — like {@link noteJitter}
+ * — it survives seeks and loop wraps unchanged.
+ *
+ * The result is index-aligned with `score.notes`, which the scheduler already
+ * walks by index.
+ */
+export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
+    const notes = score.notes;
+    const shapes: NoteShape[] = notes.map(emptyShape);
+
+    // Full-bar downbeats, borrowed from the metronome's own accent rule so a
+    // stressed note and an accented click can never disagree about beat one.
+    const downbeats = new Set<number>();
+    for (const measure of score.measures) {
+        const first = beatsForMeasure(measure, score.timeSignatures)[0];
+        if (first?.accent) {
+            downbeats.add(first.tick);
+        }
+    }
+
+    // Notes are sorted by tick, so everything sounding together is one run.
+    let start = 0;
+    while (start < notes.length) {
+        const head = notes[start];
+        if (!head) {
+            break;
+        }
+        let end = start;
+        while (end < notes.length && notes[end]?.t === head.t) {
+            end += 1;
+        }
+        const onDownbeat = downbeats.has(head.t);
+
+        for (const hand of [HAND_RH, HAND_LH] as const) {
+            const group: Array<{ index: number; pitch: number }> = [];
+            for (let i = start; i < end; i++) {
+                const note = notes[i];
+                if (note && note.h === hand) {
+                    group.push({ index: i, pitch: note.p });
+                }
+            }
+            group.sort((a, b) => a.pitch - b.pitch);
+            group.forEach(({ index }, position) => {
+                const shape = shapes[index];
+                if (!shape) {
+                    return;
+                }
+                shape.roll = Math.min(CHORD_ROLL_MAX_S, position * CHORD_ROLL_S);
+                shape.accent = onDownbeat ? DOWNBEAT_ACCENT : 0;
+            });
+            const top = hand === HAND_RH && group.length >= 2 ? group[group.length - 1] : undefined;
+            const topShape = top ? shapes[top.index] : undefined;
+            if (topShape) {
+                topShape.lift = MELODY_LIFT;
+            }
+        }
+        start = end;
+    }
+    return shapes;
+};
+
+/**
+ * The tick each note actually stops sounding at, index-aligned with `notes`.
+ * `pedals` must be in tick order, as parseScoreData leaves it.
+ *
+ * A damper held off the string by the pedal leaves a note ringing past the
+ * length it was written at, which is the whole point of the pedal and the one
+ * thing a note-plus-duration model cannot say on its own. `pedals` carries
+ * edges rather than spans (see ScoreData.pedals), so the state has to be
+ * integrated here; a note the pedal is not holding keeps its notated end, as
+ * does one the pedal never releases before the piece stops.
+ *
+ * Two boundary readings carry the musical meaning, and both fall out of taking
+ * only edges STRICTLY around the note's end. An 'up' printed on the very tick a
+ * note ends damps it there, so a re-catch — 'up' then 'down' on one tick —
+ * clears everything that was sounding and holds only what follows, the same
+ * clearing a pianist's foot performs. And a 'down' printed on the tick a note
+ * ends does NOT catch it: that is syncopated pedalling, where the foot falls
+ * after the hand lifts precisely so the old harmony is let go.
+ */
+export const buildPedalEnds = (
+    notes: readonly ScoreNote[],
+    pedals: readonly ScorePedal[] | undefined,
+): readonly number[] => {
+    const ends = notes.map((note) => note.t + note.d);
+    if (!pedals || pedals.length === 0) {
+        return ends;
+    }
+
+    // Tick of the first lift at or after each position, so extending a note is a
+    // lookup rather than a forward scan of the edges per note.
+    const nextLift = new Array<number>(pedals.length + 1).fill(-1);
+    for (let i = pedals.length - 1; i >= 0; i--) {
+        nextLift[i] = pedals[i]?.k === 'up' ? (pedals[i]?.tick ?? -1) : (nextLift[i + 1] ?? -1);
+    }
+
+    // Note starts are sorted but note ends are not — a whole note and an eighth
+    // can begin on the same tick — so the walk goes in end order. That keeps one
+    // monotone pointer into the edges for the whole score rather than a scan of
+    // them per note, which on a pedalled piece is the difference between one
+    // pass and fifty thousand.
+    const byEnd = ends.map((_, index) => index).sort((a, b) => (ends[a] ?? 0) - (ends[b] ?? 0));
+    let cursor = 0;
+    let down = false;
+    for (const index of byEnd) {
+        const end = ends[index] ?? 0;
+        while (cursor < pedals.length && (pedals[cursor]?.tick ?? 0) < end) {
+            down = pedals[cursor]?.k === 'down';
+            cursor += 1;
+        }
+        if (!down) {
+            continue;
+        }
+        // The next lift is at or after `end` by construction. One landing exactly
+        // on it is the damper falling with the key, and -1 is a foot that never
+        // comes up; in both cases the note keeps the length it was written at.
+        const lift = nextLift[cursor] ?? -1;
+        if (lift > end) {
+            ends[index] = lift;
+        }
+    }
+    return ends;
+};

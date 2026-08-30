@@ -1,35 +1,79 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+    buildNoteShapes,
+    noteJitter,
+    PEDAL_RELEASE_TAU_S,
+    releaseTauFor,
+    velocityToGain,
+} from '@/features/playback/expression';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { AudioContextLike, AudioParamLike } from '@/features/playback/PlaybackEngine';
-import { PIANO_ANCHORS } from '@/features/playback/pianoSampler';
+import { nearestAnchor, PIANO_ANCHORS } from '@/features/playback/pianoSampler';
 import type { PlaybackStatus } from '@/state/store';
+import { DEFAULT_VELOCITY } from '@/types/scoreData';
+import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
 
 class MockParam implements AudioParamLike {
     value = 0;
-    readonly targets: Array<{ target: number; time: number }> = [];
+    /** `tau` is present only on setTargetAtTime entries — it is the curve. */
+    readonly targets: Array<{ target: number; time: number; tau?: number }> = [];
     setValueAtTime(value: number, time: number): void {
         this.targets.push({ target: value, time });
     }
-    setTargetAtTime(target: number, time: number): void {
-        this.targets.push({ target, time });
+    setTargetAtTime(target: number, time: number, tau: number): void {
+        this.targets.push({ target, time, tau });
     }
+    cancelScheduledValues(): void {}
 }
 
-class MockGain {
-    gain = new MockParam();
-    connect(): void {}
+/** Every mock node records what it was wired to, so tests can walk the graph. */
+class MockNode {
+    readonly connections: unknown[] = [];
+    connect(target: unknown): void {
+        this.connections.push(target);
+    }
     disconnect(): void {}
 }
 
-class MockSource {
+class MockGain extends MockNode {
+    gain = new MockParam();
+}
+
+class MockFilter extends MockNode {
+    type = '';
+    frequency = new MockParam();
+    Q = new MockParam();
+}
+
+class MockPanner extends MockNode {
+    pan = new MockParam();
+}
+
+class MockCompressor extends MockNode {
+    threshold = new MockParam();
+    knee = new MockParam();
+    ratio = new MockParam();
+    attack = new MockParam();
+    release = new MockParam();
+}
+
+class MockConvolver extends MockNode {
+    buffer: AudioBuffer | null = null;
+}
+
+class MockShaper extends MockNode {
+    curve: Float32Array | null = null;
+    oversample = 'none';
+}
+
+class MockSource extends MockNode {
     buffer: AudioBuffer | null = null;
     playbackRate = new MockParam();
     startedAt: number | null = null;
     stoppedAt: number | null = null;
     onended: (() => void) | null = null;
-    connect(): void {}
     start(when = 0): void {
         this.startedAt = when;
     }
@@ -48,13 +92,36 @@ class MockOscillator {
     stop(): void {}
 }
 
+class MockAudioBuffer {
+    private readonly channels: Float32Array[];
+    constructor(
+        readonly numberOfChannels: number,
+        readonly length: number,
+        readonly sampleRate: number,
+    ) {
+        this.channels = Array.from({ length: numberOfChannels }, () => new Float32Array(length));
+    }
+    get duration(): number {
+        return this.length / this.sampleRate;
+    }
+    getChannelData(channel: number): Float32Array {
+        return this.channels[channel] ?? new Float32Array(this.length);
+    }
+}
+
 class MockContext implements AudioContextLike {
     currentTime = 0;
     state = 'running';
     destination = {};
+    sampleRate = 44100;
     readonly gains: MockGain[] = [];
     readonly sources: MockSource[] = [];
     readonly oscillators: MockOscillator[] = [];
+    readonly filters: MockFilter[] = [];
+    readonly panners: MockPanner[] = [];
+    readonly compressors: MockCompressor[] = [];
+    readonly convolvers: MockConvolver[] = [];
+    readonly shapers: MockShaper[] = [];
     onstatechange: (() => void) | null = null;
     createGain(): MockGain {
         const gain = new MockGain();
@@ -71,6 +138,34 @@ class MockContext implements AudioContextLike {
         this.oscillators.push(osc);
         return osc;
     }
+    createBiquadFilter(): MockFilter {
+        const filter = new MockFilter();
+        this.filters.push(filter);
+        return filter;
+    }
+    createStereoPanner(): MockPanner {
+        const panner = new MockPanner();
+        this.panners.push(panner);
+        return panner;
+    }
+    createDynamicsCompressor(): MockCompressor {
+        const compressor = new MockCompressor();
+        this.compressors.push(compressor);
+        return compressor;
+    }
+    createConvolver(): MockConvolver {
+        const convolver = new MockConvolver();
+        this.convolvers.push(convolver);
+        return convolver;
+    }
+    createWaveShaper(): MockShaper {
+        const shaper = new MockShaper();
+        this.shapers.push(shaper);
+        return shaper;
+    }
+    createBuffer(numberOfChannels: number, length: number, sampleRate: number): AudioBuffer {
+        return new MockAudioBuffer(numberOfChannels, length, sampleRate) as unknown as AudioBuffer;
+    }
     async decodeAudioData(): Promise<AudioBuffer> {
         return {} as AudioBuffer;
     }
@@ -81,21 +176,49 @@ class MockContext implements AudioContextLike {
 const fakeBuffers = (attackLagSec = 0) =>
     new Map(PIANO_ANCHORS.map((midi) => [midi, { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec }]));
 
-// Graph construction order in buildGraph(): master, RH bus, LH bus, click bus.
+// Graph construction order in buildGraph(): master, RH bus, LH bus, reverb
+// send, click bus. Every gain after that belongs to a voice or a click.
 const BUS_RH = 1;
 const BUS_LH = 2;
+const REVERB_SEND = 3;
+const CLICK_BUS = 4;
+const FIRST_VOICE_GAIN = 5;
 
 const makeEngine = (overrides?: { bpm?: number; score?: typeof tinyScore; attackLagSec?: number }) => {
     const ctx = new MockContext();
     const statuses: PlaybackStatus[] = [];
+    const warnings: string[] = [];
+    // One buffer map per engine, so a sample's identity names its anchor and
+    // tests can pick a specific note out of the source list.
+    const buffers = fakeBuffers(overrides?.attackLagSec);
     const engine = new PlaybackEngine({
         score: overrides?.score ?? tinyScore,
         bpm: overrides?.bpm ?? 120,
         onStatus: (status) => statuses.push(status),
+        onWarning: (code) => warnings.push(code),
         createContext: () => ctx,
-        loadBuffers: async () => fakeBuffers(overrides?.attackLagSec),
+        loadBuffers: async () => buffers,
     });
-    return { ctx, engine, statuses };
+    return { ctx, engine, statuses, buffers, warnings };
+};
+
+/** Walk source → filter → gain, the chain schedulePianoVoice builds. */
+const voiceGainNodeOf = (source: MockSource | undefined): MockGain | undefined => {
+    const filter = source?.connections[0] as MockFilter | undefined;
+    return filter?.connections[0] as MockGain | undefined;
+};
+
+const voiceGainOf = (source: MockSource | undefined): number => voiceGainNodeOf(source)?.gain.value ?? -1;
+
+/** Seconds between a voice's attack and the point its source is torn down. */
+const lifespanOf = (source: MockSource | undefined): number => (source?.stoppedAt ?? 0) - (source?.startedAt ?? 0);
+
+const sampleOf = (buffers: ReturnType<typeof fakeBuffers>, midi: number): AudioBuffer | undefined =>
+    buffers.get(nearestAnchor(midi))?.buffer;
+
+const expectConnections = (node: MockNode | undefined, ...targets: unknown[]): void => {
+    expect(node?.connections).toHaveLength(targets.length);
+    targets.forEach((target, i) => expect(node?.connections[i]).toBe(target));
 };
 
 /** Advance wall clock and audio clock together (the engine assumes they agree). */
@@ -111,6 +234,15 @@ const advance = async (ctx: MockContext, seconds: number) => {
 // run for 14.5 s.
 const SPT_120 = 60 / (120 * 480);
 
+/** Where a note is actually struck: its grid time plus its roll and jitter. */
+const onsetOf = (score: typeof tinyScore, index: number, gridSeconds: number): number => {
+    const note = score.notes[index];
+    if (!note) {
+        return gridSeconds;
+    }
+    return gridSeconds + (buildNoteShapes(score)[index]?.roll ?? 0) + noteJitter(note.t, note.p, note.h).dt;
+};
+
 beforeEach(() => {
     vi.useFakeTimers();
 });
@@ -125,14 +257,18 @@ describe('PlaybackEngine', () => {
         await engine.play();
         await advance(ctx, 16);
         expect(ctx.sources).toHaveLength(tinyScore.notes.length);
-        // Default velocity 0.75 through the perceptual curve (v^1.6).
-        expect(ctx.gains[4]?.gain.value).toBeCloseTo(Math.pow(0.75, 1.6), 4);
-        // Note k starts at anchor(0.08) + t·spt.
-        const expected = tinyScore.notes.map((n) => 0.08 + n.t * SPT_120);
+        // The pickup carries no dynamic of its own: the score default, nudged
+        // by this note's jitter, through the dB velocity curve.
+        expect(ctx.gains[FIRST_VOICE_GAIN]?.gain.value).toBeCloseTo(
+            velocityToGain(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv),
+            10,
+        );
+        // Note k starts at anchor(0.08) + t·spt, shaped by its chord and jitter.
+        const expected = tinyScore.notes.map((n, i) => onsetOf(tinyScore, i, 0.08 + n.t * SPT_120));
         const actual = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
         expected.sort((a, b) => a - b);
         for (const [i, time] of expected.entries()) {
-            expect(actual[i]).toBeCloseTo(time, 3);
+            expect(actual[i]).toBeCloseTo(time, 9);
         }
         expect(engine.getStatus()).toBe('ended');
     });
@@ -150,7 +286,7 @@ describe('PlaybackEngine', () => {
         expect(ctx.oscillators.filter((o) => o.frequency.value === 1800)).toHaveLength(2);
         // The pickup note enters exactly where beat 4 of the second bar falls.
         const firstNote = Math.min(...ctx.sources.map((s) => s.startedAt ?? Infinity));
-        expect(firstNote).toBeCloseTo(0.08 + 7 * 0.5, 3);
+        expect(firstNote).toBeCloseTo(onsetOf(tinyScore, 0, 0.08 + 7 * 0.5), 9);
         expect(statuses).toContain('playing');
         expect(engine.getPositionTicks()).toBeGreaterThan(0);
     });
@@ -197,18 +333,16 @@ describe('PlaybackEngine', () => {
     });
 
     it('wraps an A-B loop seamlessly and stays inside it', async () => {
-        const { ctx, engine } = makeEngine();
+        const { ctx, engine, buffers } = makeEngine();
         // Loop m.0–m.1 (ticks 0–2400): 2400 ticks at 120 bpm = 2.5 s per pass.
         engine.setLoop({ startTick: 0, endTick: 2400 });
         await engine.play();
         await advance(ctx, 8.2);
         expect(engine.getPositionTicks()).toBeLessThan(2400);
-        // The pickup C5 (t=0) recurs on every pass: ≥3 passes in 4.2 s.
-        const t0Starts = ctx.sources.filter((s) => {
-            const at = s.startedAt;
-            return at !== null && Math.abs(((at - 0.08) / SPT_120) % 2400) < 1;
-        });
-        expect(t0Starts.length).toBeGreaterThanOrEqual(3);
+        // The pickup C5 (t=0) recurs on every pass: ≥3 passes in 8.2 s. Its
+        // anchor sample appears nowhere else inside the loop.
+        const pickup = sampleOf(buffers, 72);
+        expect(ctx.sources.filter((s) => s.buffer === pickup).length).toBeGreaterThanOrEqual(3);
         expect(engine.getStatus()).toBe('playing'); // loops never end
     });
 
@@ -236,7 +370,7 @@ describe('PlaybackEngine', () => {
 
     it('starts each note early by its attack lag so it is heard on the click', async () => {
         const lag = 0.02;
-        const { ctx, engine } = makeEngine({ attackLagSec: lag });
+        const { ctx, engine, buffers } = makeEngine({ attackLagSec: lag });
         engine.setMetronome(true);
         await engine.play();
         await advance(ctx, 2.6);
@@ -245,8 +379,10 @@ describe('PlaybackEngine', () => {
         const beatAt = 0.08 + 480 * SPT_120;
         const click = ctx.oscillators.find((o) => Math.abs((o.startedAt ?? -1) - beatAt) < 0.001);
         expect(click).toBeDefined(); // the click stays on the grid…
-        const notes = ctx.sources.filter((s) => Math.abs((s.startedAt ?? -1) - (beatAt - lag)) < 0.001);
-        expect(notes.length).toBeGreaterThan(0); // …and the note leads it by its rise time
+        // …and the left hand's C3 there leads it by its rise time. That note is
+        // alone in its hand at that tick, so it takes no chord roll.
+        const note = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 48));
+        expect(note?.startedAt).toBeCloseTo(beatAt - lag + noteJitter(480, 48, 1).dt, 9);
         expect(ctx.sources.some((s) => Math.abs((s.startedAt ?? -1) - beatAt) < 0.001)).toBe(false);
     });
 
@@ -270,6 +406,102 @@ describe('PlaybackEngine', () => {
     });
 });
 
+describe('expression through the engine', () => {
+    it('routes the limiter, the soft clip, the reverb send, and the dry click bus', async () => {
+        const { ctx, engine } = makeEngine();
+        await engine.play();
+        await advance(ctx, 0.1);
+        const master = ctx.gains[0];
+        const limiter = ctx.compressors[0];
+        const softClip = ctx.shapers[0];
+        const convolver = ctx.convolvers[0];
+        const send = ctx.gains[REVERB_SEND];
+
+        // Nothing reaches the speakers except through limiter then soft clip —
+        // the compressor's attack passes transients, the memoryless clip cannot.
+        expectConnections(master, limiter);
+        expectConnections(limiter, softClip);
+        expectConnections(softClip, ctx.destination);
+        expect(softClip?.oversample).toBe('2x');
+        expect(softClip?.curve?.length).toBeGreaterThan(0);
+        // The send is the only thing feeding the reverb, and both hands use it.
+        expectConnections(send, convolver);
+        expectConnections(convolver, master);
+        expectConnections(ctx.gains[BUS_RH], master, send);
+        expectConnections(ctx.gains[BUS_LH], master, send);
+        // The metronome stays dry: a click smeared by a room is no reference.
+        expectConnections(ctx.gains[CLICK_BUS], master);
+        expect(convolver?.buffer?.numberOfChannels).toBe(2);
+        expect(limiter?.threshold.value).toBe(-12);
+    });
+
+    it('gives every voice a filter and a panner between the source and its bus', async () => {
+        const { ctx, engine } = makeEngine();
+        await engine.play();
+        await advance(ctx, 0.1);
+        const source = ctx.sources[0];
+        const filter = source?.connections[0] as MockFilter | undefined;
+        const gain = filter?.connections[0] as MockGain | undefined;
+        const panner = gain?.connections[0] as MockPanner | undefined;
+        expect(filter?.type).toBe('lowpass');
+        expect(panner).toBeInstanceOf(MockPanner);
+        expectConnections(panner, ctx.gains[BUS_RH]);
+        // The pickup C5 sits a fifth above middle C, so it leans slightly right.
+        expect(panner?.pan.value).toBeCloseTo(0.4, 10);
+    });
+
+    it('gives a note the same jitter on every loop pass, so the seam never flams', async () => {
+        const { ctx, engine, buffers } = makeEngine();
+        const loopSeconds = 2400 * SPT_120;
+        engine.setLoop({ startTick: 0, endTick: 2400 });
+        await engine.play();
+        await advance(ctx, 8.2);
+
+        // The left hand's C3 at t=480 is the only note in the region on its
+        // anchor, so its sample identifies every pass of that one note.
+        const passes = ctx.sources
+            .filter((s) => s.buffer === sampleOf(buffers, 48))
+            .map((s) => ({ startedAt: s.startedAt ?? -1, gain: voiceGainOf(s) }))
+            .sort((a, b) => a.startedAt - b.startedAt);
+        expect(passes.length).toBeGreaterThanOrEqual(3);
+        const first = passes[0];
+        for (const [i, pass] of passes.entries()) {
+            expect(pass.startedAt - (first?.startedAt ?? 0)).toBeCloseTo(i * loopSeconds, 9);
+            expect(pass.gain).toBe(first?.gain);
+        }
+    });
+
+    it('resumes a note seeked into mid-ring at the loudness its attack had', async () => {
+        const { ctx, engine, buffers } = makeEngine();
+        await engine.play();
+        await advance(ctx, 1); // inside the left hand's C3, which rings to 2400
+        const attacks = ctx.sources.filter((s) => s.buffer === sampleOf(buffers, 48));
+        expect(attacks).toHaveLength(1);
+
+        engine.seek(1200);
+        await advance(ctx, 0.1);
+        const all = ctx.sources.filter((s) => s.buffer === sampleOf(buffers, 48));
+        expect(all.length).toBeGreaterThan(1);
+        expect(voiceGainOf(all[0])).toBeGreaterThan(0);
+        // Same loudness, but the tail starts where the transport landed rather
+        // than being nudged by the timing jitter a second time.
+        expect(voiceGainOf(all[all.length - 1])).toBe(voiceGainOf(all[0]));
+        expect(all[all.length - 1]?.startedAt).toBeCloseTo(1.05, 9);
+    });
+
+    it('voices the top of a right-hand chord above the note under it', async () => {
+        const { ctx, engine, buffers } = makeEngine();
+        await engine.play();
+        await advance(ctx, 0.7);
+        // m.1's chord: E5 (index 1) under G5 (index 2), the melody note.
+        const under = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 76));
+        const top = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 79));
+        expect(voiceGainOf(top)).toBeGreaterThan(voiceGainOf(under));
+        // …and it arrives after it: the chord rolls from the bottom up.
+        expect((top?.startedAt ?? 0) - (under?.startedAt ?? 0)).toBeGreaterThan(0);
+    });
+});
+
 describe('tempo map', () => {
     // tinyScore's bars are 1920 ticks. Halve the tempo from bar 3 (tick 5760):
     // bars 1-3 run at 120, everything after at 60.
@@ -282,16 +514,18 @@ describe('tempo map', () => {
         ],
     };
 
+    /** Grid seconds of a note under `paced`, before roll and jitter. */
+    const gridSeconds = (tick: number): number =>
+        tick <= 5760 ? tick * SPT_120 : 5760 * SPT_120 + (tick - 5760) * SPT_120 * 2;
+
     it('hears a mid-score tempo change at the right moment', async () => {
         const { ctx, engine } = makeEngine({ score: paced, bpm: 120 });
         await engine.play();
         await advance(ctx, 30);
         const started = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
-        const expected = paced.notes
-            .map((n) => 0.08 + (n.t <= 5760 ? n.t * SPT_120 : 5760 * SPT_120 + (n.t - 5760) * SPT_120 * 2))
-            .sort((a, b) => a - b);
+        const expected = paced.notes.map((n, i) => onsetOf(paced, i, 0.08 + gridSeconds(n.t))).sort((a, b) => a - b);
         expect(started).toHaveLength(expected.length);
-        started.forEach((at, i) => expect(at).toBeCloseTo(expected[i] ?? -1, 3));
+        started.forEach((at, i) => expect(at).toBeCloseTo(expected[i] ?? -1, 9));
     });
 
     it('rings a note through a fermata rather than cutting it at the hold', async () => {
@@ -319,20 +553,19 @@ describe('tempo map', () => {
         await engine.play();
         await advance(ctx, 24);
 
-        const loopSeconds =
-            (5760 - 3840) * SPT_120 + (7680 - 5760) * SPT_120 * 2; // 2 s at 120, then 4 s at 60
+        const loopSeconds = gridSeconds(7680) - gridSeconds(3840); // 2 s at 120, then 4 s at 60
         const onsets = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
         expect(onsets.length).toBeGreaterThan(0);
 
         // Every onset lands on the loop's grid: k full laps plus a real note offset.
         const inLoop = paced.notes
-            .filter((n) => n.t >= 3840 && n.t < 7680)
-            .map((n) => (n.t <= 5760 ? (n.t - 3840) * SPT_120 : 1920 * SPT_120 + (n.t - 5760) * SPT_120 * 2));
+            .map((n, i) => (n.t >= 3840 && n.t < 7680 ? onsetOf(paced, i, gridSeconds(n.t) - gridSeconds(3840)) : null))
+            .filter((offset): offset is number => offset !== null);
         for (const onset of onsets) {
-            const sinceStart = onset - 0.08 - (3840 - 3840) * SPT_120;
+            const sinceStart = onset - 0.08;
             const lap = Math.floor(sinceStart / loopSeconds + 1e-6);
             const offset = sinceStart - lap * loopSeconds;
-            expect(inLoop.some((o) => Math.abs(o - offset) < 0.02)).toBe(true);
+            expect(inLoop.some((o) => Math.abs(o - offset) < 1e-6)).toBe(true);
         }
         // It really did wrap more than once.
         expect(Math.max(...onsets)).toBeGreaterThan(0.08 + loopSeconds);
@@ -354,5 +587,137 @@ describe('tempo map', () => {
         engine.setBpm(60); // practise the whole thing at half speed
         expect(engine.getBpmAt(0)).toBe(60);
         expect(engine.getBpmAt(6000)).toBe(30);
+    });
+});
+
+describe('sustain pedal', () => {
+    const pedalled = (pedals: ScorePedal[], notes: readonly ScoreNote[] = tinyScore.notes): ScoreData => ({
+        ...tinyScore,
+        notes: [...notes],
+        pedals,
+    });
+
+    /** Seconds a voice's source outlives its key release, under the pedal. */
+    const PEDAL_TAIL_S = 5 * PEDAL_RELEASE_TAU_S;
+
+    it('rings a note past its written end until the foot comes up', async () => {
+        // The pickup C5 is written for one beat and pedalled for five.
+        const { ctx, engine, buffers } = makeEngine({
+            score: pedalled([
+                { tick: 0, k: 'down' },
+                { tick: 2400, k: 'up' },
+            ]),
+        });
+        await engine.play();
+        await advance(ctx, 3);
+        const held = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        expect(lifespanOf(held)).toBeCloseTo(2400 * SPT_120 + PEDAL_TAIL_S, 9);
+
+        // Same note, same score, no pedal: one beat and a damped tail.
+        const dry = makeEngine();
+        await dry.engine.play();
+        await advance(dry.ctx, 3);
+        const damped = dry.ctx.sources.find((s) => s.buffer === sampleOf(dry.buffers, 72));
+        expect(lifespanOf(damped)).toBeCloseTo(480 * SPT_120 + 0.3, 9);
+    });
+
+    it('releases a pedalled note as a free string, not as a damped one', async () => {
+        const { ctx, engine, buffers } = makeEngine({
+            score: pedalled([
+                { tick: 0, k: 'down' },
+                { tick: 2400, k: 'up' },
+            ]),
+        });
+        await engine.play();
+        await advance(ctx, 3);
+        const held = voiceGainNodeOf(ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72)));
+        const release = held?.gain.targets.at(-1);
+        expect(release?.target).toBe(0);
+        expect(release?.tau).toBe(PEDAL_RELEASE_TAU_S);
+        // The lift at 2400 is where the damper finally lands.
+        expect(release?.time).toBeCloseTo(0.08 + 2400 * SPT_120 + noteJitter(0, 72, 0).dt, 9);
+    });
+
+    it('clears at a re-catch and holds only what is struck on it', async () => {
+        // Foot down at 0, changed at 2400, up at 5760. The first note is caught
+        // by the opening take and let go by the clearing half of the change; the
+        // second is struck on the change and rides the re-take to the lift.
+        const { ctx, engine } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 2400, k: 'up' },
+                    { tick: 2400, k: 'down' },
+                    { tick: 5760, k: 'up' },
+                ],
+                [
+                    { t: 0, d: 480, p: 72, h: 0 },
+                    { t: 2400, d: 480, p: 60, h: 0 },
+                ],
+            ),
+        });
+        await engine.play();
+        await advance(ctx, 3);
+        expect(ctx.sources).toHaveLength(2);
+        expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + PEDAL_TAIL_S, 9);
+        expect(lifespanOf(ctx.sources[1])).toBeCloseTo(3360 * SPT_120 + PEDAL_TAIL_S, 9);
+        expect(ctx.sources[1]?.startedAt).toBeCloseTo(0.08 + 2400 * SPT_120 + noteJitter(2400, 60, 0).dt, 9);
+    });
+
+    it('cuts a pedalled note at the loop end, the way a written one is cut', async () => {
+        // Pedalled to 5760, but the B point is 2400 — carrying the harmony over
+        // the wrap would smear every pass into the next.
+        const { ctx, engine } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 5760, k: 'up' },
+                ],
+                [{ t: 0, d: 480, p: 72, h: 0 }],
+            ),
+        });
+        engine.setLoop({ startTick: 0, endTick: 2400 });
+        await engine.play();
+        await advance(ctx, 1);
+        expect(ctx.sources).toHaveLength(1);
+        expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + PEDAL_TAIL_S, 9);
+    });
+
+    it('silences a ringing note when its own key is struck again', async () => {
+        const { ctx, engine } = makeEngine({
+            score: pedalled(
+                [],
+                [
+                    { t: 0, d: 1920, p: 60, h: 0 },
+                    { t: 480, d: 1920, p: 60, h: 0 },
+                ],
+            ),
+        });
+        await engine.play();
+        await advance(ctx, 1);
+        expect(ctx.sources).toHaveLength(2);
+        const [first, second] = ctx.sources;
+        const restrike = second?.startedAt ?? 0;
+
+        // Left alone the first voice would have run four beats plus its tail.
+        expect(first?.stoppedAt ?? 0).toBeGreaterThan(restrike);
+        expect(first?.stoppedAt ?? 0).toBeLessThan(restrike + 0.1);
+        const damping = voiceGainNodeOf(first)?.gain.targets.at(-1);
+        expect(damping?.target).toBe(0);
+        expect(damping?.time).toBeCloseTo(restrike, 9);
+        expect(damping?.tau ?? 1).toBeLessThan(releaseTauFor(60, DEFAULT_VELOCITY));
+        // The note that did the striking is untouched.
+        expect(lifespanOf(second)).toBeCloseTo(1920 * SPT_120 + 0.3, 9);
+    });
+
+    it('carries the polyphony a held pedal needs before it gives up', async () => {
+        // Eighty voices at once is far past any notated piano texture, but the
+        // pedal makes it reachable — and it must not warn or drop notes.
+        const cluster = Array.from({ length: 80 }, (_, i): ScoreNote => ({ t: 0, d: 480, p: 21 + i, h: 0 }));
+        const { ctx, engine, warnings } = makeEngine({ score: pedalled([], cluster) });
+        await engine.play();
+        await advance(ctx, 0.5);
+        expect(ctx.sources).toHaveLength(80);
+        expect(warnings).toEqual([]);
     });
 });

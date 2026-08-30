@@ -24,6 +24,43 @@ class MockBuffer implements AudioBuffer {
     copyToChannel(): void {}
 }
 
+const mockParam = () => ({
+    value: 0,
+    setValueAtTime: vi.fn(),
+    setTargetAtTime: vi.fn(),
+    cancelScheduledValues: vi.fn(),
+});
+
+/**
+ * Audition shares PlaybackEngine's voice path (source → lowpass → gain →
+ * panner) and its limiter, so a mock context has to be able to build those.
+ */
+const voiceNodeFactories = {
+    createBiquadFilter: () => ({
+        type: '',
+        frequency: mockParam(),
+        Q: mockParam(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+    }),
+    createStereoPanner: () => ({ pan: mockParam(), connect: vi.fn(), disconnect: vi.fn() }),
+    createDynamicsCompressor: () => ({
+        threshold: mockParam(),
+        knee: mockParam(),
+        ratio: mockParam(),
+        attack: mockParam(),
+        release: mockParam(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+    }),
+    createWaveShaper: () => ({
+        curve: null as Float32Array | null,
+        oversample: 'none',
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+    }),
+};
+
 function installAudioMocks() {
     const sources: Array<{ start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }> = [];
     class MockContext {
@@ -47,6 +84,7 @@ function installAudioMocks() {
                 buffer: null as AudioBuffer | null,
                 playbackRate: { value: 1 },
                 connect: vi.fn(),
+                disconnect: vi.fn(),
                 start: vi.fn(),
                 stop: vi.fn(),
                 onended: null as (() => void) | null,
@@ -54,6 +92,10 @@ function installAudioMocks() {
             sources.push(source);
             return source;
         }
+        createBiquadFilter = voiceNodeFactories.createBiquadFilter;
+        createStereoPanner = voiceNodeFactories.createStereoPanner;
+        createDynamicsCompressor = voiceNodeFactories.createDynamicsCompressor;
+        createWaveShaper = voiceNodeFactories.createWaveShaper;
         async decodeAudioData(): Promise<AudioBuffer> {
             return new MockBuffer();
         }
@@ -144,6 +186,7 @@ describe('auditionNotes', () => {
                     buffer: null as AudioBuffer | null,
                     playbackRate: { value: 1 },
                     connect: vi.fn(),
+                    disconnect: vi.fn(),
                     start: vi.fn(),
                     stop: vi.fn(),
                     onended: null as (() => void) | null,
@@ -151,6 +194,10 @@ describe('auditionNotes', () => {
                 sources.push(source);
                 return source;
             }
+            createBiquadFilter = voiceNodeFactories.createBiquadFilter;
+            createStereoPanner = voiceNodeFactories.createStereoPanner;
+            createDynamicsCompressor = voiceNodeFactories.createDynamicsCompressor;
+            createWaveShaper = voiceNodeFactories.createWaveShaper;
             async decodeAudioData(): Promise<AudioBuffer> {
                 return new MockBuffer();
             }
@@ -160,7 +207,10 @@ describe('auditionNotes', () => {
             }
         }
         vi.stubGlobal('AudioContext', MockContext);
-        vi.stubGlobal('fetch', vi.fn(async () => fetchPromise));
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => fetchPromise),
+        );
 
         const pending = auditionNotes([60]);
         stopAudition();
