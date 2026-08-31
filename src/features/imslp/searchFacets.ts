@@ -19,11 +19,12 @@ import {
 
 export {
     COMPOSER_FACETS,
-    ERA_COMPOSER_SEEDS,
+    DEFAULT_INSTRUMENT_ID,
     ERA_FACETS,
     FORM_FACETS,
     INSTRUMENT_FACETS,
     KEY_FACETS,
+    filtersForTypedSearch,
 } from '../../../supabase/functions/_shared/searchFacetData';
 export type {
     EraId,
@@ -66,7 +67,7 @@ export const hasActiveFilters = (filters: SearchFilters): boolean =>
 
 /** Whether category browse / A–Z / New sort are meaningful. */
 export const categoryBackedFilters = (filters: SearchFilters): boolean =>
-    Boolean(filters.composerCategory || filters.instrument || filters.form);
+    Boolean(filters.composerCategory || filters.instrument || filters.form || filters.era);
 
 export const filtersToStatusParts = (filters: SearchFilters): string[] => {
     const parts: string[] = [];

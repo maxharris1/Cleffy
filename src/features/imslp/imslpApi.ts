@@ -22,6 +22,8 @@ export interface ImslpSearchResponse {
     results: ImslpSearchHit[];
     /** True when the instrument filter matched too little and was relaxed to a boost. */
     filterRelaxed: boolean;
+    /** False when chip browse ran against an incomplete category index. */
+    indexReady?: boolean;
 }
 
 export type ImslpEditionLicense = 'pd' | 'cc' | 'non-pd' | 'unknown';
@@ -163,10 +165,15 @@ export const searchImslp = async (
     if (!response.ok) {
         throw new Error(await messageFromJsonBody(response));
     }
-    const body = (await response.json()) as { results?: ImslpSearchHit[]; filterRelaxed?: boolean };
+    const body = (await response.json()) as {
+        results?: ImslpSearchHit[];
+        filterRelaxed?: boolean;
+        indexReady?: boolean;
+    };
     const result: ImslpSearchResponse = {
         results: body.results ?? [],
         filterRelaxed: body.filterRelaxed === true,
+        indexReady: body.indexReady !== false,
     };
     SEARCH_CACHE.set(key, { at: Date.now(), response: result });
     if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {

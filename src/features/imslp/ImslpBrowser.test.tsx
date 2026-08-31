@@ -220,8 +220,12 @@ describe('ImslpBrowser', () => {
             expect(searchSpy).toHaveBeenCalled();
         });
         const lastCall = searchSpy.mock.calls.at(-1);
+        expect(lastCall?.[0]).toBe('beethoven sonata');
+        // Default Piano-only is not a typed-search hard filter.
         expect(lastCall?.[1]).toEqual(
-            expect.objectContaining({ filters: expect.objectContaining({ instrument: 'piano' }) }),
+            expect.objectContaining({
+                filters: undefined,
+            }),
         );
         expect(await screen.findByText('Best matches')).toBeInTheDocument();
         expect(screen.getByText('More from IMSLP')).toBeInTheDocument();
@@ -264,29 +268,75 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText(/piano-tagged/)).not.toBeInTheDocument();
     });
 
-    it('hides the sort chips for an era-only browse the server cannot sort', async () => {
+    it('hides the sort chips for a key-only browse the server cannot sort', async () => {
         const { screen } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
         vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: [hit('Toccata and Fugue in D minor (Bach, Johann Sebastian)', 565)],
+            results: [hit('Nocturne in C-sharp minor (Chopin, Frédéric)', 9)],
             filterRelaxed: false,
         });
 
         await renderBrowser();
-        // Drop the default piano scope, then browse by era alone.
+        // Drop the default piano scope, then browse by key alone — Key is not a category.
         await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
         await userEvent.click(await screen.findByRole('button', { name: 'Piano' }));
-        await userEvent.click(screen.getByRole('button', { name: 'Era' }));
-        await userEvent.click(await screen.findByRole('button', { name: 'Baroque' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Key' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'C-sharp minor' }));
 
         expect(await screen.findByText('Best matches')).toBeInTheDocument();
         expect(screen.queryByRole('group', { name: 'Sort results' })).not.toBeInTheDocument();
 
         // A typed query takes the sortable text path, so the chips come back.
-        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'bach');
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'chopin');
         expect(await screen.findByRole('group', { name: 'Sort results' })).toBeInTheDocument();
+    });
+
+    it('sends a chosen instrument on a typed query, and drops Popular when a second chip is on', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue({
+            results: [hit('Violin Sonata No.9, Op.47 (Beethoven, Ludwig van)', 47)],
+            filterRelaxed: false,
+        });
+
+        await renderBrowser();
+        expect(screen.getByRole('heading', { name: 'Popular' })).toBeInTheDocument();
+
+        await userEvent.click(screen.getByRole('button', { name: 'Form' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Nocturne' }));
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalled();
+        });
+        expect(screen.queryByRole('heading', { name: 'Popular' })).not.toBeInTheDocument();
+        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
+            expect.objectContaining({ filters: expect.objectContaining({ instrument: 'piano', form: 'nocturne' }) }),
+        );
+
+        searchSpy.mockClear();
+        await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Violin' }));
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'sonata');
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalled();
+        });
+        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
+            expect.objectContaining({ filters: expect.objectContaining({ instrument: 'violin' }) }),
+        );
+    });
+
+    it('lists Early 20th century and Modern as separate era chips', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Era' }));
+        expect(await screen.findByRole('button', { name: 'Early 20th century' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Modern' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Baroque' })).toBeInTheDocument();
     });
 
     it('keeps prior results and shows an error — not the empty state — when a search fails', async () => {

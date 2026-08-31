@@ -8,7 +8,7 @@
  * edge ranker and the client's Popular list read one curated list.
  */
 
-export type PopularEraId = 'baroque' | 'classical' | 'romantic' | 'modern';
+export type PopularEraId = 'baroque' | 'classical' | 'romantic' | 'early-20th' | 'modern';
 
 export interface PopularWork {
     /** Friendly label shown in the UI */
@@ -680,7 +680,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · from Suite bergamasque',
     }),
     w({
@@ -689,7 +689,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano',
     }),
     w({
@@ -699,7 +699,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
         form: 'prelude',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · Préludes Book 1',
     }),
     w({
@@ -708,7 +708,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano',
     }),
     w({
@@ -717,7 +717,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano',
     }),
     w({
@@ -727,7 +727,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composerCategory: 'Debussy, Claude',
         instrument: 'orchestra',
         form: 'prelude',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Orchestra',
     }),
     w({
@@ -736,7 +736,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'orchestra',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Orchestra',
     }),
     w({
@@ -745,7 +745,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · from Children’s Corner',
     }),
 
@@ -1115,7 +1115,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Ravel',
         composerCategory: 'Ravel, Maurice',
         instrument: 'orchestra',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Orchestra · M.81',
     }),
     w({
@@ -1124,7 +1124,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Ravel',
         composerCategory: 'Ravel, Maurice',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · M.19',
     }),
     w({
@@ -1133,7 +1133,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Ravel',
         composerCategory: 'Ravel, Maurice',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · M.30',
     }),
     w({
@@ -1143,7 +1143,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composerCategory: 'Ravel, Maurice',
         instrument: 'piano',
         form: 'concerto',
-        era: 'modern',
+        era: 'early-20th',
         key: 'g-major',
         note: 'Piano · M.83',
     }),
@@ -1152,7 +1152,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         title: 'String Quartet in F major, M.35 (Ravel, Maurice)',
         composer: 'Ravel',
         composerCategory: 'Ravel, Maurice',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Strings · M.35',
     }),
 
@@ -1163,7 +1163,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Joplin',
         composerCategory: 'Joplin, Scott',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano rag',
     }),
     w({
@@ -1172,7 +1172,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Joplin',
         composerCategory: 'Joplin, Scott',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano rag',
     }),
     w({
@@ -1181,7 +1181,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Joplin',
         composerCategory: 'Joplin, Scott',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano rag',
     }),
     w({
@@ -1190,7 +1190,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Joplin',
         composerCategory: 'Joplin, Scott',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano rag',
     }),
 
@@ -1210,7 +1210,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Satie',
         composerCategory: 'Satie, Erik',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano',
     }),
     w({
@@ -1219,7 +1219,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composer: 'Satie',
         composerCategory: 'Satie, Erik',
         instrument: 'piano',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano',
     }),
     w({
@@ -1263,7 +1263,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composerCategory: 'Rachmaninoff, Sergei',
         instrument: 'piano',
         form: 'prelude',
-        era: 'modern',
+        era: 'early-20th',
         key: 'c-sharp-minor',
         note: 'Piano · Op.3 No.2',
     }),
@@ -1274,7 +1274,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composerCategory: 'Rachmaninoff, Sergei',
         instrument: 'piano',
         form: 'concerto',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · Op.18',
     }),
     w({
@@ -1284,7 +1284,7 @@ export const POPULAR_WORKS: PopularWork[] = [
         composerCategory: 'Rachmaninoff, Sergei',
         instrument: 'piano',
         form: 'concerto',
-        era: 'modern',
+        era: 'early-20th',
         note: 'Piano · Op.30',
     }),
     w({

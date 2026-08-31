@@ -8,6 +8,7 @@ import {
     categoryBackedFilters,
     FACET_DIMENSIONS,
     facetValuesFor,
+    filtersForTypedSearch,
     filtersToStatusParts,
     hasActiveFilters,
     INSTRUMENT_FACETS,
@@ -61,6 +62,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const [searching, setSearching] = useState(false);
     const [searchError, setSearchError] = useState<string | null>(null);
     const [filterRelaxed, setFilterRelaxed] = useState(false);
+    const [indexReady, setIndexReady] = useState(true);
     const [dimension, setDimension] = useState<FacetDimension>('composer');
     const [composerId, setComposerId] = useState<string | null>(null);
     const [instrumentId, setInstrumentId] = useState<string | null>(DEFAULT_INSTRUMENT);
@@ -100,7 +102,8 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
     const runSearch = useEffectEvent(async (nextQ: string, nextFilters = filters, nextSort = sort) => {
         const trimmed = nextQ.trim();
-        const withFilters = hasActiveFilters(nextFilters);
+        const requestFilters = trimmed.length >= 2 ? filtersForTypedSearch(nextFilters) : nextFilters;
+        const withFilters = hasActiveFilters(requestFilters);
         const seq = ++seqRef.current;
         abortRef.current?.abort();
         const controller = new AbortController();
@@ -109,7 +112,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         try {
             const response = await searchImslp(trimmed, {
                 limit: DEFAULT_SEARCH_LIMIT,
-                filters: withFilters ? nextFilters : undefined,
+                filters: withFilters ? requestFilters : undefined,
                 sort: nextSort,
                 signal: controller.signal,
             });
@@ -118,6 +121,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             }
             setResults(response.results);
             setFilterRelaxed(response.filterRelaxed);
+            setIndexReady(response.indexReady !== false);
             setSearchError(null);
         } catch (err) {
             if (seq !== seqRef.current) {
@@ -153,6 +157,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 setSearching(false);
                 setSearchError(null);
                 setFilterRelaxed(false);
+                setIndexReady(true);
                 return;
             }
             void runSearch(q, filters, sort);
@@ -441,11 +446,13 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             {showResults && results.length === 0 && !searching && !searchError ? (
                 <EmptyState
                     className="imslp-panel-view mt-8"
-                    title="No matches"
+                    title={q || indexReady ? 'No matches' : 'Still loading'}
                     body={
                         q
                             ? `Nothing on IMSLP matches “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
-                            : 'Nothing on IMSLP matches these filters. Try fewer of them.'
+                            : indexReady
+                              ? 'No works on IMSLP are in all of these categories. Try fewer chips, or type a title.'
+                              : 'The IMSLP category index is still loading. Try again shortly, or type a title.'
                     }
                 >
                     {!isDefaultState ? (

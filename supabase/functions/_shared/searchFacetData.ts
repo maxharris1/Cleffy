@@ -6,12 +6,16 @@
  * by Deno (with the `.ts` extension) and by Vite/vitest (without it), so both
  * runtimes read one definition and cannot drift from each other.
  *
- * Era has no reliable work category on IMSLP — seed composers instead.
+ * Every chip except Key maps to one IMSLP Category:. Era uses IMSLP's own
+ * period categories, including the split between Early 20th century and Modern.
  */
 
 export type FacetDimension = 'composer' | 'instrument' | 'form' | 'key' | 'era';
 export type SearchSort = 'relevance' | 'title' | 'recent';
-export type EraId = 'baroque' | 'classical' | 'romantic' | 'modern';
+export type EraId = 'baroque' | 'classical' | 'romantic' | 'early-20th' | 'modern';
+
+/** Cleffy starts Find piano-scoped; this id is the default chip, not a typed-search hard filter. */
+export const DEFAULT_INSTRUMENT_ID = 'piano';
 
 export interface FacetValueData {
     id: string;
@@ -91,19 +95,12 @@ export const KEY_FACETS: FacetValueData[] = [
 ];
 
 export const ERA_FACETS: FacetValueData[] = [
-    { id: 'baroque', label: 'Baroque', tokens: ['Bach', 'Vivaldi', 'Handel'] },
-    { id: 'classical', label: 'Classical', tokens: ['Mozart', 'Haydn', 'Beethoven'] },
-    { id: 'romantic', label: 'Romantic', tokens: ['Chopin', 'Schubert', 'Brahms'] },
-    { id: 'modern', label: 'Modern', tokens: ['Debussy', 'Ravel', 'Rachmaninoff'] },
+    { id: 'baroque', label: 'Baroque', category: 'Baroque', tokens: ['Baroque'] },
+    { id: 'classical', label: 'Classical', category: 'Classical', tokens: ['Classical'] },
+    { id: 'romantic', label: 'Romantic', category: 'Romantic', tokens: ['Romantic'] },
+    { id: 'early-20th', label: 'Early 20th century', category: 'Early 20th century', tokens: ['Early 20th'] },
+    { id: 'modern', label: 'Modern', category: 'Modern', tokens: ['Modern'] },
 ];
-
-/** Representative surnames injected when era is set without a composer. */
-export const ERA_COMPOSER_SEEDS: Record<EraId, string[]> = {
-    baroque: ['Bach', 'Vivaldi', 'Handel', 'Pachelbel'],
-    classical: ['Mozart', 'Haydn', 'Beethoven'],
-    romantic: ['Chopin', 'Schubert', 'Brahms', 'Liszt', 'Schumann', 'Tchaikovsky'],
-    modern: ['Debussy', 'Ravel', 'Satie', 'Rachmaninoff', 'Joplin'],
-};
 
 // Prototype-free: these maps are read by untrusted ids, so "constructor" or
 // "toString" must miss rather than resolve to an Object.prototype member.
@@ -118,6 +115,7 @@ const byId = (values: FacetValueData[]): Record<string, FacetValueData> => {
 export const INSTRUMENT_BY_ID: Record<string, FacetValueData> = byId(INSTRUMENT_FACETS);
 export const FORM_BY_ID: Record<string, FacetValueData> = byId(FORM_FACETS);
 export const KEY_BY_ID: Record<string, FacetValueData> = byId(KEY_FACETS);
+export const ERA_BY_ID: Record<string, FacetValueData> = byId(ERA_FACETS);
 export const ERA_IDS: ReadonlySet<string> = new Set(ERA_FACETS.map((e) => e.id));
 
 const fold = (s: string): string => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
@@ -146,6 +144,9 @@ export const primaryBrowseCategory = (filters: SearchFilters): string | null => 
     if (filters.instrument && INSTRUMENT_BY_ID[filters.instrument]?.category) {
         return INSTRUMENT_BY_ID[filters.instrument]?.category ?? null;
     }
+    if (filters.era && ERA_BY_ID[filters.era]?.category) {
+        return ERA_BY_ID[filters.era]?.category ?? null;
+    }
     return null;
 };
 
@@ -163,6 +164,47 @@ export const hardFilterCategories = (filters: SearchFilters): string[] => {
         return [];
     }
     return [category, `${category} (arr)`];
+};
+
+/**
+ * Walker-style AND of OR-clauses. Instrument is category ∪ "(arr)".
+ * Key is title-only and is not a clause.
+ */
+export const browseCategoryClauses = (filters: SearchFilters): string[][] => {
+    const clauses: string[][] = [];
+    if (filters.composerCategory) {
+        clauses.push([filters.composerCategory]);
+    }
+    const instrumentCats = hardFilterCategories(filters);
+    if (instrumentCats.length > 0) {
+        clauses.push(instrumentCats);
+    }
+    const formCategory = filters.form ? FORM_BY_ID[filters.form]?.category : undefined;
+    if (formCategory) {
+        clauses.push([formCategory]);
+    }
+    const eraCategory = filters.era ? ERA_BY_ID[filters.era]?.category : undefined;
+    if (eraCategory) {
+        clauses.push([eraCategory]);
+    }
+    return clauses;
+};
+
+/** Default Piano with no other chip — Popular browse, not a typed-search hard filter. */
+export const isDefaultInstrumentOnly = (filters: SearchFilters): boolean =>
+    filters.instrument === DEFAULT_INSTRUMENT_ID &&
+    !filters.composerCategory &&
+    !filters.form &&
+    !filters.key &&
+    !filters.era;
+
+/** Strip the default Piano chip before live text search. Same rule on client and server. */
+export const filtersForTypedSearch = (filters: SearchFilters): SearchFilters => {
+    if (!isDefaultInstrumentOnly(filters)) {
+        return filters;
+    }
+    const { instrument: _instrument, ...rest } = filters;
+    return rest;
 };
 
 /** Extra search tokens implied by filters. */
@@ -183,8 +225,8 @@ export const facetTokens = (filters: SearchFilters): string[] => {
     if (filters.key && KEY_BY_ID[filters.key]) {
         out.push(...(KEY_BY_ID[filters.key]?.tokens ?? []));
     }
-    if (filters.era && ERA_COMPOSER_SEEDS[filters.era]) {
-        out.push(...ERA_COMPOSER_SEEDS[filters.era].slice(0, 3));
+    if (filters.era && ERA_BY_ID[filters.era]) {
+        out.push(...(ERA_BY_ID[filters.era]?.tokens ?? []));
     }
     return out;
 };
@@ -224,13 +266,6 @@ export const titleMatchesFilters = (title: string, filters: SearchFilters): bool
     if (key) {
         const keys = key.tokens.map(fold);
         if (!keys.some((t) => folded.includes(t))) {
-            return false;
-        }
-    }
-
-    if (filters.era && ERA_COMPOSER_SEEDS[filters.era] && !filters.composerCategory) {
-        const seeds = ERA_COMPOSER_SEEDS[filters.era].map((s) => s.toLowerCase());
-        if (!seeds.some((s) => folded.includes(s))) {
             return false;
         }
     }

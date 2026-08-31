@@ -1,20 +1,31 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
     COMPOSER_FACETS,
+    ERA_BY_ID,
+    FORM_BY_ID,
     FORM_FACETS,
     INSTRUMENT_BY_ID,
+    browseCategoryClauses,
     facetBoost,
     facetTokens,
+    filtersForTypedSearch,
     hardFilterCategories,
     hasActiveFilters,
     parseFilters,
     parseSort,
-    primaryBrowseCategory,
     titleMatchesFilters,
     type SearchFilters,
     type SearchSort,
 } from '../_shared/searchFacetData.ts';
-import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, workPageUrl } from '../_shared/imslp.ts';
+import {
+    bootstrapMembership,
+    clausesAreCovered,
+    emptyMembership,
+    intersectClauses,
+    mergeMembership,
+    addMembership,
+} from '../_shared/categoryMembership.ts';
+import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, serviceClient, workPageUrl } from '../_shared/imslp.ts';
 import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
 import {
     aliasTitlesForQuery,
@@ -42,11 +53,6 @@ interface MwSearchHit {
     pageid: number;
     snippet?: string;
     timestamp?: string;
-}
-
-interface MwCategoryMember {
-    title: string;
-    pageid: number;
 }
 
 /** Folded titles of the curated list — the ranking's popularity prior. */
@@ -114,50 +120,6 @@ const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
         }
     }
     return hits;
-};
-
-/** MediaWiki caps cmlimit at 50 — page with cmcontinue. */
-const mwCategoryMembers = async (
-    categoryTitle: string,
-    limit: number,
-    sort: SearchSort,
-): Promise<MwCategoryMember[]> => {
-    const members: MwCategoryMember[] = [];
-    let cmcontinue: string | undefined;
-    while (members.length < limit) {
-        const params: Record<string, string> = {
-            action: 'query',
-            list: 'categorymembers',
-            cmtitle: `Category:${categoryTitle}`,
-            cmnamespace: '0',
-            cmtype: 'page',
-            cmlimit: String(Math.min(50, limit - members.length)),
-        };
-        if (sort === 'recent') {
-            params['cmsort'] = 'timestamp';
-            params['cmdir'] = 'desc';
-        } else {
-            params['cmsort'] = 'sortkey';
-            params['cmdir'] = 'asc';
-        }
-        if (cmcontinue) {
-            params['cmcontinue'] = cmcontinue;
-        }
-        const data = (await mwFetch(params)) as {
-            query?: { categorymembers?: MwCategoryMember[] };
-            continue?: { cmcontinue?: string };
-        };
-        const page = data.query?.categorymembers ?? [];
-        if (page.length === 0) {
-            break;
-        }
-        members.push(...page);
-        cmcontinue = data.continue?.cmcontinue;
-        if (!cmcontinue) {
-            break;
-        }
-    }
-    return members;
 };
 
 interface TitleResolution {
@@ -252,21 +214,6 @@ const resolveTitles = async (titles: string[], hardCategories: string[]): Promis
     return resolution;
 };
 
-/**
- * Folded titles (of `titles`) that belong to at least one of the categories,
- * plus the ones whose lookup failed — those are unknown, not non-members.
- */
-const verifyCategoryMembership = async (
-    titles: string[],
-    categories: string[],
-): Promise<{ members: Set<string>; unverified: Set<string> }> => {
-    const resolution = await resolveTitles(titles, categories);
-    return {
-        members: new Set([...resolution.categoryHits.keys(), ...resolution.unverified]),
-        unverified: resolution.unverified,
-    };
-};
-
 const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     title,
     pageid,
@@ -275,74 +222,105 @@ const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     imslpUrl: workPageUrl(title),
 });
 
+const CATEGORY_OF = {
+    instrument: (id: string) => INSTRUMENT_BY_ID[id]?.category,
+    form: (id: string) => FORM_BY_ID[id]?.category,
+    era: (id: string) => ERA_BY_ID[id]?.category,
+};
+
+const lookupBrowseTitles = async (
+    clauses: string[][],
+): Promise<{ titles: string[]; indexReady: boolean }> => {
+    const boot = bootstrapMembership(POPULAR_WORKS, CATEGORY_OF);
+    const needed = [...new Set(clauses.flat())];
+    const admin = serviceClient();
+    if (!admin || needed.length === 0) {
+        return { titles: intersectClauses(boot, clauses), indexReady: clausesAreCovered(boot, clauses) };
+    }
+
+    try {
+        const { data: snaps, error: snapErr } = await admin
+            .from('imslp_category_snapshots')
+            .select('category, status')
+            .in('category', needed);
+        if (snapErr) {
+            throw snapErr;
+        }
+        const okCats = new Set(
+            (snaps ?? [])
+                .filter((row: { status?: string }) => row.status === 'ok')
+                .map((row: { category?: string }) => row.category)
+                .filter((c: string | undefined): c is string => Boolean(c)),
+        );
+        const allOk = needed.every((category) => okCats.has(category));
+
+        if (allOk) {
+            const { data, error } = await admin.rpc('imslp_intersect_categories', { p_clauses: clauses });
+            if (!error && Array.isArray(data)) {
+                return {
+                    titles: data
+                        .map((row: { page_title?: string }) => row.page_title)
+                        .filter((title: string | undefined): title is string => Boolean(title)),
+                    indexReady: true,
+                };
+            }
+            // A complete snapshot whose INTERSECT failed is unknown, not empty.
+            return { titles: [], indexReady: false };
+        }
+
+        const merged = emptyMembership();
+        mergeMembership(merged, boot);
+        const { data: rows, error: rowErr } = await admin
+            .from('imslp_category_members')
+            .select('category, page_title')
+            .in('category', needed)
+            .limit(5000);
+        if (!rowErr && rows) {
+            for (const row of rows as Array<{ category?: string; page_title?: string }>) {
+                if (row.category && row.page_title) {
+                    addMembership(merged, row.category, row.page_title);
+                }
+            }
+        }
+        return {
+            titles: intersectClauses(merged, clauses),
+            indexReady: clausesAreCovered(merged, clauses),
+        };
+    } catch {
+        return { titles: intersectClauses(boot, clauses), indexReady: clausesAreCovered(boot, clauses) };
+    }
+};
+
 const browseByFilters = async (
     filters: SearchFilters,
     limit: number,
     sort: SearchSort,
-): Promise<{ results: SearchHit[]; filterRelaxed: boolean }> => {
-    const category = primaryBrowseCategory(filters);
-    if (category) {
-        const members = await mwCategoryMembers(category, Math.min(Math.max(limit * 2, 100), 160), sort);
-        const hardCategories = hardFilterCategories(filters);
-        const instrumentIsPrimary = Boolean(
-            filters.instrument && INSTRUMENT_BY_ID[filters.instrument]?.category === category,
+): Promise<{ results: SearchHit[]; filterRelaxed: boolean; indexReady: boolean }> => {
+    const clauses = browseCategoryClauses(filters);
+    if (clauses.length > 0) {
+        const { titles, indexReady } = await lookupBrowseTitles(clauses);
+        const residual: SearchFilters = filters.key ? { key: filters.key } : {};
+        const matched = titles.filter((title) => isWorkTitle(title) && titleMatchesFilters(title, residual));
+        matched.sort((a, b) =>
+            sort === 'title' || sort === 'recent'
+                ? a.localeCompare(b)
+                : a.length - b.length || a.localeCompare(b),
         );
-
-        let kept = members;
-        let verified = false;
-        let filterRelaxed = false;
-        if (hardCategories.length > 0 && !instrumentIsPrimary) {
-            const { members: membership, unverified } = await verifyCategoryMembership(
-                members.map((m) => m.title),
-                hardCategories,
-            );
-            const matching = members.filter((m) => membership.has(foldAccents(m.title)));
-            if (matching.length > 0) {
-                kept = matching;
-                // A wholly-unverified match list confirms nothing — the token
-                // proxy below must stay in force rather than being dropped as
-                // "already answered" when every lookup chunk failed.
-                verified = matching.some((m) => !unverified.has(foldAccents(m.title)));
-            } else {
-                filterRelaxed = true;
-            }
-            if (unverified.size > 0) {
-                // Some members were kept without a completed check — say so.
-                filterRelaxed = true;
-            }
-        }
-
-        // Category membership already answered the instrument question — the
-        // token fallback would wrongly drop titles that don't say "piano".
-        const residualFilters: SearchFilters = { ...filters };
-        if (verified || instrumentIsPrimary) {
-            delete residualFilters.instrument;
-        }
-
-        let matched = kept.filter((m) => titleMatchesFilters(m.title, residualFilters));
-        if (matched.length === 0 && filterRelaxed) {
-            // Relaxing means we stopped enforcing the instrument at all — the
-            // token proxy must not re-impose it and blank the panel.
-            const { instrument: _instrument, ...withoutInstrument } = residualFilters;
-            matched = kept.filter((m) => titleMatchesFilters(m.title, withoutInstrument));
-        }
-        const filtered = matched.slice(0, limit).map((m) => toHit(m.title, m.pageid));
-        if (sort === 'relevance') {
-            // Mild preference for shorter / more specific titles when browsing.
-            return {
-                results: [...filtered].sort(
-                    (a, b) => a.title.length - b.title.length || a.title.localeCompare(b.title),
-                ),
-                filterRelaxed,
-            };
-        }
-        return { results: filtered, filterRelaxed };
+        const page = matched.slice(0, limit);
+        const resolution = await resolveTitles(page, []);
+        return {
+            results: page.map((title) =>
+                toHit(title, resolution.resolvedPageIds.get(title) ?? 0),
+            ),
+            filterRelaxed: false,
+            indexReady,
+        };
     }
 
-    // Era / key-only: seed search with facet tokens.
+    // Key-only: no IMSLP category. Title search, no era-surname seeding.
     const tokens = facetTokens(filters);
     if (tokens.length === 0) {
-        return { results: [], filterRelaxed: false };
+        return { results: [], filterRelaxed: false, indexReady: true };
     }
     const seedQuery = tokens.slice(0, 2).join(' ');
     const hits = await mwSearch(seedQuery, limit);
@@ -352,6 +330,7 @@ const browseByFilters = async (
             .slice(0, limit)
             .map((h) => toHit(h.title, h.pageid, (h.snippet ?? '').replace(/<[^>]+>/g, ''))),
         filterRelaxed: false,
+        indexReady: true,
     };
 };
 
@@ -388,18 +367,19 @@ Deno.serve(async (req) => {
     const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 100);
 
     try {
-        // Empty / short query with filters → category browse or seeded search.
+        // Empty / short query with filters → cached Walker intersection.
         if (q.length < 2 && activeFilters) {
-            const { results, filterRelaxed } = await browseByFilters(filters, limit, sort);
-            return jsonResponse({ results, total: results.length, mode: 'browse', filterRelaxed });
+            const { results, filterRelaxed, indexReady } = await browseByFilters(filters, limit, sort);
+            return jsonResponse({ results, total: results.length, mode: 'browse', filterRelaxed, indexReady });
         }
 
-        const hardCategories = hardFilterCategories(filters);
-        const composerSurname = foldAccents(filters.composerCategory?.split(',')[0]?.trim() ?? '');
+        const searchFilters = filtersForTypedSearch(filters);
+        const hardCategories = hardFilterCategories(searchFilters);
+        const composerSurname = foldAccents(searchFilters.composerCategory?.split(',')[0]?.trim() ?? '');
 
         let tokens = tokenizeQuery(q);
         let aliasTitles = aliasTitlesForQuery(q, WORK_ALIASES);
-        const variants = buildSearchVariants(q, { aliasTitles, facetTokens: facetTokens(filters) });
+        const variants = buildSearchVariants(q, { aliasTitles, facetTokens: facetTokens(searchFilters) });
 
         const perQuery = Math.min(50, Math.max(limit, 30));
         const batches: RankBatch[] = await Promise.all(
@@ -445,7 +425,7 @@ Deno.serve(async (req) => {
                 categoryHits: resolution.categoryHits,
                 unverifiedTitles: resolution.unverified,
                 requireCategories,
-                extraScore: (title) => facetBoost(title, filters),
+                extraScore: (title) => facetBoost(title, searchFilters),
             });
             if (!composerSurname) {
                 return ranked;
@@ -526,7 +506,7 @@ Deno.serve(async (req) => {
         }
         const results = page.map((h) => toHit(h.title, h.pageid, h.snippet));
 
-        return jsonResponse({ results, total: results.length, mode: 'search', filterRelaxed });
+        return jsonResponse({ results, total: results.length, mode: 'search', filterRelaxed, indexReady: true });
     } catch (err) {
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP search failed' }, 502);
     }

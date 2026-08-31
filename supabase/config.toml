@@ -410,6 +410,9 @@ verify_jwt = true
 [functions.imslp-download]
 verify_jwt = true
 
+[functions.imslp-category-sync]
+verify_jwt = true
+
 # Metered analysis endpoints — JWT required; each one meters the caller.
 [functions.score-analyze]
 verify_jwt = true
