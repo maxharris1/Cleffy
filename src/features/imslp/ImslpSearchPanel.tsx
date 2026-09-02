@@ -1,18 +1,19 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { displayWorkTitle, searchTokens, splitSearchResults } from '@/features/imslp/imslpDisplay';
-import { searchImslp, type ImslpSearchHit } from '@/features/imslp/imslpApi';
+import { searchImslp, type ImslpPeriod, type ImslpSearchHit } from '@/features/imslp/imslpApi';
 import { filterPopularWorks, groupPopularByComposer, POPULAR_WORKS, type PopularWork } from '@/features/imslp/popularWorks';
 import {
     buildSearchFilters,
     categoryBackedFilters,
+    ERA_FACETS,
     FACET_DIMENSIONS,
     facetValuesFor,
     filtersToStatusParts,
     hasActiveFilters,
     INSTRUMENT_FACETS,
-    type EraId,
     type FacetDimension,
+    type RelaxedConstraint,
     type SearchSort,
 } from '@/features/imslp/searchFacets';
 import { Button } from '@/ui/Button';
@@ -33,6 +34,28 @@ const DEFAULT_INSTRUMENT = 'piano';
 /** Chip strips scroll on phones (like the library's) and wrap from sm up. */
 const CHIP_ROW_CLASS =
     'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0';
+
+const setsEqual = (a: Set<string>, b: Set<string>): boolean => {
+    if (a.size !== b.size) {
+        return false;
+    }
+    for (const v of a) {
+        if (!b.has(v)) {
+            return false;
+        }
+    }
+    return true;
+};
+
+const toggleInSet = (prev: Set<string>, id: string): Set<string> => {
+    const next = new Set(prev);
+    if (next.has(id)) {
+        next.delete(id);
+    } else {
+        next.add(id);
+    }
+    return next;
+};
 
 const highlightMatches = (text: string, tokens: string[]): ReactNode => {
     if (tokens.length === 0 || !text) {
@@ -61,86 +84,123 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const [searching, setSearching] = useState(false);
     const [searchError, setSearchError] = useState<string | null>(null);
     const [filterRelaxed, setFilterRelaxed] = useState(false);
+    const [relaxed, setRelaxed] = useState<RelaxedConstraint[]>([]);
+    const [total, setTotal] = useState(0);
+    const [hasMore, setHasMore] = useState(false);
+    const [indexReady, setIndexReady] = useState(true);
+    const [notReady, setNotReady] = useState<string[]>([]);
+    const [period, setPeriod] = useState<ImslpPeriod | null>(null);
+    const [searchMode, setSearchMode] = useState<'browse' | 'search' | null>(null);
+    const [typedLimit, setTypedLimit] = useState(DEFAULT_SEARCH_LIMIT);
     const [dimension, setDimension] = useState<FacetDimension>('composer');
-    const [composerId, setComposerId] = useState<string | null>(null);
-    const [instrumentId, setInstrumentId] = useState<string | null>(DEFAULT_INSTRUMENT);
-    const [formId, setFormId] = useState<string | null>(null);
-    const [keyId, setKeyId] = useState<string | null>(null);
-    const [eraId, setEraId] = useState<EraId | null>(null);
+    const [composerIds, setComposerIds] = useState<Set<string>>(() => new Set());
+    const [instrumentIds, setInstrumentIds] = useState<Set<string>>(() => new Set([DEFAULT_INSTRUMENT]));
+    const [formIds, setFormIds] = useState<Set<string>>(() => new Set());
+    const [keyIds, setKeyIds] = useState<Set<string>>(() => new Set());
+    const [eraIds, setEraIds] = useState<Set<string>>(() => new Set());
+    const [ignoreQueryPeriod, setIgnoreQueryPeriod] = useState(false);
     const [sort, setSort] = useState<SearchSort>('relevance');
 
-    // Supersede in-flight searches: the token decides who may write state, the
-    // controller stops wasted network on the way out.
     const seqRef = useRef(0);
     const abortRef = useRef<AbortController | null>(null);
-    // Enter and "Try again" bump the tick with the debounce skipped.
     const [searchTick, setSearchTick] = useState(0);
     const immediateRef = useRef(false);
 
     const filters = useMemo(
         () =>
             buildSearchFilters({
-                composerId,
-                instrumentId,
-                formId,
-                keyId,
-                eraId,
+                composerIds,
+                instrumentIds,
+                formIds,
+                keyIds,
+                eraIds,
+                ignoreQueryPeriod,
             }),
-        [composerId, instrumentId, formId, keyId, eraId],
+        [composerIds, instrumentIds, formIds, keyIds, eraIds, ignoreQueryPeriod],
     );
     const filtersActive = hasActiveFilters(filters);
     const isDefaultFilterState =
-        instrumentId === DEFAULT_INSTRUMENT && !composerId && !formId && !keyId && !eraId;
+        setsEqual(instrumentIds, new Set([DEFAULT_INSTRUMENT])) &&
+        composerIds.size === 0 &&
+        formIds.size === 0 &&
+        keyIds.size === 0 &&
+        eraIds.size === 0;
     const isDefaultState = isDefaultFilterState && sort === 'relevance' && query.trim() === '';
 
     const q = query.trim();
-    // The default state renders the curated piano list without a network call;
-    // a search fires only for a typed query or a non-default filter choice.
     const isLiveQuery = q.length >= 2 || (filtersActive && !isDefaultFilterState);
 
-    const runSearch = useEffectEvent(async (nextQ: string, nextFilters = filters, nextSort = sort) => {
-        const trimmed = nextQ.trim();
-        const withFilters = hasActiveFilters(nextFilters);
-        const seq = ++seqRef.current;
-        abortRef.current?.abort();
-        const controller = new AbortController();
-        abortRef.current = controller;
-        setSearching(true);
-        try {
-            const response = await searchImslp(trimmed, {
-                limit: DEFAULT_SEARCH_LIMIT,
-                filters: withFilters ? nextFilters : undefined,
-                sort: nextSort,
-                signal: controller.signal,
-            });
-            if (seq !== seqRef.current) {
-                return;
-            }
-            setResults(response.results);
-            setFilterRelaxed(response.filterRelaxed);
-            setSearchError(null);
-        } catch (err) {
-            if (seq !== seqRef.current) {
-                return;
-            }
-            if (err instanceof DOMException && err.name === 'AbortError') {
-                return;
-            }
-            // Keep whatever results are on screen — a failed refresh is not
-            // "no matches".
-            setSearchError(
-                err instanceof DOMException && err.name === 'TimeoutError'
-                    ? 'IMSLP took too long to answer.'
-                    : err instanceof Error
-                      ? err.message
-                      : 'Search failed',
-            );
-        } finally {
-            if (seq === seqRef.current) {
-                setSearching(false);
-            }
+    const applyResponse = (
+        response: Awaited<ReturnType<typeof searchImslp>>,
+        append: boolean,
+        seq: number,
+    ) => {
+        if (seq !== seqRef.current) {
+            return;
         }
-    });
+        setResults((prev) => {
+            if (!append || !prev) {
+                return response.results;
+            }
+            const seen = new Set(prev.map((h) => h.pageid));
+            const extra = response.results.filter((h) => !seen.has(h.pageid));
+            return [...prev, ...extra];
+        });
+        setFilterRelaxed(response.filterRelaxed);
+        setRelaxed(response.relaxed);
+        setTotal(response.total);
+        setHasMore(response.hasMore);
+        setIndexReady(response.indexReady);
+        setNotReady(response.notReady ?? []);
+        setPeriod(response.period);
+        setSearchMode(response.mode ?? (q.length >= 2 ? 'search' : 'browse'));
+        setSearchError(null);
+    };
+
+    const runSearch = useEffectEvent(
+        async (
+            nextQ: string,
+            nextFilters = filters,
+            nextSort = sort,
+            opts: { limit?: number; offset?: number; append?: boolean } = {},
+        ) => {
+            const trimmed = nextQ.trim();
+            const withFilters = hasActiveFilters(nextFilters);
+            const seq = ++seqRef.current;
+            abortRef.current?.abort();
+            const controller = new AbortController();
+            abortRef.current = controller;
+            setSearching(true);
+            try {
+                const response = await searchImslp(trimmed, {
+                    limit: opts.limit ?? DEFAULT_SEARCH_LIMIT,
+                    offset: opts.offset ?? 0,
+                    filters: withFilters ? nextFilters : undefined,
+                    sort: nextSort,
+                    signal: controller.signal,
+                });
+                applyResponse(response, opts.append === true, seq);
+            } catch (err) {
+                if (seq !== seqRef.current) {
+                    return;
+                }
+                if (err instanceof DOMException && err.name === 'AbortError') {
+                    return;
+                }
+                setSearchError(
+                    err instanceof DOMException && err.name === 'TimeoutError'
+                        ? 'IMSLP took too long to answer.'
+                        : err instanceof Error
+                          ? err.message
+                          : 'Search failed',
+                );
+            } finally {
+                if (seq === seqRef.current) {
+                    setSearching(false);
+                }
+            }
+        },
+    );
 
     useEffect(() => {
         const delay = immediateRef.current ? 0 : 280;
@@ -153,12 +213,25 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 setSearching(false);
                 setSearchError(null);
                 setFilterRelaxed(false);
+                setRelaxed([]);
+                setTotal(0);
+                setHasMore(false);
+                setIndexReady(true);
+                setNotReady([]);
+                setPeriod(null);
+                setSearchMode(null);
+                setTypedLimit(DEFAULT_SEARCH_LIMIT);
                 return;
             }
-            void runSearch(q, filters, sort);
+            setTypedLimit(DEFAULT_SEARCH_LIMIT);
+            void runSearch(q, filters, sort, { limit: DEFAULT_SEARCH_LIMIT, offset: 0 });
         }, delay);
         return () => window.clearTimeout(handle);
     }, [q, filters, sort, isLiveQuery, searchTick]);
+
+    useEffect(() => {
+        setIgnoreQueryPeriod(false);
+    }, [q]);
 
     useEffect(
         () => () => {
@@ -174,27 +247,24 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
     const submitNow = () => {
         searchNow();
-        // Dismiss the mobile keyboard — the promised "search" action happened.
         searchRef.current?.blur();
     };
 
     const showCurated = !isLiveQuery;
     const showResults = isLiveQuery && results !== null;
-    // Highlight only what the user typed — with a default instrument filter,
-    // highlighting filter tokens would <mark> "Piano" on every row.
     const tokens = useMemo(() => searchTokens(q), [q]);
     const { best, more } = useMemo(() => splitSearchResults(results ?? []), [results]);
 
     const curatedWorks = useMemo(
         () =>
             filterPopularWorks(POPULAR_WORKS, {
-                composerId,
-                instrumentId,
-                formId,
-                keyId,
-                eraId,
+                composerIds,
+                instrumentIds,
+                formIds,
+                keyIds,
+                eraIds,
             }),
-        [composerId, instrumentId, formId, keyId, eraId],
+        [composerIds, instrumentIds, formIds, keyIds, eraIds],
     );
     const curatedGroups = useMemo(() => groupPopularByComposer(curatedWorks), [curatedWorks]);
 
@@ -206,34 +276,63 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const statusLine = searching
         ? `${facetPrefix}Searching IMSLP…`
         : isLiveQuery && results
-          ? `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
+          ? searchMode === 'browse' && indexReady
+              ? `${facetPrefix}${total} score${total === 1 ? '' : 's'}`
+              : hasMore && total > results.length
+                ? `${facetPrefix}${results.length} of ${total}`
+                : `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
           : isLiveQuery
-            ? // Nothing to show yet: either the debounce is still armed or the
-              // first response failed.
-              `${facetPrefix}${searchError ? 'Search unavailable' : 'Searching IMSLP…'}`
+            ? `${facetPrefix}${searchError ? 'Search unavailable' : 'Searching IMSLP…'}`
             : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
 
-    // The server relaxes the instrument hard filter, whichever one is selected.
-    const relaxedInstrument = instrumentId
-        ? (INSTRUMENT_FACETS.find((i) => i.id === instrumentId)?.label.toLowerCase() ?? null)
-        : null;
+    const relaxedHint = (() => {
+        if (relaxed.length === 0) {
+            return filterRelaxed
+                ? 'Showing close matches — few matching scores were found for this search.'
+                : null;
+        }
+        const names = relaxed.map((constraint) => {
+            switch (constraint) {
+                case 'instrument': {
+                    const labels = [...instrumentIds]
+                        .map((id) => INSTRUMENT_FACETS.find((i) => i.id === id)?.label.toLowerCase())
+                        .filter((v): v is string => Boolean(v));
+                    return labels.length > 0 ? labels.join('/') : 'instrument';
+                }
+                case 'era':
+                    return 'era';
+                default: {
+                    const _exhaustive: never = constraint;
+                    return _exhaustive;
+                }
+            }
+        });
+        return `Showing close matches — the ${names.join(' and ')} filter${relaxed.length === 1 ? '' : 's'} matched too few scores.`;
+    })();
+
+    const inferredEraIds =
+        period?.source === 'query' && !ignoreQueryPeriod ? new Set(period.eraIds) : new Set<string>();
 
     const toggleValue = (id: string) => {
         switch (dimension) {
             case 'composer':
-                setComposerId((prev) => (prev === id ? null : id));
+                setComposerIds((prev) => toggleInSet(prev, id));
                 break;
             case 'instrument':
-                setInstrumentId((prev) => (prev === id ? null : id));
+                setInstrumentIds((prev) => toggleInSet(prev, id));
                 break;
             case 'form':
-                setFormId((prev) => (prev === id ? null : id));
+                setFormIds((prev) => toggleInSet(prev, id));
                 break;
             case 'key':
-                setKeyId((prev) => (prev === id ? null : id));
+                setKeyIds((prev) => toggleInSet(prev, id));
                 break;
             case 'era':
-                setEraId((prev) => (prev === id ? null : (id as EraId)));
+                if (inferredEraIds.has(id) && !eraIds.has(id)) {
+                    setIgnoreQueryPeriod(true);
+                    break;
+                }
+                setEraIds((prev) => toggleInSet(prev, id));
                 break;
             default: {
                 const _exhaustive: never = dimension;
@@ -245,15 +344,15 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const selectedForDimension = (() => {
         switch (dimension) {
             case 'composer':
-                return composerId;
+                return composerIds;
             case 'instrument':
-                return instrumentId;
+                return instrumentIds;
             case 'form':
-                return formId;
+                return formIds;
             case 'key':
-                return keyId;
+                return keyIds;
             case 'era':
-                return eraId;
+                return eraIds;
             default: {
                 const _exhaustive: never = dimension;
                 return _exhaustive;
@@ -261,15 +360,37 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         }
     })();
 
+    const isChipPressed = (id: string): boolean => {
+        if (dimension === 'era' && inferredEraIds.has(id)) {
+            return true;
+        }
+        return selectedForDimension.has(id);
+    };
+
     const resetToDefault = () => {
         setQuery('');
-        setComposerId(null);
-        setInstrumentId(DEFAULT_INSTRUMENT);
-        setFormId(null);
-        setKeyId(null);
-        setEraId(null);
+        setComposerIds(new Set());
+        setInstrumentIds(new Set([DEFAULT_INSTRUMENT]));
+        setFormIds(new Set());
+        setKeyIds(new Set());
+        setEraIds(new Set());
+        setIgnoreQueryPeriod(false);
         setSort('relevance');
         setDimension('composer');
+    };
+
+    const showMore = () => {
+        if (searchMode === 'browse') {
+            void runSearch(q, filters, sort, {
+                limit: DEFAULT_SEARCH_LIMIT,
+                offset: results?.length ?? 0,
+                append: true,
+            });
+            return;
+        }
+        const nextLimit = typedLimit >= 200 ? 300 : 200;
+        setTypedLimit(nextLimit);
+        void runSearch(q, filters, sort, { limit: nextLimit, offset: 0, append: true });
     };
 
     const renderHit = (hit: ImslpSearchHit) => {
@@ -297,7 +418,9 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         );
     };
 
-    const valueFacets = facetValuesFor(dimension);
+    const valueFacets = dimension === 'era' ? ERA_FACETS : facetValuesFor(dimension);
+    const emptyParts = filtersToStatusParts(filters);
+    const indexLabel = notReady[0] ?? emptyParts.find((p) => ERA_FACETS.some((e) => e.label === p)) ?? 'this category';
 
     return (
         <div className="mt-4">
@@ -344,12 +467,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     </button>
                 ))}
                 {!isDefaultState ? (
-                    <button
-                        type="button"
-                        className={chipClassName(false)}
-                        onClick={resetToDefault}
-                        disabled={disabled}
-                    >
+                    <button type="button" className={chipClassName(false)} onClick={resetToDefault} disabled={disabled}>
                         Reset
                     </button>
                 ) : null}
@@ -360,8 +478,8 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     <button
                         key={value.id}
                         type="button"
-                        aria-pressed={selectedForDimension === value.id}
-                        className={chipClassName(selectedForDimension === value.id)}
+                        aria-pressed={isChipPressed(value.id)}
+                        className={chipClassName(isChipPressed(value.id))}
                         onClick={() => toggleValue(value.id)}
                         disabled={disabled}
                     >
@@ -402,11 +520,8 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 </div>
             ) : null}
 
-            {isLiveQuery && filterRelaxed && (results?.length ?? 0) > 0 ? (
-                <p className="mt-2 text-xs text-stone-500">
-                    Showing close matches — few {relaxedInstrument ? `${relaxedInstrument}-tagged` : 'matching'} scores
-                    were found for this search.
-                </p>
+            {isLiveQuery && relaxedHint && (results?.length ?? 0) > 0 ? (
+                <p className="mt-2 text-xs text-stone-500">{relaxedHint}</p>
             ) : null}
 
             {showCurated ? (
@@ -441,11 +556,13 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             {showResults && results.length === 0 && !searching && !searchError ? (
                 <EmptyState
                     className="imslp-panel-view mt-8"
-                    title="No matches"
+                    title={!indexReady ? 'Index still building' : 'No matches'}
                     body={
-                        q
-                            ? `Nothing on IMSLP matches “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
-                            : 'Nothing on IMSLP matches these filters. Try fewer of them.'
+                        !indexReady
+                            ? `IMSLP index is still being built for ${indexLabel}. Try typing a title.`
+                            : q.length >= 2
+                              ? `Nothing on IMSLP matches “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
+                              : `No IMSLP works are in all of: ${emptyParts.join(' · ') || 'these filters'}.`
                     }
                 >
                     {!isDefaultState ? (
@@ -458,7 +575,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
             {showResults && results.length > 0 ? (
                 <div
-                    key={`results-${q}-${composerId}-${instrumentId}-${formId}-${keyId}-${eraId}`}
+                    key={`results-${q}-${[...composerIds]}-${[...instrumentIds]}-${[...formIds]}-${[...keyIds]}-${[...eraIds]}`}
                     aria-busy={searching}
                     className={`imslp-panel-view mt-3 transition-opacity ${searching ? 'opacity-60' : ''}`}
                 >
@@ -472,10 +589,12 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                             <ul className="mt-1">{more.map(renderHit)}</ul>
                         </>
                     ) : null}
-                    {results.length >= DEFAULT_SEARCH_LIMIT ? (
-                        <p className="mt-3 text-xs text-stone-500">
-                            Showing the first {DEFAULT_SEARCH_LIMIT} results — add a composer or form to narrow down.
-                        </p>
+                    {hasMore ? (
+                        <div className="mt-3">
+                            <Button variant="ghost" size="sm" onClick={showMore} disabled={searching}>
+                                Show more
+                            </Button>
+                        </div>
                     ) : null}
                 </div>
             ) : null}

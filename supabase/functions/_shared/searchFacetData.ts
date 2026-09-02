@@ -6,12 +6,15 @@
  * by Deno (with the `.ts` extension) and by Vite/vitest (without it), so both
  * runtimes read one definition and cannot drift from each other.
  *
- * Era has no reliable work category on IMSLP — seed composers instead.
+ * Era chips bind to IMSLP period categories (Baroque, Classical, Romantic,
+ * Early 20th century, Modern). Key is a title constraint only — it has no
+ * work category.
  */
 
 export type FacetDimension = 'composer' | 'instrument' | 'form' | 'key' | 'era';
 export type SearchSort = 'relevance' | 'title' | 'recent';
-export type EraId = 'baroque' | 'classical' | 'romantic' | 'modern';
+export type EraId = 'baroque' | 'classical' | 'romantic' | 'early-20th' | 'modern';
+export type RelaxedConstraint = 'instrument' | 'era';
 
 export interface FacetValueData {
     id: string;
@@ -22,12 +25,19 @@ export interface FacetValueData {
     tokens: string[];
 }
 
+/**
+ * Multi-select filters. Within a dimension = OR (one UNION group); across
+ * dimensions = AND (INTERSECT). Legacy singular field names are accepted by
+ * parseFilters for one release.
+ */
 export interface SearchFilters {
-    composerCategory?: string;
-    instrument?: string;
-    form?: string;
-    key?: string;
-    era?: EraId;
+    composerCategories?: string[];
+    instruments?: string[];
+    forms?: string[];
+    keys?: string[];
+    eras?: EraId[];
+    /** Typed-search only: do not apply a period inferred from the query. */
+    ignoreQueryPeriod?: boolean;
 }
 
 export const COMPOSER_FACETS: FacetValueData[] = [
@@ -91,19 +101,12 @@ export const KEY_FACETS: FacetValueData[] = [
 ];
 
 export const ERA_FACETS: FacetValueData[] = [
-    { id: 'baroque', label: 'Baroque', tokens: ['Bach', 'Vivaldi', 'Handel'] },
-    { id: 'classical', label: 'Classical', tokens: ['Mozart', 'Haydn', 'Beethoven'] },
-    { id: 'romantic', label: 'Romantic', tokens: ['Chopin', 'Schubert', 'Brahms'] },
-    { id: 'modern', label: 'Modern', tokens: ['Debussy', 'Ravel', 'Rachmaninoff'] },
+    { id: 'baroque', label: 'Baroque', category: 'Baroque', tokens: ['baroque'] },
+    { id: 'classical', label: 'Classical', category: 'Classical', tokens: ['classical'] },
+    { id: 'romantic', label: 'Romantic', category: 'Romantic', tokens: ['romantic'] },
+    { id: 'early-20th', label: 'Early 20th century', category: 'Early 20th century', tokens: ['early 20th'] },
+    { id: 'modern', label: 'Modern', category: 'Modern', tokens: ['modern'] },
 ];
-
-/** Representative surnames injected when era is set without a composer. */
-export const ERA_COMPOSER_SEEDS: Record<EraId, string[]> = {
-    baroque: ['Bach', 'Vivaldi', 'Handel', 'Pachelbel'],
-    classical: ['Mozart', 'Haydn', 'Beethoven'],
-    romantic: ['Chopin', 'Schubert', 'Brahms', 'Liszt', 'Schumann', 'Tchaikovsky'],
-    modern: ['Debussy', 'Ravel', 'Satie', 'Rachmaninoff', 'Joplin'],
-};
 
 // Prototype-free: these maps are read by untrusted ids, so "constructor" or
 // "toString" must miss rather than resolve to an Object.prototype member.
@@ -118,124 +121,179 @@ const byId = (values: FacetValueData[]): Record<string, FacetValueData> => {
 export const INSTRUMENT_BY_ID: Record<string, FacetValueData> = byId(INSTRUMENT_FACETS);
 export const FORM_BY_ID: Record<string, FacetValueData> = byId(FORM_FACETS);
 export const KEY_BY_ID: Record<string, FacetValueData> = byId(KEY_FACETS);
+export const ERA_BY_ID: Record<string, FacetValueData> = byId(ERA_FACETS);
 export const ERA_IDS: ReadonlySet<string> = new Set(ERA_FACETS.map((e) => e.id));
 
+const MAX_FILTERS_PER_DIMENSION = 6;
+
 const fold = (s: string): string => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+const uniqCap = (ids: string[], cap = MAX_FILTERS_PER_DIMENSION): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of ids) {
+        const id = raw.trim();
+        if (!id || seen.has(id)) {
+            continue;
+        }
+        seen.add(id);
+        out.push(id);
+        if (out.length >= cap) {
+            break;
+        }
+    }
+    return out;
+};
 
 export const hasActiveFilters = (filters: SearchFilters | undefined): boolean => {
     if (!filters) {
         return false;
     }
-    return Boolean(filters.composerCategory || filters.instrument || filters.form || filters.key || filters.era);
+    return Boolean(
+        (filters.composerCategories && filters.composerCategories.length > 0) ||
+            (filters.instruments && filters.instruments.length > 0) ||
+            (filters.forms && filters.forms.length > 0) ||
+            (filters.keys && filters.keys.length > 0) ||
+            (filters.eras && filters.eras.length > 0),
+    );
 };
 
-/**
- * Best category for empty-query browse: composer > form > instrument. Form
- * before instrument because form categories (Nocturnes, Sonatas) are far
- * smaller than "For piano" — with an instrument also active, members of the
- * small category get verified against the instrument categories, which is the
- * cheap direction.
- */
-export const primaryBrowseCategory = (filters: SearchFilters): string | null => {
-    if (filters.composerCategory) {
-        return filters.composerCategory;
-    }
-    if (filters.form && FORM_BY_ID[filters.form]?.category) {
-        return FORM_BY_ID[filters.form]?.category ?? null;
-    }
-    if (filters.instrument && INSTRUMENT_BY_ID[filters.instrument]?.category) {
-        return INSTRUMENT_BY_ID[filters.instrument]?.category ?? null;
-    }
-    return null;
-};
-
-/**
- * IMSLP categories that must contain a hit for it to survive the instrument
- * filter. Includes the "(arr)" variant — arrangements for the instrument are
- * fine to play, just ranked below originals.
- */
-export const hardFilterCategories = (filters: SearchFilters): string[] => {
-    if (!filters.instrument) {
-        return [];
-    }
-    const category = INSTRUMENT_BY_ID[filters.instrument]?.category;
+const instrumentCategories = (id: string): string[] => {
+    const category = INSTRUMENT_BY_ID[id]?.category;
     if (!category) {
         return [];
     }
     return [category, `${category} (arr)`];
 };
 
-/** Extra search tokens implied by filters. */
-export const facetTokens = (filters: SearchFilters): string[] => {
-    const out: string[] = [];
-    if (filters.composerCategory) {
-        const surname = filters.composerCategory.split(',')[0]?.trim();
-        if (surname) {
-            out.push(surname);
+/**
+ * One UNION group per active dimension (OR within, AND across). Instrument
+ * groups include the "(arr)" variant. Key produces no group — title only.
+ */
+export const categoryGroupsFor = (filters: SearchFilters): string[][] => {
+    const groups: string[][] = [];
+
+    if (filters.composerCategories && filters.composerCategories.length > 0) {
+        groups.push([...filters.composerCategories]);
+    }
+
+    if (filters.instruments && filters.instruments.length > 0) {
+        const cats: string[] = [];
+        for (const id of filters.instruments) {
+            cats.push(...instrumentCategories(id));
+        }
+        if (cats.length > 0) {
+            groups.push(cats);
         }
     }
-    if (filters.instrument && INSTRUMENT_BY_ID[filters.instrument]) {
-        out.push(...(INSTRUMENT_BY_ID[filters.instrument]?.tokens ?? []));
+
+    if (filters.forms && filters.forms.length > 0) {
+        const cats: string[] = [];
+        for (const id of filters.forms) {
+            const category = FORM_BY_ID[id]?.category;
+            if (category) {
+                cats.push(category);
+            }
+        }
+        if (cats.length > 0) {
+            groups.push(cats);
+        }
     }
-    if (filters.form && FORM_BY_ID[filters.form]) {
-        out.push(...(FORM_BY_ID[filters.form]?.tokens ?? []));
+
+    if (filters.eras && filters.eras.length > 0) {
+        const cats: string[] = [];
+        for (const id of filters.eras) {
+            const category = ERA_BY_ID[id]?.category;
+            if (category) {
+                cats.push(category);
+            }
+        }
+        if (cats.length > 0) {
+            groups.push(cats);
+        }
     }
-    if (filters.key && KEY_BY_ID[filters.key]) {
-        out.push(...(KEY_BY_ID[filters.key]?.tokens ?? []));
-    }
-    if (filters.era && ERA_COMPOSER_SEEDS[filters.era]) {
-        out.push(...ERA_COMPOSER_SEEDS[filters.era].slice(0, 3));
+
+    return groups;
+};
+
+/** Flattened categories from groups — used to ask which snapshots are missing. */
+export const categoriesInGroups = (groups: string[][]): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const group of groups) {
+        for (const category of group) {
+            if (!seen.has(category)) {
+                seen.add(category);
+                out.push(category);
+            }
+        }
     }
     return out;
 };
 
-/** Title must match secondary facet constraints when browsing a primary category. */
+/**
+ * IMSLP categories that must contain a hit for it to survive hard filters.
+ * Instrument includes "(arr)"; era is the period category.
+ */
+export const hardFilterCategories = (filters: SearchFilters): string[] => {
+    const cats: string[] = [];
+    for (const id of filters.instruments ?? []) {
+        cats.push(...instrumentCategories(id));
+    }
+    for (const id of filters.eras ?? []) {
+        const category = ERA_BY_ID[id]?.category;
+        if (category) {
+            cats.push(category);
+        }
+    }
+    return cats;
+};
+
+/** Extra search tokens implied by filters. Era is category membership, not tokens. */
+export const facetTokens = (filters: SearchFilters): string[] => {
+    const out: string[] = [];
+    for (const category of filters.composerCategories ?? []) {
+        const surname = category.split(',')[0]?.trim();
+        if (surname) {
+            out.push(surname);
+        }
+    }
+    for (const id of filters.instruments ?? []) {
+        if (INSTRUMENT_BY_ID[id]) {
+            out.push(...(INSTRUMENT_BY_ID[id]?.tokens ?? []));
+        }
+    }
+    for (const id of filters.forms ?? []) {
+        if (FORM_BY_ID[id]) {
+            out.push(...(FORM_BY_ID[id]?.tokens ?? []));
+        }
+    }
+    for (const id of filters.keys ?? []) {
+        if (KEY_BY_ID[id]) {
+            out.push(...(KEY_BY_ID[id]?.tokens ?? []));
+        }
+    }
+    return out;
+};
+
+/**
+ * Title must match key (and only key) when a key chip is set. Other dimensions
+ * are category membership. Documented limitation: key is a title check on the
+ * returned page, not an IMSLP category.
+ */
 export const titleMatchesFilters = (title: string, filters: SearchFilters): boolean => {
     const folded = fold(title);
-
-    if (filters.composerCategory && primaryBrowseCategory(filters) !== filters.composerCategory) {
-        const surname = filters.composerCategory.split(',')[0]?.trim().toLowerCase();
-        if (surname && !folded.includes(fold(surname))) {
+    const keys = filters.keys ?? [];
+    if (keys.length === 0) {
+        return true;
+    }
+    return keys.some((id) => {
+        const key = KEY_BY_ID[id];
+        if (!key) {
             return false;
         }
-    }
-
-    const instrument = filters.instrument ? INSTRUMENT_BY_ID[filters.instrument] : undefined;
-    if (instrument) {
-        // When browsing instrument category itself, skip token check.
-        if (primaryBrowseCategory(filters) !== instrument.category) {
-            if (!instrument.tokens.some((t) => folded.includes(t.toLowerCase()))) {
-                return false;
-            }
-        }
-    }
-
-    const form = filters.form ? FORM_BY_ID[filters.form] : undefined;
-    if (form) {
-        const tokens = form.tokens.map(fold);
-        if (primaryBrowseCategory(filters) !== form.category) {
-            if (!tokens.some((t) => folded.includes(t))) {
-                return false;
-            }
-        }
-    }
-
-    const key = filters.key ? KEY_BY_ID[filters.key] : undefined;
-    if (key) {
-        const keys = key.tokens.map(fold);
-        if (!keys.some((t) => folded.includes(t))) {
-            return false;
-        }
-    }
-
-    if (filters.era && ERA_COMPOSER_SEEDS[filters.era] && !filters.composerCategory) {
-        const seeds = ERA_COMPOSER_SEEDS[filters.era].map((s) => s.toLowerCase());
-        if (!seeds.some((s) => folded.includes(s))) {
-            return false;
-        }
-    }
-
-    return true;
+        return key.tokens.map(fold).some((t) => folded.includes(t));
+    });
 };
 
 /** Extra score for hits that align with active facets. */
@@ -243,8 +301,8 @@ export const facetBoost = (title: string, filters: SearchFilters): number => {
     let boost = 0;
     const folded = fold(title);
 
-    if (filters.composerCategory) {
-        const surname = filters.composerCategory.split(',')[0]?.trim().toLowerCase() ?? '';
+    for (const category of filters.composerCategories ?? []) {
+        const surname = category.split(',')[0]?.trim().toLowerCase() ?? '';
         if (surname && folded.includes(surname)) {
             boost += 20;
         }
@@ -268,10 +326,46 @@ export const parseSort = (raw: unknown): SearchSort => {
 /** "Surname, First" shape — sanity bound for the free-text composer category. */
 const COMPOSER_CATEGORY_RE = /^[\p{L}\p{M}.'\- ]+,\s?[\p{L}\p{M}.'\- ]+$/u;
 
+const asStringList = (raw: unknown): string[] => {
+    if (typeof raw === 'string') {
+        return [raw];
+    }
+    if (Array.isArray(raw)) {
+        return raw.filter((v): v is string => typeof v === 'string');
+    }
+    return [];
+};
+
+const parseComposerCategories = (o: Record<string, unknown>): string[] => {
+    const fromArray = asStringList(o['composerCategories']);
+    const fromSingular = typeof o['composerCategory'] === 'string' ? [o['composerCategory']] : [];
+    const accepted: string[] = [];
+    for (const value of [...fromArray, ...fromSingular]) {
+        const category = value.trim();
+        if (category && category.length <= 80 && COMPOSER_CATEGORY_RE.test(category)) {
+            accepted.push(category);
+        }
+    }
+    return uniqCap(accepted);
+};
+
+const parseKnownIds = (raw: unknown, extra: unknown, isKnown: (id: string) => boolean): string[] => {
+    const ids = [...asStringList(raw), ...asStringList(extra)];
+    const accepted: string[] = [];
+    for (const value of ids) {
+        const id = value.trim();
+        if (id && isKnown(id)) {
+            accepted.push(id);
+        }
+    }
+    return uniqCap(accepted);
+};
+
 /**
  * Validate raw filters. Ids outside the shared taxonomy are dropped rather
  * than passed through — an unknown id used to silently behave as no filter,
- * which hid client/server drift.
+ * which hid client/server drift. Accepts the old singular field names for
+ * one release so an un-refreshed tab keeps working.
  */
 export const parseFilters = (raw: unknown): SearchFilters => {
     if (!raw || typeof raw !== 'object') {
@@ -279,23 +373,35 @@ export const parseFilters = (raw: unknown): SearchFilters => {
     }
     const o = raw as Record<string, unknown>;
     const filters: SearchFilters = {};
-    if (typeof o['composerCategory'] === 'string') {
-        const category = o['composerCategory'].trim();
-        if (category && category.length <= 80 && COMPOSER_CATEGORY_RE.test(category)) {
-            filters.composerCategory = category;
-        }
+
+    const composerCategories = parseComposerCategories(o);
+    if (composerCategories.length > 0) {
+        filters.composerCategories = composerCategories;
     }
-    if (typeof o['instrument'] === 'string' && INSTRUMENT_BY_ID[o['instrument'].trim()]) {
-        filters.instrument = o['instrument'].trim();
+
+    const instruments = parseKnownIds(o['instruments'], o['instrument'], (id) => Boolean(INSTRUMENT_BY_ID[id]));
+    if (instruments.length > 0) {
+        filters.instruments = instruments;
     }
-    if (typeof o['form'] === 'string' && FORM_BY_ID[o['form'].trim()]) {
-        filters.form = o['form'].trim();
+
+    const forms = parseKnownIds(o['forms'], o['form'], (id) => Boolean(FORM_BY_ID[id]));
+    if (forms.length > 0) {
+        filters.forms = forms;
     }
-    if (typeof o['key'] === 'string' && KEY_BY_ID[o['key'].trim()]) {
-        filters.key = o['key'].trim();
+
+    const keys = parseKnownIds(o['keys'], o['key'], (id) => Boolean(KEY_BY_ID[id]));
+    if (keys.length > 0) {
+        filters.keys = keys;
     }
-    if (typeof o['era'] === 'string' && ERA_IDS.has(o['era'].trim())) {
-        filters.era = o['era'].trim() as EraId;
+
+    const eras = parseKnownIds(o['eras'], o['era'], (id) => ERA_IDS.has(id));
+    if (eras.length > 0) {
+        filters.eras = eras as EraId[];
     }
+
+    if (o['ignoreQueryPeriod'] === true) {
+        filters.ignoreQueryPeriod = true;
+    }
+
     return filters;
 };

@@ -209,6 +209,16 @@ If `pg_cron` / `pg_net` are unavailable, schedule Cloud Scheduler to
 `POST /poke` every minute instead; the worker calls `omr_reap_expired_leases`
 at the top of each poke.
 
+IMSLP chip browse uses the same vault + cron pattern. After deploying
+`imslp-sync` (`--no-verify-jwt`) and setting `IMSLP_SYNC_SECRET` as an Edge
+secret, store the function URL and the same secret in Vault so
+`imslp_sync_tick` can POST every two minutes:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp-sync', 'imslp_sync_url');
+select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
+```
+
 The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `SELF_URL` (its public base URL for drain-chain self-pokes). Without any of
 this configured the app still works — the transport bar just reports analysis
@@ -350,6 +360,7 @@ explicitly when deploying by hand:
 supabase functions deploy stripe-webhook --no-verify-jwt
 supabase functions deploy student-claim  --no-verify-jwt
 supabase functions deploy student-login  --no-verify-jwt
+supabase functions deploy imslp-sync     --no-verify-jwt
 supabase functions deploy stripe-checkout
 supabase functions deploy stripe-portal
 supabase functions deploy student-provision   # roster create/reset/archive/restore

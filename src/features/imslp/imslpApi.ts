@@ -1,5 +1,5 @@
 import { parseLimitResponse } from '@/features/billing/limitErrors';
-import type { SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
+import type { EraId, RelaxedConstraint, SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 export interface ImslpSearchHit {
@@ -12,16 +12,29 @@ export interface ImslpSearchHit {
 
 export interface ImslpSearchOptions {
     limit?: number;
+    offset?: number;
     filters?: SearchFilters;
     sort?: SearchSort;
     /** Cancels the request (the panel aborts superseded searches). */
     signal?: AbortSignal;
 }
 
+export interface ImslpPeriod {
+    eraIds: EraId[];
+    source: 'query' | 'chip' | 'both';
+}
+
 export interface ImslpSearchResponse {
     results: ImslpSearchHit[];
-    /** True when the instrument filter matched too little and was relaxed to a boost. */
+    /** True when a hard filter matched too little and was relaxed to a boost. */
     filterRelaxed: boolean;
+    relaxed: RelaxedConstraint[];
+    total: number;
+    hasMore: boolean;
+    indexReady: boolean;
+    period: ImslpPeriod | null;
+    mode?: 'browse' | 'search';
+    notReady?: string[];
 }
 
 export type ImslpEditionLicense = 'pd' | 'cc' | 'non-pd' | 'unknown';
@@ -113,15 +126,23 @@ const SEARCH_CACHE_MAX = 30;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
 const SEARCH_TIMEOUT_MS = 15_000;
 
-const searchCacheKey = (q: string, limit: number, filters: SearchFilters | undefined, sort: SearchSort | undefined) =>
+const searchCacheKey = (
+    q: string,
+    limit: number,
+    offset: number,
+    filters: SearchFilters | undefined,
+    sort: SearchSort | undefined,
+) =>
     JSON.stringify([
         q.trim().toLowerCase(),
         limit,
-        filters?.composerCategory ?? null,
-        filters?.instrument ?? null,
-        filters?.form ?? null,
-        filters?.key ?? null,
-        filters?.era ?? null,
+        offset,
+        filters?.composerCategories ?? [],
+        filters?.instruments ?? [],
+        filters?.forms ?? [],
+        filters?.keys ?? [],
+        filters?.eras ?? [],
+        filters?.ignoreQueryPeriod === true,
         sort ?? 'relevance',
     ]);
 
@@ -131,8 +152,9 @@ export const searchImslp = async (
 ): Promise<ImslpSearchResponse> => {
     const opts: ImslpSearchOptions = typeof options === 'number' ? { limit: options } : options;
     const limit = opts.limit ?? 100;
+    const offset = opts.offset ?? 0;
 
-    const key = searchCacheKey(q, limit, opts.filters, opts.sort);
+    const key = searchCacheKey(q, limit, offset, opts.filters, opts.sort);
     const cached = SEARCH_CACHE.get(key);
     if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) {
         // Re-insert to keep recently used entries alive under the size cap.
@@ -157,16 +179,36 @@ export const searchImslp = async (
             apikey: anonKey,
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ q, limit, filters: opts.filters, sort: opts.sort }),
+        body: JSON.stringify({ q, limit, offset, filters: opts.filters, sort: opts.sort }),
         signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
     });
     if (!response.ok) {
         throw new Error(await messageFromJsonBody(response));
     }
-    const body = (await response.json()) as { results?: ImslpSearchHit[]; filterRelaxed?: boolean };
+    const body = (await response.json()) as {
+        results?: ImslpSearchHit[];
+        filterRelaxed?: boolean;
+        relaxed?: RelaxedConstraint[];
+        total?: number;
+        hasMore?: boolean;
+        indexReady?: boolean;
+        period?: ImslpPeriod | null;
+        mode?: 'browse' | 'search';
+        notReady?: string[];
+    };
+    const relaxed = Array.isArray(body.relaxed)
+        ? body.relaxed.filter((v): v is RelaxedConstraint => v === 'instrument' || v === 'era')
+        : [];
     const result: ImslpSearchResponse = {
         results: body.results ?? [],
-        filterRelaxed: body.filterRelaxed === true,
+        filterRelaxed: body.filterRelaxed === true || relaxed.length > 0,
+        relaxed,
+        total: typeof body.total === 'number' ? body.total : (body.results?.length ?? 0),
+        hasMore: body.hasMore === true,
+        indexReady: body.indexReady !== false,
+        period: body.period ?? null,
+        mode: body.mode,
+        notReady: Array.isArray(body.notReady) ? body.notReady : [],
     };
     SEARCH_CACHE.set(key, { at: Date.now(), response: result });
     if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {

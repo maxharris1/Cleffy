@@ -5,6 +5,7 @@ import {
     buildSearchVariants,
     correctTokens,
     damerauLevenshtein,
+    extractPeriod,
     foldAccents,
     isWorkTitle,
     nearMatch,
@@ -153,6 +154,36 @@ describe('buildSearchVariants', () => {
     it('adds a facet-scoped variant at weight 0.8', () => {
         const variants = buildSearchVariants('nocturne', { facetTokens: ['piano'] });
         expect(variants.find((v) => v.q === 'piano nocturne')?.weight).toBe(0.8);
+    });
+});
+
+describe('extractPeriod', () => {
+    it('maps a composition year to an era and strips it from rest', () => {
+        expect(extractPeriod('chopin nocturne 1831')).toEqual({
+            eraIds: ['romantic'],
+            rest: 'chopin nocturne',
+        });
+    });
+
+    it('maps period words and leaves the rest of the query', () => {
+        expect(extractPeriod('baroque fugue')).toEqual({
+            eraIds: ['baroque'],
+            rest: 'fugue',
+        });
+    });
+
+    it('does not treat classical as a period when followed by guitar', () => {
+        expect(extractPeriod('classical guitar')).toEqual({
+            eraIds: [],
+            rest: 'classical guitar',
+        });
+    });
+
+    it('maps decades onto the early-20th bin', () => {
+        expect(extractPeriod('1920s piano')).toEqual({
+            eraIds: ['early-20th'],
+            rest: 'piano',
+        });
     });
 });
 
