@@ -640,8 +640,14 @@ describe('LibraryPage', () => {
             documentTags: new Map<string, string[]>(),
         });
 
-        expect(await screen.findByText('Fresh from the server')).toBeInTheDocument();
+        // Flush the cache-paint microtask before waiting on the fresh title —
+        // otherwise a reverted firstResolved guard can paint stale and then
+        // overwrite it, and findByText still passes.
+        await act(async () => {
+            await Promise.resolve();
+        });
         expect(screen.queryByText('Stale snapshot title')).not.toBeInTheDocument();
+        expect(await screen.findByText('Fresh from the server')).toBeInTheDocument();
     });
 
     describe('snapshot write-through', () => {

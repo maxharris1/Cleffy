@@ -67,15 +67,21 @@ vi.mock('@/sync/db', () => {
                 },
             }),
             libraryList: table({ clear: libraryListClear }),
+            transaction: (_mode: string, _table: unknown, fn: () => unknown) => Promise.resolve(fn()),
         }),
     };
 });
+vi.mock('@/features/import/prepareUpload', () => ({
+    prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
+    UPLOAD_ACCEPT: '',
+}));
 
 import {
     deleteDocument,
     loadDocumentBytes,
     prefetchDocumentBytes,
     replaceDocumentPdf,
+    uploadDocument,
 } from '@/features/library/documentsService';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
@@ -104,7 +110,11 @@ interface StubOptions {
     listNames?: string[];
     /** Objects under the document's folder in the thumbnails bucket. */
     thumbListNames?: string[];
+    /** Sequential download payloads; later calls fall back to downloadBytes. */
+    downloadSequence?: string[];
     updatedRow?: DocumentRow;
+    insertedRow?: DocumentRow;
+    insertError?: string;
     deleteError?: string;
 }
 
@@ -117,6 +127,7 @@ const makeStub = (options: StubOptions = {}) => {
         list: vi.fn(),
         update: vi.fn(),
         upsert: vi.fn(),
+        insert: vi.fn(),
         delete: vi.fn(),
     };
     const storageApi = (bucket: string) => ({
@@ -125,8 +136,10 @@ const makeStub = (options: StubOptions = {}) => {
             if (options.downloadError) {
                 return Promise.resolve({ data: null, error: { message: options.downloadError } });
             }
+            const n = calls.download.mock.calls.length - 1;
+            const payload = options.downloadSequence?.[n] ?? options.downloadBytes ?? 'fresh-bytes';
             return Promise.resolve({
-                data: new Blob([options.downloadBytes ?? 'fresh-bytes'], { type: 'application/pdf' }),
+                data: new Blob([payload], { type: 'application/pdf' }),
                 error: null,
             });
         },
@@ -157,6 +170,26 @@ const makeStub = (options: StubOptions = {}) => {
     const supabase = {
         storage: { from: (bucket: string) => storageApi(bucket) },
         from: (table: string) => ({
+            insert: (row: Record<string, unknown>) => {
+                calls.insert(table, row);
+                return {
+                    select: () => ({
+                        single: () =>
+                            Promise.resolve({
+                                data: options.insertError
+                                    ? null
+                                    : (options.insertedRow ??
+                                      doc({
+                                          id: String(row.id),
+                                          owner_id: String(row.owner_id),
+                                          title: String(row.title),
+                                          storage_path: String(row.storage_path),
+                                      })),
+                                error: options.insertError ? { message: options.insertError } : null,
+                            }),
+                    }),
+                };
+            },
             update: (patch: Record<string, unknown>) => {
                 calls.update(table, patch);
                 return {
@@ -363,6 +396,19 @@ describe('prefetchDocumentBytes (cold open)', () => {
         await expect(loadDocumentBytes(d, { prefetch })).rejects.toThrow(/Could not download score/);
         expect(calls.download).toHaveBeenCalledTimes(2);
     });
+
+    it('discards prefetch bytes when the row revision is not 0 and does not cache them as that rev', async () => {
+        const calls = makeStub({ downloadSequence: ['prefetched-bytes', 'rev2-bytes'] });
+        const d = doc({ content_rev: 2 });
+        const prefetch = prefetchDocumentBytes(d.id);
+        const bytes = await loadDocumentBytes(d, { prefetch });
+        expect(new TextDecoder().decode(bytes)).toBe('rev2-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(2);
+        expect(calls.download).toHaveBeenLastCalledWith(d.storage_path);
+        const cached = await getDb().pdfCache.get(d.id);
+        expect(cached?.contentRev).toBe(2);
+        expect(new TextDecoder().decode(cached?.bytes as ArrayBuffer)).toBe('rev2-bytes');
+    });
 });
 
 describe('replaceDocumentPdf', () => {
@@ -434,6 +480,13 @@ describe('deleteDocument', () => {
         expect(calls.removeFrom).not.toHaveBeenCalledWith('thumbnails', expect.anything());
     });
 
+    it('removes the stamped cover when list returns empty', async () => {
+        const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: [] });
+        const d = doc({ thumb_rev: 2 });
+        await deleteDocument(d);
+        expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', [`${d.id}/2.jpg`]);
+    });
+
     /**
      * The producer half of the library-cache contract: the epoch moves at
      * the attempt edge, BEFORE the server write (so a bootstrap racing it is
@@ -472,5 +525,33 @@ describe('deleteDocument', () => {
         });
         await deleteDocument(d);
         expect(memThumbs.has(d.id)).toBe(false);
+    });
+});
+
+describe('uploadDocument commit edge', () => {
+    const pdf = () => new File(['%PDF-1.4'], 'sonata.pdf', { type: 'application/pdf' });
+
+    it('does not commit the library mutation until storage succeeds, and seeds the cache as owner', async () => {
+        makeStub();
+        const before = libraryMutationEpoch();
+        vi.mocked(uploadPdfToStorage).mockImplementation(async () => {
+            expect(libraryMutationEpoch()).toBe(before + 1);
+            expect(libraryListClear).not.toHaveBeenCalled();
+        });
+        const { document } = await uploadDocument(pdf(), 'user-1');
+        expect(libraryMutationEpoch()).toBe(before + 2);
+        expect(libraryListClear).toHaveBeenCalledTimes(1);
+        const cached = await getDb().pdfCache.get(document.id);
+        expect(cached?.myRole).toBe('owner');
+    });
+
+    it('commits after rolling back a row whose storage upload failed', async () => {
+        const calls = makeStub();
+        vi.mocked(uploadPdfToStorage).mockRejectedValueOnce(new Error('storage down'));
+        const before = libraryMutationEpoch();
+        await expect(uploadDocument(pdf(), 'user-1')).rejects.toThrow('storage down');
+        expect(calls.delete).toHaveBeenCalledWith('documents');
+        expect(libraryMutationEpoch()).toBe(before + 2);
+        expect(libraryListClear).toHaveBeenCalledTimes(1);
     });
 });

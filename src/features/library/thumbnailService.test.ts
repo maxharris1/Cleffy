@@ -29,11 +29,11 @@ vi.mock('@/sync/db', () => ({
     }),
 }));
 
-const renderFirstPagePng = vi.hoisted(() => vi.fn());
+const renderFirstPageJpeg = vi.hoisted(() => vi.fn());
 // The service reads THUMB_MAX_SIDE from thumbnailSize (the real module, kept
 // separate precisely so importing it cannot drag pdf.js into the bundle); only
 // the renderer itself is mocked away here.
-vi.mock('@/features/library/thumbnailRender', () => ({ renderFirstPagePng }));
+vi.mock('@/features/library/thumbnailRender', () => ({ renderFirstPageJpeg }));
 
 // The published copy: Storage upload/download and the row update that stamps
 // documents.thumb_rev. The real thumbnailRemote module runs over this stub.
@@ -99,8 +99,8 @@ beforeEach(() => {
     pdfCache.clear();
     thumbnails.clear();
     storeFailure.put = null;
-    renderFirstPagePng.mockReset();
-    renderFirstPagePng.mockResolvedValue({ blob: pngBlob(), width: 181, height: 256 });
+    renderFirstPageJpeg.mockReset();
+    renderFirstPageJpeg.mockResolvedValue({ blob: pngBlob(), width: 181, height: 256 });
     storageUpload.mockReset();
     storageUpload.mockResolvedValue({ data: null, error: null });
     storageDownload.mockReset();
@@ -117,7 +117,7 @@ describe('getThumbnail', () => {
         const { getThumbnail } = await loadService();
 
         expect(await getThumbnail('d1', 2)).toBe(stored);
-        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(renderFirstPageJpeg).not.toHaveBeenCalled();
     });
 
     it('renders from the cached bytes on a miss and stores the render', async () => {
@@ -126,7 +126,7 @@ describe('getThumbnail', () => {
 
         const blob = await getThumbnail('d1', 3);
         expect(blob).toBeInstanceOf(Blob);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         // The revision stored is the one the BYTES carry, not the one asked for.
         expect(thumbnails.get('d1')).toMatchObject({
             contentRev: 3,
@@ -156,7 +156,7 @@ describe('getThumbnail', () => {
         const first = await getThumbnail('d1', 1);
         const second = await getThumbnail('d1', 1);
         expect(second).toBe(first);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
     });
 
     // The memo stands in for a store that refused us, so it must not become the
@@ -170,22 +170,22 @@ describe('getThumbnail', () => {
             cachePdf(`d${i}`, 1);
             await getThumbnail(`d${i}`, 1);
         }
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(25);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(25);
 
         // Still held: asking again is free.
         await getThumbnail('d24', 1);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(25);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(25);
 
         // Evicted: asking again pays for another render rather than growing.
         await getThumbnail('d0', 1);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(26);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(26);
     });
 
     it('never fetches: no cached bytes means no thumbnail and no render', async () => {
         const { getThumbnail } = await loadService();
 
         expect(await getThumbnail('d1', 0)).toBeNull();
-        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(renderFirstPageJpeg).not.toHaveBeenCalled();
     });
 
     it('re-renders when the document revision moves past the stored thumbnail', async () => {
@@ -194,7 +194,7 @@ describe('getThumbnail', () => {
         const { getThumbnail } = await loadService();
 
         await getThumbnail('d1', 1);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(thumbnails.get('d1')?.contentRev).toBe(1);
     });
 
@@ -204,7 +204,7 @@ describe('getThumbnail', () => {
         const { getThumbnail } = await loadService();
 
         expect(await getThumbnail('d1', 1)).toBe(stale);
-        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(renderFirstPageJpeg).not.toHaveBeenCalled();
     });
 
     it('renders bytes that lag the requested revision once, not on every library visit', async () => {
@@ -217,7 +217,7 @@ describe('getThumbnail', () => {
         const first = await getThumbnail('d1', 1);
         const second = await getThumbnail('d1', 1);
 
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(second).toBe(first);
         // Still stamped with the BYTES' revision, so the render regenerates as
         // soon as ensureLocalPdf caches the replacement.
@@ -231,7 +231,7 @@ describe('getThumbnail', () => {
         const { getThumbnail } = await loadService();
 
         await getThumbnail('d1', 2);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(thumbnails.get('d1')?.maxSide).toBe(THUMB_MAX_SIDE);
         expect(THUMB_MAX_SIDE).toBe(512);
     });
@@ -251,7 +251,7 @@ describe('getThumbnail', () => {
         const { getThumbnail } = await loadService();
 
         expect(await getThumbnail('d1', 2)).not.toBe(legacy);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(thumbnails.get('d1')?.maxSide).toBe(THUMB_MAX_SIDE);
     });
 
@@ -260,18 +260,18 @@ describe('getThumbnail', () => {
         const { getThumbnail } = await loadService();
 
         const [a, b] = await Promise.all([getThumbnail('d1', 0), getThumbnail('d1', 0)]);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(a).toBe(b);
     });
 
     it('remembers a failed render so a scrolling library does not retry it', async () => {
         cachePdf('d1', 0);
-        renderFirstPagePng.mockRejectedValue(new Error('bad xref table'));
+        renderFirstPageJpeg.mockRejectedValue(new Error('bad xref table'));
         const { getThumbnail } = await loadService();
 
         expect(await getThumbnail('d1', 0)).toBeNull();
         expect(await getThumbnail('d1', 0)).toBeNull();
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -315,6 +315,36 @@ describe('published covers', () => {
         expect(rowUpdate).not.toHaveBeenCalled();
     });
 
+    it('republishes a current local JPEG when the published object 404s', async () => {
+        const stored = pngBlob();
+        cacheThumb('d1', 3, stored);
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(stored);
+        await settle();
+
+        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageUpload).toHaveBeenCalledTimes(1);
+        expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg', stored, expect.anything());
+        expect(rowUpdate).toHaveBeenCalledWith('documents', { thumb_rev: 3 }, 'id', 'd1');
+    });
+
+    it('does not republish a current local JPEG when the published object is still there', async () => {
+        const stored = pngBlob();
+        const published = new Blob(['published-jpeg'], { type: 'image/jpeg' });
+        storageDownload.mockResolvedValue({ data: published, error: null });
+        cacheThumb('d1', 3, stored);
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(stored);
+        await settle();
+
+        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageUpload).not.toHaveBeenCalled();
+    });
+
     it('publishes an earlier JPEG render found in the cache without rendering again', async () => {
         const stored = pngBlob();
         cacheThumb('d1', 2, stored);
@@ -324,7 +354,7 @@ describe('published covers', () => {
         expect(await getThumbnail('d1', 2, null)).toBe(stored);
         await settle();
 
-        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(renderFirstPageJpeg).not.toHaveBeenCalled();
         expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/2.jpg', stored, expect.anything());
     });
 
@@ -336,13 +366,13 @@ describe('published covers', () => {
         const first = await getThumbnail('d1', 2, null);
         await settle();
         expect(first?.type).toBe('image/jpeg');
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/2.jpg', first, expect.anything());
 
         // The attempt is remembered: no second pass on the next scroll.
         await getThumbnail('d1', 2, null);
         await settle();
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(storageUpload).toHaveBeenCalledTimes(1);
     });
 
@@ -353,7 +383,7 @@ describe('published covers', () => {
 
         expect(await getThumbnail('d1', 2, null)).toBe(legacy);
         await settle();
-        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(renderFirstPageJpeg).not.toHaveBeenCalled();
         expect(storageUpload).not.toHaveBeenCalled();
     });
 
@@ -379,7 +409,7 @@ describe('published covers', () => {
         expect(await getThumbnail('d1', 2, 2)).toBe(published);
         expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/2.jpg');
         expect(thumbnails.get('d1')).toMatchObject({ contentRev: 2, maxSide: THUMB_MAX_SIDE });
-        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(renderFirstPageJpeg).not.toHaveBeenCalled();
 
         expect(await getThumbnail('d1', 2, 2)).toBe(published);
         expect(storageDownload).toHaveBeenCalledTimes(1);
@@ -397,7 +427,7 @@ describe('published covers', () => {
         const { getThumbnail } = await loadService();
 
         await getThumbnail('d1', 2, 2);
-        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(renderFirstPageJpeg).toHaveBeenCalledTimes(1);
         expect(storageDownload).not.toHaveBeenCalled();
     });
 

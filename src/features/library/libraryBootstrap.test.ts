@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchLibraryBootstrap } from '@/features/library/libraryBootstrap';
-import { libraryMutationEpoch, noteLibraryMutation } from '@/features/library/libraryCache';
+import {
+    fetchLibraryBootstrap,
+    prependCachedLibraryDocument,
+    readCachedLibraryList,
+    writeCachedLibraryList,
+    type LibraryListSnapshot,
+} from '@/features/library/libraryBootstrap';
+import { libraryMutationEpoch, noteLibraryMutation, noteLibraryMutationCommitted } from '@/features/library/libraryCache';
 import { getDb } from '@/sync/db';
+import type { DocumentRow } from '@/types/database';
 
 const rpc = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/supabase', () => ({
@@ -134,6 +141,72 @@ describe('fetchLibraryBootstrap', () => {
         expect(a.fetchedAtEpoch).toBe(epochAtDispatch);
         expect(b.fetchedAtEpoch).toBe(epochAtDispatch);
         expect(libraryMutationEpoch()).not.toBe(epochAtDispatch);
+    });
+
+    const listSnapshot = (title: string): LibraryListSnapshot => ({
+        documents: payload(title).documents as DocumentRow[],
+        hasMore: false,
+        favoriteIds: new Set(),
+        tags: [],
+        documentTags: new Map(),
+    });
+
+    it('does not let a detached bootstrap clobber a post-edit snapshot', async () => {
+        const db = getDb();
+        let releaseFirst: () => void = () => undefined;
+        const firstTxHeld = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        let txStarts = 0;
+        const orig = db.transaction.bind(db) as (...args: unknown[]) => Promise<unknown>;
+        const spy = vi.spyOn(db, 'transaction').mockImplementation((...args: unknown[]) => {
+            txStarts += 1;
+            if (txStarts === 1) {
+                return firstTxHeld.then(() => orig(...args));
+            }
+            return orig(...args);
+        });
+
+        rpc.mockResolvedValue({ data: payload('STALE-BOOTSTRAP'), error: null });
+        await fetchLibraryBootstrap('user-clobber');
+        await vi.waitFor(() => expect(txStarts).toBeGreaterThanOrEqual(1));
+
+        noteLibraryMutationCommitted();
+        await writeCachedLibraryList('user-clobber', listSnapshot('POST-EDIT'));
+        releaseFirst();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect((await db.libraryList.get('user-clobber'))?.documents[0]?.title).toBe('POST-EDIT');
+        spy.mockRestore();
+    });
+
+    it('refuses a persist whose epoch is older than the stored snapshot', async () => {
+        noteLibraryMutationCommitted();
+        const high = libraryMutationEpoch();
+        await writeCachedLibraryList('user-gen', listSnapshot('PREPEND'), high);
+        await writeCachedLibraryList('user-gen', listSnapshot('STALE-PERSIST'), high - 1);
+        expect((await getDb().libraryList.get('user-gen'))?.documents[0]?.title).toBe('PREPEND');
+    });
+
+    it('skips a write when the epoch moved after the caller captured it', async () => {
+        const captured = libraryMutationEpoch();
+        noteLibraryMutation();
+        await writeCachedLibraryList('user-moved', listSnapshot('NOPE'), captured);
+        expect(await getDb().libraryList.get('user-moved')).toBeUndefined();
+    });
+
+    it('prepends onto the snapshot written after snapshotBefore was captured', async () => {
+        await writeCachedLibraryList('user-prepend', listSnapshot('BEFORE'));
+        const before = await readCachedLibraryList('user-prepend');
+        await writeCachedLibraryList('user-prepend', listSnapshot('AFTER-PERSIST'));
+        const uploaded: DocumentRow = {
+            ...(payload('New score').documents[0] as DocumentRow),
+            id: 'd-new',
+            title: 'New score',
+        };
+        await prependCachedLibraryDocument('user-prepend', before, uploaded);
+        const row = await readCachedLibraryList('user-prepend');
+        expect(row?.documents[0]?.id).toBe('d-new');
+        expect(row?.documents[1]?.title).toBe('AFTER-PERSIST');
     });
 
     it('does not memoize a failed request', async () => {

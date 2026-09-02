@@ -127,6 +127,7 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup();
+    vi.useRealTimers();
 });
 
 describe('CloudViewer warm open', () => {
@@ -153,6 +154,25 @@ describe('CloudViewer warm open', () => {
         expect(viewport()).toHaveAttribute('data-sync', 'on');
         expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
         expect(screen.queryByText(/access was revoked/)).not.toBeInTheDocument();
+    });
+
+    it('stays read-only while confirm hangs, even after several seconds', async () => {
+        vi.useFakeTimers();
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        const docRequest = deferred<DocumentRow | null>();
+        fetchDocument.mockReturnValue(docRequest.promise);
+        fetchMyRole.mockReturnValue(new Promise(() => undefined));
+
+        renderViewer();
+
+        await waitFor(() => expect(screen.getByTestId('pdf-viewport')).toBeInTheDocument());
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+
+        vi.useRealTimers();
     });
 
     it('paints read-only without sync until the role is confirmed, then opens for writing', async () => {
