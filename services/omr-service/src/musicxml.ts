@@ -12,6 +12,14 @@ import type {
     ScoreTimeSig,
 } from './scoreData.js';
 import { ERROR_CODES, JobError } from './errors.js';
+import {
+    appoggiaturaSteal,
+    arpeggiateChord,
+    graceTicks,
+    realizeOrnament,
+    type AccidentalMark,
+    type OrnamentKind,
+} from './ornaments.js';
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
 export interface MusicalScore {
@@ -47,6 +55,11 @@ export interface MusicalScore {
     dynamicCurves?: Array<{ staff: number } & DynamicCurve>;
     /** Meter-based opening pulse, whether or not anything printed a tempo. */
     meterDefaultBpm?: number;
+    /**
+     * A heading or <sound><swing/> asked for swung eighths. Service-side only —
+     * buildScoreData bakes the long–short into the note list.
+     */
+    swing?: boolean;
 }
 
 /**
@@ -463,11 +476,79 @@ const articulationOf = (arts: Set<string>, underSlur: boolean): ArtSet => {
 const gateDuration = (dur: number, gate: number): number =>
     Math.max(MIN_SOUNDING_TICKS, Math.min(dur, Math.round(dur * gate)));
 
-/** Crushed grace-note length (≈115 ms at 120 bpm) — acciaccatura feel. */
-const GRACE_TICKS = 110;
-
 const clampVelocity = (v: number): number => Math.min(1, Math.max(0.1, v));
 const roundVelocity = (v: number): number => Math.round(v * 100) / 100;
+
+const ORNAMENT_TAGS: Record<string, OrnamentKind> = {
+    'trill-mark': 'trill',
+    mordent: 'mordent',
+    'inverted-mordent': 'inverted-mordent',
+    turn: 'turn',
+    'inverted-turn': 'inverted-turn',
+};
+
+const accidentalMarkOf = (text: string): AccidentalMark | undefined => {
+    const folded = text.trim().toLowerCase();
+    if (folded === 'sharp' || folded === 'sharp-sharp' || folded === 's') {
+        return 'sharp';
+    }
+    if (folded === 'flat' || folded === 'flat-flat' || folded === 'f') {
+        return 'flat';
+    }
+    if (folded === 'natural' || folded === 'n') {
+        return 'natural';
+    }
+    return undefined;
+};
+
+const ornamentOf = (noteEl: Elem): { kind: OrnamentKind; accidentalMark?: AccidentalMark } | undefined => {
+    const groups = noteEl.getElementsByTagName('ornaments');
+    for (let g = 0; g < groups.length; g++) {
+        const group = groups.item(g) as Elem | null;
+        if (!group) {
+            continue;
+        }
+        let kind: OrnamentKind | undefined;
+        let accidentalMark: AccidentalMark | undefined;
+        for (const mark of childElements(group)) {
+            const mapped = ORNAMENT_TAGS[mark.nodeName];
+            if (mapped && kind === undefined) {
+                kind = mapped;
+            }
+            if (mark.nodeName === 'accidental-mark') {
+                accidentalMark = accidentalMarkOf(mark.textContent ?? '') ?? accidentalMark;
+            }
+        }
+        if (kind) {
+            return accidentalMark ? { kind, accidentalMark } : { kind };
+        }
+    }
+    return undefined;
+};
+
+const arpeggiateOf = (noteEl: Elem): 'up' | 'down' | undefined => {
+    const el = noteEl.getElementsByTagName('arpeggiate').item(0) as Elem | null;
+    if (!el) {
+        return undefined;
+    }
+    return (el.getAttribute('direction') ?? '').toLowerCase() === 'down' ? 'down' : 'up';
+};
+
+/** slash default true = acciaccatura; steal-time-following without slash → appoggiatura. */
+const graceFigureOf = (graceEl: Elem): { slash: boolean; stealPrevious: boolean; stealFollowing: boolean } => {
+    const slashAttr = graceEl.getAttribute('slash');
+    const stealPrevious = (graceEl.getAttribute('steal-time-previous') ?? '') !== '';
+    const stealFollowing = (graceEl.getAttribute('steal-time-following') ?? '') !== '';
+    let slash = true;
+    if (slashAttr === 'no') {
+        slash = false;
+    } else if (slashAttr === 'yes') {
+        slash = true;
+    } else if (stealFollowing) {
+        slash = false;
+    }
+    return { slash, stealPrevious, stealFollowing };
+};
 
 type Elem = NonNullable<ReturnType<DOMParser['parseFromString']>['documentElement']>;
 
@@ -610,6 +691,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
     // The lead part is the timeline authority: its measures define barlines.
     const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings, seed });
     const notes = [...leadResult.notes];
+    let swing = leadResult.swing;
     for (const target of targets.slice(1)) {
         const secondary = parsePart(target.part, {
             fallbackHand: target.fallbackHand,
@@ -619,6 +701,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
             seed,
         });
         notes.push(...secondary.notes);
+        swing = swing || secondary.swing;
     }
 
     if (leadStaves < 2 && targets.length === 1) {
@@ -651,6 +734,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
         tempoMarks: leadResult.tempoMarks,
         dynamicCurves: leadResult.dynamicCurves,
         meterDefaultBpm: leadResult.meterDefaultBpm,
+        swing,
     };
 };
 
@@ -786,6 +870,7 @@ interface PartResult {
     tempoMarks: TempoMark[];
     dynamicCurves: Array<{ staff: number } & DynamicCurve>;
     meterDefaultBpm: number;
+    swing: boolean;
 }
 
 /**
@@ -815,8 +900,18 @@ type RawEvent =
           tieStop: boolean;
           arts: ArtSet;
           fermata: boolean;
+          ornament?: { kind: OrnamentKind; accidentalMark?: AccidentalMark };
+          arpeggiate?: 'up' | 'down';
       }
-    | { k: 'grace'; rel: number; midi: number; staff: number }
+    | {
+          k: 'grace';
+          rel: number;
+          midi: number;
+          staff: number;
+          slash: boolean;
+          stealPrevious: boolean;
+          stealFollowing: boolean;
+      }
     | { k: 'dyn'; rel: number; staff: EventStaff; v: number }
     | { k: 'accentDyn'; rel: number; staff: EventStaff; toPiano: boolean }
     | { k: 'wedge'; rel: number; staff: EventStaff; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }
@@ -827,7 +922,8 @@ type RawEvent =
     | { k: 'pedal'; rel: number; kind: 'down' | 'up' | 'change' }
     | { k: 'time'; rel: number; num: number; den: number }
     | { k: 'key'; rel: number; fifths: number }
-    | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number };
+    | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number }
+    | { k: 'swing' };
 
 /**
  * Repeat structure engraved on a measure's barlines. Service-side only — this
@@ -908,6 +1004,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
     const slurDepth = new Map<number, number>();
     /** Last non-chord articulation per staff, for chord members to inherit. */
     const lastArts = new Map<number, ArtSet>();
+    /** Last non-chord arpeggio sign per staff — members of the chord share it. */
+    const lastArp = new Map<number, 'up' | 'down' | undefined>();
 
     const measureElems = childElements(part, 'measure');
     for (let index = 0; index < measureElems.length; index++) {
@@ -996,7 +1094,13 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const text = (allWords.item(w) as Elem | null)?.textContent ?? '';
                         if (text) {
                             applyWordStructure(text, repeat);
+                            if (/\bswing\b/i.test(foldDiacritics(text))) {
+                                events.push({ k: 'swing' });
+                            }
                         }
+                    }
+                    if (child.getElementsByTagName('swing').length > 0) {
+                        events.push({ k: 'swing' });
                     }
 
                     const pedalEl = child.getElementsByTagName('pedal').item(0) as Elem | null;
@@ -1123,6 +1227,9 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         events.push({ k: 'tempo', rel: cursor, qbpm: Math.round(parsed), src: 'sound' });
                     }
                     applySoundStructure(child, repeat);
+                    if (child.getElementsByTagName('swing').length > 0) {
+                        events.push({ k: 'swing' });
+                    }
                     break;
                 }
                 case 'backup': {
@@ -1173,15 +1280,20 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     break;
                 }
                 case 'note': {
-                    if (firstChild(child, 'grace')) {
+                    const graceEl = firstChild(child, 'grace');
+                    if (graceEl) {
                         const gracePitch = firstChild(child, 'pitch');
                         const graceMidi = gracePitch ? midiFromPitch(gracePitch) : null;
                         if (graceMidi !== null) {
+                            const figure = graceFigureOf(graceEl);
                             events.push({
                                 k: 'grace',
                                 rel: cursor,
                                 midi: graceMidi,
                                 staff: childInt(child, 'staff') ?? 1,
+                                slash: figure.slash,
+                                stealPrevious: figure.stealPrevious,
+                                stealFollowing: figure.stealFollowing,
                             });
                         }
                         break;
@@ -1193,6 +1305,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
 
                     const noteStaff = childInt(child, 'staff') ?? 1;
                     let arts = lastArts.get(noteStaff) ?? PLAIN_ART;
+                    let arp = lastArp.get(noteStaff);
                     if (!isChord) {
                         // A slur's LAST note is its release, so it is not "under"
                         // the slur for gating — that is what lets a phrase end.
@@ -1203,8 +1316,10 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const underSlur = (depth > 0 || starts > 0) && stops === 0;
                         slurDepth.set(noteStaff, Math.max(0, depth + starts - stops));
                         arts = articulationOf(markNames(child, 'articulations'), underSlur);
+                        arp = arpeggiateOf(child);
                         // Chord members carry the marking of the note they hang off.
                         lastArts.set(noteStaff, arts);
+                        lastArp.set(noteStaff, arp);
                     }
 
                     if (!isRest && durTicks > 0) {
@@ -1212,6 +1327,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const midi = pitch ? midiFromPitch(pitch) : null;
                         if (midi !== null) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
+                            const ornament = ornamentOf(child);
                             events.push({
                                 k: 'note',
                                 rel: start,
@@ -1224,6 +1340,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 tieStop: tieTypes.includes('stop'),
                                 arts,
                                 fermata: child.getElementsByTagName('fermata').length > 0,
+                                ...(ornament ? { ornament } : {}),
+                                ...(arp ? { arpeggiate: arp } : {}),
                             });
                         }
                     }
@@ -1959,6 +2077,41 @@ const seedCurveStarts = (curves: Map<number, DynamicCurve>, seed: ParseSeed, tic
 };
 
 /**
+ * Tempo and gradual marks sit on the timeline, not on notes, so they can be
+ * gathered before anything is emitted — which is what lets a later pass ask
+ * "what is the pulse at this tick" while crushing a grace or spelling a trill.
+ */
+const collectTempoMarks = (raws: readonly RawMeasure[], placements: readonly MeasurePlacement[]): TempoMark[] => {
+    const marks: TempoMark[] = [];
+    for (let pos = 0; pos < raws.length; pos++) {
+        const raw = raws[pos];
+        const place = placements[pos];
+        if (!raw || !place) {
+            continue;
+        }
+        for (const ev of raw.events) {
+            if (ev.k === 'tempo') {
+                marks.push({ tick: place.tick + ev.rel, kind: 'abs', bpm: ev.qbpm, src: ev.src });
+            } else if (ev.k === 'gradual') {
+                if (ev.kind === 'rit' || ev.kind === 'accel') {
+                    marks.push({ tick: place.tick + ev.rel, kind: ev.kind, amount: ev.amount });
+                } else if (ev.kind === 'step') {
+                    marks.push({
+                        tick: place.tick + ev.rel,
+                        kind: 'step',
+                        amount: ev.amount,
+                        becomesSteady: ev.becomesSteady,
+                    });
+                } else {
+                    marks.push({ tick: place.tick + ev.rel, kind: 'atempo' });
+                }
+            }
+        }
+    }
+    return marks;
+};
+
+/**
  * Pass 2 — assign absolute ticks, merge ties, pad, and resolve velocities.
  * Events are walked in document order, which is what dynamics currently key off;
  * their `rel` positions are carried through so that resolution can move to a
@@ -1970,19 +2123,92 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const timeSignatures: ScoreTimeSig[] = [];
     const keySignatures: ScoreKeySig[] = [];
     const clefs: ScoreClef[] = [];
-    const tempoMarks: TempoMark[] = [];
     const holds: ScoreHold[] = [];
     const pedals: ScorePedal[] = [];
 
     /** Grace notes buffered until their principal note arrives. */
-    let pendingGraces: Array<{ midi: number; hand: 0 | 1 }> = [];
+    let pendingGraces: Array<{ midi: number; hand: 0 | 1; slash: boolean }> = [];
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
     const openTies = new Map<string, ScoreNote>();
+    let arpBuffer: ScoreNote[] = [];
+    let arpDirection: 'up' | 'down' | null = null;
+    let swing = false;
 
     // Secondary parts take their barlines from the lead, so only the lead's
     // signatures are worth second-guessing.
     const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
     const placements = placeMeasures(raws, sigs, ctx);
+
+    const lastPlace = placements[placements.length - 1];
+    const endTick = lastPlace ? lastPlace.tick + lastPlace.dTicks : ctx.tickOffset;
+    const sigAtTick = (tick: number): { num: number; den: number } => {
+        for (let pos = placements.length - 1; pos >= 0; pos--) {
+            if ((placements[pos]?.tick ?? 0) <= tick) {
+                return sigs[pos] ?? { num: 4, den: 4 };
+            }
+        }
+        return sigs[0] ?? { num: 4, den: 4 };
+    };
+    const tempoMarks = collectTempoMarks(raws, placements);
+    const tempos = ctx.timeline
+        ? []
+        : resolveTempos(
+              tempoMarks,
+              endTick,
+              (tick) => barTicksOf(sigAtTick(tick)),
+              (tick) => Math.round((TICKS_PER_QUARTER * 4) / sigAtTick(tick).den),
+              ctx.warnings,
+              ctx.seed,
+          );
+    const pulseFallback = meterDefaultBpm(sigs[0] ?? { num: 4, den: 4 });
+    const bpmAt = (tick: number): number => {
+        let bpm: number | null = null;
+        for (const entry of tempos) {
+            if (entry.tick > tick) {
+                break;
+            }
+            bpm = entry.bpm;
+        }
+        return bpm ?? ctx.seed.tempoBpm ?? pulseFallback;
+    };
+
+    const keyPoints: Array<{ tick: number; fifths: number }> = [];
+    for (let pos = 0; pos < raws.length; pos++) {
+        const raw = raws[pos];
+        const place = placements[pos];
+        if (!raw || !place) {
+            continue;
+        }
+        for (const ev of raw.events) {
+            if (ev.k === 'key') {
+                keyPoints.push({ tick: place.tick, fifths: ev.fifths });
+            }
+        }
+    }
+    const fifthsAt = (tick: number): number => {
+        let fifths = 0;
+        for (const ks of keyPoints) {
+            if (ks.tick > tick) {
+                break;
+            }
+            fifths = ks.fifths;
+        }
+        return fifths;
+    };
+
+    const flushArp = (): void => {
+        if (arpBuffer.length === 0) {
+            return;
+        }
+        const t0 = arpBuffer[0]?.t;
+        const realized = arpeggiateChord(arpBuffer, arpDirection ?? 'up');
+        if (t0 !== undefined && realized.some((n) => n.t !== t0)) {
+            ctx.warnings.add('ornaments_realized');
+        }
+        notes.push(...realized);
+        arpBuffer = [];
+        arpDirection = null;
+    };
 
     let staffCount = 1;
     for (const raw of raws) {
@@ -2045,25 +2271,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     }
                     break;
                 }
-                case 'tempo': {
-                    tempoMarks.push({ tick: measureStart + ev.rel, kind: 'abs', bpm: ev.qbpm, src: ev.src });
+                case 'tempo':
+                case 'gradual':
+                    // Collected in the pre-pass so the map exists before notes emit.
                     break;
-                }
-                case 'gradual': {
-                    if (ev.kind === 'rit' || ev.kind === 'accel') {
-                        tempoMarks.push({ tick: measureStart + ev.rel, kind: ev.kind, amount: ev.amount });
-                    } else if (ev.kind === 'step') {
-                        tempoMarks.push({
-                            tick: measureStart + ev.rel,
-                            kind: 'step',
-                            amount: ev.amount,
-                            becomesSteady: ev.becomesSteady,
-                        });
-                    } else {
-                        tempoMarks.push({ tick: measureStart + ev.rel, kind: 'atempo' });
-                    }
-                    break;
-                }
                 case 'pedal': {
                     // A release written after the bar's last note sits exactly on
                     // the next bar's downbeat, which hands it to whatever follows
@@ -2091,12 +2302,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                 case 'accentDyn':
                     // Already resolved into per-staff curves by musical position.
                     break;
+                case 'swing':
+                    swing = true;
+                    break;
                 case 'grace': {
                     // Buffer graces; they crush in just before their principal.
                     if (pendingGraces.length < 8) {
                         pendingGraces.push({
                             midi: ev.midi,
                             hand: ev.staff >= 2 ? 1 : ctx.fallbackHand,
+                            slash: ev.slash,
                         });
                     }
                     break;
@@ -2148,21 +2363,47 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         break;
                     }
 
+                    if (!ev.chord) {
+                        flushArp();
+                    }
+
                     const sustained = velocityAt(curveFor(ev.staff), start);
+                    let principalStart = start;
+                    let principalNotated = ev.dur;
                     if (!ev.chord && pendingGraces.length > 0) {
-                        // Crush buffered graces just before this attack, stealing
-                        // time from what came before (they may reach back across
-                        // the barline — that's correct).
-                        const count = pendingGraces.length;
-                        pendingGraces.forEach((grace, i) => {
-                            notes.push({
-                                t: Math.max(ctx.tickOffset, start - GRACE_TICKS * (count - i)),
-                                d: GRACE_TICKS,
-                                p: grace.midi,
-                                h: grace.hand,
-                                v: roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) * 0.8)),
+                        const bpm = bpmAt(start);
+                        const graceV = roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) * 0.8));
+                        const accis = pendingGraces.filter((g) => g.slash);
+                        const appogs = pendingGraces.filter((g) => !g.slash);
+                        if (accis.length > 0) {
+                            // Crush acciaccaturas just before this attack, stealing
+                            // time from what came before (they may reach back across
+                            // the barline — that's correct).
+                            const gt = graceTicks(bpm, ev.dur);
+                            accis.forEach((grace, i) => {
+                                notes.push({
+                                    t: Math.max(ctx.tickOffset, start - gt * (accis.length - i)),
+                                    d: gt,
+                                    p: grace.midi,
+                                    h: grace.hand,
+                                    v: graceV,
+                                });
                             });
-                        });
+                        }
+                        if (appogs.length > 0) {
+                            const steal = appoggiaturaSteal(ev.dur);
+                            let t = start;
+                            let remaining = steal;
+                            appogs.forEach((grace, i) => {
+                                const d =
+                                    i === appogs.length - 1 ? remaining : Math.floor(remaining / (appogs.length - i));
+                                notes.push({ t, d, p: grace.midi, h: grace.hand, v: graceV });
+                                t += d;
+                                remaining -= d;
+                            });
+                            principalStart = start + steal;
+                            principalNotated = Math.max(1, ev.dur - steal);
+                        }
                         pendingGraces = [];
                     }
                     // Velocity is now a pure function of (staff, tick), so every
@@ -2173,14 +2414,32 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     const velocity =
                         boost > 0 ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + boost)) : sustained;
                     const note: ScoreNote = {
-                        t: start,
+                        t: principalStart,
                         // Held notes are gated when their chain closes, not here.
-                        d: ev.tieStart ? ev.dur : gateDuration(ev.dur, ev.arts.gate),
+                        d: ev.tieStart ? principalNotated : gateDuration(principalNotated, ev.arts.gate),
                         p: ev.midi,
                         h: hand,
                         ...(velocity !== undefined ? { v: velocity } : {}),
                     };
-                    notes.push(note);
+                    // A tie chain is one sounding event: skip ornaments on tied notes
+                    // rather than spelling them on a length we do not yet know.
+                    let emitted: ScoreNote[] = [note];
+                    if (ev.ornament && !ev.tieStart && !ev.tieStop) {
+                        emitted = realizeOrnament(note, ev.ornament.kind, {
+                            fifths: fifthsAt(principalStart),
+                            bpm: bpmAt(principalStart),
+                            accidentalMark: ev.ornament.accidentalMark,
+                        });
+                        if (emitted.length > 1) {
+                            ctx.warnings.add('ornaments_realized');
+                        }
+                    }
+                    if (ev.arpeggiate) {
+                        arpDirection = arpDirection ?? ev.arpeggiate;
+                        arpBuffer.push(...emitted);
+                    } else {
+                        notes.push(...emitted);
+                    }
                     if (ev.fermata) {
                         // Hold on ARRIVING at the onset, so the note itself still
                         // starts on time and everything sounding across it rings on.
@@ -2195,6 +2454,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     break;
             }
         }
+
+        flushArp();
 
         // Extend open ties across inserted padding so a tie-stop in the next bar
         // still lands after the real sounding content, not inside the pad.
@@ -2222,27 +2483,6 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         const finalSig = sigs[sigs.length - 1] ?? { num: 4, den: 4 };
         timeSignatures.push({ tick: ctx.tickOffset, num: finalSig.num, den: finalSig.den });
     }
-
-    const lastMeasure = measures[measures.length - 1];
-    const endTick = lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : ctx.tickOffset;
-    const sigAtTick = (tick: number): { num: number; den: number } => {
-        for (let pos = measures.length - 1; pos >= 0; pos--) {
-            if ((measures[pos]?.tick ?? 0) <= tick) {
-                return sigs[pos] ?? { num: 4, den: 4 };
-            }
-        }
-        return sigs[0] ?? { num: 4, den: 4 };
-    };
-    const tempos = ctx.timeline
-        ? []
-        : resolveTempos(
-              tempoMarks,
-              endTick,
-              (tick) => barTicksOf(sigAtTick(tick)),
-              (tick) => Math.round((TICKS_PER_QUARTER * 4) / sigAtTick(tick).den),
-              ctx.warnings,
-              ctx.seed,
-          );
 
     // Nothing printed a number, nothing printed a word: the meter is the last
     // evidence there is. Deliberately NOT a tempos[] entry — deployed clients
@@ -2284,6 +2524,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         tempoMarks: ctx.timeline ? [] : tempoMarks,
         dynamicCurves: [...curves.entries()].map(([staff, curve]) => ({ staff, ...curve })),
         meterDefaultBpm: meterDefault,
+        swing,
     };
 };
 
@@ -2369,6 +2610,7 @@ export const parseMxlFiles = (files: Buffer[], seed: ParseSeed = EMPTY_SEED): Mu
         openTiesAtEnd: 0,
         tempoMarks: [],
         dynamicCurves: [],
+        swing: false,
     };
     const warnings = new Set<string>();
     // Whether the movement whose `defaultBpm` survives is the one that guessed
@@ -2411,6 +2653,7 @@ export const parseMxlFiles = (files: Buffer[], seed: ParseSeed = EMPTY_SEED): Mu
         }
         combined.totalTicks = parsed.totalTicks;
         combined.openTiesAtEnd = parsed.openTiesAtEnd;
+        combined.swing = combined.swing || parsed.swing;
         parsed.warnings.forEach((warning) => {
             if (warning !== 'tempo_defaulted') {
                 warnings.add(warning);

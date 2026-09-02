@@ -220,7 +220,7 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 370, d: 110, p: 62, h: 0, v: 0.6 }, // acciaccatura — never gated
+            { t: 419, d: 61, p: 62, h: 0, v: 0.6 }, // acciaccatura — never gated; 96 bpm → 61 ticks
             { t: 480, d: plain(480), p: 64, h: 0 },
         ]);
         expect(score.warnings).not.toContain('grace_notes_skipped');
@@ -666,7 +666,7 @@ describe('articulation', () => {
                 `<note><grace/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>` +
                 `${note('E', 4, 4, arts('staccato'))}${note('F', 4, 8)}`,
         );
-        expect(durs(xml)[0]).toBe(110);
+        expect(durs(xml)[0]).toBe(61);
     });
 });
 
@@ -1352,6 +1352,103 @@ describe('sustain pedal', () => {
     it('offsets pedal edges along with the rest of a concatenated movement', () => {
         const xml = wrap(`<measure number="1">${ATTRS_44}${pedal('start')}${note('C', 4, 16)}</measure>`);
         expect(parseMusicXmlString(xml, 10000).pedals).toEqual([{ tick: 10000, k: 'down' }]);
+    });
+});
+
+/** Ornaments, grace figures, and swing — baked into the note list at parse/build. */
+describe('ornaments, graces and swing', () => {
+    const orns = (tag: string, accidental = ''): string =>
+        `<notations><ornaments><${tag}/>${accidental}</ornaments><articulations><tenuto/></articulations></notations>`;
+
+    const soundTempo = (bpm: number): string =>
+        `<direction><direction-type><words>x</words></direction-type><sound tempo="${bpm}"/></direction>`;
+
+    const words = (text: string): string =>
+        `<direction><direction-type><words>${text}</words></direction-type></direction>`;
+
+    it('realises a trill-mark on a half note as 32nds ending on the principal', () => {
+        const xml = wrap(`<measure number="1">${ATTRS_44}${note('C', 4, 8, orns('trill-mark'))}</measure>`);
+        const score = parseMusicXmlString(xml);
+        const notes = score.notes;
+        expect(notes.length).toBeGreaterThan(1);
+        expect(notes[0]?.p).toBe(60);
+        expect(notes[1]?.p).toBe(62);
+        expect(notes[notes.length - 1]?.p).toBe(60);
+        expect(notes.slice(0, -1).every((n) => n.d === 60)).toBe(true);
+        expect(notes.reduce((sum, n) => sum + n.d, 0)).toBe(960);
+        expect(score.warnings).toContain('ornaments_realized');
+    });
+
+    it('realises a mordent as principal–lower–principal', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 4, orns('mordent'))}${note('E', 4, 12)}</measure>`,
+        );
+        const notes = parseMusicXmlString(xml).notes.filter((n) => n.t < 480);
+        expect(notes.map((n) => n.p)).toEqual([60, 59, 60]);
+        expect(notes.map((n) => n.d)).toEqual([60, 60, 360]);
+    });
+
+    it('rolls an arpeggiated chord from the bottom', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice>
+                    <notations><arpeggiate direction="up"/><articulations><tenuto/></articulations></notations></note>
+                <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice>
+                    <notations><articulations><tenuto/></articulations></notations></note>
+                <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice>
+                    <notations><articulations><tenuto/></articulations></notations></note>
+                ${note('C', 5, 12)}
+            </measure>`,
+        );
+        const chord = parseMusicXmlString(xml).notes.filter((n) => n.t < 480);
+        expect(chord.map((n) => n.p)).toEqual([60, 64, 67]);
+        expect(chord.map((n) => n.t)).toEqual([0, 60, 120]);
+        expect(chord.every((n) => n.t + n.d === 480)).toBe(true);
+        expect(parseMusicXmlString(xml).warnings).toContain('ornaments_realized');
+    });
+
+    it('gives an appoggiatura half the principal on the beat', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <note><grace slash="no"/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>
+                ${note('E', 4, 4)}
+                <note><rest/><duration>12</duration><voice>1</voice></note>
+            </measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.notes).toEqual([
+            { t: 0, d: 240, p: 62, h: 0, v: 0.6 },
+            { t: 240, d: plain(240), p: 64, h: 0 },
+        ]);
+    });
+
+    it('sizes an acciaccatura to 77 ticks at 120 bpm and 38 at 60 bpm', () => {
+        const at = (bpm: number) =>
+            wrap(
+                `<measure number="1">${ATTRS_44}${soundTempo(bpm)}
+                    <note><rest/><duration>4</duration><voice>1</voice></note>
+                    <note><grace/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>
+                    ${note('E', 4, 4)}
+                    <note><rest/><duration>8</duration><voice>1</voice></note>
+                </measure>`,
+            );
+        const fast = parseMusicXmlString(at(120)).notes[0];
+        expect(fast).toMatchObject({ t: 403, d: 77, p: 62 });
+        const slow = parseMusicXmlString(at(60)).notes[0];
+        expect(slow).toMatchObject({ t: 442, d: 38, p: 62 });
+    });
+
+    it('swings a pair of eighths from a heading and warns', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${words('Swing')}${note('C', 4, 2)}${note('D', 4, 2)}${note('E', 4, 12)}</measure>`,
+        );
+        const parsed = parseMusicXmlString(xml);
+        expect(parsed.swing).toBe(true);
+        const score = buildScoreData(parsed, null);
+        expect(score.warnings).toContain('swing_applied');
+        const pair = score.notes.filter((n) => n.p === 60 || n.p === 62);
+        expect(pair.find((n) => n.p === 60)).toMatchObject({ t: 0, d: plain(240) + 80 });
+        expect(pair.find((n) => n.p === 62)).toMatchObject({ t: 320, d: plain(240) - 80 });
     });
 });
 
