@@ -13,6 +13,7 @@ import {
     scoreTitleMatch,
     tokenizeQuery,
 } from '../../supabase/functions/_shared/search';
+import { facetTokens } from '../../supabase/functions/_shared/searchFacetData';
 
 describe('foldAccents', () => {
     it('strips combining accents', () => {
@@ -154,6 +155,13 @@ describe('buildSearchVariants', () => {
     it('adds a facet-scoped variant at weight 0.8', () => {
         const variants = buildSearchVariants('nocturne', { facetTokens: ['piano'] });
         expect(variants.find((v) => v.q === 'piano nocturne')?.weight).toBe(0.8);
+    });
+
+    it('does not inject era surnames into search variants', () => {
+        const tokens = facetTokens({ eras: ['baroque'] });
+        const variants = buildSearchVariants('sonata', { facetTokens: tokens });
+        const blob = variants.map((v) => v.q).join(' ');
+        expect(blob).not.toMatch(/bach|vivaldi|handel/i);
     });
 });
 

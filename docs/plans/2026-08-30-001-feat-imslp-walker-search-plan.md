@@ -11,7 +11,7 @@ execution: code
 
 # IMSLP Walker Search - Plan
 
-> **Status (2026-09-02):** U1–U5 were not shipped. Implementation is the IMSLP Search Gap Closure plan (`imslp_search_gap_closure_b7979f1c`): cached category index, Postgres INTERSECT browse, date/period axis, multi-select, paging, hosted refresh. Canvases kept as-is.
+> **Status (2026-09-02):** A first Walker cut landed on this branch (`imslp-category-sync`, `imslp_intersect_categories`). The IMSLP Search Gap Closure plan (`imslp_search_gap_closure_b7979f1c`) supersedes it: generation-based cache, `imslp-sync` cron, date/period axis, multi-select, paging. Canvases kept as-is.
 
 ## Goal Capsule
 

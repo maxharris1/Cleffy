@@ -6,6 +6,13 @@
 --
 -- Vault secrets imslp_sync_url + imslp_sync_secret must be created
 -- out-of-band (see SETUP_SUPABASE.md). If missing, the cron tick is a no-op.
+--
+-- Supersedes 20260831090000 (imslp_category_snapshots + imslp_intersect_categories).
+
+drop function if exists public.imslp_intersect_categories (jsonb);
+drop table if exists public.imslp_category_snapshots;
+drop table if exists public.imslp_category_members;
+drop table if exists public.imslp_category_sync;
 
 create table public.imslp_category_members (
     category text not null,
