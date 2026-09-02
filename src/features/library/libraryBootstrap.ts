@@ -143,8 +143,9 @@ const fetchBootstrap = async (userId: string): Promise<LibraryBootstrap> => {
     // A mutation (or sign-out) since this request left means the payload
     // predates local edits: hand it to the caller — which re-checks the epoch
     // before applying — but do not persist it over their newer state.
+    // Detached: the page paints from the payload now, not after two Dexie puts.
     if (libraryMutationEpoch() === epochAtFetch) {
-        await cacheBootstrap(userId, boot);
+        void cacheBootstrap(userId, boot).catch(() => undefined);
     }
     return boot;
 };

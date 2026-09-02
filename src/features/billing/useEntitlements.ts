@@ -27,10 +27,7 @@ export interface UseEntitlementsOptions {
  * for very little gain. The Dexie cache means repeat mounts are cheap and the
  * first paint is instant even offline.
  */
-export const useEntitlements = (
-    userId: string | null,
-    options: UseEntitlementsOptions = {},
-): EntitlementsState => {
+export const useEntitlements = (userId: string | null, options: UseEntitlementsOptions = {}): EntitlementsState => {
     const viaBootstrap = options.viaLibraryBootstrap === true;
     const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
     const [loading, setLoading] = useState(userId !== null);
@@ -56,42 +53,47 @@ export const useEntitlements = (
         }
 
         let mounted = true;
+        // Server first, cache alongside — two independent legs. The request
+        // must not wait behind an IndexedDB open it does not need, and its
+        // answer must not wait behind the cache read either. A fresh answer
+        // that lands before the cached row is read makes the cached paint moot.
+        let freshArrived = false;
+        const fresh: Promise<Entitlements> = viaBootstrap
+            ? fetchLibraryBootstrap(userId).then((boot) => boot.entitlements)
+            : loadEntitlements(userId);
+
         void (async () => {
-            // Paint from cache first so an offline start is instant, then
-            // reconcile with the server.
             try {
                 const cached = await readCachedEntitlements(userId);
-                if (mounted && cached) {
+                if (mounted && cached && !freshArrived) {
                     setEntitlements(cached);
                 }
             } catch {
                 // Cache miss is not worth surfacing — the server read follows.
             }
+        })();
+
+        void (async () => {
+            let value: Entitlements | null = null;
             try {
-                if (viaBootstrap) {
-                    const boot = await fetchLibraryBootstrap(userId);
-                    if (mounted) {
-                        setEntitlements(boot.entitlements);
-                    }
-                } else {
-                    const fresh = await loadEntitlements(userId);
-                    if (mounted) {
-                        setEntitlements(fresh);
-                    }
-                }
+                value = await fresh;
             } catch {
                 if (viaBootstrap) {
                     try {
-                        const fresh = await loadEntitlements(userId);
-                        if (mounted) {
-                            setEntitlements(fresh);
-                        }
-                    } catch {
                         // loadEntitlements already falls back to cache, then to free.
+                        value = await loadEntitlements(userId);
+                    } catch {
+                        value = null;
                     }
                 }
             }
+            if (value) {
+                freshArrived = true;
+            }
             if (mounted) {
+                if (value) {
+                    setEntitlements(value);
+                }
                 setLoading(false);
             }
         })();

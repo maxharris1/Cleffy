@@ -604,6 +604,45 @@ describe('LibraryPage', () => {
         await waitFor(() => expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument());
     });
 
+    it('dispatches the bootstrap before the snapshot read resolves, and skips the paint a fresh answer beat', async () => {
+        const order: string[] = [];
+        let releaseCache: (value: unknown) => void = () => undefined;
+        readCachedLibraryList.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    order.push('cache-read');
+                    releaseCache = resolve;
+                }),
+        );
+        fetchLibraryBootstrap.mockImplementation(async () => {
+            order.push('bootstrap');
+            return {
+                documents: [doc('d1', 'Fresh from the server')],
+                hasMore: false,
+                favoriteIds: new Set<string>(),
+                tags: [],
+                documentTags: new Map<string, string[]>(),
+                entitlements: FREE_ENTITLEMENTS,
+                fetchedAtEpoch: libraryMutationEpoch(),
+            };
+        });
+        renderLibrary();
+
+        await waitFor(() => expect(order).toEqual(['bootstrap', 'cache-read']));
+        // The network answered while IndexedDB was still opening.
+        await new Promise((r) => setTimeout(r, 10));
+        releaseCache({
+            documents: [doc('d1', 'Stale snapshot title')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+
+        expect(await screen.findByText('Fresh from the server')).toBeInTheDocument();
+        expect(screen.queryByText('Stale snapshot title')).not.toBeInTheDocument();
+    });
+
     describe('snapshot write-through', () => {
         it('persists the post-edit list after a favorite lands, so the next visit paints it', async () => {
             const user = userEvent.setup();

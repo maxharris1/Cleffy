@@ -133,14 +133,29 @@ export const LibraryPage = () => {
 
     useEffect(() => {
         let cancelled = false;
+        // The network request leaves first: it must not queue behind an
+        // IndexedDB open (a schema upgrade can take a good fraction of a
+        // second) that it does not depend on. The snapshot read runs alongside.
+        let firstResolved = false;
+        const first = fetchLibraryBootstrap(userId);
+        first.then(
+            (boot) => {
+                // Only a FRESH answer makes the snapshot moot; a payload a
+                // mutation outran will be refetched, and the snapshot bridges
+                // that gap exactly as it bridges a slow first request.
+                firstResolved = libraryMutationEpoch() === boot.fetchedAtEpoch;
+            },
+            () => undefined,
+        );
         void (async () => {
             // Instant paint from the last bootstrap before the network. Only the
             // user-scoped snapshot qualifies: pdfCache (opened PDFs) is shared by
             // every account on this browser, so it stays out of the happy path
-            // and appears only under the labelled offline fallback below.
+            // and appears only under the labelled offline fallback below. A
+            // network answer that beat the snapshot read makes the paint moot.
             const cachedList = await readCachedLibraryList(userId).catch(() => null);
             let painted = false;
-            if (!cancelled && cachedList && cachedList.documents.length > 0) {
+            if (!cancelled && !firstResolved && cachedList && cachedList.documents.length > 0) {
                 setDocuments(cachedList.documents);
                 setHasMore(cachedList.hasMore);
                 setFavorites(cachedList.favoriteIds);
@@ -162,7 +177,7 @@ export const LibraryPage = () => {
             for (let pass = 0; pass < 3; pass++) {
                 const lastPass = pass === 2;
                 try {
-                    const boot = await fetchLibraryBootstrap(userId);
+                    const boot = await (pass === 0 ? first : fetchLibraryBootstrap(userId));
                     if (cancelled) {
                         return;
                     }

@@ -87,14 +87,19 @@ describe('fetchLibraryBootstrap', () => {
         noteLibraryMutation();
         release({ data: payload('Aria'), error: null });
         await inFlight;
+        // Give a (wrongly) detached write every chance to land before asserting.
+        await new Promise((resolve) => setTimeout(resolve, 20));
         expect(await getDb().libraryList.get('user-stale')).toBeUndefined();
     });
 
     it('persists a payload no mutation raced', async () => {
         rpc.mockResolvedValue({ data: payload('Aria'), error: null });
         await fetchLibraryBootstrap('user-fresh');
-        const row = await getDb().libraryList.get('user-fresh');
-        expect(row?.documents[0]?.title).toBe('Aria');
+        // The write is detached from the resolution so the page can paint first.
+        await vi.waitFor(async () => {
+            const row = await getDb().libraryList.get('user-fresh');
+            expect(row?.documents[0]?.title).toBe('Aria');
+        });
     });
 
     it('coalesces only requests in flight — a sequential call fetches anew', async () => {
