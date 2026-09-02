@@ -49,8 +49,8 @@ export const ImslpScoreCard = ({
                 aria-hidden="true"
                 className="library-card-cover aspect-[1/1.414] overflow-hidden rounded-md border border-stone-200/80 bg-white shadow-sm"
             >
-                {/* pt-5: no favourite star to clear here, unlike the library cover. */}
-                <TypesetCover title={coverTitle} composer={coverComposer} className="pt-5" />
+                {/* pt-6: no favourite star to clear here, unlike the library cover. */}
+                <TypesetCover title={coverTitle} composer={coverComposer} className="pt-6" />
             </div>
             <span className="mt-2.5 block">
                 {/*
