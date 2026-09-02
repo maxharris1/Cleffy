@@ -28,9 +28,10 @@ export interface ScoreAnalysisStatusRow {
  * same ScoreData out, only sooner — so it deliberately stayed behind at 5
  * rather than asking every reader to regenerate an identical analysis. svc-7
  * (D.C./D.S. roadmaps, the tempo map surviving a shard merge, pedal) changes
- * the performance, so it is worth the interruption.
+ * the performance, so it is worth the interruption. svc-8 seeds expression
+ * across the page-cut seam, which changes what every 4+ page score sounds like.
  */
-export const CURRENT_ENGINE_GENERATION = 7;
+export const CURRENT_ENGINE_GENERATION = 8;
 
 const engineGeneration = (engineVersion: string | null): number | null => {
     const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');

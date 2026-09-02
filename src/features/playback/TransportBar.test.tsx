@@ -291,7 +291,7 @@ describe('analysis warnings', () => {
 });
 
 describe('tempo disclosure and stale analyses', () => {
-    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine: string | null = 'audiveris-5.6.1+svc-7') =>
+    const ready = (over: Partial<Parameters<typeof renderBar>[0]> = {}, score = tinyScore, engine: string | null = 'audiveris-5.6.1+svc-8') =>
         renderBar({
             state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },
             ...over,

@@ -1,6 +1,6 @@
 # Musicality review — OMR → ScoreData → playback
 
-> **Addendum — 2026-08-30.** This review was written against the pipeline as it stood before
+> **Addendum — 2026-09-02.** This review was written against the pipeline as it stood before
 > svc-5. The probe transcript, the case study and the priorities below are a record of that
 > state, not of today's; read them as history. What has been fixed since:
 >
@@ -17,6 +17,12 @@
 >   printed, and says which; sustain pedal is read (P2). On the client, the engine this
 >   document's thesis calls a MIDI note list gains a dB-domain dynamic range, reverb, keyboard
 >   panning, a velocity-tracked filter, deterministic humanization and pitch-dependent release.
+> - **svc-8** — a 4+ page score is still two shards, but the second is now parsed with the
+>   first's tempo and dynamics at the overlap, so a rit. that crossed the cut, an a tempo that
+>   opened the next page, and a pp printed only on page 1 all survive. A later movement with
+>   no heading of its own starts at its meter default rather than the previous movement's
+>   ritardando floor. Gradual marks are shaded (poco / molto) and the stepped family —
+>   meno mosso, più mosso, ritenuto, l'istesso tempo, doppio movimento — is read.
 >
 > Still open, and still described accurately below: ornaments and trills, appoggiatura versus
 > acciaccatura, swing, velocity-layered samples, the measure counter across concatenated
