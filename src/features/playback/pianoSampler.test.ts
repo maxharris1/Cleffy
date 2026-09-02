@@ -192,12 +192,12 @@ describe('layersBracketing', () => {
 
 describe('loadPianoBuffers', () => {
     it('decodes every mid-layer anchor with its onset and caches the result', async () => {
-        const fetchImpl = vi.fn(async () => ({
+        const fetchImpl = vi.fn(async (_url: string) => ({
             ok: true,
             arrayBuffer: async () => new ArrayBuffer(8),
-        })) as unknown as typeof fetch;
+        }));
         const decoder = { decodeAudioData: vi.fn(async () => stubBuffer(1102)) };
-        const voices = await loadPianoBuffers(decoder, fetchImpl);
+        const voices = await loadPianoBuffers(decoder, fetchImpl as unknown as typeof fetch);
         expect(voices.size).toBe(PIANO_ANCHORS.length);
         expect(voices.get(60)?.[0]?.onsetSec).toBeCloseTo(0.048, 3); // ~50ms padding skipped
         expect(voices.get(60)?.[0]?.velocity).toBe(LAYER_MID_VELOCITY);
@@ -206,7 +206,7 @@ describe('loadPianoBuffers', () => {
                 ([url]) => typeof url === 'string' && !url.includes('-soft') && !url.includes('-loud'),
             ).length;
         expect(midCalls()).toBe(PIANO_ANCHORS.length);
-        await loadPianoBuffers(decoder, fetchImpl);
+        await loadPianoBuffers(decoder, fetchImpl as unknown as typeof fetch);
         expect(midCalls()).toBe(PIANO_ANCHORS.length); // second call served from cache
     });
 
