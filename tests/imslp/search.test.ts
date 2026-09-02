@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     STOP_TOKENS,
     buildSearchVariants,
+    cleanSnippet,
     correctTokens,
     damerauLevenshtein,
     extractPeriod,
@@ -232,5 +233,64 @@ describe('scoreTitleMatch', () => {
 
     it('matches accent-folded non-decomposable letters', () => {
         expect(scoreTitleMatch('Symphony No.3 (Lutosławski, Witold)', ['lutoslawski'])).toBeGreaterThan(0);
+    });
+});
+
+describe('cleanSnippet', () => {
+    // Fixtures are verbatim srwhat=text snippets captured from imslp.org for "moonlight".
+    it('drops file names, thumbnails and the uploader line', () => {
+        expect(
+            cleanSnippet(
+                '|File Name 1=PMLP1458-01.01._Sonata_No._14_In_C-Sharp_Minor,_Op._27,_No._2_(&quot;<span class="searchmatch">Moonlight</span>&quot;)-_I_-_Adagio_Sostenuto.mp3\n...ilename=TN-PMLP1458-01.01._Sonata_No._14-7939.png\n',
+            ),
+        ).toBe('');
+        expect(cleanSnippet('|Uploader=[[User:Mr. Moonlight|Mr. Moonlight]]\n')).toBe('');
+        expect(cleanSnippet('#REDIRECT [[Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)]]')).toBe('');
+    });
+
+    it('reduces templates and links to their labels and drops a bare "Source:"', () => {
+        expect(
+            cleanSnippet(
+                '|Misc. Notes=Source: {{plain|https://archive.org/details/lp_three-favorite-sonatas|Internet Archive}}\n',
+            ),
+        ).toBe('Source: Internet Archive');
+        expect(cleanSnippet('|Misc. Notes=Source: {{plain|https://archive.org/details/x}}\n')).toBe('');
+        // A field name cut mid-word by the snippet window is unknown plumbing, not prose.
+        expect(cleanSnippet('...otes=Source: {{plain|https://archive.org/details/x|Internet Archive}}\n')).toBe('');
+        expect(
+            cleanSnippet(
+                '|Work Title=Ludwig van Beethovens Werke\n|External Links=[[wikipedia:Beethoven Gesamtausgabe|Wikipedia article]]\n',
+            ),
+        ).toBe('Ludwig van Beethovens Werke');
+    });
+
+    it('keeps movement lists and human fields as prose, with entities decoded', () => {
+        expect(
+            cleanSnippet(
+                '# Mondnacht am Seegestade ; Clair de lune au bord de la mer ; Moonlight on the Lake-Shore. Andante placido ({{K|Ab}}) \n',
+            ),
+        ).toBe(
+            'Mondnacht am Seegestade ; Clair de lune au bord de la mer ; Moonlight on the Lake-Shore. Andante placido (Ab)',
+        );
+        expect(cleanSnippet('# Nocturne &quot;Moonlight&quot; (Ноктюрн «Лунный свет»)\n')).toBe(
+            'Nocturne "Moonlight" (Ноктюрн «Лунный свет»)',
+        );
+        expect(cleanSnippet(':5. Boro Budur in Moonlight\n**Nocturne: &quot;The Moonlight&quot;\n')).toBe(
+            '5. Boro Budur in Moonlight · Nocturne: "The Moonlight"',
+        );
+        expect(cleanSnippet('|Work Title=Water in the Moonlight\n|Alternative Title=\n')).toBe(
+            'Water in the Moonlight',
+        );
+    });
+
+    it('caps length and handles empty input', () => {
+        expect(cleanSnippet(undefined)).toBe('');
+        expect(cleanSnippet('')).toBe('');
+        const long = Array.from({ length: 20 }, (_, i) => `# Movement number ${i} with a long descriptive title`).join(
+            '\n',
+        );
+        const out = cleanSnippet(long);
+        expect(out.length).toBeLessThanOrEqual(200);
+        expect(out.endsWith('…')).toBe(true);
     });
 });

@@ -424,6 +424,105 @@ export const buildSearchVariants = (
 /** MW rank position → score bonus, scaled by variant trust. */
 export const rankBonus = (position: number, weight: number): number => weight * 24 * 0.85 ** position;
 
+/** Work-page fields whose values read as prose; every other `|Field=` line is file plumbing. */
+const SNIPPET_FIELDS = new Set(
+    [
+        'work title',
+        'alternative title',
+        'opus/catalogue number',
+        'movements/sections',
+        'year/date of composition',
+        'first performance',
+        'dedication',
+        'instrumentation',
+        'piece style',
+        'comments',
+        'notes',
+        'misc. notes',
+        'discography',
+    ].map((f) => f.toLowerCase()),
+);
+
+const MEDIA_FILE_RE = /\.(?:pdf|mp3|ogg|flac|mid|midi|png|jpe?g|gif|zip|mxl|musicxml|sib|mus)\b/i;
+const SNIPPET_MAX = 200;
+
+const decodeEntities = (s: string): string =>
+    s
+        .replace(/&quot;/g, '"')
+        .replace(/&#0?39;|&apos;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&');
+
+/** `{{plain|url|label}}` → label, `{{K|Ab}}` → Ab, `{{cite}}` → nothing. */
+const stripTemplates = (s: string): string => {
+    let out = s;
+    for (let i = 0; i < 4 && out.includes('{{'); i++) {
+        out = out.replace(/\{\{([^{}]*)\}\}/g, (_m, inner: string) => {
+            const args = inner
+                .split('|')
+                .map((a) => a.trim())
+                .filter((a) => a.length > 0 && !a.includes('='));
+            const last = args[args.length - 1];
+            return args.length >= 2 && last && !/^https?:\/\//i.test(last) ? last : '';
+        });
+    }
+    return out.replace(/\{\{|\}\}/g, '');
+};
+
+/** `[[Target|Label]]` → Label, `[[Target]]` → Target, `[[wikipedia:X|Article]]` → Article. */
+const stripLinks = (s: string): string =>
+    s.replace(/\[\[([^[\]|]*)(?:\|([^[\]]*))?\]\]/g, (_m, target: string, label?: string) => label ?? target);
+
+/**
+ * Turn a MediaWiki search snippet (raw wikitext of the work page) into a line
+ * of prose: keep human fields and list items, drop file names, thumbnails,
+ * uploader and template plumbing.
+ */
+export const cleanSnippet = (raw: string | undefined): string => {
+    if (!raw) {
+        return '';
+    }
+    const text = decodeEntities(raw.replace(/<[^>]+>/g, ''));
+    const kept: string[] = [];
+    for (const rawLine of text.split(/\r?\n/)) {
+        let line = rawLine.trim().replace(/^\.\.\.\s*/, '');
+        if (!line) {
+            continue;
+        }
+        // "...ilename=TN-..." — a field name cut mid-word by the snippet window;
+        // "#REDIRECT [[...]]" — a nickname page pointing at the work.
+        if (/^[a-z]*(?:ile ?name|humb)\s*=/i.test(line) || /^#?\s*redirect\b/i.test(line)) {
+            continue;
+        }
+        const field = line.match(/^\|?\s*([^=|]{2,40}?)\s*(?:\d+)?\s*=\s*(.*)$/);
+        if (field) {
+            const name = (field[1] ?? '').trim().toLowerCase();
+            if (!SNIPPET_FIELDS.has(name)) {
+                continue;
+            }
+            line = field[2] ?? '';
+        }
+        line = stripLinks(stripTemplates(line));
+        line = line
+            .replace(/^=+\s*(.*?)\s*=+$/, '$1')
+            .replace(/^[#*:;]+\s*/, '')
+            .replace(/'{2,}/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (line.length < 3 || MEDIA_FILE_RE.test(line) || /^source:?$/i.test(line)) {
+            continue;
+        }
+        kept.push(line);
+        if (kept.join(' · ').length >= SNIPPET_MAX) {
+            break;
+        }
+    }
+    const joined = kept.join(' · ');
+    return joined.length > SNIPPET_MAX ? `${joined.slice(0, SNIPPET_MAX - 1).trimEnd()}…` : joined;
+};
+
 export interface RankHitInput {
     title: string;
     pageid: number;
@@ -490,7 +589,7 @@ export const mergeAndRank = (batches: RankBatch[], opts: RankOptions): RankedHit
             if (existing) {
                 existing.score = Math.max(existing.score, bonus);
                 if (!existing.snippet && hit.snippet) {
-                    existing.snippet = hit.snippet.replace(/<[^>]+>/g, '');
+                    existing.snippet = cleanSnippet(hit.snippet);
                 }
                 if (!existing.timestamp && hit.timestamp) {
                     existing.timestamp = hit.timestamp;
@@ -502,7 +601,7 @@ export const mergeAndRank = (batches: RankBatch[], opts: RankOptions): RankedHit
                 merged.set(title, {
                     title,
                     pageid,
-                    snippet: (hit.snippet ?? '').replace(/<[^>]+>/g, ''),
+                    snippet: cleanSnippet(hit.snippet),
                     timestamp: hit.timestamp ?? null,
                     score: bonus,
                 });
