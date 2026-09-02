@@ -167,6 +167,9 @@ const fetchAndStore = async (
         return fallback?.blob ?? null;
     }
     const blob = await fetchPublishedThumbnail(docId, thumbRev);
+    if (blob) {
+        publishedProbed.add(`${docId}:${thumbRev}`);
+    }
     if (!blob) {
         failed.add(key);
         noteThumbnailObjectMissing(docId, thumbRev);

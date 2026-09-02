@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Navigate } from 'react-router';
 
 import { isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import { BrandLoading } from '@/ui/BrandShell';
 
 /** Landing route for a registered account: students have their own chrome. */
@@ -33,8 +34,8 @@ export const RequireRegistered = ({
     return children(session);
 };
 
-/** Blocks until session bootstrap finishes; registered users go to their own home. */
-export const RequireGuest = ({ children }: { children: ReactNode }) => {
+/** Session gate — only mounted when a project exists to ask. */
+const RequireGuestConfigured = ({ children }: { children: ReactNode }) => {
     const { session, loading } = useSession();
     if (loading && !session) {
         return <BrandLoading />;
@@ -43,6 +44,17 @@ export const RequireGuest = ({ children }: { children: ReactNode }) => {
         return <Navigate to={homeFor(session)} replace />;
     }
     return children;
+};
+
+/** Blocks until session bootstrap finishes; registered users go to their own home. */
+export const RequireGuest = ({ children }: { children: ReactNode }) => {
+    // Local-only builds have no project: do not call getSupabase(), which
+    // throws, and do not block the landing page behind a session that
+    // cannot exist.
+    if (!isSupabaseConfigured()) {
+        return children;
+    }
+    return <RequireGuestConfigured>{children}</RequireGuestConfigured>;
 };
 
 /**

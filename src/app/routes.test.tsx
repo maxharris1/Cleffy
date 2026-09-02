@@ -8,6 +8,10 @@ const SESSION = {
     user: { id: 'teacher-1', email: 'teacher@example.com', is_anonymous: false, user_metadata: {} },
 };
 
+vi.mock('@/lib/supabase', () => ({
+    isSupabaseConfigured: () => true,
+}));
+
 vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
     isRegisteredSession: (session: { user?: { is_anonymous?: boolean } } | null) =>

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -157,10 +157,8 @@ describe('CloudViewer warm open', () => {
     });
 
     it('stays read-only while confirm hangs, even after several seconds', async () => {
-        vi.useFakeTimers();
         loadDocumentOffline.mockResolvedValue(cachedOpen());
-        const docRequest = deferred<DocumentRow | null>();
-        fetchDocument.mockReturnValue(docRequest.promise);
+        fetchDocument.mockReturnValue(new Promise(() => undefined));
         fetchMyRole.mockReturnValue(new Promise(() => undefined));
 
         renderViewer();
@@ -168,11 +166,12 @@ describe('CloudViewer warm open', () => {
         await waitFor(() => expect(screen.getByTestId('pdf-viewport')).toBeInTheDocument());
         expect(viewport()).toHaveAttribute('data-readonly', 'true');
 
-        await vi.advanceTimersByTimeAsync(4000);
+        vi.useFakeTimers();
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(4000);
+        });
         expect(viewport()).toHaveAttribute('data-readonly', 'true');
         expect(viewport()).toHaveAttribute('data-sync', 'off');
-
-        vi.useRealTimers();
     });
 
     it('paints read-only without sync until the role is confirmed, then opens for writing', async () => {
