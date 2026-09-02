@@ -444,6 +444,8 @@ const SNIPPET_FIELDS = new Set(
 );
 
 const MEDIA_FILE_RE = /\.(?:pdf|mp3|ogg|flac|mid|midi|png|jpe?g|gif|zip|mxl|musicxml|sib|mus)\b/i;
+/** Discography/URL slugs such as nocturne-for-piano-no-11-in-g-minor-op-37-1-ct-118-mc0002468657. */
+const SLUG_RE = /\b[a-z0-9]+(?:-[a-z0-9]+){4,}\b/i;
 const SNIPPET_MAX = 200;
 
 const decodeEntities = (s: string): string =>
@@ -455,11 +457,18 @@ const decodeEntities = (s: string): string =>
         .replace(/&nbsp;/g, ' ')
         .replace(/&amp;/g, '&');
 
-/** `{{plain|url|label}}` → label, `{{K|Ab}}` → Ab, `{{cite}}` → nothing. */
+/**
+ * `{{plain|url|label}}` → label, `{{K|Ab}}` → Ab, `{{cite}}` → nothing. A
+ * template carrying a catalogue slug (`{{AMG|nocturne-for-piano-…|No.2}}`) is
+ * a discography link, not prose — it goes entirely.
+ */
 const stripTemplates = (s: string): string => {
     let out = s;
     for (let i = 0; i < 4 && out.includes('{{'); i++) {
         out = out.replace(/\{\{([^{}]*)\}\}/g, (_m, inner: string) => {
+            if (SLUG_RE.test(inner)) {
+                return '';
+            }
             const args = inner
                 .split('|')
                 .map((a) => a.trim())
@@ -471,9 +480,17 @@ const stripTemplates = (s: string): string => {
     return out.replace(/\{\{|\}\}/g, '');
 };
 
-/** `[[Target|Label]]` → Label, `[[Target]]` → Target, `[[wikipedia:X|Article]]` → Article. */
+/**
+ * `[[Target|Label]]` → Label, `[[Target]]` → Target, `[[wikipedia:X|Article]]` →
+ * Article, `[https://… Label]` → Label, bare `[https://…]` → nothing.
+ */
 const stripLinks = (s: string): string =>
-    s.replace(/\[\[([^[\]|]*)(?:\|([^[\]]*))?\]\]/g, (_m, target: string, label?: string) => label ?? target);
+    s
+        .replace(/\[\[([^[\]|]*)(?:\|([^[\]]*))?\]\]/g, (_m, target: string, label?: string) => label ?? target)
+        .replace(/\[https?:\/\/\S+(?:\s+([^\]]*))?\]/gi, (_m, label?: string) => label ?? '');
+
+/** A `{{…` or `…}}` with no partner on the line: the snippet window cut a template. */
+const stripCutTemplates = (s: string): string => s.replace(/\{\{[^}]*$/, '').replace(/^[^{]*\}\}/, '');
 
 /**
  * Turn a MediaWiki search snippet (raw wikitext of the work page) into a line
@@ -484,7 +501,9 @@ export const cleanSnippet = (raw: string | undefined): string => {
     if (!raw) {
         return '';
     }
-    const text = decodeEntities(raw.replace(/<[^>]+>/g, ''));
+    // Decode first: the page source's own <br> arrives as &lt;br&gt;, and both
+    // it and MediaWiki's searchmatch spans should vanish.
+    const text = decodeEntities(raw).replace(/<[^>]+>/g, ' ');
     const kept: string[] = [];
     for (const rawLine of text.split(/\r?\n/)) {
         let line = rawLine.trim().replace(/^\.\.\.\s*/, '');
@@ -492,8 +511,9 @@ export const cleanSnippet = (raw: string | undefined): string => {
             continue;
         }
         // "...ilename=TN-..." — a field name cut mid-word by the snippet window;
-        // "#REDIRECT [[...]]" — a nickname page pointing at the work.
-        if (/^[a-z]*(?:ile ?name|humb)\s*=/i.test(line) || /^#?\s*redirect\b/i.test(line)) {
+        // "#REDIRECT [[...]]" — a nickname page pointing at the work;
+        // a line opening with "{{" is the tail of a field the window cut.
+        if (/^[a-z]*(?:ile ?name|humb)\s*=/i.test(line) || /^#?\s*redirect\b/i.test(line) || line.startsWith('{{')) {
             continue;
         }
         const field = line.match(/^\|?\s*([^=|]{2,40}?)\s*(?:\d+)?\s*=\s*(.*)$/);
@@ -504,14 +524,14 @@ export const cleanSnippet = (raw: string | undefined): string => {
             }
             line = field[2] ?? '';
         }
-        line = stripLinks(stripTemplates(line));
+        line = stripLinks(stripTemplates(stripCutTemplates(line)));
         line = line
             .replace(/^=+\s*(.*?)\s*=+$/, '$1')
             .replace(/^[#*:;]+\s*/, '')
             .replace(/'{2,}/g, '')
             .replace(/\s+/g, ' ')
             .trim();
-        if (line.length < 3 || MEDIA_FILE_RE.test(line) || /^source:?$/i.test(line)) {
+        if (line.length < 3 || MEDIA_FILE_RE.test(line) || SLUG_RE.test(line) || /^source:?$/i.test(line)) {
             continue;
         }
         kept.push(line);

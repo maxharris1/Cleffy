@@ -283,6 +283,26 @@ describe('cleanSnippet', () => {
         );
     });
 
+    it('drops discography slugs, cut templates and escaped <br>, and reads [url label] links', () => {
+        // Verbatim shapes from "chopin nocturne": a Discography field cut by the window.
+        expect(
+            cleanSnippet(
+                '...rne-for-piano-no-11-in-g-minor-op-37-1-ct-118-mc0002468657|No.1}}&lt;br&gt;{{AMG|nocturne-for-piano-no-12-in-g-major-op-37-2-ct-119-mc0002429720|No.2}}&lt;br&gt;{{AMG|noct\n',
+            ),
+        ).toBe('');
+        expect(
+            cleanSnippet(
+                '...cturne_in_C_minor,_Op._posth._(Chopin)&lt;br&gt;136&lt;br&gt;nocturne-for-piano-in-c-minor-kk-ivb-8\n',
+            ),
+        ).toBe('');
+        expect(
+            cleanSnippet(
+                '|Misc. Notes=Manuscript description given here @ [https://en.chopin.nifc.pl/chopin/manuscripts/detail/id/98 Chopin Society].\n',
+            ),
+        ).toBe('Manuscript description given here @ Chopin Society.');
+        expect(cleanSnippet('...{{plain|https://archive.org/details/x|Internet Archive}}\n')).toBe('');
+    });
+
     it('caps length and handles empty input', () => {
         expect(cleanSnippet(undefined)).toBe('');
         expect(cleanSnippet('')).toBe('');
