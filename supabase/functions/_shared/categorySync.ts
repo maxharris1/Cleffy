@@ -141,6 +141,46 @@ export interface CategoryMemberPage {
     timestamp?: string;
 }
 
+export interface MemberPageResult {
+    members: CategoryMemberPage[];
+    cmcontinue: string | null;
+}
+
+/**
+ * Read one `list=categorymembers` response. IMSLP runs MediaWiki 1.18, which
+ * signals the next page as `query-continue.categorymembers.cmcontinue`; newer
+ * wikis use `continue.cmcontinue`. Both are honored — missing either one used
+ * to end every category after its first page.
+ */
+export const parseMemberPage = (data: unknown): MemberPageResult => {
+    const o = (data && typeof data === 'object' ? data : {}) as {
+        query?: { categorymembers?: unknown };
+        continue?: { cmcontinue?: unknown };
+        'query-continue'?: { categorymembers?: { cmcontinue?: unknown } };
+    };
+    const raw = Array.isArray(o.query?.categorymembers) ? o.query.categorymembers : [];
+    const members: CategoryMemberPage[] = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') {
+            continue;
+        }
+        const m = item as Record<string, unknown>;
+        if (typeof m['title'] !== 'string' || typeof m['pageid'] !== 'number') {
+            continue;
+        }
+        members.push({
+            title: m['title'],
+            pageid: m['pageid'],
+            sortkeyprefix: typeof m['sortkeyprefix'] === 'string' ? m['sortkeyprefix'] : undefined,
+            timestamp: typeof m['timestamp'] === 'string' ? m['timestamp'] : undefined,
+        });
+    }
+    const legacy = o['query-continue']?.categorymembers?.cmcontinue;
+    const modern = o.continue?.cmcontinue;
+    const token = typeof legacy === 'string' ? legacy : typeof modern === 'string' ? modern : null;
+    return { members, cmcontinue: token && token.length > 0 ? token : null };
+};
+
 export interface RolloverDecision {
     kind: 'continue' | 'complete' | 'failed';
     activeGeneration: number;

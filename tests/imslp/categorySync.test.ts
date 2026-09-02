@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     applyPageResult,
     categoriesToSync,
+    parseMemberPage,
     pickNextCategory,
     planTick,
     type CategoryMemberPage,
@@ -32,6 +33,65 @@ const page = (title: string, pageid: number): CategoryMemberPage => ({
     pageid,
     sortkeyprefix: title,
     timestamp: '2026-01-01T00:00:00Z',
+});
+
+describe('parseMemberPage', () => {
+    // Verbatim shape of imslp.org/api.php?list=categorymembers (MediaWiki 1.18):
+    // the next-page token lives under `query-continue`, not `continue`.
+    const legacyResponse = {
+        query: {
+            categorymembers: [
+                {
+                    pageid: 1497603,
+                    ns: 0,
+                    title: 'Au bord de la mer, Op.68 (Oberthür, Charles)',
+                    sortkeyprefix: 'AU BORD DE LA MER, OP.0068~~OBERTHUR, CHARLES',
+                    timestamp: '2019-03-02T11:04:22Z',
+                },
+                { pageid: 42, ns: 0, title: 'Nocturne (Howe, Mary)' },
+            ],
+        },
+        'query-continue': {
+            categorymembers: {
+                cmcontinue: 'page|415520424f5244|1497603',
+            },
+        },
+    };
+
+    it('reads the MediaWiki 1.18 query-continue token — the shape IMSLP actually returns', () => {
+        const page = parseMemberPage(legacyResponse);
+        expect(page.members).toHaveLength(2);
+        expect(page.members[0]).toEqual({
+            title: 'Au bord de la mer, Op.68 (Oberthür, Charles)',
+            pageid: 1497603,
+            sortkeyprefix: 'AU BORD DE LA MER, OP.0068~~OBERTHUR, CHARLES',
+            timestamp: '2019-03-02T11:04:22Z',
+        });
+        expect(page.members[1]?.sortkeyprefix).toBeUndefined();
+        expect(page.cmcontinue).toBe('page|415520424f5244|1497603');
+    });
+
+    it('also accepts the modern continue block', () => {
+        const page = parseMemberPage({
+            query: { categorymembers: [{ pageid: 1, title: 'Fugue (Bach, Johann Sebastian)' }] },
+            continue: { cmcontinue: 'page|00|1', continue: '-||' },
+        });
+        expect(page.cmcontinue).toBe('page|00|1');
+    });
+
+    it('returns a null token only on the last page, and tolerates junk', () => {
+        expect(parseMemberPage({ query: { categorymembers: [] } }).cmcontinue).toBeNull();
+        expect(parseMemberPage(null)).toEqual({ members: [], cmcontinue: null });
+        expect(parseMemberPage({ query: { categorymembers: [{ title: 'no id' }, 'junk'] } }).members).toEqual([]);
+    });
+
+    it('a full IMSLP page keeps the sync in the continue state', () => {
+        const page = parseMemberPage(legacyResponse);
+        const plan = planTick('For piano', undefined);
+        const decision = applyPageResult(plan, undefined, page.members, page.cmcontinue, null);
+        expect(decision.kind).toBe('continue');
+        expect(decision.cmcontinue).toBe('page|415520424f5244|1497603');
+    });
 });
 
 describe('categoriesToSync', () => {

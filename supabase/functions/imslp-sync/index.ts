@@ -2,10 +2,11 @@ import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
     applyPageResult,
     categoriesToSync,
+    parseMemberPage,
     pickNextCategory,
     planTick,
-    type CategoryMemberPage,
     type CategorySyncRow,
+    type MemberPageResult,
 } from '../_shared/categorySync.ts';
 import { mwFetch, serviceClient } from '../_shared/imslp.ts';
 import { COMPOSER_FACETS, ERA_FACETS, FORM_FACETS, INSTRUMENT_FACETS } from '../_shared/searchFacetData.ts';
@@ -15,13 +16,16 @@ import { COMPOSER_FACETS, ERA_FACETS, FORM_FACETS, INSTRUMENT_FACETS } from '../
  * (see supabase/config.toml) because pg_cron / pg_net have no Supabase JWT —
  * the request is authenticated by x-imslp-sync-secret or a service-role bearer.
  *
- * Each tick pages one category (~50 MW pages at ~1 req/s) into a building
- * generation. The previous ok snapshot stays live until the pager finishes.
+ * Each tick pages one category (up to 50 MW pages of 500 at ~1 req/s) into a
+ * building generation. The previous ok snapshot stays live until the pager
+ * finishes.
  */
 
 const PAGES_PER_TICK = 50;
 const PAGE_DELAY_MS = 1000;
-const CM_LIMIT = 50;
+// IMSLP serves the anonymous maximum of 500 per page; 50 would take ~5 hours
+// to walk the taxonomy on the 2-minute cron.
+const CM_LIMIT = 500;
 
 const SYNC_CATEGORIES = categoriesToSync(COMPOSER_FACETS, INSTRUMENT_FACETS, FORM_FACETS, ERA_FACETS);
 
@@ -41,10 +45,7 @@ const authorized = (req: Request): boolean => {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const fetchMemberPage = async (
-    category: string,
-    cmcontinue: string | null,
-): Promise<{ members: CategoryMemberPage[]; cmcontinue: string | null }> => {
+const fetchMemberPage = async (category: string, cmcontinue: string | null): Promise<MemberPageResult> => {
     const params: Record<string, string> = {
         action: 'query',
         list: 'categorymembers',
@@ -57,14 +58,7 @@ const fetchMemberPage = async (
     if (cmcontinue) {
         params['cmcontinue'] = cmcontinue;
     }
-    const data = (await mwFetch(params)) as {
-        query?: { categorymembers?: CategoryMemberPage[] };
-        continue?: { cmcontinue?: string };
-    };
-    return {
-        members: data.query?.categorymembers ?? [],
-        cmcontinue: data.continue?.cmcontinue ?? null,
-    };
+    return parseMemberPage(await mwFetch(params));
 };
 
 Deno.serve(async (req) => {
