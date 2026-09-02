@@ -3544,10 +3544,10 @@ begin
     values ('thumbnails', 'thumbnails', false, 2097152, array['image/jpeg'])
     on conflict (id) do nothing;
 exception
-    when others then
-        -- Hosted projects may refuse this from a migration; the dashboard step
-        -- in SETUP_SUPABASE.md creates the bucket by hand. The policies below
-        -- are what matter and do not depend on the row existing yet.
+    when insufficient_privilege then
+        -- Hosted projects may refuse storage.buckets writes from a migration
+        -- (SQLSTATE 42501); the dashboard step in SETUP_SUPABASE.md creates
+        -- the bucket by hand. Any other error must fail the migration.
         raise notice 'thumbnails bucket not created here (%): create it in the dashboard', sqlerrm;
 end;
 $$;
