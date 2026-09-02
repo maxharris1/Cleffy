@@ -1,6 +1,7 @@
 import {
     buildNoteShapes,
     buildPedalEnds,
+    buildResonanceImpulse,
     buildReverbImpulse,
     buildSoftClipCurve,
     CHORD_ROLL_MAX_S,
@@ -10,7 +11,11 @@ import {
     noteJitter,
     panForMidi,
     PEDAL_RELEASE_TAU_S,
+    pedalStateAt,
     releaseTauFor,
+    RESONANCE_RAMP_S,
+    RESONANCE_SEED,
+    RESONANCE_WET,
     REVERB_SECONDS,
     REVERB_SECONDS_LOW_POWER,
     REVERB_SEED,
@@ -335,6 +340,8 @@ export class PlaybackEngine {
     private handBuses: [GainNodeLike, GainNodeLike] | null = null;
     private reverbSend: GainNodeLike | null = null;
     private convolver: ConvolverLike | null = null;
+    private resonanceSend: GainNodeLike | null = null;
+    private resonance: ConvolverLike | null = null;
     private clickBus: GainNodeLike | null = null;
 
     /** Chord/melody/downbeat shaping, index-aligned with `score.notes`. */
@@ -350,6 +357,7 @@ export class PlaybackEngine {
     private pendingAnchor: Anchor | null = null;
     private pausedTick = 0;
     private nextNoteIndex = 0;
+    private nextPedalIndex = 0;
     private nextBeat: BeatTick | null = null;
     private loop: LoopRegion | null = null;
     private muted: [boolean, boolean] = [false, false];
@@ -452,6 +460,7 @@ export class PlaybackEngine {
         this.pendingAnchor = null;
         this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, startTick);
         this.nextBeat = null;
+        this.syncResonanceFrom(startTick, now, true);
         this.scheduleSustainingNotesAt(startTick);
         this.startScheduler();
     }
@@ -487,6 +496,7 @@ export class PlaybackEngine {
             this.pendingAnchor = null;
             this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, clamped);
             this.nextBeat = null;
+            this.syncResonanceFrom(clamped, this.ctx.currentTime, true);
             this.scheduleSustainingNotesAt(clamped);
             if (this.status === 'counting') {
                 this.setStatus('playing');
@@ -580,6 +590,8 @@ export class PlaybackEngine {
             this.clickBus,
             this.reverbSend,
             this.convolver,
+            this.resonanceSend,
+            this.resonance,
             this.master,
             this.limiter,
             this.softClip,
@@ -595,6 +607,8 @@ export class PlaybackEngine {
         this.clickBus = null;
         this.reverbSend = null;
         this.convolver = null;
+        this.resonanceSend = null;
+        this.resonance = null;
         this.master = null;
         this.limiter = null;
         this.softClip = null;
@@ -603,10 +617,12 @@ export class PlaybackEngine {
     /**
      * Signal path: voices → hand bus → master → limiter → soft clip →
      * speakers, with a parallel send off each hand bus into one shared
-     * reverb. The reverb is a send rather than an insert so muting a hand
-     * takes its reflections with it, and the metronome deliberately misses
-     * the send — a click smeared by a room stops being the sharp reference
-     * the player is following.
+     * reverb, and — when the score has pedal edges — a second send into a
+     * shorter, brighter convolver for the sympathetic bloom. Both are sends
+     * rather than inserts so muting a hand takes its reflections and its
+     * resonance with it, and the metronome deliberately misses both — a
+     * click smeared by a room stops being the sharp reference the player is
+     * following.
      */
     private buildGraph(ctx: AudioContextLike): void {
         const softClip = ctx.createWaveShaper();
@@ -646,6 +662,22 @@ export class PlaybackEngine {
         lh.connect(send);
         this.reverbSend = send;
         this.convolver = convolver;
+
+        // Only when the score actually pedals: a second convolver is real CPU,
+        // and a silent send still has to render a tail. No edges means the
+        // bloom never opens, so it is cheaper not to build it.
+        if (this.score.pedals?.length) {
+            const resonanceSend = ctx.createGain();
+            resonanceSend.gain.value = 0;
+            const resonance = ctx.createConvolver();
+            resonance.buffer = buildResonanceImpulse(ctx, { rng: seededUnitRng(RESONANCE_SEED) });
+            resonanceSend.connect(resonance);
+            resonance.connect(master);
+            rh.connect(resonanceSend);
+            lh.connect(resonanceSend);
+            this.resonanceSend = resonanceSend;
+            this.resonance = resonance;
+        }
 
         this.clickBus = ctx.createGain();
         this.clickBus.gain.value = CLICK_BUS_GAIN;
@@ -732,19 +764,25 @@ export class PlaybackEngine {
             const regionEnd = this.loop ? this.loop.endTick : this.score.totalTicks;
 
             this.scheduleNotesUpTo(regionEnd, horizon);
+            this.schedulePedalEdgesUpTo(regionEnd, horizon);
             if (this.metronome) {
                 this.scheduleBeatsUpTo(regionEnd, horizon);
             }
 
             if (this.loop && this.timeOfTick(this.loop.endTick) < horizon && !this.pendingAnchor) {
                 // Seamless wrap: future content re-anchors at the loop start.
+                // A wrap is a damper: if the pedal is still down at B, the bloom
+                // lifts with the notes, then re-reads the state at A.
+                const wrapAt = this.timeOfTick(this.loop.endTick);
+                this.liftResonanceAtLoopEnd(regionEnd, wrapAt);
                 this.pendingAnchor = {
                     tick: this.loop.startTick,
-                    ctxTime: this.timeOfTick(this.loop.endTick),
+                    ctxTime: wrapAt,
                     baseSeconds: secondsAtTick(this.map, this.loop.startTick),
                 };
                 this.nextNoteIndex = firstNoteIndexAtOrAfter(this.score.notes, this.loop.startTick);
                 this.nextBeat = null;
+                this.syncResonanceFrom(this.loop.startTick, wrapAt, false);
                 // Do not scheduleSustainingNotesAt here — notes that began before the
                 // loop start would ghost-retrigger on every wrap.
                 continue;
@@ -829,6 +867,79 @@ export class PlaybackEngine {
                 releaseTauOverrideFor(note, endTick, cutAtRegion),
             );
         }
+    }
+
+    /**
+     * Walk pedal edges the same way notes are walked: a cursor, a horizon, and
+     * never into the past. A re-catch pair on one tick is two events at the
+     * same time; the later `setTargetAtTime` wins, which is `down`.
+     */
+    private schedulePedalEdgesUpTo(regionEnd: number, horizon: number): void {
+        const send = this.resonanceSend;
+        const ctx = this.ctx;
+        const pedals = this.score.pedals;
+        if (!send || !ctx || !pedals) {
+            return;
+        }
+        while (this.nextPedalIndex < pedals.length) {
+            const edge = pedals[this.nextPedalIndex];
+            if (!edge || edge.tick >= regionEnd) {
+                break;
+            }
+            const startAt = this.timeOfTick(edge.tick);
+            if (startAt >= horizon) {
+                break;
+            }
+            this.nextPedalIndex += 1;
+            send.gain.setTargetAtTime(
+                edge.k === 'down' ? RESONANCE_WET : 0,
+                Math.max(ctx.currentTime, startAt),
+                RESONANCE_RAMP_S,
+            );
+        }
+    }
+
+    private firstPedalIndexAtOrAfter(tick: number): number {
+        const pedals = this.score.pedals;
+        if (!pedals) {
+            return 0;
+        }
+        let i = 0;
+        while (i < pedals.length && (pedals[i]?.tick ?? 0) < tick) {
+            i += 1;
+        }
+        return i;
+    }
+
+    /**
+     * (Re)start the bloom from a transport position: cursor on the next edge
+     * at or after that tick (and not before a loop's A), send opened or closed
+     * to match the pedal there. `cancel` drops automation still ahead — a seek
+     * or a fresh play — so a wrap can keep the lift at B and then reopen.
+     */
+    private syncResonanceFrom(tick: number, at: number, cancel: boolean): void {
+        const send = this.resonanceSend;
+        const ctx = this.ctx;
+        if (!send || !ctx) {
+            return;
+        }
+        const cursorTick = this.loop ? Math.max(tick, this.loop.startTick) : tick;
+        this.nextPedalIndex = this.firstPedalIndexAtOrAfter(cursorTick);
+        const when = Math.max(ctx.currentTime, at);
+        if (cancel) {
+            send.gain.cancelScheduledValues(when);
+        }
+        send.gain.setTargetAtTime(pedalStateAt(this.score.pedals, tick) ? RESONANCE_WET : 0, when, RESONANCE_RAMP_S);
+    }
+
+    /** A wrap is a damper: if the pedal is still holding at B, close the bloom. */
+    private liftResonanceAtLoopEnd(regionEnd: number, wrapAt: number): void {
+        const send = this.resonanceSend;
+        const ctx = this.ctx;
+        if (!send || !ctx || !pedalStateAt(this.score.pedals, regionEnd)) {
+            return;
+        }
+        send.gain.setTargetAtTime(0, Math.max(ctx.currentTime, wrapAt), RESONANCE_RAMP_S);
     }
 
     /**
@@ -1048,5 +1159,10 @@ export class PlaybackEngine {
             }
         }
         this.active.clear();
+        const send = this.resonanceSend;
+        if (send) {
+            send.gain.cancelScheduledValues(now);
+            send.gain.setTargetAtTime(0, now, 0.02);
+        }
     }
 }

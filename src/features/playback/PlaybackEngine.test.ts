@@ -8,6 +8,8 @@ import {
     noteJitter,
     PEDAL_RELEASE_TAU_S,
     releaseTauFor,
+    RESONANCE_RAMP_S,
+    RESONANCE_WET,
     velocityToGain,
 } from '@/features/playback/expression';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
@@ -33,6 +35,7 @@ class MockParam implements AudioParamLike {
      * Web Audio evaluates automation in time order, so cancelling drops every
      * event scheduled at or after the cancel time — that is the whole point of
      * calling it before a ramp, and a no-op stub here would hide the bug.
+     * `tau` is the timeConstant on setTargetAtTime entries — it is the curve.
      */
     cancelScheduledValues(time: number): void {
         for (let i = this.targets.length - 1; i >= 0; i--) {
@@ -192,7 +195,8 @@ const fakeBuffers = (attackLagSec = 0) =>
     new Map(PIANO_ANCHORS.map((midi) => [midi, { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec }]));
 
 // Graph construction order in buildGraph(): master, RH bus, LH bus, reverb
-// send, click bus. Every gain after that belongs to a voice or a click.
+// send, click bus. A score with pedal edges inserts a resonance send before
+// the click bus. Every gain after that belongs to a voice or a click.
 const BUS_RH = 1;
 const BUS_LH = 2;
 const REVERB_SEND = 3;
@@ -929,5 +933,196 @@ describe('sustain pedal', () => {
         expect(voiceGainOf(incoming)).toBeGreaterThan(0);
         expect(incoming?.startedAt).not.toBeNull();
         expect(voiceGainNodeOf(incoming)?.gain.targets.some((t) => t.tau === 0.01)).toBe(false);
+    });
+});
+
+describe('pedal resonance', () => {
+    const pedalled = (pedals: ScorePedal[], notes: readonly ScoreNote[] = tinyScore.notes): ScoreData => ({
+        ...tinyScore,
+        notes: [...notes],
+        pedals,
+    });
+
+    const resonanceSendOf = (ctx: MockContext): MockGain | undefined => {
+        const ir = ctx.convolvers[1];
+        return ctx.gains.find((g) => g.connections.includes(ir));
+    };
+
+    const gridAt = (score: ScoreData, tick: number): number =>
+        0.08 + secondsAtTick(buildTempoMap(score, 120 / (score.defaultBpm ?? 120), 120), tick);
+
+    it('builds a second convolver only when the score has pedal edges', async () => {
+        const dry = makeEngine();
+        await dry.engine.play();
+        expect(dry.ctx.convolvers).toHaveLength(1);
+
+        const wet = makeEngine({
+            score: pedalled([
+                { tick: 0, k: 'down' },
+                { tick: 960, k: 'up' },
+            ]),
+        });
+        await wet.engine.play();
+        expect(wet.ctx.convolvers).toHaveLength(2);
+        expect(wet.ctx.convolvers[1]?.buffer?.numberOfChannels).toBe(2);
+        expect(wet.ctx.convolvers[1]?.buffer?.duration).toBeCloseTo(0.6, 5);
+    });
+
+    it('opens the send on a down and closes it on the matching up', async () => {
+        const score = pedalled(
+            [
+                { tick: 0, k: 'down' },
+                { tick: 960, k: 'up' },
+            ],
+            [{ t: 0, d: 480, p: 60, h: 0 }],
+        );
+        const { ctx, engine } = makeEngine({ score });
+        await engine.play();
+        await advance(ctx, 1.3);
+        const send = resonanceSendOf(ctx);
+        expect(send).toBeDefined();
+        expect(
+            send?.gain.targets.some((t) => t.target === RESONANCE_WET && t.time < 0.1 && t.tau === RESONANCE_RAMP_S),
+        ).toBe(true);
+        const upAt = gridAt(score, 960);
+        const close = send?.gain.targets.filter((t) => t.target === 0 && t.tau === RESONANCE_RAMP_S) ?? [];
+        expect(close.some((t) => Math.abs(t.time - upAt) < 1e-6)).toBe(true);
+    });
+
+    it('opens immediately when seeking into a held pedal, and is closed past the lift', async () => {
+        const score = pedalled(
+            [
+                { tick: 0, k: 'down' },
+                { tick: 1920, k: 'up' },
+            ],
+            [{ t: 0, d: 480, p: 60, h: 0 }],
+        );
+        const { ctx, engine } = makeEngine({ score });
+        await engine.play();
+        await advance(ctx, 0.2);
+
+        engine.seek(480);
+        const send = resonanceSendOf(ctx);
+        const opened = send?.gain.targets.filter((t) => t.time === ctx.currentTime) ?? [];
+        expect(opened.at(-1)?.target).toBe(RESONANCE_WET);
+        expect(opened.at(-1)?.tau).toBe(RESONANCE_RAMP_S);
+
+        engine.seek(2400);
+        const closed = send?.gain.targets.filter((t) => t.time === ctx.currentTime) ?? [];
+        expect(closed.at(-1)?.target).toBe(0);
+        expect(closed.at(-1)?.tau).toBe(RESONANCE_RAMP_S);
+    });
+
+    it('drops the send at a loop B and reopens it on the wrap', async () => {
+        const B = 1920;
+        const score = pedalled(
+            [
+                { tick: 0, k: 'down' },
+                { tick: 5760, k: 'up' },
+            ],
+            [{ t: 0, d: 480, p: 60, h: 0 }],
+        );
+        const { ctx, engine } = makeEngine({ score });
+        engine.setLoop({ startTick: 0, endTick: B });
+        await engine.play();
+        await advance(ctx, 2.5);
+        const send = resonanceSendOf(ctx);
+        const bTime = gridAt(score, B);
+        const atB = send?.gain.targets.filter((t) => Math.abs(t.time - bTime) < 1e-6) ?? [];
+        expect(atB.some((t) => t.target === 0 && t.tau === RESONANCE_RAMP_S)).toBe(true);
+        expect(atB.some((t) => t.target === RESONANCE_WET && t.tau === RESONANCE_RAMP_S)).toBe(true);
+        const lastAtB = atB.at(-1);
+        expect(lastAtB?.target).toBe(RESONANCE_WET);
+    });
+
+    it('ramps the send to 0 on pause', async () => {
+        const { ctx, engine } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 1920, k: 'up' },
+                ],
+                [{ t: 0, d: 480, p: 60, h: 0 }],
+            ),
+        });
+        await engine.play();
+        await advance(ctx, 0.2);
+        const send = resonanceSendOf(ctx);
+        const now = ctx.currentTime;
+        engine.pause();
+        const ahead = send?.gain.targets.filter((t) => t.time >= now) ?? [];
+        expect(ahead).toHaveLength(1);
+        expect(ahead[0]?.target).toBe(0);
+        expect(ahead[0]?.time).toBe(now);
+        expect(ahead[0]?.tau).toBe(0.02);
+    });
+
+    it('leaves the send open after a re-catch pair', async () => {
+        const score = pedalled(
+            [
+                { tick: 0, k: 'down' },
+                { tick: 960, k: 'up' },
+                { tick: 960, k: 'down' },
+            ],
+            [{ t: 0, d: 480, p: 60, h: 0 }],
+        );
+        const { ctx, engine } = makeEngine({ score });
+        await engine.play();
+        await advance(ctx, 1.3);
+        const send = resonanceSendOf(ctx);
+        const recatchAt = gridAt(score, 960);
+        const atPair = send?.gain.targets.filter((t) => Math.abs(t.time - recatchAt) < 1e-6) ?? [];
+        expect(atPair.some((t) => t.target === 0)).toBe(true);
+        expect(atPair.at(-1)?.target).toBe(RESONANCE_WET);
+        expect(atPair.at(-1)?.tau).toBe(RESONANCE_RAMP_S);
+    });
+
+    it('does not feed the click bus into the resonance send', async () => {
+        const { ctx, engine } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 960, k: 'up' },
+                ],
+                [{ t: 0, d: 480, p: 60, h: 0 }],
+            ),
+        });
+        engine.setMetronome(true);
+        await engine.play();
+        await advance(ctx, 0.3);
+        const master = ctx.gains[0];
+        const send = resonanceSendOf(ctx);
+        const clickBus = ctx.gains.find((g) => g.connections.length === 1 && g.connections[0] === master);
+        expect(clickBus).toBeDefined();
+        expect(clickBus?.connections).not.toContain(send);
+        expect(send?.connections).not.toContain(clickBus);
+        expect(ctx.gains[BUS_RH]?.connections).not.toContain(clickBus);
+    });
+
+    it('keeps the other hand feeding the bloom when one hand is muted', async () => {
+        const { ctx, engine } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 1920, k: 'up' },
+                ],
+                [
+                    { t: 0, d: 480, p: 72, h: 0 },
+                    { t: 0, d: 480, p: 48, h: 1 },
+                ],
+            ),
+        });
+        await engine.play();
+        await advance(ctx, 0.1);
+        const send = resonanceSendOf(ctx);
+        expect(ctx.gains[BUS_RH]?.connections).toContain(send);
+        expect(ctx.gains[BUS_LH]?.connections).toContain(send);
+        engine.setHandMuted(1, true);
+        expect(ctx.gains[BUS_RH]?.connections).toContain(send);
+        expect(ctx.gains[BUS_LH]?.connections).toContain(send);
+        expectConnections(send, ctx.convolvers[1]);
+        expectConnections(ctx.convolvers[1], ctx.gains[0]);
+        const lhTargets = ctx.gains[BUS_LH]?.gain.targets ?? [];
+        expect(lhTargets[lhTargets.length - 1]?.target).toBe(0);
     });
 });
