@@ -159,13 +159,15 @@ describe('fetchLibraryBootstrap', () => {
         });
         let txStarts = 0;
         const orig = db.transaction.bind(db) as (...args: unknown[]) => Promise<unknown>;
-        const spy = vi.spyOn(db, 'transaction').mockImplementation((...args: unknown[]) => {
+        const spy = vi.spyOn(db, 'transaction');
+        const delayFirstTx = (...args: unknown[]) => {
             txStarts += 1;
             if (txStarts === 1) {
                 return firstTxHeld.then(() => orig(...args));
             }
             return orig(...args);
-        });
+        };
+        spy.mockImplementation(delayFirstTx as typeof db.transaction);
 
         rpc.mockResolvedValue({ data: payload('STALE-BOOTSTRAP'), error: null });
         await fetchLibraryBootstrap('user-clobber');
