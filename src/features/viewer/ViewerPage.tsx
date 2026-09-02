@@ -15,6 +15,7 @@ import {
     isCloudDocId,
     loadDocumentBytes,
     loadDocumentOffline,
+    prefetchDocumentBytes,
 } from '@/features/library/documentsService';
 import { TransportBar } from '@/features/playback/TransportBar';
 import { usePlayback } from '@/features/playback/usePlayback';
@@ -130,6 +131,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     setState((prev) => (prev?.provisional ? { ...prev, provisional: false } : prev));
                 }, PROVISIONAL_ROLE_TIMEOUT_MS);
             }
+            // Cold open: the bytes leave alongside the row and role instead
+            // of a round-trip behind them. Never on a warm open — a metered
+            // connection must not pay for a PDF that is already here.
+            const prefetch = offline ? undefined : prefetchDocumentBytes(docId);
 
             let doc: DocumentRow | null;
             let role: MemberRole | null;
@@ -191,7 +196,18 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     : prev,
             );
             try {
-                const bytes = await loadDocumentBytes(confirmedDoc);
+                const bytes = await loadDocumentBytes(confirmedDoc, {
+                    // The warm paint's buffer, so a same-revision confirm is
+                    // one Dexie read and one copy of the score, not two.
+                    preloaded: offline
+                        ? {
+                              bytes: offline.bytes,
+                              contentRev: offline.doc.content_rev ?? 0,
+                              archivedAt: offline.doc.archived_at,
+                          }
+                        : undefined,
+                    prefetch,
+                });
                 const withPages = await ensureDocumentPageCount(confirmedDoc, bytes).catch(() => confirmedDoc);
                 if (!cancelled) {
                     // Same document at the same content revision as the warm

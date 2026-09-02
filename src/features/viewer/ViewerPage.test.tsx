@@ -11,6 +11,7 @@ const fetchMyRole = vi.fn();
 const loadDocumentBytes = vi.fn();
 const loadDocumentOffline = vi.fn();
 const ensureDocumentPageCount = vi.fn();
+const prefetchDocumentBytes = vi.fn();
 
 vi.mock('@/features/library/documentsService', () => ({
     isCloudDocId: (id: string) => /^[0-9a-f-]{36}$/i.test(id),
@@ -19,6 +20,7 @@ vi.mock('@/features/library/documentsService', () => ({
     loadDocumentBytes: (...args: unknown[]) => loadDocumentBytes(...args),
     loadDocumentOffline: (...args: unknown[]) => loadDocumentOffline(...args),
     ensureDocumentPageCount: (...args: unknown[]) => ensureDocumentPageCount(...args),
+    prefetchDocumentBytes: (...args: unknown[]) => prefetchDocumentBytes(...args),
 }));
 
 const SESSION = {
@@ -116,6 +118,10 @@ beforeEach(() => {
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
     fetchMyRole.mockResolvedValue('owner');
+    prefetchDocumentBytes.mockImplementation((docId: string) => ({
+        path: `${docId}/original.pdf`,
+        bytes: Promise.resolve(null),
+    }));
 });
 
 afterEach(() => {
@@ -179,6 +185,31 @@ describe('CloudViewer warm open', () => {
 
         await waitFor(() => expect(screen.getByText('Archived')).toBeInTheDocument());
         expect(viewport()).toHaveAttribute('data-readonly', 'true');
+    });
+
+    it('hands the warm paint’s buffer to the bytes load and never prefetches over it', async () => {
+        const cached = cachedOpen();
+        loadDocumentOffline.mockResolvedValue(cached);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(loadDocumentBytes).toHaveBeenCalled());
+        expect(prefetchDocumentBytes).not.toHaveBeenCalled();
+        const [, options] = loadDocumentBytes.mock.calls[0] as [DocumentRow, { preloaded?: { bytes: ArrayBuffer } }];
+        expect(options.preloaded?.bytes).toBe(cached.bytes);
+    });
+
+    it('starts the bytes download alongside the row on a cold open', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(loadDocumentBytes).toHaveBeenCalled());
+        expect(prefetchDocumentBytes).toHaveBeenCalledWith(DOC_ID);
+        const [, options] = loadDocumentBytes.mock.calls[0] as [DocumentRow, { prefetch?: { path: string } }];
+        expect(options.prefetch?.path).toBe(`${DOC_ID}/original.pdf`);
     });
 
     it('reports a cold open that finds nothing on the server without a fallback', async () => {

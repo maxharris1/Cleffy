@@ -71,7 +71,12 @@ vi.mock('@/sync/db', () => {
     };
 });
 
-import { deleteDocument, loadDocumentBytes, replaceDocumentPdf } from '@/features/library/documentsService';
+import {
+    deleteDocument,
+    loadDocumentBytes,
+    prefetchDocumentBytes,
+    replaceDocumentPdf,
+} from '@/features/library/documentsService';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
@@ -276,6 +281,81 @@ describe('loadDocumentBytes content_rev staleness', () => {
         });
         const bytes = await loadDocumentBytes(d);
         expect(new TextDecoder().decode(bytes)).toBe('cached-bytes');
+    });
+});
+
+describe('loadDocumentBytes preloaded bytes (warm open)', () => {
+    it('returns the caller’s buffer without a second cache read when the revision is current', async () => {
+        const calls = makeStub();
+        const d = doc({ content_rev: 1 });
+        const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
+        // Nothing in the cache map at all: a second read would come back empty
+        // and the old path would have gone to the network.
+        const bytes = await loadDocumentBytes(d, {
+            preloaded: { bytes: held, contentRev: 1, archivedAt: null },
+        });
+        expect(bytes).toBe(held);
+        expect(calls.download).not.toHaveBeenCalled();
+    });
+
+    it('ignores preloaded bytes older than the row and downloads the newer revision', async () => {
+        const calls = makeStub({ downloadBytes: 'cleaned-bytes' });
+        const d = doc({ content_rev: 2 });
+        const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
+        const bytes = await loadDocumentBytes(d, {
+            preloaded: { bytes: held, contentRev: 1, archivedAt: null },
+        });
+        expect(new TextDecoder().decode(bytes)).toBe('cleaned-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(1);
+    });
+
+    it('refreshes the cached archive flag when the row disagrees with the preloaded one', async () => {
+        makeStub();
+        const d = doc({ content_rev: 1, archived_at: '2026-08-30T00:00:00Z' });
+        await putCache({
+            docId: d.id,
+            bytes: new Blob(['cached-bytes']),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+            archivedAt: null,
+        });
+        const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
+        await loadDocumentBytes(d, { preloaded: { bytes: held, contentRev: 1, archivedAt: null } });
+        expect((await getDb().pdfCache.get(d.id))?.archivedAt).toBe('2026-08-30T00:00:00Z');
+    });
+});
+
+describe('prefetchDocumentBytes (cold open)', () => {
+    it('uses the download that left with the row when the row confirms the path', async () => {
+        const calls = makeStub({ downloadBytes: 'prefetched-bytes' });
+        const d = doc();
+        const prefetch = prefetchDocumentBytes(d.id);
+        expect(prefetch.path).toBe(d.storage_path);
+        const bytes = await loadDocumentBytes(d, { prefetch });
+        expect(new TextDecoder().decode(bytes)).toBe('prefetched-bytes');
+        // One download in total — the prefetch — and the cache is seeded from it.
+        expect(calls.download).toHaveBeenCalledTimes(1);
+        expect((await getDb().pdfCache.get(d.id))?.contentRev).toBe(0);
+    });
+
+    it('discards the prefetch and downloads the row’s own path when they differ', async () => {
+        const calls = makeStub({ downloadBytes: 'real-bytes' });
+        const d = doc({ storage_path: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1/renamed.pdf' });
+        const prefetch = prefetchDocumentBytes(d.id);
+        const bytes = await loadDocumentBytes(d, { prefetch });
+        expect(new TextDecoder().decode(bytes)).toBe('real-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(2);
+        expect(calls.download).toHaveBeenLastCalledWith(d.storage_path);
+    });
+
+    it('falls through to a normal download when the prefetch was refused', async () => {
+        const calls = makeStub({ downloadError: 'not found' });
+        const d = doc();
+        const prefetch = prefetchDocumentBytes(d.id);
+        expect(await prefetch.bytes).toBeNull();
+        await expect(loadDocumentBytes(d, { prefetch })).rejects.toThrow(/Could not download score/);
+        expect(calls.download).toHaveBeenCalledTimes(2);
     });
 });
 

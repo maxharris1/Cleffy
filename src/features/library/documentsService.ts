@@ -385,9 +385,57 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
  * write (private browsing, no quota) gets the score without an offline copy
  * rather than an unopenable score — which is what a bare `put` cost us.
  */
-export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> => {
-    const cached = await getCachedPdf(doc.id);
+/** Bytes the caller already holds from the cache, so they are not read (and copied) twice. */
+export interface PreloadedBytes {
+    bytes: ArrayBuffer;
+    contentRev: number;
+    archivedAt: string | null;
+}
+
+/** A download started before the row was known — see prefetchDocumentBytes. */
+export interface BytesPrefetch {
+    /** The storage path the download assumed; honoured only if the row agrees. */
+    path: string;
+    bytes: Promise<ArrayBuffer | null>;
+}
+
+/**
+ * Start the PDF download in parallel with the row and role fetches. A cold
+ * open otherwise pays two round-trips in series — the row for its
+ * storage_path, then the bytes — although every score lives at
+ * `{id}/original.pdf` (documentRowFromCache already assumes as much). The
+ * caller hands this to loadDocumentBytes, which uses the result only if the
+ * row's storage_path is the path assumed here. Storage RLS still applies: a
+ * caller who cannot see the score gets null, and the row fetch says why.
+ */
+export const prefetchDocumentBytes = (docId: string): BytesPrefetch => {
+    const path = `${docId}/original.pdf`;
+    const bytes = getSupabase()
+        .storage.from('scores')
+        .download(path)
+        .then(({ data, error }) => (error || !data ? null : data.arrayBuffer()))
+        .catch(() => null);
+    return { path, bytes };
+};
+
+export const loadDocumentBytes = async (
+    doc: DocumentRow,
+    options: { preloaded?: PreloadedBytes; prefetch?: BytesPrefetch } = {},
+): Promise<ArrayBuffer> => {
     const wantRev = doc.content_rev ?? 0;
+    const { preloaded, prefetch } = options;
+    if (preloaded && preloaded.contentRev >= wantRev) {
+        // The warm open already read and materialised these bytes; a second
+        // Dexie read would hold a second multi-megabyte copy for nothing.
+        if (preloaded.archivedAt !== doc.archived_at) {
+            const cached = await getCachedPdf(doc.id);
+            if (cached) {
+                await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
+            }
+        }
+        return preloaded.bytes;
+    }
+    const cached = await getCachedPdf(doc.id);
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
         // Refresh the archive flag from the row we were handed, same as fetchMyRole
         // does for the role — an offline open must know the score is read-only.
@@ -396,15 +444,21 @@ export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> 
         }
         return readCachedPdfBytes(cached.bytes);
     }
-    const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
-    if (error || !data) {
-        if (cached) {
-            // Offline with a stale cache beats no score at all.
-            return readCachedPdfBytes(cached.bytes);
+    const prefetched = prefetch && prefetch.path === doc.storage_path ? await prefetch.bytes : null;
+    let bytes: ArrayBuffer;
+    if (prefetched) {
+        bytes = prefetched;
+    } else {
+        const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
+        if (error || !data) {
+            if (cached) {
+                // Offline with a stale cache beats no score at all.
+                return readCachedPdfBytes(cached.bytes);
+            }
+            throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
         }
-        throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
+        bytes = await data.arrayBuffer();
     }
-    const bytes = await data.arrayBuffer();
     await putCachedPdf({
         docId: doc.id,
         bytes,
