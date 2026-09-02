@@ -79,6 +79,15 @@ npx supabase db push
 - File size limit: 50 MB (raise the project-wide limit under Settings → Storage if you
   need bigger scans)
 
+And a second bucket for the library covers (`20260902130000_thumbnails.sql`
+attempts to create it, but hosted projects can refuse `storage.buckets` writes
+from a migration — check it exists after the migration runs):
+
+- Name: `thumbnails`
+- Public: **OFF** (private)
+- Allowed MIME types: `image/jpeg`
+- File size limit: 2 MB
+
 (The object-level access policies were already created by the migrations.)
 
 ## 3. Auth settings

@@ -125,6 +125,12 @@ public = false
 file_size_limit = "50MiB"
 allowed_mime_types = ["application/pdf"]
 
+# Library covers published by the owner's browser: `{documentId}/{rev}.jpg`.
+[storage.buckets.thumbnails]
+public = false
+file_size_limit = "2MiB"
+allowed_mime_types = ["image/jpeg"]
+
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
 enabled = true
