@@ -290,9 +290,25 @@ export const facetTokens = (filters: SearchFilters): string[] => {
 };
 
 /**
+ * Key has no IMSLP category, so browse narrows the intersection by title inside
+ * imslp_browse. One case-insensitive Postgres regex per key chip, word-bounded so
+ * "C major" does not match "C-sharp major".
+ */
+export const keyTitlePatterns = (filters: SearchFilters): string[] => {
+    const patterns: string[] = [];
+    for (const id of filters.keys ?? []) {
+        for (const token of KEY_BY_ID[id]?.tokens ?? []) {
+            const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            patterns.push(`\\m${escaped}\\M`);
+        }
+    }
+    return patterns;
+};
+
+/**
  * Title must match key (and only key) when a key chip is set. Other dimensions
- * are category membership. Documented limitation: key is a title check on the
- * returned page, not an IMSLP category.
+ * are category membership. Used for typed-search hits, whose titles arrive
+ * from MediaWiki rather than the index.
  */
 export const titleMatchesFilters = (title: string, filters: SearchFilters): boolean => {
     const folded = fold(title);

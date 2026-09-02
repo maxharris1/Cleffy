@@ -8,9 +8,9 @@ import {
     facetTokens,
     hardFilterGroups,
     hasActiveFilters,
+    keyTitlePatterns,
     parseFilters,
     parseSort,
-    titleMatchesFilters,
     type RelaxedConstraint,
     type SearchFilters,
 } from '../_shared/searchFacetData.ts';
@@ -269,11 +269,15 @@ const browseFromIndex = async (
         return { results: [], total: 0, indexReady: false, hasMore: false, notReady };
     }
 
+    // Key chips narrow the intersection inside the function, so total, paging
+    // and hasMore all describe the same filtered set.
     const { data: rows, error: browseError } = await admin.rpc('imslp_browse', {
         groups,
         sort,
         lim: limit,
         off: offset,
+        title_filters: keyTitlePatterns(filters),
+        popular_titles: POPULAR_WORKS.map((w) => w.title),
     });
     if (browseError) {
         throw new Error(browseError.message);
@@ -281,9 +285,7 @@ const browseFromIndex = async (
 
     const page = (rows ?? []) as BrowseRow[];
     const total = page.length > 0 ? Number(page[0]?.total ?? 0) : 0;
-    // Key is a title check on this page only — documented limitation.
-    const filtered = page.filter((row) => titleMatchesFilters(row.page_title, filters));
-    const results = filtered.map((row) => toHit(row.page_title, row.page_id));
+    const results = page.map((row) => toHit(row.page_title, row.page_id));
     return {
         results,
         total,

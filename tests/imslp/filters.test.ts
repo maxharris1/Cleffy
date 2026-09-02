@@ -6,6 +6,7 @@ import {
     ERA_FACETS,
     hardFilterCategories,
     hardFilterGroups,
+    keyTitlePatterns,
     parseFilters,
     titleMatchesFilters,
 } from '../../supabase/functions/_shared/searchFacetData';
@@ -200,6 +201,25 @@ describe('browse intersection (fixture)', () => {
         const missing = categoriesInGroups(groups).filter((c) => !ready.has(c));
         expect(missing).toEqual(['Baroque']);
         expect(intersectGroups(groups, { 'For piano': [], 'For piano (arr)': [], Baroque: [] })).toEqual([]);
+    });
+});
+
+describe('keyTitlePatterns', () => {
+    it('emits one word-bounded case-insensitive regex per key chip token', () => {
+        expect(keyTitlePatterns({ keys: ['c-major', 'e-flat-major'] })).toEqual(['\\mC major\\M', '\\mE-flat major\\M']);
+    });
+
+    it('is empty without key chips, and ignores unknown ids', () => {
+        expect(keyTitlePatterns({ instruments: ['piano'] })).toEqual([]);
+        expect(keyTitlePatterns({ keys: ['constructor'] })).toEqual([]);
+    });
+
+    it('matches the way Postgres ~* will: C major but not C-sharp major', () => {
+        const toJs = (p: string) => new RegExp(p.replace(/\\m/g, '\\b').replace(/\\M/g, '\\b'), 'i');
+        const [pattern] = keyTitlePatterns({ keys: ['c-major'] }).map(toJs);
+        expect(pattern?.test('Prelude and Fugue in C major, BWV 846 (Bach, Johann Sebastian)')).toBe(true);
+        expect(pattern?.test('Sonata in C-sharp major (Composer, One)')).toBe(false);
+        expect(pattern?.test('Sonata in c major (Composer, One)')).toBe(true);
     });
 });
 
