@@ -32,15 +32,17 @@ MAX_TICKS=120
 
 log() { echo "[imslp-sync] $*"; }
 
-status_counts() {
+# Categories with an ok snapshot right now, one per line. A category the picker
+# has not started yet has no row at all, so row counts cannot tell "done".
+ok_categories() {
     docker exec "$DB_CONTAINER" psql -U postgres -d postgres -Atc \
-        "select count(*) filter (where state='ok'), count(*) filter (where state<>'ok') from public.imslp_category_sync;" \
-        2>/dev/null | tr '|' ' '
+        "select category from public.imslp_category_sync where state = 'ok' and active_generation > 0;" 2>/dev/null
 }
 
 tick=0
 while :; do
     tick=$((tick + 1))
+    before="$(ok_categories)"
     out="$(curl -sS -m 300 -X POST "$API/functions/v1/imslp-sync" \
         -H "Authorization: Bearer $LOCAL_SERVICE_ROLE_KEY" \
         -H 'Content-Type: application/json' -d '{}')" || out='{"error":"request failed"}'
@@ -53,9 +55,11 @@ while :; do
         log "nothing left to build"
         break
     fi
-    read -r ok not_ok <<<"$(status_counts)"
-    if [ -n "${ok:-}" ] && [ "${not_ok:-1}" = "0" ] && [ "$ok" -gt 0 ]; then
-        log "all $ok categories ok after $tick ticks"
+    category="$(printf '%s' "$out" | sed -n 's/.*"category":"\([^"]*\)".*/\1/p')"
+    # The picker only revisits an ok category once every category has one:
+    # that first refresh tick means the index is complete.
+    if [ -n "$category" ] && printf '%s\n' "$before" | grep -qxF -- "$category"; then
+        log "index complete after $((tick - 1)) build ticks (tick $tick refreshed '$category')"
         break
     fi
     if [ "$tick" -ge "$MAX_TICKS" ]; then
