@@ -271,14 +271,15 @@ describe('buildNoteShapes', () => {
         expect(shapes[0]?.lift).toBe(MELODY_LIFT);
     });
 
-    it('dips the left hand when the right is sounding, and lifts an LH-only line', () => {
+    it('dips the left hand when the right is sounding, held or attacking', () => {
         // t=480: RH chord takes the tune, C3 is accompaniment.
         expect(shapes[3]?.lift).toBe(0);
         expect(shapes[3]?.dip).toBe(ACCOMP_DIP);
-        // t=4320 is the left hand alone — that bass line is the melody.
-        const lone = tinyScore.notes.findIndex((n) => n.t === 4320);
-        expect(shapes[lone]?.lift).toBe(MELODY_LIFT);
-        expect(shapes[lone]?.dip).toBe(0);
+        // t=4320 attacks under the tie-merged RH A5 still held from m.2 —
+        // that bass is accompaniment, not a new melody.
+        const underHeld = tinyScore.notes.findIndex((n) => n.t === 4320);
+        expect(shapes[underHeld]?.lift).toBe(0);
+        expect(shapes[underHeld]?.dip).toBe(ACCOMP_DIP);
     });
 
     it('lifts a single right-hand melody note and dips the left-hand chord under it', () => {
@@ -326,6 +327,59 @@ describe('buildNoteShapes', () => {
         expect(shaped[1]?.dip).toBe(0);
         expect(shaped[0]?.lift).toBe(0);
         expect(shaped[0]?.dip).toBe(ACCOMP_DIP);
+    });
+
+    it('dips LH eighths under a held right-hand melody, and does not lift them', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 960, p: 72, h: 0 },
+                { t: 480, d: 240, p: 48, h: 1 },
+                { t: 720, d: 240, p: 52, h: 1 },
+                { t: 960, d: 240, p: 55, h: 1 },
+                { t: 1200, d: 240, p: 60, h: 1 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[0]?.lift).toBe(MELODY_LIFT);
+        expect(shaped[0]?.dip).toBe(0);
+        for (const i of [1, 2, 3, 4]) {
+            expect(shaped[i]?.lift).toBe(0);
+            expect(shaped[i]?.dip).toBe(ACCOMP_DIP);
+        }
+    });
+
+    it('lifts RH melody eighths over a sustained bass, and dips the bass only if the RH is already sounding', () => {
+        const together: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 1920, p: 48, h: 1 },
+                { t: 480, d: 240, p: 72, h: 0 },
+                { t: 720, d: 240, p: 74, h: 0 },
+                { t: 960, d: 240, p: 76, h: 0 },
+                { t: 1200, d: 240, p: 77, h: 0 },
+            ],
+        };
+        const withRh = buildNoteShapes(together);
+        expect(withRh[0]?.lift).toBe(0);
+        expect(withRh[0]?.dip).toBe(ACCOMP_DIP);
+        for (const i of [1, 2, 3, 4]) {
+            expect(withRh[i]?.lift).toBe(MELODY_LIFT);
+            expect(withRh[i]?.dip).toBe(0);
+        }
+
+        const bassFirst: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 1920, p: 48, h: 1 },
+                { t: 480, d: 240, p: 72, h: 0 },
+            ],
+        };
+        const beforeRh = buildNoteShapes(bassFirst);
+        expect(beforeRh[0]?.lift).toBe(MELODY_LIFT);
+        expect(beforeRh[0]?.dip).toBe(0);
+        expect(beforeRh[1]?.lift).toBe(MELODY_LIFT);
+        expect(beforeRh[1]?.dip).toBe(0);
     });
 
     it('accents full bars and never the pickup', () => {

@@ -40,7 +40,7 @@ export const JITTER_VEL = 0.03;
 export const CHORD_ROLL_S = 0.004;
 /** Ceiling on a roll — a ten-note chord must still land as one event. */
 export const CHORD_ROLL_MAX_S = 0.012;
-/** Velocity added to the highest sounding note of an onset, so the tune sings. */
+/** Velocity added to the highest sounding note when that note attacks, so the tune sings. */
 export const MELODY_LIFT = 0.06;
 /** Velocity taken off the other hand when it sounds under that melody note. */
 export const ACCOMP_DIP = 0.02;
@@ -250,15 +250,33 @@ export interface NoteShape {
 
 const emptyShape = (): NoteShape => ({ roll: 0, lift: 0, accent: 0, dip: 0 });
 
+interface ActiveNote {
+    index: number;
+    note: ScoreNote;
+}
+
+/** Drop notes whose written end has arrived — they are no longer sounding. */
+const evictEnded = (active: ActiveNote[], tick: number): void => {
+    let kept = 0;
+    for (const entry of active) {
+        if (tick < entry.note.t + entry.note.d) {
+            active[kept] = entry;
+            kept += 1;
+        }
+    }
+    active.length = kept;
+};
+
 /**
  * One pass over the score at engine construction, deciding what each note owes
  * to its neighbours: a chord is rolled from the bottom up the way a hand
- * actually lands on it, the highest note of each onset is voiced as the melody
- * — a single-line tune included, either hand — and the other hand, when both
- * sound, is dipped as accompaniment. Notes take the weight of their beat, or a
- * small dip when they sit off it in a full bar. All of it is a function of the
- * score alone, so — like {@link noteJitter} — it survives seeks and loop wraps
- * unchanged.
+ * actually lands on it, and voicing looks at everything still sounding — a
+ * held melody note stays the tune while the other hand's figure attacks under
+ * it, so those attacks are dipped and not lifted. The highest sounding pitch
+ * (right hand on a tie) is the melody; it is lifted only when it attacks in
+ * this group. Notes take the weight of their beat, or a small dip when they
+ * sit off it in a full bar. All of it is a function of the score alone, so —
+ * like {@link noteJitter} — it survives seeks and loop wraps unchanged.
  *
  * The result is index-aligned with `score.notes`, which the scheduler already
  * walks by index.
@@ -288,7 +306,12 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
     }
     const inFullBar = (tick: number): boolean => fullBars.some((bar) => tick >= bar.start && tick < bar.end);
 
-    // Notes are sorted by tick, so everything sounding together is one run.
+    // Sounding notes, not just attacks: a held RH under an Alberti figure is
+    // still the tune. Notes are tick-sorted, so one active list per hand and a
+    // sweep is enough — no scan of the whole score at each onset.
+    const activeRh: ActiveNote[] = [];
+    const activeLh: ActiveNote[] = [];
+
     let start = 0;
     while (start < notes.length) {
         const head = notes[start];
@@ -299,53 +322,39 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
         while (end < notes.length && notes[end]?.t === head.t) {
             end += 1;
         }
-        const weight = weightAt.get(head.t);
-        const accent = weight !== undefined ? weight : inFullBar(head.t) ? -OFFBEAT_DIP : 0;
+        const tick = head.t;
+        const weight = weightAt.get(tick);
+        const accent = weight !== undefined ? weight : inFullBar(tick) ? -OFFBEAT_DIP : 0;
 
-        let topPitch = -Infinity;
-        let handsPresent = 0;
-        let sawRh = false;
-        let sawLh = false;
+        evictEnded(activeRh, tick);
+        evictEnded(activeLh, tick);
         for (let i = start; i < end; i++) {
             const note = notes[i];
             if (!note) {
                 continue;
             }
-            if (note.p > topPitch) {
-                topPitch = note.p;
-            }
-            if (note.h === HAND_RH && !sawRh) {
-                sawRh = true;
-                handsPresent += 1;
-            }
-            if (note.h === HAND_LH && !sawLh) {
-                sawLh = true;
-                handsPresent += 1;
-            }
+            (note.h === HAND_RH ? activeRh : activeLh).push({ index: i, note });
         }
 
-        // Prefer the right hand on a unison so two hands on one key keep the
-        // lifted voice, which is the one stealSamePitch will let speak.
-        let melodyIndex = -1;
+        let topPitch = -Infinity;
         let melodyHand: 0 | 1 = HAND_LH;
-        for (let i = start; i < end; i++) {
-            const note = notes[i];
-            if (!note || note.p !== topPitch) {
-                continue;
-            }
-            if (melodyIndex < 0 || note.h === HAND_RH) {
-                melodyIndex = i;
+        let topIndex = -1;
+        for (const { index, note } of [...activeRh, ...activeLh]) {
+            if (note.p > topPitch || (note.p === topPitch && note.h === HAND_RH && melodyHand !== HAND_RH)) {
+                topPitch = note.p;
                 melodyHand = note.h;
-                if (note.h === HAND_RH) {
-                    break;
-                }
+                topIndex = index;
             }
         }
-        const melodyShape = melodyIndex >= 0 ? shapes[melodyIndex] : undefined;
-        if (melodyShape) {
-            melodyShape.lift = MELODY_LIFT;
+        const topAttacking = topIndex >= 0 && notes[topIndex]?.t === tick;
+        if (topAttacking) {
+            const topShape = shapes[topIndex];
+            if (topShape) {
+                topShape.lift = MELODY_LIFT;
+            }
         }
 
+        const bothHands = activeRh.length > 0 && activeLh.length > 0;
         for (const hand of [HAND_RH, HAND_LH] as const) {
             const group: Array<{ index: number; pitch: number }> = [];
             for (let i = start; i < end; i++) {
@@ -362,7 +371,7 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
                 }
                 shape.roll = Math.min(CHORD_ROLL_MAX_S, position * CHORD_ROLL_S);
                 shape.accent = accent;
-                if (handsPresent === 2 && hand !== melodyHand) {
+                if (bothHands && hand !== melodyHand) {
                     shape.dip = ACCOMP_DIP;
                 }
             });
