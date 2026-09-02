@@ -2,7 +2,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ImslpBrowserProps } from '@/features/imslp/ImslpBrowser';
-import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
+import type { ImslpEdition, ImslpSearchResponse, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import {
     displayEditionName,
     displayWorkTitle,
@@ -48,6 +48,18 @@ const hit = (title: string, pageid: number) => ({
     snippet: '',
     composer: title.match(/\(([^)]+)\)\s*$/)?.[1] ?? null,
     imslpUrl: `https://imslp.org/wiki/${pageid}`,
+});
+
+const searchOk = (overrides: Partial<ImslpSearchResponse> & Pick<ImslpSearchResponse, 'results'>): ImslpSearchResponse => ({
+    filterRelaxed: false,
+    relaxed: [],
+    total: overrides.results.length,
+    hasMore: false,
+    indexReady: true,
+    period: null,
+    mode: 'search',
+    notReady: [],
+    ...overrides,
 });
 
 const edition = (filename: string, overrides: Partial<ImslpEdition> = {}): ImslpEdition => ({
@@ -169,13 +181,13 @@ describe('popular works browse', () => {
 describe('search facets', () => {
     it('builds filters from selected facet ids', () => {
         const filters = buildSearchFilters({
-            composerId: 'beethoven',
-            instrumentId: 'piano',
-            formId: 'sonata',
+            composerIds: ['beethoven'],
+            instrumentIds: ['piano'],
+            formIds: ['sonata'],
         });
-        expect(filters.composerCategory).toBe('Beethoven, Ludwig van');
-        expect(filters.instrument).toBe('piano');
-        expect(filters.form).toBe('sonata');
+        expect(filters.composerCategories).toEqual(['Beethoven, Ludwig van']);
+        expect(filters.instruments).toEqual(['piano']);
+        expect(filters.forms).toEqual(['sonata']);
         expect(hasActiveFilters(filters)).toBe(true);
     });
 });
@@ -231,17 +243,18 @@ describe('ImslpBrowser', () => {
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
-        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: Array.from({ length: 10 }, (_, i) =>
-                hit(
-                    i === 0
-                        ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
-                        : `Other Work ${i} (Composer, Name)`,
-                    1458 + i,
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: Array.from({ length: 10 }, (_, i) =>
+                    hit(
+                        i === 0
+                            ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
+                            : `Other Work ${i} (Composer, Name)`,
+                        1458 + i,
+                    ),
                 ),
-            ),
-            filterRelaxed: false,
-        });
+            }),
+        );
 
         await renderBrowser();
         await userEvent.type(
@@ -253,12 +266,8 @@ describe('ImslpBrowser', () => {
             expect(searchSpy).toHaveBeenCalled();
         });
         const lastCall = searchSpy.mock.calls.at(-1);
-        expect(lastCall?.[0]).toBe('beethoven sonata');
-        // Default Piano-only is not a typed-search hard filter.
         expect(lastCall?.[1]).toEqual(
-            expect.objectContaining({
-                filters: undefined,
-            }),
+            expect.objectContaining({ filters: expect.objectContaining({ instruments: ['piano'] }) }),
         );
         expect(await screen.findByText('Best matches')).toBeInTheDocument();
         expect(screen.getByText('More from IMSLP')).toBeInTheDocument();
@@ -287,89 +296,45 @@ describe('ImslpBrowser', () => {
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
-        vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: [hit('Violin Sonata No.9, Op.47 (Beethoven, Ludwig van)', 47)],
-            filterRelaxed: true,
-        });
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [hit('Violin Sonata No.9, Op.47 (Beethoven, Ludwig van)', 47)],
+                filterRelaxed: true,
+                relaxed: ['instrument'],
+            }),
+        );
 
         await renderBrowser();
-        await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
-        await userEvent.click(await screen.findByRole('button', { name: 'Violin' }));
-        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'sonata');
-
-        expect(await screen.findByText(/few violin-tagged scores were found/)).toBeInTheDocument();
-        expect(screen.queryByText(/piano-tagged/)).not.toBeInTheDocument();
-    });
-
-    it('hides the sort chips for a key-only browse the server cannot sort', async () => {
-        const { screen } = await import('@testing-library/react');
-        const userEvent = (await import('@testing-library/user-event')).default;
-        const api = await import('@/features/imslp/imslpApi');
-
-        vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: [hit('Nocturne in C-sharp minor (Chopin, Frédéric)', 9)],
-            filterRelaxed: false,
-        });
-
-        await renderBrowser();
-        // Drop the default piano scope, then browse by key alone — Key is not a category.
         await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
         await userEvent.click(await screen.findByRole('button', { name: 'Piano' }));
-        await userEvent.click(screen.getByRole('button', { name: 'Key' }));
-        await userEvent.click(await screen.findByRole('button', { name: 'C-sharp minor' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Violin' }));
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'sonata');
 
-        expect(await screen.findByText('Best matches')).toBeInTheDocument();
-        expect(screen.queryByRole('group', { name: 'Sort results' })).not.toBeInTheDocument();
-
-        // A typed query takes the sortable text path, so the chips come back.
-        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'chopin');
-        expect(await screen.findByRole('group', { name: 'Sort results' })).toBeInTheDocument();
+        expect(await screen.findByText(/the violin filter matched too few scores/)).toBeInTheDocument();
+        expect(screen.queryByText(/piano filter/)).not.toBeInTheDocument();
     });
 
-    it('sends a chosen instrument on a typed query, and drops Popular when a second chip is on', async () => {
-        const { screen, waitFor } = await import('@testing-library/react');
+    it('shows sort chips for an era browse now that the index can sort', async () => {
+        const { screen } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
-        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue({
-            results: [hit('Violin Sonata No.9, Op.47 (Beethoven, Ludwig van)', 47)],
-            filterRelaxed: false,
-        });
-
-        await renderBrowser();
-        expect(screen.getByRole('heading', { name: 'Popular' })).toBeInTheDocument();
-
-        await userEvent.click(screen.getByRole('button', { name: 'Form' }));
-        await userEvent.click(await screen.findByRole('button', { name: 'Nocturne' }));
-        await waitFor(() => {
-            expect(searchSpy).toHaveBeenCalled();
-        });
-        expect(screen.queryByRole('heading', { name: 'Popular' })).not.toBeInTheDocument();
-        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
-            expect.objectContaining({ filters: expect.objectContaining({ instrument: 'piano', form: 'nocturne' }) }),
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [hit('Toccata and Fugue in D minor (Bach, Johann Sebastian)', 565)],
+                mode: 'browse',
+                total: 1,
+            }),
         );
 
-        searchSpy.mockClear();
+        await renderBrowser();
         await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
-        await userEvent.click(await screen.findByRole('button', { name: 'Violin' }));
-        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'sonata');
-        await waitFor(() => {
-            expect(searchSpy).toHaveBeenCalled();
-        });
-        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
-            expect.objectContaining({ filters: expect.objectContaining({ instrument: 'violin' }) }),
-        );
-    });
-
-    it('lists Early 20th century and Modern as separate era chips', async () => {
-        const { screen } = await import('@testing-library/react');
-        const userEvent = (await import('@testing-library/user-event')).default;
-
-        await renderBrowser();
+        await userEvent.click(await screen.findByRole('button', { name: 'Piano' }));
         await userEvent.click(screen.getByRole('button', { name: 'Era' }));
-        expect(await screen.findByRole('button', { name: 'Early 20th century' })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Modern' })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Baroque' })).toBeInTheDocument();
+        await userEvent.click(await screen.findByRole('button', { name: 'Baroque' }));
+
+        expect(await screen.findByText('Best matches')).toBeInTheDocument();
+        expect(screen.getByRole('group', { name: 'Sort results' })).toBeInTheDocument();
     });
 
     it('keeps prior results and shows an error — not the empty state — when a search fails', async () => {
@@ -379,7 +344,7 @@ describe('ImslpBrowser', () => {
 
         const searchSpy = vi
             .spyOn(api, 'searchImslp')
-            .mockResolvedValueOnce({ results: [hit('Nocturnes, Op.9 (Chopin, Frédéric)', 7)], filterRelaxed: false })
+            .mockResolvedValueOnce(searchOk({ results: [hit('Nocturnes, Op.9 (Chopin, Frédéric)', 7)] }))
             .mockRejectedValueOnce(new Error('IMSLP is down'));
 
         await renderBrowser();
@@ -411,10 +376,10 @@ describe('ImslpBrowser', () => {
                 () =>
                     new Promise((resolve) => {
                         releaseFirst = () =>
-                            resolve({ results: [hit('Stale Result (Old, Query)', 1)], filterRelaxed: false });
+                            resolve(searchOk({ results: [hit('Stale Result (Old, Query)', 1)] }));
                     }),
             )
-            .mockResolvedValueOnce({ results: [hit('Fresh Result (New, Query)', 2)], filterRelaxed: false });
+            .mockResolvedValueOnce(searchOk({ results: [hit('Fresh Result (New, Query)', 2)] }));
 
         await renderBrowser();
         const input = screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…');
@@ -503,6 +468,148 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     });
 
+    it('searches when Nocturne is added and names both chips plus total', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [hit('Nocturnes, Op.9 (Chopin, Frédéric)', 9)],
+                mode: 'browse',
+                total: 61,
+            }),
+        );
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Form' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Nocturne' }));
+
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalled();
+        });
+        expect(screen.queryByRole('heading', { name: 'Popular' })).not.toBeInTheDocument();
+        expect(await screen.findByText(/Piano · Nocturne · 61 scores/)).toBeInTheDocument();
+        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
+            expect.objectContaining({
+                filters: expect.objectContaining({ instruments: ['piano'], forms: ['nocturne'] }),
+            }),
+        );
+    });
+
+    it('sends both composer ids when two composers are selected', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [hit('Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)', 14)],
+                mode: 'browse',
+                total: 2,
+            }),
+        );
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Composer' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Bach' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Beethoven' }));
+
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalled();
+        });
+        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
+            expect.objectContaining({
+                filters: expect.objectContaining({
+                    composerCategories: ['Bach, Johann Sebastian', 'Beethoven, Ludwig van'],
+                }),
+            }),
+        );
+    });
+
+    it('renders the index-building copy when the snapshot is not ready', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [],
+                mode: 'browse',
+                total: 0,
+                indexReady: false,
+                notReady: ['Baroque'],
+            }),
+        );
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Era' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Baroque' }));
+
+        expect(await screen.findByText('Index still building')).toBeInTheDocument();
+        expect(screen.getByText(/IMSLP index is still being built for Baroque/)).toBeInTheDocument();
+        expect(screen.queryByText('No matches')).not.toBeInTheDocument();
+    });
+
+    it('issues a second request with offset when Show more is clicked', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi
+            .spyOn(api, 'searchImslp')
+            .mockResolvedValueOnce(
+                searchOk({
+                    results: [hit('Nocturnes, Op.9 (Chopin, Frédéric)', 9)],
+                    mode: 'browse',
+                    total: 2,
+                    hasMore: true,
+                }),
+            )
+            .mockResolvedValueOnce(
+                searchOk({
+                    results: [hit('Nocturnes, Op.27 (Chopin, Frédéric)', 27)],
+                    mode: 'browse',
+                    total: 2,
+                    hasMore: false,
+                }),
+            );
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Form' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Nocturne' }));
+        expect(await screen.findByRole('button', { name: 'Show more' })).toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', { name: 'Show more' }));
+
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalledTimes(2);
+        });
+        expect(searchSpy.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ offset: 1 }));
+    });
+
+    it('shows an inferred Romantic chip for a typed year query', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [hit('Nocturnes, Op.9 (Chopin, Frédéric)', 9)],
+                period: { eraIds: ['romantic'], source: 'query' },
+            }),
+        );
+
+        await renderBrowser();
+        await userEvent.type(
+            screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'),
+            'chopin 1831',
+        );
+        await screen.findByText('Best matches');
+        await userEvent.click(screen.getByRole('button', { name: 'Era' }));
+        expect(await screen.findByRole('button', { name: 'Romantic' })).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.getByRole('button', { name: 'Early 20th century' })).toBeInTheDocument();
+    });
+
     describe('card view', () => {
         beforeEach(() => {
             window.localStorage.removeItem('cleffy:imslp-view');
@@ -574,18 +681,19 @@ describe('ImslpBrowser', () => {
             const userEvent = (await import('@testing-library/user-event')).default;
             const api = await import('@/features/imslp/imslpApi');
 
-            vi.spyOn(api, 'searchImslp').mockResolvedValue({
-                results: Array.from({ length: 10 }, (_, i) => ({
-                    ...hit(
-                        i === 0
-                            ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
-                            : `Other Work ${i} (Composer, Name)`,
-                        1458 + i,
-                    ),
-                    snippet: 'A snippet about the sonata form.',
-                })),
-                filterRelaxed: false,
-            });
+            vi.spyOn(api, 'searchImslp').mockResolvedValue(
+                searchOk({
+                    results: Array.from({ length: 10 }, (_, i) => ({
+                        ...hit(
+                            i === 0
+                                ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
+                                : `Other Work ${i} (Composer, Name)`,
+                            1458 + i,
+                        ),
+                        snippet: 'A snippet about the sonata form.',
+                    })),
+                }),
+            );
             window.localStorage.setItem('cleffy:imslp-view', 'grid');
 
             await renderBrowser();

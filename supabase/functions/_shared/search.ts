@@ -36,6 +36,116 @@ export const foldAccents = (s: string): string =>
 
 export const foldEquals = (a: string, b: string): boolean => foldAccents(a) === foldAccents(b);
 
+export type PeriodEraId = 'baroque' | 'classical' | 'romantic' | 'early-20th' | 'modern';
+
+const YEAR_MIN = 1500;
+const YEAR_MAX = 2026;
+
+const erasForYear = (year: number): PeriodEraId[] => {
+    if (year < YEAR_MIN || year > YEAR_MAX) {
+        return [];
+    }
+    if (year >= 1600 && year <= 1749) {
+        return ['baroque'];
+    }
+    if (year >= 1750 && year <= 1819) {
+        return ['classical'];
+    }
+    if (year >= 1820 && year <= 1899) {
+        return ['romantic'];
+    }
+    if (year >= 1900 && year <= 1945) {
+        return ['early-20th'];
+    }
+    if (year >= 1946) {
+        return ['modern'];
+    }
+    return [];
+};
+
+const erasForRange = (from: number, to: number): PeriodEraId[] => {
+    const start = Math.min(from, to);
+    const end = Math.max(from, to);
+    const out: PeriodEraId[] = [];
+    const seen = new Set<PeriodEraId>();
+    const samples = [start, end, 1600, 1750, 1820, 1900, 1946];
+    for (const year of samples) {
+        if (year < start || year > end) {
+            continue;
+        }
+        for (const era of erasForYear(year)) {
+            if (!seen.has(era)) {
+                seen.add(era);
+                out.push(era);
+            }
+        }
+    }
+    return out;
+};
+
+const pushUnique = (into: PeriodEraId[], eras: PeriodEraId[]) => {
+    for (const era of eras) {
+        if (!into.includes(era)) {
+            into.push(era);
+        }
+    }
+};
+
+/**
+ * Pull period words and years out of a typed query. Tokens are removed from
+ * `rest` so they do not have to appear in the title. `classical` is not a
+ * period when followed by `guitar`.
+ */
+export const extractPeriod = (q: string): { eraIds: PeriodEraId[]; rest: string } => {
+    const eraIds: PeriodEraId[] = [];
+    let rest = q.trim().replace(/\s+/g, ' ');
+    if (!rest) {
+        return { eraIds, rest: '' };
+    }
+
+    const strip = (re: RegExp, eras: PeriodEraId[] | ((match: RegExpExecArray) => PeriodEraId[])) => {
+        const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+        rest = rest.replace(global, (substring, ...args) => {
+            const match = [substring, ...args.slice(0, -2)] as unknown as RegExpExecArray;
+            match[0] = substring;
+            const ids = typeof eras === 'function' ? eras(match) : eras;
+            pushUnique(eraIds, ids);
+            return ' ';
+        });
+    };
+
+    // Guard first so "classical guitar" is not eaten as a period.
+    rest = rest.replace(/\bclassical\s+guitar\b/gi, '§cg§');
+
+    strip(/\bearly\s+20th(?:\s+century)?\b/i, ['early-20th']);
+    strip(/\b20th\s+century\b/i, ['early-20th', 'modern']);
+    strip(/\b(?:contemporary|modern)\b/i, ['modern']);
+    strip(/\bbaroque\b/i, ['baroque']);
+    strip(/\bromantic\b/i, ['romantic']);
+    strip(/\bclassical\b/i, ['classical']);
+    strip(/\b(\d{1,2})(?:st|nd|rd|th)\s+century\b/i, (m) => {
+        const n = Number(m[1]);
+        if (!Number.isFinite(n) || n < 16 || n > 21) {
+            return [];
+        }
+        const start = (n - 1) * 100 + 1;
+        const end = n * 100;
+        return erasForRange(start, end);
+    });
+    strip(/\b(1[5-9]\d{2}|20[0-2]\d)s\b/i, (m) => {
+        const start = Number(m[1]);
+        return erasForRange(start, start + 9);
+    });
+    strip(/\b(1[5-9]\d{2}|20[0-2]\d)\s*[-–—]\s*(1[5-9]\d{2}|20[0-2]\d)\b/, (m) => {
+        return erasForRange(Number(m[1]), Number(m[2]));
+    });
+    strip(/\b(1[5-9]\d{2}|20[0-2]\d)\b/, (m) => erasForYear(Number(m[1])));
+
+    rest = rest.replace(/§cg§/gi, 'classical guitar');
+    rest = rest.replace(/\s+/g, ' ').trim();
+    return { eraIds, rest };
+};
+
 /**
  * Tokens too common in IMSLP titles to score on ("Op." and "No." appear in
  * nearly every title). Excluded from per-token scoring and the all-tokens

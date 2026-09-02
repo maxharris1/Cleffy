@@ -5,6 +5,7 @@ import {
     buildSearchVariants,
     correctTokens,
     damerauLevenshtein,
+    extractPeriod,
     foldAccents,
     isWorkTitle,
     nearMatch,
@@ -157,10 +158,40 @@ describe('buildSearchVariants', () => {
     });
 
     it('does not inject era surnames into search variants', () => {
-        const tokens = facetTokens({ era: 'baroque' });
+        const tokens = facetTokens({ eras: ['baroque'] });
         const variants = buildSearchVariants('sonata', { facetTokens: tokens });
         const blob = variants.map((v) => v.q).join(' ');
         expect(blob).not.toMatch(/bach|vivaldi|handel/i);
+    });
+});
+
+describe('extractPeriod', () => {
+    it('maps a composition year to an era and strips it from rest', () => {
+        expect(extractPeriod('chopin nocturne 1831')).toEqual({
+            eraIds: ['romantic'],
+            rest: 'chopin nocturne',
+        });
+    });
+
+    it('maps period words and leaves the rest of the query', () => {
+        expect(extractPeriod('baroque fugue')).toEqual({
+            eraIds: ['baroque'],
+            rest: 'fugue',
+        });
+    });
+
+    it('does not treat classical as a period when followed by guitar', () => {
+        expect(extractPeriod('classical guitar')).toEqual({
+            eraIds: [],
+            rest: 'classical guitar',
+        });
+    });
+
+    it('maps decades onto the early-20th bin', () => {
+        expect(extractPeriod('1920s piano')).toEqual({
+            eraIds: ['early-20th'],
+            rest: 'piano',
+        });
     });
 });
 

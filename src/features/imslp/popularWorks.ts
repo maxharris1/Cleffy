@@ -56,37 +56,46 @@ export const popularWorkTags = (work: PopularWork): string[] => {
     return tags;
 };
 
+const setHas = (ids: Iterable<string> | undefined): Set<string> => {
+    const set = ids instanceof Set ? ids : new Set(ids ?? []);
+    return set;
+};
+
 /** Filter curated works by facet ids (local browse when no live results needed). */
 export const filterPopularWorks = (
     works: PopularWork[],
     selected: {
-        composerId?: string | null;
-        instrumentId?: string | null;
-        formId?: string | null;
-        keyId?: string | null;
-        eraId?: EraId | null;
+        composerIds?: Iterable<string>;
+        instrumentIds?: Iterable<string>;
+        formIds?: Iterable<string>;
+        keyIds?: Iterable<string>;
+        eraIds?: Iterable<EraId | string>;
     },
 ): PopularWork[] => {
+    const composerIds = setHas(selected.composerIds);
+    const instrumentIds = setHas(selected.instrumentIds);
+    const formIds = setHas(selected.formIds);
+    const keyIds = setHas(selected.keyIds);
+    const eraIds = setHas(selected.eraIds);
     return works.filter((work) => {
-        if (selected.composerId) {
-            // COMPOSER_FACETS ids are lowercase surnames, so a substring check
-            // against the short composer label covers every curated entry.
+        if (composerIds.size > 0) {
             const short = work.composer.toLowerCase();
             const cat = work.composerCategory?.toLowerCase() ?? '';
-            if (!short.includes(selected.composerId) && !cat.includes(selected.composerId)) {
+            const match = [...composerIds].some((id) => short.includes(id) || cat.includes(id));
+            if (!match) {
                 return false;
             }
         }
-        if (selected.instrumentId && work.instrument !== selected.instrumentId) {
+        if (instrumentIds.size > 0 && (!work.instrument || !instrumentIds.has(work.instrument))) {
             return false;
         }
-        if (selected.formId && work.form !== selected.formId) {
+        if (formIds.size > 0 && (!work.form || !formIds.has(work.form))) {
             return false;
         }
-        if (selected.keyId && work.key !== selected.keyId) {
+        if (keyIds.size > 0 && (!work.key || !keyIds.has(work.key))) {
             return false;
         }
-        if (selected.eraId && work.era !== selected.eraId) {
+        if (eraIds.size > 0 && (!work.era || !eraIds.has(work.era))) {
             return false;
         }
         return true;

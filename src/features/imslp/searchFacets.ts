@@ -11,6 +11,7 @@ import {
     FORM_FACETS,
     INSTRUMENT_FACETS,
     KEY_FACETS,
+    categoryGroupsFor,
     type EraId,
     type FacetDimension,
     type FacetValueData,
@@ -19,16 +20,16 @@ import {
 
 export {
     COMPOSER_FACETS,
-    DEFAULT_INSTRUMENT_ID,
     ERA_FACETS,
     FORM_FACETS,
     INSTRUMENT_FACETS,
     KEY_FACETS,
-    filtersForTypedSearch,
+    hasActiveFilters,
 } from '../../../supabase/functions/_shared/searchFacetData';
 export type {
     EraId,
     FacetDimension,
+    RelaxedConstraint,
     SearchFilters,
     SearchSort,
 } from '../../../supabase/functions/_shared/searchFacetData';
@@ -62,60 +63,68 @@ export const facetValuesFor = (dimension: FacetDimension): FacetValue[] => {
     }
 };
 
-export const hasActiveFilters = (filters: SearchFilters): boolean =>
-    Boolean(filters.composerCategory || filters.instrument || filters.form || filters.key || filters.era);
-
 /** Whether category browse / A–Z / New sort are meaningful. */
-export const categoryBackedFilters = (filters: SearchFilters): boolean =>
-    Boolean(filters.composerCategory || filters.instrument || filters.form || filters.era);
+export const categoryBackedFilters = (filters: SearchFilters): boolean => categoryGroupsFor(filters).length > 0;
 
 export const filtersToStatusParts = (filters: SearchFilters): string[] => {
     const parts: string[] = [];
-    if (filters.composerCategory) {
-        const match = COMPOSER_FACETS.find((c) => c.category === filters.composerCategory);
-        parts.push(match?.label ?? filters.composerCategory.split(',')[0] ?? 'Composer');
+    for (const category of filters.composerCategories ?? []) {
+        const match = COMPOSER_FACETS.find((c) => c.category === category);
+        parts.push(match?.label ?? category.split(',')[0] ?? 'Composer');
     }
-    if (filters.instrument) {
-        parts.push(INSTRUMENT_FACETS.find((i) => i.id === filters.instrument)?.label ?? filters.instrument);
+    for (const id of filters.instruments ?? []) {
+        parts.push(INSTRUMENT_FACETS.find((i) => i.id === id)?.label ?? id);
     }
-    if (filters.form) {
-        parts.push(FORM_FACETS.find((f) => f.id === filters.form)?.label ?? filters.form);
+    for (const id of filters.forms ?? []) {
+        parts.push(FORM_FACETS.find((f) => f.id === id)?.label ?? id);
     }
-    if (filters.key) {
-        parts.push(KEY_FACETS.find((k) => k.id === filters.key)?.label ?? filters.key);
+    for (const id of filters.keys ?? []) {
+        parts.push(KEY_FACETS.find((k) => k.id === id)?.label ?? id);
     }
-    if (filters.era) {
-        parts.push(ERA_FACETS.find((e) => e.id === filters.era)?.label ?? filters.era);
+    for (const id of filters.eras ?? []) {
+        parts.push(ERA_FACETS.find((e) => e.id === id)?.label ?? id);
     }
     return parts;
 };
 
-/** Build API filters object from selected facet value ids. */
+/** Build API filters object from selected facet value ids (multi-select). */
 export const buildSearchFilters = (selected: {
-    composerId?: string | null;
-    instrumentId?: string | null;
-    formId?: string | null;
-    keyId?: string | null;
-    eraId?: EraId | null;
+    composerIds?: Iterable<string>;
+    instrumentIds?: Iterable<string>;
+    formIds?: Iterable<string>;
+    keyIds?: Iterable<string>;
+    eraIds?: Iterable<string>;
+    ignoreQueryPeriod?: boolean;
 }): SearchFilters => {
     const filters: SearchFilters = {};
-    if (selected.composerId) {
-        const c = COMPOSER_FACETS.find((x) => x.id === selected.composerId);
+    const composerCategories: string[] = [];
+    for (const id of selected.composerIds ?? []) {
+        const c = COMPOSER_FACETS.find((x) => x.id === id);
         if (c?.category) {
-            filters.composerCategory = c.category;
+            composerCategories.push(c.category);
         }
     }
-    if (selected.instrumentId) {
-        filters.instrument = selected.instrumentId;
+    if (composerCategories.length > 0) {
+        filters.composerCategories = composerCategories;
     }
-    if (selected.formId) {
-        filters.form = selected.formId;
+    const instruments = [...(selected.instrumentIds ?? [])];
+    if (instruments.length > 0) {
+        filters.instruments = instruments;
     }
-    if (selected.keyId) {
-        filters.key = selected.keyId;
+    const forms = [...(selected.formIds ?? [])];
+    if (forms.length > 0) {
+        filters.forms = forms;
     }
-    if (selected.eraId) {
-        filters.era = selected.eraId;
+    const keys = [...(selected.keyIds ?? [])];
+    if (keys.length > 0) {
+        filters.keys = keys;
+    }
+    const eras = [...(selected.eraIds ?? [])].filter((id): id is EraId => ERA_FACETS.some((e) => e.id === id));
+    if (eras.length > 0) {
+        filters.eras = eras;
+    }
+    if (selected.ignoreQueryPeriod) {
+        filters.ignoreQueryPeriod = true;
     }
     return filters;
 };
