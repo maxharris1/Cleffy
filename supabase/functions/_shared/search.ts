@@ -501,9 +501,12 @@ export const cleanSnippet = (raw: string | undefined): string => {
     if (!raw) {
         return '';
     }
-    // Decode first: the page source's own <br> arrives as &lt;br&gt;, and both
-    // it and MediaWiki's searchmatch spans should vanish.
-    const text = decodeEntities(raw).replace(/<[^>]+>/g, ' ');
+    // Decode first: the page source's own <br> arrives as &lt;br&gt; and reads as
+    // a space; MediaWiki's searchmatch spans sit inside words and URLs, so they
+    // vanish without one.
+    const text = decodeEntities(raw)
+        .replace(/<br\s*\/?>/gi, ' ')
+        .replace(/<[^>]+>/g, '');
     const kept: string[] = [];
     for (const rawLine of text.split(/\r?\n/)) {
         let line = rawLine.trim().replace(/^\.\.\.\s*/, '');
@@ -512,8 +515,12 @@ export const cleanSnippet = (raw: string | undefined): string => {
         }
         // "...ilename=TN-..." — a field name cut mid-word by the snippet window;
         // "#REDIRECT [[...]]" — a nickname page pointing at the work;
-        // a line opening with "{{" is the tail of a field the window cut.
-        if (/^[a-z]*(?:ile ?name|humb)\s*=/i.test(line) || /^#?\s*redirect\b/i.test(line) || line.startsWith('{{')) {
+        // "...: {{plain|…}}" — the tail of a field the window cut.
+        if (
+            /^[a-z]*(?:ile ?name|humb)\s*=/i.test(line) ||
+            /^#?\s*redirect\b/i.test(line) ||
+            /^[\s:;,.\-–—]*\{\{/.test(line)
+        ) {
             continue;
         }
         const field = line.match(/^\|?\s*([^=|]{2,40}?)\s*(?:\d+)?\s*=\s*(.*)$/);

@@ -301,6 +301,22 @@ describe('cleanSnippet', () => {
             ),
         ).toBe('Manuscript description given here @ Chopin Society.');
         expect(cleanSnippet('...{{plain|https://archive.org/details/x|Internet Archive}}\n')).toBe('');
+        // Verbatim: the window cut "Source:" off, and searchmatch spans sit inside the URL.
+        expect(
+            cleanSnippet(
+                "...: {{plain|https://archive.org/details/lp_nocturnes_frdric-<span class='searchmatch'>chopin</span>-eugene-istomin|Internet Archive}}\n|File Name 1=<span class='searchmatch'>Chopin</span> - 2 Nocturnes, Op 27.pdf\n",
+            ),
+        ).toBe('');
+        expect(
+            cleanSnippet(
+                "|Misc. Notes=Manuscript given here @ [https://en.<span class='searchmatch'>chopin</span>.nifc.pl/<span class='searchmatch'>chopin</span>/manuscripts/detail/id/98 Chopin Society].\n",
+            ),
+        ).toBe('Manuscript given here @ Chopin Society.');
+        expect(
+            cleanSnippet(
+                "|Publisher Information=''Guiomar Novaes: <span class='searchmatch'>Chopin</span>: Nocturnes'' - {{RC||Vox|New York||1956||PL 963\n|Misc. Notes=File split by the uploader from &quot;<span class='searchmatch'>Nocturne</span>-Waltz-Scherzo&quot;\n",
+            ),
+        ).toBe('File split by the uploader from "Nocturne-Waltz-Scherzo"');
     });
 
     it('caps length and handles empty input', () => {
