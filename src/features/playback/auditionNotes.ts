@@ -85,7 +85,13 @@ const silenceActive = (): void => {
         try {
             voice.gain.gain.cancelScheduledValues(now);
             voice.gain.gain.setTargetAtTime(0, now, 0.02);
-            voice.source.stop(now + 0.08);
+            for (const source of voice.sources) {
+                try {
+                    source.stop(now + 0.08);
+                } catch {
+                    // already stopped
+                }
+            }
         } catch {
             // already stopped
         }
