@@ -19,8 +19,12 @@ export const DYN_REF_GAIN = 0.5;
 export const REVERB_WET = 0.22;
 /** T60 of the synthesized impulse: a small hall, not a cathedral. */
 export const REVERB_SECONDS = 1.8;
+/** Shorter T60 on machines that cannot afford the full tail. */
+export const REVERB_SECONDS_LOW_POWER = 1.2;
 /** Silence before the tail begins — the ear reads this as room size. */
 export const REVERB_PREDELAY_MS = 15;
+/** Fixed seed so every engine instance renders the same room. */
+export const REVERB_SEED = 0x52455642;
 
 /**
  * Humanization amounts. The timing figure is deliberately far below the 25 ms
@@ -105,6 +109,20 @@ const splitmix32 = (seed: number): number => {
 
 /** Hash word → [0, 1). */
 const unitFrom = (hash: number): number => hash / 0x1_0000_0000;
+
+/**
+ * Deterministic [0, 1) stream from a seed, built on the same splitmix32 that
+ * {@link noteJitter} uses. The reverb IR is the caller that needs this: a
+ * fresh Math.random on every engine would make two plays of the same score
+ * different rooms.
+ */
+export const seededUnitRng = (seed: number): (() => number) => {
+    let state = seed >>> 0;
+    return () => {
+        state = splitmix32(state);
+        return unitFrom(state);
+    };
+};
 
 export interface NoteJitter {
     /** Seconds to shift the attack by, within ±JITTER_TIME_S. */
@@ -203,7 +221,10 @@ export const buildSoftClipCurve = (samples = 4096): Float32Array => {
     for (let i = 0; i < samples; i++) {
         const x = (i / (samples - 1)) * 2 - 1;
         const a = Math.abs(x);
-        const shaped = a <= SOFTCLIP_KNEE ? a : SOFTCLIP_KNEE + (1 - SOFTCLIP_KNEE) * Math.tanh((a - SOFTCLIP_KNEE) / (1 - SOFTCLIP_KNEE));
+        const shaped =
+            a <= SOFTCLIP_KNEE
+                ? a
+                : SOFTCLIP_KNEE + (1 - SOFTCLIP_KNEE) * Math.tanh((a - SOFTCLIP_KNEE) / (1 - SOFTCLIP_KNEE));
         curve[i] = Math.sign(x) * shaped * SOFTCLIP_CEILING;
     }
     return curve;
@@ -288,14 +309,16 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
 
 /**
  * The tick each note actually stops sounding at, index-aligned with `notes`.
- * `pedals` must be in tick order, as parseScoreData leaves it.
+ * `pedals` must be in tick order, as parseScoreData leaves it. `totalTicks` is
+ * the score's end, used as an implicit lift for a trailing `down` that never
+ * got an `up` — a pedal held to the double bar, or an OMR pass that lost the
+ * last lift — so the ending rings instead of damping at the written value.
  *
  * A damper held off the string by the pedal leaves a note ringing past the
  * length it was written at, which is the whole point of the pedal and the one
  * thing a note-plus-duration model cannot say on its own. `pedals` carries
  * edges rather than spans (see ScoreData.pedals), so the state has to be
- * integrated here; a note the pedal is not holding keeps its notated end, as
- * does one the pedal never releases before the piece stops.
+ * integrated here; a note the pedal is not holding keeps its notated end.
  *
  * Two boundary readings carry the musical meaning, and both fall out of taking
  * only edges STRICTLY around the note's end. An 'up' printed on the very tick a
@@ -308,6 +331,7 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
 export const buildPedalEnds = (
     notes: readonly ScoreNote[],
     pedals: readonly ScorePedal[] | undefined,
+    totalTicks: number,
 ): readonly number[] => {
     const ends = notes.map((note) => note.t + note.d);
     if (!pedals || pedals.length === 0) {
@@ -339,11 +363,13 @@ export const buildPedalEnds = (
             continue;
         }
         // The next lift is at or after `end` by construction. One landing exactly
-        // on it is the damper falling with the key, and -1 is a foot that never
-        // comes up; in both cases the note keeps the length it was written at.
+        // on it is the damper falling with the key; a trailing `down` with no
+        // later `up` is an implicit lift at the score end. In both cases a lift
+        // that is not strictly past `end` leaves the written length alone.
         const lift = nextLift[cursor] ?? -1;
-        if (lift > end) {
-            ends[index] = lift;
+        const releaseAt = lift === -1 ? totalTicks : lift;
+        if (releaseAt > end) {
+            ends[index] = releaseAt;
         }
     }
     return ends;

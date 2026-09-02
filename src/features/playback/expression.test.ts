@@ -319,45 +319,57 @@ describe('buildPedalEnds', () => {
     const note = (t: number, d: number, p = 60): ScoreNote => ({ t, d, p, h: 0 });
     const down = (tick: number): ScorePedal => ({ tick, k: 'down' });
     const up = (tick: number): ScorePedal => ({ tick, k: 'up' });
+    const END = tinyScore.totalTicks;
 
     it('leaves an unpedalled score exactly as written', () => {
         const written = tinyScore.notes.map((n) => n.t + n.d);
-        expect(buildPedalEnds(tinyScore.notes, undefined)).toEqual(written);
-        expect(buildPedalEnds(tinyScore.notes, [])).toEqual(written);
+        expect(buildPedalEnds(tinyScore.notes, undefined, END)).toEqual(written);
+        expect(buildPedalEnds(tinyScore.notes, [], END)).toEqual(written);
     });
 
     it('holds a note taken under the pedal until the foot lifts', () => {
-        expect(buildPedalEnds([note(480, 480)], [down(0), up(1920)])).toEqual([1920]);
+        expect(buildPedalEnds([note(480, 480)], [down(0), up(1920)], END)).toEqual([1920]);
     });
 
     it('lets go at the lift, not at the next one', () => {
         // The foot came up long before this note ended; nothing is holding it.
-        expect(buildPedalEnds([note(480, 480)], [down(0), up(720), down(1200), up(2400)])).toEqual([960]);
+        expect(buildPedalEnds([note(480, 480)], [down(0), up(720), down(1200), up(2400)], END)).toEqual([960]);
     });
 
     it('damps a note whose end falls on the lift itself', () => {
         // The later span must not reach back and pick this note up again.
-        expect(buildPedalEnds([note(480, 480)], [down(0), up(960), down(1200), up(2400)])).toEqual([960]);
+        expect(buildPedalEnds([note(480, 480)], [down(0), up(960), down(1200), up(2400)], END)).toEqual([960]);
     });
 
     it('does not catch a note under a pedal taken as it ends', () => {
         // Syncopated pedalling: the foot falls after the hand lifts precisely so
         // the old harmony is released before the new one is held.
-        expect(buildPedalEnds([note(480, 480)], [down(960), up(2400)])).toEqual([960]);
+        expect(buildPedalEnds([note(480, 480)], [down(960), up(2400)], END)).toEqual([960]);
     });
 
     it('clears at a re-catch and holds only what follows it', () => {
         const notes = [note(0, 480, 60), note(1920, 480, 64)];
         const pedals = [down(0), up(1920), down(1920), up(3840)];
-        expect(buildPedalEnds(notes, pedals)).toEqual([1920, 3840]);
+        expect(buildPedalEnds(notes, pedals, END)).toEqual([1920, 3840]);
     });
 
     it('keeps the written end when the pedal is never released', () => {
-        expect(buildPedalEnds([note(480, 480)], [down(0)])).toEqual([960]);
+        // Implicit lift at the written end itself is a no-op: lift > end fails.
+        expect(buildPedalEnds([note(480, 480)], [down(0)], 960)).toEqual([960]);
+    });
+
+    it('holds a trailing down to the end of the score', () => {
+        expect(buildPedalEnds([note(480, 480)], [down(0)], 3840)).toEqual([3840]);
+    });
+
+    it('extends only notes after a trailing down that follows an earlier lift', () => {
+        const notes = [note(0, 480), note(1920, 480)];
+        const pedals = [down(0), up(960), down(1440)];
+        expect(buildPedalEnds(notes, pedals, 3840)).toEqual([960, 3840]);
     });
 
     it('ignores pedalling that happens entirely after the note', () => {
-        expect(buildPedalEnds([note(0, 480)], [down(1920), up(3840)])).toEqual([480]);
+        expect(buildPedalEnds([note(0, 480)], [down(1920), up(3840)], END)).toEqual([480]);
     });
 
     it('resolves each note against its own end, not the order they start in', () => {
@@ -365,11 +377,11 @@ describe('buildPedalEnds', () => {
         // walk cannot assume note ends arrive sorted.
         const notes = [note(0, 3840, 60), note(480, 480, 62)];
         const pedals = [down(0), up(1920), down(2880), up(5760)];
-        expect(buildPedalEnds(notes, pedals)).toEqual([5760, 1920]);
+        expect(buildPedalEnds(notes, pedals, END)).toEqual([5760, 1920]);
     });
 
     it('stays index-aligned with the note list it was given', () => {
-        const ends = buildPedalEnds(tinyScore.notes, [down(0), up(13920)]);
+        const ends = buildPedalEnds(tinyScore.notes, [down(0), up(13920)], END);
         expect(ends).toHaveLength(tinyScore.notes.length);
         // Every note in the score is inside the one span, so all of them ring on.
         expect(ends.every((end) => end === 13920)).toBe(true);
