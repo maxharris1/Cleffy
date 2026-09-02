@@ -202,12 +202,14 @@ export const SECONDARY_ACCENT = 0.012;
 /**
  * How much a beat contributes to a note's velocity. The metronome still uses
  * {@link beatsForMeasure}'s boolean accent (downbeat only); this is the extra
- * hierarchy a player puts on the page — downbeat, the half-bar in even meters,
- * nothing on a pickup.
+ * hierarchy a player puts on the page — downbeat, the half-bar in even meters
+ * of four or more beats (and in 6/8, the second dotted beat), nothing on a
+ * pickup. Two-beat simple meters (2/4, 2/2) have no secondary: beat two of a
+ * march is weak. Triple meters (3/4, 3/8, 9/8) have none either.
  *
  * Compound signatures are counted in the dotted beats {@link clickBeatTicks}
  * already returns, so 6/8's secondary is the second dotted quarter (index 1)
- * and 12/8's is index 2. Triple meters (3/4, 3/8, 9/8) have no secondary.
+ * and 12/8's is index 2.
  */
 export const beatWeight = (sig: ScoreTimeSig, beatIndex: number, isFullBar: boolean): number => {
     if (!isFullBar) {
@@ -217,7 +219,11 @@ export const beatWeight = (sig: ScoreTimeSig, beatIndex: number, isFullBar: bool
         return DOWNBEAT_ACCENT;
     }
     const nBeats = barTicks(sig) / clickBeatTicks(sig);
-    if (nBeats % 2 === 0 && beatIndex === nBeats / 2) {
+    // 2/4 and 2/2 click in two simple beats; 6/8 clicks in two dotted beats
+    // and keeps the secondary. clickBeatTicks equals the denominator-beat
+    // only in the simple case.
+    const simpleDuple = nBeats === 2 && clickBeatTicks(sig) === ticksPerBeat(sig.den);
+    if (nBeats % 2 === 0 && beatIndex === nBeats / 2 && !simpleDuple) {
         return SECONDARY_ACCENT;
     }
     return 0;

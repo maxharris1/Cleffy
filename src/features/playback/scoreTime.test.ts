@@ -239,7 +239,8 @@ describe('beatWeight', () => {
         expect(beatWeight(sig(4, 4), 1, true)).toBe(0);
         expect(beatWeight(sig(4, 4), 2, true)).toBe(SECONDARY_ACCENT);
         expect(beatWeight(sig(4, 4), 3, true)).toBe(0);
-        expect(beatWeight(sig(2, 2), 1, true)).toBe(SECONDARY_ACCENT);
+        expect(beatWeight(sig(2, 2), 1, true)).toBe(0);
+        expect(beatWeight(sig(2, 4), 1, true)).toBe(0);
         expect(beatWeight(sig(3, 4), 1, true)).toBe(0);
         expect(beatWeight(sig(3, 4), 2, true)).toBe(0);
         expect(beatWeight(sig(6, 8), 1, true)).toBe(SECONDARY_ACCENT);
