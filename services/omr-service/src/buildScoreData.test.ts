@@ -55,7 +55,16 @@ const geometry: OmrGeometry = {
 describe('buildScoreData', () => {
     it('zips measures with geometry and carries warnings/bpm through', () => {
         const score = buildScoreData(musical, geometry);
-        expect(score.measures[0]).toEqual({ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.1, x1: 0.5, srcIndex: 0 });
+        expect(score.measures[0]).toEqual({
+            n: 1,
+            tick: 0,
+            dTicks: 1920,
+            page: 0,
+            sys: 0,
+            x0: 0.1,
+            x1: 0.5,
+            srcIndex: 0,
+        });
         // Trivially the index while scores are linear; repeats will make several
         // entries share one.
         expect(score.measures.map((m) => m.srcIndex)).toEqual([0, 1]);
@@ -105,13 +114,22 @@ describe('buildScoreData', () => {
 });
 
 describe('buildScoreData structure', () => {
-    const plainMarks = { repeatForward: false, repeatBackward: false, repeatTimes: 2, endingStart: null, endingStop: false };
+    const plainMarks = {
+        repeatForward: false,
+        repeatBackward: false,
+        repeatTimes: 2,
+        endingStart: null,
+        endingStop: false,
+    };
 
     it('unrolls a repeat into performed measures that reuse the printed geometry', () => {
         const score = buildScoreData(
             {
                 ...musical,
-                repeats: [{ ...plainMarks, repeatForward: true }, { ...plainMarks, repeatBackward: true }],
+                repeats: [
+                    { ...plainMarks, repeatForward: true },
+                    { ...plainMarks, repeatBackward: true },
+                ],
             },
             geometry,
         );
@@ -259,7 +277,10 @@ describe('buildScoreData structure', () => {
                     { tick: 0, k: 'down' },
                     { tick: 1900, k: 'up' },
                 ],
-                repeats: [{ ...plainMarks, repeatForward: true }, { ...plainMarks, repeatBackward: true }],
+                repeats: [
+                    { ...plainMarks, repeatForward: true },
+                    { ...plainMarks, repeatBackward: true },
+                ],
             },
             geometry,
         );
@@ -279,7 +300,10 @@ describe('buildScoreData structure', () => {
             {
                 ...musical,
                 tempos: ramp,
-                repeats: [{ ...plainMarks, repeatForward: true }, { ...plainMarks, repeatBackward: true }],
+                repeats: [
+                    { ...plainMarks, repeatForward: true },
+                    { ...plainMarks, repeatBackward: true },
+                ],
             },
             geometry,
         );
@@ -289,5 +313,33 @@ describe('buildScoreData structure', () => {
         expect(score.tempos!.length).toBeLessThanOrEqual(512);
         // Thinned across the whole performance, not truncated at the front.
         expect(score.tempos!.at(-1)!.tick).toBeGreaterThan(score.totalTicks / 2);
+    });
+
+    it('swings eighths on the linear score so unrolled copies inherit the long–short', () => {
+        const score = buildScoreData(
+            {
+                ...musical,
+                swing: true,
+                notes: [
+                    { t: 0, d: 216, p: 60, h: 0 },
+                    { t: 240, d: 216, p: 62, h: 0 },
+                    { t: 480, d: 480, p: 48, h: 1 },
+                ],
+                repeats: [
+                    { ...plainMarks, repeatForward: true },
+                    { ...plainMarks, repeatBackward: true },
+                ],
+            },
+            geometry,
+        );
+        const swung = score.notes.filter((n) => n.p === 60 || n.p === 62);
+        expect(swung).toEqual([
+            { t: 0, d: 296, p: 60, h: 0 },
+            { t: 320, d: 136, p: 62, h: 0 },
+            { t: 3840, d: 296, p: 60, h: 0 },
+            { t: 4160, d: 136, p: 62, h: 0 },
+        ]);
+        expect(score.warnings).toContain('swing_applied');
+        expect(score.warnings).toContain('repeats_unrolled');
     });
 });
