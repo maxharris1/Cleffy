@@ -474,11 +474,15 @@ const stripTemplates = (s: string): string => {
                 .map((a) => a.trim())
                 .filter((a) => a.length > 0 && !a.includes('='));
             const last = args[args.length - 1];
-            return args.length >= 2 && last && !/^https?:\/\//i.test(last) ? last : '';
+            // A bare short number is a catalogue flag ({{BWV|944|0}}), not a label.
+            return args.length >= 2 && last && !/^https?:\/\//i.test(last) && !/^\d{1,2}$/.test(last) ? last : '';
         });
     }
     return out.replace(/\{\{|\}\}/g, '');
 };
+
+/** "No.1 No.2", "136" — movement/catalogue fragments left once their templates went. */
+const FRAGMENT_ONLY_RE = /^(?:(?:no\.?\s*\d+[a-z]?|\d+[a-z]?|[–—-])\s*)+$/i;
 
 /**
  * `[[Target|Label]]` → Label, `[[Target]]` → Target, `[[wikipedia:X|Article]]` →
@@ -537,8 +541,15 @@ export const cleanSnippet = (raw: string | undefined): string => {
             .replace(/^[#*:;]+\s*/, '')
             .replace(/'{2,}/g, '')
             .replace(/\s+/g, ' ')
+            .replace(/[\s–—-]+$/, '')
             .trim();
-        if (line.length < 3 || MEDIA_FILE_RE.test(line) || SLUG_RE.test(line) || /^source:?$/i.test(line)) {
+        if (
+            line.length < 3 ||
+            MEDIA_FILE_RE.test(line) ||
+            SLUG_RE.test(line) ||
+            FRAGMENT_ONLY_RE.test(line) ||
+            /^source:?$/i.test(line)
+        ) {
             continue;
         }
         kept.push(line);

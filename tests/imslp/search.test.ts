@@ -317,6 +317,10 @@ describe('cleanSnippet', () => {
                 "|Publisher Information=''Guiomar Novaes: <span class='searchmatch'>Chopin</span>: Nocturnes'' - {{RC||Vox|New York||1956||PL 963\n|Misc. Notes=File split by the uploader from &quot;<span class='searchmatch'>Nocturne</span>-Waltz-Scherzo&quot;\n",
             ),
         ).toBe('File split by the uploader from "Nocturne-Waltz-Scherzo"');
+        expect(cleanSnippet('{{AMG|mc0002468657|No.1}} {{AMG|mc0002429720|No.2}}\n# Nocturne in C minor\n136\n')).toBe(
+            'Nocturne in C minor',
+        );
+        expect(cleanSnippet("# BWV 944 – {{tick|0}}\n# ''Fugue in D'' (No.3)\n")).toBe('BWV 944 · Fugue in D (No.3)');
     });
 
     it('caps length and handles empty input', () => {
