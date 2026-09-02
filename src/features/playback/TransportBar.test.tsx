@@ -374,6 +374,11 @@ describe('tempo disclosure and stale analyses', () => {
         expect(screen.getByText('est.').getAttribute('title')).toMatch(/time signature/i);
     });
 
+    it('does not treat a later tempo word as the opening estimate', () => {
+        ready({}, { ...tinyScore, tempos: [{ tick: 960, bpm: 120, src: 'word' }], warnings: [] });
+        expect(screen.queryByText('est.')).toBeNull();
+    });
+
     it('offers to regenerate an analysis made by an older engine', async () => {
         const onGenerate = vi.fn();
         ready({ onGenerate }, tinyScore, 'audiveris-5.6.1+svc-2');

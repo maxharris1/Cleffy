@@ -289,11 +289,7 @@ export const tempoAt = (score: ScoreData, tick: number, fallback: number): numbe
  * guessed `defaultBpm`, and the map having entries further along must not
  * hide that.
  */
-export const tempoIsInferred = (score: ScoreData): boolean => {
-    const opening = score.tempos?.[0];
-    return (
-        (opening?.src === 'word' && opening.tick === 0) ||
-        ((opening?.tick ?? Number.POSITIVE_INFINITY) > 0 &&
-            (score.warnings.includes('tempo_inferred') || score.warnings.includes('tempo_defaulted')))
-    );
-};
+export const tempoIsInferred = (score: ScoreData): boolean =>
+    score.tempos?.[0]?.src === 'word' ||
+    ((score.tempos?.[0]?.tick ?? Number.POSITIVE_INFINITY) > 0 &&
+        (score.warnings.includes('tempo_inferred') || score.warnings.includes('tempo_defaulted')));
