@@ -51,9 +51,6 @@ export const ViewerPage = () => {
 // ---------------------------------------------------------------------------
 // Cloud documents: auth-gated, role-aware, synced.
 
-/** How long a warm open waits for the server to confirm the cached role. */
-const PROVISIONAL_ROLE_TIMEOUT_MS = 4000;
-
 interface CloudDocState {
     doc: DocumentRow;
     role: MemberRole | null;
@@ -109,7 +106,6 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
     useEffect(() => {
         let cancelled = false;
-        let provisionalTimer: ReturnType<typeof setTimeout> | undefined;
         (async () => {
             // No session yet: on an SPA navigation the session is known
             // synchronously, and a cold start resolves it from local storage in
@@ -120,18 +116,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             }
 
             // Warm open: paint from Dexie immediately (provisionally — see
-            // CloudDocState), then refresh in the background.
+            // CloudDocState), then refresh in the background. A hung confirm
+            // stays read-only: lifting provisional on a timer would grant a
+            // cached (or default editor) role the server never vouched for.
             const offline = await loadDocumentOffline(docId).catch(() => null);
             if (!cancelled && offline) {
                 setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes, provisional: true });
                 perfMark('viewer-cache-paint');
-                // A confirm request that stalls without failing (captive portal,
-                // half-open TCP) would otherwise hold the score read-only for as
-                // long as the tab lives. Past this window the open degrades to
-                // the offline contract: last-known role, edits repaired at flush.
-                provisionalTimer = setTimeout(() => {
-                    setState((prev) => (prev?.provisional ? { ...prev, provisional: false } : prev));
-                }, PROVISIONAL_ROLE_TIMEOUT_MS);
             }
             // Cold open: the bytes leave alongside the row and role instead
             // of a round-trip behind them. Never on a warm open — a metered
@@ -145,7 +136,6 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             } catch (err) {
                 // Transport failure only: the server never answered, so the
                 // last-known copy is the best truth available (plan §offline).
-                clearTimeout(provisionalTimer);
                 if (cancelled) {
                     return;
                 }
@@ -166,16 +156,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             }
             // The role is truth from here — confirm the warm paint now
             // rather than holding the pen hostage to the bytes download
-            // and page-count parse still ahead (which can take seconds on
-            // a replaced PDF, long enough for the timer to promote the
-            // cached role instead of this one). The fresh archived_at
+            // and page-count parse still ahead. The fresh archived_at
             // rides along: readOnly derives from it, and confirming an
             // owner role against the CACHED flag would open a just-
             // archived score for writes RLS then silently discards. Only
             // that field — the cached content_rev must survive so the
             // bytes reuse below can still tell whether the buffer it
             // painted matches the server's revision.
-            clearTimeout(provisionalTimer);
             if (cancelled) {
                 return;
             }
@@ -253,7 +240,6 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
         return () => {
             cancelled = true;
-            clearTimeout(provisionalTimer);
         };
     }, [docId, userId]);
 
