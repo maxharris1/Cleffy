@@ -141,13 +141,12 @@ const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: b
         return null;
     }
     return (
-        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900" role="status">
+        <div
+            className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900"
+            role="status"
+        >
             This play-along was made by an older version of the analysis.{' '}
-            <button
-                type="button"
-                onClick={props.onGenerate}
-                className="font-medium underline underline-offset-2"
-            >
+            <button type="button" onClick={props.onGenerate} className="font-medium underline underline-offset-2">
                 Regenerate it
             </button>{' '}
             to pick up the improvements.
@@ -171,7 +170,9 @@ const ScoreWarnings = (props: { warnings: readonly string[] }) => {
                 className="flex w-full items-center gap-1.5 text-left text-xs font-medium text-amber-900"
             >
                 {open ? <ChevronDownIcon size={13} /> : <ChevronUpIcon size={13} />}
-                {present.length === 1 ? '1 thing to know about this play-along' : `${present.length} things to know about this play-along`}
+                {present.length === 1
+                    ? '1 thing to know about this play-along'
+                    : `${present.length} things to know about this play-along`}
             </button>
             {open ? (
                 <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-amber-900">
@@ -497,7 +498,12 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} estimate={tempoEstimate(score)} />
+                    <TempoControl
+                        bpm={bpm}
+                        onBpm={setBpm}
+                        compound={isCompoundMeter(score)}
+                        estimate={tempoEstimate(score)}
+                    />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
@@ -746,15 +752,23 @@ const HandControl = ({
 );
 
 /**
- * Which admission the guessed tempo warrants. A tempo word beats the meter as
- * an explanation whenever one was read, since the meter is only ever the last
- * resort for a score that marks nothing.
+ * Which admission the guessed tempo warrants. A tempo word at the opening
+ * beats the meter as an explanation; a WORD further in does not, because the
+ * meter is what filled the unmarked start. The meter is only ever the last
+ * resort for a score that marks nothing at tick 0.
  */
 const tempoEstimate = (score: ScoreData): TempoEstimate | null => {
     if (!tempoIsInferred(score)) {
         return null;
     }
-    return score.tempos?.[0]?.src === 'word' || score.warnings.includes('tempo_inferred') ? 'word' : 'meter';
+    const opening = score.tempos?.[0];
+    const openingWord = opening?.src === 'word' && opening.tick === 0;
+    // A later WORD must not outrank a meter-defaulted opening: the first page
+    // printed no tempo at all, and that is what the badge should admit.
+    if (score.warnings.includes('tempo_defaulted') && !openingWord) {
+        return 'meter';
+    }
+    return 'word';
 };
 
 /** 6/8, 9/8, 12/8… — musicians read those tempos in dotted-quarter beats. */

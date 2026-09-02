@@ -14,10 +14,11 @@ import { DEFAULT_VELOCITY } from '@/types/scoreData';
 
 const HOLD_S = 0.6;
 /**
- * Trim ahead of the limiter, matching the engine's master. A chord heard in the
- * margin should be the same loudness as that chord in the score — before this
- * shared path, audition ran straight into the destination and was both louder
- * than playback and free to clip.
+ * Trim ahead of the limiter, matching the engine's master. Audition is dry by
+ * design — playback has a 0.22 reverb send that this chain deliberately lacks —
+ * so a chord heard in the margin is slightly quieter than that chord in the
+ * score. Before this shared path, audition ran straight into the destination
+ * and was both louder than playback and free to clip.
  */
 const AUDITION_GAIN = 0.8;
 

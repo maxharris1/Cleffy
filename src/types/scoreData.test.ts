@@ -132,4 +132,10 @@ describe('tempoIsInferred', () => {
         expect(tempoIsInferred(score({ tempos: later, warnings: ['tempo_defaulted'] }))).toBe(true);
         expect(tempoIsInferred(score({ tempos: later, warnings: [] }))).toBe(false);
     });
+
+    it('does not treat a later tempo word as the opening estimate', () => {
+        const laterWord: ScoreData['tempos'] = [{ tick: 960, bpm: 120, src: 'word' }];
+        expect(tempoIsInferred(score({ tempos: laterWord, warnings: ['tempo_defaulted'] }))).toBe(true);
+        expect(tempoIsInferred(score({ tempos: laterWord, warnings: [] }))).toBe(false);
+    });
 });
