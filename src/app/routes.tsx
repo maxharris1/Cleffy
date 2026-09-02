@@ -1,10 +1,12 @@
 import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 
+import { RequireGuest } from '@/features/auth/AuthGates';
 import { AuthCallbackPage } from '@/features/auth/AuthCallbackPage';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
 import { NotFoundPage } from '@/features/marketing/NotFoundPage';
+import { BrandLoading } from '@/ui/BrandShell';
 import { LoadingText } from '@/ui/Loading';
 
 // Lazy: keeps pdf.js (large, browser-only) out of the app-shell bundle.
@@ -71,15 +73,18 @@ const PageFallback = ({ label }: { label: string }) => (
 export const AppRoutes = () => {
     return (
         <Routes>
-            {/* No text in the storefront's fallback: BrandLoading is what it
-                shows itself while the session resolves, so a second caption
-                would flash in front of it. */}
+            {/* Gate before the lazy chunk: a registered knownSession redirects
+                on the first paint instead of a blank frame. BrandLoading
+                matches RequireGuest's own cold-start, so the fallback is not
+                a second caption in front of the storefront. */}
             <Route
                 path="/"
                 element={
-                    <Suspense fallback={null}>
-                        <LandingPage />
-                    </Suspense>
+                    <RequireGuest>
+                        <Suspense fallback={<BrandLoading />}>
+                            <LandingPage />
+                        </Suspense>
+                    </RequireGuest>
                 }
             />
             <Route

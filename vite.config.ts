@@ -45,14 +45,11 @@ const pdfjsWasmPlugin = (): Plugin => ({
 });
 
 /**
- * `<link rel="preconnect">` for every Supabase origin the build knows about.
- *
- * The app picks its project at runtime by hostname (see src/lib/supabase.ts),
- * so the HTML cannot name just one — but both candidates are in the env at
- * build time, and a preconnect to an origin that goes unused costs a socket
- * for a few seconds. What it buys on a cold start is the DNS + TCP + TLS
- * handshake to the API host, done while the shell bundle is still parsing
- * instead of in front of the first request.
+ * `<link rel="preconnect">` for the Supabase origin this build will actually
+ * talk to. Runtime picks the project by hostname when `VITE_SUPABASE_URL` is
+ * unset (see src/lib/supabase.ts); that choice is not known at build time, so
+ * we only preconnect the explicit URL. Emitting both `_PROD` and `_DEV` would
+ * handshake an origin the page never uses.
  */
 const supabasePreconnectPlugin = (): Plugin => {
     let origins: string[] = [];
@@ -60,21 +57,18 @@ const supabasePreconnectPlugin = (): Plugin => {
         name: 'supabase-preconnect',
         configResolved(config) {
             const env = loadEnv(config.mode, config.envDir ?? process.cwd(), 'VITE_');
-            origins = [
-                ...new Set(
-                    ['VITE_SUPABASE_URL', 'VITE_SUPABASE_PROD_URL', 'VITE_SUPABASE_DEV_URL']
-                        .map((key) => env[key])
-                        .filter((value): value is string => Boolean(value))
-                        .map((value) => {
-                            try {
-                                return new URL(value).origin;
-                            } catch {
-                                return null;
-                            }
-                        })
-                        .filter((value): value is string => value !== null && /^https:/.test(value)),
-                ),
-            ];
+            const url = env['VITE_SUPABASE_URL'];
+            origins = [];
+            if (url) {
+                try {
+                    const origin = new URL(url).origin;
+                    if (/^https:/.test(origin)) {
+                        origins = [origin];
+                    }
+                } catch {
+                    // Invalid URL — skip; the client will fail the same way.
+                }
+            }
         },
         transformIndexHtml() {
             return origins.map((href) => ({
