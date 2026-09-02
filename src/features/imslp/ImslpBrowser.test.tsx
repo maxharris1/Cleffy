@@ -566,7 +566,8 @@ describe('ImslpBrowser', () => {
         await waitFor(() => {
             expect(searchSpy).toHaveBeenCalled();
         });
-        const sent = searchSpy.mock.calls.at(-1)?.[1]?.filters?.composerCategories ?? [];
+        const opts = searchSpy.mock.calls.at(-1)?.[1];
+        const sent = typeof opts === 'object' ? (opts.filters?.composerCategories ?? []) : [];
         expect(sent).toHaveLength(6);
     });
 
