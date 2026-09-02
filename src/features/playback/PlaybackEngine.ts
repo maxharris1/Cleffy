@@ -23,6 +23,7 @@ import { loadPianoBuffers, nearestAnchor, playbackRateFor } from '@/features/pla
 import type { PianoBuffers } from '@/features/playback/pianoSampler';
 import {
     beatsForMeasure,
+    bpmAtTick,
     buildTempoMap,
     countInClicks,
     firstNoteIndexAtOrAfter,
@@ -521,19 +522,7 @@ export class PlaybackEngine {
      * alternative to a number that quietly stops being true.
      */
     getBpmAt(tick: number): number {
-        return Math.round(this.bpmValue * this.tempoRatioAt(tick));
-    }
-
-    private tempoRatioAt(tick: number): number {
-        const nominal = this.score.tempos?.[0]?.bpm ?? this.score.defaultBpm ?? this.bpmValue;
-        let bpm = nominal;
-        for (const tempo of this.score.tempos ?? []) {
-            if (tempo.tick > tick) {
-                break;
-            }
-            bpm = tempo.bpm;
-        }
-        return nominal > 0 ? bpm / nominal : 1;
+        return Math.round(bpmAtTick(this.map, tick));
     }
 
     setHandMuted(hand: 0 | 1, muted: boolean): void {
@@ -794,7 +783,8 @@ export class PlaybackEngine {
             (note.v ?? DEFAULT_VELOCITY) +
             noteJitter(note.t, note.p, note.h).dv +
             (shape?.lift ?? 0) +
-            (shape?.accent ?? 0)
+            (shape?.accent ?? 0) -
+            (shape?.dip ?? 0)
         );
     }
 
