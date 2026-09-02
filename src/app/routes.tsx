@@ -2,20 +2,30 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 
 import { AuthCallbackPage } from '@/features/auth/AuthCallbackPage';
-import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage';
-import { LoginPage } from '@/features/auth/LoginPage';
-import { RegisterPage } from '@/features/auth/RegisterPage';
-import { UpdatePasswordPage } from '@/features/auth/UpdatePasswordPage';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import { LibraryShell } from '@/features/library/LibraryShell';
-import { SearchPage } from '@/features/library/SearchPage';
-import { LandingPage } from '@/features/marketing/LandingPage';
 import { NotFoundPage } from '@/features/marketing/NotFoundPage';
-import { JoinPage } from '@/features/share/JoinPage';
 import { LoadingText } from '@/ui/Loading';
 
 // Lazy: keeps pdf.js (large, browser-only) out of the app-shell bundle.
 const ViewerPage = lazy(() => import('@/features/viewer/ViewerPage').then((m) => ({ default: m.ViewerPage })));
+
+// Lazy: a signed-in teacher lands on /library and never sees the storefront
+// or the sign-in forms again — the hero demo and product showcase alone are
+// a good slice of the shell bundle that every session used to download.
+const LandingPage = lazy(() => import('@/features/marketing/LandingPage').then((m) => ({ default: m.LandingPage })));
+const LoginPage = lazy(() => import('@/features/auth/LoginPage').then((m) => ({ default: m.LoginPage })));
+const RegisterPage = lazy(() => import('@/features/auth/RegisterPage').then((m) => ({ default: m.RegisterPage })));
+const ForgotPasswordPage = lazy(() =>
+    import('@/features/auth/ForgotPasswordPage').then((m) => ({ default: m.ForgotPasswordPage })),
+);
+const UpdatePasswordPage = lazy(() =>
+    import('@/features/auth/UpdatePasswordPage').then((m) => ({ default: m.UpdatePasswordPage })),
+);
+// Lazy: IMSLP search is its own surface with its own API module.
+const SearchPage = lazy(() => import('@/features/library/SearchPage').then((m) => ({ default: m.SearchPage })));
+// Lazy: the invite landing is reached once per share link, by a guest.
+const JoinPage = lazy(() => import('@/features/share/JoinPage').then((m) => ({ default: m.JoinPage })));
 
 // Lazy: the account surface is rarely visited — keep Stripe copy and the
 // pricing dialog out of the shell bundle that every session pays for.
@@ -61,11 +71,49 @@ const PageFallback = ({ label }: { label: string }) => (
 export const AppRoutes = () => {
     return (
         <Routes>
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/update-password" element={<UpdatePasswordPage />} />
+            {/* No text in the storefront's fallback: BrandLoading is what it
+                shows itself while the session resolves, so a second caption
+                would flash in front of it. */}
+            <Route
+                path="/"
+                element={
+                    <Suspense fallback={null}>
+                        <LandingPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/login"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading sign-in…" />}>
+                        <LoginPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/register"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading sign-up…" />}>
+                        <RegisterPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/forgot-password"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <ForgotPasswordPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/update-password"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <UpdatePasswordPage />
+                    </Suspense>
+                }
+            />
             {/* Public: a student arrives with a username or email and no session yet. */}
             <Route
                 path="/student"
@@ -105,7 +153,14 @@ export const AppRoutes = () => {
             />
             <Route element={<LibraryShell />}>
                 <Route path="/library" element={<LibraryPage />} />
-                <Route path="/search" element={<SearchPage />} />
+                <Route
+                    path="/search"
+                    element={
+                        <Suspense fallback={<LoadingText className="mt-10">Loading search…</LoadingText>}>
+                            <SearchPage />
+                        </Suspense>
+                    }
+                />
                 {/* Inside the shell group: inherits its RequireRegistered gate and chrome. */}
                 <Route
                     path="/students"
@@ -134,7 +189,14 @@ export const AppRoutes = () => {
                     </Suspense>
                 }
             />
-            <Route path="/join/:token" element={<JoinPage />} />
+            <Route
+                path="/join/:token"
+                element={
+                    <Suspense fallback={<PageFallback label="Opening invite…" />}>
+                        <JoinPage />
+                    </Suspense>
+                }
+            />
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route path="*" element={<NotFoundPage />} />
         </Routes>
