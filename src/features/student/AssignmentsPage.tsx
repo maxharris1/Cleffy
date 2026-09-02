@@ -8,7 +8,7 @@ import { fetchMyAssignments, fetchMyRosterProfile, type AssignedScore } from '@/
 import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
 import { EmptyState } from '@/ui/EmptyState';
-import { LoadingText } from '@/ui/Loading';
+import { AssignmentsSkeleton } from '@/ui/Skeleton';
 import { buttonClassName } from '@/ui/classNames';
 
 /**
@@ -36,7 +36,9 @@ const AssignmentsView = ({ session }: { session: Session }) => {
     useEffect(() => {
         let mounted = true;
         void (async () => {
-            const cached = await getDb().assignmentsCache.get(session.user.id).catch(() => undefined);
+            const cached = await getDb()
+                .assignmentsCache.get(session.user.id)
+                .catch(() => undefined);
             if (mounted && cached && cached.scores.length > 0) {
                 setScores(cached.scores);
                 setLoading(false);
@@ -107,7 +109,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     </p>
                 ) : null}
 
-                {loading && scores === null ? <LoadingText className="mt-6">Finding your pieces…</LoadingText> : null}
+                {loading && scores === null ? <AssignmentsSkeleton label="Finding your pieces…" /> : null}
 
                 {scores && scores.length > 0 ? (
                     <ul className="mt-6 space-y-3">

@@ -54,8 +54,8 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
-import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { LibrarySkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
 import { LayoutGridIcon, ListIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
@@ -518,7 +518,7 @@ export const LibraryPage = () => {
                 ) : null}
 
                 {documents === null ? (
-                    <LoadingText className="mt-10">Loading scores…</LoadingText>
+                    <LibrarySkeleton view={view} label="Loading scores…" />
                 ) : hasScores ? (
                     <section className="mt-8">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

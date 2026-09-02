@@ -28,6 +28,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
@@ -387,7 +388,7 @@ export const RosterPage = () => {
             {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
 
             {students === null ? (
-                <LoadingText className="mt-10">Loading your roster…</LoadingText>
+                <RosterSkeleton label="Loading your roster…" />
             ) : loadError && students.length === 0 ? (
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
