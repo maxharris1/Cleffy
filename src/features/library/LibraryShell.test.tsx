@@ -39,10 +39,18 @@ vi.mock('@/features/billing/entitlementsService', () => ({
     clearCachedEntitlements: vi.fn(),
 }));
 
+const uploadDocument = vi.fn();
 vi.mock('@/features/library/documentsService', () => ({
     importDocumentFromImslp: vi.fn(),
     loadDocumentBytes: vi.fn(),
-    uploadDocument: vi.fn(),
+    uploadDocument: (...args: unknown[]) => uploadDocument(...args),
+}));
+
+const readCachedLibraryList = vi.fn();
+const prependCachedLibraryDocument = vi.fn();
+vi.mock('@/features/library/libraryBootstrap', () => ({
+    readCachedLibraryList: (...args: unknown[]) => readCachedLibraryList(...args),
+    prependCachedLibraryDocument: (...args: unknown[]) => prependCachedLibraryDocument(...args),
 }));
 
 vi.mock('@/features/import/importPromptService', () => ({
@@ -79,15 +87,42 @@ const renderShell = () =>
                     <Route path="/library" element={<Page name="library page" />} />
                     <Route path="/students" element={<Page name="students page" />} />
                 </Route>
+                <Route path="/doc/:id" element={<Page name="viewer page" />} />
             </Routes>
         </MemoryRouter>,
     );
 
 afterEach(() => {
     cleanup();
+    vi.clearAllMocks();
 });
 
 describe('LibraryShell', () => {
+    it('puts an uploaded score at the top of the snapshot read before the upload cleared it', async () => {
+        const user = userEvent.setup();
+        const before = {
+            documents: [{ id: 'd1' }],
+            hasMore: false,
+            favoriteIds: new Set(),
+            tags: [],
+            documentTags: new Map(),
+        };
+        readCachedLibraryList.mockResolvedValue(before);
+        prependCachedLibraryDocument.mockResolvedValue(undefined);
+        const document = { id: 'd2', title: 'New score' };
+        uploadDocument.mockResolvedValue({ document });
+        const { requestScoreAnalysis } = await import('@/features/playback/scoreAnalysisService');
+        vi.mocked(requestScoreAnalysis).mockResolvedValue(undefined as never);
+        renderShell();
+
+        const input = screen.getByLabelText('Upload score', { selector: 'input' });
+        await user.upload(input, new File(['%PDF-1.4'], 'new.pdf', { type: 'application/pdf' }));
+
+        expect(await screen.findByText('viewer page')).toBeInTheDocument();
+        expect(readCachedLibraryList).toHaveBeenCalledWith('teacher-1');
+        expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', before, document);
+    });
+
     it('keeps the account menu closed after coming back to the route it was opened on', async () => {
         const user = userEvent.setup();
         renderShell();

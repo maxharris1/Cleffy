@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
@@ -10,7 +10,11 @@ import {
     renameDocument,
     setDocumentFavorite,
 } from '@/features/library/documentsService';
-import { fetchLibraryBootstrap, readCachedLibraryList } from '@/features/library/libraryBootstrap';
+import {
+    fetchLibraryBootstrap,
+    readCachedLibraryList,
+    writeCachedLibraryList,
+} from '@/features/library/libraryBootstrap';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import {
     displayTitleOf,
@@ -95,6 +99,37 @@ export const LibraryPage = () => {
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
     const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
+    /**
+     * Bumped after a mutation's server write resolved, once the state updates
+     * that reflect it are queued. The effect below then persists what is on
+     * screen — after the render commits, so it sees the post-edit state, not
+     * the closure's copy. Every mutation's commit edge cleared the snapshot;
+     * this is the write that puts back the one page that knows the truth, so
+     * the next visit paints instantly instead of loading.
+     */
+    const [persistTick, setPersistTick] = useState(0);
+    const persistSnapshot = () => setPersistTick((t) => t + 1);
+    /**
+     * The opened-PDF fallback (listCachedDocuments) is drawn from pdfCache,
+     * which every account on this browser shares. A list painted from it must
+     * never be written into this user's snapshot.
+     */
+    const snapshotUnsafe = useRef(false);
+
+    useEffect(() => {
+        if (persistTick === 0 || documents === null || snapshotUnsafe.current) {
+            return;
+        }
+        void writeCachedLibraryList(userId, {
+            documents,
+            hasMore,
+            favoriteIds: favorites,
+            tags,
+            documentTags: assignments,
+        }).catch(() => undefined);
+        // Only the tick: the other values are read at persist time, not watched.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [persistTick]);
 
     useEffect(() => {
         let cancelled = false;
@@ -190,6 +225,7 @@ export const LibraryPage = () => {
                         }
                         setHasMore(false);
                         if (opened.length > 0) {
+                            snapshotUnsafe.current = true;
                             setDocuments(opened);
                             setError('Offline — showing scores cached on this device.');
                         } else {
@@ -258,18 +294,20 @@ export const LibraryPage = () => {
             }
             return set;
         });
-        setDocumentFavorite(doc.id, userId, next).catch((err: unknown) => {
-            setFavorites((prev) => {
-                const set = new Set(prev);
-                if (next) {
-                    set.delete(doc.id);
-                } else {
-                    set.add(doc.id);
-                }
-                return set;
+        setDocumentFavorite(doc.id, userId, next)
+            .then(persistSnapshot)
+            .catch((err: unknown) => {
+                setFavorites((prev) => {
+                    const set = new Set(prev);
+                    if (next) {
+                        set.delete(doc.id);
+                    } else {
+                        set.add(doc.id);
+                    }
+                    return set;
+                });
+                setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
             });
-            setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
-        });
     };
 
     const patchAssignment = (documentId: string, tagId: string, assigned: boolean) => {
@@ -300,6 +338,7 @@ export const LibraryPage = () => {
         patchAssignment(docId, tagId, assigned);
         try {
             await setDocumentTag(docId, tagId, assigned);
+            persistSnapshot();
         } catch (err) {
             patchAssignment(docId, tagId, !assigned);
             throw err;
@@ -319,6 +358,10 @@ export const LibraryPage = () => {
         } catch (err) {
             patchAssignment(tagTarget.id, created.id, false);
             throw err;
+        } finally {
+            // The tag exists either way; the assignment state is whichever
+            // branch above left it in.
+            persistSnapshot();
         }
     };
 
@@ -326,6 +369,7 @@ export const LibraryPage = () => {
     const handleCreateTagOnly = async (name: string) => {
         const created = await createLibraryTag(userId, name);
         setTags((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+        persistSnapshot();
     };
 
     const handleRenameTag = async (tagId: string, name: string) => {
@@ -335,6 +379,7 @@ export const LibraryPage = () => {
                 .map((t) => (t.id === tagId ? { ...t, name: name.trim().replace(/\s+/g, ' ') } : t))
                 .sort((a, b) => a.name.localeCompare(b.name)),
         );
+        persistSnapshot();
     };
 
     const handleDeleteTag = async (tagId: string) => {
@@ -355,6 +400,7 @@ export const LibraryPage = () => {
         if (activeTagId === tagId) {
             setActiveTagId(null);
         }
+        persistSnapshot();
     };
 
     const saveRename = async (title: string) => {
@@ -367,6 +413,7 @@ export const LibraryPage = () => {
             await renameDocument(target.id, title);
             setDocuments((docs) => docs?.map((d) => (d.id === target.id ? { ...d, title } : d)) ?? docs);
             setRenameTarget(null);
+            persistSnapshot();
         } finally {
             setBusyAction(false);
         }
@@ -390,6 +437,7 @@ export const LibraryPage = () => {
             // A slot just came free, so the "you are at your score limit" notice
             // from the upload that failed a moment ago is no longer true.
             clearUploadError();
+            persistSnapshot();
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {

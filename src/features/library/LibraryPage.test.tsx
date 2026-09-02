@@ -22,6 +22,7 @@ const deleteLibraryTag = vi.fn();
 const setDocumentTag = vi.fn();
 const fetchLibraryBootstrap = vi.fn();
 const readCachedLibraryList = vi.fn();
+const writeCachedLibraryList = vi.fn();
 
 vi.mock('@/features/library/documentsService', () => ({
     listDocuments: (...args: unknown[]) => listDocuments(...args),
@@ -35,6 +36,7 @@ vi.mock('@/features/library/documentsService', () => ({
 vi.mock('@/features/library/libraryBootstrap', () => ({
     fetchLibraryBootstrap: (...args: unknown[]) => fetchLibraryBootstrap(...args),
     readCachedLibraryList: (...args: unknown[]) => readCachedLibraryList(...args),
+    writeCachedLibraryList: (...args: unknown[]) => writeCachedLibraryList(...args),
 }));
 
 vi.mock('@/features/library/tagsService', () => ({
@@ -179,6 +181,7 @@ beforeEach(() => {
     });
     listCachedDocuments.mockResolvedValue([]);
     readCachedLibraryList.mockResolvedValue(null);
+    writeCachedLibraryList.mockResolvedValue(undefined);
     mockBootstrap();
     listFavoriteDocumentIds.mockResolvedValue(new Set());
     setDocumentFavorite.mockResolvedValue(undefined);
@@ -599,6 +602,64 @@ describe('LibraryPage', () => {
         await user.click(screen.getByRole('button', { name: 'Delete' }));
         await waitFor(() => expect(deleteDocument).toHaveBeenCalledWith(expect.objectContaining({ id: 'd2' })));
         await waitFor(() => expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument());
+    });
+
+    describe('snapshot write-through', () => {
+        it('persists the post-edit list after a favorite lands, so the next visit paints it', async () => {
+            const user = userEvent.setup();
+            renderLibrary();
+            await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+
+            await user.click(screen.getAllByRole('button', { name: 'Add to favorites' })[0] as HTMLElement);
+
+            await waitFor(() => expect(writeCachedLibraryList).toHaveBeenCalledTimes(1));
+            const [userId, snapshot] = writeCachedLibraryList.mock.calls[0] as [string, { favoriteIds: Set<string> }];
+            expect(userId).toBe('teacher-1');
+            expect([...snapshot.favoriteIds]).toEqual(['d1']);
+        });
+
+        it('does not persist a favorite the server refused', async () => {
+            const user = userEvent.setup();
+            setDocumentFavorite.mockRejectedValue(new Error('offline'));
+            renderLibrary();
+            await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+
+            await user.click(screen.getAllByRole('button', { name: 'Add to favorites' })[0] as HTMLElement);
+
+            await screen.findByText('offline');
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
+
+        it('persists the list without a deleted score', async () => {
+            const user = userEvent.setup();
+            deleteDocument.mockResolvedValue(undefined);
+            renderLibrary();
+            await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+            await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+            await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+            await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+            await waitFor(() => expect(writeCachedLibraryList).toHaveBeenCalledTimes(1));
+            const [, snapshot] = writeCachedLibraryList.mock.calls[0] as [string, { documents: DocumentRow[] }];
+            expect(snapshot.documents.map((d) => d.id)).toEqual(['d1']);
+        });
+
+        it('never writes a list painted from the shared opened-PDF cache into this user’s snapshot', async () => {
+            const user = userEvent.setup();
+            fetchLibraryBootstrap.mockRejectedValue(new Error('offline'));
+            listDocuments.mockRejectedValue(new Error('offline'));
+            listCachedDocuments.mockResolvedValue([doc('d9', 'Someone else’s score')]);
+            renderLibrary();
+            await screen.findByText('Someone else’s score');
+
+            // The favorite itself goes through (the server is back), but the
+            // list on screen came from pdfCache, which every account shares.
+            await user.click(screen.getByRole('button', { name: 'Add to favorites' }));
+            await waitFor(() => expect(setDocumentFavorite).toHaveBeenCalled());
+            await new Promise((r) => setTimeout(r, 20));
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
     });
 
     it('opens the share dialog for a row', async () => {

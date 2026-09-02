@@ -52,28 +52,60 @@ const cacheBootstrap = async (userId: string, boot: LibraryBootstrap): Promise<v
     const now = new Date().toISOString();
     await Promise.all([
         getDb().entitlements.put({ userId, entitlements: boot.entitlements, cachedAt: now }),
-        getDb().libraryList.put({
-            userId,
-            documents: boot.documents,
-            hasMore: boot.hasMore,
-            favoriteIds: [...boot.favoriteIds],
-            tags: boot.tags,
-            documentTags: [...boot.documentTags.entries()],
-            cachedAt: now,
-        }),
+        writeCachedLibraryList(userId, boot),
     ]);
 };
 
-/** Dexie snapshot for an instant library paint before the network returns. */
-export const readCachedLibraryList = async (
-    userId: string,
-): Promise<{
+/** What the library page paints from, and writes back after an edit. */
+export interface LibraryListSnapshot {
     documents: DocumentRow[];
     hasMore: boolean;
     favoriteIds: Set<string>;
     tags: LibraryTagRow[];
     documentTags: Map<string, string[]>;
-} | null> => {
+}
+
+/**
+ * Persist the list the page is showing. Called after a mutation's server write
+ * resolved: the commit edge cleared the snapshot (it may be wrong for a page
+ * that is not mounted), and this puts back the one page that knows the truth.
+ * IndexedDB runs same-store transactions in creation order, so a put issued
+ * after the clear cannot be swept by it.
+ */
+export const writeCachedLibraryList = async (userId: string, snapshot: LibraryListSnapshot): Promise<void> => {
+    await getDb().libraryList.put({
+        userId,
+        documents: snapshot.documents,
+        hasMore: snapshot.hasMore,
+        favoriteIds: [...snapshot.favoriteIds],
+        tags: snapshot.tags,
+        documentTags: [...snapshot.documentTags.entries()],
+        cachedAt: new Date().toISOString(),
+    });
+};
+
+/**
+ * Put a just-created score at the top of a snapshot read BEFORE the upload
+ * began — by the time the upload resolves, its commit edge has cleared the
+ * row, so there is nothing left to read. No snapshot, no write: a one-score
+ * library painted over a library of fifty would be a worse lie than a spinner.
+ */
+export const prependCachedLibraryDocument = async (
+    userId: string,
+    before: LibraryListSnapshot | null,
+    doc: DocumentRow,
+): Promise<void> => {
+    if (!before) {
+        return;
+    }
+    await writeCachedLibraryList(userId, {
+        ...before,
+        documents: [doc, ...before.documents.filter((d) => d.id !== doc.id)],
+    });
+};
+
+/** Dexie snapshot for an instant library paint before the network returns. */
+export const readCachedLibraryList = async (userId: string): Promise<LibraryListSnapshot | null> => {
     const row = await getDb().libraryList.get(userId);
     if (!row) {
         return null;

@@ -7,6 +7,11 @@ import { recordImportStatus, shouldOfferImport } from '@/features/import/importP
 import { prescanDocument } from '@/features/import/prescan';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
+import {
+    prependCachedLibraryDocument,
+    readCachedLibraryList,
+    type LibraryListSnapshot,
+} from '@/features/library/libraryBootstrap';
 import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
@@ -126,14 +131,25 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         setUploadError(err instanceof Error ? err.message : fallback);
     };
 
+    /**
+     * The library snapshot, read before the write that will clear it, so the
+     * new score can be put at the top of it afterwards and the return from the
+     * viewer paints instantly instead of loading.
+     */
+    const snapshotBefore = (): Promise<LibraryListSnapshot | null> => readCachedLibraryList(userId).catch(() => null);
+    const rememberNewScore = (before: Promise<LibraryListSnapshot | null>, document: DocumentRow) =>
+        void before.then((snapshot) => prependCachedLibraryDocument(userId, snapshot, document)).catch(() => undefined);
+
     const onUpload = async (file: File) => {
         clearErrors();
         setUploadPct(0);
+        const before = snapshotBefore();
         try {
             const { document } = await uploadDocument(file, userId, ({ loaded, total }) => {
                 const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
                 setUploadPct(pct);
             });
+            rememberNewScore(before, document);
             // Kick off play-along analysis in the background; the viewer's
             // transport bar reports progress and offers a retry on failure.
             void requestScoreAnalysis(document.id).catch(() => undefined);
@@ -170,6 +186,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const onImportImslp = async (filename: string, workTitle: string) => {
         clearErrors();
         setUploadPct(0);
+        const before = snapshotBefore();
         try {
             const result = await importDocumentFromImslp(filename, workTitle, userId);
             if (!result.ok) {
@@ -179,6 +196,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     message: result.fallback.message,
                 };
             }
+            rememberNewScore(before, result.document);
             void requestScoreAnalysis(result.document.id).catch(() => undefined);
             navigate(`/doc/${result.document.id}`);
             return { ok: true as const };
