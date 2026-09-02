@@ -36,7 +36,30 @@ export interface MusicalScore {
     warnings: string[];
     /** Unresolved tie-starts still open at end of the lead part (shard seam risk). */
     openTiesAtEnd: number;
+    /**
+     * Raw tempo marks resolveTempos consumed, absolute ticks. Service-side only —
+     * never copied into ScoreData.
+     */
+    tempoMarks?: TempoMark[];
+    /**
+     * Per-staff dynamic curves after hairpin interpolation. Service-side only.
+     */
+    dynamicCurves?: Array<{ staff: number } & DynamicCurve>;
+    /** Meter-based opening pulse, whether or not anything printed a tempo. */
+    meterDefaultBpm?: number;
 }
+
+/**
+ * Expression state a later parse can resume from — the second shard of a
+ * split score, which never sees the heading and dynamics printed on page 1.
+ */
+export interface ParseSeed {
+    tempoBpm: number | null;
+    steadyBpm: number | null;
+    velocityByStaff: Record<number, number>;
+}
+
+const EMPTY_SEED: ParseSeed = { tempoBpm: null, steadyBpm: null, velocityByStaff: {} };
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
 
@@ -183,14 +206,39 @@ const shadeTempo = (bpm: number, text: string): number => {
 };
 
 /** Gradual tempo changes, which arrive as words and never as numbers. */
-const RITARDANDO_RE = /^\s*(rit\b|rit\.|ritard|rall|allarg|slentando|calando\s+e)/i;
-const ACCELERANDO_RE = /^\s*(accel|stringendo|affrett)/i;
+const GRADUAL_QUALIFIER = '(?:(?:un\\s+poco|poco|molto|assai)\\s+)?';
+const RITARDANDO_RE = new RegExp(
+    `^\\s*${GRADUAL_QUALIFIER}(?:rit\\b|rit\\.|ritard|rall|allarg|slentando|calando\\s+e)`,
+    'i',
+);
+const ACCELERANDO_RE = new RegExp(`^\\s*${GRADUAL_QUALIFIER}(?:accel|stringendo|affrett)`, 'i');
 const A_TEMPO_RE = /^\s*(a\s*tempo|tempo\s+prim|tempo\s+i\b)/i;
+const ISTESSO_TEMPO_RE = /^\s*(?:l['\u2018\u2019]istesso\s+tempo|lo\s+stesso\s+tempo)/i;
+const MENO_MOSSO_RE = /^\s*meno\s+mosso/i;
+const PIU_MOSSO_RE = /^\s*piu\s+mosso/i;
+const RITENUTO_RE = /^\s*(?:ritenuto|riten\.)/i;
+const DOPPIO_MOVIMENTO_RE = /^\s*doppio\s+movimento/i;
 
 /** How far a rit./accel. bends the pulse, and how long it runs unbounded. */
 const RITARDANDO_FACTOR = 0.75;
 const ACCELERANDO_FACTOR = 1.25;
 const GRADUAL_TEMPO_BARS = 4;
+
+/**
+ * Multiplicative target for a rit./accel. The page shades these: poco is a
+ * smaller bend, molto/stringendo a larger one, and a bare rit. stays at the
+ * historical 0.75 / 1.25 so unmarked scores do not change.
+ */
+const gradualTargetFactor = (text: string, kind: 'rit' | 'accel'): number => {
+    const folded = foldDiacritics(text);
+    if (/\b(?:un\s+poco|poco)\b/i.test(folded)) {
+        return kind === 'rit' ? 0.85 : 1.15;
+    }
+    if (/\b(?:molto|assai)\b/i.test(folded) || (kind === 'accel' && /\bstringendo\b/i.test(folded))) {
+        return kind === 'rit' ? 0.65 : 1.3;
+    }
+    return kind === 'rit' ? RITARDANDO_FACTOR : ACCELERANDO_FACTOR;
+};
 
 /**
  * Quarter-BPM for a tempo heading, or null. A compound heading averages its two
@@ -539,7 +587,7 @@ interface PartCandidate {
  * document order so Audiveris "Voice" dummy parts (and art-song vocal lines)
  * do not become the play-along timeline.
  */
-export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore => {
+export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed = EMPTY_SEED): MusicalScore => {
     const doc = new DOMParser().parseFromString(xml, 'text/xml');
     const root = doc.documentElement;
     if (!root || root.nodeName !== 'score-partwise') {
@@ -560,7 +608,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
     const leadStaves = countDeclaredStaves(lead);
 
     // The lead part is the timeline authority: its measures define barlines.
-    const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings });
+    const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings, seed });
     const notes = [...leadResult.notes];
     for (const target of targets.slice(1)) {
         const secondary = parsePart(target.part, {
@@ -568,6 +616,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
             timeline: leadResult.measures,
             tickOffset,
             warnings,
+            seed,
         });
         notes.push(...secondary.notes);
     }
@@ -599,6 +648,9 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0): MusicalScore =
         totalTicks,
         warnings: [...warnings],
         openTiesAtEnd: leadResult.openTiesAtEnd,
+        tempoMarks: leadResult.tempoMarks,
+        dynamicCurves: leadResult.dynamicCurves,
+        meterDefaultBpm: leadResult.meterDefaultBpm,
     };
 };
 
@@ -634,9 +686,7 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
     const rank = (a: PartCandidate, b: PartCandidate): number =>
         b.pitchedNotes - a.pitchedNotes || b.nameScore - a.nameScore || b.staves - a.staves || a.index - b.index;
 
-    const grands = candidates
-        .filter((c) => c.staves >= 2 || (c.nameScore > 0 && !isNoise(c)))
-        .sort(rank);
+    const grands = candidates.filter((c) => c.staves >= 2 || (c.nameScore > 0 && !isNoise(c))).sort(rank);
 
     let selected: PartCandidate[];
     if (grands[0]) {
@@ -718,6 +768,7 @@ interface PartContext {
     timeline: Array<{ n: number; tick: number; dTicks: number }> | null;
     tickOffset: number;
     warnings: Set<string>;
+    seed: ParseSeed;
 }
 
 interface PartResult {
@@ -732,6 +783,9 @@ interface PartResult {
     repeats: MeasureRepeatMarks[];
     defaultBpm: number | null;
     openTiesAtEnd: number;
+    tempoMarks: TempoMark[];
+    dynamicCurves: Array<{ staff: number } & DynamicCurve>;
+    meterDefaultBpm: number;
 }
 
 /**
@@ -767,7 +821,9 @@ type RawEvent =
     | { k: 'accentDyn'; rel: number; staff: EventStaff; toPiano: boolean }
     | { k: 'wedge'; rel: number; staff: EventStaff; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }
     | { k: 'tempo'; rel: number; qbpm: number; src: 'sound' | 'metronome' | 'word' }
-    | { k: 'gradual'; rel: number; kind: 'rit' | 'accel' | 'atempo' }
+    | { k: 'gradual'; rel: number; kind: 'rit' | 'accel'; amount: number }
+    | { k: 'gradual'; rel: number; kind: 'atempo' }
+    | { k: 'gradual'; rel: number; kind: 'step'; amount: number; becomesSteady: boolean }
     | { k: 'pedal'; rel: number; kind: 'down' | 'up' | 'change' }
     | { k: 'time'; rel: number; num: number; den: number }
     | { k: 'key'; rel: number; fifths: number }
@@ -958,11 +1014,38 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     const wordsForTempo = child.getElementsByTagName('words').item(0) as Elem | null;
                     const wordText = wordsForTempo ? (wordsForTempo.textContent ?? '') : '';
                     if (wordText) {
-                        if (RITARDANDO_RE.test(wordText)) {
-                            events.push({ k: 'gradual', rel: cursor, kind: 'rit' });
-                        } else if (ACCELERANDO_RE.test(wordText)) {
-                            events.push({ k: 'gradual', rel: cursor, kind: 'accel' });
-                        } else if (A_TEMPO_RE.test(wordText)) {
+                        const foldedWords = foldDiacritics(wordText);
+                        if (ISTESSO_TEMPO_RE.test(foldedWords)) {
+                            // Same pulse, new note values — not a heading and not a bend.
+                        } else if (MENO_MOSSO_RE.test(foldedWords)) {
+                            events.push({ k: 'gradual', rel: cursor, kind: 'step', amount: 0.8, becomesSteady: true });
+                        } else if (PIU_MOSSO_RE.test(foldedWords)) {
+                            events.push({ k: 'gradual', rel: cursor, kind: 'step', amount: 1.2, becomesSteady: true });
+                        } else if (RITENUTO_RE.test(foldedWords)) {
+                            events.push({
+                                k: 'gradual',
+                                rel: cursor,
+                                kind: 'step',
+                                amount: 0.8,
+                                becomesSteady: false,
+                            });
+                        } else if (DOPPIO_MOVIMENTO_RE.test(foldedWords)) {
+                            events.push({ k: 'gradual', rel: cursor, kind: 'step', amount: 2, becomesSteady: true });
+                        } else if (RITARDANDO_RE.test(foldedWords)) {
+                            events.push({
+                                k: 'gradual',
+                                rel: cursor,
+                                kind: 'rit',
+                                amount: gradualTargetFactor(foldedWords, 'rit'),
+                            });
+                        } else if (ACCELERANDO_RE.test(foldedWords)) {
+                            events.push({
+                                k: 'gradual',
+                                rel: cursor,
+                                kind: 'accel',
+                                amount: gradualTargetFactor(foldedWords, 'accel'),
+                            });
+                        } else if (A_TEMPO_RE.test(foldedWords)) {
                             events.push({ k: 'gradual', rel: cursor, kind: 'atempo' });
                         } else if (qbpm === null) {
                             const worded = tempoFromWords(wordText);
@@ -1248,12 +1331,7 @@ const MIN_OVER_MODAL_COUNT = 6;
  * bar, so a genuinely correct signature is seldom exceeded; a wrong one is
  * exceeded constantly, and those excesses cluster at the true bar length.
  */
-const judgeSpan = (
-    raws: readonly RawMeasure[],
-    from: number,
-    to: number,
-    warnings: Set<string>,
-): MeterVerdict => {
+const judgeSpan = (raws: readonly RawMeasure[], from: number, to: number, warnings: Set<string>): MeterVerdict => {
     const declared = raws[from]?.sig ?? { num: 4, den: 4 };
     const fallback: MeterVerdict = { from, to, sig: declared, corrected: false };
     const expected = barTicksOf(declared);
@@ -1341,9 +1419,11 @@ const effectiveSigs = (raws: readonly RawMeasure[], verdicts: readonly MeterVerd
     return sigs;
 };
 
-type TempoMark =
+export type TempoMark =
     | { tick: number; kind: 'abs'; bpm: number; src: 'sound' | 'metronome' | 'word' }
-    | { tick: number; kind: 'rit' | 'accel' | 'atempo' };
+    | { tick: number; kind: 'rit' | 'accel'; amount: number }
+    | { tick: number; kind: 'atempo' }
+    | { tick: number; kind: 'step'; amount: number; becomesSteady: boolean };
 
 /**
  * Turn tempo marks into a stepwise map.
@@ -1360,6 +1440,7 @@ const resolveTempos = (
     barTicksAt: (tick: number) => number,
     beatTicksAt: (tick: number) => number,
     warnings: Set<string>,
+    seed: ParseSeed,
 ): ScoreTempo[] => {
     // A printed number anywhere in the movement beats a word everywhere in it.
     const hasPrinted = marks.some((m) => m.kind === 'abs' && m.src !== 'word');
@@ -1388,9 +1469,9 @@ const resolveTempos = (
         out.push({ tick, bpm: rounded, ...(src ? { src } : {}) });
     };
 
-    let current: number | null = null;
+    let current: number | null = seed.tempoBpm;
     /** The last tempo that was actually printed — what "a tempo" returns to. */
-    let steady: number | null = null;
+    let steady: number | null = seed.steadyBpm;
 
     for (let i = 0; i < usable.length; i++) {
         const mark = usable[i];
@@ -1414,12 +1495,23 @@ const resolveTempos = (
             // A rit. before any tempo is known has nothing to bend.
             continue;
         }
+        if (mark.kind === 'step') {
+            const next = current * mark.amount;
+            // A new steady is a printed-equivalent pulse (no src); a ritenuto is
+            // a temporary step that `a tempo` cancels, so it wears 'ramp'.
+            push(mark.tick, next, mark.becomesSteady ? undefined : 'ramp');
+            current = next;
+            if (mark.becomesSteady) {
+                steady = next;
+            }
+            continue;
+        }
         const next = usable[i + 1];
         const limit = mark.tick + GRADUAL_TEMPO_BARS * barTicksAt(mark.tick);
         const spanEnd = Math.min(endTick, limit, next ? next.tick : Number.POSITIVE_INFINITY);
         const step = Math.max(1, beatTicksAt(mark.tick));
         const from: number = current;
-        const target: number = from * (mark.kind === 'rit' ? RITARDANDO_FACTOR : ACCELERANDO_FACTOR);
+        const target: number = from * mark.amount;
         // Reach the target on the LAST beat inside the span, not at its edge:
         // a rit. is at its slowest just before the a tempo, and a point sitting
         // exactly on the next mark would be overwritten by it anyway.
@@ -1500,7 +1592,7 @@ const placeMeasures = (
  * A staff's dynamic shape over time: `points` hold until the next one.
  * (`ramps` are filled in by hairpin interpolation.)
  */
-interface DynamicCurve {
+export interface DynamicCurve {
     points: Array<{ tick: number; v: number }>;
     ramps: Array<{ from: number; to: number; vFrom: number; vTo: number }>;
 }
@@ -1604,9 +1696,7 @@ const buildRamps = (
         } else {
             const grown = vFrom * (span.dir === 'crescendo' ? HAIRPIN_GROWTH : HAIRPIN_DECAY);
             vTo = roundVelocity(
-                span.dir === 'crescendo'
-                    ? clampVelocity(grown)
-                    : Math.max(HAIRPIN_FLOOR, clampVelocity(grown)),
+                span.dir === 'crescendo' ? clampVelocity(grown) : Math.max(HAIRPIN_FLOOR, clampVelocity(grown)),
             );
             // Materialise the arrival, so the very next note holds it instead of
             // snapping back to where the hairpin started.
@@ -1665,6 +1755,8 @@ const resolveDynamics = (
     sigs: ReadonlyArray<{ num: number; den: number }>,
     staffCount: number,
     warnings: Set<string>,
+    seed: ParseSeed,
+    tickOffset: number,
 ): DynamicsResolution => {
     const staves = Array.from({ length: Math.max(1, staffCount) }, (_, i) => i + 1);
     const curves = new Map<number, DynamicCurve>(staves.map((s) => [s, { points: [], ramps: [] }]));
@@ -1705,6 +1797,7 @@ const resolveDynamics = (
         }
     }
     if (marks.length === 0) {
+        seedCurveStarts(curves, seed, tickOffset);
         return { curves, accents };
     }
     marks.sort((a, b) => a.tick - b.tick);
@@ -1768,7 +1861,7 @@ const resolveDynamics = (
     /** Staves that have been given a dynamic of their own, and keep it. */
     const independent = new Set<number>();
 
-    for (let i = 0; i < marks.length; ) {
+    for (let i = 0; i < marks.length;) {
         const first = marks[i];
         if (!first) {
             break;
@@ -1841,11 +1934,28 @@ const resolveDynamics = (
         return barTicksOf(sigs[0] ?? { num: 4, den: 4 });
     };
 
-    for (const [staff, curve] of curves) {
+    for (const curve of curves.values()) {
         curve.points.sort((a, b) => a.tick - b.tick);
+    }
+    seedCurveStarts(curves, seed, tickOffset);
+    for (const [staff, curve] of curves) {
         buildRamps(curve, wedges.get(staff) ?? [], endTick, barTicksAt);
     }
     return { curves, accents };
+};
+
+/** Resume a staff's curve from a prior shard when this parse has no earlier point. */
+const seedCurveStarts = (curves: Map<number, DynamicCurve>, seed: ParseSeed, tickOffset: number): void => {
+    for (const [staff, curve] of curves) {
+        const v = seed.velocityByStaff[staff];
+        if (v === undefined) {
+            continue;
+        }
+        if (pointValueAt(curve.points, tickOffset) === undefined) {
+            curve.points.push({ tick: tickOffset, v });
+            curve.points.sort((a, b) => a.tick - b.tick);
+        }
+    }
 };
 
 /**
@@ -1882,7 +1992,15 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
     }
-    const { curves, accents } = resolveDynamics(raws, placements, sigs, staffCount, ctx.warnings);
+    const { curves, accents } = resolveDynamics(
+        raws,
+        placements,
+        sigs,
+        staffCount,
+        ctx.warnings,
+        ctx.seed,
+        ctx.tickOffset,
+    );
     const curveFor = (staff: number): DynamicCurve | undefined => curves.get(staff) ?? curves.get(1);
 
     for (let pos = 0; pos < raws.length; pos++) {
@@ -1932,7 +2050,18 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     break;
                 }
                 case 'gradual': {
-                    tempoMarks.push({ tick: measureStart + ev.rel, kind: ev.kind });
+                    if (ev.kind === 'rit' || ev.kind === 'accel') {
+                        tempoMarks.push({ tick: measureStart + ev.rel, kind: ev.kind, amount: ev.amount });
+                    } else if (ev.kind === 'step') {
+                        tempoMarks.push({
+                            tick: measureStart + ev.rel,
+                            kind: 'step',
+                            amount: ev.amount,
+                            becomesSteady: ev.becomesSteady,
+                        });
+                    } else {
+                        tempoMarks.push({ tick: measureStart + ev.rel, kind: 'atempo' });
+                    }
                     break;
                 }
                 case 'pedal': {
@@ -2042,9 +2171,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     // LARGER boost, never the sum — stacking them overshoots.
                     const boost = Math.max(accents.has(`${ev.staff}:${start}`) ? 0.2 : 0, ev.arts.boost);
                     const velocity =
-                        boost > 0
-                            ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + boost))
-                            : sustained;
+                        boost > 0 ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + boost)) : sustained;
                     const note: ScoreNote = {
                         t: start,
                         // Held notes are gated when their chain closes, not here.
@@ -2114,16 +2241,20 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
               (tick) => barTicksOf(sigAtTick(tick)),
               (tick) => Math.round((TICKS_PER_QUARTER * 4) / sigAtTick(tick).den),
               ctx.warnings,
+              ctx.seed,
           );
 
     // Nothing printed a number, nothing printed a word: the meter is the last
     // evidence there is. Deliberately NOT a tempos[] entry — deployed clients
     // validate that array against a closed `src` enum and would reject the whole
     // score over a new value, so a guess this weak travels as defaultBpm plus a
-    // warning, which every version of the client already tolerates.
+    // warning, which every version of the client already tolerates. Concatenated
+    // movements re-emit it as a src-less tempos[] point in parseMxlFiles, so a
+    // later movement does not inherit the previous one's ritardando floor.
+    const meterDefault = meterDefaultBpm(timeSignatures[0] ?? sigs[0] ?? { num: 4, den: 4 });
     let defaultBpm = tempos[0]?.bpm ?? null;
     if (defaultBpm === null && !ctx.timeline) {
-        defaultBpm = meterDefaultBpm(timeSignatures[0] ?? sigs[0] ?? { num: 4, den: 4 });
+        defaultBpm = meterDefault;
         ctx.warnings.add('tempo_defaulted');
     }
 
@@ -2150,10 +2281,40 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         repeats: raws.map((raw) => raw.repeat),
         defaultBpm,
         openTiesAtEnd: openTies.size,
+        tempoMarks: ctx.timeline ? [] : tempoMarks,
+        dynamicCurves: [...curves.entries()].map(([staff, curve]) => ({ staff, ...curve })),
+        meterDefaultBpm: meterDefault,
     };
 };
 
 const parsePart = (part: Elem, ctx: PartContext): PartResult => placeAndEmit(scanPart(part), ctx);
+
+/**
+ * Expression in force at `tick`: last resolved tempo, last non-ramp (steady)
+ * tempo, and each staff's curve value. Used to seed the second shard of a
+ * split score so rit./a tempo/dynamics survive the page cut.
+ */
+export const expressionSeedAt = (musical: MusicalScore, tick: number): ParseSeed => {
+    let tempoBpm: number | null = null;
+    let steadyBpm: number | null = null;
+    for (const entry of musical.tempos) {
+        if (entry.tick > tick) {
+            continue;
+        }
+        tempoBpm = entry.bpm;
+        if (entry.src !== 'ramp') {
+            steadyBpm = entry.bpm;
+        }
+    }
+    const velocityByStaff: Record<number, number> = {};
+    for (const curve of musical.dynamicCurves ?? []) {
+        const v = velocityAt(curve, tick);
+        if (v !== undefined) {
+            velocityByStaff[curve.staff] = v;
+        }
+    }
+    return { tempoBpm, steadyBpm, velocityByStaff };
+};
 
 const ticksOf = (duration: number, divisions: number): number =>
     Math.max(0, Math.round((duration * TICKS_PER_QUARTER) / Math.max(1, divisions)));
@@ -2188,7 +2349,7 @@ const beatUnitToQuarters = (metronome: Elem | null): number => {
  * Parse one or more exported .mxl files (Audiveris writes one per detected
  * movement) into a single tick-continuous MusicalScore.
  */
-export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
+export const parseMxlFiles = (files: Buffer[], seed: ParseSeed = EMPTY_SEED): MusicalScore => {
     if (files.length === 0) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No MusicXML produced');
     }
@@ -2206,6 +2367,8 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
         totalTicks: 0,
         warnings: [],
         openTiesAtEnd: 0,
+        tempoMarks: [],
+        dynamicCurves: [],
     };
     const warnings = new Set<string>();
     // Whether the movement whose `defaultBpm` survives is the one that guessed
@@ -2214,22 +2377,37 @@ export const parseMxlFiles = (files: Buffer[]): MusicalScore => {
     // thrown away below, so its disclosure would only contradict the first
     // movement's printed tempo.
     let defaultedAtOpening = false;
-    for (const file of files) {
-        const parsed = parseMusicXmlString(extractMxl(file), combined.totalTicks);
+    for (const [index, file] of files.entries()) {
+        const tickOffset = combined.totalTicks;
+        // A later movement is a new piece — never resume the previous movement's
+        // ritardando floor. Only the first file of a shard carries the seed.
+        const parsed = parseMusicXmlString(extractMxl(file), tickOffset, index === 0 ? seed : EMPTY_SEED);
         combined.notes.push(...parsed.notes);
         combined.measures.push(...parsed.measures);
         combined.timeSignatures.push(...parsed.timeSignatures);
         combined.keySignatures.push(...parsed.keySignatures);
         combined.clefs.push(...parsed.clefs);
-        // Each movement carries its own tempo: this is what stops an Allegro
-        // vivace and an Andantino playing at identical speeds.
+        // A heading-less movement has no tempos[] entry at its first tick, so
+        // without a point here it would inherit the previous movement's last
+        // pulse — including a ritardando floor. Re-emit the meter default the
+        // parser already computed, with no `src` (the client enum is closed).
+        const startTick = parsed.measures[0]?.tick ?? tickOffset;
+        const hasOpeningTempo = parsed.tempos.some((t) => t.tick <= startTick);
+        // The opening of the whole score still travels as defaultBpm: a src-less
+        // point at tick 0 would look printed to the client and hide the guess.
+        if (!hasOpeningTempo && parsed.meterDefaultBpm !== undefined && tickOffset > 0) {
+            combined.tempos.push({ tick: startTick, bpm: parsed.meterDefaultBpm });
+        }
         combined.tempos.push(...parsed.tempos);
         combined.holds.push(...parsed.holds);
         combined.pedals = [...(combined.pedals ?? []), ...(parsed.pedals ?? [])];
         combined.repeats.push(...parsed.repeats);
+        combined.tempoMarks = [...(combined.tempoMarks ?? []), ...(parsed.tempoMarks ?? [])];
+        combined.dynamicCurves = [...(combined.dynamicCurves ?? []), ...(parsed.dynamicCurves ?? [])];
         if (combined.defaultBpm === null && parsed.defaultBpm !== null) {
             combined.defaultBpm = parsed.defaultBpm;
             defaultedAtOpening = parsed.warnings.includes('tempo_defaulted');
+            combined.meterDefaultBpm = parsed.meterDefaultBpm;
         }
         combined.totalTicks = parsed.totalTicks;
         combined.openTiesAtEnd = parsed.openTiesAtEnd;
