@@ -24,12 +24,18 @@ export interface FacetCategorySource {
     category?: string;
 }
 
-/** Every taxonomy category plus instrument "(arr)" variants, each its own row. */
+/**
+ * Every taxonomy category plus instrument "(arr)" variants, each its own row,
+ * in build priority order: the default instrument first (every chip browse
+ * intersects with it), then eras and forms (the second chip), then the other
+ * instruments and finally composers. pickNextCategory breaks ties by this order.
+ */
 export const categoriesToSync = (
     composers: FacetCategorySource[],
     instruments: FacetCategorySource[],
     forms: FacetCategorySource[],
     eras: FacetCategorySource[],
+    defaultInstrumentCategory?: string,
 ): string[] => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -41,19 +47,26 @@ export const categoriesToSync = (
         seen.add(name);
         out.push(name);
     };
-    for (const facet of composers) {
-        add(facet.category);
-    }
-    for (const facet of instruments) {
-        add(facet.category);
-        if (facet.category) {
-            add(`${facet.category} (arr)`);
+    const addInstrument = (category: string | undefined) => {
+        add(category);
+        if (category) {
+            add(`${category} (arr)`);
         }
+    };
+    const defaultInstrument = instruments.find((i) => i.category === defaultInstrumentCategory);
+    if (defaultInstrument) {
+        addInstrument(defaultInstrument.category);
+    }
+    for (const facet of eras) {
+        add(facet.category);
     }
     for (const facet of forms) {
         add(facet.category);
     }
-    for (const facet of eras) {
+    for (const facet of instruments) {
+        addInstrument(facet.category);
+    }
+    for (const facet of composers) {
         add(facet.category);
     }
     return out;
@@ -69,7 +82,9 @@ const completedMs = (row: CategorySyncRow | undefined): number => {
 
 /**
  * Next category to page: never/building first (oldest completed_at, missing
- * treated as epoch), then failed, then the oldest ok snapshot.
+ * treated as epoch), then failed, then the oldest ok snapshot. Ties keep the
+ * order of `categories`, so a cold index builds the default-instrument
+ * intersections before the long composer tail.
  */
 export const pickNextCategory = (categories: string[], rows: CategorySyncRow[]): string | null => {
     if (categories.length === 0) {
@@ -80,27 +95,22 @@ export const pickNextCategory = (categories: string[], rows: CategorySyncRow[]):
         byCategory.set(row.category, row);
     }
 
-    const rank = (category: string): [number, number, string] => {
+    const rank = (category: string): [number, number] => {
         const row = byCategory.get(category);
         if (!row || row.state === 'never' || row.state === 'building') {
-            return [0, completedMs(row), category];
+            return [0, completedMs(row)];
         }
         if (row.state === 'failed') {
-            return [1, completedMs(row), category];
+            return [1, completedMs(row)];
         }
-        return [2, completedMs(row), category];
+        return [2, completedMs(row)];
     };
 
     let best: string | null = null;
-    let bestKey: [number, number, string] | null = null;
+    let bestKey: [number, number] | null = null;
     for (const category of categories) {
         const key = rank(category);
-        if (
-            !bestKey ||
-            key[0] < bestKey[0] ||
-            (key[0] === bestKey[0] && key[1] < bestKey[1]) ||
-            (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] < bestKey[2])
-        ) {
+        if (!bestKey || key[0] < bestKey[0] || (key[0] === bestKey[0] && key[1] < bestKey[1])) {
             best = category;
             bestKey = key;
         }

@@ -9,7 +9,13 @@ import {
     type MemberPageResult,
 } from '../_shared/categorySync.ts';
 import { mwFetch, serviceClient } from '../_shared/imslp.ts';
-import { COMPOSER_FACETS, ERA_FACETS, FORM_FACETS, INSTRUMENT_FACETS } from '../_shared/searchFacetData.ts';
+import {
+    COMPOSER_FACETS,
+    ERA_FACETS,
+    FORM_FACETS,
+    INSTRUMENT_BY_ID,
+    INSTRUMENT_FACETS,
+} from '../_shared/searchFacetData.ts';
 
 /**
  * Hosted IMSLP category-index refresh. Deployed with verify_jwt = false
@@ -27,7 +33,14 @@ const PAGE_DELAY_MS = 1000;
 // to walk the taxonomy on the 2-minute cron.
 const CM_LIMIT = 500;
 
-const SYNC_CATEGORIES = categoriesToSync(COMPOSER_FACETS, INSTRUMENT_FACETS, FORM_FACETS, ERA_FACETS);
+// The search panel opens piano-scoped, so For piano gates every chip browse.
+const SYNC_CATEGORIES = categoriesToSync(
+    COMPOSER_FACETS,
+    INSTRUMENT_FACETS,
+    FORM_FACETS,
+    ERA_FACETS,
+    INSTRUMENT_BY_ID['piano']?.category,
+);
 
 const authorized = (req: Request): boolean => {
     const syncSecret = Deno.env.get('IMSLP_SYNC_SECRET');

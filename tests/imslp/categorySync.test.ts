@@ -104,11 +104,30 @@ describe('categoriesToSync', () => {
         expect(cats).toContain('Beethoven, Ludwig van');
         expect(cats).toContain('Fugues');
         expect(cats.filter((c) => c.endsWith('(arr)')).length).toBe(INSTRUMENT_FACETS.length);
+        expect(new Set(cats).size).toBe(cats.length);
+    });
+
+    it('builds the default instrument, then eras and forms, before the composer tail', () => {
+        const cats = categoriesToSync(COMPOSER_FACETS, INSTRUMENT_FACETS, FORM_FACETS, ERA_FACETS, 'For piano');
+        expect(cats.slice(0, 2)).toEqual(['For piano', 'For piano (arr)']);
+        const idx = (c: string) => cats.indexOf(c);
+        expect(idx('Baroque')).toBeLessThan(idx('Sonatas'));
+        expect(idx('Sonatas')).toBeLessThan(idx('For violin'));
+        expect(idx('For violin')).toBeLessThan(idx('Bach, Johann Sebastian'));
+        expect(idx('Beethoven, Ludwig van')).toBeGreaterThan(idx('Modern'));
     });
 });
 
 describe('pickNextCategory / planTick', () => {
     const wanted = ['Baroque', 'For piano', 'For piano (arr)'];
+
+    it('breaks ties in list order, not alphabetically, so For piano beats Bach on a cold index', () => {
+        const ordered = ['For piano', 'For piano (arr)', 'Baroque', 'Bach, Johann Sebastian'];
+        expect(pickNextCategory(ordered, [])).toBe('For piano');
+        expect(pickNextCategory(ordered, [row({ category: 'For piano', state: 'ok', active_generation: 1 })])).toBe(
+            'For piano (arr)',
+        );
+    });
 
     it('prefers never/building over a completed snapshot', () => {
         const next = pickNextCategory(wanted, [
