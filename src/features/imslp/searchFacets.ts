@@ -24,6 +24,7 @@ export {
     FORM_FACETS,
     INSTRUMENT_FACETS,
     KEY_FACETS,
+    MAX_FILTERS_PER_DIMENSION,
     hasActiveFilters,
 } from '../../../supabase/functions/_shared/searchFacetData';
 export type {
@@ -85,6 +86,36 @@ export const filtersToStatusParts = (filters: SearchFilters): string[] => {
         parts.push(ERA_FACETS.find((e) => e.id === id)?.label ?? id);
     }
     return parts;
+};
+
+/**
+ * Chip labels for IMSLP category titles the server reports (e.g. notReady),
+ * so copy says "Piano and Nocturne" rather than "For piano (arr)". Unknown
+ * categories fall back to their own title; duplicates collapse.
+ */
+export const labelsForCategories = (categories: string[]): string[] => {
+    const labels: string[] = [];
+    const push = (label: string) => {
+        if (!labels.includes(label)) {
+            labels.push(label);
+        }
+    };
+    for (const raw of categories) {
+        const category = raw.replace(/\s*\(arr\)$/i, '');
+        const facet = [...INSTRUMENT_FACETS, ...FORM_FACETS, ...ERA_FACETS, ...COMPOSER_FACETS].find(
+            (f) => f.category === category,
+        );
+        push(facet?.label ?? raw);
+    }
+    return labels;
+};
+
+/** "Piano", "Piano and Baroque", "Piano, Baroque and Nocturne". */
+export const joinLabels = (labels: string[]): string => {
+    if (labels.length <= 1) {
+        return labels[0] ?? '';
+    }
+    return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
 };
 
 /** Build API filters object from selected facet value ids (multi-select). */

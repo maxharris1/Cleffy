@@ -519,6 +519,57 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('No matches')).not.toBeInTheDocument();
     });
 
+    it('names every chip whose category is missing, as chips — not raw IMSLP titles', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [],
+                mode: 'browse',
+                total: 0,
+                indexReady: false,
+                notReady: ['For piano', 'For piano (arr)', 'Nocturnes'],
+            }),
+        );
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Form' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Nocturne' }));
+
+        expect(await screen.findByText('Index still building')).toBeInTheDocument();
+        expect(
+            screen.getByText('IMSLP index is still being built for Piano and Nocturne. Try typing a title.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/for For piano/)).not.toBeInTheDocument();
+    });
+
+    it('stops offering a seventh chip in a dimension and says why', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi
+            .spyOn(api, 'searchImslp')
+            .mockResolvedValue(searchOk({ results: [], mode: 'browse', total: 0, indexReady: false, notReady: [] }));
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Composer' }));
+        for (const name of ['Bach', 'Beethoven', 'Mozart', 'Chopin', 'Schubert', 'Brahms']) {
+            await userEvent.click(await screen.findByRole('button', { name }));
+        }
+
+        expect(screen.getByRole('button', { name: 'Liszt' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Chopin' })).toBeEnabled();
+        expect(screen.getByText(/Up to 6 per group/)).toBeInTheDocument();
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalled();
+        });
+        const sent = searchSpy.mock.calls.at(-1)?.[1]?.filters?.composerCategories ?? [];
+        expect(sent).toHaveLength(6);
+    });
+
     it('issues a second request with offset when Show more is clicked', async () => {
         const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
@@ -576,5 +627,7 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Era' }));
         expect(await screen.findByRole('button', { name: 'Romantic' })).toHaveAttribute('aria-pressed', 'true');
         expect(screen.getByRole('button', { name: 'Early 20th century' })).toBeInTheDocument();
+        // The status line names the era in force, matching the pressed chip.
+        expect(screen.getByText('Piano · Romantic · 1 result')).toBeInTheDocument();
     });
 });

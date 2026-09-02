@@ -12,6 +12,9 @@ import {
     filtersToStatusParts,
     hasActiveFilters,
     INSTRUMENT_FACETS,
+    joinLabels,
+    labelsForCategories,
+    MAX_FILTERS_PER_DIMENSION,
     type FacetDimension,
     type RelaxedConstraint,
     type SearchSort,
@@ -277,8 +280,18 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     );
     const curatedGroups = useMemo(() => groupPopularByComposer(curatedWorks), [curatedWorks]);
 
+    const inferredEraIds =
+        period?.source === 'query' && !ignoreQueryPeriod ? new Set(period.eraIds) : new Set<string>();
+
     const facetPrefix = (() => {
         const facetParts = filtersToStatusParts(filters);
+        // An era read from the query is in force too — say so next to its pressed chip.
+        for (const id of inferredEraIds) {
+            const label = ERA_FACETS.find((e) => e.id === id)?.label;
+            if (label && !facetParts.includes(label)) {
+                facetParts.push(label);
+            }
+        }
         return facetParts.length > 0 ? `${facetParts.join(' · ')} · ` : '';
     })();
 
@@ -318,9 +331,6 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         });
         return `Showing close matches — the ${names.join(' and ')} filter${relaxed.length === 1 ? '' : 's'} matched too few scores.`;
     })();
-
-    const inferredEraIds =
-        period?.source === 'query' && !ignoreQueryPeriod ? new Set(period.eraIds) : new Set<string>();
 
     const toggleValue = (id: string) => {
         switch (dimension) {
@@ -428,7 +438,9 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
     const valueFacets = dimension === 'era' ? ERA_FACETS : facetValuesFor(dimension);
     const emptyParts = filtersToStatusParts(filters);
-    const indexLabel = notReady[0] ?? emptyParts.find((p) => ERA_FACETS.some((e) => e.label === p)) ?? 'this category';
+    // Name every chip whose category has no snapshot yet, not the first raw title.
+    const indexLabel = joinLabels(labelsForCategories(notReady)) || 'these filters';
+    const dimensionFull = selectedForDimension.size >= MAX_FILTERS_PER_DIMENSION;
 
     return (
         <div className="mt-4">
@@ -493,12 +505,19 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                         aria-pressed={isChipPressed(value.id)}
                         className={chipClassName(isChipPressed(value.id))}
                         onClick={() => toggleValue(value.id)}
-                        disabled={disabled}
+                        // The server keeps at most six per dimension; do not offer a seventh
+                        // that would be dropped silently.
+                        disabled={disabled || (dimensionFull && !isChipPressed(value.id))}
                     >
                         {value.label}
                     </button>
                 ))}
             </div>
+            {dimensionFull ? (
+                <p className="mt-1.5 text-xs text-stone-500">
+                    Up to {MAX_FILTERS_PER_DIMENSION} per group — unselect one to choose another.
+                </p>
+            ) : null}
 
             {showResults && (q.length >= 2 || categoryBackedFilters(filters)) ? (
                 <div role="group" aria-label="Sort results" className={`${CHIP_ROW_CLASS} mt-1.5`}>

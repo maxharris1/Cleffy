@@ -124,7 +124,8 @@ export const KEY_BY_ID: Record<string, FacetValueData> = byId(KEY_FACETS);
 export const ERA_BY_ID: Record<string, FacetValueData> = byId(ERA_FACETS);
 export const ERA_IDS: ReadonlySet<string> = new Set(ERA_FACETS.map((e) => e.id));
 
-const MAX_FILTERS_PER_DIMENSION = 6;
+/** Server cap per dimension; the UI stops offering more chips at this count. */
+export const MAX_FILTERS_PER_DIMENSION = 6;
 
 const fold = (s: string): string => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 
