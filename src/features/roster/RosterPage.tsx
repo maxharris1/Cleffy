@@ -130,6 +130,16 @@ const noRosterOnThisPlan = (tier: EffectiveTier): LimitReachedError =>
  * seat back rather than claims one. Hiding those rows would leave live student
  * sign-ins with no control left anywhere that could turn them off.
  */
+const countsOf = (grouped: Map<string, RosterAssignment[]>): Array<[string, number]> =>
+    [...grouped.entries()].map(([id, rows]) => [id, rows.length]);
+
+/** Best-effort snapshot for the next mount's instant paint; a refused write costs nothing. */
+const persistRoster = (userId: string, students: ManagedStudentRow[], assignmentCounts: Array<[string, number]>) => {
+    void getDb()
+        .rosterCache.put({ userId, students, assignmentCounts, cachedAt: new Date().toISOString() })
+        .catch(() => undefined);
+};
+
 export const RosterPage = () => {
     const { userId, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
@@ -161,7 +171,9 @@ export const RosterPage = () => {
         let mounted = true;
         void (async () => {
             // Names first — assignment counts fill in with the network response.
-            const cached = await getDb().rosterCache.get(userId).catch(() => undefined);
+            const cached = await getDb()
+                .rosterCache.get(userId)
+                .catch(() => undefined);
             if (mounted && cached && cached.students.length > 0) {
                 setStudents(cached.students);
                 setCachedCounts(new Map(cached.assignmentCounts));
@@ -184,17 +196,7 @@ export const RosterPage = () => {
                     setCachedCounts(null);
                 }
                 setLoadError(null);
-                const assignmentCounts: Array<[string, number]> = grouped
-                    ? [...grouped.entries()].map(([id, rows]) => [id, rows.length])
-                    : (cached?.assignmentCounts ?? []);
-                void getDb()
-                    .rosterCache.put({
-                        userId,
-                        students: roster,
-                        assignmentCounts,
-                        cachedAt: new Date().toISOString(),
-                    })
-                    .catch(() => undefined);
+                persistRoster(userId, roster, grouped ? countsOf(grouped) : (cached?.assignmentCounts ?? []));
             } catch (err) {
                 if (mounted) {
                     setStudents((prev) => prev ?? []);
@@ -208,11 +210,25 @@ export const RosterPage = () => {
         };
     }, [userId]);
 
-    const reloadRoster = async () => setStudents(await listRoster());
+    /**
+     * Every roster mutation re-reads the server and rewrites the snapshot the
+     * mount effect paints from. Without the rewrite a remount would show the
+     * pre-action roster — an archived student active, a removed one back —
+     * until the network corrected it.
+     */
+    const currentCounts = (): Array<[string, number]> =>
+        assignmentsStatus === 'ready' ? countsOf(assignments) : [...(cachedCounts ?? new Map()).entries()];
+    const reloadRoster = async () => {
+        const roster = await listRoster();
+        setStudents(roster);
+        persistRoster(userId, roster, currentCounts());
+    };
     const reloadAssignments = async () => {
-        setAssignments(await listAssignmentsForStudents());
+        const grouped = await listAssignmentsForStudents();
+        setAssignments(grouped);
         setAssignmentsStatus('ready');
         setCachedCounts(null);
+        persistRoster(userId, students ?? [], countsOf(grouped));
     };
 
     /**

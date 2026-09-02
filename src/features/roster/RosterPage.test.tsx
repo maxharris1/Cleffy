@@ -371,6 +371,37 @@ describe('RosterPage', () => {
         }
     });
 
+    it('rewrites the roster snapshot after an action so a remount does not resurrect the old roster', async () => {
+        const user = userEvent.setup();
+        const active = student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' });
+        const archived = { ...active, archived_at: '2026-08-30T00:00:00Z' };
+        listRoster.mockResolvedValueOnce([active]).mockResolvedValueOnce([archived]);
+        listAssignmentsForStudents.mockResolvedValue(
+            new Map([['s1-user', [rosterAssignment('doc-1', 'Prelude and Fugue', 's1-user')]]]),
+        );
+        archiveStudent.mockResolvedValue(undefined);
+        try {
+            renderRoster();
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            await waitFor(async () => {
+                const row = await getDb().rosterCache.get('teacher-1');
+                expect(row?.students[0]?.archived_at).toBeNull();
+            });
+
+            await pickRowAction(user, 'Archive…');
+            await user.click(screen.getByRole('button', { name: 'Archive' }));
+
+            await waitFor(async () => {
+                const row = await getDb().rosterCache.get('teacher-1');
+                expect(row?.students[0]?.archived_at).toBe('2026-08-30T00:00:00Z');
+                // The counts ride along; the snapshot is not blanked by the rewrite.
+                expect(row?.assignmentCounts).toEqual([['s1-user', 1]]);
+            });
+        } finally {
+            await getDb().rosterCache.clear();
+        }
+    });
+
     it('answers a refused Restore with one notice, not a second copy of the one already up', async () => {
         // METRIC_COPY.students interpolates neither the limit nor the tier, so the
         // 402 renders the same sentence the standing notice already shows. Two of
