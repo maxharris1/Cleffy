@@ -105,6 +105,9 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const abortRef = useRef<AbortController | null>(null);
     const [searchTick, setSearchTick] = useState(0);
     const immediateRef = useRef(false);
+    /** Show-more params staged by the click for the tick effect to consume. */
+    const moreRef = useRef<{ limit: number; offset: number } | null>(null);
+    const [moreTick, setMoreTick] = useState(0);
 
     const filters = useMemo(
         () =>
@@ -230,8 +233,14 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     }, [q, filters, sort, isLiveQuery, searchTick]);
 
     useEffect(() => {
-        setIgnoreQueryPeriod(false);
-    }, [q]);
+        const params = moreRef.current;
+        if (!params) {
+            // Re-fires on q/filters/sort are consumed clicks — nothing staged.
+            return;
+        }
+        moreRef.current = null;
+        void runSearch(q, filters, sort, { ...params, append: true });
+    }, [moreTick, q, filters, sort]);
 
     useEffect(
         () => () => {
@@ -380,17 +389,16 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     };
 
     const showMore = () => {
+        // runSearch is an Effect Event, callable only from effects — the click
+        // stages its params and bumps the tick for the effect below to consume.
         if (searchMode === 'browse') {
-            void runSearch(q, filters, sort, {
-                limit: DEFAULT_SEARCH_LIMIT,
-                offset: results?.length ?? 0,
-                append: true,
-            });
-            return;
+            moreRef.current = { limit: DEFAULT_SEARCH_LIMIT, offset: results?.length ?? 0 };
+        } else {
+            const nextLimit = typedLimit >= 200 ? 300 : 200;
+            setTypedLimit(nextLimit);
+            moreRef.current = { limit: nextLimit, offset: 0 };
         }
-        const nextLimit = typedLimit >= 200 ? 300 : 200;
-        setTypedLimit(nextLimit);
-        void runSearch(q, filters, sort, { limit: nextLimit, offset: 0, append: true });
+        setMoreTick((t) => t + 1);
     };
 
     const renderHit = (hit: ImslpSearchHit) => {
@@ -440,7 +448,11 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                         id={searchId}
                         type="search"
                         value={query}
-                        onChange={(e) => setQuery(e.target.value)}
+                        onChange={(e) => {
+                            setQuery(e.target.value);
+                            // An edited query voids the "ignore its period" choice.
+                            setIgnoreQueryPeriod(false);
+                        }}
                         placeholder="Beethoven moonlight, bolero, Chopin nocturne…"
                         className={fieldClassName('sm')}
                         autoComplete="off"

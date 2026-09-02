@@ -22,7 +22,6 @@ import {
     correctTokens,
     extractPeriod,
     foldAccents,
-    isWorkTitle,
     mergeAndRank,
     tokenizeQuery,
     type PeriodEraId,
