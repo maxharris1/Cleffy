@@ -52,7 +52,7 @@ const cacheBootstrap = async (userId: string, boot: LibraryBootstrap): Promise<v
     const now = new Date().toISOString();
     await Promise.all([
         getDb().entitlements.put({ userId, entitlements: boot.entitlements, cachedAt: now }),
-        writeCachedLibraryList(userId, boot),
+        writeCachedLibraryList(userId, boot, boot.fetchedAtEpoch),
     ]);
 };
 
@@ -69,38 +69,66 @@ export interface LibraryListSnapshot {
  * Persist the list the page is showing. Called after a mutation's server write
  * resolved: the commit edge cleared the snapshot (it may be wrong for a page
  * that is not mounted), and this puts back the one page that knows the truth.
- * IndexedDB runs same-store transactions in creation order, so a put issued
- * after the clear cannot be swept by it.
+ *
+ * `incomingEpoch` is libraryMutationEpoch() at the caller's decision to write
+ * (dispatch-time for bootstrap, commit-time for persist/prepend). The put
+ * runs in an explicit readwrite transaction: it refuses if the epoch has
+ * moved since then, or if a newer generation is already stored — so a
+ * detached bootstrap cannot clobber a post-edit snapshot, and a stale
+ * persist cannot wipe a prepend.
  */
-export const writeCachedLibraryList = async (userId: string, snapshot: LibraryListSnapshot): Promise<void> => {
-    await getDb().libraryList.put({
-        userId,
-        documents: snapshot.documents,
-        hasMore: snapshot.hasMore,
-        favoriteIds: [...snapshot.favoriteIds],
-        tags: snapshot.tags,
-        documentTags: [...snapshot.documentTags.entries()],
-        cachedAt: new Date().toISOString(),
+export const writeCachedLibraryList = async (
+    userId: string,
+    snapshot: LibraryListSnapshot,
+    incomingEpoch: number = libraryMutationEpoch(),
+): Promise<void> => {
+    const db = getDb();
+    await db.transaction('rw', db.libraryList, async () => {
+        if (libraryMutationEpoch() !== incomingEpoch) {
+            return;
+        }
+        const existing = await db.libraryList.get(userId);
+        if ((existing?.writtenAtEpoch ?? 0) > incomingEpoch) {
+            return;
+        }
+        // Re-check immediately before put: a mutation can land after the
+        // get() yield, and a stale bootstrap must not persist over it.
+        if (libraryMutationEpoch() !== incomingEpoch) {
+            return;
+        }
+        await db.libraryList.put({
+            userId,
+            documents: snapshot.documents,
+            hasMore: snapshot.hasMore,
+            favoriteIds: [...snapshot.favoriteIds],
+            tags: snapshot.tags,
+            documentTags: [...snapshot.documentTags.entries()],
+            cachedAt: new Date().toISOString(),
+            writtenAtEpoch: incomingEpoch,
+        });
     });
 };
 
 /**
- * Put a just-created score at the top of a snapshot read BEFORE the upload
- * began — by the time the upload resolves, its commit edge has cleared the
- * row, so there is nothing left to read. No snapshot, no write: a one-score
- * library painted over a library of fifty would be a worse lie than a spinner.
+ * Put a just-created score at the top of the snapshot. Re-reads at write
+ * time so a persist that landed during the upload (favorite, rename) is
+ * kept; falls back to the list captured before the upload began. No
+ * snapshot at all means no write: a one-score library painted over a
+ * library of fifty would be a worse lie than a spinner.
  */
 export const prependCachedLibraryDocument = async (
     userId: string,
     before: LibraryListSnapshot | null,
     doc: DocumentRow,
 ): Promise<void> => {
-    if (!before) {
+    const current = await readCachedLibraryList(userId).catch(() => null);
+    const base = current ?? before;
+    if (!base) {
         return;
     }
     await writeCachedLibraryList(userId, {
-        ...before,
-        documents: [doc, ...before.documents.filter((d) => d.id !== doc.id)],
+        ...base,
+        documents: [doc, ...base.documents.filter((d) => d.id !== doc.id)],
     });
 };
 

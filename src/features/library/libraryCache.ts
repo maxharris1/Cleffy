@@ -38,9 +38,10 @@ export const noteLibraryMutation = (): void => {
 export const noteLibraryMutationCommitted = (): void => {
     epoch += 1;
     try {
-        void getDb()
-            .libraryList.clear()
-            .catch(() => undefined);
+        const db = getDb();
+        // Explicit transaction so this clear and a later writeCachedLibraryList
+        // put are ordered by transaction creation, not by Dexie's lazy open.
+        void db.transaction('rw', db.libraryList, () => db.libraryList.clear()).catch(() => undefined);
     } catch {
         // No IndexedDB (private mode) means no snapshot to drop.
     }

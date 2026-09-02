@@ -130,6 +130,12 @@ export interface CachedLibraryList {
     /** document_id → tag ids */
     documentTags: Array<[string, string[]]>;
     cachedAt: string;
+    /**
+     * libraryMutationEpoch() at put time. A later write with a smaller value
+     * is dropped so a detached bootstrap or a stale persist cannot clobber
+     * a newer snapshot. Rows written before this field existed read as 0.
+     */
+    writtenAtEpoch?: number;
 }
 
 /** Last roster snapshot for Library ↔ Students navigations. */

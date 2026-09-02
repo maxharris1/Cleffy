@@ -118,6 +118,10 @@ export const LibraryPage = () => {
     const snapshotUnsafe = useRef(false);
 
     useEffect(() => {
+        snapshotUnsafe.current = false;
+    }, [userId]);
+
+    useEffect(() => {
         if (persistTick === 0 || documents === null || snapshotUnsafe.current) {
             return;
         }
@@ -128,9 +132,9 @@ export const LibraryPage = () => {
             tags,
             documentTags: assignments,
         }).catch(() => undefined);
-        // Only the tick: the other values are read at persist time, not watched.
+        // Tick + user: the list values are read at persist time, not watched.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [persistTick]);
+    }, [persistTick, userId]);
 
     useEffect(() => {
         let cancelled = false;
@@ -155,6 +159,10 @@ export const LibraryPage = () => {
             // and appears only under the labelled offline fallback below. A
             // network answer that beat the snapshot read makes the paint moot.
             const cachedList = await readCachedLibraryList(userId).catch(() => null);
+            // A bootstrap that already settled must run its then before we
+            // decide whether the snapshot is moot — otherwise a fresh answer
+            // that beat the Dexie read still paints one frame of stale titles.
+            await Promise.resolve();
             let painted = false;
             if (!cancelled && !firstResolved && cachedList && cachedList.documents.length > 0) {
                 setDocuments(cachedList.documents);
@@ -191,6 +199,7 @@ export const LibraryPage = () => {
                             return;
                         }
                     }
+                    snapshotUnsafe.current = false;
                     setDocuments(boot.documents);
                     setHasMore(boot.hasMore);
                     setFavorites(boot.favoriteIds);
@@ -221,6 +230,7 @@ export const LibraryPage = () => {
                                 return;
                             }
                         }
+                        snapshotUnsafe.current = false;
                         setDocuments(docs);
                         setHasMore(more);
                         setFavorites(ids);
