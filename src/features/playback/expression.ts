@@ -29,6 +29,23 @@ export const REVERB_PREDELAY_MS = 15;
 export const REVERB_SEED = 0x52455642;
 
 /**
+ * Sympathetic string bloom while the dampers are up. A real piano does not
+ * only lengthen notes under the pedal — the undamped strings speak with
+ * whatever was just struck, a short bright halo rather than another room.
+ */
+export const RESONANCE_WET = 0.16;
+/** T60 of the bloom — strings, not a hall. */
+export const RESONANCE_SECONDS = 0.6;
+/** Almost no predelay: the undamped strings speak with the hammer, not after it. */
+export const RESONANCE_PREDELAY_MS = 4;
+/** Fixed seed so every engine instance blooms the same. */
+export const RESONANCE_SEED = 0x52534e43;
+/** Time constant for the send to open and close — a foot, not a switch. */
+export const RESONANCE_RAMP_S = 0.03;
+/** How far the bloom's one-pole floor is raised toward remaining open. */
+const RESONANCE_BRIGHTNESS = 0.55;
+
+/**
  * Humanization amounts. The timing figure is deliberately far below the 25 ms
  * attack-lag ceiling the sampler corrects for: this is a practice app, and a
  * player following the metronome must never be able to hear the engine drift.
@@ -168,6 +185,13 @@ export interface ReverbOptions {
     predelayMs?: number;
     /** Injectable noise source; tests need a reproducible tail. */
     rng?: () => number;
+    /**
+     * 0..1. Raises the one-pole lowpass floor so the tail keeps more high end.
+     * 0 (default) eases the coefficient from 0.6 to 0.15 — the original room,
+     * byte-identical. 1 leaves it at 0.6, so the tail never darkens. Linear
+     * in between.
+     */
+    brightness?: number;
 }
 
 /**
@@ -184,11 +208,16 @@ export const buildReverbImpulse = (ctx: ImpulseFactory, options: ReverbOptions =
     const seconds = options.seconds ?? REVERB_SECONDS;
     const predelayMs = options.predelayMs ?? REVERB_PREDELAY_MS;
     const rng = options.rng ?? Math.random;
+    const brightness = options.brightness ?? 0;
     const rate = ctx.sampleRate;
     const length = Math.max(1, Math.round(seconds * rate));
     const predelay = Math.min(length, Math.max(0, Math.round((predelayMs / 1000) * rate)));
     const buffer = ctx.createBuffer(2, length, rate);
     const span = Math.max(1, length - predelay);
+    // One-pole coefficient eases from open (0.6) toward a floor that brightness
+    // raises: 0 keeps the original 0.15 close, 1 never closes at all.
+    const open = 0.6;
+    const closed = 0.15 + (0.6 - 0.15) * brightness;
 
     for (let channel = 0; channel < 2; channel++) {
         const data = buffer.getChannelData(channel);
@@ -197,12 +226,43 @@ export const buildReverbImpulse = (ctx: ImpulseFactory, options: ReverbOptions =
             const progress = (i - predelay) / span;
             const elapsed = (i - predelay) / rate;
             const white = rng() * 2 - 1;
-            // One-pole coefficient easing from open to nearly closed.
-            lowpassed += (0.6 + (0.15 - 0.6) * progress) * (white - lowpassed);
+            lowpassed += (open + (closed - open) * progress) * (white - lowpassed);
             data[i] = lowpassed * Math.pow(10, (-3 * elapsed) / seconds);
         }
     }
     return buffer;
+};
+
+/**
+ * The pedal's own impulse: the room IR with a shorter T60, a shorter predelay,
+ * and a brighter tail. Same factory so the two convolvers stay one shape of
+ * decaying noise, just tuned for strings rather than air.
+ */
+export const buildResonanceImpulse = (ctx: ImpulseFactory, options: Pick<ReverbOptions, 'rng'> = {}): AudioBuffer =>
+    buildReverbImpulse(ctx, {
+        seconds: RESONANCE_SECONDS,
+        predelayMs: RESONANCE_PREDELAY_MS,
+        rng: options.rng,
+        brightness: RESONANCE_BRIGHTNESS,
+    });
+
+/**
+ * Whether the sustain pedal is holding at `tick`. Edges at the tick count —
+ * a re-catch is an `up` then a `down` on one tick, in array order, so the
+ * later `down` wins and the state is down. No edges, or none yet, is up.
+ */
+export const pedalStateAt = (pedals: readonly ScorePedal[] | undefined, tick: number): boolean => {
+    if (!pedals || pedals.length === 0) {
+        return false;
+    }
+    let down = false;
+    for (const edge of pedals) {
+        if (edge.tick > tick) {
+            break;
+        }
+        down = edge.k === 'down';
+    }
+    return down;
 };
 
 /** Below this the soft clip is a straight wire; above it the knee bends. */

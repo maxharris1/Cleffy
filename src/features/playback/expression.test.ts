@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     buildNoteShapes,
     buildPedalEnds,
+    buildResonanceImpulse,
     buildReverbImpulse,
     buildSoftClipCurve,
     clampVelocity,
@@ -19,8 +20,11 @@ import {
     noteJitter,
     OFFBEAT_DIP,
     panForMidi,
+    pedalStateAt,
     PEDAL_RELEASE_TAU_S,
     releaseTauFor,
+    RESONANCE_SECONDS,
+    seededUnitRng,
     SOFTCLIP_CEILING,
     SOFTCLIP_KNEE,
     velocityToGain,
@@ -246,6 +250,83 @@ describe('buildReverbImpulse', () => {
             },
         });
         expect(calls).toBe(2 * (1000 - 10));
+    });
+
+    it('is byte-identical when brightness is omitted or zero', () => {
+        const implicit = buildReverbImpulse(impulseFactory(1000), { ...options, rng: seededUnitRng(0xabc) });
+        const explicit = buildReverbImpulse(impulseFactory(1000), {
+            ...options,
+            rng: seededUnitRng(0xabc),
+            brightness: 0,
+        });
+        expect(Array.from(implicit.getChannelData(0))).toEqual(Array.from(explicit.getChannelData(0)));
+        expect(Array.from(implicit.getChannelData(1))).toEqual(Array.from(explicit.getChannelData(1)));
+        // Pins against the constant-rng envelope the previous implementation used.
+        const constant = buildReverbImpulse(impulseFactory(1000), options);
+        const data = constant.getChannelData(0);
+        expect(data[110]).toBeCloseTo(Math.pow(10, -0.3), 3);
+        expect(data[510]).toBeCloseTo(Math.pow(10, -1.5), 3);
+    });
+});
+
+describe('buildResonanceImpulse', () => {
+    it('is stereo and exactly RESONANCE_SECONDS long', () => {
+        const ir = buildResonanceImpulse(impulseFactory(1000), { rng: () => 1 });
+        expect(ir.numberOfChannels).toBe(2);
+        expect(ir.length).toBe(Math.round(RESONANCE_SECONDS * 1000));
+    });
+
+    it('keeps more high end in the tail than the room IR', () => {
+        // Mean absolute first difference of the latter half, envelope-stripped:
+        // the bloom's raised lowpass floor must leave more ripple than the room.
+        const hfEnergy = (buffer: AudioBuffer, seconds: number, predelay: number): number => {
+            const data = buffer.getChannelData(0);
+            const rate = buffer.sampleRate;
+            let sum = 0;
+            let n = 0;
+            const start = Math.max(predelay + 1, Math.floor(data.length * 0.5));
+            for (let i = start; i < data.length; i++) {
+                const elapsed = (i - predelay) / rate;
+                const prevElapsed = (i - 1 - predelay) / rate;
+                const envelope = Math.pow(10, (-3 * elapsed) / seconds);
+                const prevEnvelope = Math.pow(10, (-3 * prevElapsed) / seconds);
+                if (envelope < 1e-6 || prevEnvelope < 1e-6) {
+                    continue;
+                }
+                const a = (data[i] ?? 0) / envelope;
+                const b = (data[i - 1] ?? 0) / prevEnvelope;
+                sum += Math.abs(a - b);
+                n += 1;
+            }
+            return n === 0 ? 0 : sum / n;
+        };
+        const resonance = buildResonanceImpulse(impulseFactory(2000), { rng: seededUnitRng(7) });
+        const reverb = buildReverbImpulse(impulseFactory(2000), { rng: seededUnitRng(7) });
+        expect(hfEnergy(resonance, RESONANCE_SECONDS, 8)).toBeGreaterThan(hfEnergy(reverb, 1.8, 30));
+    });
+});
+
+describe('pedalStateAt', () => {
+    const down = (tick: number): ScorePedal => ({ tick, k: 'down' });
+    const up = (tick: number): ScorePedal => ({ tick, k: 'up' });
+
+    it('is up before any edge, and when there are no edges', () => {
+        expect(pedalStateAt([{ tick: 480, k: 'down' }], 479)).toBe(false);
+        expect(pedalStateAt([], 0)).toBe(false);
+        expect(pedalStateAt(undefined, 0)).toBe(false);
+    });
+
+    it('is down after a down, and up after an up', () => {
+        const pedals = [down(0), up(960)];
+        expect(pedalStateAt(pedals, 0)).toBe(true);
+        expect(pedalStateAt(pedals, 480)).toBe(true);
+        expect(pedalStateAt(pedals, 960)).toBe(false);
+        expect(pedalStateAt(pedals, 1440)).toBe(false);
+    });
+
+    it('resolves a re-catch tick to down', () => {
+        expect(pedalStateAt([down(0), up(1920), down(1920)], 1920)).toBe(true);
+        expect(pedalStateAt([up(480), down(480)], 480)).toBe(true);
     });
 });
 
