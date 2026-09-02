@@ -209,14 +209,15 @@ export const uploadDocument = async (
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
-    noteLibraryMutationCommitted();
-
     try {
         await uploadPdfToStorage(storagePath, file, onProgress);
     } catch (err) {
         await supabase.from('documents').delete().eq('id', id);
+        // The row existed, then didn't: outrank any bootstrap that saw it.
+        noteLibraryMutationCommitted();
         throw err;
     }
+    noteLibraryMutationCommitted();
 
     const bytes = await file.arrayBuffer();
     const pageCount = await countPdfPages(bytes);
@@ -230,6 +231,7 @@ export const uploadDocument = async (
         bytes,
         title,
         cachedAt: new Date().toISOString(),
+        myRole: 'owner',
     });
 
     // Render the library thumbnail from the bytes we already hold. Detached on
@@ -269,14 +271,13 @@ export const importDocumentFromImslp = async (
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
-    noteLibraryMutationCommitted();
-
     const rollback = async () => {
         await supabase.storage
             .from('scores')
             .remove([storagePath])
             .catch(() => undefined);
         await supabase.from('documents').delete().eq('id', id);
+        noteLibraryMutationCommitted();
     };
 
     try {
@@ -285,6 +286,7 @@ export const importDocumentFromImslp = async (
             await rollback();
             return { ok: false, fallback: result };
         }
+        noteLibraryMutationCommitted();
 
         const bytes = await loadDocumentBytes({ ...document, page_count: null });
         const pageCount = await countPdfPages(bytes);
@@ -363,10 +365,13 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     }
     // Published covers live in their own bucket under the same folder. Best
     // effort: an orphaned 40 KB image must not stop the delete, and the row's
-    // cascade already makes it unreachable.
+    // cascade already makes it unreachable. list() can be refused — still
+    // remove the stamped revision, same as scores falling back to storage_path.
     try {
+        const knownCover = doc.thumb_rev != null ? [`${doc.id}/${doc.thumb_rev}.jpg`] : [];
         const { data: covers } = await supabase.storage.from('thumbnails').list(doc.id);
-        const coverPaths = (covers ?? []).map((o) => `${doc.id}/${o.name}`);
+        const listed = (covers ?? []).map((o) => `${doc.id}/${o.name}`);
+        const coverPaths = [...new Set([...knownCover, ...listed])];
         if (coverPaths.length > 0) {
             await supabase.storage.from('thumbnails').remove(coverPaths);
         }
@@ -459,7 +464,11 @@ export const loadDocumentBytes = async (
         }
         return readCachedPdfBytes(cached.bytes);
     }
-    const prefetched = prefetch && prefetch.path === doc.storage_path ? await prefetch.bytes : null;
+    // Prefetch left before the row was known. Honour it only for an
+    // unreplaced score (content_rev 0): a replace that raced the download
+    // would otherwise be cached under the new revision and never re-fetched.
+    const prefetched =
+        prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
     let bytes: ArrayBuffer;
     if (prefetched) {
         bytes = prefetched;
