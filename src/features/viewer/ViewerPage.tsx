@@ -28,6 +28,7 @@ import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
+import { perfMark } from '@/lib/perf';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
@@ -123,6 +124,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             const offline = await loadDocumentOffline(docId).catch(() => null);
             if (!cancelled && offline) {
                 setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes, provisional: true });
+                perfMark('viewer-cache-paint');
                 // A confirm request that stalls without failing (captive portal,
                 // half-open TCP) would otherwise hold the score read-only for as
                 // long as the tab lives. Past this window the open degrades to
@@ -195,6 +197,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     ? { ...prev, doc: { ...prev.doc, archived_at: confirmedDoc.archived_at }, role, provisional: false }
                     : prev,
             );
+            perfMark('viewer-confirmed');
             try {
                 const bytes = await loadDocumentBytes(confirmedDoc, {
                     // The warm paint's buffer, so a same-revision confirm is

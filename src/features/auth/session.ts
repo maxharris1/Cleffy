@@ -1,6 +1,7 @@
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
+import { perfMark } from '@/lib/perf';
 import { getSupabase } from '@/lib/supabase';
 
 export interface SessionState {
@@ -38,6 +39,9 @@ export const useSession = (): SessionState => {
         let mounted = true;
 
         void supabase.auth.getSession().then(({ data }) => {
+            if (knownSession === undefined) {
+                perfMark('session-known');
+            }
             rememberSession(data.session);
             if (mounted) {
                 setState((prev) => ({ ...prev, session: data.session, loading: false }));

@@ -30,6 +30,7 @@ import { FileDropZone } from '@/features/library/FileDropZone';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { perfLogIfDev, perfMark } from '@/lib/perf';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { RowMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
@@ -162,6 +163,7 @@ export const LibraryPage = () => {
                 setTags(cachedList.tags);
                 setAssignments(cachedList.documentTags);
                 painted = true;
+                perfMark('library-cache-paint');
             }
 
             // The painted list is interactive while the network is out, so an
@@ -195,6 +197,8 @@ export const LibraryPage = () => {
                     setTags(boot.tags);
                     setAssignments(boot.documentTags);
                     setError(null);
+                    perfMark('library-network-paint');
+                    perfLogIfDev();
                     return;
                 } catch (err: unknown) {
                     // Fallback: four parallel GETs if the bootstrap RPC is unavailable.
@@ -223,6 +227,8 @@ export const LibraryPage = () => {
                         setTags(tagRows);
                         setAssignments(tagMap);
                         setError(null);
+                        perfMark('library-network-paint');
+                        perfLogIfDev();
                         return;
                     } catch {
                         if (cancelled) {
