@@ -1,4 +1,9 @@
-import { fetchPublishedThumbnail, publishThumbnail, shouldPublishThumbnail } from '@/features/library/thumbnailRemote';
+import {
+    fetchPublishedThumbnail,
+    noteThumbnailObjectMissing,
+    publishThumbnail,
+    shouldPublishThumbnail,
+} from '@/features/library/thumbnailRemote';
 import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -100,6 +105,10 @@ const resolveThumbnail = async (docId: string, contentRev: number, thumbRev: num
                 // publish attempt is remembered whether or not it succeeds.
                 return renderAndStore(docId, contentRev, thumbRev, thumb, true);
             }
+        } else if (thumbRev === thumb.contentRev && thumb.blob.type === 'image/jpeg') {
+            // Row says this revision is published, but the object may be gone.
+            // One probe per session; a 404 republishes the local JPEG.
+            void verifyPublishedOrRepublish(docId, thumb.contentRev, thumb.blob);
         }
         return thumb.blob;
     }
@@ -123,11 +132,35 @@ const resolveThumbnail = async (docId: string, contentRev: number, thumbRev: num
     return renderAndStore(docId, contentRev, thumbRev, thumb);
 };
 
+/**
+ * `${docId}:${rev}` pairs already probed for a published object this session.
+ * A current local JPEG must not download on every scroll just to learn the
+ * object is still there.
+ */
+const publishedProbed = new Set<string>();
+
+/** Row names this rev, local JPEG is current — confirm the object, republish on 404. */
+const verifyPublishedOrRepublish = async (docId: string, contentRev: number, localJpeg: Blob): Promise<void> => {
+    const key = `${docId}:${contentRev}`;
+    if (publishedProbed.has(key)) {
+        return;
+    }
+    publishedProbed.add(key);
+    const published = await fetchPublishedThumbnail(docId, contentRev);
+    if (published) {
+        return;
+    }
+    noteThumbnailObjectMissing(docId, contentRev);
+    if (shouldPublishThumbnail(docId, contentRev, contentRev, true)) {
+        await publishThumbnail(docId, contentRev, localJpeg);
+    }
+};
+
 /** Published cover → Dexie → caller. A miss is remembered for the session like a failed render. */
 const fetchAndStore = async (
     docId: string,
     thumbRev: number,
-    fallback: { blob: Blob } | undefined,
+    fallback: { blob: Blob; contentRev?: number } | undefined,
 ): Promise<Blob | null> => {
     const key = `${docId}:remote:${thumbRev}`;
     if (failed.has(key)) {
@@ -136,6 +169,16 @@ const fetchAndStore = async (
     const blob = await fetchPublishedThumbnail(docId, thumbRev);
     if (!blob) {
         failed.add(key);
+        noteThumbnailObjectMissing(docId, thumbRev);
+        // The row still points at this revision, but the object is gone —
+        // republish only a JPEG that was rendered at this same revision.
+        if (
+            fallback?.blob.type === 'image/jpeg' &&
+            fallback.contentRev === thumbRev &&
+            shouldPublishThumbnail(docId, thumbRev, thumbRev, true)
+        ) {
+            void publishThumbnail(docId, thumbRev, fallback.blob);
+        }
         return fallback?.blob ?? null;
     }
     try {
@@ -196,8 +239,8 @@ const renderAndStore = async (
         let png: { blob: Blob; width: number; height: number };
         try {
             // Dynamic: this is the boundary that keeps pdf.js out of the shell.
-            const { renderFirstPagePng } = await import('@/features/library/thumbnailRender');
-            png = await renderFirstPagePng(await readCachedPdfBytes(cached.bytes));
+            const { renderFirstPageJpeg } = await import('@/features/library/thumbnailRender');
+            png = await renderFirstPageJpeg(await readCachedPdfBytes(cached.bytes));
         } catch {
             // Best-effort decoration: a thumbnail is never worth an error state.
             failed.add(key);

@@ -25,13 +25,30 @@ export const thumbnailObjectPath = (docId: string, rev: number): string => `${do
  */
 const attempted = new Set<string>();
 
-/** Whether a publish for this revision is still worth attempting this session; null = nothing published. */
-export const shouldPublishThumbnail = (docId: string, rev: number, publishedRev: number | null): boolean =>
-    (publishedRev === null || rev > publishedRev) && !attempted.has(`${docId}:${rev}`);
+const attemptKey = (docId: string, rev: number): string => `${docId}:${rev}`;
+
+/**
+ * Whether a publish for this revision is still worth attempting this session.
+ * `publishedRev` null = nothing published. `publishedMissing` is the 404
+ * path: the row still names this revision but the object is gone, so the
+ * same rev may be written again.
+ */
+export const shouldPublishThumbnail = (
+    docId: string,
+    rev: number,
+    publishedRev: number | null,
+    publishedMissing = false,
+): boolean =>
+    (publishedMissing || publishedRev === null || rev > publishedRev) && !attempted.has(attemptKey(docId, rev));
+
+/** The published object is gone — allow this session to publish the same rev again. */
+export const noteThumbnailObjectMissing = (docId: string, rev: number): void => {
+    attempted.delete(attemptKey(docId, rev));
+};
 
 /** Upload the render and stamp the row. Resolves to whether both landed. */
 export const publishThumbnail = async (docId: string, rev: number, blob: Blob): Promise<boolean> => {
-    const key = `${docId}:${rev}`;
+    const key = attemptKey(docId, rev);
     if (attempted.has(key)) {
         return false;
     }

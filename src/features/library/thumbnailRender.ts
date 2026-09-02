@@ -16,7 +16,7 @@ const THUMB_JPEG_QUALITY = 0.85;
  * `await import(...)` so the ~1 MB pdf chunk stays off the library's
  * critical path. Nothing here touches the network or Dexie.
  */
-export const renderFirstPagePng = async (
+export const renderFirstPageJpeg = async (
     bytes: ArrayBuffer,
 ): Promise<{ blob: Blob; width: number; height: number }> => {
     const worker = createPdfWorker();
