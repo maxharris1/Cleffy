@@ -42,8 +42,9 @@ import type { ScoreData } from './scoreData.js';
  *
  * svc-8 seeds the second shard of a split score with the first's tempo and
  * dynamics, so rit./a tempo/hairpins survive the page cut instead of resetting.
+ * svc-9: ornaments, appoggiatura, tempo-relative graces, swing.
  */
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-8';
+export const ENGINE_VERSION = 'audiveris-5.6.1+svc-9';
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;

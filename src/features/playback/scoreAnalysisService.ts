@@ -30,8 +30,9 @@ export interface ScoreAnalysisStatusRow {
  * (D.C./D.S. roadmaps, the tempo map surviving a shard merge, pedal) changes
  * the performance, so it is worth the interruption. svc-8 seeds expression
  * across the page-cut seam, which changes what every 4+ page score sounds like.
+ * svc-9 realises ornaments, appoggiaturas, tempo-relative graces and swing.
  */
-export const CURRENT_ENGINE_GENERATION = 8;
+export const CURRENT_ENGINE_GENERATION = 9;
 
 const engineGeneration = (engineVersion: string | null): number | null => {
     const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');

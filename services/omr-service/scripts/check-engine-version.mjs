@@ -32,6 +32,7 @@ const WATCHED = [
     'services/omr-service/src/caps.ts',
     'services/omr-service/src/scoreData.ts',
     'services/omr-service/src/audiveris.ts',
+    'services/omr-service/src/ornaments.ts',
     'src/types/scoreData.ts',
 ];
 
@@ -62,10 +63,7 @@ const resolveBase = (candidate) => {
 
 const baseArg = process.argv.find((a) => a.startsWith('--base='));
 const requested =
-    baseArg?.slice('--base='.length) ||
-    process.env.GITHUB_BASE_REF ||
-    process.env.ENGINE_VERSION_BASE ||
-    'origin/main';
+    baseArg?.slice('--base='.length) || process.env.GITHUB_BASE_REF || process.env.ENGINE_VERSION_BASE || 'origin/main';
 const base = resolveBase(requested);
 
 if (base === null) {

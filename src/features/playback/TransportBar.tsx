@@ -124,6 +124,14 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'Dynamics could not be told apart between the hands, so both play at the same volume.',
     },
     { code: 'grace_notes_skipped', text: 'Some grace notes had nothing to attach to and were left out.' },
+    {
+        code: 'ornaments_realized',
+        text: 'Trills, mordents, turns and arpeggio signs are played out as written, at the tempo in force.',
+    },
+    {
+        code: 'swing_applied',
+        text: 'The heading says swing, so pairs of eighth notes are played long–short.',
+    },
     { code: 'no_geometry', text: 'The page positions could not be read, so there is no moving playhead.' },
     {
         code: 'measure_geometry_mismatch',
@@ -141,13 +149,12 @@ const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: b
         return null;
     }
     return (
-        <div className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900" role="status">
+        <div
+            className="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-1.5 text-xs text-amber-900"
+            role="status"
+        >
             This play-along was made by an older version of the analysis.{' '}
-            <button
-                type="button"
-                onClick={props.onGenerate}
-                className="font-medium underline underline-offset-2"
-            >
+            <button type="button" onClick={props.onGenerate} className="font-medium underline underline-offset-2">
                 Regenerate it
             </button>{' '}
             to pick up the improvements.
@@ -171,7 +178,9 @@ const ScoreWarnings = (props: { warnings: readonly string[] }) => {
                 className="flex w-full items-center gap-1.5 text-left text-xs font-medium text-amber-900"
             >
                 {open ? <ChevronDownIcon size={13} /> : <ChevronUpIcon size={13} />}
-                {present.length === 1 ? '1 thing to know about this play-along' : `${present.length} things to know about this play-along`}
+                {present.length === 1
+                    ? '1 thing to know about this play-along'
+                    : `${present.length} things to know about this play-along`}
             </button>
             {open ? (
                 <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-xs text-amber-900">
@@ -497,7 +506,12 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
-                    <TempoControl bpm={bpm} onBpm={setBpm} compound={isCompoundMeter(score)} estimate={tempoEstimate(score)} />
+                    <TempoControl
+                        bpm={bpm}
+                        onBpm={setBpm}
+                        compound={isCompoundMeter(score)}
+                        estimate={tempoEstimate(score)}
+                    />
 
                     <div className="mx-0.5 hidden h-6 w-px bg-stone-200 sm:block" />
 
