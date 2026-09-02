@@ -131,32 +131,68 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 }, PROVISIONAL_ROLE_TIMEOUT_MS);
             }
 
+            let doc: DocumentRow | null;
+            let role: MemberRole | null;
             try {
-                const [doc, role] = await Promise.all([fetchDocument(docId), fetchMyRole(docId, userId)]);
-                // The role is truth from here — confirm the warm paint now
-                // rather than holding the pen hostage to the bytes download
-                // and page-count parse still ahead (which can take seconds on
-                // a replaced PDF, long enough for the timer to promote the
-                // cached role instead of this one). The fresh archived_at
-                // rides along: readOnly derives from it, and confirming an
-                // owner role against the CACHED flag would open a just-
-                // archived score for writes RLS then silently discards. Only
-                // that field — the cached content_rev must survive so the
-                // bytes reuse below can still tell whether the buffer it
-                // painted matches the server's revision.
+                [doc, role] = await Promise.all([fetchDocument(docId), fetchMyRole(docId, userId)]);
+            } catch (err) {
+                // Transport failure only: the server never answered, so the
+                // last-known copy is the best truth available (plan §offline).
                 clearTimeout(provisionalTimer);
-                if (!doc) {
-                    throw new Error('Score not found — it may have been deleted, or your access was revoked.');
+                if (cancelled) {
+                    return;
                 }
-                if (!cancelled) {
-                    setState((prev) =>
-                        prev?.provisional
-                            ? { ...prev, doc: { ...prev.doc, archived_at: doc.archived_at }, role, provisional: false }
-                            : prev,
-                    );
+                if (offline) {
+                    setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
+                    return;
                 }
-                const bytes = await loadDocumentBytes(doc);
-                const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
+                const fallback = await loadDocumentOffline(docId).catch(() => null);
+                if (cancelled) {
+                    return;
+                }
+                if (fallback) {
+                    setState({ doc: fallback.doc, role: fallback.role, bytes: fallback.bytes });
+                } else {
+                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                }
+                return;
+            }
+            // The role is truth from here — confirm the warm paint now
+            // rather than holding the pen hostage to the bytes download
+            // and page-count parse still ahead (which can take seconds on
+            // a replaced PDF, long enough for the timer to promote the
+            // cached role instead of this one). The fresh archived_at
+            // rides along: readOnly derives from it, and confirming an
+            // owner role against the CACHED flag would open a just-
+            // archived score for writes RLS then silently discards. Only
+            // that field — the cached content_rev must survive so the
+            // bytes reuse below can still tell whether the buffer it
+            // painted matches the server's revision.
+            clearTimeout(provisionalTimer);
+            if (cancelled) {
+                return;
+            }
+            if (!doc) {
+                // The server ANSWERED, and the answer is no: deleted, or this
+                // account was never (or is no longer) a member. That is not
+                // the offline contract — pdfCache is keyed by document, not by
+                // user, so the warm paint may be another account's score on a
+                // shared device, and a revoked member's strokes would be
+                // discarded by RLS at flush. Drop the paint; nothing to fall
+                // back to.
+                setState(null);
+                setLoadError('Score not found — it may have been deleted, or your access was revoked.');
+                return;
+            }
+            const confirmedDoc = doc;
+            setState((prev) =>
+                prev?.provisional
+                    ? { ...prev, doc: { ...prev.doc, archived_at: confirmedDoc.archived_at }, role, provisional: false }
+                    : prev,
+            );
+            try {
+                const bytes = await loadDocumentBytes(confirmedDoc);
+                const withPages = await ensureDocumentPageCount(confirmedDoc, bytes).catch(() => confirmedDoc);
                 if (!cancelled) {
                     // Same document at the same content revision as the warm
                     // paint → keep the old buffer: PdfProvider re-parses (and
@@ -174,21 +210,21 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     setLoadError(null);
                 }
             } catch (err) {
-                clearTimeout(provisionalTimer);
                 if (cancelled) {
                     return;
                 }
-                // No network? A previously-cached score still opens (plan §offline).
+                // The row and role are confirmed; only the bytes failed to
+                // download. The cached copy still opens, under the role the
+                // server just vouched for rather than the cached one.
                 if (offline) {
-                    setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
+                    setState({
+                        doc: { ...offline.doc, archived_at: confirmedDoc.archived_at },
+                        role,
+                        bytes: offline.bytes,
+                    });
                     return;
                 }
-                const fallback = await loadDocumentOffline(docId).catch(() => null);
-                if (fallback) {
-                    setState({ doc: fallback.doc, role: fallback.role, bytes: fallback.bytes });
-                } else {
-                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
-                }
+                setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
             }
         })();
 
