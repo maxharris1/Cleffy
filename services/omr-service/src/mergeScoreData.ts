@@ -155,12 +155,12 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
             }
             clefs.push({ ...clef, tick: clef.tick + tickOffset });
         }
-        // Tempo crosses the seam without the inheritance pass time/key/clef get.
-        // It is stepwise state, so with the parts concatenated in tick order,
-        // part A's last tempo is still the one in force when part B's first tick
-        // arrives. Restating it at part B's start would add a point that says
-        // only what the reader already knows — and would have to guess whether
-        // part A ended mid-ritardando or at its steady tempo.
+        // Tempo at the seam is seeded, not inherited. Shard B is parsed with
+        // shard A's expression state at the overlap page, so a rit. that A
+        // carried in and an a tempo that B opens with actually meet. Concatenating
+        // the maps still works after that: A's last point is the pulse in force
+        // when B's first surviving tick arrives, and restating it would only
+        // add a point that says what the reader already knows.
         for (const tempo of working.tempos ?? []) {
             if (overlapPage0 !== null && noteOnDroppedPage(working, tempo.tick, overlapPage0, pageMap)) {
                 continue;
