@@ -1,6 +1,8 @@
-import { beatsForMeasure } from '@/features/playback/scoreTime';
+import { barTicks, beatWeight, beatsForMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
+
+export { DOWNBEAT_ACCENT } from '@/features/playback/scoreTime';
 
 /**
  * The pure half of expressive playback: every curve that turns a velocity, a
@@ -38,10 +40,12 @@ export const JITTER_VEL = 0.03;
 export const CHORD_ROLL_S = 0.004;
 /** Ceiling on a roll — a ten-note chord must still land as one event. */
 export const CHORD_ROLL_MAX_S = 0.012;
-/** Velocity added to the top note of a right-hand chord, so the tune sings. */
+/** Velocity added to the highest sounding note of an onset, so the tune sings. */
 export const MELODY_LIFT = 0.06;
-/** Velocity added on a full bar's downbeat. */
-export const DOWNBEAT_ACCENT = 0.025;
+/** Velocity taken off the other hand when it sounds under that melody note. */
+export const ACCOMP_DIP = 0.02;
+/** Velocity taken off a note whose onset sits between beats of a full bar. */
+export const OFFBEAT_DIP = 0.01;
 
 /** Floor for a humanized velocity: below this a note is inaudible, not quiet. */
 export const MIN_VELOCITY = 0.05;
@@ -235,19 +239,26 @@ export interface NoteShape {
     roll: number;
     /** Velocity added because this note carries the melody. */
     lift: number;
-    /** Velocity added because this note falls on a full bar's downbeat. */
+    /**
+     * Velocity offset from the note's place in the bar: a downbeat, a weaker
+     * half-bar, or a small dip when the onset sits off the beat. May be negative.
+     */
     accent: number;
+    /** Velocity subtracted because this note is accompaniment under a melody. */
+    dip: number;
 }
 
-const emptyShape = (): NoteShape => ({ roll: 0, lift: 0, accent: 0 });
+const emptyShape = (): NoteShape => ({ roll: 0, lift: 0, accent: 0, dip: 0 });
 
 /**
  * One pass over the score at engine construction, deciding what each note owes
  * to its neighbours: a chord is rolled from the bottom up the way a hand
- * actually lands on it, the top note of a right-hand chord is voiced above the
- * ones under it, and notes on a real downbeat get the weight a player gives
- * them. All of it is a function of the score alone, so — like {@link noteJitter}
- * — it survives seeks and loop wraps unchanged.
+ * actually lands on it, the highest note of each onset is voiced as the melody
+ * — a single-line tune included, either hand — and the other hand, when both
+ * sound, is dipped as accompaniment. Notes take the weight of their beat, or a
+ * small dip when they sit off it in a full bar. All of it is a function of the
+ * score alone, so — like {@link noteJitter} — it survives seeks and loop wraps
+ * unchanged.
  *
  * The result is index-aligned with `score.notes`, which the scheduler already
  * walks by index.
@@ -256,15 +267,26 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
     const notes = score.notes;
     const shapes: NoteShape[] = notes.map(emptyShape);
 
-    // Full-bar downbeats, borrowed from the metronome's own accent rule so a
-    // stressed note and an accented click can never disagree about beat one.
-    const downbeats = new Set<number>();
+    // Beat ticks and their metrical weight, from the same beat grid the
+    // metronome clicks. The click's boolean accent is unchanged; this map is
+    // only how hard a note on that tick is struck.
+    const weightAt = new Map<number, number>();
+    const fullBars: Array<{ start: number; end: number }> = [];
     for (const measure of score.measures) {
-        const first = beatsForMeasure(measure, score.timeSignatures)[0];
-        if (first?.accent) {
-            downbeats.add(first.tick);
+        const sig = timeSigAt(score.timeSignatures, measure.tick);
+        const isFullBar = measure.dTicks >= barTicks(sig);
+        if (isFullBar) {
+            fullBars.push({ start: measure.tick, end: measure.tick + measure.dTicks });
+        }
+        const beats = beatsForMeasure(measure, score.timeSignatures);
+        for (let k = 0; k < beats.length; k++) {
+            const beat = beats[k];
+            if (beat) {
+                weightAt.set(beat.tick, beatWeight(sig, k, isFullBar));
+            }
         }
     }
+    const inFullBar = (tick: number): boolean => fullBars.some((bar) => tick >= bar.start && tick < bar.end);
 
     // Notes are sorted by tick, so everything sounding together is one run.
     let start = 0;
@@ -277,7 +299,52 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
         while (end < notes.length && notes[end]?.t === head.t) {
             end += 1;
         }
-        const onDownbeat = downbeats.has(head.t);
+        const weight = weightAt.get(head.t);
+        const accent = weight !== undefined ? weight : inFullBar(head.t) ? -OFFBEAT_DIP : 0;
+
+        let topPitch = -Infinity;
+        let handsPresent = 0;
+        let sawRh = false;
+        let sawLh = false;
+        for (let i = start; i < end; i++) {
+            const note = notes[i];
+            if (!note) {
+                continue;
+            }
+            if (note.p > topPitch) {
+                topPitch = note.p;
+            }
+            if (note.h === HAND_RH && !sawRh) {
+                sawRh = true;
+                handsPresent += 1;
+            }
+            if (note.h === HAND_LH && !sawLh) {
+                sawLh = true;
+                handsPresent += 1;
+            }
+        }
+
+        // Prefer the right hand on a unison so two hands on one key keep the
+        // lifted voice, which is the one stealSamePitch will let speak.
+        let melodyIndex = -1;
+        let melodyHand: 0 | 1 = HAND_LH;
+        for (let i = start; i < end; i++) {
+            const note = notes[i];
+            if (!note || note.p !== topPitch) {
+                continue;
+            }
+            if (melodyIndex < 0 || note.h === HAND_RH) {
+                melodyIndex = i;
+                melodyHand = note.h;
+                if (note.h === HAND_RH) {
+                    break;
+                }
+            }
+        }
+        const melodyShape = melodyIndex >= 0 ? shapes[melodyIndex] : undefined;
+        if (melodyShape) {
+            melodyShape.lift = MELODY_LIFT;
+        }
 
         for (const hand of [HAND_RH, HAND_LH] as const) {
             const group: Array<{ index: number; pitch: number }> = [];
@@ -294,13 +361,11 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
                     return;
                 }
                 shape.roll = Math.min(CHORD_ROLL_MAX_S, position * CHORD_ROLL_S);
-                shape.accent = onDownbeat ? DOWNBEAT_ACCENT : 0;
+                shape.accent = accent;
+                if (handsPresent === 2 && hand !== melodyHand) {
+                    shape.dip = ACCOMP_DIP;
+                }
             });
-            const top = hand === HAND_RH && group.length >= 2 ? group[group.length - 1] : undefined;
-            const topShape = top ? shapes[top.index] : undefined;
-            if (topShape) {
-                topShape.lift = MELODY_LIFT;
-            }
         }
         start = end;
     }
