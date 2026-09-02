@@ -22,6 +22,12 @@ export type DocumentRow = {
     page_count: number | null;
     /** Bumped when the stored PDF bytes are replaced (smart import cleanup). */
     content_rev: number;
+    /**
+     * content_rev of the cover published to the `thumbnails` bucket at
+     * `{id}/{thumb_rev}.jpg`; null until the owner's browser has rendered one
+     * (a fresh upload is content_rev 0, so 0 is a real revision, not "none").
+     */
+    thumb_rev: number | null;
     created_at: string;
     updated_at: string;
     /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
@@ -35,6 +41,7 @@ export type DocumentInsert = {
     storage_path: string;
     page_count?: number | null;
     content_rev?: number;
+    thumb_rev?: number | null;
     archived_at?: string | null;
 };
 

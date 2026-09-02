@@ -79,6 +79,7 @@ const serverDoc = (overrides: Partial<DocumentRow> = {}): DocumentRow => ({
     storage_path: `${DOC_ID}/original.pdf`,
     page_count: 2,
     content_rev: 0,
+    thumb_rev: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
     archived_at: null,

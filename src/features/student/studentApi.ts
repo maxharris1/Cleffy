@@ -189,7 +189,9 @@ export const fetchMyAssignments = async (): Promise<AssignedScore[]> => {
     // Narrow columns — the student list only needs title + id for the card link.
     const { data: documents, error: documentsError } = await supabase
         .from('documents')
-        .select('id, owner_id, title, storage_path, page_count, content_rev, created_at, updated_at, archived_at')
+        .select(
+            'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at',
+        )
         .in('id', documentIds);
     if (documentsError) {
         throw new Error(`Could not load your pieces: ${documentsError.message}`);

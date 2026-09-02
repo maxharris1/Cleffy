@@ -19,7 +19,9 @@ export const LIBRARY_PAGE_SIZE = 100;
 export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
     const { data, error } = await getSupabase()
         .from('documents')
-        .select('id, owner_id, title, storage_path, page_count, content_rev, created_at, updated_at, archived_at')
+        .select(
+            'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at',
+        )
         .order('updated_at', { ascending: false })
         .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
@@ -77,6 +79,7 @@ export const documentRowFromCache = (cached: {
     storage_path: `${cached.id}/original.pdf`,
     page_count: null,
     content_rev: cached.contentRev ?? 0,
+    thumb_rev: null,
     created_at: cached.cachedAt,
     updated_at: cached.cachedAt,
     archived_at: cached.archivedAt ?? null,
@@ -357,6 +360,18 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
         .remove(paths.length > 0 ? paths : [doc.storage_path]);
     if (storageError) {
         throw new Error(`Could not delete the PDF: ${storageError.message}`);
+    }
+    // Published covers live in their own bucket under the same folder. Best
+    // effort: an orphaned 40 KB image must not stop the delete, and the row's
+    // cascade already makes it unreachable.
+    try {
+        const { data: covers } = await supabase.storage.from('thumbnails').list(doc.id);
+        const coverPaths = (covers ?? []).map((o) => `${doc.id}/${o.name}`);
+        if (coverPaths.length > 0) {
+            await supabase.storage.from('thumbnails').remove(coverPaths);
+        }
+    } catch {
+        // See above.
     }
     const { error } = await supabase.from('documents').delete().eq('id', doc.id);
     if (error) {

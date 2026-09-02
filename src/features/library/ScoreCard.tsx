@@ -1,9 +1,10 @@
+import { useRef } from 'react';
 import { Link } from 'react-router';
 
 import { composerOf, displayTitleOf } from '@/features/library/libraryView';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { RowMenu } from '@/features/library/RowMenu';
-import { useScoreThumbnail } from '@/features/library/useScoreThumbnail';
+import { useNearViewport, useScoreThumbnail } from '@/features/library/useScoreThumbnail';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { StarIcon } from '@/ui/icons';
@@ -87,7 +88,9 @@ export const ScoreCard = ({
     onAssign?: () => void;
     onDelete: () => void;
 }) => {
-    const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0);
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    const near = useNearViewport(rootRef);
+    const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0, { thumbRev: doc.thumb_rev ?? null, enabled: near });
     // Suppressed under a composer group header, which already says it — five
     // cards in a row repeating "Bach, Johann Sebastian" is noise, not context.
     const composer = stripComposer ? null : composerOf(doc.title);
@@ -99,6 +102,7 @@ export const ScoreCard = ({
 
     return (
         <div
+            ref={rootRef}
             className="library-card group relative has-[[aria-expanded=true]]:z-20"
             style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
             // Titles clamp to two lines and tags have no room on a cover, so the

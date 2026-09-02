@@ -891,7 +891,7 @@ const ScoreRow = ({
                   into a column on phones, which would stack the thumbnail above
                   the title instead of beside it.
                 */}
-                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} />
+                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
                 <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
                     <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">

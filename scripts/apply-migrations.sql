@@ -3414,7 +3414,8 @@ create index if not exists omr_jobs_created_by_idx
 -- downloads a ~40 KB image instead of a multi-megabyte PDF.
 --
 --  1. documents.thumb_rev — the content_rev the published cover was rendered
---     from; 0 means none yet. Read by the library list, written by the owner
+--     from; null means none yet (a fresh upload is content_rev 0, so 0 has
+--     to be a real revision). Read by the library list, written by the owner
 --     after a successful publish (documents_update is owner-only).
 --  2. library_bootstrap() carries the new column.
 --  3. A private `thumbnails` bucket, object path `{documentId}/{rev}.jpg`,
@@ -3424,7 +3425,7 @@ create index if not exists omr_jobs_created_by_idx
 --     writes from migrations (see the `scores` note in 20260801160754_rls).
 
 alter table public.documents
-    add column if not exists thumb_rev integer not null default 0;
+    add column if not exists thumb_rev integer;
 
 -- ---------------------------------------------------------------------------
 -- library_bootstrap — same body as 20260830120000, plus d.thumb_rev

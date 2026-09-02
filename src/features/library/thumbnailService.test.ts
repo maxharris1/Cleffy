@@ -35,7 +35,31 @@ const renderFirstPagePng = vi.hoisted(() => vi.fn());
 // the renderer itself is mocked away here.
 vi.mock('@/features/library/thumbnailRender', () => ({ renderFirstPagePng }));
 
-const pngBlob = () => new Blob(['png-bytes'], { type: 'image/png' });
+// The published copy: Storage upload/download and the row update that stamps
+// documents.thumb_rev. The real thumbnailRemote module runs over this stub.
+const storageUpload = vi.hoisted(() => vi.fn());
+const storageDownload = vi.hoisted(() => vi.fn());
+const rowUpdate = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/supabase', () => ({
+    getSupabase: () => ({
+        storage: {
+            from: (bucket: string) => ({
+                upload: (...args: unknown[]) => storageUpload(bucket, ...args),
+                download: (...args: unknown[]) => storageDownload(bucket, ...args),
+            }),
+        },
+        from: (table: string) => ({
+            update: (patch: unknown) => ({
+                eq: (column: string, value: unknown) => rowUpdate(table, patch, column, value),
+            }),
+        }),
+    }),
+}));
+
+/** What the renderer produces today, and what the bucket accepts. */
+const pngBlob = () => new Blob(['jpeg-bytes'], { type: 'image/jpeg' });
+/** A render from before the JPEG encoder — still in many browsers' Dexie stores. */
+const legacyPngBlob = () => new Blob(['png-bytes'], { type: 'image/png' });
 
 const cachePdf = (docId: string, contentRev: number | undefined) => {
     pdfCache.set(docId, {
@@ -68,12 +92,21 @@ const loadService = async () => {
     return import('@/features/library/thumbnailService');
 };
 
+/** Lets every detached publish/fetch settle before asserting on it. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 beforeEach(() => {
     pdfCache.clear();
     thumbnails.clear();
     storeFailure.put = null;
     renderFirstPagePng.mockReset();
     renderFirstPagePng.mockResolvedValue({ blob: pngBlob(), width: 181, height: 256 });
+    storageUpload.mockReset();
+    storageUpload.mockResolvedValue({ data: null, error: null });
+    storageDownload.mockReset();
+    storageDownload.mockResolvedValue({ data: null, error: { message: 'Object not found' } });
+    rowUpdate.mockReset();
+    rowUpdate.mockResolvedValue({ data: null, error: null });
 });
 
 describe('getThumbnail', () => {
@@ -239,5 +272,190 @@ describe('getThumbnail', () => {
         expect(await getThumbnail('d1', 0)).toBeNull();
         expect(await getThumbnail('d1', 0)).toBeNull();
         expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('published covers', () => {
+    it('publishes a fresh render and stamps the row when nothing newer is published', async () => {
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        const blob = await getThumbnail('d1', 3, null);
+        await settle();
+
+        expect(storageUpload).toHaveBeenCalledWith(
+            'thumbnails',
+            'd1/3.jpg',
+            blob,
+            expect.objectContaining({ contentType: 'image/jpeg', upsert: true }),
+        );
+        expect(rowUpdate).toHaveBeenCalledWith('documents', { thumb_rev: 3 }, 'id', 'd1');
+    });
+
+    it('publishes a fresh upload — content_rev 0 with nothing published is not "already at 0"', async () => {
+        // Shaped like the row uploadDocument just seeded: bytes with no contentRev.
+        cachePdf('d1', undefined);
+        const { getThumbnail } = await loadService();
+
+        const blob = await getThumbnail('d1', 0, null);
+        await settle();
+
+        expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/0.jpg', blob, expect.anything());
+        expect(rowUpdate).toHaveBeenCalledWith('documents', { thumb_rev: 0 }, 'id', 'd1');
+    });
+
+    it('does not publish when the published revision is already current', async () => {
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        await getThumbnail('d1', 3, 3);
+        await settle();
+
+        expect(storageUpload).not.toHaveBeenCalled();
+        expect(rowUpdate).not.toHaveBeenCalled();
+    });
+
+    it('publishes an earlier JPEG render found in the cache without rendering again', async () => {
+        const stored = pngBlob();
+        cacheThumb('d1', 2, stored);
+        cachePdf('d1', 2);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 2, null)).toBe(stored);
+        await settle();
+
+        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/2.jpg', stored, expect.anything());
+    });
+
+    it('re-encodes a legacy PNG render once so the bucket will take it', async () => {
+        cacheThumb('d1', 2, legacyPngBlob());
+        cachePdf('d1', 2);
+        const { getThumbnail } = await loadService();
+
+        const first = await getThumbnail('d1', 2, null);
+        await settle();
+        expect(first?.type).toBe('image/jpeg');
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(storageUpload).toHaveBeenCalledWith('thumbnails', 'd1/2.jpg', first, expect.anything());
+
+        // The attempt is remembered: no second pass on the next scroll.
+        await getThumbnail('d1', 2, null);
+        await settle();
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(storageUpload).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a legacy PNG when the bytes to re-encode it are not here', async () => {
+        const legacy = legacyPngBlob();
+        cacheThumb('d1', 2, legacy);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 2, null)).toBe(legacy);
+        await settle();
+        expect(renderFirstPagePng).not.toHaveBeenCalled();
+        expect(storageUpload).not.toHaveBeenCalled();
+    });
+
+    it('attempts a refused publish once per session, not on every scroll', async () => {
+        storageUpload.mockResolvedValue({ data: null, error: { message: 'new row violates row-level security' } });
+        cachePdf('d1', 1);
+        const { getThumbnail } = await loadService();
+
+        await getThumbnail('d1', 1, null);
+        await settle();
+        await getThumbnail('d1', 1, null);
+        await settle();
+
+        expect(storageUpload).toHaveBeenCalledTimes(1);
+        expect(rowUpdate).not.toHaveBeenCalled();
+    });
+
+    it('downloads the published cover when the bytes are not on this device, then serves it from Dexie', async () => {
+        const published = new Blob(['published-jpeg'], { type: 'image/jpeg' });
+        storageDownload.mockResolvedValue({ data: published, error: null });
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 2, 2)).toBe(published);
+        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/2.jpg');
+        expect(thumbnails.get('d1')).toMatchObject({ contentRev: 2, maxSide: THUMB_MAX_SIDE });
+        expect(renderFirstPagePng).not.toHaveBeenCalled();
+
+        expect(await getThumbnail('d1', 2, 2)).toBe(published);
+        expect(storageDownload).toHaveBeenCalledTimes(1);
+    });
+
+    it('never downloads when nothing is published', async () => {
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 2, null)).toBeNull();
+        expect(storageDownload).not.toHaveBeenCalled();
+    });
+
+    it('prefers the local bytes over a download when both are available', async () => {
+        cachePdf('d1', 2);
+        const { getThumbnail } = await loadService();
+
+        await getThumbnail('d1', 2, 2);
+        expect(renderFirstPagePng).toHaveBeenCalledTimes(1);
+        expect(storageDownload).not.toHaveBeenCalled();
+    });
+
+    it('keeps a stale local cover rather than downloading one no newer than it', async () => {
+        const stale = pngBlob();
+        cacheThumb('d1', 2, stale);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 2)).toBe(stale);
+        expect(storageDownload).not.toHaveBeenCalled();
+    });
+
+    it('downloads a published cover newer than the stale local one', async () => {
+        const published = new Blob(['newer'], { type: 'image/jpeg' });
+        storageDownload.mockResolvedValue({ data: published, error: null });
+        cacheThumb('d1', 1, pngBlob());
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(published);
+        expect(thumbnails.get('d1')?.contentRev).toBe(3);
+    });
+
+    it('remembers a failed download for the session and shows what it has', async () => {
+        const stale = pngBlob();
+        cacheThumb('d1', 1, stale);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(stale);
+        expect(await getThumbnail('d1', 3, 3)).toBe(stale);
+        expect(storageDownload).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs at most four downloads at a time', async () => {
+        let inFlightNow = 0;
+        let peak = 0;
+        const gates: Array<() => void> = [];
+        storageDownload.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    inFlightNow += 1;
+                    peak = Math.max(peak, inFlightNow);
+                    gates.push(() => {
+                        inFlightNow -= 1;
+                        resolve({ data: new Blob(['x'], { type: 'image/jpeg' }), error: null });
+                    });
+                }),
+        );
+        const { getThumbnail } = await loadService();
+
+        const all = Promise.all(Array.from({ length: 10 }, (_, i) => getThumbnail(`d${i}`, 1, 1)));
+        await settle();
+        expect(peak).toBe(4);
+        while (gates.length > 0) {
+            gates.shift()?.();
+            await settle();
+        }
+        await all;
+        expect(storageDownload).toHaveBeenCalledTimes(10);
+        expect(peak).toBe(4);
     });
 });

@@ -1,3 +1,4 @@
+import { fetchPublishedThumbnail, publishThumbnail, shouldPublishThumbnail } from '@/features/library/thumbnailRemote';
 import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -52,28 +53,35 @@ const rememberUnstored = (key: string, blob: Blob): void => {
 let queue: Promise<unknown> = Promise.resolve();
 
 /**
- * First-page PNG for a library row, or null when there is nothing to show yet.
+ * First-page image for a library row, or null when there is nothing to show yet.
  *
- * Strictly offline: the bytes come from the Dexie PDF cache and nowhere else.
- * A score whose bytes have never been downloaded gets no thumbnail rather than
- * a background download — the library must not turn a scroll into fifty
+ * Two sources, in order. The Dexie PDF cache: a score whose bytes are on this
+ * device is rendered here (and, when this browser is the owner's and nothing
+ * newer is published, the render is published for everyone else). Otherwise
+ * the published copy: `thumbRev` is documents.thumb_rev, the revision of the
+ * cover in the `thumbnails` bucket, null for none. What this never does is
+ * download the PDF itself — the library must not turn a scroll into fifty
  * multi-megabyte fetches, and a metered connection must not pay for art.
  */
-export const getThumbnail = (docId: string, contentRev: number): Promise<Blob | null> => {
+export const getThumbnail = (
+    docId: string,
+    contentRev: number,
+    thumbRev: number | null = null,
+): Promise<Blob | null> => {
     // Synchronous, before any await: two rows mounting in the same tick must
     // find each other here, not both fall through to a render.
     const existing = inFlight.get(docId);
     if (existing) {
         return existing;
     }
-    const pending = resolveThumbnail(docId, contentRev).finally(() => {
+    const pending = resolveThumbnail(docId, contentRev, thumbRev).finally(() => {
         inFlight.delete(docId);
     });
     inFlight.set(docId, pending);
     return pending;
 };
 
-const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob | null> => {
+const resolveThumbnail = async (docId: string, contentRev: number, thumbRev: number | null): Promise<Blob | null> => {
     const db = getDb();
     const thumb = await db.thumbnails.get(docId).catch(() => undefined);
     // `?? 0` is load-bearing: rows cached before the shelf existed have no
@@ -81,6 +89,18 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
     // field raw would keep serving 256px renders into a 208px cover forever.
     const tooSmall = (thumb?.maxSide ?? 0) < THUMB_MAX_SIDE;
     if (thumb && thumb.contentRev >= contentRev && !tooSmall) {
+        if (shouldPublishThumbnail(docId, thumb.contentRev, thumbRev)) {
+            if (thumb.blob.type === 'image/jpeg') {
+                // Rendered here earlier, never published (the feature is newer
+                // than the render, or the upload failed on another device).
+                void publishThumbnail(docId, thumb.contentRev, thumb.blob);
+            } else if (await getCachedPdf(docId)) {
+                // A PNG from before the JPEG encoder; the bucket takes JPEG only.
+                // Fall through to render it again from the bytes, once — the
+                // publish attempt is remembered whether or not it succeeds.
+                return renderAndStore(docId, contentRev, thumbRev, thumb, true);
+            }
+        }
         return thumb.blob;
     }
 
@@ -91,7 +111,64 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
 
     const cached = await getCachedPdf(docId);
     if (!cached) {
-        // A stale thumbnail beats an empty box: the title has not changed.
+        // Not on this device. The published copy, if there is one newer than
+        // what we hold — else a stale thumbnail beats an empty box: the title
+        // has not changed.
+        const haveRev = thumb && !tooSmall ? thumb.contentRev : -1;
+        if (thumbRev !== null && thumbRev > haveRev) {
+            return fetchAndStore(docId, thumbRev, thumb);
+        }
+        return thumb?.blob ?? null;
+    }
+    return renderAndStore(docId, contentRev, thumbRev, thumb);
+};
+
+/** Published cover → Dexie → caller. A miss is remembered for the session like a failed render. */
+const fetchAndStore = async (
+    docId: string,
+    thumbRev: number,
+    fallback: { blob: Blob } | undefined,
+): Promise<Blob | null> => {
+    const key = `${docId}:remote:${thumbRev}`;
+    if (failed.has(key)) {
+        return fallback?.blob ?? null;
+    }
+    const blob = await fetchPublishedThumbnail(docId, thumbRev);
+    if (!blob) {
+        failed.add(key);
+        return fallback?.blob ?? null;
+    }
+    try {
+        await getDb().thumbnails.put({
+            docId,
+            contentRev: thumbRev,
+            maxSide: THUMB_MAX_SIDE,
+            blob,
+            // Not decoded here — the cover is object-fit anyway, and decoding
+            // a hundred images to learn their size would cost what the fetch saved.
+            width: 0,
+            height: 0,
+            createdAt: new Date().toISOString(),
+        });
+    } catch {
+        rememberUnstored(`${docId}:${thumbRev}:${THUMB_MAX_SIDE}`, blob);
+    }
+    return blob;
+};
+
+const renderAndStore = async (
+    docId: string,
+    contentRev: number,
+    thumbRev: number | null,
+    thumb: { blob: Blob; contentRev: number; maxSide?: number } | undefined,
+    /** Re-encode even though the stored render is current (legacy PNG → publishable JPEG). */
+    reencode = false,
+): Promise<Blob | null> => {
+    const db = getDb();
+    const key = `${docId}:${contentRev}`;
+    const tooSmall = (thumb?.maxSide ?? 0) < THUMB_MAX_SIDE;
+    const cached = await getCachedPdf(docId);
+    if (!cached) {
         return thumb?.blob ?? null;
     }
 
@@ -104,14 +181,14 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
     // library visit paid another pdf.js document open. Serve what we have; the
     // check above takes over as soon as ensureLocalPdf caches the newer bytes.
     const bytesRev = cached.contentRev ?? 0;
-    if (thumb && thumb.contentRev >= bytesRev && !tooSmall) {
+    if (!reencode && thumb && thumb.contentRev >= bytesRev && !tooSmall) {
         return thumb.blob;
     }
 
     // Rendered earlier this session but never stored — serve it rather than
     // paying for a second identical pdf.js pass.
     const memo = unstored.get(`${docId}:${bytesRev}:${THUMB_MAX_SIDE}`);
-    if (memo) {
+    if (memo && !reencode) {
         return memo;
     }
 
@@ -146,6 +223,11 @@ const resolveThumbnail = async (docId: string, contentRev: number): Promise<Blob
             // with a library of blank covers.
             console.warn('Could not cache the thumbnail', err);
             rememberUnstored(`${docId}:${bytesRev}:${THUMB_MAX_SIDE}`, png.blob);
+        }
+        // Publish for every other device, detached: the render is on screen
+        // already, and Storage RLS turns a member's attempt into a quiet no.
+        if (shouldPublishThumbnail(docId, bytesRev, thumbRev)) {
+            void publishThumbnail(docId, bytesRev, png.blob);
         }
         return png.blob;
     });

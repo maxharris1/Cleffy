@@ -1,0 +1,95 @@
+import { getSupabase } from '@/lib/supabase';
+
+/**
+ * The published copy of a library cover.
+ *
+ * Edge Functions cannot render a PDF, so the browser that already rendered a
+ * first page (on upload, on import, or because it holds the bytes) publishes
+ * that render to the private `thumbnails` bucket at `{docId}/{rev}.jpg` and
+ * records the revision on the row (documents.thumb_rev). Every other device
+ * then downloads a ~40 KB image instead of the whole score.
+ *
+ * Storage RLS does the authorisation: only the owner may write under a
+ * document's folder, so a member's attempt fails quietly and costs one
+ * request per session; every member may read.
+ */
+
+const BUCKET = 'thumbnails';
+
+export const thumbnailObjectPath = (docId: string, rev: number): string => `${docId}/${rev}.jpg`;
+
+/**
+ * One publish attempt per `docId:rev` per session, successful or not. A member
+ * (or an offline owner) must not re-upload on every scroll, and a refused
+ * upload on this device will be refused again the same way.
+ */
+const attempted = new Set<string>();
+
+/** Whether a publish for this revision is still worth attempting this session; null = nothing published. */
+export const shouldPublishThumbnail = (docId: string, rev: number, publishedRev: number | null): boolean =>
+    (publishedRev === null || rev > publishedRev) && !attempted.has(`${docId}:${rev}`);
+
+/** Upload the render and stamp the row. Resolves to whether both landed. */
+export const publishThumbnail = async (docId: string, rev: number, blob: Blob): Promise<boolean> => {
+    const key = `${docId}:${rev}`;
+    if (attempted.has(key)) {
+        return false;
+    }
+    attempted.add(key);
+    try {
+        const supabase = getSupabase();
+        const { error } = await supabase.storage
+            .from(BUCKET)
+            .upload(thumbnailObjectPath(docId, rev), blob, { contentType: 'image/jpeg', upsert: true });
+        if (error) {
+            return false;
+        }
+        const { error: rowError } = await supabase.from('documents').update({ thumb_rev: rev }).eq('id', docId);
+        return !rowError;
+    } catch {
+        return false;
+    }
+};
+
+/**
+ * Downloads run a few at a time. A shelf of a hundred cards mounting at once
+ * must not open a hundred connections — and on a phone the visible dozen are
+ * the ones that matter, so the queue is FIFO in mount order.
+ */
+const MAX_CONCURRENT_DOWNLOADS = 4;
+let active = 0;
+const waiting: Array<() => void> = [];
+
+const acquire = (): Promise<void> =>
+    new Promise((resolve) => {
+        if (active < MAX_CONCURRENT_DOWNLOADS) {
+            active += 1;
+            resolve();
+            return;
+        }
+        waiting.push(() => {
+            active += 1;
+            resolve();
+        });
+    });
+
+const release = (): void => {
+    active -= 1;
+    waiting.shift()?.();
+};
+
+/** The published cover at this revision, or null when there is none / no network. */
+export const fetchPublishedThumbnail = async (docId: string, rev: number): Promise<Blob | null> => {
+    await acquire();
+    try {
+        const { data, error } = await getSupabase().storage.from(BUCKET).download(thumbnailObjectPath(docId, rev));
+        if (error || !data) {
+            return null;
+        }
+        return data;
+    } catch {
+        return null;
+    } finally {
+        release();
+    }
+};

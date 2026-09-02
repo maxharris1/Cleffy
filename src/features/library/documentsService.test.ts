@@ -90,6 +90,7 @@ const doc = (over: Partial<DocumentRow> = {}): DocumentRow => ({
     storage_path: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1/original.pdf',
     page_count: 3,
     content_rev: 0,
+    thumb_rev: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
     archived_at: null,
@@ -101,6 +102,8 @@ interface StubOptions {
     downloadError?: string;
     backupError?: string | null;
     listNames?: string[];
+    /** Objects under the document's folder in the thumbnails bucket. */
+    thumbListNames?: string[];
     updatedRow?: DocumentRow;
     deleteError?: string;
 }
@@ -110,12 +113,13 @@ const makeStub = (options: StubOptions = {}) => {
         download: vi.fn(),
         upload: vi.fn(),
         remove: vi.fn(),
+        removeFrom: vi.fn(),
         list: vi.fn(),
         update: vi.fn(),
         upsert: vi.fn(),
         delete: vi.fn(),
     };
-    const storageApi = {
+    const storageApi = (bucket: string) => ({
         download: (path: string) => {
             calls.download(path);
             if (options.downloadError) {
@@ -138,18 +142,20 @@ const makeStub = (options: StubOptions = {}) => {
         },
         remove: (paths: string[]) => {
             calls.remove(paths);
+            calls.removeFrom(bucket, paths);
             return Promise.resolve({ data: null, error: null });
         },
         list: (prefix: string) => {
             calls.list(prefix);
+            const names = bucket === 'thumbnails' ? (options.thumbListNames ?? []) : (options.listNames ?? []);
             return Promise.resolve({
-                data: (options.listNames ?? []).map((name) => ({ name })),
+                data: names.map((name) => ({ name })),
                 error: null,
             });
         },
-    };
+    });
     const supabase = {
-        storage: { from: () => storageApi },
+        storage: { from: (bucket: string) => storageApi(bucket) },
         from: (table: string) => ({
             update: (patch: Record<string, unknown>) => {
                 calls.update(table, patch);
@@ -409,7 +415,23 @@ describe('deleteDocument', () => {
         const calls = makeStub({ listNames: ['original.pdf', 'pre-import-original.pdf'] });
         const d = doc();
         await deleteDocument(d);
-        expect(calls.remove).toHaveBeenCalledWith([`${d.id}/original.pdf`, `${d.id}/pre-import-original.pdf`]);
+        expect(calls.removeFrom).toHaveBeenCalledWith('scores', [
+            `${d.id}/original.pdf`,
+            `${d.id}/pre-import-original.pdf`,
+        ]);
+    });
+
+    it('removes the published covers along with the PDF', async () => {
+        const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg', '2.jpg'] });
+        const d = doc();
+        await deleteDocument(d);
+        expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', [`${d.id}/0.jpg`, `${d.id}/2.jpg`]);
+    });
+
+    it('does not touch the thumbnails bucket when nothing was ever published', async () => {
+        const calls = makeStub({ listNames: ['original.pdf'] });
+        await deleteDocument(doc());
+        expect(calls.removeFrom).not.toHaveBeenCalledWith('thumbnails', expect.anything());
     });
 
     /**
