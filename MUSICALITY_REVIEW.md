@@ -23,14 +23,11 @@
 >   no heading of its own starts at its meter default rather than the previous movement's
 >   ritardando floor. Gradual marks are shaded (poco / molto) and the stepped family —
 >   meno mosso, più mosso, ritenuto, l'istesso tempo, doppio movimento — is read.
-> - **svc-9** — ornaments (trill, mordent, turn) and arpeggio signs are spelled as ordinary
->   notes at the tempo in force; appoggiaturas take the beat and acciaccaturas scale with
->   the pulse; a "swing" heading long–shorts pairs of eighths.
 >
-> Still open, and still described accurately below: velocity-layered samples, the measure
-> counter across concatenated movements, `totalTicks` cutting off secondary parts, and both
-> rhythm findings in the case study (No. 1's triplets, No. 2's misread meter) — those two are
-> Audiveris's limits, not ours.
+> Still open, and still described accurately below: ornaments and trills, appoggiatura versus
+> acciaccatura, swing, velocity-layered samples, the measure counter across concatenated
+> movements, `totalTicks` cutting off secondary parts, and both rhythm findings in the case
+> study (No. 1's triplets, No. 2's misread meter) — those two are Audiveris's limits, not ours.
 >
 > None of this reaches a document that was already analyzed until it is regenerated. The engine
 > generation bump is what puts that offer on the reader's screen.
@@ -76,7 +73,7 @@ Output (`t` = tick, `d` = duration, `v` = velocity):
 ```
 
 Every staccato quarter is `d=480` — full length. The accent is inaudible. The crescendo is
-flat. The fermata does not hold. The tempo stays 120. And the right hand is playing _piano_
+flat. The fermata does not hold. The tempo stays 120. And the right hand is playing *piano*
 from bar 2 to the end of the piece.
 
 ---
@@ -128,12 +125,12 @@ smeared" rather than as a missing feature.
 nothing else in the app reads it, fingering included. So `d` is already a _sounding_ duration
 in practice, and the OMR service can shorten it directly:
 
-| marking       | gate  |
-| ------------- | ----- |
-| staccatissimo | ~0.25 |
-| staccato      | ~0.50 |
-| (unmarked)    | ~0.90 |
-| tenuto/slur   | 1.0   |
+| marking      | gate         |
+| ------------ | ------------ |
+| staccatissimo| ~0.25        |
+| staccato     | ~0.50        |
+| (unmarked)   | ~0.90        |
+| tenuto/slur  | 1.0          |
 
 No schema change, no client change.
 
@@ -193,7 +190,7 @@ against data that already exists.
 - **Ornaments:** trill / mordent / turn / arpeggiate play as plain notes (probe: the trill
   became a plain quarter). Reasonable v1 scope, but a real gap for baroque and classical.
 - **Grace notes:** always crushed acciaccatura at a fixed `GRACE_TICKS = 110`. `<grace
-slash="no">` — an appoggiatura, which should take half the principal's value **on** the
+  slash="no">` — an appoggiatura, which should take half the principal's value **on** the
   beat — plays identically. `steal-time-following` / `steal-time-previous` ignored. (Minor: the
   comment at `musicxml.ts:43` says "≈55 ms at 120 bpm"; 110/480 quarter at 120 bpm is ~115 ms.)
 - **Swing:** no swing flag in ScoreData; eighths are always straight. If charts/lead sheets are
@@ -273,26 +270,26 @@ ScoreData.
 **Key signatures are essentially perfect.** All twenty key changes across the set are correct,
 including internal modulations:
 
-|       | printed                              | read                             |
-| ----- | ------------------------------------ | -------------------------------- |
-| No. 1 | C major, → G major middle section    | 0 (default), `fifths=1` @42000 ✓ |
-| No. 2 | A♭ major, → F♯ minor middle sections | `-4`, `+3` twice ✓               |
-| No. 3 | F minor                              | `-4` ✓                           |
-| No. 4 | C♯ minor                             | `+4` ✓                           |
-| No. 5 | F minor                              | `-4` ✓                           |
-| No. 6 | A♭ major                             | `-4` ✓                           |
+| | printed | read |
+| --- | --- | --- |
+| No. 1 | C major, → G major middle section | 0 (default), `fifths=1` @42000 ✓ |
+| No. 2 | A♭ major, → F♯ minor middle sections | `-4`, `+3` twice ✓ |
+| No. 3 | F minor | `-4` ✓ |
+| No. 4 | C♯ minor | `+4` ✓ |
+| No. 5 | F minor | `-4` ✓ |
+| No. 6 | A♭ major | `-4` ✓ |
 
 Catching the enharmonic F♯-minor episodes inside an A♭ movement — twice — is genuinely good.
 
 **Movement segmentation found all six.** **Time signatures: five of six correct.** And rhythm
 recognition in the back four movements is strong:
 
-| movement    | bars | bars at correct length | rate    |
-| ----------- | ---- | ---------------------- | ------- |
-| No. 3 (2/4) | 77   | 76                     | **99%** |
-| No. 4 (2/4) | 182  | 172                    | **95%** |
-| No. 5 (2/4) | 111  | 110                    | **99%** |
-| No. 6 (3/4) | 120  | 116                    | **97%** |
+| movement | bars | bars at correct length | rate |
+| --- | --- | --- | --- |
+| No. 3 (2/4) | 77 | 76 | **99%** |
+| No. 4 (2/4) | 182 | 172 | **95%** |
+| No. 5 (2/4) | 111 | 110 | **99%** |
+| No. 6 (3/4) | 120 | 116 | **97%** |
 
 ## No. 2 is read in 6/8. It is printed in 9/8.
 
@@ -302,9 +299,9 @@ This is an Audiveris misread, not a parser bug — but **the parser then amplifi
 bar length becomes 1440 ticks instead of 2160, so the underfull-padding path
 (`musicxml.ts:643-651`) pads bars to a target derived from the wrong meter:
 
-| movement    | bars | at correct length | actual ticks | correct ticks |
-| ----------- | ---- | ----------------- | ------------ | ------------- |
-| No. 2 (9/8) | 94   | **18 (19%)**      | 159,960      | 203,040       |
+| movement | bars | at correct length | actual ticks | correct ticks |
+| --- | --- | --- | --- | --- |
+| No. 2 (9/8) | 94 | **18 (19%)** | 159,960 | 203,040 |
 
 44 bars were padded to exactly 1440 — each one **720 ticks short, a full dotted-quarter beat
 of 9/8**. The Andantino runs **21% short overall**, and because the error accumulates bar by
@@ -318,9 +315,9 @@ Instead the padding logic propagated it, and the user was told nothing.
 
 ## No. 1 loses its triplets
 
-| movement    | bars | at correct length | rate    |
-| ----------- | ---- | ----------------- | ------- |
-| No. 1 (3/4) | 95   | 64                | **67%** |
+| movement | bars | at correct length | rate |
+| --- | --- | --- | --- |
+| No. 1 (3/4) | 95 | 64 | **67%** |
 
 67% is an **upper bound** — silently padded underfull bars also land on exactly 1440 and are
 indistinguishable from correct ones in the stored data.
@@ -355,15 +352,15 @@ on a singing line over a quieter accompaniment.
 
 The whole dynamic range of the set reduces to seven values:
 
-| velocity | notes | share |                  |
-| -------- | ----- | ----- | ---------------- |
-| 0.34     | 3460  | 42.2% | `pp`             |
-| 0.46     | 3454  | 42.1% | `p`              |
-| 0.82     | 885   | 10.8% | `f`              |
-| 0.92     | 333   | 4.1%  | `ff`             |
-| 0.66     | 51    | 0.6%  | accent over `p`  |
-| 0.70     | 13    | 0.2%  | `mf`             |
-| 0.54     | 2     | 0.0%  | accent over `pp` |
+| velocity | notes | share | |
+| --- | --- | --- | --- |
+| 0.34 | 3460 | 42.2% | `pp` |
+| 0.46 | 3454 | 42.1% | `p` |
+| 0.82 | 885 | 10.8% | `f` |
+| 0.92 | 333 | 4.1% | `ff` |
+| 0.66 | 51 | 0.6% | accent over `p` |
+| 0.70 | 13 | 0.2% | `mf` |
+| 0.54 | 2 | 0.0% | accent over `pp` |
 
 **84% of the work plays at _p_ or _pp_.** Every value is an exact `DYNAMIC_LEVELS` constant or
 an accent offset — **there is not one intermediate value in 8198 notes**. That is direct proof
@@ -396,8 +393,8 @@ of six movements are all good enough to practise against. The failures cluster i
 places:
 
 1. **Rhythm, where the notation is dense** (No. 1's triplets, No. 2's misread meter). Both are
-   Audiveris limits, but both were _detectable_ from data the pipeline already computes and
-   _worsened_ by padding against a wrong target.
+   Audiveris limits, but both were *detectable* from data the pipeline already computes and
+   *worsened* by padding against a wrong target.
 2. **Everything expressive** — dynamics, accents, articulation, tempo, graces, repeats — which
    is the pipeline's own gap, not Audiveris's.
 

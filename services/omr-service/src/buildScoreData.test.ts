@@ -342,4 +342,30 @@ describe('buildScoreData structure', () => {
         expect(score.warnings).toContain('swing_applied');
         expect(score.warnings).toContain('repeats_unrolled');
     });
+
+    it('swings each hand independently on a two-hand bar of eighths', () => {
+        const score = buildScoreData(
+            {
+                ...musical,
+                swing: true,
+                notes: [
+                    { t: 0, d: 216, p: 60, h: 0 },
+                    { t: 0, d: 216, p: 48, h: 1 },
+                    { t: 240, d: 216, p: 62, h: 0 },
+                    { t: 240, d: 216, p: 50, h: 1 },
+                ],
+            },
+            geometry,
+        );
+        const rh = score.notes.filter((n) => n.h === 0);
+        const lh = score.notes.filter((n) => n.h === 1);
+        expect(rh).toEqual([
+            { t: 0, d: 296, p: 60, h: 0 },
+            { t: 320, d: 136, p: 62, h: 0 },
+        ]);
+        expect(lh).toEqual([
+            { t: 0, d: 296, p: 48, h: 1 },
+            { t: 320, d: 136, p: 50, h: 1 },
+        ]);
+    });
 });

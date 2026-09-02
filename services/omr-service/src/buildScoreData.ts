@@ -35,12 +35,13 @@ const applySwing = (notes: ScoreNote[]): ScoreNote[] => {
         n.t += SWING_SHIFT;
         n.d -= SWING_SHIFT;
         const onBeatT = origT - 240;
-        for (let j = 0; j < out.length; j++) {
-            if (grown.has(j)) {
-                continue;
-            }
+        // Notes are sorted by tick, so the partner sits just behind this off-beat.
+        for (let j = i - 1; j >= 0; j--) {
             const on = out[j];
-            if (!on || on.h !== n.h || on.t !== onBeatT || on.d < EIGHTH_MIN || on.d > EIGHTH_MAX) {
+            if (!on || on.t < onBeatT) {
+                break;
+            }
+            if (grown.has(j) || on.h !== n.h || on.t !== onBeatT || on.d < EIGHTH_MIN || on.d > EIGHTH_MAX) {
                 continue;
             }
             on.d += SWING_SHIFT;
