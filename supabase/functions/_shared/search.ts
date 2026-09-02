@@ -454,11 +454,15 @@ export interface RankOptions {
     resolvedPageIds?: Map<string, number>;
     /** Folded resolved title → hard-filter categories the page belongs to. */
     categoryHits?: Map<string, Set<string>>;
-    /** When true, drop hits with no categoryHits entry (instrument hard filter). */
-    requireCategories?: boolean;
+    /**
+     * Hard filter: a hit must be in at least one category of EVERY group
+     * (OR within a group, AND across groups — e.g. [[For piano, For piano (arr)],
+     * [Baroque]]). Empty or absent means no hard filter.
+     */
+    requiredGroups?: string[][];
     /**
      * Folded titles whose category lookup never completed. Under
-     * requireCategories they mean "unknown", not "not a member" — an upstream
+     * requiredGroups they mean "unknown", not "not a member" — an upstream
      * failure must not be indistinguishable from a genuine non-match.
      */
     unverifiedTitles?: Set<string>;
@@ -506,11 +510,15 @@ export const mergeAndRank = (batches: RankBatch[], opts: RankOptions): RankedHit
         });
     }
 
+    const groups = (opts.requiredGroups ?? []).filter((g) => g.length > 0);
+    const satisfiesGroups = (categories: Set<string> | undefined): boolean =>
+        groups.every((group) => group.some((c) => categories?.has(c) ?? false));
+
     const ranked: RankedHit[] = [];
     for (const hit of merged.values()) {
         const folded = foldAccents(hit.title);
         const categories = opts.categoryHits?.get(folded);
-        if (opts.requireCategories && !opts.unverifiedTitles?.has(folded) && (!categories || categories.size === 0)) {
+        if (groups.length > 0 && !opts.unverifiedTitles?.has(folded) && !satisfiesGroups(categories)) {
             continue;
         }
         let score = hit.score + scoreTitleMatch(hit.title, opts.tokens);

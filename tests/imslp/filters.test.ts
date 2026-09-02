@@ -5,6 +5,7 @@ import {
     categoriesInGroups,
     ERA_FACETS,
     hardFilterCategories,
+    hardFilterGroups,
     parseFilters,
     titleMatchesFilters,
 } from '../../supabase/functions/_shared/searchFacetData';
@@ -94,6 +95,27 @@ describe('hardFilterCategories', () => {
     it('is empty without an instrument or era filter', () => {
         expect(hardFilterCategories({ forms: ['sonata'] })).toEqual([]);
         expect(hardFilterCategories({})).toEqual([]);
+    });
+});
+
+describe('hardFilterGroups', () => {
+    it('keeps instrument and era as separate AND groups', () => {
+        expect(hardFilterGroups({ instruments: ['piano'], eras: ['baroque'] })).toEqual([
+            ['For piano', 'For piano (arr)'],
+            ['Baroque'],
+        ]);
+    });
+
+    it('ORs several values inside one dimension', () => {
+        expect(hardFilterGroups({ instruments: ['piano', 'organ'], eras: ['baroque', 'classical'] })).toEqual([
+            ['For piano', 'For piano (arr)', 'For organ', 'For organ (arr)'],
+            ['Baroque', 'Classical'],
+        ]);
+    });
+
+    it('emits no group for a dimension that is not set', () => {
+        expect(hardFilterGroups({ eras: ['romantic'] })).toEqual([['Romantic']]);
+        expect(hardFilterGroups({ forms: ['sonata'], keys: ['c-major'] })).toEqual([]);
     });
 });
 

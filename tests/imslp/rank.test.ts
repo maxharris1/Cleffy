@@ -106,10 +106,29 @@ describe('mergeAndRank', () => {
             query: 'nocturne',
             tokens: ['nocturne'],
             categoryHits,
-            requireCategories: true,
+            requiredGroups: [['For piano', 'For piano (arr)']],
         });
         expect(ranked.map((h) => h.title)).not.toContain(excluded);
         expect(ranked[0]?.title).toBe(original);
+    });
+
+    it('requires every group — For piano membership does not satisfy a Baroque chip', () => {
+        const baroquePiano = 'Suite No.6 in E-flat major (Mattheson, Johann)';
+        const pianoOnly = 'Suite bergamasque, CD 82 (Debussy, Claude)';
+        const baroqueOnly = 'Ouverture-Suite, TWV 55:e8 (Telemann, Georg Philipp)';
+        const batches = [batch('suite', 1, [pianoOnly, baroqueOnly, baroquePiano])];
+        const categoryHits = new Map([
+            [foldAccents(baroquePiano), new Set(['For piano (arr)', 'Baroque'])],
+            [foldAccents(pianoOnly), new Set(['For piano'])],
+            [foldAccents(baroqueOnly), new Set(['Baroque'])],
+        ]);
+        const ranked = mergeAndRank(batches, {
+            query: 'suite',
+            tokens: ['suite'],
+            categoryHits,
+            requiredGroups: [['For piano', 'For piano (arr)'], ['Baroque']],
+        });
+        expect(ranked.map((h) => h.title)).toEqual([baroquePiano]);
     });
 
     it('keeps hits whose category lookup failed rather than treating them as non-members', () => {
@@ -122,21 +141,23 @@ describe('mergeAndRank', () => {
             tokens: ['nocturne'],
             categoryHits: new Map([[foldAccents(member), new Set(['For piano'])]]),
             unverifiedTitles: new Set([foldAccents(unknown)]),
-            requireCategories: true,
+            requiredGroups: [['For piano', 'For piano (arr)']],
         });
         expect(ranked.map((h) => h.title)).toEqual([member, unknown]);
     });
 
-    it('keeps everything when requireCategories is false (relaxed mode)', () => {
+    it('keeps everything when no groups are required (relaxed mode)', () => {
         const titles = ['A (Composer, One)', 'B (Composer, Two)'];
         const batches = [batch('q', 1, titles)];
-        const ranked = mergeAndRank(batches, {
-            query: 'q',
-            tokens: [],
-            categoryHits: new Map(),
-            requireCategories: false,
-        });
-        expect(ranked).toHaveLength(2);
+        for (const requiredGroups of [[], undefined, [[]]]) {
+            const ranked = mergeAndRank(batches, {
+                query: 'q',
+                tokens: [],
+                categoryHits: new Map(),
+                requiredGroups,
+            });
+            expect(ranked).toHaveLength(2);
+        }
     });
 
     it('does not let "Op." and "No." stop tokens trigger the all-tokens bonus', () => {

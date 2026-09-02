@@ -6,7 +6,7 @@ import {
     categoryGroupsFor,
     facetBoost,
     facetTokens,
-    hardFilterCategories,
+    hardFilterGroups,
     hasActiveFilters,
     parseFilters,
     parseSort,
@@ -395,7 +395,12 @@ Deno.serve(async (req) => {
         const searchQ = extracted.rest.length > 0 ? extracted.rest : q;
         const typedFilters: SearchFilters = { ...filters, eras: eraIds };
 
-        const hardCategories = hardFilterCategories(typedFilters);
+        // One group per hard dimension (instrument, era). Relaxation drops whole
+        // groups, era first, so the hint can name what was actually let go.
+        const instrumentGroups = hardFilterGroups({ instruments: typedFilters.instruments });
+        const eraGroups = hardFilterGroups({ eras: typedFilters.eras });
+        const allGroups = [...instrumentGroups, ...eraGroups];
+        const hardCategories = allGroups.flat();
         const missingSnapshots = await categoriesMissingSnapshot(hardCategories);
         const liveCategories = hardCategories.filter((c) => missingSnapshots.includes(c));
         const cachedCategories = hardCategories.filter((c) => !missingSnapshots.includes(c));
@@ -441,7 +446,7 @@ Deno.serve(async (req) => {
         const resolution = await resolveTitles(collectTitles(), liveCategories);
         await fillCachedMembership(collectTitles(), cachedCategories, resolution.categoryHits);
 
-        const rank = (requireCategories: boolean): RankedHit[] => {
+        const rank = (requiredGroups: string[][]): RankedHit[] => {
             const ranked = mergeAndRank(batches, {
                 query: searchQ,
                 tokens,
@@ -451,7 +456,7 @@ Deno.serve(async (req) => {
                 resolvedPageIds: resolution.resolvedPageIds,
                 categoryHits: resolution.categoryHits,
                 unverifiedTitles: resolution.unverified,
-                requireCategories,
+                requiredGroups,
                 extraScore: (title) => facetBoost(title, typedFilters),
             });
             if (composerSurnames.length === 0) {
@@ -463,7 +468,7 @@ Deno.serve(async (req) => {
             });
         };
 
-        let ranked = rank(hardCategories.length > 0);
+        let ranked = rank(allGroups);
 
         if (ranked.length < 5) {
             const corrected = correctTokens(tokens, CORRECTION_VOCAB);
@@ -501,19 +506,26 @@ Deno.serve(async (req) => {
                     resolution.unverified.add(title);
                 }
                 await fillCachedMembership(unresolved, cachedCategories, resolution.categoryHits);
-                ranked = rank(hardCategories.length > 0);
+                ranked = rank(allGroups);
             }
         }
 
+        // Too few survivors: let go of the era first (the softer axis), then the
+        // instrument, and only when doing so actually finds more.
         const relaxed: RelaxedConstraint[] = [];
-        if (hardCategories.length > 0 && ranked.length < 5) {
-            const relaxedRank = rank(false);
-            if (relaxedRank.length > ranked.length) {
-                ranked = relaxedRank;
-                if ((typedFilters.instruments ?? []).length > 0) {
-                    relaxed.push('instrument');
-                }
-                if (eraIds.length > 0) {
+        if (eraGroups.length > 0 && ranked.length < 5) {
+            const withoutEra = rank(instrumentGroups);
+            if (withoutEra.length > ranked.length) {
+                ranked = withoutEra;
+                relaxed.push('era');
+            }
+        }
+        if (instrumentGroups.length > 0 && ranked.length < 5) {
+            const withoutInstrument = rank([]);
+            if (withoutInstrument.length > ranked.length) {
+                ranked = withoutInstrument;
+                relaxed.push('instrument');
+                if (eraGroups.length > 0 && !relaxed.includes('era')) {
                     relaxed.push('era');
                 }
             }

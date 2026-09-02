@@ -232,22 +232,35 @@ export const categoriesInGroups = (groups: string[][]): string[] => {
 };
 
 /**
- * IMSLP categories that must contain a hit for it to survive hard filters.
- * Instrument includes "(arr)"; era is the period category.
+ * Hard-filter groups for typed search, one per dimension: a hit must belong to
+ * at least one category in EVERY group (OR within, AND across). Instrument
+ * includes "(arr)"; era is the period category. A flat list of these would let
+ * For piano membership satisfy a Baroque chip.
  */
-export const hardFilterCategories = (filters: SearchFilters): string[] => {
-    const cats: string[] = [];
+export const hardFilterGroups = (filters: SearchFilters): string[][] => {
+    const groups: string[][] = [];
+    const instruments: string[] = [];
     for (const id of filters.instruments ?? []) {
-        cats.push(...instrumentCategories(id));
+        instruments.push(...instrumentCategories(id));
     }
+    if (instruments.length > 0) {
+        groups.push(instruments);
+    }
+    const eras: string[] = [];
     for (const id of filters.eras ?? []) {
         const category = ERA_BY_ID[id]?.category;
         if (category) {
-            cats.push(category);
+            eras.push(category);
         }
     }
-    return cats;
+    if (eras.length > 0) {
+        groups.push(eras);
+    }
+    return groups;
 };
+
+/** Flattened hardFilterGroups — the categories whose membership must be looked up. */
+export const hardFilterCategories = (filters: SearchFilters): string[] => hardFilterGroups(filters).flat();
 
 /** Extra search tokens implied by filters. Era is category membership, not tokens. */
 export const facetTokens = (filters: SearchFilters): string[] => {
