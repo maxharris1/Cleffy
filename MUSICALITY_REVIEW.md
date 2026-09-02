@@ -23,11 +23,14 @@
 >   no heading of its own starts at its meter default rather than the previous movement's
 >   ritardando floor. Gradual marks are shaded (poco / molto) and the stepped family —
 >   meno mosso, più mosso, ritenuto, l'istesso tempo, doppio movimento — is read.
+> - **svc-9** — ornaments (trill, mordent, turn) and arpeggio signs are spelled as ordinary
+>   notes at the tempo in force; appoggiaturas take the beat and acciaccaturas scale with
+>   the pulse; a "swing" heading long–shorts pairs of eighths.
 >
-> Still open, and still described accurately below: ornaments and trills, appoggiatura versus
-> acciaccatura, swing, velocity-layered samples, the measure counter across concatenated
-> movements, `totalTicks` cutting off secondary parts, and both rhythm findings in the case
-> study (No. 1's triplets, No. 2's misread meter) — those two are Audiveris's limits, not ours.
+> Still open, and still described accurately below: velocity-layered samples, the measure
+> counter across concatenated movements, `totalTicks` cutting off secondary parts, and both
+> rhythm findings in the case study (No. 1's triplets, No. 2's misread meter) — those two are
+> Audiveris's limits, not ours.
 >
 > None of this reaches a document that was already analyzed until it is regenerated. The engine
 > generation bump is what puts that offer on the reader's screen.
