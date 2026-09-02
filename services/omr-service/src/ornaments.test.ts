@@ -87,6 +87,21 @@ describe('realizeOrnament', () => {
         ]);
     });
 
+    it('trills a half note in 32nds at 120 bpm and 64ths below 90 bpm', () => {
+        const half = { ...C4, d: 960 };
+        const allegro = realizeOrnament(half, 'trill', { fifths: 0, bpm: 120 });
+        const adagio = realizeOrnament(half, 'trill', { fifths: 0, bpm: 60 });
+        expect(allegro.slice(0, -1).every((n) => n.d === 60)).toBe(true);
+        expect(adagio.slice(0, -1).every((n) => n.d === 30)).toBe(true);
+        expect(allegro.length).toBe(15);
+        expect(adagio.length).toBe(31);
+        expect(allegro.length).not.toBe(adagio.length);
+        expect(span(allegro)).toBe(960);
+        expect(span(adagio)).toBe(960);
+        expect(allegro[allegro.length - 1]?.p).toBe(60);
+        expect(adagio[adagio.length - 1]?.p).toBe(60);
+    });
+
     it('caps a trill at 64 units', () => {
         const long = { ...C4, d: 64 * 60 + 480 };
         const out = realizeOrnament(long, 'trill', { fifths: 0, bpm: 120 });

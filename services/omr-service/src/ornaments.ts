@@ -77,10 +77,9 @@ export const realizeOrnament = (
     kind: OrnamentKind,
     opts: { fifths: number; bpm: number; accidentalMark?: AccidentalMark },
 ): ScoreNote[] => {
-    void opts.bpm;
     const { upper, lower } = neighbours(principal.p, opts.fifths, opts.accidentalMark);
     if (kind === 'trill') {
-        return realizeTrill(principal, upper);
+        return realizeTrill(principal, upper, opts.bpm);
     }
     if (kind === 'mordent') {
         return realizeMordent(principal, lower);
@@ -94,12 +93,15 @@ export const realizeOrnament = (
     return realizeTurn(principal, lower, upper);
 };
 
-const realizeTrill = (principal: ScoreNote, upper: number): ScoreNote[] => {
+const realizeTrill = (principal: ScoreNote, upper: number, bpm: number): ScoreNote[] => {
     if (principal.d < 120) {
         return [principal];
     }
+    // Below 90, a 32nd is a slow wobble (125 ms at 60 bpm); a 64th keeps the
+    // figure sounding like a trill. Mordents and turns stay on 32nds.
+    const unit = bpm < 90 ? 30 : THIRTY_SECOND;
     const altV = trillVelocity(principal);
-    let units = Math.min(64, Math.floor(principal.d / THIRTY_SECOND));
+    let units = Math.min(64, Math.floor(principal.d / unit));
     if (units < 2) {
         return [principal];
     }
@@ -114,7 +116,7 @@ const realizeTrill = (principal: ScoreNote, upper: number): ScoreNote[] => {
     for (let i = 0; i < units; i++) {
         const isPrincipal = i % 2 === 0;
         const isLast = i === units - 1;
-        const d = isLast ? principal.t + principal.d - t : THIRTY_SECOND;
+        const d = isLast ? principal.t + principal.d - t : unit;
         out.push(
             clone(principal, {
                 t,
