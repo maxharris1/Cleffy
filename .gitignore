@@ -33,3 +33,4 @@ e2e-shots
 
 # OMR bench CSV output
 services/omr-service/bench/results
+__pycache__/
