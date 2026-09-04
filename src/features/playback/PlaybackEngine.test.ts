@@ -316,9 +316,12 @@ describe('PlaybackEngine', () => {
         await advance(ctx, 16);
         expect(ctx.sources).toHaveLength(tinyScore.notes.length);
         // The pickup carries no dynamic of its own: the score default, nudged
-        // by this note's jitter, through the dB velocity curve.
+        // by this note's jitter, lifted as the tune and placed in its phrase's
+        // contour, through the dB velocity curve.
+        const pickupPhrase = buildNoteShapes(tinyScore)[0]?.phrase ?? 0;
+        expect(pickupPhrase).toBeLessThan(0);
         expect(ctx.gains[FIRST_VOICE_GAIN]?.gain.value).toBeCloseTo(
-            velocityToGain(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT),
+            velocityToGain(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT + pickupPhrase),
             10,
         );
         // Note k starts at anchor(0.08) + map(t), shaped by its chord and jitter.

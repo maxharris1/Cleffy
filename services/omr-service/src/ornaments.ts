@@ -1,3 +1,4 @@
+import type { Era } from './era.js';
 import { DEFAULT_VELOCITY } from './scoreData.js';
 import type { ScoreNote } from './scoreData.js';
 
@@ -76,17 +77,22 @@ const trillVelocity = (principal: ScoreNote): number =>
 export const realizeOrnament = (
     principal: ScoreNote,
     kind: OrnamentKind,
-    opts: { fifths: number; bpm: number; accidentalMark?: AccidentalMark },
+    opts: { fifths: number; bpm: number; accidentalMark?: AccidentalMark; era?: Era },
 ): ScoreNote[] => {
     const { upper, lower } = neighbours(principal.p, opts.fifths, opts.accidentalMark);
+    // Before about 1800 the upper-neighbour ornaments begin ON the auxiliary
+    // (Bach's Explication, C. P. E. Bach): the trill and the Pralltriller start
+    // above and fall to the principal. The mordent proper is principal-first in
+    // every era, so it is untouched.
+    const fromAbove = opts.era === 'baroque';
     if (kind === 'trill') {
-        return realizeTrill(principal, upper, opts.bpm);
+        return realizeTrill(principal, upper, opts.bpm, fromAbove);
     }
     if (kind === 'mordent') {
         return realizeMordent(principal, lower);
     }
     if (kind === 'inverted-mordent') {
-        return realizeMordent(principal, upper);
+        return fromAbove ? realizePralltriller(principal, upper) : realizeMordent(principal, upper);
     }
     if (kind === 'turn') {
         return realizeTurn(principal, upper, lower);
@@ -94,7 +100,7 @@ export const realizeOrnament = (
     return realizeTurn(principal, lower, upper);
 };
 
-const realizeTrill = (principal: ScoreNote, upper: number, bpm: number): ScoreNote[] => {
+const realizeTrill = (principal: ScoreNote, upper: number, bpm: number, fromAbove = false): ScoreNote[] => {
     if (principal.d < 120) {
         return [principal];
     }
@@ -106,16 +112,16 @@ const realizeTrill = (principal: ScoreNote, upper: number, bpm: number): ScoreNo
     if (units < 2) {
         return [principal];
     }
-    // Alternate principal / upper, starting on the principal. An even count
-    // would end on the upper; drop that last upper so the final unit is the
-    // principal, and give it any remainder of the sounding duration.
-    if (units % 2 === 0) {
+    // Alternate principal / upper. The figure always ENDS on the principal,
+    // which gets any remainder of the sounding duration: starting on the
+    // principal that is an odd count; starting above (Baroque) an even one.
+    if (fromAbove ? units % 2 === 1 : units % 2 === 0) {
         units -= 1;
     }
     const out: ScoreNote[] = [];
     let t = principal.t;
     for (let i = 0; i < units; i++) {
-        const isPrincipal = i % 2 === 0;
+        const isPrincipal = fromAbove ? i % 2 === 1 : i % 2 === 0;
         const isLast = i === units - 1;
         const d = isLast ? principal.t + principal.d - t : unit;
         out.push(
@@ -142,6 +148,20 @@ const realizeMordent = (principal: ScoreNote, neighbour: number): ScoreNote[] =>
     ];
 };
 
+/** Baroque Pralltriller: upper–principal–upper, then the principal holds. */
+const realizePralltriller = (principal: ScoreNote, upper: number): ScoreNote[] => {
+    if (principal.d < 240) {
+        return [principal];
+    }
+    const altV = trillVelocity(principal);
+    return [
+        clone(principal, { d: THIRTY_SECOND, p: upper, v: altV }),
+        clone(principal, { t: principal.t + THIRTY_SECOND, d: THIRTY_SECOND }),
+        clone(principal, { t: principal.t + 2 * THIRTY_SECOND, d: THIRTY_SECOND, p: upper, v: altV }),
+        clone(principal, { t: principal.t + 3 * THIRTY_SECOND, d: principal.d - 3 * THIRTY_SECOND }),
+    ];
+};
+
 const realizeTurn = (principal: ScoreNote, first: number, third: number): ScoreNote[] => {
     if (principal.d < 300) {
         return [principal];
@@ -152,6 +172,52 @@ const realizeTurn = (principal: ScoreNote, first: number, third: number): ScoreN
     const rest = principal.d - span;
     if (rest > 0) {
         out.push(clone(principal, { t: principal.t + span, d: rest }));
+    }
+    return out;
+};
+
+/**
+ * A single-note tremolo as the measured repetition it abbreviates: `strokes`
+ * beams give eighths (1), sixteenths (2), 32nds (3)…, repeated across the
+ * sounding span, the last repetition taking any remainder. A note too short
+ * for two strokes comes back unchanged.
+ */
+export const realizeTremolo = (principal: ScoreNote, strokes: number): ScoreNote[] => {
+    const unit = Math.max(THIRTY_SECOND / 2, Math.round(480 / 2 ** strokes));
+    const count = Math.min(64, Math.floor(principal.d / unit));
+    if (count < 2) {
+        return [principal];
+    }
+    const out: ScoreNote[] = [];
+    for (let i = 0; i < count; i++) {
+        const t = principal.t + i * unit;
+        const d = i === count - 1 ? principal.t + principal.d - t : unit;
+        out.push(clone(principal, { t, d }));
+    }
+    return out;
+};
+
+/** Longest glissando spelled out; beyond it the run is left as the two written notes. */
+const MAX_GLISSANDO_STEPS = 48;
+
+/**
+ * A glissando as the chromatic run a keyboard can make of it: from the
+ * written start, one semitone per step toward `target` (exclusive — the
+ * target is its own written note), spread evenly over the start note's
+ * sounding span. An interval of a step or less has nothing to fill.
+ */
+export const realizeGlissando = (start: ScoreNote, target: number): ScoreNote[] => {
+    const steps = Math.abs(target - start.p);
+    if (steps < 2 || steps > MAX_GLISSANDO_STEPS || start.d < steps * (THIRTY_SECOND / 2)) {
+        return [start];
+    }
+    const direction = target > start.p ? 1 : -1;
+    const out: ScoreNote[] = [];
+    let t = start.t;
+    for (let i = 0; i < steps; i++) {
+        const end = i === steps - 1 ? start.t + start.d : start.t + Math.round(((i + 1) * start.d) / steps);
+        out.push(clone(start, { t, d: end - t, p: start.p + i * direction }));
+        t = end;
     }
     return out;
 };

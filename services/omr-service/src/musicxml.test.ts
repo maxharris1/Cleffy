@@ -1379,6 +1379,58 @@ describe('ornaments, graces and swing', () => {
         expect(score.warnings).toContain('ornaments_realized');
     });
 
+    it('plays a single-note tremolo as the repetition it abbreviates', () => {
+        // A half note with two strokes: eight sixteenths on one pitch, tenuto so
+        // the sounding span is the full 960.
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('G', 4, 8, '<notations><ornaments><tremolo type="single">2</tremolo></ornaments><articulations><tenuto/></articulations></notations>')}${note('C', 4, 8)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        const repeated = score.notes.filter((n) => n.p === 67);
+        expect(repeated.map((n) => n.t)).toEqual([0, 120, 240, 360, 480, 600, 720, 840]);
+        expect(repeated.every((n) => n.d === 120)).toBe(true);
+        expect(score.warnings).toContain('ornaments_realized');
+        // A two-note tremolo is not modelled: the notes play as written.
+        const twoNote = wrap(
+            `<measure number="1">${ATTRS_44}${note('G', 4, 8, '<notations><ornaments><tremolo type="start">2</tremolo></ornaments></notations>')}${note('C', 4, 8, '<notations><ornaments><tremolo type="stop">2</tremolo></ornaments></notations>')}</measure>`,
+        );
+        expect(parseMusicXmlString(twoNote).notes).toHaveLength(2);
+    });
+
+    it('fills a glissando with the chromatic run up to its target', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 8, '<notations><glissando type="start"/></notations>')}${note('F', 4, 8, '<notations><glissando type="stop"/></notations>')}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        // C4 → F4 is five semitones: C C# D D# E over the C's span, then the F as written.
+        expect(score.notes.map((n) => n.p)).toEqual([60, 61, 62, 63, 64, 65]);
+        const run = score.notes.slice(0, 5);
+        expect(run[0]?.t).toBe(0);
+        expect(run.reduce((sum, n) => sum + n.d, 0)).toBe(plain(960));
+        expect(score.notes[5]).toMatchObject({ t: 960, d: plain(960) });
+        expect(score.warnings).toContain('ornaments_realized');
+    });
+
+    it('stops the clock half a beat after a caesura or breath mark', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 8, '<notations><articulations><caesura/></articulations></notations>')}${note('D', 4, 4, '<notations><articulations><breath-mark/></articulations></notations>')}${note('E', 4, 4)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.holds).toEqual([
+            { tick: 960, beats: 0.5 },
+            { tick: 1440, beats: 0.5 },
+        ]);
+    });
+
+    it('starts the same trill from above when the job says the piece is Baroque', () => {
+        const xml = wrap(`<measure number="1">${ATTRS_44}${note('C', 4, 8, orns('trill-mark'))}</measure>`);
+        const notes = parseMusicXmlString(xml, 0, undefined, { era: 'baroque' }).notes;
+        expect(notes[0]?.p).toBe(62);
+        expect(notes[1]?.p).toBe(60);
+        expect(notes[notes.length - 1]?.p).toBe(60);
+        expect(notes.reduce((sum, n) => sum + n.d, 0)).toBe(960);
+    });
+
     it('realises a mordent as principal–lower–principal', () => {
         const xml = wrap(
             `<measure number="1">${ATTRS_44}${note('C', 4, 4, orns('mordent'))}${note('E', 4, 12)}</measure>`,

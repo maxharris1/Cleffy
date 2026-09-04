@@ -77,6 +77,14 @@ export const ACCOMPANIMENT_DIP = 6 / 127;
 export const LEGATO_OVERLAP_FRACTION = 0.06;
 /** …and never more than this, so a long note's overlap does not become a smear. */
 export const LEGATO_OVERLAP_MAX_S = 0.06;
+/**
+ * Phrase shaping: a melody-voice phrase leans toward its highest note and away
+ * from its lowest, by up to this much either way. Three MIDI steps; uncalibrated.
+ */
+export const PHRASE_CONTOUR = 3 / 127;
+/** The second-to-last and last note of a legato run in the melody voice ease off by these. */
+export const LEGATO_TAPER_PENULTIMATE = 2 / 127;
+export const LEGATO_TAPER_LAST = 3 / 127;
 
 /** Floor for a humanized velocity: below this a note is inaudible, not quiet. */
 export const MIN_VELOCITY = 0.05;
@@ -364,6 +372,102 @@ const evictEnded = (active: ActiveNote[], tick: number): void => {
     active.length = kept;
 };
 
+/** Whether note `i` is in the melody voice of the bar it sounds in. */
+const inMelodyVoice = (score: ScoreData, analysis: VoiceAnalysis, i: number): boolean => {
+    const note = score.notes[i];
+    if (!note) {
+        return false;
+    }
+    const bar = measureIndexAtTick(score.measures, note.t);
+    return bar >= 0 && analysis.melodyVoiceByBar[bar] === analysis.voiceOf[i];
+};
+
+/**
+ * Phrase shaping inside the melody voice, written into `shape.phrase`. Two
+ * gestures a player makes without thinking: a line grows toward its peak and
+ * eases away from it, so each phrase (from one phrase start to the next in
+ * the voice) maps its lowest note to −{@link PHRASE_CONTOUR} and its highest
+ * to +; and a legato run lands softly, its last two notes taking off
+ * {@link LEGATO_TAPER_PENULTIMATE} and {@link LEGATO_TAPER_LAST}. Only melody
+ * voice notes are shaped: an accompaniment already has its dip.
+ */
+const shapePhrases = (score: ScoreData, analysis: VoiceAnalysis, shapes: NoteShape[]): void => {
+    const notes = score.notes;
+    // Notes are tick-sorted, so walking them in order and bucketing by voice
+    // yields each voice's notes in onset order.
+    const byVoice = new Map<number, number[]>();
+    for (let i = 0; i < notes.length; i++) {
+        const key = analysis.voiceOf[i];
+        if (key === undefined) {
+            continue;
+        }
+        const list = byVoice.get(key);
+        if (list) {
+            list.push(i);
+        } else {
+            byVoice.set(key, [i]);
+        }
+    }
+
+    for (const indices of byVoice.values()) {
+        let segmentStart = 0;
+        for (let k = 1; k <= indices.length; k++) {
+            const index = indices[k];
+            const startsPhrase =
+                index === undefined ||
+                (analysis.phraseStart[index] && notes[index]?.t !== notes[indices[k - 1] ?? -1]?.t);
+            if (!startsPhrase) {
+                continue;
+            }
+            const segment = indices.slice(segmentStart, k);
+            // The line is the top of each onset: a chord's members share its place
+            // in the contour rather than being spread across it.
+            const topAt = new Map<number, number>();
+            for (const i of segment) {
+                const note = notes[i];
+                if (note) {
+                    topAt.set(note.t, Math.max(topAt.get(note.t) ?? Number.NEGATIVE_INFINITY, note.p));
+                }
+            }
+            let low = Number.POSITIVE_INFINITY;
+            let high = Number.NEGATIVE_INFINITY;
+            for (const pitch of topAt.values()) {
+                low = Math.min(low, pitch);
+                high = Math.max(high, pitch);
+            }
+            if (topAt.size >= 2 && high > low) {
+                for (const i of segment) {
+                    const note = notes[i];
+                    const shape = shapes[i];
+                    const top = note ? topAt.get(note.t) : undefined;
+                    if (note && shape && top !== undefined && inMelodyVoice(score, analysis, i)) {
+                        shape.phrase += PHRASE_CONTOUR * ((2 * (top - low)) / (high - low) - 1);
+                    }
+                }
+            }
+            segmentStart = k;
+        }
+    }
+
+    // A chord's members all run into the same successor; it lands once.
+    const tapered = new Set<number>();
+    for (let i = 0; i < notes.length; i++) {
+        const next = analysis.nextInVoice[i] ?? -1;
+        if (!analysis.legato[i] || next < 0 || analysis.legato[next]) {
+            continue;
+        }
+        const penultimate = shapes[i];
+        const last = shapes[next];
+        if (penultimate && inMelodyVoice(score, analysis, i)) {
+            penultimate.phrase -= LEGATO_TAPER_PENULTIMATE;
+        }
+        if (last && !tapered.has(next) && inMelodyVoice(score, analysis, next)) {
+            tapered.add(next);
+            last.phrase -= LEGATO_TAPER_LAST;
+        }
+    }
+};
+
 /**
  * One pass over the score at engine construction, deciding what each note owes
  * to its neighbours: a chord is rolled from the bottom up the way a hand
@@ -406,6 +510,7 @@ export const buildNoteShapes = (
             shape.dip += ACCOMPANIMENT_DIP;
         }
     }
+    shapePhrases(score, analysis, shapes);
 
     // Beat ticks and their metrical weight, from the same beat grid the
     // metronome clicks. The click's boolean accent is unchanged; this map is
