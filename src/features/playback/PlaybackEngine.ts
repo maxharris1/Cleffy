@@ -3,13 +3,19 @@ import {
     buildPedalEnds,
     buildReverbImpulse,
     buildSoftClipCurve,
+    CHORD_ROLL_MAX_S,
     clampVelocity,
     filterCutoffHz,
+    JITTER_TIME_S,
     noteJitter,
     panForMidi,
     PEDAL_RELEASE_TAU_S,
     releaseTauFor,
+    REVERB_SECONDS,
+    REVERB_SECONDS_LOW_POWER,
+    REVERB_SEED,
     REVERB_WET,
+    seededUnitRng,
     velocityToGain,
 } from '@/features/playback/expression';
 import type { NoteShape } from '@/features/playback/expression';
@@ -196,6 +202,14 @@ export interface ScheduledVoice {
     gain: GainNodeLike;
     /** Pitch, so a re-strike can find the voice it is silencing. */
     midi: number;
+    /**
+     * Struck velocity, before clamping. A unison keeps the louder of two
+     * same-pitch attacks, and that comparison has to see the melody lift
+     * (and not the clamped floor).
+     */
+    velocity: number;
+    /** Context time this voice was asked to be heard at (after roll/jitter). */
+    startAt: number;
     /** Context time the source stops; nothing of this voice sounds past it. */
     stopsAt: number;
     /** Release the voice's nodes once it has ended. */
@@ -263,7 +277,7 @@ export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice |
             }
         }
     };
-    return { source, gain, midi, stopsAt, dispose };
+    return { source, gain, midi, velocity: request.velocity, startAt: request.startAt, stopsAt, dispose };
 };
 
 /**
@@ -271,9 +285,14 @@ export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice |
  * notated end can only mean the pedal is holding it, so it decays as a free
  * string; anything else is a damper landing, which {@link releaseTauFor}
  * already describes better than a single constant could.
+ *
+ * A pedal-held note cut at a loop's B point is the second case, even though
+ * the clamped end is past the written one: the wrap is a damper, not a lift,
+ * and using {@link PEDAL_RELEASE_TAU_S} here would carry the previous pass's
+ * harmony a beat into the next.
  */
-const releaseTauOverrideFor = (note: ScoreNote, endTick: number): number | undefined =>
-    endTick > note.t + note.d ? PEDAL_RELEASE_TAU_S : undefined;
+const releaseTauOverrideFor = (note: ScoreNote, endTick: number, cutAtRegion: boolean): number | undefined =>
+    !cutAtRegion && endTick > note.t + note.d ? PEDAL_RELEASE_TAU_S : undefined;
 
 export interface LoopRegion {
     startTick: number;
@@ -348,7 +367,7 @@ export class PlaybackEngine {
         // pedal, being state integrated from edges, cannot be resolved for one
         // note in isolation at the moment that note is scheduled.
         this.shapes = buildNoteShapes(options.score);
-        this.pedalEnds = buildPedalEnds(options.score.notes, options.score.pedals);
+        this.pedalEnds = buildPedalEnds(options.score.notes, options.score.pedals, options.score.totalTicks);
         this.map = buildTempoMap(options.score, this.scaleFor(options.bpm), options.bpm);
         this.onStatus = options.onStatus;
         this.onPositionJump = options.onPositionJump;
@@ -627,7 +646,11 @@ export class PlaybackEngine {
         const send = ctx.createGain();
         send.gain.value = REVERB_WET;
         const convolver = ctx.createConvolver();
-        convolver.buffer = buildReverbImpulse(ctx);
+        const lowPower = typeof navigator !== 'undefined' && (navigator.hardwareConcurrency ?? 8) <= 4;
+        convolver.buffer = buildReverbImpulse(ctx, {
+            rng: seededUnitRng(REVERB_SEED),
+            seconds: lowPower ? REVERB_SECONDS_LOW_POWER : REVERB_SECONDS,
+        });
         send.connect(convolver);
         convolver.connect(master);
         rh.connect(send);
@@ -796,15 +819,24 @@ export class PlaybackEngine {
             // Durations convert through the map, so a note sounding across a
             // fermata rings through the hold instead of being cut at it. The
             // hold is measured from the unshifted onset, so a rolled chord's
-            // notes all ring for their written length.
+            // notes all ring for their written length — never from a clamped
+            // attack, which would shorten the note when the roll is pulled back.
             const endTick = this.effectiveEndTick(index, note, regionEnd);
+            const cutAtRegion = (this.pedalEnds[index] ?? note.t + note.d) > regionEnd;
+            let onset = startAt + this.attackOffsetFor(index, note);
+            if (this.loop) {
+                // Chord roll + jitter can push an upper note past B even when
+                // its grid tick is inside the loop; wrapping that attack onto
+                // the next downbeat flams the seam.
+                onset = Math.min(onset, this.timeOfTick(regionEnd) - 0.001);
+            }
             this.scheduleNote(
                 note.p,
                 note.h,
-                startAt + this.attackOffsetFor(index, note),
-                this.timeOfTick(endTick) - startAt,
+                onset,
+                Math.max(0, this.timeOfTick(endTick) - startAt),
                 this.velocityFor(index, note),
-                releaseTauOverrideFor(note, endTick),
+                releaseTauOverrideFor(note, endTick, cutAtRegion),
             );
         }
     }
@@ -840,6 +872,7 @@ export class PlaybackEngine {
             if (noteEnd <= tick) {
                 continue;
             }
+            const cutAtRegion = (this.pedalEnds[index] ?? note.t + note.d) > regionEnd;
             // No attack offset here: the roll and the timing jitter belong to an
             // onset that already happened, and this tail starts wherever the
             // transport landed.
@@ -847,9 +880,9 @@ export class PlaybackEngine {
                 note.p,
                 note.h,
                 startAt,
-                this.timeOfTick(noteEnd) - startAt,
+                Math.max(0, this.timeOfTick(noteEnd) - startAt),
                 this.velocityFor(index, note),
-                releaseTauOverrideFor(note, noteEnd),
+                releaseTauOverrideFor(note, noteEnd, cutAtRegion),
             );
         }
     }
@@ -901,22 +934,40 @@ export class PlaybackEngine {
      * that is also the only thing keeping a pedalled passage bounded — under a
      * held pedal a repeated note would otherwise stack a voice per strike until
      * the cap cut the music off — so stealing runs before the cap is consulted.
+     *
+     * Same-tick unisons are the exception: two hands on one key are one sound,
+     * and the louder strike (the one carrying the melody lift) is the one that
+     * should speak. Returning false means the incoming voice is the quieter
+     * copy and must not be scheduled.
      */
-    private stealSamePitch(midi: number, startAt: number): void {
-        for (const voice of this.active) {
+    private stealSamePitch(midi: number, startAt: number, velocity: number): boolean {
+        // Chord roll + jitter can split two same-tick strikes by up to this
+        // much; 1 ms is the "same instant" floor, and anything inside the roll
+        // ceiling is still one musical event, not a re-strike.
+        const unisonWindow = CHORD_ROLL_MAX_S + 2 * JITTER_TIME_S + 0.001;
+        for (const voice of [...this.active]) {
             if (voice.midi !== midi || voice.stopsAt <= startAt) {
                 continue;
             }
-            try {
-                voice.gain.gain.cancelScheduledValues(startAt);
-                voice.gain.gain.setTargetAtTime(0, startAt, STEAL_TAU_S);
-                voice.source.stop(startAt + STEAL_TAU_S * RELEASE_STOP_TAUS);
-            } catch {
-                // never started / already stopped
+            const unison = Math.abs(voice.startAt - startAt) <= unisonWindow;
+            if (unison && velocity <= voice.velocity) {
+                return false;
             }
-            // Its nodes go in onended; the slot is free from here.
-            this.active.delete(voice);
+            this.stealVoice(voice, startAt);
         }
+        return true;
+    }
+
+    private stealVoice(voice: ScheduledVoice, at: number): void {
+        try {
+            voice.gain.gain.cancelScheduledValues(at);
+            voice.gain.gain.setTargetAtTime(0, at, STEAL_TAU_S);
+            voice.source.stop(at + STEAL_TAU_S * RELEASE_STOP_TAUS);
+        } catch {
+            // never started / already stopped
+        }
+        // Its nodes go in onended; the slot is free from here.
+        this.active.delete(voice);
     }
 
     private scheduleNote(
@@ -933,13 +984,25 @@ export class PlaybackEngine {
         if (!ctx || !buffers || !bus) {
             return;
         }
-        this.stealSamePitch(midi, startAt);
+        if (!this.stealSamePitch(midi, startAt, velocity)) {
+            return;
+        }
         if (this.active.size >= MAX_ACTIVE_SOURCES) {
             if (!this.warnedSourceCap) {
                 this.warnedSourceCap = true;
                 this.onWarning?.('too_many_voices');
             }
-            return;
+            // Dropping the incoming note is the most audible failure: steal the
+            // voice that is nearest to finishing so the new attack still speaks.
+            let victim: ScheduledVoice | undefined;
+            for (const voice of this.active) {
+                if (!victim || voice.stopsAt < victim.stopsAt) {
+                    victim = voice;
+                }
+            }
+            if (victim) {
+                this.stealVoice(victim, startAt);
+            }
         }
         const entry = schedulePianoVoice({
             ctx,

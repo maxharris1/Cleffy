@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     buildNoteShapes,
+    clampVelocity,
+    MELODY_LIFT,
     noteJitter,
     PEDAL_RELEASE_TAU_S,
     releaseTauFor,
@@ -530,6 +532,61 @@ describe('expression through the engine', () => {
         // …and it arrives after it: the chord rolls from the bottom up.
         expect((top?.startedAt ?? 0) - (under?.startedAt ?? 0)).toBeGreaterThan(0);
     });
+
+    it('keeps a rolled chord on the last beat of a loop from attacking after B', async () => {
+        // Four notes on the last beat of a one-bar loop, close enough to B that
+        // a 12 ms roll would otherwise land the top notes after the wrap.
+        const B = 1920;
+        const lastBeat = B - 8;
+        const chord: ScoreNote[] = [60, 64, 67, 72].map((p) => ({ t: lastBeat, d: 8, p, h: 0 as const }));
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: chord,
+            totalTicks: B,
+            measures: [{ n: 1, tick: 0, dTicks: B, page: 0, sys: 0, x0: 0.08, x1: 0.92 }],
+        };
+        const { ctx, engine } = makeEngine({ score });
+        engine.setLoop({ startTick: 0, endTick: B });
+        await engine.play();
+        await advance(ctx, 2.6);
+        const bTime = 0.08 + B * SPT_120;
+        const firstPass = ctx.sources.filter((s) => (s.startedAt ?? Infinity) < bTime + 0.05);
+        expect(firstPass).toHaveLength(4);
+        for (const source of firstPass) {
+            expect(source.startedAt ?? Infinity).toBeLessThan(bTime);
+        }
+    });
+
+    it('keeps the lifted G when the left hand doubles it on the same tick', async () => {
+        const notes: ScoreNote[] = [
+            { t: 0, d: 480, p: 60, h: 0 },
+            { t: 0, d: 480, p: 64, h: 0 },
+            { t: 0, d: 480, p: 67, h: 0 },
+            { t: 0, d: 480, p: 67, h: 1 },
+        ];
+        const score: ScoreData = { ...tinyScore, notes };
+        const { ctx, engine, buffers } = makeEngine({ score });
+        await engine.play();
+        await advance(ctx, 0.5);
+        const gSources = ctx.sources.filter((s) => s.buffer === sampleOf(buffers, 67));
+        expect(gSources).toHaveLength(1);
+        const lifted = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 67, 0).dv + MELODY_LIFT);
+        expect(voiceGainOf(gSources[0])).toBeCloseTo(velocityToGain(lifted), 10);
+    });
+
+    it('builds the same room for every engine of the same score', async () => {
+        const a = makeEngine();
+        await a.engine.play();
+        const b = makeEngine();
+        await b.engine.play();
+        const bufA = a.ctx.convolvers[0]?.buffer;
+        const bufB = b.ctx.convolvers[0]?.buffer;
+        expect(bufA).toBeDefined();
+        expect(bufB).toBeDefined();
+        expect(bufA?.length).toBe(bufB?.length);
+        expect(Array.from(bufA!.getChannelData(0))).toEqual(Array.from(bufB!.getChannelData(0)));
+        expect(Array.from(bufA!.getChannelData(1))).toEqual(Array.from(bufB!.getChannelData(1)));
+    });
 });
 
 describe('tempo map', () => {
@@ -696,7 +753,8 @@ describe('sustain pedal', () => {
 
     it('cuts a pedalled note at the loop end, the way a written one is cut', async () => {
         // Pedalled to 5760, but the B point is 2400 — carrying the harmony over
-        // the wrap would smear every pass into the next.
+        // the wrap would smear every pass into the next. The clamp is a damper,
+        // not a lift, so the tail is the damped one.
         const { ctx, engine } = makeEngine({
             score: pedalled(
                 [
@@ -710,7 +768,30 @@ describe('sustain pedal', () => {
         await engine.play();
         await advance(ctx, 1);
         expect(ctx.sources).toHaveLength(1);
-        expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + PEDAL_TAIL_S, 9);
+        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv);
+        const dampedTail = Math.max(0.3, 5 * releaseTauFor(72, vel));
+        expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + dampedTail, 9);
+    });
+
+    it('damps a loop-clamped pedalled note instead of letting the pedal tail ring into the wrap', async () => {
+        const { ctx, engine, buffers } = makeEngine({
+            score: pedalled(
+                [
+                    { tick: 0, k: 'down' },
+                    { tick: 5760, k: 'up' },
+                ],
+                [{ t: 0, d: 480, p: 72, h: 0 }],
+            ),
+        });
+        engine.setLoop({ startTick: 0, endTick: 2400 });
+        await engine.play();
+        await advance(ctx, 1);
+        const held = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        const bTime = 0.08 + 2400 * SPT_120;
+        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv);
+        const damped = Math.max(0.3, 5 * releaseTauFor(72, vel));
+        expect(held?.stoppedAt ?? Infinity).toBeLessThanOrEqual(bTime + damped + 0.006);
+        expect(held?.stoppedAt ?? Infinity).toBeLessThan(bTime + 1.25);
     });
 
     it('revives only the key still down when a seek lands inside a held pedal', async () => {
@@ -779,5 +860,23 @@ describe('sustain pedal', () => {
         await advance(ctx, 0.5);
         expect(ctx.sources).toHaveLength(80);
         expect(warnings).toEqual([]);
+    });
+
+    it('steals the soonest-ending voice once the cap is hit, rather than dropping the incoming note', async () => {
+        const cluster = Array.from({ length: 97 }, (_, i): ScoreNote => ({ t: 0, d: 480, p: 21 + i, h: 0 }));
+        const { ctx, engine, warnings } = makeEngine({ score: pedalled([], cluster) });
+        await engine.play();
+        await advance(ctx, 0.5);
+        expect(ctx.sources).toHaveLength(97);
+        expect(warnings).toEqual(['too_many_voices']);
+        const stolen = ctx.sources.filter((source) => {
+            const ramp = voiceGainNodeOf(source)?.gain.targets.find((t) => t.target === 0 && t.tau === 0.01);
+            return ramp !== undefined;
+        });
+        expect(stolen).toHaveLength(1);
+        const incoming = ctx.sources[96];
+        expect(voiceGainOf(incoming)).toBeGreaterThan(0);
+        expect(incoming?.startedAt).not.toBeNull();
+        expect(voiceGainNodeOf(incoming)?.gain.targets.some((t) => t.tau === 0.01)).toBe(false);
     });
 });

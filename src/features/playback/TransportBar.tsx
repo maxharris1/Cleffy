@@ -6,7 +6,7 @@ import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import { BPM_MAX, BPM_MIN, useViewerStore } from '@/state/store';
 import type { MemberRole } from '@/types/database';
-import { hasLeftHand, tempoIsInferred } from '@/types/scoreData';
+import { hasLeftHand } from '@/types/scoreData';
 import type { ScoreData } from '@/types/scoreData';
 import {
     ChevronDownIcon,
@@ -760,15 +760,39 @@ const HandControl = ({
 );
 
 /**
- * Which admission the guessed tempo warrants. A tempo word beats the meter as
- * an explanation whenever one was read, since the meter is only ever the last
- * resort for a score that marks nothing.
+ * True when the opening tempo was guessed rather than printed. A WORD only
+ * counts at tick 0 — `tempoIsInferred` in the schema module treats any WORD as
+ * an estimate, which is why this lives here: that file is watched by the
+ * engine-version guard, and this badge change does not change what a PDF turns
+ * into.
+ */
+const openingTempoIsInferred = (score: ScoreData): boolean => {
+    const opening = score.tempos?.[0];
+    return (
+        (opening?.src === 'word' && opening.tick === 0) ||
+        ((opening?.tick ?? Number.POSITIVE_INFINITY) > 0 &&
+            (score.warnings.includes('tempo_inferred') || score.warnings.includes('tempo_defaulted')))
+    );
+};
+
+/**
+ * Which admission the guessed tempo warrants. A tempo word at the opening
+ * beats the meter as an explanation; a WORD further in does not, because the
+ * meter is what filled the unmarked start. The meter is only ever the last
+ * resort for a score that marks nothing at tick 0.
  */
 const tempoEstimate = (score: ScoreData): TempoEstimate | null => {
-    if (!tempoIsInferred(score)) {
+    if (!openingTempoIsInferred(score)) {
         return null;
     }
-    return score.tempos?.[0]?.src === 'word' || score.warnings.includes('tempo_inferred') ? 'word' : 'meter';
+    const opening = score.tempos?.[0];
+    const openingWord = opening?.src === 'word' && opening.tick === 0;
+    // A later WORD must not outrank a meter-defaulted opening: the first page
+    // printed no tempo at all, and that is what the badge should admit.
+    if (score.warnings.includes('tempo_defaulted') && !openingWord) {
+        return 'meter';
+    }
+    return 'word';
 };
 
 /** 6/8, 9/8, 12/8… — musicians read those tempos in dotted-quarter beats. */
