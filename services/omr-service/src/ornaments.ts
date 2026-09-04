@@ -62,6 +62,7 @@ const clone = (note: ScoreNote, over: Partial<ScoreNote>): ScoreNote => ({
     p: over.p ?? note.p,
     h: over.h ?? note.h,
     ...(over.v !== undefined ? { v: over.v } : note.v !== undefined ? { v: note.v } : {}),
+    ...(note.vc !== undefined ? { vc: note.vc } : {}),
 });
 
 const trillVelocity = (principal: ScoreNote): number =>

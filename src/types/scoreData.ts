@@ -8,7 +8,8 @@ import { z } from 'zod';
  * to the rendered PDF. v2 also carries per-staff bands, key signatures, and
  * clefs so the fingering populator can synthesize notehead bboxes. v3 adds a
  * tempo map and fermata holds, so playback can follow the score's own tempo
- * instead of one number for the whole piece. v4 adds sustain-pedal edges.
+ * instead of one number for the whole piece. v4 adds sustain-pedal edges. v5
+ * adds the voice slot each note belongs to.
  *
  * All geometry is normalized 0–1 against its page (the same contract as
  * annotations), so it is zoom/DPI/rotation invariant.
@@ -16,13 +17,16 @@ import { z } from 'zod';
  * KEEP IN LOCKSTEP with services/omr-service/src/scoreData.ts.
  */
 
-/** Current writer version. Readers accept 1 through 4 (see parseScoreData). */
-export const SCORE_DATA_VERSION = 4;
+/** Current writer version. Readers accept 1 through 5 (see parseScoreData). */
+export const SCORE_DATA_VERSION = 5;
 /** Oldest ScoreData version the client still serves from cache. */
 export const SCORE_DATA_MIN_VERSION = 1;
 
 /** Canonical tick resolution — every duration is normalized to 480 ticks per quarter note. */
 export const TICKS_PER_QUARTER = 480;
+
+/** Highest voice slot a note may carry; slots are per staff, 0-based. */
+export const MAX_VOICE_SLOT = 7;
 
 /**
  * Velocity for a note the score never gave a dynamic — roughly mezzo-forte.
@@ -48,6 +52,12 @@ const scoreNoteSchema = z.object({
     h: z.union([z.literal(0), z.literal(1)]),
     /** Velocity 0–1 (optional; playback defaults apply). */
     v: z.number().min(0).max(1).optional(),
+    /**
+     * Voice slot within the hand's staff, normalised so the same slot names the
+     * same voice across barlines even where the engraving renumbered it. Absent
+     * on v1–v4 caches and read as 0. v5+.
+     */
+    vc: z.number().int().min(0).max(MAX_VOICE_SLOT).optional(),
 });
 
 const scoreMeasureSchema = z.object({

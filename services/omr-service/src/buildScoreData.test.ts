@@ -82,7 +82,7 @@ describe('buildScoreData', () => {
         ]);
         expect(score.defaultBpm).toBe(88);
         expect(score.warnings).toContain('grace_notes_skipped');
-        expect(score.version).toBe(4);
+        expect(score.version).toBe(5);
     });
 
     it('degrades to geometry-less measures when the .omr is unusable', () => {
