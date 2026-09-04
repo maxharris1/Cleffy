@@ -41,9 +41,11 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
     });
 
     it('zips every measure to geometry in reading order, skipping the cautionary stack', () => {
-        // 15 stacks ↔ 15 measures, so nothing geometric to report. The single
-        // warning is about tempo: Audiveris never recognized the ♩=n text.
-        expect(score.warnings).toEqual(['tempo_defaulted']);
+        // 15 stacks ↔ 15 measures, so nothing geometric to report. The warnings
+        // are about tempo — Audiveris never recognized the ♩=n text — and the
+        // pedalling this unmarked score was given.
+        expect(score.warnings).toEqual(['tempo_defaulted', 'pedal_inferred']);
+        expect(score.pedals?.length ?? 0).toBeGreaterThan(0);
         for (const [index, measure] of score.measures.entries()) {
             expect(measure.sys, `measure ${index} has geometry`).toBeGreaterThanOrEqual(0);
             expect(measure.x1).toBeGreaterThan(measure.x0);

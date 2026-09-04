@@ -237,6 +237,7 @@ const makeEngine = (overrides?: {
     attackLagSec?: number;
     allLayers?: boolean;
     tempoStyle?: TempoStyle;
+    autoPedal?: boolean;
 }) => {
     const ctx = new MockContext();
     const statuses: PlaybackStatus[] = [];
@@ -250,6 +251,7 @@ const makeEngine = (overrides?: {
         score: overrides?.score ?? tinyScore,
         bpm: overrides?.bpm ?? 120,
         ...(overrides?.tempoStyle ? { tempoStyle: overrides.tempoStyle } : {}),
+        ...(overrides?.autoPedal === undefined ? {} : { autoPedal: overrides.autoPedal }),
         onStatus: (status) => statuses.push(status),
         onWarning: (code) => warnings.push(code),
         createContext: () => ctx,
@@ -1094,6 +1096,65 @@ describe('sustain pedal', () => {
         expect(voiceGainOf(incoming)).toBeGreaterThan(0);
         expect(incoming?.startedAt).not.toBeNull();
         expect(voiceGainNodeOf(incoming)?.gain.targets.some((t) => t.tau === 0.01)).toBe(false);
+    });
+});
+
+describe('auto-pedal', () => {
+    const edges: ScorePedal[] = [
+        { tick: 0, k: 'down' },
+        { tick: 2400, k: 'up' },
+    ];
+    const inferred: ScoreData = { ...tinyScore, pedals: edges, warnings: ['pedal_inferred'] };
+    const engraved: ScoreData = { ...tinyScore, pedals: edges };
+    const pickupLifespan = async (score: ScoreData, autoPedal?: boolean): Promise<number> => {
+        const { ctx, engine, buffers } = makeEngine({ score, autoPedal });
+        await engine.play();
+        await advance(ctx, 3);
+        return lifespanOf(ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72)));
+    };
+
+    it('plays inferred pedalling by default, exactly like engraved pedalling', async () => {
+        expect(await pickupLifespan(inferred)).toBe(await pickupLifespan(engraved));
+        expect(await pickupLifespan(inferred, true)).toBe(await pickupLifespan(engraved));
+    });
+
+    it('drops inferred pedalling when auto-pedal is off, but never engraved pedalling', async () => {
+        const dry = await pickupLifespan({ ...tinyScore, warnings: ['pedal_inferred'] });
+        expect(await pickupLifespan(inferred, false)).toBe(dry);
+        expect(await pickupLifespan(engraved, false)).toBe(await pickupLifespan(engraved));
+    });
+
+    it('can be toggled before play and reports its state', async () => {
+        const { ctx, engine, buffers } = makeEngine({ score: inferred });
+        expect(engine.getAutoPedal()).toBe(true);
+        engine.setAutoPedal(false);
+        expect(engine.getAutoPedal()).toBe(false);
+        await engine.play();
+        await advance(ctx, 3);
+        const pickup = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        expect(lifespanOf(pickup)).toBe(await pickupLifespan({ ...tinyScore, warnings: ['pedal_inferred'] }));
+    });
+
+    it('takes effect mid-play for the notes still to come', async () => {
+        const { ctx, engine, buffers } = makeEngine({ score: inferred, autoPedal: false });
+        await engine.play();
+        // 0.2 s in: the chord on beat 1 of m.1 (tick 480, 0.58 s) is still
+        // outside the scheduler's lookahead.
+        await advance(ctx, 0.2);
+        engine.setAutoPedal(true);
+        await advance(ctx, 3.3);
+        // With the pedal down from tick 0 to 2400, that chord's E5 (written for
+        // 960 ticks) now rings to the lift; without it, it would not.
+        const e5 = (sources: MockSource[], b: PianoBuffers) =>
+            lifespanOf(sources.find((s) => s.buffer === sampleOf(b, 76)));
+        const withPedal = makeEngine({ score: inferred });
+        await withPedal.engine.play();
+        await advance(withPedal.ctx, 3.5);
+        const dry = makeEngine({ score: inferred, autoPedal: false });
+        await dry.engine.play();
+        await advance(dry.ctx, 3.5);
+        expect(e5(ctx.sources, buffers)).toBeCloseTo(e5(withPedal.ctx.sources, withPedal.buffers), 6);
+        expect(e5(ctx.sources, buffers)).toBeGreaterThan(e5(dry.ctx.sources, dry.buffers) + 0.5);
     });
 });
 

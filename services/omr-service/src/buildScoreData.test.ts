@@ -113,6 +113,40 @@ describe('buildScoreData', () => {
     });
 });
 
+describe('buildScoreData auto-pedal', () => {
+    it('pedals an unmarked score by its era and says so', () => {
+        const score = buildScoreData(musical, geometry, { era: 'romantic' });
+        expect(score.warnings).toContain('pedal_inferred');
+        expect(score.pedals?.[0]).toEqual({ tick: 0, k: 'down' });
+        expect(score.pedals?.[score.pedals.length - 1]?.k).toBe('up');
+    });
+
+    it('defaults to Classical pedalling when no era is given', () => {
+        expect(buildScoreData(musical, geometry).pedals).toEqual(
+            buildScoreData(musical, geometry, { era: 'classical' }).pedals,
+        );
+    });
+
+    it('leaves Baroque music dry, with no disclosure', () => {
+        const score = buildScoreData(musical, geometry, { era: 'baroque' });
+        expect(score.pedals).toBeUndefined();
+        expect(score.warnings).not.toContain('pedal_inferred');
+    });
+
+    it('does not second-guess engraved pedalling', () => {
+        const pedalled: MusicalScore = {
+            ...musical,
+            pedals: [
+                { tick: 0, k: 'down' },
+                { tick: 3839, k: 'up' },
+            ],
+        };
+        const score = buildScoreData(pedalled, geometry, { era: 'romantic' });
+        expect(score.pedals).toEqual(pedalled.pedals);
+        expect(score.warnings).not.toContain('pedal_inferred');
+    });
+});
+
 describe('buildScoreData structure', () => {
     const plainMarks = {
         repeatForward: false,

@@ -1,4 +1,6 @@
+import { inferAutoPedal } from './autoPedal.js';
 import { capHolds, capPedals, capTempoEvents } from './caps.js';
+import { DEFAULT_ERA, type Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import type { MusicalScore } from './musicxml.js';
 import type { OmrGeometry } from './omrGeometry.js';
@@ -59,7 +61,16 @@ const applySwing = (notes: ScoreNote[]): ScoreNote[] => {
  * they don't, the tail degrades to geometry-less measures (audio still plays,
  * the playhead hides there) rather than risking wrong positions.
  */
-export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | null): ScoreData => {
+export interface BuildScoreDataOptions {
+    /** Stylistic era, which decides how an unpedalled score is pedalled. */
+    era?: Era;
+}
+
+export const buildScoreData = (
+    musical: MusicalScore,
+    geometry: OmrGeometry | null,
+    options: BuildScoreDataOptions = {},
+): ScoreData => {
     if (musical.notes.length === 0 || musical.measures.length === 0) {
         throw new JobError(ERROR_CODES.noStavesFound, 'No playable notes recognized');
     }
@@ -186,7 +197,24 @@ export const buildScoreData = (musical: MusicalScore, geometry: OmrGeometry | nu
     // self-check below, throwing away a score that is otherwise perfectly good.
     const tempos = performed.tempos ? capTempoEvents(performed.tempos) : undefined;
     const holds = performed.holds ? capHolds(performed.holds) : undefined;
-    const pedals = performed.pedals ? capPedals(performed.pedals) : undefined;
+
+    // Where the engraving does not pedal, play it the way its era would. On
+    // the performed timeline so a repeated passage is pedalled both times, and
+    // before the cap so the inference can coarsen itself to fit under it.
+    const pedalling = inferAutoPedal(
+        {
+            notes: performed.notes,
+            measures: performed.measures,
+            timeSignatures: performed.timeSignatures,
+            pedals: performed.pedals ?? [],
+            totalTicks: performed.totalTicks,
+        },
+        options.era ?? DEFAULT_ERA,
+    );
+    if (pedalling.inferred) {
+        warnings.add('pedal_inferred');
+    }
+    const pedals = pedalling.pedals.length > 0 ? capPedals(pedalling.pedals) : undefined;
 
     const candidate: ScoreData = {
         version: SCORE_DATA_VERSION,

@@ -8,6 +8,7 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
 import { runAudiveris, timeoutForPages } from './audiveris.js';
 import { buildScoreData } from './buildScoreData.js';
+import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
 import {
     cacheLookup,
@@ -129,6 +130,8 @@ interface PipelineAdapters {
     registerKill?: (kill: KillJvm) => void;
     /** When true, abort without failing (lease lost). */
     isAbandoned?: () => boolean;
+    /** The document's stylistic era, for auto-pedalling; the default when absent. */
+    resolveEra?: () => Promise<Era>;
 }
 
 /**
@@ -154,6 +157,7 @@ export const runJob = async (job: JobRequest, writeback: Writeback): Promise<voi
             return true;
         },
         onFailed: (code) => writeback.failed(job.documentId, code),
+        resolveEra: () => eraForDocument(job.documentId),
     });
 };
 
@@ -214,6 +218,7 @@ export const runClaimedJob = async (
                 killJvm = kill;
             },
             isAbandoned: () => abandoned,
+            resolveEra: () => eraForDocument(job.document_id),
         });
         return { ok };
     } finally {
@@ -257,10 +262,14 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             return false;
         }
 
+        // Looked up only on a cache miss: a cached score already carries its
+        // pedalling, and every document sharing that PDF shares it too.
+        const era = adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
         const score = await transcribe(
             pdfPath,
             workDir,
             timings,
+            era,
             (sheet) => {
                 const now = Date.now();
                 if (now - lastBeat >= HEARTBEAT_MIN_INTERVAL_MS) {
@@ -325,6 +334,7 @@ const transcribe = async (
     pdfPath: string,
     workDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill?: (kill: KillJvm) => void,
 ): Promise<ScoreData> => {
@@ -332,7 +342,7 @@ const transcribe = async (
     const memoryBytes = readContainerMemoryBytes();
     if (shouldRunParallelShards(pages, memoryBytes)) {
         try {
-            return await transcribeParallel(pdfPath, workDir, timings, onSheet, registerKill);
+            return await transcribeParallel(pdfPath, workDir, timings, era, onSheet, registerKill);
         } catch (err) {
             if (
                 err instanceof JobError &&
@@ -345,6 +355,7 @@ const transcribe = async (
                     pdfPath,
                     join(workDir, 'out-serial'),
                     timings,
+                    era,
                     onSheet,
                     registerKill,
                     undefined,
@@ -357,13 +368,14 @@ const transcribe = async (
         timings.parallelPath = 'serial';
         timings.parallelFallbackReasons = ['insufficient_memory'];
     }
-    return transcribeRange(pdfPath, join(workDir, 'out'), timings, onSheet, registerKill, undefined);
+    return transcribeRange(pdfPath, join(workDir, 'out'), timings, era, onSheet, registerKill, undefined);
 };
 
 const transcribeParallel = async (
     pdfPath: string,
     workDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill?: (kill: KillJvm) => void,
 ): Promise<ScoreData> => {
@@ -424,9 +436,9 @@ const transcribeParallel = async (
     if (!first || !second) {
         throw new JobError(ERROR_CODES.internal, 'parallel transcribe: expected two shards');
     }
-    const parsedA = parseRangeArtifacts(first.mxlBuffers, first.geometry);
+    const parsedA = parseRangeArtifacts(first.mxlBuffers, first.geometry, era);
     const seed = expressionSeedAt(parsedA.musical, overlapPageStartTick(parsedA.score, parsedA.musical));
-    const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, seed);
+    const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, era, seed);
     timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
 
     const parts = [
@@ -449,7 +461,7 @@ const transcribeParallel = async (
         timings.parallelPath = 'serial_fallback';
         timings.parallelFallbackReasons = safety.reasons;
         timings.audiverisTotalMs = Date.now() - started;
-        return transcribeRange(pdfPath, join(workDir, 'out-serial'), timings, onSheet, registerKill, undefined);
+        return transcribeRange(pdfPath, join(workDir, 'out-serial'), timings, era, onSheet, registerKill, undefined);
     }
 
     timings.parallelPath = 'merged';
@@ -461,6 +473,7 @@ const transcribeRange = async (
     pdfPath: string,
     outDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
@@ -470,6 +483,7 @@ const transcribeRange = async (
         pdfPath,
         outDir,
         timings,
+        era,
         onSheet,
         registerKill,
         sheets,
@@ -482,6 +496,7 @@ const transcribeRangeDetailed = async (
     pdfPath: string,
     outDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
@@ -497,7 +512,7 @@ const transcribeRangeDetailed = async (
         aggregateTimings,
     );
     const tParse = Date.now();
-    const parsed = parseRangeArtifacts(artifacts.mxlBuffers, artifacts.geometry);
+    const parsed = parseRangeArtifacts(artifacts.mxlBuffers, artifacts.geometry, era);
     if (aggregateTimings) {
         timings.parseMs = Date.now() - tParse;
     } else {
@@ -545,10 +560,11 @@ const collectRangeArtifacts = async (
 const parseRangeArtifacts = (
     mxlBuffers: Buffer[],
     geometry: OmrGeometry | null,
+    era: Era,
     seed?: ParseSeed,
 ): { score: ScoreData; musical: MusicalScore; openTiesAtEnd: number; structure: StructureSummary } => {
     const musical = parseMxlFiles(mxlBuffers, seed);
-    const score = buildScoreData(musical, geometry);
+    const score = buildScoreData(musical, geometry, { era });
     return {
         score,
         musical,
