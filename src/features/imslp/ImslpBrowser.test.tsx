@@ -725,9 +725,7 @@ describe('ImslpBrowser', () => {
         await waitFor(() => {
             expect(searchSpy).toHaveBeenCalledTimes(2);
         });
-        expect(searchSpy.mock.calls[1]?.[1]).toEqual(
-            expect.objectContaining({ offset: 1, limit: searchSpy.mock.calls[0]?.[1]?.limit }),
-        );
+        expect(searchSpy.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ offset: 1, limit: 100 }));
     });
 
     it('shows an inferred Romantic chip for a typed year query', async () => {

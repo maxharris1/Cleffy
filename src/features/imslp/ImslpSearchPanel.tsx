@@ -123,6 +123,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     /** Show-more params staged by the click for the tick effect to consume. */
     const moreRef = useRef<{ limit: number; offset: number } | null>(null);
     const [moreTick, setMoreTick] = useState(0);
+    const [errorKey, setErrorKey] = useState<string | null>(null);
 
     const filters = useMemo(
         () =>
@@ -145,7 +146,10 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const isDefaultState = isDefaultFilterState && sort === 'relevance' && query.trim() === '';
 
     const q = query.trim();
-    const isLiveQuery = q.length >= 2 || categoryBackedFilters(filters);
+    const isLiveQuery = q.length >= 2 || (categoryBackedFilters(filters) && !isDefaultFilterState);
+    const requestKey = (nextQ: string, nextFilters: unknown, nextSort: SearchSort) =>
+        `${nextQ}\0${JSON.stringify(nextFilters)}\0${nextSort}`;
+    const liveError = searchError && errorKey === requestKey(q, filters, sort) ? searchError : null;
 
     const applyResponse = (
         response: Awaited<ReturnType<typeof searchImslp>>,
@@ -172,6 +176,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         setPeriod(response.period);
         setSearchMode(response.mode ?? (q.length >= 2 ? 'search' : 'browse'));
         setSearchError(null);
+        setErrorKey(null);
     };
 
     const runSearch = useEffectEvent(
@@ -189,6 +194,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             abortRef.current = controller;
             setSearching(true);
             setSearchError(null);
+            setErrorKey(null);
             try {
                 const response = await searchImslp(trimmed, {
                     limit: opts.limit ?? DEFAULT_SEARCH_LIMIT,
@@ -212,6 +218,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                           ? err.message
                           : 'Search failed',
                 );
+                setErrorKey(requestKey(trimmed, nextFilters, nextSort));
             } finally {
                 if (seq === seqRef.current) {
                     setSearching(false);
@@ -223,9 +230,6 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     useEffect(() => {
         const delay = immediateRef.current ? 0 : 280;
         immediateRef.current = false;
-        if (isLiveQuery) {
-            setSearchError(null);
-        }
         const handle = window.setTimeout(() => {
             if (!isLiveQuery) {
                 seqRef.current++;
@@ -241,6 +245,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 setNotReady([]);
                 setPeriod(null);
                 setSearchMode(null);
+                setErrorKey(null);
                 return;
             }
             void runSearch(q, filters, sort, { limit: DEFAULT_SEARCH_LIMIT, offset: 0 });
@@ -259,6 +264,8 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         }
         moreRef.current = null;
         void runSearch(q, filters, sort, { ...params, append: true });
+        // q/filters/sort are read from the click render; a later change clears moreRef instead of appending.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [moreTick]);
 
     useEffect(
@@ -320,7 +327,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 ? `${facetPrefix}${results.length} of ${total}`
                 : `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
           : isLiveQuery
-            ? `${facetPrefix}${searchError ? 'Search unavailable' : 'Searching IMSLP…'}`
+            ? `${facetPrefix}${liveError ? 'Search unavailable' : 'Searching IMSLP…'}`
             : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
 
     const relaxedHint = (() => {
@@ -582,9 +589,9 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 </div>
             ) : null}
 
-            {searchError ? (
+            {liveError ? (
                 <div className="mt-3 flex flex-wrap items-center gap-3">
-                    <ErrorText>{searchError}</ErrorText>
+                    <ErrorText>{liveError}</ErrorText>
                     <Button variant="ghost" size="sm" onClick={searchNow}>
                         Try again
                     </Button>
@@ -641,7 +648,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 </div>
             ) : null}
 
-            {showResults && results.length === 0 && !searching && !searchError ? (
+            {showResults && results.length === 0 && !searching && !liveError ? (
                 <EmptyState
                     className="imslp-panel-view mt-8"
                     title={!indexReady ? 'Index still building' : 'No matches'}
