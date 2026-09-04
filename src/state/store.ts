@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 
+import { readPlaybackPrefs, writePlaybackPrefs } from '@/features/playback/playbackPrefs';
+import type { TempoStyle } from '@/features/playback/playbackPrefs';
 import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
@@ -51,6 +53,10 @@ interface PlaybackSlice {
     countInOn: boolean;
     loopRange: LoopRange | null;
     followMode: FollowMode;
+    /** Per-device preference, persisted; survives a document switch. */
+    tempoStyle: TempoStyle;
+    /** Per-device preference, persisted; survives a document switch. */
+    autoPedal: boolean;
     setPlaybackStatus: (playbackStatus: PlaybackStatus) => void;
     setBpm: (bpm: number) => void;
     setCurrentMeasureIndex: (currentMeasureIndex: number | null) => void;
@@ -60,7 +66,9 @@ interface PlaybackSlice {
     setCountInOn: (countInOn: boolean) => void;
     setLoopRange: (loopRange: LoopRange | null) => void;
     setFollowMode: (followMode: FollowMode) => void;
-    /** Back to defaults when the viewer switches documents. */
+    setTempoStyle: (tempoStyle: TempoStyle) => void;
+    setAutoPedal: (autoPedal: boolean) => void;
+    /** Back to defaults when the viewer switches documents — the persisted preferences stay. */
     resetPlayback: () => void;
 }
 
@@ -123,6 +131,7 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setFocusedPageIndex: (focusedPageIndex) => set({ focusedPageIndex }),
     setFingerDraws: (fingerDraws) => set({ fingerDraws }),
     ...INITIAL_PLAYBACK,
+    ...readPlaybackPrefs(),
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),
     setCurrentMeasureIndex: (currentMeasureIndex) => set({ currentMeasureIndex }),
@@ -135,5 +144,15 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setCountInOn: (countInOn) => set({ countInOn }),
     setLoopRange: (loopRange) => set({ loopRange }),
     setFollowMode: (followMode) => set({ followMode }),
+    setTempoStyle: (tempoStyle) =>
+        set((state) => {
+            writePlaybackPrefs({ tempoStyle, autoPedal: state.autoPedal });
+            return { tempoStyle };
+        }),
+    setAutoPedal: (autoPedal) =>
+        set((state) => {
+            writePlaybackPrefs({ tempoStyle: state.tempoStyle, autoPedal });
+            return { autoPedal };
+        }),
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));

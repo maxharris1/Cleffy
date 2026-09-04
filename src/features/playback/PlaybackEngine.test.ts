@@ -25,7 +25,9 @@ import {
     PIANO_ANCHORS,
 } from '@/features/playback/pianoSampler';
 import type { PianoBuffers } from '@/features/playback/pianoSampler';
+import type { TempoStyle } from '@/features/playback/playbackPrefs';
 import { buildTempoMap, FINAL_RIT_FACTOR, secondsAtTick } from '@/features/playback/scoreTime';
+import { EXPRESSIVE_FINAL_RIT_FACTOR, expressiveTempoCurve } from '@/features/playback/tempoStyle';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY } from '@/types/scoreData';
 import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
@@ -234,6 +236,7 @@ const makeEngine = (overrides?: {
     score?: typeof tinyScore;
     attackLagSec?: number;
     allLayers?: boolean;
+    tempoStyle?: TempoStyle;
 }) => {
     const ctx = new MockContext();
     const statuses: PlaybackStatus[] = [];
@@ -246,6 +249,7 @@ const makeEngine = (overrides?: {
     const engine = new PlaybackEngine({
         score: overrides?.score ?? tinyScore,
         bpm: overrides?.bpm ?? 120,
+        ...(overrides?.tempoStyle ? { tempoStyle: overrides.tempoStyle } : {}),
         onStatus: (status) => statuses.push(status),
         onWarning: (code) => warnings.push(code),
         createContext: () => ctx,
@@ -762,6 +766,129 @@ describe('tempo map', () => {
         engine.setBpm(60);
         expect(engine.getBpmAt(0)).toBe(60);
         expect(engine.getBpmAt(7200)).toBe(Math.round(60 * FINAL_RIT_FACTOR));
+    });
+});
+
+describe('tempo style', () => {
+    const closing: ScoreData = {
+        ...tinyScore,
+        defaultBpm: 120,
+        totalTicks: 7680,
+        timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        tempos: [{ tick: 0, bpm: 120 }],
+        measures: [0, 1, 2, 3].map((i) => ({
+            n: i + 1,
+            tick: i * 1920,
+            dTicks: 1920,
+            page: 0,
+            sys: 0,
+            x0: 0.08,
+            x1: 0.92,
+            srcIndex: i,
+        })),
+        // A quarter-note line, one in each hand, to the very end.
+        notes: Array.from({ length: 16 }, (_, i): ScoreNote[] => [
+            { t: 480 * i, d: 480, p: 72 + (i % 5), h: 0 },
+            { t: 480 * i, d: 480, p: 48 - (i % 3), h: 1 },
+        ]).flat(),
+    };
+
+    const timeline = (ctx: MockContext) => ({
+        onsets: ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b),
+        gains: ctx.sources.map((s) => voiceGainOf(s)).sort((a, b) => a - b),
+        clicks: ctx.oscillators.map((o) => o.startedAt ?? -1).sort((a, b) => a - b),
+    });
+
+    it('clicks each beat exactly once, through the last beat to the end', async () => {
+        // Regression: after the final beat the cursor used to fall back to the
+        // anchor and re-fire every past click on every scheduler tick.
+        const { ctx, engine } = makeEngine({ score: closing, bpm: 120 });
+        engine.setMetronome(true);
+        await engine.play();
+        await advance(ctx, 12);
+        const clicks = ctx.oscillators.map((o) => o.startedAt ?? -1);
+        expect(clicks).toHaveLength(16);
+        expect(new Set(clicks).size).toBe(16);
+    });
+
+    it('strict is byte-identical to giving no style at all', async () => {
+        const plain = makeEngine({ score: closing, bpm: 120 });
+        const strict = makeEngine({ score: closing, bpm: 120, tempoStyle: 'strict' });
+        for (const { engine } of [plain, strict]) {
+            engine.setMetronome(true);
+        }
+        await plain.engine.play();
+        await strict.engine.play();
+        await advance(plain.ctx, 12);
+        await advance(strict.ctx, 12);
+        expect(timeline(strict.ctx)).toEqual(timeline(plain.ctx));
+        expect(plain.ctx.sources.length).toBe(closing.notes.length);
+    });
+
+    it('expressive eases the last beat to 0.75 of the tempo, clicks included', async () => {
+        const { ctx, engine } = makeEngine({ score: closing, bpm: 120, tempoStyle: 'expressive' });
+        engine.setMetronome(true);
+        await engine.play();
+        await advance(ctx, 14);
+        const clicks = ctx.oscillators.map((o) => o.startedAt ?? -1).sort((a, b) => a - b);
+        // 16 beats; the last two clicks are a beat 0.75x as fast apart.
+        expect(clicks).toHaveLength(16);
+        const lastBeat = (clicks[15] ?? 0) - (clicks[14] ?? 0);
+        const firstBeat = (clicks[1] ?? 0) - (clicks[0] ?? 0);
+        expect(firstBeat).toBeCloseTo(0.5, 9);
+        // Click 14→15 spans the beat at factor 6/7 of the way down: 1 + (0.75-1)*(6/7).
+        expect(lastBeat).toBeCloseTo(0.5 / (1 + (EXPRESSIVE_FINAL_RIT_FACTOR - 1) * (6 / 7)), 9);
+        // The notes read the same clock as the click: the note on beat 16 is
+        // struck where the map says, not 7.5 s + 0.08 in.
+        const map = buildTempoMap(closing, 1, 120, expressiveTempoCurve(closing));
+        const expected = 0.08 + secondsAtTick(map, 7200);
+        expect(expected).toBeGreaterThan(0.08 + 7.5);
+        const onBeat16 = ctx.sources.filter((s) => Math.abs((s.startedAt ?? -1) - expected) < 0.02);
+        expect(onBeat16).toHaveLength(2);
+        // The last beat itself runs at the reported tempo.
+        expect(engine.getBpmAt(7200)).toBe(Math.round(120 * EXPRESSIVE_FINAL_RIT_FACTOR));
+        expect(engine.getBpmAt(0)).toBe(120);
+    });
+
+    it('switches style mid-play without moving the playhead', async () => {
+        const { ctx, engine } = makeEngine({ score: closing, bpm: 120 });
+        await engine.play();
+        await advance(ctx, 3);
+        const before = engine.getPositionTicks();
+        engine.setTempoStyle('expressive');
+        expect(engine.getTempoStyle()).toBe('expressive');
+        expect(engine.getPositionTicks()).toBeCloseTo(before, 0);
+        engine.setTempoStyle('strict');
+        expect(engine.getPositionTicks()).toBeCloseTo(before, 0);
+    });
+
+    it('wraps a loop through the closing bars on the expressive clock', async () => {
+        const { ctx, engine } = makeEngine({ score: closing, bpm: 120, tempoStyle: 'expressive' });
+        engine.setLoop({ startTick: 5760, endTick: 7680 });
+        await engine.play();
+        await advance(ctx, 12);
+        const map = buildTempoMap(closing, 1, 120, expressiveTempoCurve(closing));
+        const loopSeconds = secondsAtTick(map, 7680) - secondsAtTick(map, 5760);
+        expect(loopSeconds).toBeGreaterThan(2);
+        const onsets = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
+        const inLoop = closing.notes
+            .map((n, i) =>
+                n.t >= 5760 && n.t < 7680
+                    ? onsetOf(closing, i, secondsAtTick(map, n.t) - secondsAtTick(map, 5760))
+                    : null,
+            )
+            .filter((offset): offset is number => offset !== null);
+        for (const onset of onsets) {
+            const sinceStart = onset - 0.08;
+            const lap = Math.floor(sinceStart / loopSeconds + 1e-6);
+            const offset = sinceStart - lap * loopSeconds;
+            // A note with negative jitter at A lands just before the seam, in
+            // the previous lap's count; it is still on the grid.
+            expect(inLoop.some((o) => Math.abs(o - offset) < 1e-6 || Math.abs(o - (offset - loopSeconds)) < 1e-6)).toBe(
+                true,
+            );
+        }
+        expect(Math.max(...onsets)).toBeGreaterThan(0.08 + loopSeconds);
     });
 });
 

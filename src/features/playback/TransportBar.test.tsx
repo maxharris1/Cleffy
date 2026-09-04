@@ -185,6 +185,43 @@ describe('TransportBar ready controls', () => {
         expect(screen.getByRole('button', { name: /mute left hand/i })).toHaveAttribute('aria-pressed', 'true');
     });
 
+    it('toggles the tempo style and remembers it on this device', async () => {
+        renderBar();
+        const strict = screen.getByRole('button', { name: /strict tempo/i });
+        expect(strict).toHaveAttribute('aria-pressed', 'false');
+        await userEvent.click(strict);
+        expect(useViewerStore.getState().tempoStyle).toBe('expressive');
+        expect(screen.getByRole('button', { name: /expressive tempo/i })).toHaveAttribute('aria-pressed', 'true');
+        expect(JSON.parse(window.localStorage.getItem('cleffy:playback-prefs') ?? '{}')).toMatchObject({
+            tempoStyle: 'expressive',
+        });
+        // Not a per-score setting: resetting playback leaves it alone.
+        setStore(() => useViewerStore.getState().resetPlayback());
+        expect(useViewerStore.getState().tempoStyle).toBe('expressive');
+        setStore(() => useViewerStore.getState().setTempoStyle('strict'));
+    });
+
+    it('offers the auto-pedal toggle only when the pedalling was inferred', async () => {
+        renderBar();
+        expect(screen.queryByRole('button', { name: /auto-pedal/i })).toBeNull();
+        cleanup();
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: { ...tinyScore, warnings: ['pedal_inferred'] },
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+            },
+        });
+        const pedal = screen.getByRole('button', { name: /auto-pedal/i });
+        expect(pedal).toHaveAttribute('aria-pressed', 'true');
+        await userEvent.click(pedal);
+        expect(useViewerStore.getState().autoPedal).toBe(false);
+        expect(screen.getByRole('button', { name: /auto-pedal/i })).toHaveAttribute('aria-pressed', 'false');
+        setStore(() => useViewerStore.getState().setAutoPedal(true));
+    });
+
     it('disables the left hand for single-staff scores', () => {
         const rhOnly = { ...tinyScore, notes: tinyScore.notes.filter((n) => n.h === 0) };
         renderBar({

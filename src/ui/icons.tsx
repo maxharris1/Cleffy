@@ -1,10 +1,12 @@
 import {
     ArrowLeft,
+    AudioWaveform,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     ChevronUp,
     EllipsisVertical,
+    Footprints,
     Hourglass,
     LayoutGrid,
     List,
@@ -71,6 +73,10 @@ export const Volume2Icon = withBrandStroke(Volume2);
 export const VolumeXIcon = withBrandStroke(VolumeX);
 export const RepeatIcon = withBrandStroke(Repeat);
 export const MetronomeIcon = withBrandStroke(Timer);
+/** Expressive tempo: the beat bending rather than ticking. */
+export const TempoStyleIcon = withBrandStroke(AudioWaveform);
+/** Auto-pedal: the foot. */
+export const PedalIcon = withBrandStroke(Footprints);
 export const FollowIcon = withBrandStroke(LocateFixed);
 export const MusicIcon = withBrandStroke(Music);
 export const RetryIcon = withBrandStroke(RefreshCw);
