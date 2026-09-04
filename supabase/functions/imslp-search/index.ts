@@ -11,9 +11,11 @@ import {
     keyTitlePatterns,
     parseFilters,
     parseSort,
+    titleMatchesFilters,
     type RelaxedConstraint,
     type SearchFilters,
 } from '../_shared/searchFacetData.ts';
+import { browseFromIndex as queryBrowseIndex, type BrowseRpcClient } from '../_shared/imslpBrowse.ts';
 import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, serviceClient, workPageUrl } from '../_shared/imslp.ts';
 import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
 import {
@@ -22,7 +24,9 @@ import {
     correctTokens,
     extractPeriod,
     foldAccents,
+    markTitlesUnverified,
     mergeAndRank,
+    titlesForCachedMembership,
     tokenizeQuery,
     type PeriodEraId,
     type RankBatch,
@@ -43,13 +47,6 @@ interface MwSearchHit {
     pageid: number;
     snippet?: string;
     timestamp?: string;
-}
-
-interface BrowseRow {
-    page_title: string;
-    page_id: number;
-    touched: string | null;
-    total: number | string;
 }
 
 interface TitleResolution {
@@ -255,68 +252,48 @@ const browseFromIndex = async (
 }> => {
     const groups = categoryGroupsFor(filters);
     const needed = categoriesInGroups(groups);
-    const admin = serviceClient();
-    if (!admin || needed.length === 0) {
-        return { results: [], total: 0, indexReady: needed.length === 0, hasMore: false, notReady: needed };
-    }
-
-    const { data: missingRaw, error: readyError } = await admin.rpc('imslp_index_ready', { categories: needed });
-    if (readyError) {
-        throw new Error(readyError.message);
-    }
-    const notReady = Array.isArray(missingRaw) ? (missingRaw as string[]) : [];
-    if (notReady.length > 0) {
-        return { results: [], total: 0, indexReady: false, hasMore: false, notReady };
-    }
-
-    // Key chips narrow the intersection inside the function, so total, paging
-    // and hasMore all describe the same filtered set.
-    const { data: rows, error: browseError } = await admin.rpc('imslp_browse', {
+    const browsed = await queryBrowseIndex(serviceClient() as BrowseRpcClient | null, {
         groups,
+        needed,
         sort,
-        lim: limit,
-        off: offset,
-        title_filters: keyTitlePatterns(filters),
-        popular_titles: POPULAR_WORKS.map((w) => w.title),
+        limit,
+        offset,
+        titleFilters: keyTitlePatterns(filters),
+        popularTitles: POPULAR_WORKS.map((w) => w.title),
     });
-    if (browseError) {
-        throw new Error(browseError.message);
-    }
-
-    const page = (rows ?? []) as BrowseRow[];
-    const total = page.length > 0 ? Number(page[0]?.total ?? 0) : 0;
-    const results = page.map((row) => toHit(row.page_title, row.page_id));
     return {
-        results,
-        total,
-        indexReady: true,
-        hasMore: offset + page.length < total,
-        notReady: [],
+        results: browsed.rows.map((row) => toHit(row.page_title, row.page_id)),
+        total: browsed.total,
+        indexReady: browsed.indexReady,
+        hasMore: browsed.hasMore,
+        notReady: browsed.notReady,
     };
 };
 
 const fillCachedMembership = async (
     titles: string[],
     cachedCategories: string[],
-    categoryHits: Map<string, Set<string>>,
+    resolution: TitleResolution,
 ): Promise<void> => {
     if (titles.length === 0 || cachedCategories.length === 0) {
         return;
     }
     const admin = serviceClient();
     if (!admin) {
+        markTitlesUnverified(titles, resolution.unverified);
         return;
     }
     const { data, error } = await admin.rpc('imslp_titles_in_categories', {
         titles,
         categories: cachedCategories,
     });
-    if (error || !data) {
+    if (error || !Array.isArray(data)) {
+        markTitlesUnverified(titles, resolution.unverified);
         return;
     }
     for (const row of data as Array<{ page_title?: string; category?: string }>) {
         if (row.page_title && row.category) {
-            mergeCategoryHits(categoryHits, row.page_title, row.category);
+            mergeCategoryHits(resolution.categoryHits, row.page_title, row.category);
         }
     }
 };
@@ -397,30 +374,30 @@ Deno.serve(async (req) => {
         const searchQ = extracted.rest.length > 0 ? extracted.rest : q;
         const typedFilters: SearchFilters = { ...filters, eras: eraIds };
 
-        // One group per hard dimension (instrument, era). Relaxation drops whole
-        // groups, era first, so the hint can name what was actually let go.
+        // Hard groups: instrument, era, form, composer. Relaxation drops era
+        // then instrument only; forms and composers stay required.
         const instrumentGroups = hardFilterGroups({ instruments: typedFilters.instruments });
         const eraGroups = hardFilterGroups({ eras: typedFilters.eras });
-        const allGroups = [...instrumentGroups, ...eraGroups];
+        const allGroups = categoryGroupsFor(typedFilters);
         const hardCategories = allGroups.flat();
         const missingSnapshots = await categoriesMissingSnapshot(hardCategories);
         const liveCategories = hardCategories.filter((c) => missingSnapshots.includes(c));
         const cachedCategories = hardCategories.filter((c) => !missingSnapshots.includes(c));
-
-        const composerSurnames = (filters.composerCategories ?? [])
-            .map((c) => foldAccents(c.split(',')[0]?.trim() ?? ''))
-            .filter(Boolean);
 
         let tokens = tokenizeQuery(searchQ);
         let aliasTitles = aliasTitlesForQuery(q, WORK_ALIASES);
         const variants = buildSearchVariants(searchQ, { aliasTitles, facetTokens: facetTokens(typedFilters) });
 
         const perQuery = Math.min(50, Math.max(limit, 30));
+        let variantFailures = 0;
+        let lastVariantError: unknown;
         const batches: RankBatch[] = await Promise.all(
             variants.map(async (variant: SearchVariant) => {
                 try {
                     return { variant, hits: await mwSearch(variant.q, perQuery) };
-                } catch {
+                } catch (err) {
+                    variantFailures += 1;
+                    lastVariantError = err;
                     return { variant, hits: [] as MwSearchHit[] };
                 }
             }),
@@ -434,6 +411,9 @@ Deno.serve(async (req) => {
             }
         };
         pushAliasBatch(aliasTitles);
+        if (variants.length > 0 && variantFailures === variants.length && aliasTitles.length === 0) {
+            throw lastVariantError instanceof Error ? lastVariantError : new Error('IMSLP search failed');
+        }
 
         const collectTitles = (): string[] => {
             const seen = new Set<string>();
@@ -446,7 +426,14 @@ Deno.serve(async (req) => {
         };
 
         const resolution = await resolveTitles(collectTitles(), liveCategories);
-        await fillCachedMembership(collectTitles(), cachedCategories, resolution.categoryHits);
+        const fillMembership = async (titles: string[]) => {
+            await fillCachedMembership(
+                titlesForCachedMembership(titles, resolution.resolvedTitles),
+                cachedCategories,
+                resolution,
+            );
+        };
+        await fillMembership(collectTitles());
 
         const rank = (requiredGroups: string[][]): RankedHit[] => {
             const ranked = mergeAndRank(batches, {
@@ -461,13 +448,10 @@ Deno.serve(async (req) => {
                 requiredGroups,
                 extraScore: (title) => facetBoost(title, typedFilters),
             });
-            if (composerSurnames.length === 0) {
+            if ((typedFilters.keys ?? []).length === 0) {
                 return ranked;
             }
-            return ranked.filter((h) => {
-                const folded = foldAccents(h.title);
-                return composerSurnames.some((s) => folded.includes(s));
-            });
+            return ranked.filter((h) => titleMatchesFilters(h.title, typedFilters));
         };
 
         let ranked = rank(allGroups);
@@ -507,23 +491,26 @@ Deno.serve(async (req) => {
                 for (const title of extra.unverified) {
                     resolution.unverified.add(title);
                 }
-                await fillCachedMembership(unresolved, cachedCategories, resolution.categoryHits);
+                await fillMembership(unresolved);
                 ranked = rank(allGroups);
             }
         }
 
         // Too few survivors: let go of the era first (the softer axis), then the
-        // instrument, and only when doing so actually finds more.
+        // instrument, and only when doing so actually finds more. Forms and
+        // composers stay hard.
         const relaxed: RelaxedConstraint[] = [];
         if (eraGroups.length > 0 && ranked.length < 5) {
-            const withoutEra = rank(instrumentGroups);
+            const withoutEra = rank(categoryGroupsFor({ ...typedFilters, eras: undefined }));
             if (withoutEra.length > ranked.length) {
                 ranked = withoutEra;
                 relaxed.push('era');
             }
         }
         if (instrumentGroups.length > 0 && ranked.length < 5) {
-            const withoutInstrument = rank([]);
+            const withoutInstrument = rank(
+                categoryGroupsFor({ ...typedFilters, eras: undefined, instruments: undefined }),
+            );
             if (withoutInstrument.length > ranked.length) {
                 ranked = withoutInstrument;
                 relaxed.push('instrument');
@@ -539,11 +526,8 @@ Deno.serve(async (req) => {
             ranked.sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? '') || b.score - a.score);
         }
 
-        const page = ranked.slice(0, limit);
-        let filterRelaxed = relaxed.length > 0;
-        if (!filterRelaxed) {
-            filterRelaxed = page.some((h) => resolution.unverified.has(foldAccents(h.title)));
-        }
+        const page = ranked.slice(offset, offset + limit);
+        const filterRelaxed = relaxed.length > 0;
         const results = page.map((h) => toHit(h.title, h.pageid, h.snippet));
         const source = periodSource(queryEras, chipEras);
 
@@ -554,7 +538,7 @@ Deno.serve(async (req) => {
             filterRelaxed,
             relaxed,
             indexReady: true,
-            hasMore: ranked.length > page.length,
+            hasMore: ranked.length > offset + page.length,
             period: source ? { eraIds, source } : null,
         });
     } catch (err) {

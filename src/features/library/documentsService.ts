@@ -268,7 +268,7 @@ export const importDocumentFromImslp = async (
     };
 
     try {
-        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer);
+        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle);
         if (!result.ok) {
             await rollback();
             return { ok: false, fallback: result };

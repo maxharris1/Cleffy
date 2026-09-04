@@ -236,6 +236,20 @@ export const applyPageResult = (
             deleteGenerationsBefore: null,
         };
     }
+    // An empty first page with no continue is a failed fetch (error JSON,
+    // truncated body), not a real empty category. A later empty last page
+    // after members were stored still completes.
+    if (page.length === 0 && plan.pagesDone === 0) {
+        return {
+            kind: 'failed',
+            activeGeneration: previous?.active_generation ?? 0,
+            buildingGeneration: plan.generation,
+            cmcontinue: plan.cmcontinue,
+            pagesDone: plan.pagesDone,
+            lastError: 'empty first page',
+            deleteGenerationsBefore: null,
+        };
+    }
     return {
         kind: 'complete',
         activeGeneration: plan.generation,

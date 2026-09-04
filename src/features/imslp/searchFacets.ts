@@ -127,7 +127,13 @@ export const buildSearchFilters = (selected: {
     eraIds?: Iterable<string>;
     ignoreQueryPeriod?: boolean;
 }): SearchFilters => {
-    const filters: SearchFilters = {};
+    const filters: SearchFilters & {
+        composerCategory?: string;
+        instrument?: string;
+        form?: string;
+        key?: string;
+        era?: EraId;
+    } = {};
     const composerCategories: string[] = [];
     for (const id of selected.composerIds ?? []) {
         const c = COMPOSER_FACETS.find((x) => x.id === id);
@@ -137,22 +143,37 @@ export const buildSearchFilters = (selected: {
     }
     if (composerCategories.length > 0) {
         filters.composerCategories = composerCategories;
+        if (composerCategories.length === 1) {
+            filters.composerCategory = composerCategories[0];
+        }
     }
     const instruments = [...(selected.instrumentIds ?? [])];
     if (instruments.length > 0) {
         filters.instruments = instruments;
+        if (instruments.length === 1) {
+            filters.instrument = instruments[0];
+        }
     }
     const forms = [...(selected.formIds ?? [])];
     if (forms.length > 0) {
         filters.forms = forms;
+        if (forms.length === 1) {
+            filters.form = forms[0];
+        }
     }
     const keys = [...(selected.keyIds ?? [])];
     if (keys.length > 0) {
         filters.keys = keys;
+        if (keys.length === 1) {
+            filters.key = keys[0];
+        }
     }
     const eras = [...(selected.eraIds ?? [])].filter((id): id is EraId => ERA_FACETS.some((e) => e.id === id));
     if (eras.length > 0) {
         filters.eras = eras;
+        if (eras.length === 1) {
+            filters.era = eras[0];
+        }
     }
     if (selected.ignoreQueryPeriod) {
         filters.ignoreQueryPeriod = true;

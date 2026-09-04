@@ -44,7 +44,18 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
     if (!res.ok) {
         throw new Error(`IMSLP API HTTP ${res.status}`);
     }
-    return res.json();
+    const payload: unknown = await res.json();
+    if (payload && typeof payload === 'object' && 'error' in payload) {
+        const err = (payload as { error: unknown }).error;
+        if (err) {
+            const info =
+                typeof err === 'object' && err && 'info' in err && typeof (err as { info: unknown }).info === 'string'
+                    ? (err as { info: string }).info
+                    : 'IMSLP API error';
+            throw new Error(info);
+        }
+    }
+    return payload;
 };
 
 export const workPageUrl = (title: string): string =>

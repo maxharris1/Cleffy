@@ -10,6 +10,7 @@ import {
     parseFilters,
     titleMatchesFilters,
 } from '../../supabase/functions/_shared/searchFacetData';
+import { browseFromIndex, type BrowseRpcClient } from '../../supabase/functions/_shared/imslpBrowse';
 import { isWorkTitle } from '../../supabase/functions/_shared/search';
 
 describe('parseFilters', () => {
@@ -204,6 +205,130 @@ describe('browse intersection (fixture)', () => {
     });
 });
 
+const fakeBrowseRpc = (members: Record<string, string[]>, ready: string[]): BrowseRpcClient => ({
+    rpc: async (fn, args) => {
+        if (fn === 'imslp_index_ready') {
+            const categories = args['categories'] as string[];
+            return { data: categories.filter((c) => !ready.includes(c)), error: null };
+        }
+        if (fn === 'imslp_browse') {
+            const groups = args['groups'] as string[][];
+            const titles = intersectGroups(groups, members);
+            const off = Number(args['off'] ?? 0);
+            const lim = Number(args['lim'] ?? titles.length);
+            const page = titles.slice(off, off + lim).map((title, i) => ({
+                page_title: title,
+                page_id: i + 1,
+                touched: null,
+                total: titles.length,
+            }));
+            return { data: page, error: null };
+        }
+        return { data: null, error: { message: `unknown rpc ${fn}` } };
+    },
+});
+
+describe('browseFromIndex (mocked RPC)', () => {
+    const members: Record<string, string[]> = {
+        'For piano': [
+            'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)',
+            'Sonata in D minor, K.9 (Scarlatti, Domenico)',
+            'Nocturnes, Op.9 (Chopin, Frédéric)',
+        ],
+        'For piano (arr)': ['Messiah, HWV 56 (Handel, George Frideric)'],
+        Baroque: [
+            'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)',
+            'Sonata in D minor, K.9 (Scarlatti, Domenico)',
+            'Messiah, HWV 56 (Handel, George Frideric)',
+            'Le quattro stagioni (Vivaldi, Antonio)',
+        ],
+        Fugues: ['Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)'],
+        Modern: ['Structures I (Boulez, Pierre)'],
+    };
+    const ready = ['For piano', 'For piano (arr)', 'Baroque', 'Fugues', 'Modern'];
+
+    it('For piano ∩ Baroque via imslp_browse is non-empty and includes a non-seed surname (AE1)', async () => {
+        const filters = { instruments: ['piano'], eras: ['baroque' as const] };
+        const groups = categoryGroupsFor(filters);
+        const result = await browseFromIndex(fakeBrowseRpc(members, ready), {
+            groups,
+            needed: categoriesInGroups(groups),
+            sort: 'relevance',
+            limit: 50,
+            offset: 0,
+            titleFilters: [],
+            popularTitles: [],
+        });
+        expect(result.indexReady).toBe(true);
+        expect(result.rows.length).toBeGreaterThan(0);
+        expect(result.rows.some((r) => r.page_title.includes('Scarlatti'))).toBe(true);
+        expect(result.rows.some((r) => r.page_title.includes('Chopin'))).toBe(false);
+    });
+
+    it('three-way Piano · Fugue · Modern via imslp_browse is an honest empty (AE4)', async () => {
+        const filters = { instruments: ['piano'], forms: ['fugue'], eras: ['modern' as const] };
+        const groups = categoryGroupsFor(filters);
+        const result = await browseFromIndex(fakeBrowseRpc(members, ready), {
+            groups,
+            needed: categoriesInGroups(groups),
+            sort: 'relevance',
+            limit: 50,
+            offset: 0,
+            titleFilters: [],
+            popularTitles: [],
+        });
+        expect(result.indexReady).toBe(true);
+        expect(result.rows).toEqual([]);
+        expect(result.total).toBe(0);
+    });
+
+    it('missing snapshot returns indexReady false, not honest empty', async () => {
+        const filters = { instruments: ['piano'], eras: ['baroque' as const] };
+        const groups = categoryGroupsFor(filters);
+        const result = await browseFromIndex(fakeBrowseRpc(members, ['For piano', 'For piano (arr)']), {
+            groups,
+            needed: categoriesInGroups(groups),
+            sort: 'relevance',
+            limit: 50,
+            offset: 0,
+            titleFilters: [],
+            popularTitles: [],
+        });
+        expect(result.indexReady).toBe(false);
+        expect(result.notReady).toEqual(['Baroque']);
+        expect(result.rows).toEqual([]);
+    });
+
+    it('key-only needed.length 0 is not a completed empty intersection', async () => {
+        const result = await browseFromIndex(fakeBrowseRpc(members, ready), {
+            groups: [],
+            needed: [],
+            sort: 'relevance',
+            limit: 50,
+            offset: 0,
+            titleFilters: ['\\mC-sharp minor\\M'],
+            popularTitles: [],
+        });
+        expect(result.indexReady).toBe(false);
+        expect(result.rows).toEqual([]);
+    });
+
+    it('missing admin stays not-ready', async () => {
+        const groups = categoryGroupsFor({ instruments: ['piano'], eras: ['baroque'] });
+        const result = await browseFromIndex(null, {
+            groups,
+            needed: categoriesInGroups(groups),
+            sort: 'relevance',
+            limit: 50,
+            offset: 0,
+            titleFilters: [],
+            popularTitles: [],
+        });
+        expect(result.indexReady).toBe(false);
+        expect(result.notReady).toEqual(['For piano', 'For piano (arr)', 'Baroque']);
+    });
+});
+
 describe('keyTitlePatterns', () => {
     it('emits one word-bounded case-insensitive regex per key chip token', () => {
         expect(keyTitlePatterns({ keys: ['c-major', 'e-flat-major'] })).toEqual(['\\mC major\\M', '\\mE-flat major\\M']);
@@ -228,6 +353,7 @@ describe('titleMatchesFilters', () => {
         const filters = { keys: ['c-sharp-minor'] };
         expect(titleMatchesFilters('Nocturne in C-sharp minor (Chopin, Frédéric)', filters)).toBe(true);
         expect(titleMatchesFilters('Nocturne in E-flat major (Chopin, Frédéric)', filters)).toBe(false);
+        expect(titleMatchesFilters('Nocturne in C♯ minor (Chopin, Frédéric)', filters)).toBe(true);
     });
 
     it('does not require an era surname in the title', () => {

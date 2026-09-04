@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { editionAvailability } from '@/features/imslp/imslpDisplay';
 
 import {
+    canonicalImslpFilename,
     classifyLicense,
     isDownloadable,
     parseWorkPageLicenses,
@@ -13,6 +14,14 @@ import {
 
 const fixture = (name: string): string =>
     readFileSync(resolve(process.cwd(), 'tests/imslp/fixtures', name), 'utf8');
+
+describe('canonicalImslpFilename', () => {
+    it('turns underscores, extra spaces, and a lower first letter into the cache key', () => {
+        expect(canonicalImslpFilename('pmlp01458-Op.27-2_Manuscript.pdf')).toBe('Pmlp01458-Op.27-2 Manuscript.pdf');
+        expect(canonicalImslpFilename('  Moonlight   Sonata.pdf  ')).toBe('Moonlight Sonata.pdf');
+        expect(canonicalImslpFilename('already Canonical.pdf')).toBe('Already Canonical.pdf');
+    });
+});
 
 describe('classifyLicense', () => {
     it('maps verbatim IMSLP labels to classes', () => {

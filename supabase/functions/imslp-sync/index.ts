@@ -172,14 +172,6 @@ Deno.serve(async (req) => {
         );
     }
 
-    if (lastDecision.kind === 'complete' && lastDecision.deleteGenerationsBefore !== null) {
-        await admin
-            .from('imslp_category_members')
-            .delete()
-            .eq('category', category)
-            .lt('generation', lastDecision.deleteGenerationsBefore);
-    }
-
     const state = lastDecision.kind === 'complete' ? 'ok' : lastDecision.kind === 'failed' ? 'failed' : 'building';
     const { error: finishError } = await admin.from('imslp_category_sync').upsert({
         category,
@@ -194,6 +186,16 @@ Deno.serve(async (req) => {
     });
     if (finishError) {
         return jsonResponse({ error: finishError.message }, 500);
+    }
+
+    // Rollover the sync row first so a failed generation delete cannot leave
+    // the index pointing at a generation that was already removed.
+    if (lastDecision.kind === 'complete' && lastDecision.deleteGenerationsBefore !== null) {
+        await admin
+            .from('imslp_category_members')
+            .delete()
+            .eq('category', category)
+            .lt('generation', lastDecision.deleteGenerationsBefore);
     }
 
     return jsonResponse({

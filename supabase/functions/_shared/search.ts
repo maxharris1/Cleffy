@@ -36,6 +36,33 @@ export const foldAccents = (s: string): string =>
 
 export const foldEquals = (a: string, b: string): boolean => foldAccents(a) === foldAccents(b);
 
+/** Canonical titles to look up in the membership cache (redirect targets included). */
+export const titlesForCachedMembership = (titles: string[], resolvedTitles: Map<string, string>): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const add = (title: string) => {
+        if (seen.has(title)) {
+            return;
+        }
+        seen.add(title);
+        out.push(title);
+    };
+    for (const title of titles) {
+        add(resolvedTitles.get(title) ?? title);
+    }
+    for (const title of resolvedTitles.values()) {
+        add(title);
+    }
+    return out;
+};
+
+/** Membership RPC miss: unknown, not non-member. */
+export const markTitlesUnverified = (titles: string[], unverified: Set<string>): void => {
+    for (const title of titles) {
+        unverified.add(foldAccents(title));
+    }
+};
+
 export type PeriodEraId = 'baroque' | 'classical' | 'romantic' | 'early-20th' | 'modern';
 
 const YEAR_MIN = 1500;

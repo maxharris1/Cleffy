@@ -127,7 +127,19 @@ export const ERA_IDS: ReadonlySet<string> = new Set(ERA_FACETS.map((e) => e.id))
 /** Server cap per dimension; the UI stops offering more chips at this count. */
 export const MAX_FILTERS_PER_DIMENSION = 6;
 
-const fold = (s: string): string => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+/** Same accidental map as CHAR_FOLDS in search.ts — this file cannot import it. */
+const ACCIDENTAL_FOLDS: Record<string, string> = {
+    '♭': '-flat',
+    '♯': '-sharp',
+    '♮': '',
+};
+
+const fold = (s: string): string =>
+    s
+        .normalize('NFD')
+        .replace(/\p{M}/gu, '')
+        .toLowerCase()
+        .replace(/[♭♯♮]/g, (c) => ACCIDENTAL_FOLDS[c] ?? c);
 
 const uniqCap = (ids: string[], cap = MAX_FILTERS_PER_DIMENSION): string[] => {
     const seen = new Set<string>();

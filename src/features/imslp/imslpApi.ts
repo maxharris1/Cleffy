@@ -61,7 +61,7 @@ export interface ImslpWorkDetail {
     editions: ImslpEdition[];
 }
 
-const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream', 'non_pd'] as const;
+const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream', 'non_pd', 'license_unknown'] as const;
 type FallbackCode = (typeof FALLBACK_CODES)[number];
 
 export type ImslpDownloadFallback = {
@@ -210,11 +210,13 @@ export const searchImslp = async (
         mode: body.mode,
         notReady: Array.isArray(body.notReady) ? body.notReady : [],
     };
-    SEARCH_CACHE.set(key, { at: Date.now(), response: result });
-    if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
-        const oldest = SEARCH_CACHE.keys().next().value;
-        if (oldest !== undefined) {
-            SEARCH_CACHE.delete(oldest);
+    if (result.indexReady) {
+        SEARCH_CACHE.set(key, { at: Date.now(), response: result });
+        if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
+            const oldest = SEARCH_CACHE.keys().next().value;
+            if (oldest !== undefined) {
+                SEARCH_CACHE.delete(oldest);
+            }
         }
     }
     return result;
@@ -242,6 +244,7 @@ export const importImslpPdfToStorage = async (
     filename: string,
     documentId: string,
     acceptedDisclaimer: boolean,
+    workTitle?: string,
 ): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
@@ -258,7 +261,7 @@ export const importImslpPdfToStorage = async (
             apikey: anonKey,
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ filename, documentId, acceptedDisclaimer }),
+        body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
     });
 
     // Smart-import quota exhausted. Surfaced as the same typed error the other

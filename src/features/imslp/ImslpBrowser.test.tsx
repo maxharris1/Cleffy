@@ -189,6 +189,13 @@ describe('search facets', () => {
         expect(filters.instruments).toEqual(['piano']);
         expect(filters.forms).toEqual(['sonata']);
         expect(hasActiveFilters(filters)).toBe(true);
+        expect(filters).toEqual(
+            expect.objectContaining({
+                composerCategory: 'Beethoven, Ludwig van',
+                instrument: 'piano',
+                form: 'sonata',
+            }),
+        );
     });
 });
 
@@ -287,6 +294,30 @@ describe('ImslpBrowser', () => {
         // Still inside the 280 ms debounce: nothing has failed, so the
         // aria-live status must not announce a failure.
         expect(searchSpy).not.toHaveBeenCalled();
+        expect(screen.getByText('Piano · Searching IMSLP…')).toBeInTheDocument();
+        expect(screen.queryByText(/Search unavailable/)).not.toBeInTheDocument();
+    });
+
+    it('says Searching — not unavailable — while debounce is armed after a failed search', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi
+            .spyOn(api, 'searchImslp')
+            .mockRejectedValueOnce(new Error('IMSLP is down'))
+            .mockImplementation(() => new Promise(() => {}));
+
+        await renderBrowser();
+        const input = screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…');
+        await userEvent.type(input, 'be');
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalledTimes(1);
+        });
+        expect(await screen.findByText('Piano · Search unavailable')).toBeInTheDocument();
+
+        await userEvent.type(input, 'ethoven');
+        expect(searchSpy).toHaveBeenCalledTimes(1);
         expect(screen.getByText('Piano · Searching IMSLP…')).toBeInTheDocument();
         expect(screen.queryByText(/Search unavailable/)).not.toBeInTheDocument();
     });
@@ -497,6 +528,26 @@ describe('ImslpBrowser', () => {
         );
     });
 
+    it('keeps key-only with Piano off on Popular, not a live Walker search', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi.spyOn(api, 'searchImslp');
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'Piano' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Key' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'C-sharp minor' }));
+
+        await new Promise((r) => setTimeout(r, 350));
+        expect(searchSpy).not.toHaveBeenCalled();
+        expect(screen.getByRole('heading', { name: 'Popular' })).toBeInTheDocument();
+        expect(screen.getByText(/C-sharp minor · Popular ·/)).toBeInTheDocument();
+        expect(screen.queryByText('No matches')).not.toBeInTheDocument();
+    });
+
     it('sends both composer ids when two composers are selected', async () => {
         const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
@@ -637,6 +688,46 @@ describe('ImslpBrowser', () => {
             expect(searchSpy).toHaveBeenCalledTimes(2);
         });
         expect(searchSpy.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ offset: 1 }));
+    });
+
+    it('issues typed Show more with offset and a stable limit', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const searchSpy = vi
+            .spyOn(api, 'searchImslp')
+            .mockResolvedValueOnce(
+                searchOk({
+                    results: [hit('Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)', 14)],
+                    mode: 'search',
+                    total: 2,
+                    hasMore: true,
+                }),
+            )
+            .mockResolvedValueOnce(
+                searchOk({
+                    results: [hit('Piano Sonata No.8, Op.13 (Beethoven, Ludwig van)', 13)],
+                    mode: 'search',
+                    total: 2,
+                    hasMore: false,
+                }),
+            );
+
+        await renderBrowser();
+        await userEvent.type(
+            screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'),
+            'beethoven sonata',
+        );
+        expect(await screen.findByRole('button', { name: 'Show more' })).toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', { name: 'Show more' }));
+
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalledTimes(2);
+        });
+        expect(searchSpy.mock.calls[1]?.[1]).toEqual(
+            expect.objectContaining({ offset: 1, limit: searchSpy.mock.calls[0]?.[1]?.limit }),
+        );
     });
 
     it('shows an inferred Romantic chip for a typed year query', async () => {

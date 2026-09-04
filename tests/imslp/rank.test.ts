@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
     foldAccents,
+    markTitlesUnverified,
     mergeAndRank,
     rankBonus,
+    titlesForCachedMembership,
     tokenizeQuery,
     type RankBatch,
 } from '../../supabase/functions/_shared/search';
+import { categoryGroupsFor, titleMatchesFilters } from '../../supabase/functions/_shared/searchFacetData';
 
 const batch = (q: string, weight: number, titles: string[]): RankBatch => ({
     variant: { q, weight },
@@ -168,5 +171,72 @@ describe('mergeAndRank', () => {
         });
         // Only the rank bonus survives — no token score, no all-tokens bonus.
         expect(ranked[0]?.score).toBeLessThanOrEqual(24);
+    });
+
+    it('RPC-failure titles survive under unverifiedTitles', () => {
+        const unknown = 'Nocturne in C-sharp minor, B.49 (Chopin, Frédéric)';
+        const unverified = new Set<string>();
+        markTitlesUnverified([unknown], unverified);
+        const ranked = mergeAndRank([batch('nocturne', 1, [unknown])], {
+            query: 'nocturne',
+            tokens: ['nocturne'],
+            unverifiedTitles: unverified,
+            requiredGroups: [['For piano', 'For piano (arr)']],
+        });
+        expect(ranked.map((h) => h.title)).toEqual([unknown]);
+    });
+
+    it('a redirect source title still matches For piano when the cache row is canonical', () => {
+        const source = 'Moonlight Sonata (Beethoven, Ludwig van)';
+        const canonical = 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)';
+        expect(titlesForCachedMembership([source], new Map([[source, canonical]]))).toEqual([canonical]);
+        const ranked = mergeAndRank([batch('moonlight', 1, [source])], {
+            query: 'moonlight',
+            tokens: ['moonlight'],
+            resolvedTitles: new Map([[source, canonical]]),
+            categoryHits: new Map([[foldAccents(canonical), new Set(['For piano'])]]),
+            requiredGroups: [['For piano', 'For piano (arr)']],
+        });
+        expect(ranked.map((h) => h.title)).toEqual([canonical]);
+    });
+
+    it('form group excludes non-nocturnes', () => {
+        const nocturne = 'Nocturnes, Op.9 (Chopin, Frédéric)';
+        const sonata = 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)';
+        const ranked = mergeAndRank([batch('chopin', 1, [nocturne, sonata])], {
+            query: 'chopin',
+            tokens: ['chopin'],
+            categoryHits: new Map([
+                [foldAccents(nocturne), new Set(['For piano', 'Nocturnes'])],
+                [foldAccents(sonata), new Set(['For piano', 'Sonatas'])],
+            ]),
+            requiredGroups: categoryGroupsFor({ instruments: ['piano'], forms: ['nocturne'] }),
+        });
+        expect(ranked.map((h) => h.title)).toEqual([nocturne]);
+    });
+
+    it('composer group is category membership, not a surname substring', () => {
+        const chopin = 'Nocturnes, Op.9 (Chopin, Frédéric)';
+        const namedAfter = 'Variations on a Theme of Chopin (Rachmaninoff, Sergei)';
+        const ranked = mergeAndRank([batch('chopin', 1, [chopin, namedAfter])], {
+            query: 'chopin',
+            tokens: ['chopin'],
+            categoryHits: new Map([
+                [foldAccents(chopin), new Set(['For piano', 'Chopin, Frédéric'])],
+                [foldAccents(namedAfter), new Set(['For piano'])],
+            ]),
+            requiredGroups: categoryGroupsFor({ composerCategories: ['Chopin, Frédéric'] }),
+        });
+        expect(ranked.map((h) => h.title)).toEqual([chopin]);
+    });
+
+    it('key chip drops E-flat when keys are c-sharp-minor', () => {
+        const sharp = 'Nocturne in C-sharp minor, B.49 (Chopin, Frédéric)';
+        const flat = 'Nocturne in E-flat major, Op.9 No.2 (Chopin, Frédéric)';
+        const ranked = mergeAndRank([batch('nocturne', 1, [sharp, flat])], {
+            query: 'nocturne',
+            tokens: ['nocturne'],
+        }).filter((h) => titleMatchesFilters(h.title, { keys: ['c-sharp-minor'] }));
+        expect(ranked.map((h) => h.title)).toEqual([sharp]);
     });
 });

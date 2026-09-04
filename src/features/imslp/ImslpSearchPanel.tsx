@@ -106,7 +106,6 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const [notReady, setNotReady] = useState<string[]>([]);
     const [period, setPeriod] = useState<ImslpPeriod | null>(null);
     const [searchMode, setSearchMode] = useState<'browse' | 'search' | null>(null);
-    const [typedLimit, setTypedLimit] = useState(DEFAULT_SEARCH_LIMIT);
     const [dimension, setDimension] = useState<FacetDimension>('composer');
     const [composerIds, setComposerIds] = useState<Set<string>>(() => new Set());
     const [instrumentIds, setInstrumentIds] = useState<Set<string>>(() => new Set([DEFAULT_INSTRUMENT]));
@@ -137,7 +136,6 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             }),
         [composerIds, instrumentIds, formIds, keyIds, eraIds, ignoreQueryPeriod],
     );
-    const filtersActive = hasActiveFilters(filters);
     const isDefaultFilterState =
         setsEqual(instrumentIds, new Set([DEFAULT_INSTRUMENT])) &&
         composerIds.size === 0 &&
@@ -147,7 +145,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const isDefaultState = isDefaultFilterState && sort === 'relevance' && query.trim() === '';
 
     const q = query.trim();
-    const isLiveQuery = q.length >= 2 || (filtersActive && !isDefaultFilterState);
+    const isLiveQuery = q.length >= 2 || categoryBackedFilters(filters);
 
     const applyResponse = (
         response: Awaited<ReturnType<typeof searchImslp>>,
@@ -190,6 +188,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             const controller = new AbortController();
             abortRef.current = controller;
             setSearching(true);
+            setSearchError(null);
             try {
                 const response = await searchImslp(trimmed, {
                     limit: opts.limit ?? DEFAULT_SEARCH_LIMIT,
@@ -224,6 +223,9 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     useEffect(() => {
         const delay = immediateRef.current ? 0 : 280;
         immediateRef.current = false;
+        if (isLiveQuery) {
+            setSearchError(null);
+        }
         const handle = window.setTimeout(() => {
             if (!isLiveQuery) {
                 seqRef.current++;
@@ -239,24 +241,25 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 setNotReady([]);
                 setPeriod(null);
                 setSearchMode(null);
-                setTypedLimit(DEFAULT_SEARCH_LIMIT);
                 return;
             }
-            setTypedLimit(DEFAULT_SEARCH_LIMIT);
             void runSearch(q, filters, sort, { limit: DEFAULT_SEARCH_LIMIT, offset: 0 });
         }, delay);
         return () => window.clearTimeout(handle);
     }, [q, filters, sort, isLiveQuery, searchTick]);
 
     useEffect(() => {
+        moreRef.current = null;
+    }, [q, filters, sort]);
+
+    useEffect(() => {
         const params = moreRef.current;
         if (!params) {
-            // Re-fires on q/filters/sort are consumed clicks — nothing staged.
             return;
         }
         moreRef.current = null;
         void runSearch(q, filters, sort, { ...params, append: true });
-    }, [moreTick, q, filters, sort]);
+    }, [moreTick]);
 
     useEffect(
         () => () => {
@@ -419,13 +422,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const showMore = () => {
         // runSearch is an Effect Event, callable only from effects — the click
         // stages its params and bumps the tick for the effect below to consume.
-        if (searchMode === 'browse') {
-            moreRef.current = { limit: DEFAULT_SEARCH_LIMIT, offset: results?.length ?? 0 };
-        } else {
-            const nextLimit = typedLimit >= 200 ? 300 : 200;
-            setTypedLimit(nextLimit);
-            moreRef.current = { limit: nextLimit, offset: 0 };
-        }
+        moreRef.current = { limit: DEFAULT_SEARCH_LIMIT, offset: results?.length ?? 0 };
         setMoreTick((t) => t + 1);
     };
 

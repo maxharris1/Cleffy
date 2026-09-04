@@ -208,4 +208,37 @@ describe('applyPageResult rollover', () => {
         expect(decision.cmcontinue).toBe('page|100');
         expect(decision.deleteGenerationsBefore).toBeNull();
     });
+
+    it('empty first page with no continue keeps the previous generation', () => {
+        const cold = planTick('Baroque', previous);
+        expect(cold.pagesDone).toBe(0);
+        const decision = applyPageResult(cold, previous, [], null, null);
+        expect(decision.kind).toBe('failed');
+        expect(decision.activeGeneration).toBe(1);
+        expect(decision.deleteGenerationsBefore).toBeNull();
+        expect(decision.lastError).toBe('empty first page');
+    });
+
+    it('MediaWiki error JSON is a failed tick, not a complete snapshot', () => {
+        const cold = planTick('For piano', previous);
+        const decision = applyPageResult(cold, previous, [], null, 'out of service');
+        expect(decision.kind).toBe('failed');
+        expect(decision.activeGeneration).toBe(1);
+        expect(decision.deleteGenerationsBefore).toBeNull();
+        expect(decision.lastError).toBe('out of service');
+    });
+
+    it('an empty last page after members were stored still completes', () => {
+        const mid = planTick('Baroque', {
+            ...previous,
+            state: 'building',
+            building_generation: 2,
+            cmcontinue: 'page|80',
+            pages_done: 80,
+        });
+        const decision = applyPageResult(mid, previous, [], null, null);
+        expect(decision.kind).toBe('complete');
+        expect(decision.activeGeneration).toBe(2);
+        expect(decision.deleteGenerationsBefore).toBe(2);
+    });
 });

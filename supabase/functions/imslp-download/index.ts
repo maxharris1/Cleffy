@@ -1,8 +1,21 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey, imagefromIndexUrl, serviceClient, tryDownloadPdf } from '../_shared/imslp.ts';
-import { LICENSE_TTL_MS } from '../_shared/imslpLicense.ts';
+import {
+    checkRateLimit,
+    clientKey,
+    fetchWorkPageHtml,
+    imagefromIndexUrl,
+    serviceClient,
+    tryDownloadPdf,
+} from '../_shared/imslp.ts';
+import {
+    LICENSE_TTL_MS,
+    canonicalImslpFilename,
+    classifyLicense,
+    isDownloadable,
+    parseWorkPageLicenses,
+} from '../_shared/imslpLicense.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -25,7 +38,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    let body: { filename?: string; acceptedDisclaimer?: boolean; documentId?: string };
+    let body: { filename?: string; acceptedDisclaimer?: boolean; documentId?: string; workTitle?: string };
     try {
         body = await req.json();
     } catch {
@@ -51,13 +64,8 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Invalid filename' }, 400);
     }
 
-    // MediaWiki treats "_" as " " and upper-cases a title's first letter, so an
-    // equivalent-but-different spelling resolves to the same file while missing
-    // the cache row (always written in the canonical space form) — which would
-    // fail the license gate below open. Lossless: a title cannot hold a literal
-    // underscore distinct from a space.
-    const spaced = filename.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
-    const canonicalFilename = spaced.charAt(0).toUpperCase() + spaced.slice(1);
+    const canonicalFilename = canonicalImslpFilename(filename);
+    const workTitle = typeof body.workTitle === 'string' ? body.workTitle.trim() : '';
 
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {
@@ -102,34 +110,71 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
     }
 
+    const licenseConflict = (code: 'non_pd' | 'license_unknown', restriction: string | null) =>
+        jsonResponse(
+            {
+                ok: false,
+                code,
+                message:
+                    code === 'non_pd'
+                        ? restriction
+                            ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
+                            : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically."
+                        : "IMSLP didn't confirm a public-domain or Creative Commons license for this edition; it can't be imported automatically.",
+                openUrl: imagefromIndexUrl(canonicalFilename),
+                filename: canonicalFilename,
+            },
+            409,
+        );
+
     // License backstop, checked BEFORE the quota so a restricted file never
-    // costs a smart_imports credit. The edition picker is the primary gate;
-    // this catches direct calls. Missing or stale cache rows fail open — every
-    // UI path warms the cache through imslp-work first.
+    // costs a smart_imports credit. Cache miss or stale row live-parses the
+    // work page; unknown or restricted fails closed and never fetches the PDF.
     const { data: licenseRow } = await admin
         .from('imslp_file_licenses')
         .select('restriction, downloadable, fetched_at')
         .eq('filename', canonicalFilename)
         .maybeSingle();
-    if (
-        licenseRow &&
-        licenseRow.downloadable === false &&
-        Date.now() - new Date(licenseRow.fetched_at as string).getTime() < LICENSE_TTL_MS
-    ) {
-        const restriction = typeof licenseRow.restriction === 'string' ? licenseRow.restriction : null;
-        return jsonResponse(
-            {
-                ok: false,
-                code: 'non_pd',
-                message: restriction
-                    ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
-                    : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically.",
-                openUrl: imagefromIndexUrl(canonicalFilename),
-                filename: canonicalFilename,
-            },
-            // 409 signals hybrid fallback to the client, like download failures.
-            409,
-        );
+    const fresh =
+        licenseRow && Date.now() - new Date(licenseRow.fetched_at as string).getTime() < LICENSE_TTL_MS
+            ? licenseRow
+            : null;
+    if (fresh && fresh.downloadable === false) {
+        const restriction = typeof fresh.restriction === 'string' ? fresh.restriction : null;
+        return licenseConflict('non_pd', restriction);
+    }
+    if (!fresh || fresh.downloadable !== true) {
+        if (!workTitle) {
+            return licenseConflict('license_unknown', null);
+        }
+        const html = await fetchWorkPageHtml(workTitle);
+        if (!html) {
+            return licenseConflict('license_unknown', null);
+        }
+        const parsed = parseWorkPageLicenses(html);
+        const license = parsed.get(canonicalFilename);
+        if (license) {
+            try {
+                await admin.from('imslp_file_licenses').upsert({
+                    filename: canonicalFilename,
+                    work_title: workTitle,
+                    license: classifyLicense(license.licenseLabel),
+                    license_label: license.licenseLabel,
+                    restriction: license.restriction,
+                    eu_hosted: license.euHosted,
+                    downloadable: isDownloadable(license),
+                    fetched_at: new Date().toISOString(),
+                });
+            } catch {
+                // cache write is best-effort
+            }
+        }
+        if (!license) {
+            return licenseConflict('license_unknown', null);
+        }
+        if (!isDownloadable(license)) {
+            return licenseConflict('non_pd', license.restriction);
+        }
     }
 
     // Metered as smart_imports, and gated BEFORE the IMSLP fetch — the expensive

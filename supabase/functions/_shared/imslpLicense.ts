@@ -22,6 +22,19 @@ export type ImslpLicenseClass = 'pd' | 'cc' | 'non-pd' | 'unknown';
  */
 export const LICENSE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * MediaWiki treats "_" as " " and upper-cases a title's first letter, so an
+ * equivalent-but-different spelling resolves to the same file while missing
+ * the cache row (always written in the canonical space form).
+ */
+export const canonicalImslpFilename = (filename: string): string => {
+    const spaced = filename.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!spaced) {
+        return spaced;
+    }
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+};
+
 export interface FileLicense {
     /** Verbatim IMSLP tag, e.g. "Creative Commons Attribution 4.0". */
     licenseLabel: string | null;
