@@ -1454,7 +1454,14 @@ describe('ornaments, graces and swing', () => {
 
 describe('voices', () => {
     const GRAND = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
-    const vn = (step: string, octave: number, duration: number, voice: number | string, staff = 1, extra = ''): string =>
+    const vn = (
+        step: string,
+        octave: number,
+        duration: number,
+        voice: number | string,
+        staff = 1,
+        extra = '',
+    ): string =>
         `<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff>${extra}</note>`;
     const rest = (duration: number, voice: number | string, staff = 1): string =>
         `<note><rest/><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff></note>`;
@@ -1476,7 +1483,11 @@ describe('voices', () => {
 
     it('numbers two voices in one staff by first appearance, and keeps the lower staff separate', () => {
         const xml = wrap(
-            bar(1, `${vn('E', 5, 8, 1)}${vn('F', 5, 8, 1)}${back(16)}${vn('C', 5, 16, 2)}${back(16)}${vn('C', 3, 16, 5, 2)}`, true),
+            bar(
+                1,
+                `${vn('E', 5, 8, 1)}${vn('F', 5, 8, 1)}${back(16)}${vn('C', 5, 16, 2)}${back(16)}${vn('C', 3, 16, 5, 2)}`,
+                true,
+            ),
         );
         expect(voicesOf(xml)).toEqual([
             { t: 0, p: 72, vc: 1 },
@@ -1532,8 +1543,7 @@ describe('voices', () => {
         // Both old voices sit an octave from the newcomer; the one that held
         // through to the barline is the one still speaking.
         const xml = wrap(
-            bar(1, `${vn('C', 6, 16, 1)}${back(16)}${vn('C', 4, 8, 2)}${rest(8, 2)}`, true) +
-                bar(2, vn('C', 5, 16, 3)),
+            bar(1, `${vn('C', 6, 16, 1)}${back(16)}${vn('C', 4, 8, 2)}${rest(8, 2)}`, true) + bar(2, vn('C', 5, 16, 3)),
         );
         expect(voicesOf(xml)).toEqual([
             { t: 0, p: 60, vc: 1 },
@@ -1543,9 +1553,7 @@ describe('voices', () => {
     });
 
     it('still links a renumbering it cannot justify, but says so', () => {
-        const xml = wrap(
-            bar(1, `${vn('C', 6, 8, 1)}${rest(8, 1)}`, true) + bar(2, vn('C', 3, 16, 2)),
-        );
+        const xml = wrap(bar(1, `${vn('C', 6, 8, 1)}${rest(8, 1)}`, true) + bar(2, vn('C', 3, 16, 2)));
         const score = parseMusicXmlString(xml);
         expect(score.warnings).toContain('voices_unstable');
         expect(voicesOf(xml).map((n) => n.vc)).toEqual([0, 0]);
@@ -1567,8 +1575,50 @@ describe('voices', () => {
         expect(new Set(trill.map((n) => n.vc))).toEqual(new Set([1]));
     });
 
+    const voicedDyn = (mark: string, voice: number, staff = 1): string =>
+        `<direction><direction-type><dynamics><${mark}/></dynamics></direction-type><voice>${voice}</voice><staff>${staff}</staff></direction>`;
+
+    it('lets two voices of one staff carry their own printed levels', () => {
+        const xml = wrap(
+            bar(
+                1,
+                `${voicedDyn('f', 1)}${vn('G', 5, 8, 1)}${vn('A', 5, 8, 1)}${back(16)}${voicedDyn('p', 2)}${vn('C', 5, 8, 2)}${vn('D', 5, 8, 2)}`,
+                true,
+            ) + bar(2, `${vn('B', 5, 16, 1)}${back(16)}${vn('E', 5, 16, 2)}`),
+        );
+        const score = parseMusicXmlString(xml);
+        const level = (p: number): number | undefined => score.notes.find((n) => n.p === p)?.v;
+        // Voice 1 (slot 0) is forte throughout, voice 2 (slot 1) piano — into the next bar too.
+        expect([level(79), level(81), level(83)]).toEqual([0.82, 0.82, 0.82]);
+        expect([level(72), level(74), level(76)]).toEqual([0.46, 0.46, 0.46]);
+    });
+
+    it('lets a later staff-wide level override a voice\u2019s own', () => {
+        const xml = wrap(
+            bar(1, `${voicedDyn('p', 2)}${vn('G', 5, 16, 1)}${back(16)}${vn('C', 5, 16, 2)}`, true) +
+                bar(
+                    2,
+                    `<direction><direction-type><dynamics><f/></dynamics></direction-type><staff>1</staff></direction>${vn('A', 5, 16, 1)}${back(16)}${vn('D', 5, 16, 2)}`,
+                ),
+        );
+        const score = parseMusicXmlString(xml);
+        const level = (p: number): number | undefined => score.notes.find((n) => n.p === p)?.v;
+        expect(level(72)).toBe(0.46);
+        expect(level(74)).toBe(0.82);
+        expect(level(81)).toBe(0.82);
+    });
+
+    it('treats a voiced level on a one-voice staff as the staff\u2019s level', () => {
+        const xml = wrap(bar(1, `${voicedDyn('p', 1)}${vn('G', 5, 8, 1)}${vn('A', 5, 8, 1)}`, true));
+        const score = parseMusicXmlString(xml);
+        expect(score.notes.map((n) => n.v)).toEqual([0.46, 0.46]);
+    });
+
     it('never hands out a slot past the cap', () => {
-        const many = Array.from({ length: 10 }, (_, i) => `${i > 0 ? back(16) : ''}${vn('C', 4 + (i % 3), 16, i + 1)}`).join('');
+        const many = Array.from(
+            { length: 10 },
+            (_, i) => `${i > 0 ? back(16) : ''}${vn('C', 4 + (i % 3), 16, i + 1)}`,
+        ).join('');
         const score = parseMusicXmlString(wrap(bar(1, many, true)));
         expect(Math.max(...score.notes.map((n) => n.vc ?? 0))).toBe(7);
     });
@@ -1617,7 +1667,9 @@ describe('ScoreData v5 contract', () => {
 
     it('refuses a voice slot past the cap', () => {
         expect(scoreDataSchema.safeParse({ ...v5, notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 8 }] }).success).toBe(false);
-        expect(scoreDataSchema.safeParse({ ...v5, notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 1.5 }] }).success).toBe(false);
+        expect(scoreDataSchema.safeParse({ ...v5, notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 1.5 }] }).success).toBe(
+            false,
+        );
     });
 
     it('refuses a pedal edge it could not act on', () => {

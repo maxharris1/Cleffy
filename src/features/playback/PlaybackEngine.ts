@@ -8,6 +8,7 @@ import {
     clampVelocity,
     filterCutoffHz,
     JITTER_TIME_S,
+    LEGATO_OVERLAP_MAX_S,
     noteJitter,
     panForMidi,
     PEDAL_RELEASE_TAU_S,
@@ -40,6 +41,7 @@ import {
     firstNoteIndexAtOrAfter,
     measureIndexAtTick,
     secondsAtTick,
+    sptAtTick,
     tickAtSeconds,
 } from '@/features/playback/scoreTime';
 import type { BeatTick, TempoMap } from '@/features/playback/scoreTime';
@@ -331,18 +333,19 @@ export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice |
 };
 
 /**
- * The release a note gets, given where it really stops. Ringing past its
- * notated end can only mean the pedal is holding it, so it decays as a free
- * string; anything else is a damper landing, which {@link releaseTauFor}
- * already describes better than a single constant could.
+ * The release a note gets, given where the pedal lets it stop. Ringing past
+ * its notated end on the pedal means it decays as a free string; anything
+ * else — including the finger-legato overlap into the next note of its voice —
+ * is a damper landing, which {@link releaseTauFor} already describes better
+ * than a single constant could.
  *
  * A pedal-held note cut at a loop's B point is the second case, even though
  * the clamped end is past the written one: the wrap is a damper, not a lift,
  * and using {@link PEDAL_RELEASE_TAU_S} here would carry the previous pass's
  * harmony a beat into the next.
  */
-const releaseTauOverrideFor = (note: ScoreNote, endTick: number, cutAtRegion: boolean): number | undefined =>
-    !cutAtRegion && endTick > note.t + note.d ? PEDAL_RELEASE_TAU_S : undefined;
+const releaseTauOverrideFor = (note: ScoreNote, pedalEndTick: number, cutAtRegion: boolean): number | undefined =>
+    !cutAtRegion && pedalEndTick > note.t + note.d ? PEDAL_RELEASE_TAU_S : undefined;
 
 export interface LoopRegion {
     startTick: number;
@@ -850,7 +853,16 @@ export class PlaybackEngine {
      * wrap would carry the previous pass's harmony over the new one.
      */
     private effectiveEndTick(index: number, note: ScoreNote, regionEnd: number): number {
-        return Math.min(this.pedalEnds[index] ?? note.t + note.d, regionEnd);
+        const written = note.t + note.d;
+        const pedalEnd = this.pedalEnds[index] ?? written;
+        const shape = this.shapes[index];
+        // Legato overlap is only worth adding where the pedal is not already
+        // pooling the line: a damper held off the string makes the overlap moot.
+        if (shape && shape.legatoTo >= 0 && pedalEnd <= written) {
+            const cap = Math.round(LEGATO_OVERLAP_MAX_S / sptAtTick(this.map, note.t));
+            return Math.min(Math.max(pedalEnd, shape.legatoTo + Math.min(shape.overlapTicks, cap)), regionEnd);
+        }
+        return Math.min(pedalEnd, regionEnd);
     }
 
     /**
@@ -865,7 +877,8 @@ export class PlaybackEngine {
             (note.v ?? DEFAULT_VELOCITY) +
             noteJitter(note.t, note.p, note.h).dv +
             (shape?.lift ?? 0) +
-            (shape?.accent ?? 0) -
+            (shape?.accent ?? 0) +
+            (shape?.phrase ?? 0) -
             (shape?.dip ?? 0)
         );
     }
@@ -894,7 +907,8 @@ export class PlaybackEngine {
             // notes all ring for their written length — never from a clamped
             // attack, which would shorten the note when the roll is pulled back.
             const endTick = this.effectiveEndTick(index, note, regionEnd);
-            const cutAtRegion = (this.pedalEnds[index] ?? note.t + note.d) > regionEnd;
+            const pedalEnd = this.pedalEnds[index] ?? note.t + note.d;
+            const cutAtRegion = pedalEnd > regionEnd;
             let onset = startAt + this.attackOffsetFor(index, note);
             if (this.loop) {
                 // Chord roll + jitter can push an upper note past B even when
@@ -908,7 +922,7 @@ export class PlaybackEngine {
                 onset,
                 Math.max(0, this.timeOfTick(endTick) - startAt),
                 this.velocityFor(index, note),
-                releaseTauOverrideFor(note, endTick, cutAtRegion),
+                releaseTauOverrideFor(note, pedalEnd, cutAtRegion),
             );
         }
     }
@@ -1017,7 +1031,8 @@ export class PlaybackEngine {
             if (noteEnd <= tick) {
                 continue;
             }
-            const cutAtRegion = (this.pedalEnds[index] ?? note.t + note.d) > regionEnd;
+            const pedalEnd = this.pedalEnds[index] ?? note.t + note.d;
+            const cutAtRegion = pedalEnd > regionEnd;
             // No attack offset here: the roll and the timing jitter belong to an
             // onset that already happened, and this tail starts wherever the
             // transport landed.
@@ -1027,7 +1042,7 @@ export class PlaybackEngine {
                 startAt,
                 Math.max(0, this.timeOfTick(noteEnd) - startAt),
                 this.velocityFor(index, note),
-                releaseTauOverrideFor(note, noteEnd, cutAtRegion),
+                releaseTauOverrideFor(note, pedalEnd, cutAtRegion),
             );
         }
     }

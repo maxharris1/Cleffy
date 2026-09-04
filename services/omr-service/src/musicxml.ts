@@ -914,7 +914,7 @@ type RawEvent =
           stealPrevious: boolean;
           stealFollowing: boolean;
       }
-    | { k: 'dyn'; rel: number; staff: EventStaff; v: number }
+    | { k: 'dyn'; rel: number; staff: EventStaff; v: number; voice: string | null }
     | { k: 'accentDyn'; rel: number; staff: EventStaff; toPiano: boolean }
     | { k: 'wedge'; rel: number; staff: EventStaff; dir: 'crescendo' | 'diminuendo' | 'stop'; num: number }
     | { k: 'tempo'; rel: number; qbpm: number; src: 'sound' | 'metronome' | 'word' }
@@ -1190,7 +1190,13 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         for (const mark of childElements(dynamics)) {
                             const level = DYNAMIC_LEVELS[mark.nodeName];
                             if (level !== undefined) {
-                                events.push({ k: 'dyn', rel: cursor, staff, v: level });
+                                events.push({
+                                    k: 'dyn',
+                                    rel: cursor,
+                                    staff,
+                                    v: level,
+                                    voice: childText(child, 'voice'),
+                                });
                                 break;
                             }
                             if (ACCENT_DYNAMICS.has(mark.nodeName)) {
@@ -1213,6 +1219,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 rel: cursor,
                                 staff,
                                 v: roundVelocity(clampVelocity((pct / 100) * 0.82)),
+                                voice: null,
                             });
                         }
                     }
@@ -1713,7 +1720,8 @@ const placeMeasures = (
  * (`ramps` are filled in by hairpin interpolation.)
  */
 export interface DynamicCurve {
-    points: Array<{ tick: number; v: number }>;
+    /** `slot` marks a level printed against one voice of the staff; absent for staff-wide marks. */
+    points: Array<{ tick: number; v: number; slot?: number }>;
     ramps: Array<{ from: number; to: number; vFrom: number; vTo: number }>;
 }
 
@@ -1742,6 +1750,8 @@ interface DynamicMark {
     staff: EventStaff;
     /** Sustained level, or undefined for a bare sf-family accent. */
     v?: number;
+    /** Voice slot the level was printed against, when the staff has more than one voice. */
+    slot?: number;
     accent: boolean;
     wedge?: { dir: 'crescendo' | 'diminuendo' | 'stop'; num: number };
 }
@@ -1843,6 +1853,12 @@ const buildRamps = (
 
 interface DynamicsResolution {
     curves: Map<number, DynamicCurve>;
+    /**
+     * `${staff}:${slot}` curves for staves whose dynamics name a voice: the
+     * staff's own curve with the OTHER voices' levels removed. Only where a
+     * staff has two or more voices; a one-voice staff never gets one.
+     */
+    voiceCurves: Map<string, DynamicCurve>;
     /** `${staff}:${onsetTick}` for attacks a sf-family mark punches. */
     accents: Set<string>;
 }
@@ -1884,6 +1900,26 @@ const resolveDynamics = (
 
     const marks: Array<DynamicMark & { pos: number }> = [];
     const onsets = new Map<number, number[]>();
+    /** Slots seen per staff — a voice-attributed level only means something where there are two. */
+    const slotsByStaff = new Map<number, Set<number>>();
+    for (const raw of raws) {
+        for (const ev of raw.events) {
+            if (ev.k === 'note') {
+                const slots = slotsByStaff.get(ev.staff) ?? new Set<number>();
+                slots.add(ev.vc ?? 0);
+                slotsByStaff.set(ev.staff, slots);
+            }
+        }
+    }
+    /** The slot a direction's <voice> names in this bar, via a note that carries the same id. */
+    const slotOfVoice = (raw: RawMeasure, staff: EventStaff, voice: string): number | undefined => {
+        for (const ev of raw.events) {
+            if (ev.k === 'note' && ev.voice === voice && (staff === null || ev.staff === staff)) {
+                return (slotsByStaff.get(ev.staff)?.size ?? 0) >= 2 ? ev.vc : undefined;
+            }
+        }
+        return undefined;
+    };
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         const place = placements[pos];
@@ -1892,7 +1928,15 @@ const resolveDynamics = (
         }
         for (const ev of raw.events) {
             if (ev.k === 'dyn') {
-                marks.push({ tick: place.tick + ev.rel, staff: ev.staff, v: ev.v, accent: false, pos });
+                const slot = ev.voice === null ? undefined : slotOfVoice(raw, ev.staff, ev.voice);
+                marks.push({
+                    tick: place.tick + ev.rel,
+                    staff: ev.staff,
+                    v: ev.v,
+                    ...(slot !== undefined ? { slot } : {}),
+                    accent: false,
+                    pos,
+                });
             } else if (ev.k === 'accentDyn') {
                 marks.push({
                     tick: place.tick + ev.rel,
@@ -1918,7 +1962,7 @@ const resolveDynamics = (
     }
     if (marks.length === 0) {
         seedCurveStarts(curves, seed, tickOffset);
-        return { curves, accents };
+        return { curves, voiceCurves: new Map(), accents };
     }
     marks.sort((a, b) => a.tick - b.tick);
     for (const list of onsets.values()) {
@@ -1965,7 +2009,10 @@ const resolveDynamics = (
 
     const applyTo = (staff: number, mark: DynamicMark, window: number): void => {
         if (mark.v !== undefined) {
-            curves.get(staff)?.points.push({ tick: mark.tick, v: mark.v });
+            // The slot tag only holds on the staff the voice lives in; broadcast
+            // to another staff it is a staff-wide level like any other.
+            const slot = mark.staff === staff ? mark.slot : undefined;
+            curves.get(staff)?.points.push({ tick: mark.tick, v: mark.v, ...(slot !== undefined ? { slot } : {}) });
         }
         if (mark.accent) {
             const onset = attackAt(staff, mark.tick, window);
@@ -2061,7 +2108,30 @@ const resolveDynamics = (
     for (const [staff, curve] of curves) {
         buildRamps(curve, wedges.get(staff) ?? [], endTick, barTicksAt);
     }
-    return { curves, accents };
+
+    // A level printed against one voice belongs to that voice: its curve is the
+    // staff's with the other voices' levels taken out. Hairpins stay shared —
+    // a wedge spans the staff. The staff curve keeps every level, so a voice
+    // no dynamic was ever printed against hears what it always did.
+    const voiceCurves = new Map<string, DynamicCurve>();
+    for (const [staff, curve] of curves) {
+        const voiced = new Set<number>();
+        for (const point of curve.points) {
+            if (point.slot !== undefined) {
+                voiced.add(point.slot);
+            }
+        }
+        if (voiced.size === 0) {
+            continue;
+        }
+        for (const slot of slotsByStaff.get(staff) ?? []) {
+            voiceCurves.set(`${staff}:${slot}`, {
+                points: curve.points.filter((point) => point.slot === undefined || point.slot === slot),
+                ramps: curve.ramps,
+            });
+        }
+    }
+    return { curves, voiceCurves, accents };
 };
 
 /** Resume a staff's curve from a prior shard when this parse has no earlier point. */
@@ -2371,7 +2441,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
     }
-    const { curves, accents } = resolveDynamics(
+    const { curves, voiceCurves, accents } = resolveDynamics(
         raws,
         placements,
         sigs,
@@ -2380,7 +2450,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         ctx.seed,
         ctx.tickOffset,
     );
-    const curveFor = (staff: number): DynamicCurve | undefined => curves.get(staff) ?? curves.get(1);
+    const curveFor = (staff: number, slot: number): DynamicCurve | undefined =>
+        voiceCurves.get(`${staff}:${slot}`) ?? curves.get(staff) ?? curves.get(1);
 
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
@@ -2520,8 +2591,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         flushArp();
                     }
 
-                    const sustained = velocityAt(curveFor(ev.staff), start);
                     const vc = ev.vc ?? 0;
+                    const sustained = velocityAt(curveFor(ev.staff, vc), start);
                     let principalStart = start;
                     let principalNotated = ev.dur;
                     if (!ev.chord && pendingGraces.length > 0) {
