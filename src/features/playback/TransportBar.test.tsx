@@ -362,9 +362,19 @@ describe('analysis warnings', () => {
         withWarnings(['ornaments_realized', 'swing_applied']);
         await userEvent.click(screen.getByRole('button', { name: /2 things to know/i }));
         expect(
-            screen.getByText(/trills, mordents, turns and arpeggio signs are played out as written/i),
+            screen.getByText(
+                /trills, mordents, turns, tremolos, glissandi and arpeggio signs are played out as written/i,
+            ),
         ).toBeInTheDocument();
         expect(screen.getByText(/pairs of eighth notes are played long–short/i)).toBeInTheDocument();
+    });
+
+    it('explains the v5 disclosures: repaired bars, wavering voices, inferred pedal', async () => {
+        withWarnings(['rhythm_repaired', 'voices_unstable', 'pedal_inferred']);
+        await userEvent.click(screen.getByRole('button', { name: /3 things to know/i }));
+        expect(screen.getByText(/one note or rest in each was corrected to fit/i)).toBeInTheDocument();
+        expect(screen.getByText(/voices within a hand could not always be followed/i)).toBeInTheDocument();
+        expect(screen.getByText(/sustain pedal is played by ear for the style/i)).toBeInTheDocument();
     });
 
     it('ignores codes it has no copy for rather than leaking them raw', () => {
@@ -378,7 +388,7 @@ describe('tempo disclosure and stale analyses', () => {
     const ready = (
         over: Partial<Parameters<typeof renderBar>[0]> = {},
         score = tinyScore,
-        engine: string | null = 'audiveris-5.11.0+svc-10',
+        engine: string | null = 'audiveris-5.11.0+svc-11',
     ) =>
         renderBar({
             state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },

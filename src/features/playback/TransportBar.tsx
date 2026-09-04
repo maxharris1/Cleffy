@@ -105,6 +105,18 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'Some bars came out short and were padded, so notes there may fall early.',
     },
     {
+        code: 'rhythm_repaired',
+        text: 'A few bars did not add up and one note or rest in each was corrected to fit. Check those bars against the page.',
+    },
+    {
+        code: 'voices_unstable',
+        text: 'The voices within a hand could not always be followed from bar to bar, so legato and voicing may waver there.',
+    },
+    {
+        code: 'pedal_inferred',
+        text: 'No pedal markings were found, so the sustain pedal is played by ear for the style. Auto-pedal can be switched off in the transport.',
+    },
+    {
         code: 'tempo_defaulted',
         text: 'No tempo is printed at all — a starting tempo was chosen from the time signature. Adjust it to taste.',
     },
@@ -128,7 +140,7 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
     { code: 'grace_notes_skipped', text: 'Some grace notes had nothing to attach to and were left out.' },
     {
         code: 'ornaments_realized',
-        text: 'Trills, mordents, turns and arpeggio signs are played out as written, at the tempo in force.',
+        text: 'Trills, mordents, turns, tremolos, glissandi and arpeggio signs are played out as written, at the tempo in force.',
     },
     {
         code: 'swing_applied',
