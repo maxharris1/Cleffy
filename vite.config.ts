@@ -7,6 +7,8 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import { collectSupabasePreconnectOrigins } from './src/lib/supabasePreconnectOrigins';
+
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
 
@@ -45,11 +47,9 @@ const pdfjsWasmPlugin = (): Plugin => ({
 });
 
 /**
- * `<link rel="preconnect">` for the Supabase origin this build will actually
- * talk to. Runtime picks the project by hostname when `VITE_SUPABASE_URL` is
- * unset (see src/lib/supabase.ts); that choice is not known at build time, so
- * we only preconnect the explicit URL. Emitting both `_PROD` and `_DEV` would
- * handshake an origin the page never uses.
+ * `<link rel="preconnect">` for every known Supabase HTTPS origin. Runtime
+ * picks the project by hostname when `VITE_SUPABASE_URL` is unset (see
+ * src/lib/supabase.ts); a production env typically has only `_PROD` and `_DEV`.
  */
 const supabasePreconnectPlugin = (): Plugin => {
     let origins: string[] = [];
@@ -57,18 +57,7 @@ const supabasePreconnectPlugin = (): Plugin => {
         name: 'supabase-preconnect',
         configResolved(config) {
             const env = loadEnv(config.mode, config.envDir ?? process.cwd(), 'VITE_');
-            const url = env['VITE_SUPABASE_URL'];
-            origins = [];
-            if (url) {
-                try {
-                    const origin = new URL(url).origin;
-                    if (/^https:/.test(origin)) {
-                        origins = [origin];
-                    }
-                } catch {
-                    // Invalid URL — skip; the client will fail the same way.
-                }
-            }
+            origins = collectSupabasePreconnectOrigins(env);
         },
         transformIndexHtml() {
             return origins.map((href) => ({

@@ -35,16 +35,26 @@ const AssignmentsView = ({ session }: { session: Session }) => {
 
     useEffect(() => {
         let mounted = true;
+        let firstResolved = false;
+        const assignedP = fetchMyAssignments();
+        const profileP = fetchMyRosterProfile();
+        assignedP.then(
+            () => {
+                firstResolved = true;
+            },
+            () => undefined,
+        );
         void (async () => {
             const cached = await getDb()
                 .assignmentsCache.get(session.user.id)
                 .catch(() => undefined);
-            if (mounted && cached && cached.scores.length > 0) {
+            await Promise.resolve();
+            if (mounted && !firstResolved && cached && cached.scores.length > 0) {
                 setScores(cached.scores);
                 setLoading(false);
             }
 
-            const [assigned, profile] = await Promise.allSettled([fetchMyAssignments(), fetchMyRosterProfile()]);
+            const [assigned, profile] = await Promise.allSettled([assignedP, profileP]);
             if (!mounted) {
                 return;
             }

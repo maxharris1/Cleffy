@@ -330,6 +330,39 @@ describe('published covers', () => {
         expect(rowUpdate).toHaveBeenCalledWith('documents', { thumb_rev: 3 }, 'id', 'd1');
     });
 
+    it('does not republish when the published-object probe returns 503', async () => {
+        const stored = pngBlob();
+        storageDownload.mockResolvedValue({
+            data: null,
+            error: { message: 'Service unavailable', statusCode: '503' },
+        });
+        cacheThumb('d1', 3, stored);
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(stored);
+        await settle();
+
+        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageUpload).not.toHaveBeenCalled();
+        expect(rowUpdate).not.toHaveBeenCalled();
+    });
+
+    it('does not republish when the published-object download throws', async () => {
+        const stored = pngBlob();
+        storageDownload.mockRejectedValue(new Error('network down'));
+        cacheThumb('d1', 3, stored);
+        cachePdf('d1', 3);
+        const { getThumbnail } = await loadService();
+
+        expect(await getThumbnail('d1', 3, 3)).toBe(stored);
+        await settle();
+
+        expect(storageDownload).toHaveBeenCalledWith('thumbnails', 'd1/3.jpg');
+        expect(storageUpload).not.toHaveBeenCalled();
+        expect(rowUpdate).not.toHaveBeenCalled();
+    });
+
     it('does not republish a current local JPEG when the published object is still there', async () => {
         const stored = pngBlob();
         const published = new Blob(['published-jpeg'], { type: 'image/jpeg' });

@@ -53,8 +53,8 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
     if (role) {
         // Remember the role so an offline open gets the right editing mode.
         const cached = await getCachedPdf(docId);
-        if (cached && cached.myRole !== role) {
-            await putCachedPdf({ ...cached, myRole: role });
+        if (cached && (cached.myRole !== role || cached.userId !== userId)) {
+            await putCachedPdf({ ...cached, myRole: role, userId });
         }
     }
     return role;
@@ -63,6 +63,12 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
 export interface OfflineDocFallback {
     doc: DocumentRow;
     role: MemberRole;
+    /**
+     * Role that was actually stored on the cache row. Null when the row had
+     * none — the display `role` then defaults to viewer, and a true-offline
+     * confirm must not lift provisional on a guessed role.
+     */
+    cachedRole: MemberRole | null;
     bytes: ArrayBuffer;
 }
 
@@ -88,14 +94,15 @@ export const documentRowFromCache = (cached: {
 /**
  * Open a previously-cached document without the network: synthesizes the
  * document row from the cache and uses the last-known role (defaulting to
- * editor — worst case an offline viewer's edits are rejected and repaired at
- * flush time by RLS).
+ * viewer — a missing role must not grant writes). Rows stamped for another
+ * account, or written before userId existed, are treated as a miss.
  */
-export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFallback | null> => {
+export const loadDocumentOffline = async (docId: string, userId: string): Promise<OfflineDocFallback | null> => {
     const cached = await getCachedPdf(docId);
-    if (!cached) {
+    if (!cached || !cached.userId || cached.userId !== userId) {
         return null;
     }
+    const cachedRole = cached.myRole ?? null;
     return {
         doc: documentRowFromCache({
             id: docId,
@@ -106,25 +113,10 @@ export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFall
             contentRev: cached.contentRev,
             archivedAt: cached.archivedAt,
         }),
-        role: cached.myRole ?? 'editor',
+        role: cachedRole ?? 'viewer',
+        cachedRole,
         bytes: await readCachedPdfBytes(cached.bytes),
     };
-};
-
-/** Cached scores for the offline library view. */
-export const listCachedDocuments = async (): Promise<DocumentRow[]> => {
-    const rows = await getDb().pdfCache.toArray();
-    return rows
-        .filter((row) => isCloudDocId(row.docId))
-        .map((row) =>
-            documentRowFromCache({
-                id: row.docId,
-                title: row.title,
-                cachedAt: row.cachedAt,
-                archivedAt: row.archivedAt,
-            }),
-        )
-        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 };
 
 /** Count pages client-side (pdf.js) so the library can show it up front. */
@@ -232,6 +224,7 @@ export const uploadDocument = async (
         title,
         cachedAt: new Date().toISOString(),
         myRole: 'owner',
+        userId: ownerId,
     });
 
     // Render the library thumbnail from the bytes we already hold. Detached on
@@ -288,7 +281,7 @@ export const importDocumentFromImslp = async (
         }
         noteLibraryMutationCommitted();
 
-        const bytes = await loadDocumentBytes({ ...document, page_count: null });
+        const bytes = await loadDocumentBytes({ ...document, page_count: null }, { userId: ownerId });
         const pageCount = await countPdfPages(bytes);
         if (pageCount !== null) {
             await supabase.from('documents').update({ page_count: pageCount }).eq('id', id);
@@ -440,10 +433,10 @@ export const prefetchDocumentBytes = (docId: string): BytesPrefetch => {
 
 export const loadDocumentBytes = async (
     doc: DocumentRow,
-    options: { preloaded?: PreloadedBytes; prefetch?: BytesPrefetch } = {},
+    options: { preloaded?: PreloadedBytes; prefetch?: BytesPrefetch; userId?: string } = {},
 ): Promise<ArrayBuffer> => {
     const wantRev = doc.content_rev ?? 0;
-    const { preloaded, prefetch } = options;
+    const { preloaded, prefetch, userId } = options;
     if (preloaded && preloaded.contentRev >= wantRev) {
         // The warm open already read and materialised these bytes; a second
         // Dexie read would hold a second multi-megabyte copy for nothing.
@@ -491,6 +484,7 @@ export const loadDocumentBytes = async (
         myRole: cached?.myRole,
         contentRev: wantRev,
         archivedAt: doc.archived_at,
+        userId: userId ?? cached?.userId,
     });
     return bytes;
 };
@@ -549,6 +543,7 @@ export const replaceDocumentPdf = async (
         cachedAt: new Date().toISOString(),
         myRole: cached?.myRole ?? 'owner',
         contentRev: updated.content_rev,
+        userId: cached?.userId,
     });
 
     // The stored bytes changed, so the old first-page render is wrong — the

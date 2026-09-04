@@ -16,6 +16,28 @@ import { getSupabase } from '@/lib/supabase';
 
 const BUCKET = 'thumbnails';
 
+export type PublishedThumbnail =
+    | { status: 'found'; blob: Blob }
+    | { status: 'missing' }
+    | { status: 'unavailable' };
+
+type StorageErrorLike = {
+    message?: string;
+    statusCode?: string | number;
+    status?: string | number;
+};
+
+const isMissingObject = (error: StorageErrorLike | null | undefined): boolean => {
+    if (!error) {
+        return false;
+    }
+    const code = error.statusCode ?? error.status;
+    if (code === 404 || code === '404') {
+        return true;
+    }
+    return /object not found/i.test(error.message ?? '');
+};
+
 export const thumbnailObjectPath = (docId: string, rev: number): string => `${docId}/${rev}.jpg`;
 
 /**
@@ -95,17 +117,20 @@ const release = (): void => {
     waiting.shift()?.();
 };
 
-/** The published cover at this revision, or null when there is none / no network. */
-export const fetchPublishedThumbnail = async (docId: string, rev: number): Promise<Blob | null> => {
+/** The published cover at this revision: found, 404-missing, or otherwise unavailable. */
+export const fetchPublishedThumbnail = async (docId: string, rev: number): Promise<PublishedThumbnail> => {
     await acquire();
     try {
         const { data, error } = await getSupabase().storage.from(BUCKET).download(thumbnailObjectPath(docId, rev));
-        if (error || !data) {
-            return null;
+        if (data && !error) {
+            return { status: 'found', blob: data };
         }
-        return data;
+        if (isMissingObject(error)) {
+            return { status: 'missing' };
+        }
+        return { status: 'unavailable' };
     } catch {
-        return null;
+        return { status: 'unavailable' };
     } finally {
         release();
     }

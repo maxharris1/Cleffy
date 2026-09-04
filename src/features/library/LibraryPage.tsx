@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import {
     deleteDocument,
-    listCachedDocuments,
     listDocuments,
     listFavoriteDocumentIds,
     renameDocument,
@@ -104,25 +103,14 @@ export const LibraryPage = () => {
      * Bumped after a mutation's server write resolved, once the state updates
      * that reflect it are queued. The effect below then persists what is on
      * screen — after the render commits, so it sees the post-edit state, not
-     * the closure's copy. Every mutation's commit edge cleared the snapshot;
-     * this is the write that puts back the one page that knows the truth, so
-     * the next visit paints instantly instead of loading.
+     * the closure's copy. The commit edge outranks in-flight bootstraps; this
+     * is the write that puts the list the page knows is true.
      */
     const [persistTick, setPersistTick] = useState(0);
     const persistSnapshot = () => setPersistTick((t) => t + 1);
-    /**
-     * The opened-PDF fallback (listCachedDocuments) is drawn from pdfCache,
-     * which every account on this browser shares. A list painted from it must
-     * never be written into this user's snapshot.
-     */
-    const snapshotUnsafe = useRef(false);
 
     useEffect(() => {
-        snapshotUnsafe.current = false;
-    }, [userId]);
-
-    useEffect(() => {
-        if (persistTick === 0 || documents === null || snapshotUnsafe.current) {
+        if (persistTick === 0 || documents === null) {
             return;
         }
         void writeCachedLibraryList(userId, {
@@ -199,7 +187,6 @@ export const LibraryPage = () => {
                             return;
                         }
                     }
-                    snapshotUnsafe.current = false;
                     setDocuments(boot.documents);
                     setHasMore(boot.hasMore);
                     setFavorites(boot.favoriteIds);
@@ -230,7 +217,6 @@ export const LibraryPage = () => {
                                 return;
                             }
                         }
-                        snapshotUnsafe.current = false;
                         setDocuments(docs);
                         setHasMore(more);
                         setFavorites(ids);
@@ -244,25 +230,15 @@ export const LibraryPage = () => {
                         if (cancelled) {
                             return;
                         }
-                        // Prefer the bootstrap Dexie snapshot already painted above —
-                        // listCachedDocuments() is only opened PDFs and would shrink the grid.
+                        // Prefer the user-scoped Dexie snapshot already painted
+                        // above. An empty snapshot plus a failed network is an
+                        // error / empty grid — opened PDFs are not a library.
                         if (cachedList && cachedList.documents.length > 0) {
                             setError('Offline — showing scores cached on this device.');
                             return;
                         }
-                        const opened = await listCachedDocuments().catch(() => []);
-                        if (cancelled) {
-                            return;
-                        }
-                        setHasMore(false);
-                        if (opened.length > 0) {
-                            snapshotUnsafe.current = true;
-                            setDocuments(opened);
-                            setError('Offline — showing scores cached on this device.');
-                        } else {
-                            setDocuments((prev) => prev ?? []);
-                            setError(err instanceof Error ? err.message : 'Could not load your scores.');
-                        }
+                        setDocuments((prev) => prev ?? []);
+                        setError(err instanceof Error ? err.message : 'Could not load your scores.');
                         return;
                     }
                 }

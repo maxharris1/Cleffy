@@ -147,12 +147,21 @@ const verifyPublishedOrRepublish = async (docId: string, contentRev: number, loc
     }
     publishedProbed.add(key);
     const published = await fetchPublishedThumbnail(docId, contentRev);
-    if (published) {
-        return;
-    }
-    noteThumbnailObjectMissing(docId, contentRev);
-    if (shouldPublishThumbnail(docId, contentRev, contentRev, true)) {
-        await publishThumbnail(docId, contentRev, localJpeg);
+    switch (published.status) {
+        case 'found':
+            return;
+        case 'unavailable':
+            return;
+        case 'missing':
+            noteThumbnailObjectMissing(docId, contentRev);
+            if (shouldPublishThumbnail(docId, contentRev, contentRev, true)) {
+                await publishThumbnail(docId, contentRev, localJpeg);
+            }
+            return;
+        default: {
+            const _exhaustive: never = published;
+            return _exhaustive;
+        }
     }
 };
 
@@ -166,24 +175,31 @@ const fetchAndStore = async (
     if (failed.has(key)) {
         return fallback?.blob ?? null;
     }
-    const blob = await fetchPublishedThumbnail(docId, thumbRev);
-    if (blob) {
-        publishedProbed.add(`${docId}:${thumbRev}`);
-    }
-    if (!blob) {
-        failed.add(key);
-        noteThumbnailObjectMissing(docId, thumbRev);
-        // The row still points at this revision, but the object is gone —
-        // republish only a JPEG that was rendered at this same revision.
-        if (
-            fallback?.blob.type === 'image/jpeg' &&
-            fallback.contentRev === thumbRev &&
-            shouldPublishThumbnail(docId, thumbRev, thumbRev, true)
-        ) {
-            void publishThumbnail(docId, thumbRev, fallback.blob);
+    const result = await fetchPublishedThumbnail(docId, thumbRev);
+    switch (result.status) {
+        case 'found':
+            publishedProbed.add(`${docId}:${thumbRev}`);
+            break;
+        case 'unavailable':
+            failed.add(key);
+            return fallback?.blob ?? null;
+        case 'missing':
+            failed.add(key);
+            noteThumbnailObjectMissing(docId, thumbRev);
+            if (
+                fallback?.blob.type === 'image/jpeg' &&
+                fallback.contentRev === thumbRev &&
+                shouldPublishThumbnail(docId, thumbRev, thumbRev, true)
+            ) {
+                void publishThumbnail(docId, thumbRev, fallback.blob);
+            }
+            return fallback?.blob ?? null;
+        default: {
+            const _exhaustive: never = result;
+            return _exhaustive;
         }
-        return fallback?.blob ?? null;
     }
+    const blob = result.blob;
     try {
         await getDb().thumbnails.put({
             docId,

@@ -54,8 +54,12 @@ vi.mock('@/features/viewer/ViewerHeader', () => ({
 
 vi.mock('@/features/viewer/presence/PresenceBar', () => ({ PresenceBar: () => null }));
 vi.mock('@/features/viewer/history/LessonHistoryButton', () => ({ LessonHistoryButton: () => null }));
-vi.mock('@/features/export/ShareExportMenu', () => ({ ShareExportMenu: () => null }));
-vi.mock('@/features/import/ImportScanButton', () => ({ ImportScanButton: () => null }));
+vi.mock('@/features/export/ShareExportMenu', () => ({
+    ShareExportMenu: () => <div data-testid="share-export-menu" />,
+}));
+vi.mock('@/features/import/ImportScanButton', () => ({
+    ImportScanButton: () => <div data-testid="import-scan-button" />,
+}));
 vi.mock('@/features/import/analyzeApi', () => ({ makeCloudClassifyFn: () => null }));
 vi.mock('@/features/import/cleanReplace', () => ({ buildCleanFn: () => null }));
 vi.mock('@/features/import/prepareUpload', () => ({ UPLOAD_ACCEPT: '', prepareUploadFile: vi.fn() }));
@@ -86,9 +90,10 @@ const serverDoc = (overrides: Partial<DocumentRow> = {}): DocumentRow => ({
     ...overrides,
 });
 
-const cachedOpen = () => ({
+const cachedOpen = (role: 'owner' | 'editor' | 'viewer' = 'owner') => ({
     doc: serverDoc({ owner_id: '', page_count: null, title: 'Nocturne (cached)' }),
-    role: 'editor' as const,
+    role,
+    cachedRole: role,
     bytes: new ArrayBuffer(8),
 });
 
@@ -163,8 +168,11 @@ describe('CloudViewer warm open', () => {
 
         renderViewer();
 
-        await waitFor(() => expect(screen.getByTestId('pdf-viewport')).toBeInTheDocument());
-        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
 
         vi.useFakeTimers();
         await act(async () => {
@@ -194,6 +202,8 @@ describe('CloudViewer warm open', () => {
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
         expect(viewport()).toHaveAttribute('data-sync', 'on');
         await waitFor(() => expect(screen.getByText('Nocturne (Chopin)')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument();
+        expect(screen.getByTestId('share-export-menu')).toBeInTheDocument();
     });
 
     it('confirms the warm paint against the fresh archive flag, not the cached one', async () => {
@@ -215,9 +225,13 @@ describe('CloudViewer warm open', () => {
         renderViewer();
 
         await waitFor(() => expect(loadDocumentBytes).toHaveBeenCalled());
-        expect(prefetchDocumentBytes).not.toHaveBeenCalled();
-        const [, options] = loadDocumentBytes.mock.calls[0] as [DocumentRow, { preloaded?: { bytes: ArrayBuffer } }];
+        expect(prefetchDocumentBytes).toHaveBeenCalledWith(DOC_ID);
+        const [, options] = loadDocumentBytes.mock.calls[0] as [
+            DocumentRow,
+            { preloaded?: { bytes: ArrayBuffer }; prefetch?: unknown },
+        ];
         expect(options.preloaded?.bytes).toBe(cached.bytes);
+        expect(options.prefetch).toBeUndefined();
     });
 
     it('starts the bytes download alongside the row on a cold open', async () => {
@@ -241,5 +255,31 @@ describe('CloudViewer warm open', () => {
 
         expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
         expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+    });
+
+    it('drops the cached paint when the document is gone even if the role request rejects', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
+    });
+
+    it('stays read-only when confirm fails with a PostgREST error', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen());
+        fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
     });
 });

@@ -9,7 +9,6 @@ import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 
 const listDocuments = vi.fn();
-const listCachedDocuments = vi.fn();
 const listFavoriteDocumentIds = vi.fn();
 const setDocumentFavorite = vi.fn();
 const renameDocument = vi.fn();
@@ -26,7 +25,6 @@ const writeCachedLibraryList = vi.fn();
 
 vi.mock('@/features/library/documentsService', () => ({
     listDocuments: (...args: unknown[]) => listDocuments(...args),
-    listCachedDocuments: (...args: unknown[]) => listCachedDocuments(...args),
     listFavoriteDocumentIds: (...args: unknown[]) => listFavoriteDocumentIds(...args),
     setDocumentFavorite: (...args: unknown[]) => setDocumentFavorite(...args),
     renameDocument: (...args: unknown[]) => renameDocument(...args),
@@ -180,7 +178,6 @@ beforeEach(() => {
         ],
         hasMore: false,
     });
-    listCachedDocuments.mockResolvedValue([]);
     readCachedLibraryList.mockResolvedValue(null);
     writeCachedLibraryList.mockResolvedValue(undefined);
     mockBootstrap();
@@ -691,19 +688,12 @@ describe('LibraryPage', () => {
             expect(snapshot.documents.map((d) => d.id)).toEqual(['d1']);
         });
 
-        it('never writes a list painted from the shared opened-PDF cache into this user’s snapshot', async () => {
-            const user = userEvent.setup();
+        it('does not paint another account’s opened PDF when this user’s snapshot is empty', async () => {
             fetchLibraryBootstrap.mockRejectedValue(new Error('offline'));
             listDocuments.mockRejectedValue(new Error('offline'));
-            listCachedDocuments.mockResolvedValue([doc('d9', 'Someone else’s score')]);
             renderLibrary();
-            await screen.findByText('Someone else’s score');
-
-            // The favorite itself goes through (the server is back), but the
-            // list on screen came from pdfCache, which every account shares.
-            await user.click(screen.getByRole('button', { name: 'Add to favorites' }));
-            await waitFor(() => expect(setDocumentFavorite).toHaveBeenCalled());
-            await new Promise((r) => setTimeout(r, 20));
+            expect(await screen.findByText('offline')).toBeInTheDocument();
+            expect(screen.queryByText('Someone else’s score')).not.toBeInTheDocument();
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
         });
     });

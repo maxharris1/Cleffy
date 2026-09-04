@@ -81,6 +81,12 @@ describe('fetchLibraryBootstrap', () => {
         expect(b.documents[0]?.title).toBe('Bourrée');
     });
 
+    it('keeps a seeded libraryList row across noteLibraryMutationCommitted', async () => {
+        await writeCachedLibraryList('user-keep', listSnapshot('Keep me'));
+        noteLibraryMutationCommitted();
+        expect((await getDb().libraryList.get('user-keep'))?.documents[0]?.title).toBe('Keep me');
+    });
+
     it('does not persist a payload that a mutation outran', async () => {
         let release: (value: unknown) => void = () => undefined;
         rpc.mockImplementationOnce(

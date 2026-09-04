@@ -156,7 +156,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             // Free, local prescan: does this score already carry colored-ink
             // markings? If so (and the user never declined), offer the import.
             try {
-                const bytes = await loadDocumentBytes(document);
+                const bytes = await loadDocumentBytes(document, { userId });
                 if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
                     setImportOffer(document);
                     return; // the dialog decides where to navigate

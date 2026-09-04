@@ -79,6 +79,7 @@ vi.mock('@/features/import/prepareUpload', () => ({
 import {
     deleteDocument,
     loadDocumentBytes,
+    loadDocumentOffline,
     prefetchDocumentBytes,
     replaceDocumentPdf,
     uploadDocument,
@@ -491,16 +492,15 @@ describe('deleteDocument', () => {
      * The producer half of the library-cache contract: the epoch moves at
      * the attempt edge, BEFORE the server write (so a bootstrap racing it is
      * outranked), and again at the commit edge (so a bootstrap dispatched
-     * mid-write is outranked too) — where the Dexie snapshot is also dropped.
-     * A refused delete takes only the attempt edge and keeps the snapshot:
-     * it must not cost an offline library its list.
+     * mid-write is outranked too). A refused delete takes only the attempt
+     * edge: it must not look like a committed mutation.
      */
-    it('bumps the epoch on both edges and drops the library snapshots on success', async () => {
+    it('bumps the epoch on both edges of a successful delete', async () => {
         makeStub();
         const before = libraryMutationEpoch();
         await deleteDocument(doc());
         expect(libraryMutationEpoch()).toBe(before + 2);
-        expect(libraryListClear).toHaveBeenCalledTimes(1);
+        expect(libraryListClear).not.toHaveBeenCalled();
     });
 
     it('keeps the library snapshots when the delete is refused', async () => {
@@ -540,9 +540,10 @@ describe('uploadDocument commit edge', () => {
         });
         const { document } = await uploadDocument(pdf(), 'user-1');
         expect(libraryMutationEpoch()).toBe(before + 2);
-        expect(libraryListClear).toHaveBeenCalledTimes(1);
+        expect(libraryListClear).not.toHaveBeenCalled();
         const cached = await getDb().pdfCache.get(document.id);
         expect(cached?.myRole).toBe('owner');
+        expect(cached?.userId).toBe('user-1');
     });
 
     it('commits after rolling back a row whose storage upload failed', async () => {
@@ -552,6 +553,44 @@ describe('uploadDocument commit edge', () => {
         await expect(uploadDocument(pdf(), 'user-1')).rejects.toThrow('storage down');
         expect(calls.delete).toHaveBeenCalledWith('documents');
         expect(libraryMutationEpoch()).toBe(before + 2);
-        expect(libraryListClear).toHaveBeenCalledTimes(1);
+        expect(libraryListClear).not.toHaveBeenCalled();
+    });
+});
+
+describe('loadDocumentOffline', () => {
+    const id = 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1';
+    const row = (over: Partial<CachedPdf> = {}): CachedPdf => ({
+        docId: id,
+        bytes: new Blob(['cached-bytes']),
+        title: 'Sonata',
+        cachedAt: '2026-08-01T00:00:00Z',
+        myRole: 'owner',
+        userId: 'user-1',
+        ...over,
+    });
+
+    it('returns the cached score when userId matches', async () => {
+        await putCache(row());
+        const offline = await loadDocumentOffline(id, 'user-1');
+        expect(offline?.role).toBe('owner');
+        expect(offline?.cachedRole).toBe('owner');
+        expect(offline?.doc.title).toBe('Sonata');
+    });
+
+    it('returns null when userId mismatches', async () => {
+        await putCache(row());
+        expect(await loadDocumentOffline(id, 'user-2')).toBeNull();
+    });
+
+    it('returns null for a legacy row with no userId', async () => {
+        await putCache(row({ userId: undefined }));
+        expect(await loadDocumentOffline(id, 'user-1')).toBeNull();
+    });
+
+    it('defaults a missing stored role to viewer and reports cachedRole null', async () => {
+        await putCache(row({ myRole: undefined }));
+        const offline = await loadDocumentOffline(id, 'user-1');
+        expect(offline?.role).toBe('viewer');
+        expect(offline?.cachedRole).toBeNull();
     });
 });

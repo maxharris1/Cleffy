@@ -62,6 +62,14 @@ export interface CachedPdf {
     contentRev?: number;
     /** Last-known archive state — archived scores are read-only (billing, M6). */
     archivedAt?: string | null;
+    /**
+     * Account that cached these bytes. Warm-open and offline load refuse a
+     * row whose userId is missing (legacy) or does not match the session —
+     * pdfCache is keyed by document, not by user, so a shared device would
+     * otherwise paint another account's score. Plain field, not indexed —
+     * no Dexie version bump needed.
+     */
+    userId?: string;
 }
 
 /** Cached play-along analysis: offline replays and fast viewer opens (M-playback). */

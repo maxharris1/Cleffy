@@ -155,6 +155,8 @@ export const signOut = async (): Promise<void> => {
         db.libraryList.clear().catch(() => undefined),
         db.rosterCache.clear().catch(() => undefined),
         db.assignmentsCache.clear().catch(() => undefined),
+        db.pdfCache.clear().catch(() => undefined),
+        db.thumbnails.clear().catch(() => undefined),
     ]);
 };
 

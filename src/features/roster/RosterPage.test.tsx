@@ -49,6 +49,14 @@ const student = (id: string, displayName: string, overrides: Partial<ManagedStud
     ...overrides,
 });
 
+const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+        resolve = res;
+    });
+    return { promise, resolve };
+};
+
 const rosterAssignment = (documentId: string, documentTitle: string, studentUserId: string): RosterAssignment => ({
     assignment: {
         id: `assignment-${documentId}`,
@@ -397,6 +405,39 @@ describe('RosterPage', () => {
                 // The counts ride along; the snapshot is not blanked by the rewrite.
                 expect(row?.assignmentCounts).toEqual([['s1-user', 1]]);
             });
+        } finally {
+            await getDb().rosterCache.clear();
+        }
+    });
+
+    it('does not let a late mount listRoster resurrect a student archived after cache paint', async () => {
+        const user = userEvent.setup();
+        const active = student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' });
+        const archived = { ...active, archived_at: '2026-08-30T00:00:00Z' };
+        await getDb().rosterCache.put({
+            userId: 'teacher-1',
+            students: [active],
+            assignmentCounts: [],
+            cachedAt: '2026-08-29T00:00:00Z',
+        });
+        const mountRoster = deferred<ManagedStudentRow[]>();
+        listRoster.mockReturnValueOnce(mountRoster.promise).mockResolvedValueOnce([archived]);
+        listAssignmentsForStudents.mockResolvedValue(new Map());
+        archiveStudent.mockResolvedValue(undefined);
+        try {
+            renderRoster();
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+
+            await pickRowAction(user, 'Archive…');
+            await user.click(screen.getByRole('button', { name: 'Archive' }));
+            expect(archiveStudent).toHaveBeenCalledWith('s1');
+            await waitFor(() => expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived'));
+
+            await act(async () => {
+                mountRoster.resolve([active]);
+            });
+            await new Promise((r) => setTimeout(r, 20));
+            expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived');
         } finally {
             await getDb().rosterCache.clear();
         }

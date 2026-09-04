@@ -167,27 +167,32 @@ export const RosterPage = () => {
     const [archiveTarget, setArchiveTarget] = useState<ManagedStudentRow | null>(null);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const rosterGen = useRef(0);
 
     useEffect(() => {
         let mounted = true;
+        const gen = rosterGen.current;
+        let firstResolved = false;
+        const first = Promise.all([listRoster(), listAssignmentsForStudents().catch(() => null)]);
+        first.then(
+            () => {
+                firstResolved = true;
+            },
+            () => undefined,
+        );
         void (async () => {
-            // Names first — assignment counts fill in with the network response.
             const cached = await getDb()
                 .rosterCache.get(userId)
                 .catch(() => undefined);
-            if (mounted && cached && cached.students.length > 0) {
+            await Promise.resolve();
+            if (mounted && !firstResolved && gen === rosterGen.current && cached && cached.students.length > 0) {
                 setStudents(cached.students);
                 setCachedCounts(new Map(cached.assignmentCounts));
             }
 
             try {
-                // null, not an empty map, on failure: an empty map is a claim
-                // ("no assignments") the page would repeat in every row.
-                const [roster, grouped] = await Promise.all([
-                    listRoster(),
-                    listAssignmentsForStudents().catch(() => null),
-                ]);
-                if (!mounted) {
+                const [roster, grouped] = await first;
+                if (!mounted || gen !== rosterGen.current) {
                     return;
                 }
                 setStudents(roster);
@@ -199,11 +204,12 @@ export const RosterPage = () => {
                 setLoadError(null);
                 persistRoster(userId, roster, grouped ? countsOf(grouped) : (cached?.assignmentCounts ?? []));
             } catch (err) {
-                if (mounted) {
-                    setStudents((prev) => prev ?? []);
-                    setAssignmentsStatus('failed');
-                    setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
+                if (!mounted || gen !== rosterGen.current) {
+                    return;
                 }
+                setStudents((prev) => prev ?? []);
+                setAssignmentsStatus('failed');
+                setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
             }
         })();
         return () => {
@@ -220,7 +226,11 @@ export const RosterPage = () => {
     const currentCounts = (): Array<[string, number]> =>
         assignmentsStatus === 'ready' ? countsOf(assignments) : [...(cachedCounts ?? new Map()).entries()];
     const reloadRoster = async () => {
+        const gen = ++rosterGen.current;
         const roster = await listRoster();
+        if (gen !== rosterGen.current) {
+            return;
+        }
         setStudents(roster);
         persistRoster(userId, roster, currentCounts());
     };
@@ -237,6 +247,7 @@ export const RosterPage = () => {
      * broke. Only the middle one gets an upgrade prompt instead of red text.
      */
     const run = async (action: () => Promise<void>): Promise<void> => {
+        rosterGen.current += 1;
         setActionError(null);
         setLimit(null);
         setBusy(true);

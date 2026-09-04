@@ -1,5 +1,3 @@
-import { getDb } from '@/sync/db';
-
 /**
  * Monotonic counter over library-affecting mutation EDGES. Every mutation
  * (upload, rename, delete, favorite, tag changes, sign-out) bumps it twice:
@@ -28,21 +26,12 @@ export const noteLibraryMutation = (): void => {
 
 /**
  * The commit edge. Called by every service mutation right after its server
- * write succeeds — never on failure, which changed nothing. Also drops the
- * persisted snapshots: they now describe a library that no longer exists,
- * and an offline mount must not resurrect a deleted score or hide a new one;
- * the next successful bootstrap rebuilds them. All accounts' rows go — they
- * are only instant-paint hints, and the write sites mostly don't know a user
- * id to scope the delete by.
+ * write succeeds — never on failure, which changed nothing. Only the counter
+ * moves: the Dexie snapshot stays so an unmounted library (favorite, then
+ * open a score) still has a list to paint, and the next bootstrap corrects
+ * it. In-flight bootstraps lose because their dispatch-time epoch no longer
+ * matches. The mounted page writes the post-edit snapshot via persistTick.
  */
 export const noteLibraryMutationCommitted = (): void => {
     epoch += 1;
-    try {
-        const db = getDb();
-        // Explicit transaction so this clear and a later writeCachedLibraryList
-        // put are ordered by transaction creation, not by Dexie's lazy open.
-        void db.transaction('rw', db.libraryList, () => db.libraryList.clear()).catch(() => undefined);
-    } catch {
-        // No IndexedDB (private mode) means no snapshot to drop.
-    }
 };
