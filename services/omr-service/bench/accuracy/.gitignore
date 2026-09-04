@@ -1,0 +1,6 @@
+# Reproducible via `node bench/accuracy/fetch.mjs` — PDFs and ground truth are
+# not committed. results/raw holds per-run artifacts; summaries are committed.
+data/
+results/raw/
+results/llm-cache/
+results/work/

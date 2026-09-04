@@ -1,0 +1,14 @@
+# Bench-only image for Audiveris 5.11.0. Build the base first:
+#   docker build --build-arg AUDIVERIS_VERSION=5.11.0 -t cleffy-omr:5.11.0 services/omr-service
+# then
+#   docker build -f services/omr-service/bench/accuracy/docker/Dockerfile.5.11 -t cleffy-omr:5.11.0-bench .
+#
+# 5.11 probes GDK for HiDPI scaling at class-init time even in -batch mode and
+# dies with UnsatisfiedLinkError without libgtk-3; the production 5.6.1 image
+# does not need it. Not a production change — the spike measures 5.11 as-is.
+FROM cleffy-omr:5.11.0
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgtk-3-0 \
+    && rm -rf /var/lib/apt/lists/*
+USER node

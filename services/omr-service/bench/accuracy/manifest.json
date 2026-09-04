@@ -1,0 +1,162 @@
+{
+    "$comment": "Ground-truth benchmark corpus. `gt` entries are ASAP dataset paths (fosfrancesco/asap-dataset, MusicXML from MuseScore, public domain). `pdf.type` is `render` (MuseScore 3 from the GT MusicXML), `imslp` (real scan; `pages` are 1-based inclusive) or `concat` (pdfunite of other entries' PDFs, multi-movement file).",
+    "asapBase": "https://raw.githubusercontent.com/fosfrancesco/asap-dataset/master",
+    "scores": [
+        {
+            "id": "bach-prelude-846",
+            "kind": "typeset",
+            "title": "Bach, WTC I Prelude in C, BWV 846",
+            "gt": ["Bach/Prelude/bwv_846"],
+            "pdf": { "type": "render" },
+            "tags": ["4/4", "simple", "arpeggios"]
+        },
+        {
+            "id": "bach-fugue-846",
+            "kind": "typeset",
+            "title": "Bach, WTC I Fugue in C, BWV 846",
+            "gt": ["Bach/Fugue/bwv_846"],
+            "pdf": { "type": "render" },
+            "tags": ["4/4", "dense-polyphony", "4-voices"]
+        },
+        {
+            "id": "bach-prelude-848",
+            "kind": "typeset",
+            "title": "Bach, WTC I Prelude in C-sharp, BWV 848",
+            "gt": ["Bach/Prelude/bwv_848"],
+            "pdf": { "type": "render" },
+            "tags": ["3/8", "7-sharps"]
+        },
+        {
+            "id": "beethoven-8-2",
+            "kind": "typeset",
+            "title": "Beethoven, Sonata Op. 13 No. 8, II Adagio cantabile",
+            "gt": ["Beethoven/Piano_Sonatas/8-2"],
+            "pdf": { "type": "render" },
+            "tags": ["2/4", "grace-notes", "tuplets", "4-flats"]
+        },
+        {
+            "id": "haydn-39-3",
+            "kind": "typeset",
+            "title": "Haydn, Sonata Hob. XVI:39, III Prestissimo",
+            "gt": ["Haydn/Keyboard_Sonatas/39-3"],
+            "pdf": { "type": "render" },
+            "tags": ["6/8", "repeats"]
+        },
+        {
+            "id": "mozart-11-3",
+            "kind": "typeset",
+            "title": "Mozart, Sonata K. 331, III Alla Turca",
+            "gt": ["Mozart/Piano_Sonatas/11-3"],
+            "pdf": { "type": "render" },
+            "tags": ["2/4", "repeats", "voltas", "key-change", "grace-notes"]
+        },
+        {
+            "id": "mozart-12-2",
+            "kind": "typeset",
+            "title": "Mozart, Sonata K. 332, II Adagio",
+            "gt": ["Mozart/Piano_Sonatas/12-2"],
+            "pdf": { "type": "render" },
+            "tags": ["4/4", "ornaments", "trills", "grace-notes"]
+        },
+        {
+            "id": "chopin-10-3",
+            "kind": "typeset",
+            "title": "Chopin, Etude Op. 10 No. 3",
+            "gt": ["Chopin/Etudes_op_10/3"],
+            "pdf": { "type": "render" },
+            "tags": ["2/4", "dense", "inner-voices", "4-sharps"]
+        },
+        {
+            "id": "scriabin-8-11",
+            "kind": "typeset",
+            "title": "Scriabin, Etude Op. 8 No. 11",
+            "gt": ["Scriabin/Etudes_op_8/11"],
+            "pdf": { "type": "render" },
+            "tags": ["3/4", "key-change", "5-flats", "polyrhythm"]
+        },
+        {
+            "id": "ravel-pavane",
+            "kind": "typeset",
+            "title": "Ravel, Pavane pour une infante défunte",
+            "gt": ["Ravel/Pavane"],
+            "pdf": { "type": "render" },
+            "tags": ["mixed-meter", "chords"]
+        },
+        {
+            "id": "bach-846-prelude-fugue",
+            "kind": "typeset",
+            "title": "Bach, WTC I Prelude + Fugue BWV 846 (two movements in one file)",
+            "gt": ["Bach/Prelude/bwv_846", "Bach/Fugue/bwv_846"],
+            "pdf": { "type": "concat", "of": ["bach-prelude-846", "bach-fugue-846"] },
+            "tags": ["multi-movement"]
+        },
+        {
+            "id": "bach-prelude-846-scan",
+            "kind": "scan",
+            "title": "Bach, WTC I Prelude BWV 846 — IMSLP scan (E917354)",
+            "gt": ["Bach/Prelude/bwv_846"],
+            "pdf": { "type": "imslp", "file": "PMLP533917-E917354 1-4-WTC 1 BWV 846-869.pdf", "pages": [1, 2] },
+            "tags": ["scan", "4/4"]
+        },
+        {
+            "id": "bach-fugue-846-scan",
+            "kind": "scan",
+            "title": "Bach, WTC I Fugue BWV 846 — IMSLP scan (E917354)",
+            "gt": ["Bach/Fugue/bwv_846"],
+            "pdf": { "type": "imslp", "file": "PMLP533917-E917354 1-4-WTC 1 BWV 846-869.pdf", "pages": [3, 4] },
+            "tags": ["scan", "dense-polyphony"]
+        },
+        {
+            "id": "beethoven-8-2-scan",
+            "kind": "scan",
+            "title": "Beethoven, Op. 13 II — Breitkopf & Härtel Werke scan",
+            "gt": ["Beethoven/Piano_Sonatas/8-2"],
+            "pdf": {
+                "type": "imslp",
+                "file": "PMLP01410-Beethoven, Ludwig van-Werke Breitkopf Kalmus Band 20 B131 Op 13 scan.pdf",
+                "pages": [8, 10]
+            },
+            "tags": ["scan", "grace-notes", "tuplets"]
+        },
+        {
+            "id": "beethoven-8-2-scan-berg",
+            "kind": "scan",
+            "title": "Beethoven, Op. 13 II — Berg 'Classic Gems' (19th-c. US print) scan",
+            "gt": ["Beethoven/Piano_Sonatas/8-2"],
+            "pdf": { "type": "imslp", "file": "PMLP01410-BeethovenAdagiocantab13edBerg.pdf", "pages": [3, 6] },
+            "tags": ["scan", "old-print", "grace-notes"]
+        },
+        {
+            "id": "haydn-39-3-scan",
+            "kind": "scan",
+            "title": "Haydn, Hob. XVI:39 III — Moscheles ed. (Sibley) scan",
+            "gt": ["Haydn/Keyboard_Sonatas/39-3"],
+            "pdf": { "type": "imslp", "file": "PMLP01719-haydn 39 moscheles sibley.1802.3067.pdf", "pages": [11, 14] },
+            "tags": ["scan", "6/8", "repeats", "old-print"]
+        },
+        {
+            "id": "mozart-11-3-scan",
+            "kind": "scan",
+            "title": "Mozart, K. 331 III Alla Turca — Breitkopf Werke scan",
+            "gt": ["Mozart/Piano_Sonatas/11-3"],
+            "pdf": { "type": "imslp", "file": "PMLP01846-Mozart Werke Breitkopf Serie 20 KV331.pdf", "pages": [9, 12] },
+            "tags": ["scan", "repeats", "voltas", "grace-notes"]
+        },
+        {
+            "id": "chopin-10-3-scan",
+            "kind": "scan",
+            "title": "Chopin, Op. 10 No. 3 — Schirmer/Mikuli scan",
+            "gt": ["Chopin/Etudes_op_10/3"],
+            "pdf": { "type": "imslp", "file": "PMLP01969-Chopin Etudes Schirmer Mikuli Op 10 scan.pdf", "pages": [22, 25] },
+            "tags": ["scan", "dense", "inner-voices"]
+        },
+        {
+            "id": "scriabin-8-11-scan",
+            "kind": "scan",
+            "title": "Scriabin, Op. 8 No. 11 — Peters scan",
+            "gt": ["Scriabin/Etudes_op_8/11"],
+            "pdf": { "type": "imslp", "file": "PMLP07375-Scriabin - 12 Etudes Op8 (Peters).pdf", "pages": [37, 39] },
+            "tags": ["scan", "key-change", "polyrhythm"]
+        }
+    ]
+}
