@@ -52,7 +52,7 @@ import { analyzeVoices } from '@/features/playback/voiceAnalysis';
 import type { VoiceAnalysis } from '@/features/playback/voiceAnalysis';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
-import type { ScoreData, ScoreNote } from '@/types/scoreData';
+import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
 
 /**
  * Web Audio playback of a ScoreData: classic lookahead scheduler (25 ms tick,
@@ -363,6 +363,11 @@ export interface PlaybackEngineOptions {
     bpm: number;
     /** Strict (the default) plays the printed tempo exactly as it always has. */
     tempoStyle?: TempoStyle;
+    /**
+     * Whether to play pedalling the service inferred for an unmarked score
+     * (`pedal_inferred`). Engraved pedalling always plays. Defaults to on.
+     */
+    autoPedal?: boolean;
     onStatus: (status: PlaybackStatus) => void;
     /** Fired after seeks/stops so the playhead can redraw while paused. */
     onPositionJump?: () => void;
@@ -403,8 +408,14 @@ export class PlaybackEngine {
     private readonly analysis: VoiceAnalysis;
     /** Chord/melody/downbeat shaping, index-aligned with `score.notes`. */
     private readonly shapes: readonly NoteShape[];
+    /**
+     * The pedal edges in force: the score's, or none when they were inferred
+     * and the listener turned auto-pedal off.
+     */
+    private pedals: readonly ScorePedal[] | undefined;
     /** Pedal-lengthened end ticks, index-aligned with `score.notes`. */
-    private readonly pedalEnds: readonly number[];
+    private pedalEnds: readonly number[];
+    private autoPedal: boolean;
 
     private status: PlaybackStatus = 'idle';
     /** The score's tempo map, scaled to the practice tempo. */
@@ -437,7 +448,9 @@ export class PlaybackEngine {
         // note in isolation at the moment that note is scheduled.
         this.analysis = analyzeVoices(options.score);
         this.shapes = buildNoteShapes(options.score, this.analysis);
-        this.pedalEnds = buildPedalEnds(options.score.notes, options.score.pedals, options.score.totalTicks);
+        this.autoPedal = options.autoPedal ?? true;
+        this.pedals = this.pedalsInForce();
+        this.pedalEnds = buildPedalEnds(options.score.notes, this.pedals, options.score.totalTicks);
         this.tempoStyle = options.tempoStyle ?? 'strict';
         this.map = this.buildMap(options.bpm);
         this.onStatus = options.onStatus;
@@ -592,6 +605,35 @@ export class PlaybackEngine {
 
     getTempoStyle(): TempoStyle {
         return this.tempoStyle;
+    }
+
+    /**
+     * Play or drop the pedalling the service inferred. Notes already sounding
+     * keep the ends they were scheduled with; everything from here on reads
+     * the new ones, and the resonance follows the pedal state at the playhead.
+     */
+    setAutoPedal(on: boolean): void {
+        if (on === this.autoPedal) {
+            return;
+        }
+        this.autoPedal = on;
+        this.pedals = this.pedalsInForce();
+        this.pedalEnds = buildPedalEnds(this.score.notes, this.pedals, this.score.totalTicks);
+        if (this.ctx && (this.status === 'playing' || this.status === 'counting')) {
+            this.syncResonanceFrom(this.getPositionTicks(), this.ctx.currentTime, true);
+        }
+    }
+
+    getAutoPedal(): boolean {
+        return this.autoPedal;
+    }
+
+    /** Engraved pedalling always plays; inferred pedalling only while auto-pedal is on. */
+    private pedalsInForce(): readonly ScorePedal[] | undefined {
+        if (!this.autoPedal && this.score.warnings.includes('pedal_inferred')) {
+            return undefined;
+        }
+        return this.score.pedals;
     }
 
     /**
@@ -990,7 +1032,7 @@ export class PlaybackEngine {
     private schedulePedalEdgesUpTo(regionEnd: number, horizon: number): void {
         const send = this.resonanceSend;
         const ctx = this.ctx;
-        const pedals = this.score.pedals;
+        const pedals = this.pedals;
         if (!send || !ctx || !pedals) {
             return;
         }
@@ -1013,7 +1055,7 @@ export class PlaybackEngine {
     }
 
     private firstPedalIndexAtOrAfter(tick: number): number {
-        const pedals = this.score.pedals;
+        const pedals = this.pedals;
         if (!pedals) {
             return 0;
         }
@@ -1042,14 +1084,14 @@ export class PlaybackEngine {
         if (cancel) {
             send.gain.cancelScheduledValues(when);
         }
-        send.gain.setTargetAtTime(pedalStateAt(this.score.pedals, tick) ? RESONANCE_WET : 0, when, RESONANCE_RAMP_S);
+        send.gain.setTargetAtTime(pedalStateAt(this.pedals, tick) ? RESONANCE_WET : 0, when, RESONANCE_RAMP_S);
     }
 
     /** A wrap is a damper: if the pedal is still holding at B, close the bloom. */
     private liftResonanceAtLoopEnd(regionEnd: number, wrapAt: number): void {
         const send = this.resonanceSend;
         const ctx = this.ctx;
-        if (!send || !ctx || !pedalStateAt(this.score.pedals, regionEnd)) {
+        if (!send || !ctx || !pedalStateAt(this.pedals, regionEnd)) {
             return;
         }
         send.gain.setTargetAtTime(0, Math.max(ctx.currentTime, wrapAt), RESONANCE_RAMP_S);
