@@ -440,6 +440,7 @@ const transcribeParallel = async (
     const seed = expressionSeedAt(parsedA.musical, overlapPageStartTick(parsedA.score, parsedA.musical));
     const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, era, seed);
     timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
+    recordRhythmRepairs(timings, parsedA.musical, parsedB.musical);
 
     const parts = [
         {
@@ -518,6 +519,7 @@ const transcribeRangeDetailed = async (
     } else {
         timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
     }
+    recordRhythmRepairs(timings, parsed.musical);
     // Summarized from the marks rather than the built score: buildScoreData has
     // already decided what this range alone can perform, and the merge needs to
     // know what reaches past it.
@@ -555,6 +557,14 @@ const collectRangeArtifacts = async (
     const mxlBuffers = await Promise.all(result.mxlPaths.map((path) => readFile(path)));
     const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
     return { mxlBuffers, geometry };
+};
+
+/** Telemetry only: how often the rhythm repair fires is how we learn whether to trust it. */
+const recordRhythmRepairs = (timings: JobTimings, ...parsed: MusicalScore[]): void => {
+    const count = parsed.reduce((acc, musical) => acc + (musical.rhythmRepairs ?? 0), 0);
+    if (count > 0) {
+        timings.rhythmRepairs = (timings.rhythmRepairs ?? 0) + count;
+    }
 };
 
 const parseRangeArtifacts = (
