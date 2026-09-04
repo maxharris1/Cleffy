@@ -123,8 +123,8 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 0, d: plain(1920), p: 72, h: 0 },
-            { t: 0, d: plain(1920), p: 36, h: 1 },
+            { t: 0, d: plain(1920), p: 72, h: 0, vc: 0 },
+            { t: 0, d: plain(1920), p: 36, h: 1, vc: 0 },
         ]);
         expect(score.warnings).not.toContain('single_staff_all_rh');
     });
@@ -187,8 +187,8 @@ describe('parseMusicXmlString', () => {
         const score = parseMusicXmlString(xml);
         expect(score.warnings).toContain('multi_part_collapsed');
         expect(score.notes).toEqual([
-            { t: 0, d: plain(1920), p: 60, h: 0 },
-            { t: 0, d: plain(1920), p: 48, h: 1 },
+            { t: 0, d: plain(1920), p: 60, h: 0, vc: 0 },
+            { t: 0, d: plain(1920), p: 48, h: 1, vc: 0 },
         ]);
     });
 
@@ -206,7 +206,7 @@ describe('parseMusicXmlString', () => {
                 <note><pitch><step>F</step><octave>4</octave><alter>1</alter></pitch><duration>16</duration><voice>1</voice></note>
             </measure>`,
         );
-        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(1920), p: 66, h: 0 }]);
+        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(1920), p: 66, h: 0, vc: 0 }]);
     });
 
     it('plays grace notes as crushed attacks stealing time before their principal', () => {
@@ -220,8 +220,8 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 419, d: 61, p: 62, h: 0, v: 0.6 }, // acciaccatura — never gated; 96 bpm → 61 ticks
-            { t: 480, d: plain(480), p: 64, h: 0 },
+            { t: 419, d: 61, p: 62, h: 0, v: 0.6, vc: 0 }, // acciaccatura — never gated; 96 bpm → 61 ticks
+            { t: 480, d: plain(480), p: 64, h: 0, vc: 0 },
         ]);
         expect(score.warnings).not.toContain('grace_notes_skipped');
     });
@@ -238,8 +238,8 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 0, d: plain(480), p: 60, h: 0, v: 0.46 },
-            { t: 480, d: plain(480), p: 62, h: 0, v: 0.82 },
+            { t: 0, d: plain(480), p: 60, h: 0, v: 0.46, vc: 0 },
+            { t: 480, d: plain(480), p: 62, h: 0, v: 0.82, vc: 0 },
         ]);
     });
 
@@ -267,7 +267,7 @@ describe('parseMusicXmlString', () => {
                 <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>3</voice><tie type="stop"/></note>
             </measure>`,
         );
-        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(3840), p: 72, h: 0 }]);
+        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(3840), p: 72, h: 0, vc: 0 }]);
     });
 
     it('refuses to merge a "tie" whose halves are not rhythmically adjacent', () => {
@@ -283,8 +283,8 @@ describe('parseMusicXmlString', () => {
         );
         // The open half ends at 960 but the "stop" starts at 1920 — two notes.
         expect(parseMusicXmlString(xml).notes).toEqual([
-            { t: 0, d: plain(960), p: 72, h: 0 },
-            { t: 1920, d: plain(960), p: 72, h: 0 },
+            { t: 0, d: plain(960), p: 72, h: 0, vc: 0 },
+            { t: 1920, d: plain(960), p: 72, h: 0, vc: 0 },
         ]);
     });
 
@@ -1417,8 +1417,8 @@ describe('ornaments, graces and swing', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 0, d: 240, p: 62, h: 0, v: 0.6 },
-            { t: 240, d: plain(240), p: 64, h: 0 },
+            { t: 0, d: 240, p: 62, h: 0, v: 0.6, vc: 0 },
+            { t: 240, d: plain(240), p: 64, h: 0, vc: 0 },
         ]);
     });
 
@@ -1452,13 +1452,135 @@ describe('ornaments, graces and swing', () => {
     });
 });
 
+describe('voices', () => {
+    const GRAND = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
+    const vn = (step: string, octave: number, duration: number, voice: number | string, staff = 1, extra = ''): string =>
+        `<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff>${extra}</note>`;
+    const rest = (duration: number, voice: number | string, staff = 1): string =>
+        `<note><rest/><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff></note>`;
+    const back = (duration: number): string => `<backup><duration>${duration}</duration></backup>`;
+    const bar = (n: number, inner: string, first = false): string =>
+        `<measure number="${n}">${first ? GRAND : ''}${inner}</measure>`;
+    const voicesOf = (xml: string, hand: 0 | 1 = 0) =>
+        parseMusicXmlString(xml)
+            .notes.filter((n) => n.h === hand)
+            .map((n) => ({ t: n.t, p: n.p, vc: n.vc }));
+
+    it('stamps every note with its slot, 0 for a single voice', () => {
+        const score = parseMusicXmlString(wrap(bar(1, `${vn('C', 5, 16, 1)}${back(16)}${vn('C', 3, 16, 5, 2)}`, true)));
+        expect(score.notes.map((n) => [n.h, n.vc])).toEqual([
+            [0, 0],
+            [1, 0],
+        ]);
+    });
+
+    it('numbers two voices in one staff by first appearance, and keeps the lower staff separate', () => {
+        const xml = wrap(
+            bar(1, `${vn('E', 5, 8, 1)}${vn('F', 5, 8, 1)}${back(16)}${vn('C', 5, 16, 2)}${back(16)}${vn('C', 3, 16, 5, 2)}`, true),
+        );
+        expect(voicesOf(xml)).toEqual([
+            { t: 0, p: 72, vc: 1 },
+            { t: 0, p: 76, vc: 0 },
+            { t: 960, p: 77, vc: 0 },
+        ]);
+        expect(voicesOf(xml, 1)).toEqual([{ t: 0, p: 48, vc: 0 }]);
+    });
+
+    it('keeps a slot through a voice crossing when the ids are stable', () => {
+        // Voice 1 dives under voice 2 in bar 2; the ids say who is who, so the slots follow the ids.
+        const xml = wrap(
+            bar(1, `${vn('G', 5, 16, 1)}${back(16)}${vn('C', 5, 16, 2)}`, true) +
+                bar(2, `${vn('A', 4, 16, 1)}${back(16)}${vn('C', 5, 16, 2)}`),
+        );
+        expect(voicesOf(xml)).toEqual([
+            { t: 0, p: 72, vc: 1 },
+            { t: 0, p: 79, vc: 0 },
+            { t: 1920, p: 69, vc: 0 },
+            { t: 1920, p: 72, vc: 1 },
+        ]);
+    });
+
+    it('gives a voice that enters mid-piece a fresh slot and lets it leave without disturbing the rest', () => {
+        const xml = wrap(
+            bar(1, vn('C', 5, 16, 1), true) +
+                bar(2, `${vn('D', 5, 16, 1)}${back(16)}${vn('G', 4, 16, 2)}`) +
+                bar(3, vn('E', 5, 16, 1)) +
+                bar(4, `${vn('F', 5, 16, 1)}${back(16)}${vn('A', 4, 16, 2)}`),
+        );
+        expect(voicesOf(xml).map((n) => n.vc)).toEqual([0, 1, 0, 0, 1, 0]);
+        expect(parseMusicXmlString(xml).warnings).not.toContain('voices_unstable');
+    });
+
+    it('links a renumbered voice to the slot nearest in pitch, silently', () => {
+        // Bar 2 calls the voices 3 and 4 instead of 1 and 2 — a system break.
+        // The high line is still the high line, so slot 0 stays the high line.
+        const xml = wrap(
+            bar(1, `${vn('G', 5, 16, 1)}${back(16)}${vn('C', 4, 16, 2)}`, true) +
+                bar(2, `${vn('D', 4, 16, 3)}${back(16)}${vn('A', 5, 16, 4)}`),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(voicesOf(xml)).toEqual([
+            { t: 0, p: 60, vc: 1 },
+            { t: 0, p: 79, vc: 0 },
+            { t: 1920, p: 62, vc: 1 },
+            { t: 1920, p: 81, vc: 0 },
+        ]);
+        expect(score.warnings).not.toContain('voices_unstable');
+    });
+
+    it('credits a note that ran up to the barline when pitch alone is ambiguous', () => {
+        // Both old voices sit an octave from the newcomer; the one that held
+        // through to the barline is the one still speaking.
+        const xml = wrap(
+            bar(1, `${vn('C', 6, 16, 1)}${back(16)}${vn('C', 4, 8, 2)}${rest(8, 2)}`, true) +
+                bar(2, vn('C', 5, 16, 3)),
+        );
+        expect(voicesOf(xml)).toEqual([
+            { t: 0, p: 60, vc: 1 },
+            { t: 0, p: 84, vc: 0 },
+            { t: 1920, p: 72, vc: 0 },
+        ]);
+    });
+
+    it('still links a renumbering it cannot justify, but says so', () => {
+        const xml = wrap(
+            bar(1, `${vn('C', 6, 8, 1)}${rest(8, 1)}`, true) + bar(2, vn('C', 3, 16, 2)),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('voices_unstable');
+        expect(voicesOf(xml).map((n) => n.vc)).toEqual([0, 0]);
+    });
+
+    it('carries the slot through a tie chain and into realized ornaments', () => {
+        const xml = wrap(
+            bar(
+                1,
+                `${vn('C', 5, 16, 1, 1, '<tie type="start"/>')}${back(16)}${vn('E', 4, 16, 2, 1, '<notations><ornaments><trill-mark/></ornaments></notations>')}`,
+                true,
+            ) + bar(2, vn('C', 5, 16, 1, 1, '<tie type="stop"/>')),
+        );
+        const score = parseMusicXmlString(xml);
+        const tied = score.notes.find((n) => n.p === 72);
+        expect(tied).toMatchObject({ t: 0, d: plain(3840), vc: 0 });
+        const trill = score.notes.filter((n) => n.t < 1920 && n.p !== 72);
+        expect(trill.length).toBeGreaterThan(1);
+        expect(new Set(trill.map((n) => n.vc))).toEqual(new Set([1]));
+    });
+
+    it('never hands out a slot past the cap', () => {
+        const many = Array.from({ length: 10 }, (_, i) => `${i > 0 ? back(16) : ''}${vn('C', 4 + (i % 3), 16, i + 1)}`).join('');
+        const score = parseMusicXmlString(wrap(bar(1, many, true)));
+        expect(Math.max(...score.notes.map((n) => n.vc ?? 0))).toBe(7);
+    });
+});
+
 /**
  * The two copies of the ScoreData contract are kept in lockstep by hand, so the
  * only thing that catches drift is a payload walked through both of them.
  */
-describe('ScoreData v4 contract', () => {
-    const v4 = {
-        version: 4,
+describe('ScoreData v5 contract', () => {
+    const v5 = {
+        version: 5,
         ticksPerQuarter: TICKS_PER_QUARTER,
         defaultBpm: 96,
         timeSignatures: [{ tick: 0, num: 4, den: 4 }],
@@ -1470,24 +1592,39 @@ describe('ScoreData v4 contract', () => {
             { tick: 960, k: 'down' as const },
         ],
         totalTicks: 1920,
-        notes: [{ t: 0, d: 480, p: 60, h: 0 as const }],
+        notes: [
+            { t: 0, d: 480, p: 60, h: 0 as const, vc: 0 },
+            { t: 0, d: 960, p: 55, h: 0 as const, vc: 1 },
+        ],
         measures: [{ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0, x1: 1, srcIndex: 0 }],
         systems: [{ page: 0, y0: 0, y1: 1 }],
         warnings: ['tempo_defaulted'],
     };
 
-    it('writes and validates version 4, pedals and all', () => {
-        expect(SCORE_DATA_VERSION).toBe(4);
-        const checked = scoreDataSchema.safeParse(v4);
+    it('writes and validates version 5, voices and all', () => {
+        expect(SCORE_DATA_VERSION).toBe(5);
+        const checked = scoreDataSchema.safeParse(v5);
         expect(checked.success).toBe(true);
-        expect(checked.data?.pedals).toEqual(v4.pedals);
+        expect(checked.data?.pedals).toEqual(v5.pedals);
+        expect(checked.data?.notes.map((n) => n.vc)).toEqual([0, 1]);
+    });
+
+    it('still reads a v4 note that carries no voice', () => {
+        const checked = scoreDataSchema.safeParse({ ...v5, version: 4, notes: [{ t: 0, d: 480, p: 60, h: 0 }] });
+        expect(checked.success).toBe(true);
+        expect(checked.data?.notes[0]?.vc).toBeUndefined();
+    });
+
+    it('refuses a voice slot past the cap', () => {
+        expect(scoreDataSchema.safeParse({ ...v5, notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 8 }] }).success).toBe(false);
+        expect(scoreDataSchema.safeParse({ ...v5, notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 1.5 }] }).success).toBe(false);
     });
 
     it('refuses a pedal edge it could not act on', () => {
-        expect(scoreDataSchema.safeParse({ ...v4, pedals: [{ tick: 0, k: 'half' }] }).success).toBe(false);
+        expect(scoreDataSchema.safeParse({ ...v5, pedals: [{ tick: 0, k: 'half' }] }).success).toBe(false);
     });
 
-    it('holds the client copy to the same version and the same field', () => {
+    it('holds the client copy to the same version and the same fields', () => {
         // Read as text rather than imported: the app tree sits outside this
         // package's rootDir, and importing it would drag the whole client into
         // the service's typecheck. A string match is enough for what this
@@ -1495,5 +1632,6 @@ describe('ScoreData v4 contract', () => {
         const client = readFileSync(new URL('../../../src/types/scoreData.ts', import.meta.url), 'utf8');
         expect(client).toContain(`export const SCORE_DATA_VERSION = ${SCORE_DATA_VERSION};`);
         expect(client).toContain('pedals: z.array(scorePedalSchema).max(256).optional(),');
+        expect(client).toContain('vc: z.number().int().min(0).max(MAX_VOICE_SLOT).optional(),');
     });
 });

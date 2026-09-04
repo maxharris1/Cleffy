@@ -7,8 +7,11 @@ import { z } from 'zod';
  */
 
 /** Writer version for newly built analyses. */
-export const SCORE_DATA_VERSION = 4;
+export const SCORE_DATA_VERSION = 5;
 export const TICKS_PER_QUARTER = 480;
+
+/** Highest voice slot a note may carry; slots are per staff, 0-based. */
+export const MAX_VOICE_SLOT = 7;
 
 /**
  * Velocity for a note the score never gave a dynamic — roughly mezzo-forte.
@@ -27,6 +30,12 @@ const scoreNoteSchema = z.object({
     p: z.number().int().min(0).max(127),
     h: z.union([z.literal(0), z.literal(1)]),
     v: z.number().min(0).max(1).optional(),
+    /**
+     * Voice slot within the hand's staff, normalised so the same slot names the
+     * same voice across barlines even where the engraving renumbered it. Absent
+     * on v1–v4 caches and read as 0. v5+.
+     */
+    vc: z.number().int().min(0).max(MAX_VOICE_SLOT).optional(),
 });
 
 /** An engraved chord column: x normalized on the page, t ticks from the measure start. */

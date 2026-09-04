@@ -1,7 +1,7 @@
 import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
-import { DEFAULT_VELOCITY, TICKS_PER_QUARTER } from './scoreData.js';
+import { DEFAULT_VELOCITY, MAX_VOICE_SLOT, TICKS_PER_QUARTER } from './scoreData.js';
 import type {
     ScoreClef,
     ScoreHold,
@@ -895,6 +895,8 @@ type RawEvent =
           midi: number;
           staff: number;
           voice: string;
+          /** Normalised voice slot, assigned by {@link assignVoiceSlots} before emission. */
+          vc?: number;
           chord: boolean;
           tieStart: boolean;
           tieStop: boolean;
@@ -2111,6 +2113,155 @@ const collectTempoMarks = (raws: readonly RawMeasure[], placements: readonly Mea
     return marks;
 };
 
+/** A voice whose nearest candidate slot sits further than this, with no rhythmic hand-over, is a guess. */
+const VOICE_LINK_MAX_SEMITONES = 12;
+/** Cost credit for a slot whose last note ran up to the barline the new voice starts at. */
+const VOICE_CONTINUITY_CREDIT = 6;
+
+interface VoiceSlotStats {
+    meanPitch: number;
+    /** Measure index and bar-relative end of the slot's last note. */
+    lastMeasure: number;
+    lastEndRel: number;
+}
+
+interface BarVoice {
+    id: string;
+    pitchSum: number;
+    count: number;
+    endRel: number;
+    events: Array<Extract<RawEvent, { k: 'note' }>>;
+}
+
+/**
+ * Normalise the engraving's voice numbers into small per-staff slots that are
+ * stable across the piece. Audiveris numbers voices per part and is free to
+ * renumber them at any barline; a voice that was "1" in one bar and "2" in the
+ * next is the same line to the ear, and everything downstream that reasons
+ * about voices (legato within a line, which line is the melody) needs one name
+ * for it.
+ *
+ * Conservative by design: an id already seen keeps its slot, so where the ids
+ * ARE stable nothing moves. Only an id never seen before is linked, and only
+ * when the previous bar lost an id at the same time — that is a renumbering,
+ * and the orphaned slot nearest in pitch (with credit for a note that ran up
+ * to the barline) takes it over. A link that has to reach further than an
+ * octave with no rhythmic hand-over is still made, because the alternative is
+ * a fresh slot for every renumbering, but it is disclosed as `voices_unstable`.
+ * An id appearing with nothing lost is a voice genuinely entering, and simply
+ * takes the lowest free slot.
+ */
+const assignVoiceSlots = (raws: readonly RawMeasure[], warnings: Set<string>): void => {
+    /** staff → engraved voice id → slot. */
+    const slotOf = new Map<number, Map<string, number>>();
+    /** staff → slot → stats of the slot's last bar. */
+    const stats = new Map<number, Map<number, VoiceSlotStats>>();
+    const mapFor = <K, V>(outer: Map<number, Map<K, V>>, staff: number): Map<K, V> => {
+        const existing = outer.get(staff);
+        if (existing) {
+            return existing;
+        }
+        const created = new Map<K, V>();
+        outer.set(staff, created);
+        return created;
+    };
+
+    for (const raw of raws) {
+        // Gather this bar's voices per staff, in order of first appearance.
+        const byStaff = new Map<number, BarVoice[]>();
+        for (const ev of raw.events) {
+            if (ev.k !== 'note') {
+                continue;
+            }
+            let voices = byStaff.get(ev.staff);
+            if (!voices) {
+                voices = [];
+                byStaff.set(ev.staff, voices);
+            }
+            let voice = voices.find((entry) => entry.id === ev.voice);
+            if (!voice) {
+                voice = { id: ev.voice, pitchSum: 0, count: 0, endRel: 0, events: [] };
+                voices.push(voice);
+            }
+            voice.pitchSum += ev.midi;
+            voice.count += 1;
+            voice.endRel = Math.max(voice.endRel, ev.rel + ev.dur);
+            voice.events.push(ev);
+        }
+
+        for (const [staff, voices] of byStaff) {
+            const slots = mapFor(slotOf, staff);
+            const slotStats = mapFor(stats, staff);
+            const presentIds = new Set(voices.map((voice) => voice.id));
+            const unseen = voices.filter((voice) => !slots.has(voice.id));
+            // Slots whose ids vanished this bar are the renumbering's other half.
+            const orphaned = [...slots.entries()].filter(([id]) => !presentIds.has(id));
+            const takenThisBar = new Set(
+                voices.filter((voice) => slots.has(voice.id)).map((voice) => slots.get(voice.id) ?? 0),
+            );
+
+            for (const voice of unseen) {
+                const meanPitch = voice.pitchSum / Math.max(1, voice.count);
+                let chosen: number | null = null;
+                if (orphaned.length > 0) {
+                    let bestCost = Number.POSITIVE_INFINITY;
+                    let bestDistance = Number.POSITIVE_INFINITY;
+                    let bestContinuity = false;
+                    for (const [, slot] of orphaned) {
+                        if (takenThisBar.has(slot)) {
+                            continue;
+                        }
+                        const last = slotStats.get(slot);
+                        const distance = last ? Math.abs(last.meanPitch - meanPitch) : VOICE_LINK_MAX_SEMITONES;
+                        const continuity =
+                            last !== undefined &&
+                            last.lastMeasure === raw.index - 1 &&
+                            last.lastEndRel >= (raws[raw.index - 1]?.contentTicks ?? 0);
+                        const cost = distance - (continuity ? VOICE_CONTINUITY_CREDIT : 0);
+                        if (cost < bestCost) {
+                            bestCost = cost;
+                            bestDistance = distance;
+                            bestContinuity = continuity;
+                            chosen = slot;
+                        }
+                    }
+                    if (chosen !== null && bestDistance > VOICE_LINK_MAX_SEMITONES && !bestContinuity) {
+                        warnings.add('voices_unstable');
+                    }
+                }
+                if (chosen === null) {
+                    let free = 0;
+                    while (takenThisBar.has(free) && free < MAX_VOICE_SLOT) {
+                        free += 1;
+                    }
+                    chosen = Math.min(MAX_VOICE_SLOT, free);
+                } else {
+                    // The old id is gone for good: one slot, one live id.
+                    for (const [id, slot] of [...slots.entries()]) {
+                        if (slot === chosen) {
+                            slots.delete(id);
+                        }
+                    }
+                }
+                slots.set(voice.id, chosen);
+                takenThisBar.add(chosen);
+            }
+
+            for (const voice of voices) {
+                const slot = slots.get(voice.id) ?? 0;
+                for (const ev of voice.events) {
+                    ev.vc = slot;
+                }
+                slotStats.set(slot, {
+                    meanPitch: voice.pitchSum / Math.max(1, voice.count),
+                    lastMeasure: raw.index,
+                    lastEndRel: voice.endRel,
+                });
+            }
+        }
+    }
+};
+
 /**
  * Pass 2 — assign absolute ticks, merge ties, pad, and resolve velocities.
  * Events are walked in document order, which is what dynamics currently key off;
@@ -2133,6 +2284,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     let arpBuffer: ScoreNote[] = [];
     let arpDirection: 'up' | 'down' | null = null;
     let swing = false;
+
+    assignVoiceSlots(raws, ctx.warnings);
 
     // Secondary parts take their barlines from the lead, so only the lead's
     // signatures are worth second-guessing.
@@ -2368,6 +2521,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     }
 
                     const sustained = velocityAt(curveFor(ev.staff), start);
+                    const vc = ev.vc ?? 0;
                     let principalStart = start;
                     let principalNotated = ev.dur;
                     if (!ev.chord && pendingGraces.length > 0) {
@@ -2387,6 +2541,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                                     p: grace.midi,
                                     h: grace.hand,
                                     v: graceV,
+                                    vc,
                                 });
                             });
                         }
@@ -2397,7 +2552,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                             appogs.forEach((grace, i) => {
                                 const d =
                                     i === appogs.length - 1 ? remaining : Math.floor(remaining / (appogs.length - i));
-                                notes.push({ t, d, p: grace.midi, h: grace.hand, v: graceV });
+                                notes.push({ t, d, p: grace.midi, h: grace.hand, v: graceV, vc });
                                 t += d;
                                 remaining -= d;
                             });
@@ -2420,6 +2575,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         p: ev.midi,
                         h: hand,
                         ...(velocity !== undefined ? { v: velocity } : {}),
+                        vc,
                     };
                     // A tie chain is one sounding event: skip ornaments on tied notes
                     // rather than spelling them on a length we do not yet know.

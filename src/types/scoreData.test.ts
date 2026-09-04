@@ -69,6 +69,24 @@ describe('parseScoreData', () => {
         expect(parsed?.pedals).toBeUndefined();
     });
 
+    it('reads a v5 voice slot, and a v4 note without one', () => {
+        const parsed = parseScoreData(
+            payload({
+                notes: [
+                    { t: 0, d: 480, p: 60, h: 0, vc: 3 },
+                    { t: 0, d: 480, p: 48, h: 1 },
+                ],
+            }),
+        );
+        expect(parsed?.notes.map((n) => n.vc)).toEqual([3, undefined]);
+        expect(parseScoreData(payload({ version: 4, notes: [{ t: 0, d: 480, p: 60, h: 0 }] }))?.notes).toHaveLength(1);
+    });
+
+    it('refuses a voice slot past the cap', () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        expect(parseScoreData(payload({ notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 8 }] }))).toBeNull();
+    });
+
     it('refuses a payload from a writer newer than it understands', () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
