@@ -37,15 +37,62 @@ export const displayEditionName = (filename: string): string => {
     return cleaned || filename;
 };
 
-/**
- * Pick a sensible default edition: prefer mid-size PDFs (often cleaner typesets)
- * over tiny stubs and huge multi-volume scans. Falls back to first edition.
- */
-export const recommendEdition = <T extends { filename: string; size: number | null }>(editions: T[]): T | null => {
-    if (editions.length === 0) {
+interface EditionLicenseFields {
+    license?: string;
+    licenseLabel?: string | null;
+    restriction?: string | null;
+    downloadable?: boolean;
+}
+
+export type EditionAvailability =
+    | { kind: 'downloadable'; label: string }
+    | { kind: 'restricted'; label: string }
+    | { kind: 'unknown'; label: string };
+
+/** Short availability status for an edition row; null for pre-license data. */
+export const editionAvailability = (edition: EditionLicenseFields): EditionAvailability | null => {
+    if (edition.downloadable === undefined && edition.license === undefined) {
         return null;
     }
-    const scored = editions.map((edition, index) => {
+    if (edition.downloadable === false) {
+        // Claim a restriction only where IMSLP stated one (a red regional flag,
+        // or a Non-PD license tag). Everything else that merely failed the
+        // downloadable check — EU-mirror hosting, an unparsed Copyright cell —
+        // is unverified, not restricted.
+        if (edition.restriction) {
+            return { kind: 'restricted', label: edition.restriction };
+        }
+        if (edition.license === 'non-pd') {
+            return { kind: 'restricted', label: edition.licenseLabel ?? 'Copyright restricted' };
+        }
+        return { kind: 'unknown', label: 'License unverified' };
+    }
+    if (edition.license === 'pd') {
+        return { kind: 'downloadable', label: 'Public domain' };
+    }
+    if (edition.license === 'cc') {
+        return { kind: 'downloadable', label: edition.licenseLabel ?? 'CC licensed' };
+    }
+    return { kind: 'unknown', label: 'License unknown' };
+};
+
+/**
+ * Pick a sensible default edition: only ones IMSLP lets us download directly
+ * (never a restricted or license-unknown file), preferring mid-size PDFs
+ * (often cleaner typesets) over tiny stubs and huge multi-volume scans.
+ * Null when nothing qualifies — the panel then makes no auto-selection.
+ */
+export const recommendEdition = <T extends { filename: string; size: number | null } & EditionLicenseFields>(
+    editions: T[],
+): T | null => {
+    // `!== false` keeps editions without license data (older responses,
+    // fixtures) eligible; 'unknown' means the page was checked and this file
+    // wasn't cleared, which is not something to recommend.
+    const candidates = editions.filter((e) => e.downloadable !== false && e.license !== 'unknown');
+    if (candidates.length === 0) {
+        return null;
+    }
+    const scored = candidates.map((edition, index) => {
         const size = edition.size ?? 0;
         // Prefer 0.4–8 MB when size is known; penalize tiny and huge files.
         let score: number;
@@ -68,7 +115,7 @@ export const recommendEdition = <T extends { filename: string; size: number | nu
         return { edition, score };
     });
     scored.sort((a, b) => b.score - a.score);
-    return scored[0]?.edition ?? editions[0] ?? null;
+    return scored[0]?.edition ?? null;
 };
 
 /** Split query into highlight tokens (≥2 chars). */

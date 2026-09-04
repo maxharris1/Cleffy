@@ -37,6 +37,7 @@ export type LibraryOutletContext = {
     onImportImslp: (
         filename: string,
         workTitle: string,
+        acceptedDisclaimer: boolean,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
@@ -94,6 +95,7 @@ export const LibraryShell = () => {
 
 const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLabel: string; userEmail: string }) => {
     const [uploadPct, setUploadPct] = useState<number | null>(null);
+    const [importingImslp, setImportingImslp] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
     const [uploadLimit, setUploadLimit] = useState<LimitReachedError | null>(null);
@@ -106,7 +108,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const canManageStudents = entitlements !== null && entitlements.limits.students !== 0;
     const navItems = NAV_ITEMS.filter((item) => !item.needsStudents || canManageStudents);
     const navigate = useNavigate();
-    const uploading = uploadPct !== null;
+    const uploading = uploadPct !== null || importingImslp;
 
     const clearErrors = () => {
         setUploadError(null);
@@ -183,12 +185,14 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
-    const onImportImslp = async (filename: string, workTitle: string) => {
+    const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
         clearErrors();
-        setUploadPct(0);
+        // The Edge function fetches server-side, so there is no byte progress
+        // to report — show the indeterminate bar instead of a stuck 0%.
+        setImportingImslp(true);
         const before = snapshotBefore();
         try {
-            const result = await importDocumentFromImslp(filename, workTitle, userId);
+            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer);
             if (!result.ok) {
                 return {
                     ok: false as const,
@@ -204,7 +208,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             captureFailure(err, 'Import failed.');
             throw err;
         } finally {
-            setUploadPct(null);
+            setImportingImslp(false);
         }
     };
 
@@ -278,6 +282,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <ProgressBar
                         value={uploadPct}
                         label="Uploading score"
+                        className="shell-progress absolute inset-x-0 bottom-0"
+                    />
+                ) : importingImslp ? (
+                    <ProgressBar
+                        indeterminate
+                        label="Importing from IMSLP"
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />
                 ) : null}

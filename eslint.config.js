@@ -5,7 +5,8 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-    { ignores: ['dist', 'dev-dist', 'coverage', 'node_modules', 'services/omr-service/dist'] },
+    // supabase/.temp is CLI-generated whenever the local stack runs.
+    { ignores: ['dist', 'dev-dist', 'coverage', 'node_modules', 'services/omr-service/dist', 'supabase/.temp'] },
     {
         files: ['**/*.{ts,tsx}'],
         extends: [

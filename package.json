@@ -10,6 +10,7 @@
         "local:down": "bash scripts/local-down.sh",
         "local:status": "bash .cursor/health-check.sh",
         "functions:serve": "bash scripts/supabase.sh functions serve --env-file supabase/functions/.env --no-verify-jwt",
+        "imslp:sync": "bash scripts/imslp-sync-local.sh",
         "build": "tsc --noEmit && vite build",
         "preview": "vite preview",
         "typecheck": "tsc --noEmit",

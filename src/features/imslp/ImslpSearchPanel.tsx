@@ -1,30 +1,76 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { displayWorkTitle, searchTokens, splitSearchResults } from '@/features/imslp/imslpDisplay';
-import { searchImslp, type ImslpSearchHit } from '@/features/imslp/imslpApi';
-import { filterPopularWorks, POPULAR_WORKS, type PopularWork } from '@/features/imslp/popularWorks';
+import { searchImslp, type ImslpPeriod, type ImslpSearchHit } from '@/features/imslp/imslpApi';
+import { ImslpScoreCard } from '@/features/imslp/ImslpScoreCard';
+import { readImslpView, writeImslpView, type ImslpView } from '@/features/imslp/imslpPrefs';
+import {
+    filterPopularWorks,
+    groupPopularByComposer,
+    POPULAR_WORKS,
+    popularWorkTags,
+    type PopularWork,
+} from '@/features/imslp/popularWorks';
 import {
     buildSearchFilters,
     categoryBackedFilters,
+    ERA_FACETS,
     FACET_DIMENSIONS,
     facetValuesFor,
-    filterSearchTokens,
     filtersToStatusParts,
     hasActiveFilters,
-    type EraId,
+    INSTRUMENT_FACETS,
+    joinLabels,
+    labelsForCategories,
+    MAX_FILTERS_PER_DIMENSION,
     type FacetDimension,
+    type RelaxedConstraint,
     type SearchSort,
 } from '@/features/imslp/searchFacets';
-import { fieldClassName } from '@/ui/classNames';
+import { Button } from '@/ui/Button';
+import { EmptyState } from '@/ui/EmptyState';
+import { ErrorText } from '@/ui/ErrorText';
+import { ViewToggle } from '@/ui/ViewToggle';
+import { chipClassName, fieldClassName } from '@/ui/classNames';
 
 interface ImslpSearchPanelProps {
     disabled?: boolean;
-    autoFocus?: boolean;
     onSelectTitle: (title: string) => void;
-    onError?: (message: string | null) => void;
 }
 
 const DEFAULT_SEARCH_LIMIT = 100;
+
+/** Cleffy's OMR reads piano music, so the search starts piano-scoped. */
+const DEFAULT_INSTRUMENT = 'piano';
+
+/** Chip strips scroll on phones (like the library's) and wrap from sm up. */
+const CHIP_ROW_CLASS =
+    'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0';
+
+/** The library shelf's exact columns — both pages fill the same shell width. */
+const GRID_UL_CLASS = 'grid grid-cols-2 gap-x-5 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6';
+
+const setsEqual = (a: Set<string>, b: Set<string>): boolean => {
+    if (a.size !== b.size) {
+        return false;
+    }
+    for (const v of a) {
+        if (!b.has(v)) {
+            return false;
+        }
+    }
+    return true;
+};
+
+const toggleInSet = (prev: Set<string>, id: string): Set<string> => {
+    const next = new Set(prev);
+    if (next.has(id)) {
+        next.delete(id);
+    } else {
+        next.add(id);
+    }
+    return next;
+};
 
 const highlightMatches = (text: string, tokens: string[]): ReactNode => {
     if (tokens.length === 0 || !text) {
@@ -45,144 +91,290 @@ const highlightMatches = (text: string, tokens: string[]): ReactNode => {
     );
 };
 
-const tagClass = (active: boolean) => `imslp-facet-tag${active ? ' imslp-facet-tag--active' : ''}`;
-
-export const ImslpSearchPanel = ({
-    disabled = false,
-    autoFocus = true,
-    onSelectTitle,
-    onError,
-}: ImslpSearchPanelProps) => {
+export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearchPanelProps) => {
     const searchId = useId();
     const searchRef = useRef<HTMLInputElement>(null);
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<ImslpSearchHit[] | null>(null);
     const [searching, setSearching] = useState(false);
+    const [searchError, setSearchError] = useState<string | null>(null);
+    const [filterRelaxed, setFilterRelaxed] = useState(false);
+    const [relaxed, setRelaxed] = useState<RelaxedConstraint[]>([]);
+    const [total, setTotal] = useState(0);
+    const [hasMore, setHasMore] = useState(false);
+    const [indexReady, setIndexReady] = useState(true);
+    const [notReady, setNotReady] = useState<string[]>([]);
+    const [period, setPeriod] = useState<ImslpPeriod | null>(null);
+    const [searchMode, setSearchMode] = useState<'browse' | 'search' | null>(null);
     const [dimension, setDimension] = useState<FacetDimension>('composer');
-    const [composerId, setComposerId] = useState<string | null>(null);
-    const [instrumentId, setInstrumentId] = useState<string | null>(null);
-    const [formId, setFormId] = useState<string | null>(null);
-    const [keyId, setKeyId] = useState<string | null>(null);
-    const [eraId, setEraId] = useState<EraId | null>(null);
+    const [composerIds, setComposerIds] = useState<Set<string>>(() => new Set());
+    const [instrumentIds, setInstrumentIds] = useState<Set<string>>(() => new Set([DEFAULT_INSTRUMENT]));
+    const [formIds, setFormIds] = useState<Set<string>>(() => new Set());
+    const [keyIds, setKeyIds] = useState<Set<string>>(() => new Set());
+    const [eraIds, setEraIds] = useState<Set<string>>(() => new Set());
+    const [ignoreQueryPeriod, setIgnoreQueryPeriod] = useState(false);
     const [sort, setSort] = useState<SearchSort>('relevance');
+    const [view, setView] = useState<ImslpView>(readImslpView);
+
+    const seqRef = useRef(0);
+    const abortRef = useRef<AbortController | null>(null);
+    const [searchTick, setSearchTick] = useState(0);
+    const immediateRef = useRef(false);
+    /** Show-more params staged by the click for the tick effect to consume. */
+    const moreRef = useRef<{ limit: number; offset: number } | null>(null);
+    const [moreTick, setMoreTick] = useState(0);
+    const [errorKey, setErrorKey] = useState<string | null>(null);
 
     const filters = useMemo(
         () =>
             buildSearchFilters({
-                composerId,
-                instrumentId,
-                formId,
-                keyId,
-                eraId,
+                composerIds,
+                instrumentIds,
+                formIds,
+                keyIds,
+                eraIds,
+                ignoreQueryPeriod,
             }),
-        [composerId, instrumentId, formId, keyId, eraId],
+        [composerIds, instrumentIds, formIds, keyIds, eraIds, ignoreQueryPeriod],
     );
-    const filtersActive = hasActiveFilters(filters);
-    const canCategorySort = categoryBackedFilters(filters);
-
-    useEffect(() => {
-        if (autoFocus) {
-            searchRef.current?.focus();
-        }
-    }, [autoFocus]);
-
-    const runSearch = useEffectEvent(async (q: string, nextFilters = filters, nextSort = sort) => {
-        const trimmed = q.trim();
-        const withFilters = hasActiveFilters(nextFilters);
-        if (trimmed.length < 2 && !withFilters) {
-            setResults(null);
-            setSearching(false);
-            return;
-        }
-        setSearching(true);
-        onError?.(null);
-        try {
-            setResults(
-                await searchImslp(trimmed, {
-                    limit: DEFAULT_SEARCH_LIMIT,
-                    filters: withFilters ? nextFilters : undefined,
-                    sort: nextSort,
-                }),
-            );
-        } catch (err) {
-            setResults([]);
-            onError?.(err instanceof Error ? err.message : 'Search failed');
-        } finally {
-            setSearching(false);
-        }
-    });
-
-    useEffect(() => {
-        const q = query.trim();
-        const handle = window.setTimeout(() => {
-            if (q.length < 2 && !filtersActive) {
-                setResults(null);
-                return;
-            }
-            void runSearch(q, filters, sort);
-        }, 280);
-        return () => window.clearTimeout(handle);
-    }, [query, filters, sort, filtersActive]);
+    const isDefaultFilterState =
+        setsEqual(instrumentIds, new Set([DEFAULT_INSTRUMENT])) &&
+        composerIds.size === 0 &&
+        formIds.size === 0 &&
+        keyIds.size === 0 &&
+        eraIds.size === 0;
+    const isDefaultState = isDefaultFilterState && sort === 'relevance' && query.trim() === '';
 
     const q = query.trim();
-    const isLiveQuery = q.length >= 2 || filtersActive;
+    const isLiveQuery = q.length >= 2 || (categoryBackedFilters(filters) && !isDefaultFilterState);
+    const requestKey = (nextQ: string, nextFilters: unknown, nextSort: SearchSort) =>
+        `${nextQ}\0${JSON.stringify(nextFilters)}\0${nextSort}`;
+    const liveError = searchError && errorKey === requestKey(q, filters, sort) ? searchError : null;
+
+    const applyResponse = (
+        response: Awaited<ReturnType<typeof searchImslp>>,
+        append: boolean,
+        seq: number,
+    ) => {
+        if (seq !== seqRef.current) {
+            return;
+        }
+        setResults((prev) => {
+            if (!append || !prev) {
+                return response.results;
+            }
+            const seen = new Set(prev.map((h) => h.pageid));
+            const extra = response.results.filter((h) => !seen.has(h.pageid));
+            return [...prev, ...extra];
+        });
+        setFilterRelaxed(response.filterRelaxed);
+        setRelaxed(response.relaxed);
+        setTotal(response.total);
+        setHasMore(response.hasMore);
+        setIndexReady(response.indexReady);
+        setNotReady(response.notReady ?? []);
+        setPeriod(response.period);
+        setSearchMode(response.mode ?? (q.length >= 2 ? 'search' : 'browse'));
+        setSearchError(null);
+        setErrorKey(null);
+    };
+
+    const runSearch = useEffectEvent(
+        async (
+            nextQ: string,
+            nextFilters = filters,
+            nextSort = sort,
+            opts: { limit?: number; offset?: number; append?: boolean } = {},
+        ) => {
+            const trimmed = nextQ.trim();
+            const withFilters = hasActiveFilters(nextFilters);
+            const seq = ++seqRef.current;
+            abortRef.current?.abort();
+            const controller = new AbortController();
+            abortRef.current = controller;
+            setSearching(true);
+            setSearchError(null);
+            setErrorKey(null);
+            try {
+                const response = await searchImslp(trimmed, {
+                    limit: opts.limit ?? DEFAULT_SEARCH_LIMIT,
+                    offset: opts.offset ?? 0,
+                    filters: withFilters ? nextFilters : undefined,
+                    sort: nextSort,
+                    signal: controller.signal,
+                });
+                applyResponse(response, opts.append === true, seq);
+            } catch (err) {
+                if (seq !== seqRef.current) {
+                    return;
+                }
+                if (err instanceof DOMException && err.name === 'AbortError') {
+                    return;
+                }
+                setSearchError(
+                    err instanceof DOMException && err.name === 'TimeoutError'
+                        ? 'IMSLP took too long to answer.'
+                        : err instanceof Error
+                          ? err.message
+                          : 'Search failed',
+                );
+                setErrorKey(requestKey(trimmed, nextFilters, nextSort));
+            } finally {
+                if (seq === seqRef.current) {
+                    setSearching(false);
+                }
+            }
+        },
+    );
+
+    useEffect(() => {
+        const delay = immediateRef.current ? 0 : 280;
+        immediateRef.current = false;
+        const handle = window.setTimeout(() => {
+            if (!isLiveQuery) {
+                seqRef.current++;
+                abortRef.current?.abort();
+                setResults(null);
+                setSearching(false);
+                setSearchError(null);
+                setFilterRelaxed(false);
+                setRelaxed([]);
+                setTotal(0);
+                setHasMore(false);
+                setIndexReady(true);
+                setNotReady([]);
+                setPeriod(null);
+                setSearchMode(null);
+                setErrorKey(null);
+                return;
+            }
+            void runSearch(q, filters, sort, { limit: DEFAULT_SEARCH_LIMIT, offset: 0 });
+        }, delay);
+        return () => window.clearTimeout(handle);
+    }, [q, filters, sort, isLiveQuery, searchTick]);
+
+    useEffect(() => {
+        moreRef.current = null;
+    }, [q, filters, sort]);
+
+    useEffect(() => {
+        const params = moreRef.current;
+        if (!params) {
+            return;
+        }
+        moreRef.current = null;
+        void runSearch(q, filters, sort, { ...params, append: true });
+        // q/filters/sort are read from the click render; a later change clears moreRef instead of appending.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [moreTick]);
+
+    useEffect(
+        () => () => {
+            abortRef.current?.abort();
+        },
+        [],
+    );
+
+    const searchNow = () => {
+        immediateRef.current = true;
+        setSearchTick((t) => t + 1);
+    };
+
+    const submitNow = () => {
+        searchNow();
+        searchRef.current?.blur();
+    };
+
     const showCurated = !isLiveQuery;
     const showResults = isLiveQuery && results !== null;
-    const tokens = useMemo(() => {
-        const fromQuery = searchTokens(q);
-        const fromFilters = filterSearchTokens(filters);
-        return [...new Set([...fromQuery, ...fromFilters])];
-    }, [q, filters]);
+    const tokens = useMemo(() => searchTokens(q), [q]);
     const { best, more } = useMemo(() => splitSearchResults(results ?? []), [results]);
 
     const curatedWorks = useMemo(
         () =>
             filterPopularWorks(POPULAR_WORKS, {
-                composerId,
-                instrumentId,
-                formId,
-                keyId,
-                eraId,
+                composerIds,
+                instrumentIds,
+                formIds,
+                keyIds,
+                eraIds,
             }),
-        [composerId, instrumentId, formId, keyId, eraId],
+        [composerIds, instrumentIds, formIds, keyIds, eraIds],
     );
+    const curatedGroups = useMemo(() => groupPopularByComposer(curatedWorks), [curatedWorks]);
 
-    const statusLine = (() => {
+    const inferredEraIds =
+        period?.source === 'query' && !ignoreQueryPeriod ? new Set(period.eraIds) : new Set<string>();
+
+    const facetPrefix = (() => {
         const facetParts = filtersToStatusParts(filters);
-        const facetPrefix = facetParts.length > 0 ? `${facetParts.join(' · ')} · ` : '';
-        if (searching) {
-            return `${facetPrefix}Searching IMSLP…`;
+        // An era read from the query is in force too — say so next to its pressed chip.
+        for (const id of inferredEraIds) {
+            const label = ERA_FACETS.find((e) => e.id === id)?.label;
+            if (label && !facetParts.includes(label)) {
+                facetParts.push(label);
+            }
         }
-        if (isLiveQuery && results) {
-            return `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`;
-        }
-        return `Popular · ${curatedWorks.length} scores`;
+        return facetParts.length > 0 ? `${facetParts.join(' · ')} · ` : '';
     })();
 
-    const selectPopular = (item: PopularWork) => {
-        onSelectTitle(item.title);
-    };
+    const statusLine = searching
+        ? `${facetPrefix}Searching IMSLP…`
+        : isLiveQuery && results
+          ? searchMode === 'browse' && indexReady
+              ? `${facetPrefix}${total} score${total === 1 ? '' : 's'}`
+              : hasMore && total > results.length
+                ? `${facetPrefix}${results.length} of ${total}`
+                : `${facetPrefix}${results.length} result${results.length === 1 ? '' : 's'}`
+          : isLiveQuery
+            ? `${facetPrefix}${liveError ? 'Search unavailable' : 'Searching IMSLP…'}`
+            : `${facetPrefix}Popular · ${curatedWorks.length} scores`;
 
-    const selectHit = (hit: ImslpSearchHit) => {
-        onSelectTitle(hit.title);
-    };
+    const relaxedHint = (() => {
+        if (relaxed.length === 0) {
+            return filterRelaxed
+                ? 'Showing close matches — few matching scores were found for this search.'
+                : null;
+        }
+        const names = relaxed.map((constraint) => {
+            switch (constraint) {
+                case 'instrument': {
+                    const labels = [...instrumentIds]
+                        .map((id) => INSTRUMENT_FACETS.find((i) => i.id === id)?.label.toLowerCase())
+                        .filter((v): v is string => Boolean(v));
+                    return labels.length > 0 ? labels.join('/') : 'instrument';
+                }
+                case 'era':
+                    return 'era';
+                default: {
+                    const _exhaustive: never = constraint;
+                    return _exhaustive;
+                }
+            }
+        });
+        return `Showing close matches — the ${names.join(' and ')} filter${relaxed.length === 1 ? '' : 's'} matched too few scores.`;
+    })();
 
     const toggleValue = (id: string) => {
         switch (dimension) {
             case 'composer':
-                setComposerId((prev) => (prev === id ? null : id));
+                setComposerIds((prev) => toggleInSet(prev, id));
                 break;
             case 'instrument':
-                setInstrumentId((prev) => (prev === id ? null : id));
+                setInstrumentIds((prev) => toggleInSet(prev, id));
                 break;
             case 'form':
-                setFormId((prev) => (prev === id ? null : id));
+                setFormIds((prev) => toggleInSet(prev, id));
                 break;
             case 'key':
-                setKeyId((prev) => (prev === id ? null : id));
+                setKeyIds((prev) => toggleInSet(prev, id));
                 break;
             case 'era':
-                setEraId((prev) => (prev === id ? null : (id as EraId)));
+                if (inferredEraIds.has(id) && !eraIds.has(id)) {
+                    setIgnoreQueryPeriod(true);
+                    break;
+                }
+                setEraIds((prev) => toggleInSet(prev, id));
                 break;
             default: {
                 const _exhaustive: never = dimension;
@@ -194,15 +386,15 @@ export const ImslpSearchPanel = ({
     const selectedForDimension = (() => {
         switch (dimension) {
             case 'composer':
-                return composerId;
+                return composerIds;
             case 'instrument':
-                return instrumentId;
+                return instrumentIds;
             case 'form':
-                return formId;
+                return formIds;
             case 'key':
-                return keyId;
+                return keyIds;
             case 'era':
-                return eraId;
+                return eraIds;
             default: {
                 const _exhaustive: never = dimension;
                 return _exhaustive;
@@ -210,13 +402,35 @@ export const ImslpSearchPanel = ({
         }
     })();
 
-    const clearFilters = () => {
-        setComposerId(null);
-        setInstrumentId(null);
-        setFormId(null);
-        setKeyId(null);
-        setEraId(null);
+    const changeView = (next: ImslpView) => {
+        setView(next);
+        writeImslpView(next);
+    };
+
+    const isChipPressed = (id: string): boolean => {
+        if (dimension === 'era' && inferredEraIds.has(id)) {
+            return true;
+        }
+        return selectedForDimension.has(id);
+    };
+
+    const resetToDefault = () => {
+        setQuery('');
+        setComposerIds(new Set());
+        setInstrumentIds(new Set([DEFAULT_INSTRUMENT]));
+        setFormIds(new Set());
+        setKeyIds(new Set());
+        setEraIds(new Set());
+        setIgnoreQueryPeriod(false);
         setSort('relevance');
+        setDimension('composer');
+    };
+
+    const showMore = () => {
+        // runSearch is an Effect Event, callable only from effects — the click
+        // stages its params and bumps the tick for the effect below to consume.
+        moreRef.current = { limit: DEFAULT_SEARCH_LIMIT, offset: results?.length ?? 0 };
+        setMoreTick((t) => t + 1);
     };
 
     const renderHit = (hit: ImslpSearchHit) => {
@@ -226,9 +440,9 @@ export const ImslpSearchPanel = ({
             <li key={`${hit.pageid}-${hit.title}`}>
                 <button
                     type="button"
-                    onClick={() => selectHit(hit)}
+                    onClick={() => onSelectTitle(hit.title)}
                     disabled={disabled}
-                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 disabled:opacity-60"
+                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
                 >
                     <span className="text-sm font-medium text-stone-800">{highlightMatches(parsed.work, tokens)}</span>
                     {composer ? (
@@ -244,150 +458,244 @@ export const ImslpSearchPanel = ({
         );
     };
 
-    const valueFacets = facetValuesFor(dimension);
+    const renderHitCard = (hit: ImslpSearchHit, index: number) => {
+        const parsed = displayWorkTitle(hit.title);
+        const composer = hit.composer ?? parsed.composer;
+        return (
+            <ImslpScoreCard
+                key={`${hit.pageid}-${hit.title}`}
+                index={index}
+                coverTitle={parsed.work}
+                coverComposer={composer}
+                title={highlightMatches(parsed.work, tokens)}
+                composer={composer ? highlightMatches(composer, tokens) : null}
+                description={hit.snippet || null}
+                disabled={disabled}
+                onClick={() => onSelectTitle(hit.title)}
+            />
+        );
+    };
+
+    const valueFacets = dimension === 'era' ? ERA_FACETS : facetValuesFor(dimension);
+    const emptyParts = filtersToStatusParts(filters);
+    // Name every chip whose category has no snapshot yet, not the first raw title.
+    const indexLabel = joinLabels(labelsForCategories(notReady)) || 'these filters';
+    const dimensionFull = selectedForDimension.size >= MAX_FILTERS_PER_DIMENSION;
+
+    // Stagger runs on across group and section boundaries, like the library's.
+    let cardIndex = 0;
 
     return (
         <div className="mt-4">
             <div className="imslp-search-sticky">
-                <label className="sr-only" htmlFor={searchId}>
-                    Search IMSLP by composer or piece
-                </label>
-                <input
-                    ref={searchRef}
-                    id={searchId}
-                    type="search"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Beethoven moonlight, bolero, Chopin nocturne…"
-                    className={fieldClassName('sm')}
-                    autoComplete="off"
-                    enterKeyHint="search"
-                />
+                <form
+                    role="search"
+                    onSubmit={(e) => {
+                        e.preventDefault();
+                        submitNow();
+                    }}
+                >
+                    <label className="sr-only" htmlFor={searchId}>
+                        Search IMSLP by composer or piece
+                    </label>
+                    <input
+                        ref={searchRef}
+                        id={searchId}
+                        type="search"
+                        value={query}
+                        onChange={(e) => {
+                            setQuery(e.target.value);
+                            // An edited query voids the "ignore its period" choice.
+                            setIgnoreQueryPeriod(false);
+                        }}
+                        placeholder="Beethoven moonlight, bolero, Chopin nocturne…"
+                        className={fieldClassName('sm')}
+                        autoComplete="off"
+                        enterKeyHint="search"
+                    />
+                </form>
 
-                <div className="imslp-facet-row mt-2.5" role="tablist" aria-label="Filter by">
-                    {FACET_DIMENSIONS.map((dim, i) => (
-                        <span key={dim.id} className="inline-flex items-center gap-2">
-                            {i > 0 ? (
-                                <span className="text-stone-300" aria-hidden>
-                                    ·
-                                </span>
-                            ) : null}
-                            <button
-                                type="button"
-                                role="tab"
-                                aria-selected={dimension === dim.id}
-                                className={tagClass(dimension === dim.id)}
-                                onClick={() => setDimension(dim.id)}
-                            >
-                                {dim.label}
-                            </button>
-                        </span>
-                    ))}
-                    {filtersActive ? (
-                        <>
-                            <span className="text-stone-300" aria-hidden>
-                                ·
-                            </span>
-                            <button type="button" className="imslp-facet-tag" onClick={clearFilters}>
-                                Clear
-                            </button>
-                        </>
-                    ) : null}
+                <div className="mt-2 flex items-center justify-between gap-3">
+                    <p className="text-xs text-stone-500" aria-live="polite">
+                        {statusLine}
+                    </p>
+                    {/* Never disabled with the panel: switching views is free. */}
+                    <ViewToggle view={view} onChange={changeView} />
                 </div>
+            </div>
 
-                <div className="imslp-facet-row mt-1.5" role="listbox" aria-label={`${dimension} values`}>
-                    {valueFacets.map((value) => (
+            <div role="group" aria-label="Filter by" className={`${CHIP_ROW_CLASS} mt-2.5`}>
+                {FACET_DIMENSIONS.map((dim) => (
+                    <button
+                        key={dim.id}
+                        type="button"
+                        aria-pressed={dimension === dim.id}
+                        className={chipClassName(dimension === dim.id)}
+                        onClick={() => setDimension(dim.id)}
+                        disabled={disabled}
+                    >
+                        {dim.label}
+                    </button>
+                ))}
+                {!isDefaultState ? (
+                    <button type="button" className={chipClassName(false)} onClick={resetToDefault} disabled={disabled}>
+                        Reset
+                    </button>
+                ) : null}
+            </div>
+
+            <div role="group" aria-label={`${dimension} values`} className={`${CHIP_ROW_CLASS} mt-1.5`}>
+                {valueFacets.map((value) => (
+                    <button
+                        key={value.id}
+                        type="button"
+                        aria-pressed={isChipPressed(value.id)}
+                        className={chipClassName(isChipPressed(value.id))}
+                        onClick={() => toggleValue(value.id)}
+                        // The server keeps at most six per dimension; do not offer a seventh
+                        // that would be dropped silently.
+                        disabled={disabled || (dimensionFull && !isChipPressed(value.id))}
+                    >
+                        {value.label}
+                    </button>
+                ))}
+            </div>
+            {dimensionFull ? (
+                <p className="mt-1.5 text-xs text-stone-500">
+                    Up to {MAX_FILTERS_PER_DIMENSION} per group — unselect one to choose another.
+                </p>
+            ) : null}
+
+            {showResults && (q.length >= 2 || categoryBackedFilters(filters)) ? (
+                <div role="group" aria-label="Sort results" className={`${CHIP_ROW_CLASS} mt-1.5`}>
+                    {(
+                        [
+                            { id: 'relevance' as const, label: 'Best' },
+                            { id: 'title' as const, label: 'A–Z' },
+                            { id: 'recent' as const, label: 'New' },
+                        ] as const
+                    ).map((opt) => (
                         <button
-                            key={value.id}
+                            key={opt.id}
                             type="button"
-                            role="option"
-                            aria-selected={selectedForDimension === value.id}
-                            className={tagClass(selectedForDimension === value.id)}
-                            onClick={() => toggleValue(value.id)}
+                            aria-pressed={sort === opt.id}
+                            className={chipClassName(sort === opt.id)}
+                            onClick={() => setSort(opt.id)}
                             disabled={disabled}
                         >
-                            {value.label}
+                            {opt.label}
                         </button>
                     ))}
                 </div>
+            ) : null}
 
-                {canCategorySort ? (
-                    <div className="imslp-facet-row mt-1.5" aria-label="Sort">
-                        {(
-                            [
-                                { id: 'relevance' as const, label: 'Best' },
-                                { id: 'title' as const, label: 'A–Z' },
-                                { id: 'recent' as const, label: 'New' },
-                            ] as const
-                        ).map((opt, i) => (
-                            <span key={opt.id} className="inline-flex items-center gap-2">
-                                {i > 0 ? (
-                                    <span className="text-stone-300" aria-hidden>
-                                        ·
-                                    </span>
-                                ) : null}
-                                <button
-                                    type="button"
-                                    className={tagClass(sort === opt.id)}
-                                    onClick={() => setSort(opt.id)}
-                                >
-                                    {opt.label}
-                                </button>
-                            </span>
-                        ))}
-                    </div>
-                ) : null}
+            {liveError ? (
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <ErrorText>{liveError}</ErrorText>
+                    <Button variant="ghost" size="sm" onClick={searchNow}>
+                        Try again
+                    </Button>
+                </div>
+            ) : null}
 
-                <p className="mt-2 text-xs text-stone-500" aria-live="polite">
-                    {statusLine}
-                </p>
-            </div>
+            {isLiveQuery && relaxedHint && (results?.length ?? 0) > 0 ? (
+                <p className="mt-2 text-xs text-stone-500">{relaxedHint}</p>
+            ) : null}
 
             {showCurated ? (
                 <div key="popular" className="imslp-panel-view mt-4">
                     <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Popular</h3>
-                    <ul className="mt-1 max-h-[28rem] overflow-y-auto">
-                        {curatedWorks.map((item) => (
-                            <li key={`${item.label}-${item.title}`}>
-                                <button
-                                    type="button"
-                                    onClick={() => selectPopular(item)}
-                                    disabled={disabled}
-                                    className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 disabled:opacity-60"
-                                >
-                                    <span className="text-sm font-medium text-stone-800">{item.label}</span>
-                                    <span className="text-xs text-stone-500">
-                                        {item.composer}
-                                        {item.note ? ` · ${item.note}` : ''}
-                                    </span>
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
+                    {curatedGroups.map((group) => (
+                        <div key={group.composer} className="mt-3 first:mt-1">
+                            <h4 className="text-xs font-medium text-stone-400">{group.composer}</h4>
+                            <ul className={view === 'grid' ? `mt-2 ${GRID_UL_CLASS}` : ''}>
+                                {group.works.map((item: PopularWork) =>
+                                    view === 'grid' ? (
+                                        // Composer omitted on the card — the group
+                                        // heading above already says it (the same
+                                        // reasoning as the library's stripComposer).
+                                        <ImslpScoreCard
+                                            key={`${item.label}-${item.title}`}
+                                            index={cardIndex++}
+                                            coverTitle={item.label}
+                                            coverComposer={null}
+                                            title={item.label}
+                                            tags={popularWorkTags(item)}
+                                            description={item.note ?? null}
+                                            disabled={disabled}
+                                            onClick={() => onSelectTitle(item.title)}
+                                        />
+                                    ) : (
+                                        <li key={`${item.label}-${item.title}`}>
+                                            <button
+                                                type="button"
+                                                onClick={() => onSelectTitle(item.title)}
+                                                disabled={disabled}
+                                                className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
+                                            >
+                                                <span className="text-sm font-medium text-stone-800">{item.label}</span>
+                                                <span className="text-xs text-stone-500">
+                                                    {item.composer}
+                                                    {item.note ? ` · ${item.note}` : ''}
+                                                </span>
+                                            </button>
+                                        </li>
+                                    ),
+                                )}
+                            </ul>
+                        </div>
+                    ))}
                 </div>
             ) : null}
 
-            {showResults && results.length === 0 && !searching ? (
-                <p className="imslp-panel-view mt-4 text-sm text-stone-500">
-                    No works match
-                    {q ? ` “${q}”` : ' these filters'}. Try fewer tags, or a nickname like “moonlight”.
-                </p>
+            {showResults && results.length === 0 && !searching && !liveError ? (
+                <EmptyState
+                    className="imslp-panel-view mt-8"
+                    title={!indexReady ? 'Index still building' : 'No matches'}
+                    body={
+                        !indexReady
+                            ? `IMSLP index is still being built for ${indexLabel}. Try typing a title.`
+                            : q.length >= 2
+                              ? `Nothing on IMSLP matches “${q}” with these filters. Try a nickname like “moonlight”, or fewer filters.`
+                              : `No IMSLP works are in all of: ${emptyParts.join(' · ') || 'these filters'}.`
+                    }
+                >
+                    {!isDefaultState ? (
+                        <Button variant="ghost" size="sm" onClick={resetToDefault}>
+                            Reset filters
+                        </Button>
+                    ) : null}
+                </EmptyState>
             ) : null}
 
             {showResults && results.length > 0 ? (
                 <div
-                    key={`results-${q}-${composerId}-${instrumentId}-${formId}-${keyId}-${eraId}`}
-                    className="imslp-panel-view mt-3 max-h-[28rem] overflow-y-auto"
+                    key={`results-${q}-${[...composerIds]}-${[...instrumentIds]}-${[...formIds]}-${[...keyIds]}-${[...eraIds]}`}
+                    aria-busy={searching}
+                    className={`imslp-panel-view mt-3 transition-opacity ${searching ? 'opacity-60' : ''}`}
                 >
                     <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Best matches</h3>
-                    <ul className="mt-1">{best.map(renderHit)}</ul>
+                    <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
+                        {best.map((hit, i) => (view === 'grid' ? renderHitCard(hit, i) : renderHit(hit)))}
+                    </ul>
                     {more.length > 0 ? (
                         <>
                             <h3 className="mt-4 text-xs font-medium uppercase tracking-wide text-stone-500">
                                 More from IMSLP
                             </h3>
-                            <ul className="mt-1">{more.map(renderHit)}</ul>
+                            <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
+                                {more.map((hit, i) =>
+                                    view === 'grid' ? renderHitCard(hit, best.length + i) : renderHit(hit),
+                                )}
+                            </ul>
                         </>
+                    ) : null}
+                    {hasMore ? (
+                        <div className="mt-3">
+                            <Button variant="ghost" size="sm" onClick={showMore} disabled={searching}>
+                                Show more
+                            </Button>
+                        </div>
                     ) : null}
                 </div>
             ) : null}

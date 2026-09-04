@@ -1,4 +1,5 @@
-import { useReducer, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 
 import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import { recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
@@ -13,15 +14,17 @@ export interface ImslpBrowserProps {
     onImportFile: (file: File) => Promise<void>;
     /**
      * Automated IMSLP import: Edge writes Storage; returns fallback info when
-     * the proxy cannot fetch (bot check / disclaimer).
+     * the proxy cannot fetch (bot check / disclaimer / restricted license).
+     * Real failures are recorded by the shell (captureFailure) before the
+     * rethrow, so this component reports only its own load errors.
      */
     onImportImslp: (
         filename: string,
         workTitle: string,
+        acceptedDisclaimer: boolean,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
-    autoFocus?: boolean;
     /** When false, omit the panel title (e.g. page already has a heading). */
     showHeading?: boolean;
     className?: string;
@@ -82,25 +85,56 @@ export const ImslpBrowser = ({
     onImportFile,
     onImportImslp,
     busy = false,
-    autoFocus = true,
     showHeading = true,
-    className = 'mt-6 rounded-xl border border-stone-300/60 bg-white/50 p-4 sm:p-5',
+    className = 'mt-6',
 }: ImslpBrowserProps) => {
     const [flow, dispatch] = useReducer(reduce, initial);
     const [error, setError] = useState<string | null>(null);
+    // The open work lives in the URL so the browser back button closes it
+    // instead of leaving /search, and reloads restore it.
+    const [searchParams, setSearchParams] = useSearchParams();
+    const workParam = searchParams.get('work');
+    const workSeqRef = useRef(0);
+    const loadedTitleRef = useRef<string | null>(null);
 
-    const openByTitle = async (title: string) => {
+    useEffect(() => {
+        if (!workParam) {
+            workSeqRef.current++;
+            loadedTitleRef.current = null;
+            dispatch({ type: 'search' });
+            return;
+        }
+        if (loadedTitleRef.current === workParam) {
+            return;
+        }
+        const seq = ++workSeqRef.current;
         setError(null);
         dispatch({ type: 'loadingWork' });
-        try {
-            dispatch({ type: 'workLoaded', work: await fetchImslpWork(title) });
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Could not load work');
-            dispatch({ type: 'search' });
-        }
+        fetchImslpWork(workParam).then(
+            (work) => {
+                if (seq !== workSeqRef.current) {
+                    return;
+                }
+                loadedTitleRef.current = workParam;
+                dispatch({ type: 'workLoaded', work });
+            },
+            (err: unknown) => {
+                if (seq !== workSeqRef.current) {
+                    return;
+                }
+                setError(err instanceof Error ? err.message : 'Could not load work');
+                setSearchParams({}, { replace: true });
+            },
+        );
+    }, [workParam, setSearchParams]);
+
+    const closeWork = () => {
+        setError(null);
+        // Replace rather than push: the UI Back lands where browser back would.
+        setSearchParams({}, { replace: true });
     };
 
-    const importEdition = async () => {
+    const importEdition = async (acceptedDisclaimer: boolean) => {
         if (flow.phase !== 'work' || !flow.selected) {
             return;
         }
@@ -108,7 +142,7 @@ export const ImslpBrowser = ({
         setError(null);
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(selected.filename, work.title);
+            const result = await onImportImslp(selected.filename, work.title, acceptedDisclaimer);
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -117,9 +151,10 @@ export const ImslpBrowser = ({
                 return;
             }
             dispatch({ type: 'download', download: { kind: 'idle' } });
-        } catch (err) {
+        } catch {
+            // Recorded by the shell as uploadError/uploadLimit — reporting it
+            // here too rendered the same message twice on /search.
             dispatch({ type: 'download', download: { kind: 'idle' } });
-            setError(err instanceof Error ? err.message : 'Import failed');
         }
     };
 
@@ -132,8 +167,8 @@ export const ImslpBrowser = ({
             await onImportFile(
                 new File([file], suggestedPdfName(flow.work.title, file.name), { type: 'application/pdf' }),
             );
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Upload failed');
+        } catch {
+            // Same contract as importEdition: the shell already recorded it.
         }
     };
 
@@ -153,32 +188,26 @@ export const ImslpBrowser = ({
                         </div>
                     ) : null}
                     {flow.phase === 'work' ? (
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setError(null);
-                                dispatch({ type: 'search' });
-                            }}
-                            className={buttonClassName('ghost', 'sm', 'shrink-0')}
-                        >
+                        <button type="button" onClick={closeWork} className={buttonClassName('ghost', 'sm', 'shrink-0')}>
                             Back
                         </button>
                     ) : null}
                 </div>
             ) : null}
 
+            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
+
             {flow.phase === 'loadingWork' ? (
                 <LoadingText className="mt-4 text-xs">Loading editions…</LoadingText>
             ) : null}
 
-            {flow.phase === 'search' ? (
+            {/* Kept mounted so query, facets and results survive opening a work. */}
+            <div hidden={flow.phase !== 'search'}>
                 <ImslpSearchPanel
                     disabled={blocked}
-                    autoFocus={autoFocus}
-                    onSelectTitle={(title) => void openByTitle(title)}
-                    onError={setError}
+                    onSelectTitle={(title) => setSearchParams({ work: title })}
                 />
-            ) : null}
+            </div>
 
             {flow.phase === 'work' ? (
                 <ImslpWorkPanel
@@ -189,12 +218,10 @@ export const ImslpBrowser = ({
                     busy={busy}
                     importing={blocked}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
-                    onImportSelected={() => void importEdition()}
+                    onImportSelected={(accepted) => void importEdition(accepted)}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
             ) : null}
-
-            {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
         </section>
     );
 };

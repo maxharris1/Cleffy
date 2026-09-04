@@ -242,6 +242,7 @@ export const importDocumentFromImslp = async (
     imslpFilename: string,
     workTitle: string,
     ownerId: string,
+    acceptedDisclaimer: boolean,
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
     noteLibraryMutation();
     const supabase = getSupabase();
@@ -274,7 +275,7 @@ export const importDocumentFromImslp = async (
     };
 
     try {
-        const result = await importImslpPdfToStorage(imslpFilename, id, true);
+        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle);
         if (!result.ok) {
             await rollback();
             return { ok: false, fallback: result };
