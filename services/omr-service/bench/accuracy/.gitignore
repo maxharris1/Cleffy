@@ -4,3 +4,4 @@ data/
 results/raw/
 results/llm-cache/
 results/work/
+results/llm-ledger.json

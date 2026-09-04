@@ -33,6 +33,7 @@ const { values } = parseArgs({
         model: { type: 'string' },
         tag: { type: 'string' },
         variant: { type: 'string' },
+        effort: { type: 'string' },
         'spend-cap-usd': { type: 'string' },
         'keep-work': { type: 'boolean', default: false },
     },
@@ -62,7 +63,7 @@ const summarizeScoreData = (scoreData) => ({
 });
 
 for (const engineName of engineNames) {
-    const engine = getEngine(engineName, { model: values.model, variant: values.variant, spendCapUsd: values['spend-cap-usd'] });
+    const engine = getEngine(engineName, { model: values.model, variant: values.variant, effort: values.effort, spendCapUsd: values['spend-cap-usd'] });
     const resultsKey = values.tag ? `${engineName}+${values.tag}` : engineName;
     console.log(`=== engine ${resultsKey}`);
     for (const score of scores) {
