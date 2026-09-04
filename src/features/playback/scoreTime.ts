@@ -370,7 +370,7 @@ export const FINAL_RIT_FACTOR = 0.85;
  * AND the engraved-bar identity advances. Repeats and D.C. jumps also reset
  * `n`, but their `srcIndex` goes down, so they are not a new movement.
  */
-const movementEnds = (score: ScoreData): number[] => {
+export const movementEnds = (score: ScoreData): number[] => {
     const ends = new Set<number>([score.totalTicks]);
     const measures = score.measures;
     for (let i = 1; i < measures.length; i++) {
@@ -472,13 +472,34 @@ export const finalRitardandoPoints = (score: ScoreData, fallbackBpm: number): Ar
     return points;
 };
 
-/** Practice-tempo scaling is a single multiplier over the whole map. */
-export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: number): TempoMap => {
+/**
+ * A step-wise tempo multiplier laid over the printed tempo: `factor` holds
+ * from `tick` until the next point. Produced by the expressive tempo style;
+ * the strict style has none.
+ */
+export interface TempoCurvePoint {
+    tick: number;
+    factor: number;
+}
+
+/**
+ * Practice-tempo scaling is a single multiplier over the whole map.
+ *
+ * Without a `curve` the map is exactly what it always was, unmarked-close
+ * ritardando included. With one, the curve REPLACES that ritardando — it has
+ * its own — and multiplies the tempo in force wherever it is not 1.
+ */
+export const buildTempoMap = (
+    score: ScoreData,
+    scale: number,
+    fallbackBpm: number,
+    curve?: readonly TempoCurvePoint[],
+): TempoMap => {
     const safeScale = scale > 0 && Number.isFinite(scale) ? scale : 1;
     const tempos = score.tempos ?? [];
     const holds = score.holds ?? [];
     // Fold the unmarked close in before scaling, the same way a printed rit. is.
-    const rit = finalRitardandoPoints(score, score.defaultBpm ?? fallbackBpm);
+    const rit = curve ? [] : finalRitardandoPoints(score, score.defaultBpm ?? fallbackBpm);
     const points = [...tempos.map((tempo) => ({ tick: tempo.tick, bpm: tempo.bpm })), ...rit].sort(
         (a, b) => a.tick - b.tick,
     );
@@ -489,6 +510,9 @@ export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: numb
     }
     for (const hold of holds) {
         boundaries.add(hold.tick);
+    }
+    for (const point of curve ?? []) {
+        boundaries.add(point.tick);
     }
     const ticks = [...boundaries].sort((a, b) => a - b);
 
@@ -511,6 +535,16 @@ export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: numb
         }
         return beats;
     };
+    const factorAt = (tick: number): number => {
+        let factor = 1;
+        for (const point of curve ?? []) {
+            if (point.tick > tick) {
+                break;
+            }
+            factor = point.factor;
+        }
+        return factor > 0 && Number.isFinite(factor) ? factor : 1;
+    };
 
     const spt: number[] = [];
     const hold: number[] = [];
@@ -518,7 +552,9 @@ export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: numb
     for (let i = 0; i < ticks.length; i++) {
         const tick = ticks[i] ?? 0;
         const bpm = Math.max(1, bpmAt(tick) * safeScale);
-        spt.push(secondsPerTick(bpm));
+        // The curve bends the beat, not the fermata: a hold is measured in
+        // beats of the printed tempo either way.
+        spt.push(curve ? secondsPerTick(Math.max(1, bpm * factorAt(tick))) : secondsPerTick(bpm));
         // A hold is measured in beats, so it stretches with the practice tempo.
         hold.push((holdBeatsAt(tick) * 60) / bpm);
         if (i === 0) {

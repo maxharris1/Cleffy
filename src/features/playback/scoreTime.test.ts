@@ -483,6 +483,65 @@ describe('finalRitardandoPoints', () => {
     });
 });
 
+describe('buildTempoMap with a tempo curve', () => {
+    const fourBar44 = (): ScoreData => ({
+        ...tinyScore,
+        defaultBpm: 120,
+        totalTicks: 7680,
+        timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        tempos: [{ tick: 0, bpm: 120 }],
+        holds: undefined,
+        measures: [0, 1, 2, 3].map((i) => ({
+            n: i + 1,
+            tick: i * 1920,
+            dTicks: 1920,
+            page: 0,
+            sys: 0,
+            x0: 0,
+            x1: 1,
+            srcIndex: i,
+        })),
+        notes: [],
+    });
+
+    it('is byte-identical to the plain map when no curve is given', () => {
+        // The strict tempo style is the plain map; a missing curve must not
+        // touch its code path.
+        expect(buildTempoMap(fourBar44(), 1, 120)).toEqual(buildTempoMap(fourBar44(), 1, 120, undefined));
+        expect(buildTempoMap(tinyScore, 0.7, 90)).toEqual(buildTempoMap(tinyScore, 0.7, 90, undefined));
+    });
+
+    it('replaces the unmarked-close ritardando with the curve', () => {
+        // An empty curve means "expressive, but nothing applies" — flat to the end.
+        const flat = buildTempoMap(fourBar44(), 1, 120, []);
+        expect(secondsAtTick(flat, 7680)).toBeCloseTo(8, 9);
+        expect(bpmAtTick(flat, 7200)).toBeCloseTo(120, 9);
+    });
+
+    it('multiplies the tempo in force between curve points', () => {
+        const map = buildTempoMap(fourBar44(), 1, 120, [
+            { tick: 1920, factor: 0.5 },
+            { tick: 3840, factor: 1 },
+        ]);
+        expect(secondsAtTick(map, 1920)).toBeCloseTo(2, 9);
+        expect(secondsAtTick(map, 3840)).toBeCloseTo(2 + 4, 9); // bar 2 at half tempo
+        expect(secondsAtTick(map, 7680)).toBeCloseTo(6 + 4, 9); // bars 3-4 back in tempo
+        expect(bpmAtTick(map, 2000)).toBeCloseTo(60, 9);
+        expect(tickAtSeconds(map, secondsAtTick(map, 3000))).toBeCloseTo(3000, 6);
+    });
+
+    it('scales with the practice tempo and leaves a fermata measured in printed beats', () => {
+        const score: ScoreData = { ...fourBar44(), holds: [{ tick: 1920, beats: 2 }] };
+        const curve = [{ tick: 0, factor: 0.5 }];
+        const full = buildTempoMap(score, 1, 120, curve);
+        const half = buildTempoMap(score, 0.5, 120, curve);
+        expect(secondsAtTick(half, 7680)).toBeCloseTo(secondsAtTick(full, 7680) * 2, 6);
+        // The hold at 1920 is still two beats of the (practice-scaled) printed
+        // tempo — one second at 120 — not two beats of the bent tempo.
+        expect(secondsAtTick(full, 1921) - secondsAtTick(full, 1920)).toBeCloseTo(1 + 2 / 960, 5);
+    });
+});
+
 describe('measureIndexAtPagePoint with repeats', () => {
     // Measures 0-2 of tinyScore performed a second time at later ticks, with
     // the same geometry — what an unrolled repeat looks like.

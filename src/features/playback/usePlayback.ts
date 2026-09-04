@@ -41,6 +41,7 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
         const engine = new PlaybackEngine({
             score,
             bpm: initialBpm,
+            tempoStyle: store.tempoStyle,
             onStatus: (status) => useViewerStore.getState().setPlaybackStatus(status),
             onWarning: (code) => setWarning(code),
         });
@@ -86,6 +87,9 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
             }
             if (state.metronomeOn !== prev.metronomeOn) {
                 engine.setMetronome(state.metronomeOn);
+            }
+            if (state.tempoStyle !== prev.tempoStyle) {
+                engine.setTempoStyle(state.tempoStyle);
             }
             if (state.loopRange !== prev.loopRange) {
                 engine.setLoop(

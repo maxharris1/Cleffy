@@ -44,8 +44,12 @@ import {
     sptAtTick,
     tickAtSeconds,
 } from '@/features/playback/scoreTime';
-import type { BeatTick, TempoMap } from '@/features/playback/scoreTime';
+import type { BeatTick, TempoCurvePoint, TempoMap } from '@/features/playback/scoreTime';
+import type { TempoStyle } from '@/features/playback/playbackPrefs';
 import { getSharedAudioContext } from '@/features/playback/sharedAudioContext';
+import { expressiveTempoCurve } from '@/features/playback/tempoStyle';
+import { analyzeVoices } from '@/features/playback/voiceAnalysis';
+import type { VoiceAnalysis } from '@/features/playback/voiceAnalysis';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData, ScoreNote } from '@/types/scoreData';
@@ -65,6 +69,8 @@ import type { ScoreData, ScoreNote } from '@/types/scoreData';
 const SCHEDULER_INTERVAL_MS = 25;
 const HORIZON_S = 0.12;
 const START_DELAY_S = 0.08;
+/** The metronome's cursor once the score's last beat has been clicked. */
+const NO_MORE_BEATS: BeatTick = { tick: Number.POSITIVE_INFINITY, accent: false };
 /**
  * Voice ceiling. Held higher than the notated polyphony of any piano writing
  * because the pedal keeps notes alive long past their written ends; the
@@ -355,6 +361,8 @@ export interface LoopRegion {
 export interface PlaybackEngineOptions {
     score: ScoreData;
     bpm: number;
+    /** Strict (the default) plays the printed tempo exactly as it always has. */
+    tempoStyle?: TempoStyle;
     onStatus: (status: PlaybackStatus) => void;
     /** Fired after seeks/stops so the playhead can redraw while paused. */
     onPositionJump?: () => void;
@@ -391,6 +399,8 @@ export class PlaybackEngine {
     private resonance: ConvolverLike | null = null;
     private clickBus: GainNodeLike | null = null;
 
+    /** What the voices are doing — shared by the note shapes and the expressive curve. */
+    private readonly analysis: VoiceAnalysis;
     /** Chord/melody/downbeat shaping, index-aligned with `score.notes`. */
     private readonly shapes: readonly NoteShape[];
     /** Pedal-lengthened end ticks, index-aligned with `score.notes`. */
@@ -400,6 +410,9 @@ export class PlaybackEngine {
     /** The score's tempo map, scaled to the practice tempo. */
     private map: TempoMap;
     private bpmValue: number;
+    private tempoStyle: TempoStyle;
+    /** The expressive curve, built on first use — most sessions never leave strict. */
+    private expressiveCurve: readonly TempoCurvePoint[] | null = null;
     private anchor: Anchor = { tick: 0, ctxTime: 0, baseSeconds: 0 };
     private pendingAnchor: Anchor | null = null;
     private pausedTick = 0;
@@ -422,9 +435,11 @@ export class PlaybackEngine {
         // arbitrary positions and must never re-decide their shaping — and the
         // pedal, being state integrated from edges, cannot be resolved for one
         // note in isolation at the moment that note is scheduled.
-        this.shapes = buildNoteShapes(options.score);
+        this.analysis = analyzeVoices(options.score);
+        this.shapes = buildNoteShapes(options.score, this.analysis);
         this.pedalEnds = buildPedalEnds(options.score.notes, options.score.pedals, options.score.totalTicks);
-        this.map = buildTempoMap(options.score, this.scaleFor(options.bpm), options.bpm);
+        this.tempoStyle = options.tempoStyle ?? 'strict';
+        this.map = this.buildMap(options.bpm);
         this.onStatus = options.onStatus;
         this.onPositionJump = options.onPositionJump;
         this.onWarning = options.onWarning;
@@ -559,17 +574,57 @@ export class PlaybackEngine {
 
     setBpm(bpm: number): void {
         this.bpmValue = bpm;
+        this.rebuildMap();
+    }
+
+    /**
+     * Switch between the printed tempo and the expressive curve. Same
+     * re-anchoring as a tempo change: the playhead must not jump, and the
+     * click, count-in and loop wrap all read the rebuilt map.
+     */
+    setTempoStyle(style: TempoStyle): void {
+        if (style === this.tempoStyle) {
+            return;
+        }
+        this.tempoStyle = style;
+        this.rebuildMap();
+    }
+
+    getTempoStyle(): TempoStyle {
+        return this.tempoStyle;
+    }
+
+    /**
+     * The tempo map for the current practice tempo and style. Strict passes no
+     * curve, so it builds the very same map it did before styles existed.
+     */
+    private buildMap(bpm: number): TempoMap {
+        switch (this.tempoStyle) {
+            case 'strict':
+                return buildTempoMap(this.score, this.scaleFor(bpm), bpm);
+            case 'expressive': {
+                this.expressiveCurve ??= expressiveTempoCurve(this.score, this.analysis);
+                return buildTempoMap(this.score, this.scaleFor(bpm), bpm, this.expressiveCurve);
+            }
+            default: {
+                const exhaustive: never = this.tempoStyle;
+                return exhaustive;
+            }
+        }
+    }
+
+    private rebuildMap(): void {
         const wasPlaying = this.ctx && (this.status === 'playing' || this.status === 'counting');
         if (wasPlaying && this.ctx) {
             // Read the position on the OLD map before rebuilding, then re-anchor
             // on the new one, or the playhead jumps when the tempo changes.
             const positionNow = this.getPositionTicks();
-            this.map = buildTempoMap(this.score, this.scaleFor(bpm), bpm);
+            this.map = this.buildMap(this.bpmValue);
             this.anchor = this.anchorAt(positionNow, this.ctx.currentTime);
             this.pendingAnchor = null;
             this.nextBeat = null;
         } else {
-            this.map = buildTempoMap(this.score, this.scaleFor(bpm), bpm);
+            this.map = this.buildMap(this.bpmValue);
         }
     }
 
@@ -1060,7 +1115,10 @@ export class PlaybackEngine {
                 return;
             }
             this.scheduleClick(at, this.nextBeat.accent);
-            this.nextBeat = this.firstBeatAtOrAfter(this.nextBeat.tick + 1);
+            // Past the last beat there is nothing left to click; `null` would
+            // mean "start over from the anchor" and re-fire every past click on
+            // every tick until the end, so park on a beat that never comes.
+            this.nextBeat = this.firstBeatAtOrAfter(this.nextBeat.tick + 1) ?? NO_MORE_BEATS;
         }
     }
 

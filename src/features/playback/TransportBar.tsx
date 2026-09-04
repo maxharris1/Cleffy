@@ -17,6 +17,8 @@ import {
     FollowIcon,
     HourglassIcon,
     MetronomeIcon,
+    PedalIcon,
+    TempoStyleIcon,
     MusicIcon,
     PauseIcon,
     PlayIcon,
@@ -267,8 +269,20 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
     const countInOn = useViewerStore((s) => s.countInOn);
     const loopRange = useViewerStore((s) => s.loopRange);
     const followMode = useViewerStore((s) => s.followMode);
-    const { setBpm, setHandMuted, setHandVolume, setMetronomeOn, setCountInOn, setLoopRange, setFollowMode } =
-        useViewerStore.getState();
+    const tempoStyle = useViewerStore((s) => s.tempoStyle);
+    const autoPedal = useViewerStore((s) => s.autoPedal);
+    const {
+        setBpm,
+        setHandMuted,
+        setHandVolume,
+        setMetronomeOn,
+        setCountInOn,
+        setLoopRange,
+        setFollowMode,
+        setTempoStyle,
+        setAutoPedal,
+    } = useViewerStore.getState();
+    const pedalInferred = score.warnings.includes('pedal_inferred');
 
     const [expanded, setExpanded] = useState(false);
 
@@ -558,6 +572,36 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                         <MetronomeIcon size={14} />
                         <span className="hidden md:inline">Click</span>
                     </button>
+                    <button
+                        type="button"
+                        aria-label={tempoStyle === 'expressive' ? 'Expressive tempo' : 'Strict tempo'}
+                        aria-pressed={tempoStyle === 'expressive'}
+                        title={
+                            tempoStyle === 'expressive'
+                                ? 'Expressive: eases into endings, breathes at phrases — tap for strict time'
+                                : 'Strict: exactly the printed tempo — tap to let the tempo breathe'
+                        }
+                        onClick={() => setTempoStyle(tempoStyle === 'expressive' ? 'strict' : 'expressive')}
+                        className={pillButton(tempoStyle === 'expressive')}
+                    >
+                        <TempoStyleIcon size={14} />
+                        <span className="hidden md:inline">
+                            {tempoStyle === 'expressive' ? 'Expressive' : 'Strict'}
+                        </span>
+                    </button>
+                    {pedalInferred && (
+                        <button
+                            type="button"
+                            aria-label="Auto-pedal"
+                            aria-pressed={autoPedal}
+                            title="This score has no pedal marks; play the pedalling Cleffy inferred"
+                            onClick={() => setAutoPedal(!autoPedal)}
+                            className={pillButton(autoPedal)}
+                        >
+                            <PedalIcon size={14} />
+                            <span className="hidden md:inline">Auto-pedal</span>
+                        </button>
+                    )}
                     <button
                         type="button"
                         aria-label={loopRange ? 'Stop looping' : 'Loop a few bars'}
