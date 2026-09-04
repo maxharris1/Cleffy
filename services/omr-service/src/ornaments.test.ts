@@ -45,6 +45,37 @@ describe('realizeOrnament', () => {
         expect(durs(out)).toEqual([60, 60, 360]);
     });
 
+    describe('in the Baroque', () => {
+        it('starts a trill on the upper auxiliary and still ends on the principal', () => {
+            const out = realizeOrnament(C4, 'trill', { fifths: 0, bpm: 120, era: 'baroque' });
+            // 8 units even → keep all eight: D C D C D C D C, remainder on the last C.
+            expect(pitches(out)).toEqual([62, 60, 62, 60, 62, 60, 62, 60]);
+            expect(durs(out)).toEqual([60, 60, 60, 60, 60, 60, 60, 60]);
+            expect(span(out)).toBe(480);
+            expect(out.filter((n) => n.p === 62).every((n) => n.v === 0.75)).toBe(true);
+        });
+
+        it('plays the inverted mordent as a Pralltriller from above', () => {
+            const out = realizeOrnament(C4, 'inverted-mordent', { fifths: 0, bpm: 120, era: 'baroque' });
+            expect(pitches(out)).toEqual([62, 60, 62, 60]);
+            expect(durs(out)).toEqual([60, 60, 60, 300]);
+            expect(span(out)).toBe(480);
+        });
+
+        it('leaves the mordent proper principal-first', () => {
+            const out = realizeOrnament(C4, 'mordent', { fifths: 0, bpm: 120, era: 'baroque' });
+            expect(pitches(out)).toEqual([60, 59, 60]);
+        });
+
+        it('is the Classical spelling for every other era', () => {
+            for (const era of ['classical', 'romantic', 'modern'] as const) {
+                expect(pitches(realizeOrnament(C4, 'trill', { fifths: 0, bpm: 120, era }))).toEqual(
+                    pitches(realizeOrnament(C4, 'trill', { fifths: 0, bpm: 120 })),
+                );
+            }
+        });
+    });
+
     it('plays a turn as four 32nds at the start, then the remainder', () => {
         const out = realizeOrnament(C4, 'turn', { fifths: 0, bpm: 120 });
         expect(pitches(out)).toEqual([62, 60, 59, 60, 60]);

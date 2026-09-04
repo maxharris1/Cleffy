@@ -18,7 +18,10 @@ import {
     JITTER_TIME_S,
     JITTER_VEL,
     LEGATO_OVERLAP_FRACTION,
+    LEGATO_TAPER_LAST,
+    LEGATO_TAPER_PENULTIMATE,
     MELODY_LIFT,
+    PHRASE_CONTOUR,
     noteJitter,
     OFFBEAT_DIP,
     panForMidi,
@@ -575,6 +578,37 @@ describe('buildNoteShapes', () => {
             expect(Math.round(plain(480) * LEGATO_OVERLAP_FRACTION)).toBe(26);
             const shapedStaccato = buildNoteShapes(score(staccato));
             expect(shapedStaccato.map((s) => s.legatoTo)).toEqual([-1, -1, -1, -1]);
+        });
+
+        it('leans a melody phrase toward its peak and lands a legato run softly', () => {
+            // One legato phrase in the tune, rising to F5 and falling back; an
+            // Alberti figure underneath that the shaping must leave alone.
+            const melody = sorted([...tune(0, [72, 74, 77, 74]), ...tune(1, [72, 72, 72, 72])]);
+            const notes = sorted([...melody, ...alberti(0), ...alberti(1)]);
+            const score: ScoreData = {
+                ...tinyScore,
+                timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+                measures: bars(2),
+                notes,
+                totalTicks: 3840,
+            };
+            const shaped = buildNoteShapes(score);
+            const phraseOf = (t: number, p: number): number =>
+                shaped[notes.findIndex((n) => n.t === t && n.p === p)]?.phrase ?? Number.NaN;
+            // Contour over the whole legato line (bars 1–2 are one phrase): low
+            // C5 at −PHRASE_CONTOUR, the peak F5 at +PHRASE_CONTOUR, D5 between.
+            expect(phraseOf(0, 72)).toBeCloseTo(-PHRASE_CONTOUR, 12);
+            expect(phraseOf(960, 77)).toBeCloseTo(PHRASE_CONTOUR, 12);
+            expect(phraseOf(480, 74)).toBeCloseTo(-PHRASE_CONTOUR * (1 - 2 * (2 / 5)), 12);
+            // The run's last two notes taper, on top of the contour.
+            expect(phraseOf(1920 + 960, 72)).toBeCloseTo(-PHRASE_CONTOUR - LEGATO_TAPER_PENULTIMATE, 12);
+            expect(phraseOf(1920 + 1440, 72)).toBeCloseTo(-PHRASE_CONTOUR - LEGATO_TAPER_LAST, 12);
+            // Accompaniment is not phrased.
+            notes.forEach((note, i) => {
+                if (note.h === 1) {
+                    expect(shaped[i]?.phrase).toBe(0);
+                }
+            });
         });
 
         it('is the same on a second pass', () => {

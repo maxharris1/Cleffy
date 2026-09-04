@@ -11,16 +11,22 @@ import type {
     ScoreTempo,
     ScoreTimeSig,
 } from './scoreData.js';
+import type { Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import {
     appoggiaturaSteal,
     arpeggiateChord,
     graceTicks,
+    realizeGlissando,
     realizeOrnament,
+    realizeTremolo,
     type AccidentalMark,
     type OrnamentKind,
 } from './ornaments.js';
 import { repairRhythm } from './rhythmRepair.js';
+
+/** A caesura / breath mark stops the clock this long, in beats. */
+const BREATH_BEATS = 0.5;
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
 export interface MusicalScore {
@@ -79,6 +85,12 @@ export interface ParseSeed {
 }
 
 const EMPTY_SEED: ParseSeed = { tempoBpm: null, steadyBpm: null, velocityByStaff: {} };
+
+/** Per-job knobs that are not expression state (and so do not travel in the seed). */
+export interface ParseOptions {
+    /** Stylistic period, from the composer: shapes how ornaments are spelled. */
+    era?: Era;
+}
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
 
@@ -532,6 +544,35 @@ const ornamentOf = (noteEl: Elem): { kind: OrnamentKind; accidentalMark?: Accide
     return undefined;
 };
 
+/**
+ * A single-note tremolo's stroke count (1 → eighths, 2 → sixteenths, 3 → 32nds).
+ * Two-note tremolos (type start/stop) are not modelled and read as plain notes.
+ */
+const tremoloOf = (noteEl: Elem): number | undefined => {
+    const el = noteEl.getElementsByTagName('tremolo').item(0) as Elem | null;
+    if (!el) {
+        return undefined;
+    }
+    const type = (el.getAttribute('type') ?? 'single').toLowerCase();
+    if (type !== 'single') {
+        return undefined;
+    }
+    const strokes = Number.parseInt((el.textContent ?? '').trim(), 10);
+    return Number.isFinite(strokes) && strokes >= 1 && strokes <= 4 ? strokes : undefined;
+};
+
+/** <glissando> or <slide> start/stop on this note. */
+const glissandoOf = (noteEl: Elem): 'start' | 'stop' | undefined => {
+    for (const tag of ['glissando', 'slide']) {
+        const el = noteEl.getElementsByTagName(tag).item(0) as Elem | null;
+        const type = (el?.getAttribute('type') ?? '').toLowerCase();
+        if (type === 'start' || type === 'stop') {
+            return type;
+        }
+    }
+    return undefined;
+};
+
 const arpeggiateOf = (noteEl: Elem): 'up' | 'down' | undefined => {
     const el = noteEl.getElementsByTagName('arpeggiate').item(0) as Elem | null;
     if (!el) {
@@ -674,7 +715,12 @@ interface PartCandidate {
  * document order so Audiveris "Voice" dummy parts (and art-song vocal lines)
  * do not become the play-along timeline.
  */
-export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed = EMPTY_SEED): MusicalScore => {
+export const parseMusicXmlString = (
+    xml: string,
+    tickOffset = 0,
+    seed: ParseSeed = EMPTY_SEED,
+    options: ParseOptions = {},
+): MusicalScore => {
     const doc = new DOMParser().parseFromString(xml, 'text/xml');
     const root = doc.documentElement;
     if (!root || root.nodeName !== 'score-partwise') {
@@ -695,7 +741,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
     const leadStaves = countDeclaredStaves(lead);
 
     // The lead part is the timeline authority: its measures define barlines.
-    const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings, seed });
+    const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings, seed, options });
     const notes = [...leadResult.notes];
     let swing = leadResult.swing;
     let rhythmRepairs = leadResult.rhythmRepairs;
@@ -706,6 +752,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
             tickOffset,
             warnings,
             seed,
+            options,
         });
         notes.push(...secondary.notes);
         swing = swing || secondary.swing;
@@ -862,6 +909,7 @@ interface PartContext {
     tickOffset: number;
     warnings: Set<string>;
     seed: ParseSeed;
+    options: ParseOptions;
 }
 
 interface PartResult {
@@ -931,6 +979,12 @@ export type RawEvent =
           fermata: boolean;
           ornament?: { kind: OrnamentKind; accidentalMark?: AccidentalMark };
           arpeggiate?: 'up' | 'down';
+          /** Single-note tremolo strokes: the note is a measured repetition. */
+          tremolo?: number;
+          /** This note begins or ends a glissando/slide. */
+          glissando?: 'start' | 'stop';
+          /** A caesura or breath mark follows the note: the clock stops half a beat after it. */
+          breath: boolean;
           /** Engraved <type> (quarter, eighth, …) — the rhythm repair's evidence, never trusted over <duration>. */
           type?: string;
           /** <dot> count. */
@@ -1396,6 +1450,9 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             const ornament = ornamentOf(child);
                             const type = childText(child, 'type');
                             const beam = beamOf(child);
+                            const tremolo = tremoloOf(child);
+                            const glissando = glissandoOf(child);
+                            const artNames = markNames(child, 'articulations');
                             events.push({
                                 k: 'note',
                                 rel: start,
@@ -1408,9 +1465,12 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 tieStop: tieTypes.includes('stop'),
                                 arts,
                                 fermata: child.getElementsByTagName('fermata').length > 0,
+                                breath: artNames.has('caesura') || artNames.has('breath-mark'),
                                 dots: childElements(child, 'dot').length,
                                 ...(type ? { type } : {}),
                                 ...(beam ? { beam } : {}),
+                                ...(tremolo !== undefined ? { tremolo } : {}),
+                                ...(glissando ? { glissando } : {}),
                                 ...(ornament ? { ornament } : {}),
                                 ...(arp ? { arpeggiate: arp } : {}),
                             });
@@ -2413,6 +2473,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     let pendingGraces: Array<{ midi: number; hand: 0 | 1; slash: boolean }> = [];
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
     const openTies = new Map<string, ScoreNote>();
+    /** Glissando starts waiting for their target note, keyed by staff:voice. */
+    const pendingGlissandi = new Map<string, ScoreNote>();
     let arpBuffer: ScoreNote[] = [];
     let arpDirection: 'up' | 'down' | null = null;
     let swing = false;
@@ -2717,15 +2779,19 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     // A tie chain is one sounding event: skip ornaments on tied notes
                     // rather than spelling them on a length we do not yet know.
                     let emitted: ScoreNote[] = [note];
-                    if (ev.ornament && !ev.tieStart && !ev.tieStop) {
+                    const untied = !ev.tieStart && !ev.tieStop;
+                    if (ev.ornament && untied) {
                         emitted = realizeOrnament(note, ev.ornament.kind, {
                             fifths: fifthsAt(principalStart),
                             bpm: bpmAt(principalStart),
                             accidentalMark: ev.ornament.accidentalMark,
+                            ...(ctx.options.era ? { era: ctx.options.era } : {}),
                         });
-                        if (emitted.length > 1) {
-                            ctx.warnings.add('ornaments_realized');
-                        }
+                    } else if (ev.tremolo !== undefined && untied) {
+                        emitted = realizeTremolo(note, ev.tremolo);
+                    }
+                    if (emitted.length > 1) {
+                        ctx.warnings.add('ornaments_realized');
                     }
                     if (ev.arpeggiate) {
                         arpDirection = arpDirection ?? ev.arpeggiate;
@@ -2733,10 +2799,33 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     } else {
                         notes.push(...emitted);
                     }
+                    // A glissando is spelled once its target is known: the start
+                    // note, already emitted, is swapped for the run up to it.
+                    const glissKey = `${ev.staff}:${ev.voice}`;
+                    if (ev.glissando === 'stop') {
+                        const from = pendingGlissandi.get(glissKey);
+                        pendingGlissandi.delete(glissKey);
+                        const at = from ? notes.indexOf(from) : -1;
+                        if (from && at >= 0) {
+                            const run = realizeGlissando(from, ev.midi);
+                            if (run.length > 1) {
+                                notes.splice(at, 1, ...run);
+                                ctx.warnings.add('ornaments_realized');
+                            }
+                        }
+                    } else if (ev.glissando === 'start' && untied && emitted.length === 1 && !ev.arpeggiate) {
+                        if (!pendingGlissandi.has(glissKey)) {
+                            pendingGlissandi.set(glissKey, note);
+                        }
+                    }
                     if (ev.fermata) {
                         // Hold on ARRIVING at the onset, so the note itself still
                         // starts on time and everything sounding across it rings on.
                         holds.push({ tick: start, beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)) });
+                    }
+                    if (ev.breath && !ev.chord) {
+                        // A caesura or breath mark is a short stop AFTER the note.
+                        holds.push({ tick: start + ev.dur, beats: BREATH_BEATS });
                     }
                     if (ev.tieStart) {
                         openTies.set(tieKey, note);
@@ -2884,7 +2973,11 @@ const beatUnitToQuarters = (metronome: Elem | null): number => {
  * Parse one or more exported .mxl files (Audiveris writes one per detected
  * movement) into a single tick-continuous MusicalScore.
  */
-export const parseMxlFiles = (files: Buffer[], seed: ParseSeed = EMPTY_SEED): MusicalScore => {
+export const parseMxlFiles = (
+    files: Buffer[],
+    seed: ParseSeed = EMPTY_SEED,
+    options: ParseOptions = {},
+): MusicalScore => {
     if (files.length === 0) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No MusicXML produced');
     }
@@ -2917,7 +3010,7 @@ export const parseMxlFiles = (files: Buffer[], seed: ParseSeed = EMPTY_SEED): Mu
         const tickOffset = combined.totalTicks;
         // A later movement is a new piece — never resume the previous movement's
         // ritardando floor. Only the first file of a shard carries the seed.
-        const parsed = parseMusicXmlString(extractMxl(file), tickOffset, index === 0 ? seed : EMPTY_SEED);
+        const parsed = parseMusicXmlString(extractMxl(file), tickOffset, index === 0 ? seed : EMPTY_SEED, options);
         combined.notes.push(...parsed.notes);
         combined.measures.push(...parsed.measures);
         combined.timeSignatures.push(...parsed.timeSignatures);

@@ -573,7 +573,7 @@ const parseRangeArtifacts = (
     era: Era,
     seed?: ParseSeed,
 ): { score: ScoreData; musical: MusicalScore; openTiesAtEnd: number; structure: StructureSummary } => {
-    const musical = parseMxlFiles(mxlBuffers, seed);
+    const musical = parseMxlFiles(mxlBuffers, seed, { era });
     const score = buildScoreData(musical, geometry, { era });
     return {
         score,
