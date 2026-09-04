@@ -50,8 +50,9 @@ import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { TextField } from '@/ui/TextField';
+import { ViewToggle } from '@/ui/ViewToggle';
 import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
-import { LayoutGridIcon, ListIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
+import { SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 
 /** Above this count, tag filters switch from chips to a select. */
 const TAG_CHIP_LIMIT = 8;
@@ -647,39 +648,6 @@ const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: Libra
                 }`}
             >
                 {label}
-            </button>
-        ))}
-    </div>
-);
-
-/**
- * Shelf or list. Two icon buttons rather than a select: it is a two-state
- * choice made rarely, and the icons say what the words would.
- */
-const ViewToggle = ({ view, onChange }: { view: LibraryView; onChange: (v: LibraryView) => void }) => (
-    <div
-        role="group"
-        aria-label="View"
-        className="flex h-8 shrink-0 items-center rounded-lg border border-stone-200 p-0.5"
-    >
-        {(
-            [
-                ['grid', 'Grid view', LayoutGridIcon],
-                ['list', 'List view', ListIcon],
-            ] as const
-        ).map(([value, label, Icon]) => (
-            <button
-                key={value}
-                type="button"
-                aria-pressed={view === value}
-                aria-label={label}
-                title={label}
-                onClick={() => onChange(value)}
-                className={`flex h-full items-center rounded-md px-2 transition ${
-                    view === value ? 'bg-accent-soft text-accent' : 'text-stone-500 hover:text-stone-800'
-                }`}
-            >
-                <Icon size={15} />
             </button>
         ))}
     </div>

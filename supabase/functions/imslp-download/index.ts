@@ -1,7 +1,21 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
-import { checkRateLimit, clientKey, serviceClient, tryDownloadPdf } from '../_shared/imslp.ts';
+import {
+    checkRateLimit,
+    clientKey,
+    fetchWorkPageHtml,
+    imagefromIndexUrl,
+    serviceClient,
+    tryDownloadPdf,
+} from '../_shared/imslp.ts';
+import {
+    LICENSE_TTL_MS,
+    canonicalImslpFilename,
+    classifyLicense,
+    isDownloadable,
+    parseWorkPageLicenses,
+} from '../_shared/imslpLicense.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -24,7 +38,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    let body: { filename?: string; acceptedDisclaimer?: boolean; documentId?: string };
+    let body: { filename?: string; acceptedDisclaimer?: boolean; documentId?: string; workTitle?: string };
     try {
         body = await req.json();
     } catch {
@@ -49,6 +63,9 @@ Deno.serve(async (req) => {
     if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
         return jsonResponse({ error: 'Invalid filename' }, 400);
     }
+
+    const canonicalFilename = canonicalImslpFilename(filename);
+    const workTitle = typeof body.workTitle === 'string' ? body.workTitle.trim() : '';
 
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {
@@ -93,6 +110,73 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
     }
 
+    const licenseConflict = (code: 'non_pd' | 'license_unknown', restriction: string | null) =>
+        jsonResponse(
+            {
+                ok: false,
+                code,
+                message:
+                    code === 'non_pd'
+                        ? restriction
+                            ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
+                            : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically."
+                        : "IMSLP didn't confirm a public-domain or Creative Commons license for this edition; it can't be imported automatically.",
+                openUrl: imagefromIndexUrl(canonicalFilename),
+                filename: canonicalFilename,
+            },
+            409,
+        );
+
+    // License backstop, checked BEFORE the quota so a restricted file never
+    // costs a smart_imports credit. Cache miss or stale row live-parses the
+    // work page; unknown or restricted fails closed and never fetches the PDF.
+    const { data: licenseRow } = await admin
+        .from('imslp_file_licenses')
+        .select('restriction, downloadable, fetched_at')
+        .eq('filename', canonicalFilename)
+        .maybeSingle();
+    const fresh =
+        licenseRow && Date.now() - new Date(licenseRow.fetched_at as string).getTime() < LICENSE_TTL_MS
+            ? licenseRow
+            : null;
+    if (fresh && fresh.downloadable === false) {
+        const restriction = typeof fresh.restriction === 'string' ? fresh.restriction : null;
+        return licenseConflict('non_pd', restriction);
+    }
+    if (!fresh || fresh.downloadable !== true) {
+        if (!workTitle) {
+            return licenseConflict('license_unknown', null);
+        }
+        const html = await fetchWorkPageHtml(workTitle);
+        if (!html) {
+            return licenseConflict('license_unknown', null);
+        }
+        const parsed = parseWorkPageLicenses(html);
+        const license = parsed.get(canonicalFilename);
+        if (license) {
+            try {
+                await admin.from('imslp_file_licenses').upsert({
+                    filename: canonicalFilename,
+                    work_title: workTitle,
+                    license: classifyLicense(license.licenseLabel),
+                    license_label: license.licenseLabel,
+                    restriction: license.restriction,
+                    eu_hosted: license.euHosted,
+                    downloadable: isDownloadable(license),
+                    fetched_at: new Date().toISOString(),
+                });
+            } catch {
+                // cache write is best-effort
+            }
+        }
+        if (!license) {
+            return licenseConflict('license_unknown', null);
+        }
+        if (!isDownloadable(license)) {
+            return licenseConflict('non_pd', license.restriction);
+        }
+    }
+
     // Metered as smart_imports, and gated BEFORE the IMSLP fetch — the expensive
     // part. Every failure path below refunds, so a teacher is only charged for an
     // import that actually landed in Storage.
@@ -112,7 +196,7 @@ Deno.serve(async (req) => {
     };
 
     try {
-        const result = await tryDownloadPdf(filename);
+        const result = await tryDownloadPdf(canonicalFilename);
         if (!result.ok) {
             await giveBack();
             return jsonResponse(

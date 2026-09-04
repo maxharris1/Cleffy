@@ -410,6 +410,12 @@ verify_jwt = true
 [functions.imslp-download]
 verify_jwt = true
 
+# pg_cron / pg_net have no Supabase JWT — imslp-sync authenticates with
+# x-imslp-sync-secret (or a service-role bearer for hand triggers).
+# Deploy with `supabase functions deploy imslp-sync --no-verify-jwt`.
+[functions.imslp-sync]
+verify_jwt = false
+
 # Metered analysis endpoints — JWT required; each one meters the caller.
 [functions.score-analyze]
 verify_jwt = true

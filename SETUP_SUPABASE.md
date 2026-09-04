@@ -209,6 +209,47 @@ If `pg_cron` / `pg_net` are unavailable, schedule Cloud Scheduler to
 `POST /poke` every minute instead; the worker calls `omr_reap_expired_leases`
 at the top of each poke.
 
+IMSLP chip browse uses the same vault + cron pattern. After deploying
+`imslp-sync` (`--no-verify-jwt`) and setting `IMSLP_SYNC_SECRET` as an Edge
+secret, store the function URL and the same secret in Vault so
+`imslp_sync_tick` can POST every two minutes:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp-sync', 'imslp_sync_url');
+select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
+```
+
+**Without those two secrets the cron tick is a silent no-op** and every chip
+beyond the default Piano shows "Index still building" forever. Rollout order
+for a fresh project (each step is required):
+
+1. `npx supabase db push` — brings `imslp_category_members`, `imslp_category_sync`,
+   `imslp_browse` (with `title_filters` / `popular_titles`), `imslp_index_ready`,
+   `imslp_titles_in_categories`, `imslp_sync_tick` and the `imslp-sync` cron job.
+2. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
+   `npx supabase functions deploy imslp-search`.
+3. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
+4. The two `vault.create_secret` statements above.
+5. Verify the walk is happening:
+
+    ```sql
+    select category, state, pages_done, completed_at
+    from public.imslp_category_sync
+    order by updated_at desc;
+    ```
+
+    Each tick pages one category (up to 50 pages of 500 titles at ~1 req/s, so
+    ~50 s). The index builds `For piano` and `For piano (arr)` first, then eras,
+    forms, the other instruments and finally composers, so Piano · Baroque /
+    Piano · Nocturne answer about 6 minutes after the first tick and the whole
+    49-category taxonomy is `ok` within ~30 minutes. Until a chip's categories
+    are `ok` the panel says "IMSLP index is still being built for …" rather
+    than guessing.
+
+Locally the cron does not fire (no vault secrets); run `npm run imslp:sync`
+after `functions:serve` to walk the taxonomy once (~15 min), or with `--once`
+for a single tick.
+
 The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `SELF_URL` (its public base URL for drain-chain self-pokes). Without any of
 this configured the app still works — the transport bar just reports analysis
@@ -350,6 +391,7 @@ explicitly when deploying by hand:
 supabase functions deploy stripe-webhook --no-verify-jwt
 supabase functions deploy student-claim  --no-verify-jwt
 supabase functions deploy student-login  --no-verify-jwt
+supabase functions deploy imslp-sync     --no-verify-jwt
 supabase functions deploy stripe-checkout
 supabase functions deploy stripe-portal
 supabase functions deploy student-provision   # roster create/reset/archive/restore
