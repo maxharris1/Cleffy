@@ -7,7 +7,7 @@ const signOutAuth = vi.fn(async () => ({ error: null }));
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
         auth: {
-            signOut: (...args: unknown[]) => signOutAuth(...args),
+            signOut: () => signOutAuth(),
         },
     }),
 }));
