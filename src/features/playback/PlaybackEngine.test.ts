@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+    ACCOMP_DIP,
     buildNoteShapes,
     clampVelocity,
     MELODY_LIFT,
@@ -13,6 +14,7 @@ import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { AudioContextLike, AudioParamLike } from '@/features/playback/PlaybackEngine';
 import { nearestAnchor, PIANO_ANCHORS } from '@/features/playback/pianoSampler';
+import { buildTempoMap, FINAL_RIT_FACTOR, secondsAtTick } from '@/features/playback/scoreTime';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY } from '@/types/scoreData';
 import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
@@ -273,11 +275,12 @@ describe('PlaybackEngine', () => {
         // The pickup carries no dynamic of its own: the score default, nudged
         // by this note's jitter, through the dB velocity curve.
         expect(ctx.gains[FIRST_VOICE_GAIN]?.gain.value).toBeCloseTo(
-            velocityToGain(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv),
+            velocityToGain(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT),
             10,
         );
-        // Note k starts at anchor(0.08) + t·spt, shaped by its chord and jitter.
-        const expected = tinyScore.notes.map((n, i) => onsetOf(tinyScore, i, 0.08 + n.t * SPT_120));
+        // Note k starts at anchor(0.08) + map(t), shaped by its chord and jitter.
+        const map = buildTempoMap(tinyScore, 120 / (tinyScore.defaultBpm ?? 120), 120);
+        const expected = tinyScore.notes.map((n, i) => onsetOf(tinyScore, i, 0.08 + secondsAtTick(map, n.t)));
         const actual = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
         expected.sort((a, b) => a - b);
         for (const [i, time] of expected.entries()) {
@@ -549,7 +552,8 @@ describe('expression through the engine', () => {
         engine.setLoop({ startTick: 0, endTick: B });
         await engine.play();
         await advance(ctx, 2.6);
-        const bTime = 0.08 + B * SPT_120;
+        const map = buildTempoMap(score, 120 / (score.defaultBpm ?? 120), 120);
+        const bTime = 0.08 + secondsAtTick(map, B);
         const firstPass = ctx.sources.filter((s) => (s.startedAt ?? Infinity) < bTime + 0.05);
         expect(firstPass).toHaveLength(4);
         for (const source of firstPass) {
@@ -572,6 +576,27 @@ describe('expression through the engine', () => {
         expect(gSources).toHaveLength(1);
         const lifted = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 67, 0).dv + MELODY_LIFT);
         expect(voiceGainOf(gSources[0])).toBeCloseTo(velocityToGain(lifted), 10);
+    });
+
+    it('schedules a left-hand accompaniment note a dip quieter than the formula without it', async () => {
+        // Beat 2 of a 4/4 bar: no downbeat, no secondary, on the beat so no
+        // offbeat dip — the only shaping on the LH is ACCOMP_DIP.
+        const score: ScoreData = {
+            ...tinyScore,
+            timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+            notes: [
+                { t: 480, d: 480, p: 72, h: 0 },
+                { t: 480, d: 480, p: 48, h: 1 },
+            ],
+            measures: [{ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.08, x1: 0.92 }],
+            totalTicks: 1920,
+        };
+        const { ctx, engine, buffers } = makeEngine({ score });
+        await engine.play();
+        await advance(ctx, 0.8);
+        const lh = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 48));
+        const expected = velocityToGain(clampVelocity(DEFAULT_VELOCITY + noteJitter(480, 48, 1).dv - ACCOMP_DIP));
+        expect(voiceGainOf(lh)).toBeCloseTo(expected, 10);
     });
 
     it('builds the same room for every engine of the same score', async () => {
@@ -602,8 +627,7 @@ describe('tempo map', () => {
     };
 
     /** Grid seconds of a note under `paced`, before roll and jitter. */
-    const gridSeconds = (tick: number): number =>
-        tick <= 5760 ? tick * SPT_120 : 5760 * SPT_120 + (tick - 5760) * SPT_120 * 2;
+    const gridSeconds = (tick: number): number => secondsAtTick(buildTempoMap(paced, 1, 120), tick);
 
     it('hears a mid-score tempo change at the right moment', async () => {
         const { ctx, engine } = makeEngine({ score: paced, bpm: 120 });
@@ -674,6 +698,33 @@ describe('tempo map', () => {
         engine.setBpm(60); // practise the whole thing at half speed
         expect(engine.getBpmAt(0)).toBe(60);
         expect(engine.getBpmAt(6000)).toBe(30);
+    });
+
+    it('reports the unmarked final ritardando near the end', () => {
+        const closing: ScoreData = {
+            ...tinyScore,
+            defaultBpm: 120,
+            totalTicks: 7680,
+            timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+            tempos: [{ tick: 0, bpm: 120 }],
+            measures: [0, 1, 2, 3].map((i) => ({
+                n: i + 1,
+                tick: i * 1920,
+                dTicks: 1920,
+                page: 0,
+                sys: 0,
+                x0: 0.08,
+                x1: 0.92,
+                srcIndex: i,
+            })),
+            notes: [],
+        };
+        const { engine } = makeEngine({ score: closing, bpm: 120 });
+        expect(engine.getBpmAt(0)).toBe(120);
+        expect(engine.getBpmAt(7200)).toBe(Math.round(120 * FINAL_RIT_FACTOR));
+        engine.setBpm(60);
+        expect(engine.getBpmAt(0)).toBe(60);
+        expect(engine.getBpmAt(7200)).toBe(Math.round(60 * FINAL_RIT_FACTOR));
     });
 });
 
@@ -768,7 +819,7 @@ describe('sustain pedal', () => {
         await engine.play();
         await advance(ctx, 1);
         expect(ctx.sources).toHaveLength(1);
-        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv);
+        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT);
         const dampedTail = Math.max(0.3, 5 * releaseTauFor(72, vel));
         expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + dampedTail, 9);
     });
@@ -788,7 +839,7 @@ describe('sustain pedal', () => {
         await advance(ctx, 1);
         const held = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
         const bTime = 0.08 + 2400 * SPT_120;
-        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv);
+        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT);
         const damped = Math.max(0.3, 5 * releaseTauFor(72, vel));
         expect(held?.stoppedAt ?? Infinity).toBeLessThanOrEqual(bTime + damped + 0.006);
         expect(held?.stoppedAt ?? Infinity).toBeLessThan(bTime + 1.25);

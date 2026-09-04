@@ -6,6 +6,7 @@ import {
     buildReverbImpulse,
     buildSoftClipCurve,
     clampVelocity,
+    ACCOMP_DIP,
     CHORD_ROLL_MAX_S,
     CHORD_ROLL_S,
     DOWNBEAT_ACCENT,
@@ -16,6 +17,7 @@ import {
     JITTER_VEL,
     MELODY_LIFT,
     noteJitter,
+    OFFBEAT_DIP,
     panForMidi,
     PEDAL_RELEASE_TAU_S,
     releaseTauFor,
@@ -25,6 +27,7 @@ import {
 } from '@/features/playback/expression';
 import type { ImpulseFactory } from '@/features/playback/expression';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
+import { SECONDARY_ACCENT } from '@/features/playback/scoreTime';
 import { DEFAULT_VELOCITY } from '@/types/scoreData';
 import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
 
@@ -264,13 +267,119 @@ describe('buildNoteShapes', () => {
     it('voices the top of a right-hand chord above what is under it', () => {
         expect(shapes[2]?.lift).toBe(MELODY_LIFT);
         expect(shapes[1]?.lift).toBe(0);
-        // A single note is not a chord, so nothing is being sung over.
-        expect(shapes[0]?.lift).toBe(0);
+        // A single-line melody is still the tune — the pickup C5 is one note.
+        expect(shapes[0]?.lift).toBe(MELODY_LIFT);
     });
 
-    it('leaves the left hand unvoiced — the accompaniment does not take the tune', () => {
-        const leftHandLifts = tinyScore.notes.map((n, i) => (n.h === 1 ? (shapes[i]?.lift ?? 0) : 0));
-        expect(leftHandLifts.every((lift) => lift === 0)).toBe(true);
+    it('dips the left hand when the right is sounding, held or attacking', () => {
+        // t=480: RH chord takes the tune, C3 is accompaniment.
+        expect(shapes[3]?.lift).toBe(0);
+        expect(shapes[3]?.dip).toBe(ACCOMP_DIP);
+        // t=4320 attacks under the tie-merged RH A5 still held from m.2 —
+        // that bass is accompaniment, not a new melody.
+        const underHeld = tinyScore.notes.findIndex((n) => n.t === 4320);
+        expect(shapes[underHeld]?.lift).toBe(0);
+        expect(shapes[underHeld]?.dip).toBe(ACCOMP_DIP);
+    });
+
+    it('lifts a single right-hand melody note and dips the left-hand chord under it', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 480, p: 72, h: 0 },
+                { t: 480, d: 480, p: 48, h: 1 },
+                { t: 480, d: 480, p: 52, h: 1 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[0]?.lift).toBe(MELODY_LIFT);
+        expect(shaped[0]?.dip).toBe(0);
+        expect(shaped[1]?.lift).toBe(0);
+        expect(shaped[1]?.dip).toBe(ACCOMP_DIP);
+        expect(shaped[2]?.lift).toBe(0);
+        expect(shaped[2]?.dip).toBe(ACCOMP_DIP);
+    });
+
+    it('lifts the top of a left-hand-only onset and dips nothing', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 480, p: 48, h: 1 },
+                { t: 480, d: 480, p: 60, h: 1 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[1]?.lift).toBe(MELODY_LIFT);
+        expect(shaped[0]?.lift).toBe(0);
+        expect(shaped.every((s) => s.dip === 0)).toBe(true);
+    });
+
+    it('gives the lift to a left-hand note that sounds above the right', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 480, p: 60, h: 0 },
+                { t: 480, d: 480, p: 72, h: 1 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[1]?.lift).toBe(MELODY_LIFT);
+        expect(shaped[1]?.dip).toBe(0);
+        expect(shaped[0]?.lift).toBe(0);
+        expect(shaped[0]?.dip).toBe(ACCOMP_DIP);
+    });
+
+    it('dips LH eighths under a held right-hand melody, and does not lift them', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 960, p: 72, h: 0 },
+                { t: 480, d: 240, p: 48, h: 1 },
+                { t: 720, d: 240, p: 52, h: 1 },
+                { t: 960, d: 240, p: 55, h: 1 },
+                { t: 1200, d: 240, p: 60, h: 1 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[0]?.lift).toBe(MELODY_LIFT);
+        expect(shaped[0]?.dip).toBe(0);
+        for (const i of [1, 2, 3, 4]) {
+            expect(shaped[i]?.lift).toBe(0);
+            expect(shaped[i]?.dip).toBe(ACCOMP_DIP);
+        }
+    });
+
+    it('lifts RH melody eighths over a sustained bass, and dips the bass only if the RH is already sounding', () => {
+        const together: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 1920, p: 48, h: 1 },
+                { t: 480, d: 240, p: 72, h: 0 },
+                { t: 720, d: 240, p: 74, h: 0 },
+                { t: 960, d: 240, p: 76, h: 0 },
+                { t: 1200, d: 240, p: 77, h: 0 },
+            ],
+        };
+        const withRh = buildNoteShapes(together);
+        expect(withRh[0]?.lift).toBe(0);
+        expect(withRh[0]?.dip).toBe(ACCOMP_DIP);
+        for (const i of [1, 2, 3, 4]) {
+            expect(withRh[i]?.lift).toBe(MELODY_LIFT);
+            expect(withRh[i]?.dip).toBe(0);
+        }
+
+        const bassFirst: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 1920, p: 48, h: 1 },
+                { t: 480, d: 240, p: 72, h: 0 },
+            ],
+        };
+        const beforeRh = buildNoteShapes(bassFirst);
+        expect(beforeRh[0]?.lift).toBe(MELODY_LIFT);
+        expect(beforeRh[0]?.dip).toBe(0);
+        expect(beforeRh[1]?.lift).toBe(MELODY_LIFT);
+        expect(beforeRh[1]?.dip).toBe(0);
     });
 
     it('accents full bars and never the pickup', () => {
@@ -279,11 +388,51 @@ describe('buildNoteShapes', () => {
         expect(shapes[1]?.accent).toBe(DOWNBEAT_ACCENT);
         expect(shapes[3]?.accent).toBe(DOWNBEAT_ACCENT);
         // Tick 8400 is an offbeat eighth inside m.5.
-        expect(shapes[12]?.accent).toBe(0);
+        expect(shapes[12]?.accent).toBe(-OFFBEAT_DIP);
     });
 
     it('accents the 6/8 downbeat too, on its own bar length', () => {
         expect(shapes[10]?.accent).toBe(DOWNBEAT_ACCENT);
+    });
+
+    it('puts secondary weight on beat 3 in 4/4, and dips an eighth off the beat', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 480, d: 240, p: 72, h: 0 },
+                { t: 960, d: 240, p: 72, h: 0 },
+                { t: 1440, d: 240, p: 72, h: 0 },
+                { t: 1920, d: 240, p: 72, h: 0 },
+                { t: 720, d: 240, p: 72, h: 0 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[0]?.accent).toBe(DOWNBEAT_ACCENT);
+        expect(shaped[1]?.accent).toBe(0);
+        expect(shaped[2]?.accent).toBe(SECONDARY_ACCENT);
+        expect(shaped[3]?.accent).toBe(0);
+        expect(shaped[4]?.accent).toBe(-OFFBEAT_DIP);
+    });
+
+    it('accents the second dotted beat in 6/8', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [{ t: 8880, d: 240, p: 72, h: 0 }],
+        };
+        expect(buildNoteShapes(score)[0]?.accent).toBe(SECONDARY_ACCENT);
+    });
+
+    it('gives a pickup no metrical weight, on or off the beat', () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 240, p: 72, h: 0 },
+                { t: 240, d: 240, p: 72, h: 0 },
+            ],
+        };
+        const shaped = buildNoteShapes(score);
+        expect(shaped[0]?.accent).toBe(0);
+        expect(shaped[1]?.accent).toBe(0);
     });
 
     it('caps the roll so a wide chord still lands as one event', () => {
