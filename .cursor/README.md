@@ -21,17 +21,18 @@ starts from a commit that includes this tree.
 - **OMR** (`services/omr-service`) is **not** started. Play-along analysis that
   needs Audiveris will not run in this environment unless you start it by hand.
 - **Hosted / live Supabase** is never linked or mutated by these scripts.
-- **Billing / Stripe** tables and env are not part of current `dev` and are not
-  seeded here.
+- **Stripe** env is not seeded here. Local billing is unlocked: `seed.sql`
+  grants an Academy subscription to the test accounts so feature work is not
+  paywalled. Hosted environments never run that seed.
 
 ## Local test accounts
 
-Seeded by `supabase/seed.sql` (password for all: **`cleffy-local-test`**):
+Seeded by `supabase/seed.sql` (password for all: **`121099`**):
 
 | Email                 | Role hint                         | Stable user id                         |
 | --------------------- | --------------------------------- | -------------------------------------- |
-| `teacher@cleffy.local`  | Owns 3 sample library documents | `a0000000-0000-4000-8000-000000000001` |
-| `student@cleffy.local`  | Second user for share / RLS     | `a0000000-0000-4000-8000-000000000002` |
+| `teacher@cleffy.local`  | Owns 3 sample library documents; Academy plan | `a0000000-0000-4000-8000-000000000001` |
+| `student@cleffy.local`  | Second user for share / RLS; Academy plan     | `a0000000-0000-4000-8000-000000000002` |
 
 Sign in through the app Auth UI (email/password). Sample document rows have
 library metadata only — there are no PDF bytes in the `scores` bucket, so open /

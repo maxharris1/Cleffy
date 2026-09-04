@@ -76,9 +76,10 @@ brought the backend up, and it does not start `functions:serve`.
 | OMR worker               | http://127.0.0.1:8091                                     |
 
 Sign in as `teacher@cleffy.local` or `student@cleffy.local`, password
-`cleffy-local-test`. The seeded documents carry library metadata only — there
-are no PDF bytes in the `scores` bucket, so upload a real file to exercise the
-viewer.
+`121099`. Both accounts are seeded on the Academy plan so local
+feature work is not paywalled. The seeded documents carry library metadata
+only — there are no PDF bytes in the `scores` bucket, so upload a real file
+to exercise the viewer.
 
 These ports are a **+100 offset** from the Supabase defaults on purpose, so this
 stack coexists with other local Supabase projects on the same machine. They are

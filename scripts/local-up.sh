@@ -88,7 +88,7 @@ cat <<EOF
   Mail (Mailpit)   http://127.0.0.1:$(awk '/^\[local_smtp\]/{f=1;next} /^\[/{f=0} f && /^[[:space:]]*port[[:space:]]*=/{print $3; exit}' supabase/config.toml)
 $([ "$WITH_OMR" = true ] && echo "  OMR worker       http://127.0.0.1:${OMR_PORT}/healthz")
 
-  Sign in as teacher@cleffy.local / student@cleffy.local (password: cleffy-local-test)
+  Sign in as teacher@cleffy.local / student@cleffy.local (password: 121099)
 
   Next:  npm run dev:local        # Vite on :5173
          npm run functions:serve  # edge functions
