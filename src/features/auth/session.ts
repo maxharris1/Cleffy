@@ -1,6 +1,7 @@
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 
+import { perfMark } from '@/lib/perf';
 import { getSupabase } from '@/lib/supabase';
 
 export interface SessionState {
@@ -13,15 +14,35 @@ export interface SessionState {
 
 const authCallbackUrl = (): string => `${window.location.origin}/auth/callback`;
 
+/**
+ * Last session observed in this tab. `undefined` means nothing has resolved yet
+ * (cold start); `null` means we know the user is signed out. Remounts of
+ * useSession / auth gates read this synchronously so SPA navigations do not
+ * flash BrandLoading while getSession() round-trips again.
+ */
+let knownSession: Session | null | undefined = undefined;
+
+const rememberSession = (session: Session | null): void => {
+    knownSession = session;
+};
+
 /** Reactive Supabase session. */
 export const useSession = (): SessionState => {
-    const [state, setState] = useState<SessionState>({ session: null, loading: true, lastEvent: null });
+    const [state, setState] = useState<SessionState>(() =>
+        knownSession !== undefined
+            ? { session: knownSession, loading: false, lastEvent: null }
+            : { session: null, loading: true, lastEvent: null },
+    );
 
     useEffect(() => {
         const supabase = getSupabase();
         let mounted = true;
 
         void supabase.auth.getSession().then(({ data }) => {
+            if (knownSession === undefined) {
+                perfMark('session-known');
+            }
+            rememberSession(data.session);
             if (mounted) {
                 setState((prev) => ({ ...prev, session: data.session, loading: false }));
             }
@@ -29,6 +50,7 @@ export const useSession = (): SessionState => {
         const {
             data: { subscription },
         } = supabase.auth.onAuthStateChange((event, session) => {
+            rememberSession(session);
             if (mounted) {
                 setState({ session, loading: false, lastEvent: event });
             }
@@ -113,12 +135,29 @@ export const signInAnonymouslyWithName = async (displayName: string): Promise<vo
 };
 
 export const signOut = async (): Promise<void> => {
+    // Bump the library mutation epoch on BOTH sides of the auth round-trip.
+    // The first bump outranks any response already in flight (including the
+    // window after callers delete the entitlements row, just ahead of us).
+    // The second outranks a request DISPATCHED during the round-trip — e.g.
+    // LibraryPage refetching the response the first bump outranked — which
+    // still left with a live JWT and would otherwise re-persist this
+    // account's rows after the clears below swept them.
+    const { noteLibraryMutation } = await import('@/features/library/libraryCache');
+    noteLibraryMutation();
     await getSupabase().auth.signOut();
+    noteLibraryMutation();
+    rememberSession(null);
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
-    await getDb()
-        .scoreCache.clear()
-        .catch(() => undefined);
+    const db = getDb();
+    await Promise.all([
+        db.scoreCache.clear().catch(() => undefined),
+        db.libraryList.clear().catch(() => undefined),
+        db.rosterCache.clear().catch(() => undefined),
+        db.assignmentsCache.clear().catch(() => undefined),
+        db.pdfCache.clear().catch(() => undefined),
+        db.thumbnails.clear().catch(() => undefined),
+    ]);
 };
 
 /** Display name for presence/attribution: metadata name, else email, else Guest. */

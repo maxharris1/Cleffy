@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LimitReachedError } from '@/features/billing/limitErrors';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { getDb } from '@/sync/db';
 import { RosterPage } from '@/features/roster/RosterPage';
 import type { RosterAssignment } from '@/features/roster/rosterService';
 import type { ManagedStudentRow } from '@/types/database';
@@ -47,6 +48,14 @@ const student = (id: string, displayName: string, overrides: Partial<ManagedStud
     updated_at: '2026-08-01T00:00:00Z',
     ...overrides,
 });
+
+const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+        resolve = res;
+    });
+    return { promise, resolve };
+};
 
 const rosterAssignment = (documentId: string, documentTitle: string, studentUserId: string): RosterAssignment => ({
     assignment: {
@@ -126,6 +135,35 @@ describe('RosterPage', () => {
         expect(screen.getByText('1 student · 1 archived')).toBeInTheDocument();
         expect(await screen.findByText('1 score')).toBeInTheDocument();
         expect(screen.getByText('No scores')).toBeInTheDocument();
+    });
+
+    it('serves the cached roster with its counts when the network fails, error beside it', async () => {
+        await getDb().rosterCache.put({
+            userId: 'teacher-1',
+            students: [student('s1', 'Ada Lovelace', { claimed_at: '2026-08-02T00:00:00Z' })],
+            assignmentCounts: [['s1-user', 3]],
+            cachedAt: '2026-08-29T00:00:00Z',
+        });
+        listRoster.mockRejectedValue(new Error('network down'));
+        listAssignmentsForStudents.mockRejectedValue(new Error('network down'));
+        try {
+            const user = userEvent.setup();
+            renderRoster();
+
+            // The cached roster stays up, with the error beside it, not instead of it.
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            expect(await screen.findByText('network down')).toBeInTheDocument();
+            // Counts come from the snapshot rather than an affirmative "No scores".
+            expect(screen.getByText('3 scores')).toBeInTheDocument();
+            // The panel is terminal about the missing rows — never an eternal spinner.
+            await user.click(screen.getByRole('button', { name: /Ada Lovelace/ }));
+            expect(
+                await screen.findByText('The assignment list couldn’t be loaded — the count is from the last sync.'),
+            ).toBeInTheDocument();
+            expect(screen.queryByText('Loading assignments…')).not.toBeInTheDocument();
+        } finally {
+            await getDb().rosterCache.clear();
+        }
     });
 
     it('provisions a code student and shows the setup code once, on a printable card', async () => {
@@ -338,6 +376,70 @@ describe('RosterPage', () => {
             expect(archiveStudent).toHaveBeenCalledWith('s1');
         } finally {
             outletContext.canManageStudents = true;
+        }
+    });
+
+    it('rewrites the roster snapshot after an action so a remount does not resurrect the old roster', async () => {
+        const user = userEvent.setup();
+        const active = student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' });
+        const archived = { ...active, archived_at: '2026-08-30T00:00:00Z' };
+        listRoster.mockResolvedValueOnce([active]).mockResolvedValueOnce([archived]);
+        listAssignmentsForStudents.mockResolvedValue(
+            new Map([['s1-user', [rosterAssignment('doc-1', 'Prelude and Fugue', 's1-user')]]]),
+        );
+        archiveStudent.mockResolvedValue(undefined);
+        try {
+            renderRoster();
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+            await waitFor(async () => {
+                const row = await getDb().rosterCache.get('teacher-1');
+                expect(row?.students[0]?.archived_at).toBeNull();
+            });
+
+            await pickRowAction(user, 'Archive…');
+            await user.click(screen.getByRole('button', { name: 'Archive' }));
+
+            await waitFor(async () => {
+                const row = await getDb().rosterCache.get('teacher-1');
+                expect(row?.students[0]?.archived_at).toBe('2026-08-30T00:00:00Z');
+                // The counts ride along; the snapshot is not blanked by the rewrite.
+                expect(row?.assignmentCounts).toEqual([['s1-user', 1]]);
+            });
+        } finally {
+            await getDb().rosterCache.clear();
+        }
+    });
+
+    it('does not let a late mount listRoster resurrect a student archived after cache paint', async () => {
+        const user = userEvent.setup();
+        const active = student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' });
+        const archived = { ...active, archived_at: '2026-08-30T00:00:00Z' };
+        await getDb().rosterCache.put({
+            userId: 'teacher-1',
+            students: [active],
+            assignmentCounts: [],
+            cachedAt: '2026-08-29T00:00:00Z',
+        });
+        const mountRoster = deferred<ManagedStudentRow[]>();
+        listRoster.mockReturnValueOnce(mountRoster.promise).mockResolvedValueOnce([archived]);
+        listAssignmentsForStudents.mockResolvedValue(new Map());
+        archiveStudent.mockResolvedValue(undefined);
+        try {
+            renderRoster();
+            expect(await screen.findByRole('button', { name: /Ada Lovelace/ })).toBeInTheDocument();
+
+            await pickRowAction(user, 'Archive…');
+            await user.click(screen.getByRole('button', { name: 'Archive' }));
+            expect(archiveStudent).toHaveBeenCalledWith('s1');
+            await waitFor(() => expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived'));
+
+            await act(async () => {
+                mountRoster.resolve([active]);
+            });
+            await new Promise((r) => setTimeout(r, 20));
+            expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived');
+        } finally {
+            await getDb().rosterCache.clear();
         }
     });
 

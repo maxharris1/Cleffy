@@ -2,8 +2,14 @@ import Dexie, { type Table } from 'dexie';
 
 import type { RecognizedRegion } from '@/features/fingering/model';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
-import type { ScoreAnalysisStatus } from '@/types/database';
-import type { Entitlements } from '@/types/database';
+import type {
+    AssignmentRow,
+    DocumentRow,
+    Entitlements,
+    LibraryTagRow,
+    ManagedStudentRow,
+    ScoreAnalysisStatus,
+} from '@/types/database';
 import type { Annotation } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 
@@ -56,6 +62,14 @@ export interface CachedPdf {
     contentRev?: number;
     /** Last-known archive state — archived scores are read-only (billing, M6). */
     archivedAt?: string | null;
+    /**
+     * Account that cached these bytes. Warm-open and offline load refuse a
+     * row whose userId is missing (legacy) or does not match the session —
+     * pdfCache is keyed by document, not by user, so a shared device would
+     * otherwise paint another account's score. Plain field, not indexed —
+     * no Dexie version bump needed.
+     */
+    userId?: string;
 }
 
 /** Cached play-along analysis: offline replays and fast viewer opens (M-playback). */
@@ -114,6 +128,43 @@ export interface CachedEntitlements {
     cachedAt: string;
 }
 
+/** Last library bootstrap payload for an instant grid on remount. */
+export interface CachedLibraryList {
+    userId: string;
+    documents: DocumentRow[];
+    hasMore: boolean;
+    favoriteIds: string[];
+    tags: LibraryTagRow[];
+    /** document_id → tag ids */
+    documentTags: Array<[string, string[]]>;
+    cachedAt: string;
+    /**
+     * libraryMutationEpoch() at put time. A later write with a smaller value
+     * is dropped so a detached bootstrap or a stale persist cannot clobber
+     * a newer snapshot. Rows written before this field existed read as 0.
+     */
+    writtenAtEpoch?: number;
+}
+
+/** Last roster snapshot for Library ↔ Students navigations. */
+export interface CachedRoster {
+    userId: string;
+    students: ManagedStudentRow[];
+    /** student_user_id → assignment count (titles filled on network refresh). */
+    assignmentCounts: Array<[string, number]>;
+    cachedAt: string;
+}
+
+/** Last student assignment list for an instant /assignments paint. */
+export interface CachedAssignments {
+    userId: string;
+    scores: Array<{
+        assignment: AssignmentRow;
+        document: DocumentRow;
+    }>;
+    cachedAt: string;
+}
+
 export class ScribblerDb extends Dexie {
     annotations!: Table<LocalAnnotation, string>;
     ops!: Table<PendingOp, number>;
@@ -124,6 +175,9 @@ export class ScribblerDb extends Dexie {
     fingeringRegions!: Table<FingeringRegionCache, string>;
     entitlements!: Table<CachedEntitlements, string>;
     thumbnails!: Table<CachedThumbnail, string>;
+    libraryList!: Table<CachedLibraryList, string>;
+    rosterCache!: Table<CachedRoster, string>;
+    assignmentsCache!: Table<CachedAssignments, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -185,6 +239,21 @@ export class ScribblerDb extends Dexie {
             fingeringRegions: 'id, docId, createdAt',
             entitlements: 'userId',
             thumbnails: 'docId',
+        });
+        // Instant paint caches for library / roster / student assignments.
+        this.version(7).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
         });
     }
 }

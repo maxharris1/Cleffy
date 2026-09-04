@@ -1,14 +1,14 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { libraryMutationEpoch, noteLibraryMutation } from '@/features/library/libraryCache';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 
 const listDocuments = vi.fn();
-const listCachedDocuments = vi.fn();
 const listFavoriteDocumentIds = vi.fn();
 const setDocumentFavorite = vi.fn();
 const renameDocument = vi.fn();
@@ -19,14 +19,22 @@ const createLibraryTag = vi.fn();
 const renameLibraryTag = vi.fn();
 const deleteLibraryTag = vi.fn();
 const setDocumentTag = vi.fn();
+const fetchLibraryBootstrap = vi.fn();
+const readCachedLibraryList = vi.fn();
+const writeCachedLibraryList = vi.fn();
 
 vi.mock('@/features/library/documentsService', () => ({
     listDocuments: (...args: unknown[]) => listDocuments(...args),
-    listCachedDocuments: (...args: unknown[]) => listCachedDocuments(...args),
     listFavoriteDocumentIds: (...args: unknown[]) => listFavoriteDocumentIds(...args),
     setDocumentFavorite: (...args: unknown[]) => setDocumentFavorite(...args),
     renameDocument: (...args: unknown[]) => renameDocument(...args),
     deleteDocument: (...args: unknown[]) => deleteDocument(...args),
+}));
+
+vi.mock('@/features/library/libraryBootstrap', () => ({
+    fetchLibraryBootstrap: (...args: unknown[]) => fetchLibraryBootstrap(...args),
+    readCachedLibraryList: (...args: unknown[]) => readCachedLibraryList(...args),
+    writeCachedLibraryList: (...args: unknown[]) => writeCachedLibraryList(...args),
 }));
 
 vi.mock('@/features/library/tagsService', () => ({
@@ -49,6 +57,7 @@ const doc = (id: string, title: string): DocumentRow => ({
     storage_path: `${id}/original.pdf`,
     page_count: 3,
     content_rev: 0,
+    thumb_rev: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
     archived_at: null,
@@ -60,6 +69,47 @@ const tag = (id: string, name: string): LibraryTagRow => ({
     name,
     created_at: '2026-08-01T00:00:00Z',
 });
+
+const FREE_ENTITLEMENTS = {
+    user_id: 'teacher-1',
+    tier: 'free' as const,
+    status: null,
+    source: 'none' as const,
+    current_period_end: null,
+    limits: {
+        cloud_scores: 3,
+        omr_runs: 3,
+        vision_reads: 5,
+        smart_imports: 2,
+        pdf_exports: 1,
+        students: 0,
+    },
+};
+
+const mockBootstrap = (
+    overrides: {
+        documents?: DocumentRow[];
+        hasMore?: boolean;
+        favoriteIds?: Set<string>;
+        tags?: LibraryTagRow[];
+        documentTags?: Map<string, string[]>;
+    } = {},
+) => {
+    // Resolved lazily so fetchedAtEpoch is honest even for a test that bumps
+    // the epoch before the page mounts.
+    fetchLibraryBootstrap.mockImplementation(async () => ({
+        documents: overrides.documents ?? [
+            doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+            doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+        ],
+        hasMore: overrides.hasMore ?? false,
+        favoriteIds: overrides.favoriteIds ?? new Set(),
+        tags: overrides.tags ?? [],
+        documentTags: overrides.documentTags ?? new Map(),
+        entitlements: FREE_ENTITLEMENTS,
+        fetchedAtEpoch: libraryMutationEpoch(),
+    }));
+};
 
 const outletContext: LibraryOutletContext = {
     userId: 'teacher-1',
@@ -128,6 +178,9 @@ beforeEach(() => {
         ],
         hasMore: false,
     });
+    readCachedLibraryList.mockResolvedValue(null);
+    writeCachedLibraryList.mockResolvedValue(undefined);
+    mockBootstrap();
     listFavoriteDocumentIds.mockResolvedValue(new Set());
     setDocumentFavorite.mockResolvedValue(undefined);
     listLibraryTags.mockResolvedValue([]);
@@ -151,23 +204,21 @@ describe('LibraryPage', () => {
     });
 
     it('says “1 page”, not “1 pages”, for a single-page score', async () => {
-        listDocuments.mockResolvedValue({
-            documents: [{ ...doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), page_count: 1 }],
-            hasMore: false,
-        });
+        const docs = [{ ...doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), page_count: 1 }];
+        listDocuments.mockResolvedValue({ documents: docs, hasMore: false });
+        mockBootstrap({ documents: docs });
         renderLibrary();
         await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
         expect(screen.getByText(/1 page ·/)).toBeInTheDocument();
     });
 
     it('marks archived scores, which stay open but read-only', async () => {
-        listDocuments.mockResolvedValue({
-            documents: [
-                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
-                { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), archived_at: '2026-08-01T00:00:00Z' },
-            ],
-            hasMore: false,
-        });
+        const docs = [
+            doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+            { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), archived_at: '2026-08-01T00:00:00Z' },
+        ];
+        listDocuments.mockResolvedValue({ documents: docs, hasMore: false });
+        mockBootstrap({ documents: docs });
         renderLibrary();
 
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
@@ -298,6 +349,220 @@ describe('LibraryPage', () => {
         expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
     });
 
+    it('refetches instead of applying a bootstrap response that a favorite toggle outran', async () => {
+        const user = userEvent.setup();
+        // The Dexie snapshot paints an interactive grid while the network is out.
+        readCachedLibraryList.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+        const bootFor = (favoriteIds: Set<string>) => ({
+            // A deliberately different list from the snapshot: if the page ever
+            // applied this stale payload, d2 would vanish from the grid.
+            documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')],
+            hasMore: false,
+            favoriteIds,
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+            fetchedAtEpoch: libraryMutationEpoch(),
+        });
+        let resolveBootstrap: (boot: unknown) => void = () => undefined;
+        // First request: deferred, dispatched before the click. Later requests
+        // (the page's refetch) answer with the post-toggle server state.
+        fetchLibraryBootstrap
+            .mockImplementationOnce(
+                () =>
+                    new Promise((resolve) => {
+                        resolveBootstrap = resolve;
+                    }),
+            )
+            .mockImplementation(async () => ({
+                documents: [
+                    doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                    doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+                ],
+                hasMore: false,
+                favoriteIds: new Set(['d1']),
+                tags: [],
+                documentTags: new Map<string, string[]>(),
+                entitlements: FREE_ENTITLEMENTS,
+                fetchedAtEpoch: libraryMutationEpoch(),
+            }));
+        // The real service bumps the mutation epoch before its write; the mock
+        // must mirror that, or the page cannot tell the response is stale.
+        setDocumentFavorite.mockImplementation(async () => {
+            noteLibraryMutation();
+        });
+
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        const staleBoot = bootFor(new Set<string>());
+        const stars = screen.getAllByRole('button', { name: 'Add to favorites' });
+        await user.click(stars[0] as HTMLElement);
+        expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
+
+        // The response — a snapshot taken before the click — arrives late. The
+        // page must refetch rather than turn the star off or drop d2.
+        resolveBootstrap(staleBoot);
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(fetchLibraryBootstrap.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
+    });
+
+    it('keeps the painted, edit-bearing list when every refetch is outrun too', async () => {
+        readCachedLibraryList.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+        // Every payload is permanently one epoch behind — the pathological
+        // mutations-keep-racing case. The painted list already reflects the
+        // user's edits, so the loop must exhaust WITHOUT applying any of them.
+        fetchLibraryBootstrap.mockImplementation(async () => ({
+            documents: [doc('d3', 'Etude (Chopin, Frederic)')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+            fetchedAtEpoch: libraryMutationEpoch() - 1,
+        }));
+
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        await waitFor(() => expect(fetchLibraryBootstrap).toHaveBeenCalledTimes(3));
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: 'Etude (Chopin, Frederic)' })).not.toBeInTheDocument();
+    });
+
+    it('takes the last payload on an unpainted page even when every pass was outrun', async () => {
+        // Nothing cached AND payloads permanently one epoch behind: the loop
+        // must exhaust and still paint — anything beats no list at all.
+        readCachedLibraryList.mockResolvedValue(null);
+        fetchLibraryBootstrap.mockImplementation(async () => ({
+            documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+            fetchedAtEpoch: libraryMutationEpoch() - 1,
+        }));
+
+        renderLibrary();
+        expect(await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)')).toBeInTheDocument();
+        expect(fetchLibraryBootstrap).toHaveBeenCalledTimes(3);
+        expect(screen.queryByText('Loading scores…')).not.toBeInTheDocument();
+    });
+
+    it('still paints when a mutation raced the very first load and nothing was cached', async () => {
+        // First visit / private mode: no snapshot, nothing painted yet — a
+        // shell upload bumping the epoch mid-flight must not strand the page
+        // on "Loading scores…".
+        readCachedLibraryList.mockResolvedValue(null);
+        let resolveBootstrap: (boot: unknown) => void = () => undefined;
+        fetchLibraryBootstrap.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    resolveBootstrap = resolve;
+                }),
+        );
+        // Leave the beforeEach mockBootstrap() implementation for later calls.
+
+        renderLibrary();
+        expect(await screen.findByText('Loading scores…')).toBeInTheDocument();
+        const staleEpoch = libraryMutationEpoch();
+        noteLibraryMutation();
+        resolveBootstrap({
+            documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+            entitlements: FREE_ENTITLEMENTS,
+            fetchedAtEpoch: staleEpoch,
+        });
+
+        expect(await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)')).toBeInTheDocument();
+        expect(screen.queryByText('Loading scores…')).not.toBeInTheDocument();
+        expect(fetchLibraryBootstrap.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('refetches the four-GET fallback too when a toggle outran it', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+        // The RPC is unavailable on this deployment: every pass falls back.
+        fetchLibraryBootstrap.mockRejectedValue(new Error('rpc missing'));
+        let resolveDocs: (value: unknown) => void = () => undefined;
+        listDocuments
+            .mockImplementationOnce(
+                () =>
+                    new Promise((resolve) => {
+                        resolveDocs = resolve;
+                    }),
+            )
+            .mockResolvedValue({
+                documents: [
+                    doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                    doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+                ],
+                hasMore: false,
+            });
+        listFavoriteDocumentIds.mockResolvedValueOnce(new Set<string>()).mockResolvedValue(new Set(['d1']));
+        setDocumentFavorite.mockImplementation(async () => {
+            noteLibraryMutation();
+        });
+
+        renderLibrary();
+        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        const stars = screen.getAllByRole('button', { name: 'Add to favorites' });
+        await user.click(stars[0] as HTMLElement);
+        expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
+
+        resolveDocs({
+            documents: [
+                doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
+                doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'),
+            ],
+            hasMore: false,
+        });
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        await waitFor(() => expect(listDocuments.mock.calls.length).toBeGreaterThanOrEqual(2));
+        expect(screen.getAllByRole('button', { name: 'Remove from favorites' })).toHaveLength(1);
+    });
+
     it('groups by composer with headers when toggled', async () => {
         const user = userEvent.setup();
         renderLibrary();
@@ -335,6 +600,102 @@ describe('LibraryPage', () => {
         await user.click(screen.getByRole('button', { name: 'Delete' }));
         await waitFor(() => expect(deleteDocument).toHaveBeenCalledWith(expect.objectContaining({ id: 'd2' })));
         await waitFor(() => expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument());
+    });
+
+    it('dispatches the bootstrap before the snapshot read resolves, and skips the paint a fresh answer beat', async () => {
+        const order: string[] = [];
+        let releaseCache: (value: unknown) => void = () => undefined;
+        readCachedLibraryList.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    order.push('cache-read');
+                    releaseCache = resolve;
+                }),
+        );
+        fetchLibraryBootstrap.mockImplementation(async () => {
+            order.push('bootstrap');
+            return {
+                documents: [doc('d1', 'Fresh from the server')],
+                hasMore: false,
+                favoriteIds: new Set<string>(),
+                tags: [],
+                documentTags: new Map<string, string[]>(),
+                entitlements: FREE_ENTITLEMENTS,
+                fetchedAtEpoch: libraryMutationEpoch(),
+            };
+        });
+        renderLibrary();
+
+        await waitFor(() => expect(order).toEqual(['bootstrap', 'cache-read']));
+        // The network answered while IndexedDB was still opening.
+        await new Promise((r) => setTimeout(r, 10));
+        releaseCache({
+            documents: [doc('d1', 'Stale snapshot title')],
+            hasMore: false,
+            favoriteIds: new Set<string>(),
+            tags: [],
+            documentTags: new Map<string, string[]>(),
+        });
+
+        // Flush the cache-paint microtask before waiting on the fresh title —
+        // otherwise a reverted firstResolved guard can paint stale and then
+        // overwrite it, and findByText still passes.
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(screen.queryByText('Stale snapshot title')).not.toBeInTheDocument();
+        expect(await screen.findByText('Fresh from the server')).toBeInTheDocument();
+    });
+
+    describe('snapshot write-through', () => {
+        it('persists the post-edit list after a favorite lands, so the next visit paints it', async () => {
+            const user = userEvent.setup();
+            renderLibrary();
+            await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+
+            await user.click(screen.getAllByRole('button', { name: 'Add to favorites' })[0] as HTMLElement);
+
+            await waitFor(() => expect(writeCachedLibraryList).toHaveBeenCalledTimes(1));
+            const [userId, snapshot] = writeCachedLibraryList.mock.calls[0] as [string, { favoriteIds: Set<string> }];
+            expect(userId).toBe('teacher-1');
+            expect([...snapshot.favoriteIds]).toEqual(['d1']);
+        });
+
+        it('does not persist a favorite the server refused', async () => {
+            const user = userEvent.setup();
+            setDocumentFavorite.mockRejectedValue(new Error('offline'));
+            renderLibrary();
+            await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+
+            await user.click(screen.getAllByRole('button', { name: 'Add to favorites' })[0] as HTMLElement);
+
+            await screen.findByText('offline');
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
+
+        it('persists the list without a deleted score', async () => {
+            const user = userEvent.setup();
+            deleteDocument.mockResolvedValue(undefined);
+            renderLibrary();
+            await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+            await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+            await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+            await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+            await waitFor(() => expect(writeCachedLibraryList).toHaveBeenCalledTimes(1));
+            const [, snapshot] = writeCachedLibraryList.mock.calls[0] as [string, { documents: DocumentRow[] }];
+            expect(snapshot.documents.map((d) => d.id)).toEqual(['d1']);
+        });
+
+        it('does not paint another account’s opened PDF when this user’s snapshot is empty', async () => {
+            fetchLibraryBootstrap.mockRejectedValue(new Error('offline'));
+            listDocuments.mockRejectedValue(new Error('offline'));
+            renderLibrary();
+            expect(await screen.findByText('offline')).toBeInTheDocument();
+            expect(screen.queryByText('Someone else’s score')).not.toBeInTheDocument();
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
     });
 
     it('opens the share dialog for a row', async () => {
@@ -387,8 +748,10 @@ describe('LibraryPage', () => {
 
     it('assigns an existing tag from the row dialog and filters via the inline label', async () => {
         const user = userEvent.setup();
-        listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
+        const tags = [tag('t-lesson', 'Lesson')];
+        listLibraryTags.mockResolvedValue(tags);
         listDocumentTagMap.mockResolvedValue(new Map());
+        mockBootstrap({ tags, documentTags: new Map() });
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(await screen.findByRole('button', { name: 'Lesson', pressed: false })).toBeInTheDocument();
@@ -410,8 +773,11 @@ describe('LibraryPage', () => {
 
     it('groups by tag when toggled', async () => {
         const user = userEvent.setup();
-        listLibraryTags.mockResolvedValue([tag('t-concert', 'Concert')]);
-        listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-concert']]]));
+        const tags = [tag('t-concert', 'Concert')];
+        const documentTags = new Map([['d1', ['t-concert']]]);
+        listLibraryTags.mockResolvedValue(tags);
+        listDocumentTagMap.mockResolvedValue(documentTags);
+        mockBootstrap({ tags, documentTags });
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         await user.click(await screen.findByRole('button', { name: 'Group by tag' }));
@@ -464,8 +830,11 @@ describe('grid view', () => {
 
     it('offers the add-a-score tile only on an unfiltered, ungrouped shelf', async () => {
         const user = userEvent.setup();
-        listLibraryTags.mockResolvedValue([tag('t-lesson', 'Lesson')]);
-        listDocumentTagMap.mockResolvedValue(new Map([['d1', ['t-lesson']]]));
+        const tags = [tag('t-lesson', 'Lesson')];
+        const documentTags = new Map([['d1', ['t-lesson']]]);
+        listLibraryTags.mockResolvedValue(tags);
+        listDocumentTagMap.mockResolvedValue(documentTags);
+        mockBootstrap({ tags, documentTags });
         renderLibrary();
         await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
         expect(screen.getByText('Add a score')).toBeInTheDocument();

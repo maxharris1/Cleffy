@@ -5,9 +5,10 @@ import { Link, useNavigate } from 'react-router';
 import { RequireStudent } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { fetchMyAssignments, fetchMyRosterProfile, type AssignedScore } from '@/features/student/studentApi';
+import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
 import { EmptyState } from '@/ui/EmptyState';
-import { LoadingText } from '@/ui/Loading';
+import { AssignmentsSkeleton } from '@/ui/Skeleton';
 import { buttonClassName } from '@/ui/classNames';
 
 /**
@@ -34,17 +35,46 @@ const AssignmentsView = ({ session }: { session: Session }) => {
 
     useEffect(() => {
         let mounted = true;
+        let firstResolved = false;
+        const assignedP = fetchMyAssignments();
+        const profileP = fetchMyRosterProfile();
+        assignedP.then(
+            () => {
+                firstResolved = true;
+            },
+            () => undefined,
+        );
         void (async () => {
-            const [assigned, profile] = await Promise.allSettled([fetchMyAssignments(), fetchMyRosterProfile()]);
+            const cached = await getDb()
+                .assignmentsCache.get(session.user.id)
+                .catch(() => undefined);
+            await Promise.resolve();
+            if (mounted && !firstResolved && cached && cached.scores.length > 0) {
+                setScores(cached.scores);
+                setLoading(false);
+            }
+
+            const [assigned, profile] = await Promise.allSettled([assignedP, profileP]);
             if (!mounted) {
                 return;
             }
             if (assigned.status === 'fulfilled') {
                 setScores(assigned.value);
-            } else {
+                void getDb()
+                    .assignmentsCache.put({
+                        userId: session.user.id,
+                        scores: assigned.value,
+                        cachedAt: new Date().toISOString(),
+                    })
+                    .catch(() => undefined);
+            } else if (!cached?.scores.length) {
                 // Leave `scores` null so the empty state cannot claim nothing is
                 // assigned when the truth is that nothing loaded.
                 setNotice('Could not load your pieces. Check the internet connection and try again.');
+            } else {
+                // The cached paint stays up, but say it is a snapshot — a new
+                // assignment made since the last sync would be missing from it.
+                setNotice('Could not refresh — showing your pieces from the last sync.');
             }
             // Best effort: the name from the session is already a fine answer.
             if (profile.status === 'fulfilled' && profile.value) {
@@ -55,7 +85,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
         return () => {
             mounted = false;
         };
-    }, []);
+    }, [session.user.id]);
 
     const handleSignOut = async () => {
         await signOut();
@@ -89,7 +119,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     </p>
                 ) : null}
 
-                {loading ? <LoadingText className="mt-6">Finding your pieces…</LoadingText> : null}
+                {loading && scores === null ? <AssignmentsSkeleton label="Finding your pieces…" /> : null}
 
                 {scores && scores.length > 0 ? (
                     <ul className="mt-6 space-y-3">

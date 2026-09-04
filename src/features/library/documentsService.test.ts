@@ -16,6 +16,7 @@ vi.mock('@/lib/storageUpload', () => ({
 // layer is replaced by an in-memory map that keeps real Blobs readable.
 const memCache = vi.hoisted(() => new Map<string, unknown>());
 const memThumbs = vi.hoisted(() => new Map<string, unknown>());
+const libraryListClear = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 // Flipped on to simulate WebKit refusing an IndexedDB write (private browsing).
 const cacheFailure = vi.hoisted(() => ({ put: null as Error | null, get: null as Error | null }));
 // The upload/replace paths kick off a thumbnail render; stubbed so these tests
@@ -65,11 +66,25 @@ vi.mock('@/sync/db', () => {
                     return Promise.resolve();
                 },
             }),
+            libraryList: table({ clear: libraryListClear }),
+            transaction: (_mode: string, _table: unknown, fn: () => unknown) => Promise.resolve(fn()),
         }),
     };
 });
+vi.mock('@/features/import/prepareUpload', () => ({
+    prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
+    UPLOAD_ACCEPT: '',
+}));
 
-import { deleteDocument, loadDocumentBytes, replaceDocumentPdf } from '@/features/library/documentsService';
+import {
+    deleteDocument,
+    loadDocumentBytes,
+    loadDocumentOffline,
+    prefetchDocumentBytes,
+    replaceDocumentPdf,
+    uploadDocument,
+} from '@/features/library/documentsService';
+import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 
@@ -82,6 +97,7 @@ const doc = (over: Partial<DocumentRow> = {}): DocumentRow => ({
     storage_path: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1/original.pdf',
     page_count: 3,
     content_rev: 0,
+    thumb_rev: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
     archived_at: null,
@@ -93,7 +109,14 @@ interface StubOptions {
     downloadError?: string;
     backupError?: string | null;
     listNames?: string[];
+    /** Objects under the document's folder in the thumbnails bucket. */
+    thumbListNames?: string[];
+    /** Sequential download payloads; later calls fall back to downloadBytes. */
+    downloadSequence?: string[];
     updatedRow?: DocumentRow;
+    insertedRow?: DocumentRow;
+    insertError?: string;
+    deleteError?: string;
 }
 
 const makeStub = (options: StubOptions = {}) => {
@@ -101,19 +124,23 @@ const makeStub = (options: StubOptions = {}) => {
         download: vi.fn(),
         upload: vi.fn(),
         remove: vi.fn(),
+        removeFrom: vi.fn(),
         list: vi.fn(),
         update: vi.fn(),
         upsert: vi.fn(),
+        insert: vi.fn(),
         delete: vi.fn(),
     };
-    const storageApi = {
+    const storageApi = (bucket: string) => ({
         download: (path: string) => {
             calls.download(path);
             if (options.downloadError) {
                 return Promise.resolve({ data: null, error: { message: options.downloadError } });
             }
+            const n = calls.download.mock.calls.length - 1;
+            const payload = options.downloadSequence?.[n] ?? options.downloadBytes ?? 'fresh-bytes';
             return Promise.resolve({
-                data: new Blob([options.downloadBytes ?? 'fresh-bytes'], { type: 'application/pdf' }),
+                data: new Blob([payload], { type: 'application/pdf' }),
                 error: null,
             });
         },
@@ -129,19 +156,41 @@ const makeStub = (options: StubOptions = {}) => {
         },
         remove: (paths: string[]) => {
             calls.remove(paths);
+            calls.removeFrom(bucket, paths);
             return Promise.resolve({ data: null, error: null });
         },
         list: (prefix: string) => {
             calls.list(prefix);
+            const names = bucket === 'thumbnails' ? (options.thumbListNames ?? []) : (options.listNames ?? []);
             return Promise.resolve({
-                data: (options.listNames ?? []).map((name) => ({ name })),
+                data: names.map((name) => ({ name })),
                 error: null,
             });
         },
-    };
+    });
     const supabase = {
-        storage: { from: () => storageApi },
+        storage: { from: (bucket: string) => storageApi(bucket) },
         from: (table: string) => ({
+            insert: (row: Record<string, unknown>) => {
+                calls.insert(table, row);
+                return {
+                    select: () => ({
+                        single: () =>
+                            Promise.resolve({
+                                data: options.insertError
+                                    ? null
+                                    : (options.insertedRow ??
+                                      doc({
+                                          id: String(row.id),
+                                          owner_id: String(row.owner_id),
+                                          title: String(row.title),
+                                          storage_path: String(row.storage_path),
+                                      })),
+                                error: options.insertError ? { message: options.insertError } : null,
+                            }),
+                    }),
+                };
+            },
             update: (patch: Record<string, unknown>) => {
                 calls.update(table, patch);
                 return {
@@ -160,7 +209,10 @@ const makeStub = (options: StubOptions = {}) => {
             delete: () => ({
                 eq: () => {
                     calls.delete(table);
-                    return Promise.resolve({ data: null, error: null });
+                    return Promise.resolve({
+                        data: null,
+                        error: options.deleteError ? { message: options.deleteError } : null,
+                    });
                 },
             }),
         }),
@@ -171,6 +223,7 @@ const makeStub = (options: StubOptions = {}) => {
 
 beforeEach(async () => {
     vi.mocked(uploadPdfToStorage).mockClear();
+    libraryListClear.mockClear();
     cacheFailure.put = null;
     cacheFailure.get = null;
     await getDb().pdfCache.clear();
@@ -271,6 +324,94 @@ describe('loadDocumentBytes content_rev staleness', () => {
     });
 });
 
+describe('loadDocumentBytes preloaded bytes (warm open)', () => {
+    it('returns the caller’s buffer without a second cache read when the revision is current', async () => {
+        const calls = makeStub();
+        const d = doc({ content_rev: 1 });
+        const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
+        // Nothing in the cache map at all: a second read would come back empty
+        // and the old path would have gone to the network.
+        const bytes = await loadDocumentBytes(d, {
+            preloaded: { bytes: held, contentRev: 1, archivedAt: null },
+        });
+        expect(bytes).toBe(held);
+        expect(calls.download).not.toHaveBeenCalled();
+    });
+
+    it('ignores preloaded bytes older than the row and downloads the newer revision', async () => {
+        const calls = makeStub({ downloadBytes: 'cleaned-bytes' });
+        const d = doc({ content_rev: 2 });
+        const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
+        const bytes = await loadDocumentBytes(d, {
+            preloaded: { bytes: held, contentRev: 1, archivedAt: null },
+        });
+        expect(new TextDecoder().decode(bytes)).toBe('cleaned-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(1);
+    });
+
+    it('refreshes the cached archive flag when the row disagrees with the preloaded one', async () => {
+        makeStub();
+        const d = doc({ content_rev: 1, archived_at: '2026-08-30T00:00:00Z' });
+        await putCache({
+            docId: d.id,
+            bytes: new Blob(['cached-bytes']),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+            archivedAt: null,
+        });
+        const held = new TextEncoder().encode('held-bytes').buffer as ArrayBuffer;
+        await loadDocumentBytes(d, { preloaded: { bytes: held, contentRev: 1, archivedAt: null } });
+        expect((await getDb().pdfCache.get(d.id))?.archivedAt).toBe('2026-08-30T00:00:00Z');
+    });
+});
+
+describe('prefetchDocumentBytes (cold open)', () => {
+    it('uses the download that left with the row when the row confirms the path', async () => {
+        const calls = makeStub({ downloadBytes: 'prefetched-bytes' });
+        const d = doc();
+        const prefetch = prefetchDocumentBytes(d.id);
+        expect(prefetch.path).toBe(d.storage_path);
+        const bytes = await loadDocumentBytes(d, { prefetch });
+        expect(new TextDecoder().decode(bytes)).toBe('prefetched-bytes');
+        // One download in total — the prefetch — and the cache is seeded from it.
+        expect(calls.download).toHaveBeenCalledTimes(1);
+        expect((await getDb().pdfCache.get(d.id))?.contentRev).toBe(0);
+    });
+
+    it('discards the prefetch and downloads the row’s own path when they differ', async () => {
+        const calls = makeStub({ downloadBytes: 'real-bytes' });
+        const d = doc({ storage_path: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1/renamed.pdf' });
+        const prefetch = prefetchDocumentBytes(d.id);
+        const bytes = await loadDocumentBytes(d, { prefetch });
+        expect(new TextDecoder().decode(bytes)).toBe('real-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(2);
+        expect(calls.download).toHaveBeenLastCalledWith(d.storage_path);
+    });
+
+    it('falls through to a normal download when the prefetch was refused', async () => {
+        const calls = makeStub({ downloadError: 'not found' });
+        const d = doc();
+        const prefetch = prefetchDocumentBytes(d.id);
+        expect(await prefetch.bytes).toBeNull();
+        await expect(loadDocumentBytes(d, { prefetch })).rejects.toThrow(/Could not download score/);
+        expect(calls.download).toHaveBeenCalledTimes(2);
+    });
+
+    it('discards prefetch bytes when the row revision is not 0 and does not cache them as that rev', async () => {
+        const calls = makeStub({ downloadSequence: ['prefetched-bytes', 'rev2-bytes'] });
+        const d = doc({ content_rev: 2 });
+        const prefetch = prefetchDocumentBytes(d.id);
+        const bytes = await loadDocumentBytes(d, { prefetch });
+        expect(new TextDecoder().decode(bytes)).toBe('rev2-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(2);
+        expect(calls.download).toHaveBeenLastCalledWith(d.storage_path);
+        const cached = await getDb().pdfCache.get(d.id);
+        expect(cached?.contentRev).toBe(2);
+        expect(new TextDecoder().decode(cached?.bytes as ArrayBuffer)).toBe('rev2-bytes');
+    });
+});
+
 describe('replaceDocumentPdf', () => {
     it('backs up the original once, uploads the replacement, bumps content_rev, refreshes the cache', async () => {
         const calls = makeStub({ updatedRow: doc({ content_rev: 1 }) });
@@ -321,7 +462,53 @@ describe('deleteDocument', () => {
         const calls = makeStub({ listNames: ['original.pdf', 'pre-import-original.pdf'] });
         const d = doc();
         await deleteDocument(d);
-        expect(calls.remove).toHaveBeenCalledWith([`${d.id}/original.pdf`, `${d.id}/pre-import-original.pdf`]);
+        expect(calls.removeFrom).toHaveBeenCalledWith('scores', [
+            `${d.id}/original.pdf`,
+            `${d.id}/pre-import-original.pdf`,
+        ]);
+    });
+
+    it('removes the published covers along with the PDF', async () => {
+        const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg', '2.jpg'] });
+        const d = doc();
+        await deleteDocument(d);
+        expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', [`${d.id}/0.jpg`, `${d.id}/2.jpg`]);
+    });
+
+    it('does not touch the thumbnails bucket when nothing was ever published', async () => {
+        const calls = makeStub({ listNames: ['original.pdf'] });
+        await deleteDocument(doc());
+        expect(calls.removeFrom).not.toHaveBeenCalledWith('thumbnails', expect.anything());
+    });
+
+    it('removes the stamped cover when list returns empty', async () => {
+        const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: [] });
+        const d = doc({ thumb_rev: 2 });
+        await deleteDocument(d);
+        expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', [`${d.id}/2.jpg`]);
+    });
+
+    /**
+     * The producer half of the library-cache contract: the epoch moves at
+     * the attempt edge, BEFORE the server write (so a bootstrap racing it is
+     * outranked), and again at the commit edge (so a bootstrap dispatched
+     * mid-write is outranked too). A refused delete takes only the attempt
+     * edge: it must not look like a committed mutation.
+     */
+    it('bumps the epoch on both edges of a successful delete', async () => {
+        makeStub();
+        const before = libraryMutationEpoch();
+        await deleteDocument(doc());
+        expect(libraryMutationEpoch()).toBe(before + 2);
+        expect(libraryListClear).not.toHaveBeenCalled();
+    });
+
+    it('keeps the library snapshots when the delete is refused', async () => {
+        makeStub({ deleteError: 'permission denied' });
+        const before = libraryMutationEpoch();
+        await expect(deleteDocument(doc())).rejects.toThrow('Could not delete');
+        expect(libraryMutationEpoch()).toBe(before + 1);
+        expect(libraryListClear).not.toHaveBeenCalled();
     });
 
     it('drops the cached thumbnail along with the other local caches', async () => {
@@ -338,5 +525,72 @@ describe('deleteDocument', () => {
         });
         await deleteDocument(d);
         expect(memThumbs.has(d.id)).toBe(false);
+    });
+});
+
+describe('uploadDocument commit edge', () => {
+    const pdf = () => new File(['%PDF-1.4'], 'sonata.pdf', { type: 'application/pdf' });
+
+    it('does not commit the library mutation until storage succeeds, and seeds the cache as owner', async () => {
+        makeStub();
+        const before = libraryMutationEpoch();
+        vi.mocked(uploadPdfToStorage).mockImplementation(async () => {
+            expect(libraryMutationEpoch()).toBe(before + 1);
+            expect(libraryListClear).not.toHaveBeenCalled();
+        });
+        const { document } = await uploadDocument(pdf(), 'user-1');
+        expect(libraryMutationEpoch()).toBe(before + 2);
+        expect(libraryListClear).not.toHaveBeenCalled();
+        const cached = await getDb().pdfCache.get(document.id);
+        expect(cached?.myRole).toBe('owner');
+        expect(cached?.userId).toBe('user-1');
+    });
+
+    it('commits after rolling back a row whose storage upload failed', async () => {
+        const calls = makeStub();
+        vi.mocked(uploadPdfToStorage).mockRejectedValueOnce(new Error('storage down'));
+        const before = libraryMutationEpoch();
+        await expect(uploadDocument(pdf(), 'user-1')).rejects.toThrow('storage down');
+        expect(calls.delete).toHaveBeenCalledWith('documents');
+        expect(libraryMutationEpoch()).toBe(before + 2);
+        expect(libraryListClear).not.toHaveBeenCalled();
+    });
+});
+
+describe('loadDocumentOffline', () => {
+    const id = 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1';
+    const row = (over: Partial<CachedPdf> = {}): CachedPdf => ({
+        docId: id,
+        bytes: new Blob(['cached-bytes']),
+        title: 'Sonata',
+        cachedAt: '2026-08-01T00:00:00Z',
+        myRole: 'owner',
+        userId: 'user-1',
+        ...over,
+    });
+
+    it('returns the cached score when userId matches', async () => {
+        await putCache(row());
+        const offline = await loadDocumentOffline(id, 'user-1');
+        expect(offline?.role).toBe('owner');
+        expect(offline?.cachedRole).toBe('owner');
+        expect(offline?.doc.title).toBe('Sonata');
+    });
+
+    it('returns null when userId mismatches', async () => {
+        await putCache(row());
+        expect(await loadDocumentOffline(id, 'user-2')).toBeNull();
+    });
+
+    it('returns null for a legacy row with no userId', async () => {
+        await putCache(row({ userId: undefined }));
+        expect(await loadDocumentOffline(id, 'user-1')).toBeNull();
+    });
+
+    it('defaults a missing stored role to viewer and reports cachedRole null', async () => {
+        await putCache(row({ myRole: undefined }));
+        const offline = await loadDocumentOffline(id, 'user-1');
+        expect(offline?.role).toBe('viewer');
+        expect(offline?.cachedRole).toBeNull();
     });
 });

@@ -186,15 +186,18 @@ export const fetchMyAssignments = async (): Promise<AssignedScore[]> => {
     }
 
     const documentIds = [...new Set(assignments.map((assignment) => assignment.document_id))];
+    // Narrow columns — the student list only needs title + id for the card link.
     const { data: documents, error: documentsError } = await supabase
         .from('documents')
-        .select('*')
+        .select(
+            'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at',
+        )
         .in('id', documentIds);
     if (documentsError) {
         throw new Error(`Could not load your pieces: ${documentsError.message}`);
     }
 
-    const documentsById = new Map(documents.map((doc) => [doc.id, doc]));
+    const documentsById = new Map((documents ?? []).map((doc) => [doc.id, doc]));
     // A missing document is a score the teacher deleted without unassigning it.
     // The row is stale, not an error: drop the pair rather than render a card
     // that leads nowhere.

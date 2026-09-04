@@ -4,8 +4,10 @@ import { fileURLToPath, URL } from 'node:url';
 
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+import { collectSupabasePreconnectOrigins } from './src/lib/supabasePreconnectOrigins';
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
@@ -44,11 +46,35 @@ const pdfjsWasmPlugin = (): Plugin => ({
     },
 });
 
+/**
+ * `<link rel="preconnect">` for every known Supabase HTTPS origin. Runtime
+ * picks the project by hostname when `VITE_SUPABASE_URL` is unset (see
+ * src/lib/supabase.ts); a production env typically has only `_PROD` and `_DEV`.
+ */
+const supabasePreconnectPlugin = (): Plugin => {
+    let origins: string[] = [];
+    return {
+        name: 'supabase-preconnect',
+        configResolved(config) {
+            const env = loadEnv(config.mode, config.envDir ?? process.cwd(), 'VITE_');
+            origins = collectSupabasePreconnectOrigins(env);
+        },
+        transformIndexHtml() {
+            return origins.map((href) => ({
+                tag: 'link',
+                attrs: { rel: 'preconnect', href, crossorigin: '' },
+                injectTo: 'head-prepend' as const,
+            }));
+        },
+    };
+};
+
 export default defineConfig({
     plugins: [
         react(),
         tailwindcss(),
         pdfjsWasmPlugin(),
+        supabasePreconnectPlugin(),
         VitePWA({
             registerType: 'autoUpdate',
             includeAssets: ['icons/apple-touch-icon.png', 'favicon.svg'],

@@ -4,12 +4,17 @@ import { Link, useOutletContext } from 'react-router';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import {
     deleteDocument,
-    listCachedDocuments,
     listDocuments,
     listFavoriteDocumentIds,
     renameDocument,
     setDocumentFavorite,
 } from '@/features/library/documentsService';
+import {
+    fetchLibraryBootstrap,
+    readCachedLibraryList,
+    writeCachedLibraryList,
+} from '@/features/library/libraryBootstrap';
+import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import {
     displayTitleOf,
     filterByTag,
@@ -24,6 +29,7 @@ import { FileDropZone } from '@/features/library/FileDropZone';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { perfLogIfDev, perfMark } from '@/lib/perf';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { RowMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
@@ -47,8 +53,8 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
-import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { LibrarySkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { ViewToggle } from '@/ui/ViewToggle';
 import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
@@ -94,57 +100,155 @@ export const LibraryPage = () => {
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
     const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
+    /**
+     * Bumped after a mutation's server write resolved, once the state updates
+     * that reflect it are queued. The effect below then persists what is on
+     * screen — after the render commits, so it sees the post-edit state, not
+     * the closure's copy. The commit edge outranks in-flight bootstraps; this
+     * is the write that puts the list the page knows is true.
+     */
+    const [persistTick, setPersistTick] = useState(0);
+    const persistSnapshot = () => setPersistTick((t) => t + 1);
+
+    useEffect(() => {
+        if (persistTick === 0 || documents === null) {
+            return;
+        }
+        void writeCachedLibraryList(userId, {
+            documents,
+            hasMore,
+            favoriteIds: favorites,
+            tags,
+            documentTags: assignments,
+        }).catch(() => undefined);
+        // Tick + user: the list values are read at persist time, not watched.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [persistTick, userId]);
 
     useEffect(() => {
         let cancelled = false;
-        listDocuments()
-            .then(({ documents: docs, hasMore: more }) => {
-                if (!cancelled) {
-                    setDocuments(docs);
-                    setHasMore(more);
+        // The network request leaves first: it must not queue behind an
+        // IndexedDB open (a schema upgrade can take a good fraction of a
+        // second) that it does not depend on. The snapshot read runs alongside.
+        let firstResolved = false;
+        const first = fetchLibraryBootstrap(userId);
+        first.then(
+            (boot) => {
+                // Only a FRESH answer makes the snapshot moot; a payload a
+                // mutation outran will be refetched, and the snapshot bridges
+                // that gap exactly as it bridges a slow first request.
+                firstResolved = libraryMutationEpoch() === boot.fetchedAtEpoch;
+            },
+            () => undefined,
+        );
+        void (async () => {
+            // Instant paint from the last bootstrap before the network. Only the
+            // user-scoped snapshot qualifies: pdfCache (opened PDFs) is shared by
+            // every account on this browser, so it stays out of the happy path
+            // and appears only under the labelled offline fallback below. A
+            // network answer that beat the snapshot read makes the paint moot.
+            const cachedList = await readCachedLibraryList(userId).catch(() => null);
+            // A bootstrap that already settled must run its then before we
+            // decide whether the snapshot is moot — otherwise a fresh answer
+            // that beat the Dexie read still paints one frame of stale titles.
+            await Promise.resolve();
+            let painted = false;
+            if (!cancelled && !firstResolved && cachedList && cachedList.documents.length > 0) {
+                setDocuments(cachedList.documents);
+                setHasMore(cachedList.hasMore);
+                setFavorites(cachedList.favoriteIds);
+                setTags(cachedList.tags);
+                setAssignments(cachedList.documentTags);
+                painted = true;
+                perfMark('library-cache-paint');
+            }
+
+            // The painted list is interactive while the network is out, so an
+            // edit made in that window outranks a response whose request left
+            // before it (the epoch moves on the edit's start AND commit, so a
+            // request dispatched mid-write is outranked too). A stale response
+            // is not just dropped — that could strand a nothing-painted page
+            // on "Loading scores…" forever — it is refetched: the new request
+            // sees the post-edit server state. If the refetches are also
+            // outrun, the painted state (which already reflects the edits)
+            // wins over any of the payloads; only an unpainted page takes the
+            // last payload regardless, because anything beats no list at all.
+            for (let pass = 0; pass < 3; pass++) {
+                const lastPass = pass === 2;
+                try {
+                    const boot = await (pass === 0 ? first : fetchLibraryBootstrap(userId));
+                    if (cancelled) {
+                        return;
+                    }
+                    if (libraryMutationEpoch() !== boot.fetchedAtEpoch) {
+                        if (!lastPass) {
+                            continue;
+                        }
+                        if (painted) {
+                            return;
+                        }
+                    }
+                    setDocuments(boot.documents);
+                    setHasMore(boot.hasMore);
+                    setFavorites(boot.favoriteIds);
+                    setTags(boot.tags);
+                    setAssignments(boot.documentTags);
                     setError(null);
-                }
-            })
-            .catch(async (err: unknown) => {
-                const cached = await listCachedDocuments().catch(() => []);
-                if (cancelled) {
+                    perfMark('library-network-paint');
+                    perfLogIfDev();
                     return;
+                } catch (err: unknown) {
+                    // Fallback: four parallel GETs if the bootstrap RPC is unavailable.
+                    try {
+                        const epochAtRetry = libraryMutationEpoch();
+                        const [{ documents: docs, hasMore: more }, ids, tagRows, tagMap] = await Promise.all([
+                            listDocuments(),
+                            listFavoriteDocumentIds().catch(() => new Set<string>()),
+                            listLibraryTags().catch(() => [] as LibraryTagRow[]),
+                            listDocumentTagMap().catch(() => new Map<string, string[]>()),
+                        ]);
+                        if (cancelled) {
+                            return;
+                        }
+                        if (libraryMutationEpoch() !== epochAtRetry) {
+                            if (!lastPass) {
+                                continue;
+                            }
+                            if (painted) {
+                                return;
+                            }
+                        }
+                        setDocuments(docs);
+                        setHasMore(more);
+                        setFavorites(ids);
+                        setTags(tagRows);
+                        setAssignments(tagMap);
+                        setError(null);
+                        perfMark('library-network-paint');
+                        perfLogIfDev();
+                        return;
+                    } catch {
+                        if (cancelled) {
+                            return;
+                        }
+                        // Prefer the user-scoped Dexie snapshot already painted
+                        // above. An empty snapshot plus a failed network is an
+                        // error / empty grid — opened PDFs are not a library.
+                        if (cachedList && cachedList.documents.length > 0) {
+                            setError('Offline — showing scores cached on this device.');
+                            return;
+                        }
+                        setDocuments((prev) => prev ?? []);
+                        setError(err instanceof Error ? err.message : 'Could not load your scores.');
+                        return;
+                    }
                 }
-                setHasMore(false);
-                if (cached.length > 0) {
-                    setDocuments(cached);
-                    setError('Offline — showing scores cached on this device.');
-                } else {
-                    setDocuments([]);
-                    setError(err instanceof Error ? err.message : 'Could not load your scores.');
-                }
-            });
-        // Favorites and tags are best-effort — an offline library still renders without them.
-        listFavoriteDocumentIds()
-            .then((ids) => {
-                if (!cancelled) {
-                    setFavorites(ids);
-                }
-            })
-            .catch(() => undefined);
-        listLibraryTags()
-            .then((rows) => {
-                if (!cancelled) {
-                    setTags(rows);
-                }
-            })
-            .catch(() => undefined);
-        listDocumentTagMap()
-            .then((map) => {
-                if (!cancelled) {
-                    setAssignments(map);
-                }
-            })
-            .catch(() => undefined);
+            }
+        })();
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [userId]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
 
@@ -198,18 +302,20 @@ export const LibraryPage = () => {
             }
             return set;
         });
-        setDocumentFavorite(doc.id, userId, next).catch((err: unknown) => {
-            setFavorites((prev) => {
-                const set = new Set(prev);
-                if (next) {
-                    set.delete(doc.id);
-                } else {
-                    set.add(doc.id);
-                }
-                return set;
+        setDocumentFavorite(doc.id, userId, next)
+            .then(persistSnapshot)
+            .catch((err: unknown) => {
+                setFavorites((prev) => {
+                    const set = new Set(prev);
+                    if (next) {
+                        set.delete(doc.id);
+                    } else {
+                        set.add(doc.id);
+                    }
+                    return set;
+                });
+                setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
             });
-            setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
-        });
     };
 
     const patchAssignment = (documentId: string, tagId: string, assigned: boolean) => {
@@ -240,6 +346,7 @@ export const LibraryPage = () => {
         patchAssignment(docId, tagId, assigned);
         try {
             await setDocumentTag(docId, tagId, assigned);
+            persistSnapshot();
         } catch (err) {
             patchAssignment(docId, tagId, !assigned);
             throw err;
@@ -259,6 +366,10 @@ export const LibraryPage = () => {
         } catch (err) {
             patchAssignment(tagTarget.id, created.id, false);
             throw err;
+        } finally {
+            // The tag exists either way; the assignment state is whichever
+            // branch above left it in.
+            persistSnapshot();
         }
     };
 
@@ -266,6 +377,7 @@ export const LibraryPage = () => {
     const handleCreateTagOnly = async (name: string) => {
         const created = await createLibraryTag(userId, name);
         setTags((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+        persistSnapshot();
     };
 
     const handleRenameTag = async (tagId: string, name: string) => {
@@ -275,6 +387,7 @@ export const LibraryPage = () => {
                 .map((t) => (t.id === tagId ? { ...t, name: name.trim().replace(/\s+/g, ' ') } : t))
                 .sort((a, b) => a.name.localeCompare(b.name)),
         );
+        persistSnapshot();
     };
 
     const handleDeleteTag = async (tagId: string) => {
@@ -295,6 +408,7 @@ export const LibraryPage = () => {
         if (activeTagId === tagId) {
             setActiveTagId(null);
         }
+        persistSnapshot();
     };
 
     const saveRename = async (title: string) => {
@@ -307,6 +421,7 @@ export const LibraryPage = () => {
             await renameDocument(target.id, title);
             setDocuments((docs) => docs?.map((d) => (d.id === target.id ? { ...d, title } : d)) ?? docs);
             setRenameTarget(null);
+            persistSnapshot();
         } finally {
             setBusyAction(false);
         }
@@ -330,6 +445,7 @@ export const LibraryPage = () => {
             // A slot just came free, so the "you are at your score limit" notice
             // from the upload that failed a moment ago is no longer true.
             clearUploadError();
+            persistSnapshot();
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {
@@ -389,7 +505,7 @@ export const LibraryPage = () => {
                 ) : null}
 
                 {documents === null ? (
-                    <LoadingText className="mt-10">Loading scores…</LoadingText>
+                    <LibrarySkeleton view={view} label="Loading scores…" />
                 ) : hasScores ? (
                     <section className="mt-8">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -729,7 +845,7 @@ const ScoreRow = ({
                   into a column on phones, which would stack the thumbnail above
                   the title instead of beside it.
                 */}
-                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} />
+                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
                 <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
                     <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">

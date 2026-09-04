@@ -19,6 +19,7 @@ import {
     type RosterAssignment,
     type TimelineEntry,
 } from '@/features/roster/rosterService';
+import { getDb } from '@/sync/db';
 import type { AssignmentAccess, AssignmentRow, EffectiveTier, ManagedStudentRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -27,6 +28,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
+import { RosterSkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
 import { fieldLabelClassName } from '@/ui/classNames';
 import { MoreVerticalIcon } from '@/ui/icons';
@@ -129,11 +131,33 @@ const noRosterOnThisPlan = (tier: EffectiveTier): LimitReachedError =>
  * seat back rather than claims one. Hiding those rows would leave live student
  * sign-ins with no control left anywhere that could turn them off.
  */
+const countsOf = (grouped: Map<string, RosterAssignment[]>): Array<[string, number]> =>
+    [...grouped.entries()].map(([id, rows]) => [id, rows.length]);
+
+/** Best-effort snapshot for the next mount's instant paint; a refused write costs nothing. */
+const persistRoster = (userId: string, students: ManagedStudentRow[], assignmentCounts: Array<[string, number]>) => {
+    void getDb()
+        .rosterCache.put({ userId, students, assignmentCounts, cachedAt: new Date().toISOString() })
+        .catch(() => undefined);
+};
+
 export const RosterPage = () => {
-    const { canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { userId, canManageStudents, tier, openPricing } = useOutletContext<LibraryOutletContext>();
 
     const [students, setStudents] = useState<ManagedStudentRow[] | null>(null);
     const [assignments, setAssignments] = useState<Map<string, RosterAssignment[]>>(new Map());
+    /**
+     * Counts from the Dexie snapshot, shown until the network's assignments
+     * arrive (then null). Without them every cached row would read "No scores"
+     * — an affirmative claim the cache can't back.
+     */
+    const [cachedCounts, setCachedCounts] = useState<Map<string, number> | null>(null);
+    /**
+     * Whether `assignments` reflects the server. While 'loading' a row with a
+     * snapshot count shows a spinner in its panel; after 'failed' it must show
+     * a terminal notice instead — nothing on this mount will fill the panel.
+     */
+    const [assignmentsStatus, setAssignmentsStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
     const [loadError, setLoadError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
@@ -143,47 +167,87 @@ export const RosterPage = () => {
     const [archiveTarget, setArchiveTarget] = useState<ManagedStudentRow | null>(null);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const rosterGen = useRef(0);
 
     useEffect(() => {
         let mounted = true;
+        const gen = rosterGen.current;
+        let firstResolved = false;
+        const first = Promise.all([listRoster(), listAssignmentsForStudents().catch(() => null)]);
+        first.then(
+            () => {
+                firstResolved = true;
+            },
+            () => undefined,
+        );
         void (async () => {
+            const cached = await getDb()
+                .rosterCache.get(userId)
+                .catch(() => undefined);
+            await Promise.resolve();
+            if (mounted && !firstResolved && gen === rosterGen.current && cached && cached.students.length > 0) {
+                setStudents(cached.students);
+                setCachedCounts(new Map(cached.assignmentCounts));
+            }
+
             try {
-                const roster = await listRoster();
-                if (!mounted) {
+                const [roster, grouped] = await first;
+                if (!mounted || gen !== rosterGen.current) {
                     return;
                 }
                 setStudents(roster);
+                setAssignments(grouped ?? new Map());
+                setAssignmentsStatus(grouped ? 'ready' : 'failed');
+                if (grouped) {
+                    setCachedCounts(null);
+                }
+                setLoadError(null);
+                persistRoster(userId, roster, grouped ? countsOf(grouped) : (cached?.assignmentCounts ?? []));
             } catch (err) {
-                if (mounted) {
-                    setStudents([]);
-                    setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
+                if (!mounted || gen !== rosterGen.current) {
+                    return;
                 }
-                return;
-            }
-            // Best-effort, like the library's favourites and tags: a roster with
-            // no counts beside it is still a usable roster.
-            try {
-                const grouped = await listAssignmentsForStudents();
-                if (mounted) {
-                    setAssignments(grouped);
-                }
-            } catch {
-                // Counts stay at zero; the per-student panel says so too.
+                setStudents((prev) => prev ?? []);
+                setAssignmentsStatus('failed');
+                setLoadError(err instanceof Error ? err.message : 'Could not load your roster.');
             }
         })();
         return () => {
             mounted = false;
         };
-    }, []);
+    }, [userId]);
 
-    const reloadRoster = async () => setStudents(await listRoster());
-    const reloadAssignments = async () => setAssignments(await listAssignmentsForStudents());
+    /**
+     * Every roster mutation re-reads the server and rewrites the snapshot the
+     * mount effect paints from. Without the rewrite a remount would show the
+     * pre-action roster — an archived student active, a removed one back —
+     * until the network corrected it.
+     */
+    const currentCounts = (): Array<[string, number]> =>
+        assignmentsStatus === 'ready' ? countsOf(assignments) : [...(cachedCounts ?? new Map()).entries()];
+    const reloadRoster = async () => {
+        const gen = ++rosterGen.current;
+        const roster = await listRoster();
+        if (gen !== rosterGen.current) {
+            return;
+        }
+        setStudents(roster);
+        persistRoster(userId, roster, currentCounts());
+    };
+    const reloadAssignments = async () => {
+        const grouped = await listAssignmentsForStudents();
+        setAssignments(grouped);
+        setAssignmentsStatus('ready');
+        setCachedCounts(null);
+        persistRoster(userId, students ?? [], countsOf(grouped));
+    };
 
     /**
      * The three ways a roster action ends: it worked, the plan refused it, or it
      * broke. Only the middle one gets an upgrade prompt instead of red text.
      */
     const run = async (action: () => Promise<void>): Promise<void> => {
+        rosterGen.current += 1;
         setActionError(null);
         setLimit(null);
         setBusy(true);
@@ -335,8 +399,8 @@ export const RosterPage = () => {
             {actionError ? <ErrorText className="mt-4">{actionError}</ErrorText> : null}
 
             {students === null ? (
-                <LoadingText className="mt-10">Loading your roster…</LoadingText>
-            ) : loadError ? (
+                <RosterSkeleton label="Loading your roster…" />
+            ) : loadError && students.length === 0 ? (
                 <ErrorText className="mt-8">{loadError}</ErrorText>
             ) : students.length === 0 ? (
                 canManageStudents ? (
@@ -354,6 +418,10 @@ export const RosterPage = () => {
                 )
             ) : (
                 <section className="mt-8">
+                    {/* Above the list, not instead of it: the cached roster the
+                        effect just painted is exactly what a teacher on a bad
+                        connection came for. */}
+                    {loadError ? <ErrorText className="mb-4">{loadError}</ErrorText> : null}
                     {/* Nothing in the list is taken away with the form: archive and
                         reset ask student-provision for no seat, and restore — which
                         does — comes back 402 into the notice above.
@@ -379,6 +447,8 @@ export const RosterPage = () => {
                                 student={student}
                                 index={index}
                                 assignments={assignments.get(student.student_user_id) ?? []}
+                                cachedCount={cachedCounts?.get(student.student_user_id)}
+                                assignmentsStatus={assignmentsStatus}
                                 expanded={expandedId === student.id}
                                 busy={busy}
                                 onToggle={() => setExpandedId((id) => (id === student.id ? null : student.id))}
@@ -620,6 +690,8 @@ const StudentRow = ({
     student,
     index,
     assignments,
+    cachedCount,
+    assignmentsStatus,
     expanded,
     busy,
     onToggle,
@@ -632,6 +704,9 @@ const StudentRow = ({
     student: ManagedStudentRow;
     index: number;
     assignments: RosterAssignment[];
+    /** Snapshot count while the network's assignments are still out (else undefined). */
+    cachedCount?: number;
+    assignmentsStatus: 'loading' | 'ready' | 'failed';
     expanded: boolean;
     busy: boolean;
     onToggle: () => void;
@@ -644,6 +719,9 @@ const StudentRow = ({
     const archived = student.archived_at !== null;
     const detailId = `student-detail-${student.id}`;
     const identifier = identifierOf(student);
+    const count = assignments.length > 0 ? assignments.length : (cachedCount ?? 0);
+    /** The badge shows a snapshot count whose rows haven't arrived (yet, or at all). */
+    const detailsMissing = assignments.length === 0 && (cachedCount ?? 0) > 0;
 
     return (
         <li className="library-list-item" style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}>
@@ -673,9 +751,7 @@ const StudentRow = ({
                         {archived ? <Badge>Archived</Badge> : null}
                     </button>
                     <span className="shrink-0 px-2 text-xs text-stone-500">
-                        {assignments.length === 0
-                            ? 'No scores'
-                            : `${assignments.length} ${assignments.length === 1 ? 'score' : 'scores'}`}
+                        {count === 0 ? 'No scores' : `${count} ${count === 1 ? 'score' : 'scores'}`}
                     </span>
                     <RosterRowMenu
                         archived={archived}
@@ -692,7 +768,15 @@ const StudentRow = ({
                         <h3 className="text-xs font-medium uppercase tracking-[0.08em] text-stone-500">
                             Assigned scores
                         </h3>
-                        {assignments.length === 0 ? (
+                        {detailsMissing && assignmentsStatus === 'loading' ? (
+                            <LoadingText className="mt-2">Loading assignments…</LoadingText>
+                        ) : detailsMissing ? (
+                            // Terminal, not a spinner: nothing on this mount will
+                            // fill the panel once the load has failed.
+                            <p className="mt-2 text-sm text-stone-500">
+                                The assignment list couldn’t be loaded — the count is from the last sync.
+                            </p>
+                        ) : assignments.length === 0 ? (
                             <p className="mt-2 text-sm text-stone-500">
                                 Nothing assigned yet — open a score’s menu in your library and pick “Assign to
                                 student…”.

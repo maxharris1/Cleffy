@@ -3,6 +3,7 @@ import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
+import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -18,7 +19,9 @@ export const LIBRARY_PAGE_SIZE = 100;
 export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
     const { data, error } = await getSupabase()
         .from('documents')
-        .select('id, owner_id, title, storage_path, page_count, content_rev, created_at, updated_at, archived_at')
+        .select(
+            'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at',
+        )
         .order('updated_at', { ascending: false })
         .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
@@ -50,8 +53,8 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
     if (role) {
         // Remember the role so an offline open gets the right editing mode.
         const cached = await getCachedPdf(docId);
-        if (cached && cached.myRole !== role) {
-            await putCachedPdf({ ...cached, myRole: role });
+        if (cached && (cached.myRole !== role || cached.userId !== userId)) {
+            await putCachedPdf({ ...cached, myRole: role, userId });
         }
     }
     return role;
@@ -60,6 +63,12 @@ export const fetchMyRole = async (docId: string, userId: string): Promise<Member
 export interface OfflineDocFallback {
     doc: DocumentRow;
     role: MemberRole;
+    /**
+     * Role that was actually stored on the cache row. Null when the row had
+     * none — the display `role` then defaults to viewer, and a true-offline
+     * confirm must not lift provisional on a guessed role.
+     */
+    cachedRole: MemberRole | null;
     bytes: ArrayBuffer;
 }
 
@@ -76,6 +85,7 @@ export const documentRowFromCache = (cached: {
     storage_path: `${cached.id}/original.pdf`,
     page_count: null,
     content_rev: cached.contentRev ?? 0,
+    thumb_rev: null,
     created_at: cached.cachedAt,
     updated_at: cached.cachedAt,
     archived_at: cached.archivedAt ?? null,
@@ -84,40 +94,29 @@ export const documentRowFromCache = (cached: {
 /**
  * Open a previously-cached document without the network: synthesizes the
  * document row from the cache and uses the last-known role (defaulting to
- * editor — worst case an offline viewer's edits are rejected and repaired at
- * flush time by RLS).
+ * viewer — a missing role must not grant writes). Rows stamped for another
+ * account, or written before userId existed, are treated as a miss.
  */
-export const loadDocumentOffline = async (docId: string): Promise<OfflineDocFallback | null> => {
+export const loadDocumentOffline = async (docId: string, userId: string): Promise<OfflineDocFallback | null> => {
     const cached = await getCachedPdf(docId);
-    if (!cached) {
+    if (!cached || !cached.userId || cached.userId !== userId) {
         return null;
     }
+    const cachedRole = cached.myRole ?? null;
     return {
         doc: documentRowFromCache({
             id: docId,
             title: cached.title,
             cachedAt: cached.cachedAt,
+            // The real revision, so a warm open can tell whether the server's
+            // answer is the same bytes it already painted.
+            contentRev: cached.contentRev,
             archivedAt: cached.archivedAt,
         }),
-        role: cached.myRole ?? 'editor',
+        role: cachedRole ?? 'viewer',
+        cachedRole,
         bytes: await readCachedPdfBytes(cached.bytes),
     };
-};
-
-/** Cached scores for the offline library view. */
-export const listCachedDocuments = async (): Promise<DocumentRow[]> => {
-    const rows = await getDb().pdfCache.toArray();
-    return rows
-        .filter((row) => isCloudDocId(row.docId))
-        .map((row) =>
-            documentRowFromCache({
-                id: row.docId,
-                title: row.title,
-                cachedAt: row.cachedAt,
-                archivedAt: row.archivedAt,
-            }),
-        )
-        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 };
 
 /** Count pages client-side (pdf.js) so the library can show it up front. */
@@ -180,6 +179,7 @@ export const uploadDocument = async (
     ownerId: string,
     onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadResult> => {
+    noteLibraryMutation();
     const { file } = await prepareUploadFile(pickedFile);
     const supabase = getSupabase();
     const id = crypto.randomUUID();
@@ -205,8 +205,11 @@ export const uploadDocument = async (
         await uploadPdfToStorage(storagePath, file, onProgress);
     } catch (err) {
         await supabase.from('documents').delete().eq('id', id);
+        // The row existed, then didn't: outrank any bootstrap that saw it.
+        noteLibraryMutationCommitted();
         throw err;
     }
+    noteLibraryMutationCommitted();
 
     const bytes = await file.arrayBuffer();
     const pageCount = await countPdfPages(bytes);
@@ -220,6 +223,8 @@ export const uploadDocument = async (
         bytes,
         title,
         cachedAt: new Date().toISOString(),
+        myRole: 'owner',
+        userId: ownerId,
     });
 
     // Render the library thumbnail from the bytes we already hold. Detached on
@@ -239,6 +244,7 @@ export const importDocumentFromImslp = async (
     ownerId: string,
     acceptedDisclaimer: boolean,
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     const id = crypto.randomUUID();
     const storagePath = `${id}/original.pdf`;
@@ -265,6 +271,7 @@ export const importDocumentFromImslp = async (
             .remove([storagePath])
             .catch(() => undefined);
         await supabase.from('documents').delete().eq('id', id);
+        noteLibraryMutationCommitted();
     };
 
     try {
@@ -273,8 +280,9 @@ export const importDocumentFromImslp = async (
             await rollback();
             return { ok: false, fallback: result };
         }
+        noteLibraryMutationCommitted();
 
-        const bytes = await loadDocumentBytes({ ...document, page_count: null });
+        const bytes = await loadDocumentBytes({ ...document, page_count: null }, { userId: ownerId });
         const pageCount = await countPdfPages(bytes);
         if (pageCount !== null) {
             await supabase.from('documents').update({ page_count: pageCount }).eq('id', id);
@@ -297,6 +305,7 @@ export const listFavoriteDocumentIds = async (): Promise<Set<string>> => {
 };
 
 export const setDocumentFavorite = async (docId: string, userId: string, favorite: boolean): Promise<void> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     if (favorite) {
         const { error } = await supabase
@@ -308,19 +317,23 @@ export const setDocumentFavorite = async (docId: string, userId: string, favorit
         if (error) {
             throw new Error(`Could not add favorite: ${error.message}`);
         }
+        noteLibraryMutationCommitted();
         return;
     }
     const { error } = await supabase.from('document_favorites').delete().eq('document_id', docId).eq('user_id', userId);
     if (error) {
         throw new Error(`Could not remove favorite: ${error.message}`);
     }
+    noteLibraryMutationCommitted();
 };
 
 export const renameDocument = async (docId: string, title: string): Promise<void> => {
+    noteLibraryMutation();
     const { error } = await getSupabase().from('documents').update({ title }).eq('id', docId);
     if (error) {
         throw new Error(`Could not rename: ${error.message}`);
     }
+    noteLibraryMutationCommitted();
     const cached = await getCachedPdf(docId);
     if (cached) {
         await putCachedPdf({ ...cached, title });
@@ -334,6 +347,7 @@ export const renameDocument = async (docId: string, title: string): Promise<void
  * The whole `{id}/` folder is listed so import backups don't leak.
  */
 export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     const { data: objects } = await supabase.storage.from('scores').list(doc.id);
     const paths = (objects ?? []).map((o) => `${doc.id}/${o.name}`);
@@ -343,10 +357,26 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     if (storageError) {
         throw new Error(`Could not delete the PDF: ${storageError.message}`);
     }
+    // Published covers live in their own bucket under the same folder. Best
+    // effort: an orphaned 40 KB image must not stop the delete, and the row's
+    // cascade already makes it unreachable. list() can be refused — still
+    // remove the stamped revision, same as scores falling back to storage_path.
+    try {
+        const knownCover = doc.thumb_rev != null ? [`${doc.id}/${doc.thumb_rev}.jpg`] : [];
+        const { data: covers } = await supabase.storage.from('thumbnails').list(doc.id);
+        const listed = (covers ?? []).map((o) => `${doc.id}/${o.name}`);
+        const coverPaths = [...new Set([...knownCover, ...listed])];
+        if (coverPaths.length > 0) {
+            await supabase.storage.from('thumbnails').remove(coverPaths);
+        }
+    } catch {
+        // See above.
+    }
     const { error } = await supabase.from('documents').delete().eq('id', doc.id);
     if (error) {
         throw new Error(`Could not delete: ${error.message}`);
     }
+    noteLibraryMutationCommitted();
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(doc.id),
@@ -369,9 +399,57 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
  * write (private browsing, no quota) gets the score without an offline copy
  * rather than an unopenable score — which is what a bare `put` cost us.
  */
-export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> => {
-    const cached = await getCachedPdf(doc.id);
+/** Bytes the caller already holds from the cache, so they are not read (and copied) twice. */
+export interface PreloadedBytes {
+    bytes: ArrayBuffer;
+    contentRev: number;
+    archivedAt: string | null;
+}
+
+/** A download started before the row was known — see prefetchDocumentBytes. */
+export interface BytesPrefetch {
+    /** The storage path the download assumed; honoured only if the row agrees. */
+    path: string;
+    bytes: Promise<ArrayBuffer | null>;
+}
+
+/**
+ * Start the PDF download in parallel with the row and role fetches. A cold
+ * open otherwise pays two round-trips in series — the row for its
+ * storage_path, then the bytes — although every score lives at
+ * `{id}/original.pdf` (documentRowFromCache already assumes as much). The
+ * caller hands this to loadDocumentBytes, which uses the result only if the
+ * row's storage_path is the path assumed here. Storage RLS still applies: a
+ * caller who cannot see the score gets null, and the row fetch says why.
+ */
+export const prefetchDocumentBytes = (docId: string): BytesPrefetch => {
+    const path = `${docId}/original.pdf`;
+    const bytes = getSupabase()
+        .storage.from('scores')
+        .download(path)
+        .then(({ data, error }) => (error || !data ? null : data.arrayBuffer()))
+        .catch(() => null);
+    return { path, bytes };
+};
+
+export const loadDocumentBytes = async (
+    doc: DocumentRow,
+    options: { preloaded?: PreloadedBytes; prefetch?: BytesPrefetch; userId?: string } = {},
+): Promise<ArrayBuffer> => {
     const wantRev = doc.content_rev ?? 0;
+    const { preloaded, prefetch, userId } = options;
+    if (preloaded && preloaded.contentRev >= wantRev) {
+        // The warm open already read and materialised these bytes; a second
+        // Dexie read would hold a second multi-megabyte copy for nothing.
+        if (preloaded.archivedAt !== doc.archived_at) {
+            const cached = await getCachedPdf(doc.id);
+            if (cached) {
+                await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
+            }
+        }
+        return preloaded.bytes;
+    }
+    const cached = await getCachedPdf(doc.id);
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
         // Refresh the archive flag from the row we were handed, same as fetchMyRole
         // does for the role — an offline open must know the score is read-only.
@@ -380,15 +458,25 @@ export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> 
         }
         return readCachedPdfBytes(cached.bytes);
     }
-    const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
-    if (error || !data) {
-        if (cached) {
-            // Offline with a stale cache beats no score at all.
-            return readCachedPdfBytes(cached.bytes);
+    // Prefetch left before the row was known. Honour it only for an
+    // unreplaced score (content_rev 0): a replace that raced the download
+    // would otherwise be cached under the new revision and never re-fetched.
+    const prefetched =
+        prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
+    let bytes: ArrayBuffer;
+    if (prefetched) {
+        bytes = prefetched;
+    } else {
+        const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
+        if (error || !data) {
+            if (cached) {
+                // Offline with a stale cache beats no score at all.
+                return readCachedPdfBytes(cached.bytes);
+            }
+            throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
         }
-        throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
+        bytes = await data.arrayBuffer();
     }
-    const bytes = await data.arrayBuffer();
     await putCachedPdf({
         docId: doc.id,
         bytes,
@@ -397,6 +485,7 @@ export const loadDocumentBytes = async (doc: DocumentRow): Promise<ArrayBuffer> 
         myRole: cached?.myRole,
         contentRev: wantRev,
         archivedAt: doc.archived_at,
+        userId: userId ?? cached?.userId,
     });
     return bytes;
 };
@@ -417,6 +506,7 @@ export const replaceDocumentPdf = async (
     newBytes: Uint8Array,
     onProgress?: (progress: UploadProgress) => void,
 ): Promise<DocumentRow> => {
+    noteLibraryMutation();
     const supabase = getSupabase();
     const backupPath = `${doc.id}/${BACKUP_OBJECT_NAME}`;
     const { error: backupError } = await supabase.storage
@@ -444,6 +534,7 @@ export const replaceDocumentPdf = async (
     if (updateError) {
         throw new Error(`The cleaned file was saved but the document could not be updated: ${updateError.message}`);
     }
+    noteLibraryMutationCommitted();
 
     const cached = await getCachedPdf(doc.id);
     await putCachedPdf({
@@ -453,6 +544,7 @@ export const replaceDocumentPdf = async (
         cachedAt: new Date().toISOString(),
         myRole: cached?.myRole ?? 'owner',
         contentRev: updated.content_rev,
+        userId: cached?.userId,
     });
 
     // The stored bytes changed, so the old first-page render is wrong — the
