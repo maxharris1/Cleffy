@@ -32,8 +32,9 @@ export interface ScoreAnalysisStatusRow {
  * across the page-cut seam, which changes what every 4+ page score sounds like.
  * svc-9 realises ornaments, appoggiaturas, tempo-relative graces and swing.
  * svc-10 is the Audiveris 5.11.0 recognizer — a new engine changes what a PDF sounds like.
+ * svc-11 carries voices, infers pedal for unmarked scores and repairs misread bars (ScoreData v5).
  */
-export const CURRENT_ENGINE_GENERATION = 10;
+export const CURRENT_ENGINE_GENERATION = 11;
 
 const engineGeneration = (engineVersion: string | null): number | null => {
     const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');

@@ -45,8 +45,9 @@ import type { ScoreData } from './scoreData.js';
  * dynamics, so rit./a tempo/hairpins survive the page cut instead of resetting.
  * svc-9: ornaments, appoggiatura, tempo-relative graces, swing.
  * svc-10: engine upgrade 5.6.1 → 5.11.0.
+ * svc-11: voices (ScoreData v5), per-voice dynamics, auto-pedal, rhythm repair, Baroque ornaments.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-10';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-11';
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;
