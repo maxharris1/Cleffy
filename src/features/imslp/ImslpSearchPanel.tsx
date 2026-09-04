@@ -2,7 +2,15 @@ import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type React
 
 import { displayWorkTitle, searchTokens, splitSearchResults } from '@/features/imslp/imslpDisplay';
 import { searchImslp, type ImslpPeriod, type ImslpSearchHit } from '@/features/imslp/imslpApi';
-import { filterPopularWorks, groupPopularByComposer, POPULAR_WORKS, type PopularWork } from '@/features/imslp/popularWorks';
+import { ImslpScoreCard } from '@/features/imslp/ImslpScoreCard';
+import { readImslpView, writeImslpView, type ImslpView } from '@/features/imslp/imslpPrefs';
+import {
+    filterPopularWorks,
+    groupPopularByComposer,
+    POPULAR_WORKS,
+    popularWorkTags,
+    type PopularWork,
+} from '@/features/imslp/popularWorks';
 import {
     buildSearchFilters,
     categoryBackedFilters,
@@ -22,6 +30,7 @@ import {
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
+import { ViewToggle } from '@/ui/ViewToggle';
 import { chipClassName, fieldClassName } from '@/ui/classNames';
 
 interface ImslpSearchPanelProps {
@@ -37,6 +46,9 @@ const DEFAULT_INSTRUMENT = 'piano';
 /** Chip strips scroll on phones (like the library's) and wrap from sm up. */
 const CHIP_ROW_CLASS =
     'no-scrollbar -mx-4 flex items-center gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0';
+
+/** The library shelf's exact columns — both pages fill the same shell width. */
+const GRID_UL_CLASS = 'grid grid-cols-2 gap-x-5 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6';
 
 const setsEqual = (a: Set<string>, b: Set<string>): boolean => {
     if (a.size !== b.size) {
@@ -103,6 +115,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const [eraIds, setEraIds] = useState<Set<string>>(() => new Set());
     const [ignoreQueryPeriod, setIgnoreQueryPeriod] = useState(false);
     const [sort, setSort] = useState<SearchSort>('relevance');
+    const [view, setView] = useState<ImslpView>(readImslpView);
 
     const seqRef = useRef(0);
     const abortRef = useRef<AbortController | null>(null);
@@ -379,6 +392,11 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         }
     })();
 
+    const changeView = (next: ImslpView) => {
+        setView(next);
+        writeImslpView(next);
+    };
+
     const isChipPressed = (id: string): boolean => {
         if (dimension === 'era' && inferredEraIds.has(id)) {
             return true;
@@ -436,11 +454,32 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         );
     };
 
+    const renderHitCard = (hit: ImslpSearchHit, index: number) => {
+        const parsed = displayWorkTitle(hit.title);
+        const composer = hit.composer ?? parsed.composer;
+        return (
+            <ImslpScoreCard
+                key={`${hit.pageid}-${hit.title}`}
+                index={index}
+                coverTitle={parsed.work}
+                coverComposer={composer}
+                title={highlightMatches(parsed.work, tokens)}
+                composer={composer ? highlightMatches(composer, tokens) : null}
+                description={hit.snippet || null}
+                disabled={disabled}
+                onClick={() => onSelectTitle(hit.title)}
+            />
+        );
+    };
+
     const valueFacets = dimension === 'era' ? ERA_FACETS : facetValuesFor(dimension);
     const emptyParts = filtersToStatusParts(filters);
     // Name every chip whose category has no snapshot yet, not the first raw title.
     const indexLabel = joinLabels(labelsForCategories(notReady)) || 'these filters';
     const dimensionFull = selectedForDimension.size >= MAX_FILTERS_PER_DIMENSION;
+
+    // Stagger runs on across group and section boundaries, like the library's.
+    let cardIndex = 0;
 
     return (
         <div className="mt-4">
@@ -472,9 +511,13 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     />
                 </form>
 
-                <p className="mt-2 text-xs text-stone-500" aria-live="polite">
-                    {statusLine}
-                </p>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                    <p className="text-xs text-stone-500" aria-live="polite">
+                        {statusLine}
+                    </p>
+                    {/* Never disabled with the panel: switching views is free. */}
+                    <ViewToggle view={view} onChange={changeView} />
+                </div>
             </div>
 
             <div role="group" aria-label="Filter by" className={`${CHIP_ROW_CLASS} mt-2.5`}>
@@ -561,23 +604,40 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     {curatedGroups.map((group) => (
                         <div key={group.composer} className="mt-3 first:mt-1">
                             <h4 className="text-xs font-medium text-stone-400">{group.composer}</h4>
-                            <ul>
-                                {group.works.map((item: PopularWork) => (
-                                    <li key={`${item.label}-${item.title}`}>
-                                        <button
-                                            type="button"
-                                            onClick={() => onSelectTitle(item.title)}
+                            <ul className={view === 'grid' ? `mt-2 ${GRID_UL_CLASS}` : ''}>
+                                {group.works.map((item: PopularWork) =>
+                                    view === 'grid' ? (
+                                        // Composer omitted on the card — the group
+                                        // heading above already says it (the same
+                                        // reasoning as the library's stripComposer).
+                                        <ImslpScoreCard
+                                            key={`${item.label}-${item.title}`}
+                                            index={cardIndex++}
+                                            coverTitle={item.label}
+                                            coverComposer={null}
+                                            title={item.label}
+                                            tags={popularWorkTags(item)}
+                                            description={item.note ?? null}
                                             disabled={disabled}
-                                            className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
-                                        >
-                                            <span className="text-sm font-medium text-stone-800">{item.label}</span>
-                                            <span className="text-xs text-stone-500">
-                                                {item.composer}
-                                                {item.note ? ` · ${item.note}` : ''}
-                                            </span>
-                                        </button>
-                                    </li>
-                                ))}
+                                            onClick={() => onSelectTitle(item.title)}
+                                        />
+                                    ) : (
+                                        <li key={`${item.label}-${item.title}`}>
+                                            <button
+                                                type="button"
+                                                onClick={() => onSelectTitle(item.title)}
+                                                disabled={disabled}
+                                                className="flex w-full flex-col gap-0.5 border-b border-stone-200/80 py-2.5 text-left transition hover:border-accent/40 hover:bg-ink/5 disabled:opacity-50"
+                                            >
+                                                <span className="text-sm font-medium text-stone-800">{item.label}</span>
+                                                <span className="text-xs text-stone-500">
+                                                    {item.composer}
+                                                    {item.note ? ` · ${item.note}` : ''}
+                                                </span>
+                                            </button>
+                                        </li>
+                                    ),
+                                )}
                             </ul>
                         </div>
                     ))}
@@ -611,13 +671,19 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     className={`imslp-panel-view mt-3 transition-opacity ${searching ? 'opacity-60' : ''}`}
                 >
                     <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">Best matches</h3>
-                    <ul className="mt-1">{best.map(renderHit)}</ul>
+                    <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
+                        {best.map((hit, i) => (view === 'grid' ? renderHitCard(hit, i) : renderHit(hit)))}
+                    </ul>
                     {more.length > 0 ? (
                         <>
                             <h3 className="mt-4 text-xs font-medium uppercase tracking-wide text-stone-500">
                                 More from IMSLP
                             </h3>
-                            <ul className="mt-1">{more.map(renderHit)}</ul>
+                            <ul className={view === 'grid' ? `mt-3 ${GRID_UL_CLASS}` : 'mt-1'}>
+                                {more.map((hit, i) =>
+                                    view === 'grid' ? renderHitCard(hit, best.length + i) : renderHit(hit),
+                                )}
+                            </ul>
                         </>
                     ) : null}
                     {hasMore ? (

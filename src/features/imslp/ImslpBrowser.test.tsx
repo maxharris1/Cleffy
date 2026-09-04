@@ -2,7 +2,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ImslpBrowserProps } from '@/features/imslp/ImslpBrowser';
-import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
+import type { ImslpEdition, ImslpSearchResponse, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import {
     displayEditionName,
     displayWorkTitle,
@@ -13,9 +13,34 @@ import {
     splitSearchResults,
     suggestedPdfName,
 } from '@/features/imslp/imslpDisplay';
-import { groupPopularByComposer, POPULAR_WORKS } from '@/features/imslp/popularWorks';
-import type { ImslpSearchResponse } from '@/features/imslp/imslpApi';
+import { groupPopularByComposer, POPULAR_WORKS, popularWorkTags } from '@/features/imslp/popularWorks';
 import { buildSearchFilters, hasActiveFilters } from '@/features/imslp/searchFacets';
+
+/**
+ * Node defines a `localStorage` global whose getter returns undefined unless
+ * the process was started with --localstorage-file, and under vitest's jsdom
+ * environment `window` IS globalThis — so that getter shadows the Storage jsdom
+ * built and `window.localStorage` reads as undefined.
+ *
+ * The panel survives that on its own (imslpPrefs treats a throwing store as
+ * "nothing saved" and falls back to rows), but the card-view tests need a
+ * store they can seed, so they bring their own.
+ */
+const memoryStorage = (): Storage => {
+    const entries = new Map<string, string>();
+    return {
+        get length() {
+            return entries.size;
+        },
+        key: (i: number) => [...entries.keys()][i] ?? null,
+        getItem: (k: string) => entries.get(k) ?? null,
+        setItem: (k: string, v: string) => void entries.set(k, String(v)),
+        removeItem: (k: string) => void entries.delete(k),
+        clear: () => entries.clear(),
+    };
+};
+
+vi.stubGlobal('localStorage', memoryStorage());
 
 const hit = (title: string, pageid: number) => ({
     title,
@@ -143,6 +168,13 @@ describe('popular works browse', () => {
         const beethoven = groups.find((g) => g.composer === 'Beethoven');
         expect(beethoven?.works.some((w) => w.label === 'Moonlight Sonata')).toBe(true);
         expect(beethoven?.works.length).toBeGreaterThanOrEqual(8);
+    });
+
+    it('humanizes a curated work’s facet ids into card tags', () => {
+        const moonlight = POPULAR_WORKS.find((w) => w.label === 'Moonlight Sonata');
+        expect(moonlight && popularWorkTags(moonlight)).toEqual(['Piano', 'Sonata', 'Classical', 'C-sharp minor']);
+        // Only fields the work really has — no fabricated tags.
+        expect(popularWorkTags({ label: 'X', title: 'X (Y, Z)', composer: 'Y' })).toEqual([]);
     });
 });
 
@@ -630,5 +662,123 @@ describe('ImslpBrowser', () => {
         expect(screen.getByRole('button', { name: 'Early 20th century' })).toBeInTheDocument();
         // The status line names the era in force, matching the pressed chip.
         expect(screen.getByText('Piano · Romantic · 1 result')).toBeInTheDocument();
+    });
+
+    describe('card view', () => {
+        beforeEach(() => {
+            window.localStorage.removeItem('cleffy:imslp-view');
+        });
+
+        it('defaults to rows, with the view toggle in the sticky header', async () => {
+            const { screen } = await import('@testing-library/react');
+
+            await renderBrowser();
+
+            expect(screen.getByRole('button', { name: 'List view' })).toHaveAttribute('aria-pressed', 'true');
+            expect(screen.getByRole('button', { name: 'Grid view' })).toHaveAttribute('aria-pressed', 'false');
+            expect(screen.getByText('Moonlight Sonata').closest('ul')?.className ?? '').not.toContain('grid-cols');
+        });
+
+        it('switches Popular to cards with real tags, and remembers the choice', async () => {
+            const { screen, within } = await import('@testing-library/react');
+            const userEvent = (await import('@testing-library/user-event')).default;
+
+            await renderBrowser();
+            await userEvent.click(screen.getByRole('button', { name: 'Grid view' }));
+
+            expect(window.localStorage.getItem('cleffy:imslp-view')).toBe('grid');
+            expect(screen.getAllByText('Moonlight Sonata')[0]!.closest('ul')?.className).toContain('grid-cols-2');
+
+            // Tags come from the work's own curated metadata, humanized through
+            // the facet tables. Scoped with within() — a bare "Piano" also
+            // lives in the status line and the filter chips.
+            const card = screen.getByRole('button', { name: /Moonlight Sonata/ });
+            expect(within(card).getByText('Piano')).toBeInTheDocument();
+            expect(within(card).getByText('Sonata')).toBeInTheDocument();
+            expect(within(card).getByText('Classical')).toBeInTheDocument();
+            expect(within(card).getByText('C-sharp minor')).toBeInTheDocument();
+        });
+
+        it('starts in cards when the choice was saved', async () => {
+            const { screen } = await import('@testing-library/react');
+            window.localStorage.setItem('cleffy:imslp-view', 'grid');
+
+            await renderBrowser();
+
+            expect(screen.getByRole('button', { name: 'Grid view' })).toHaveAttribute('aria-pressed', 'true');
+            expect(screen.getAllByText('Moonlight Sonata')[0]!.closest('ul')?.className).toContain('grid-cols-2');
+        });
+
+        it('opens a work from a Popular card', async () => {
+            const { screen } = await import('@testing-library/react');
+            const userEvent = (await import('@testing-library/user-event')).default;
+            const api = await import('@/features/imslp/imslpApi');
+
+            const title = 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)';
+            const workSpy = vi.spyOn(api, 'fetchImslpWork').mockResolvedValue({
+                title,
+                composer: 'Beethoven, Ludwig van',
+                imslpUrl: 'https://imslp.org/wiki/Moonlight',
+                editions: [edition('clean-scan.pdf')],
+            });
+            window.localStorage.setItem('cleffy:imslp-view', 'grid');
+
+            await renderBrowser();
+            await userEvent.click(screen.getByRole('button', { name: /Moonlight Sonata/ }));
+
+            await screen.findByText('Choose a PDF edition');
+            expect(workSpy).toHaveBeenCalledWith(title);
+        });
+
+        it('renders search hits as cards with highlights and snippets', async () => {
+            const { screen, within } = await import('@testing-library/react');
+            const userEvent = (await import('@testing-library/user-event')).default;
+            const api = await import('@/features/imslp/imslpApi');
+
+            vi.spyOn(api, 'searchImslp').mockResolvedValue(
+                searchOk({
+                    results: Array.from({ length: 10 }, (_, i) => ({
+                        ...hit(
+                            i === 0
+                                ? 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)'
+                                : `Other Work ${i} (Composer, Name)`,
+                            1458 + i,
+                        ),
+                        snippet: 'A snippet about the sonata form.',
+                    })),
+                }),
+            );
+            window.localStorage.setItem('cleffy:imslp-view', 'grid');
+
+            await renderBrowser();
+            await userEvent.type(
+                screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'),
+                'beethoven sonata',
+            );
+
+            expect(await screen.findByText('Best matches')).toBeInTheDocument();
+            expect(screen.getByText('More from IMSLP')).toBeInTheDocument();
+
+            // The highlight <mark>s split the title into chunks, which the
+            // accessible-name computation joins without spaces — so find the
+            // card by its stitched-together text, not by role name.
+            const title = screen.getAllByText((_, el) => el?.textContent === 'Piano Sonata No.14, Op.27 No.2')[0]!;
+            const card = title.closest('button')!;
+            // The typed tokens are highlighted in the card's readable title.
+            expect(card.querySelector('mark')).not.toBeNull();
+            expect(within(card).getByText('A snippet about the sonata form.')).toBeInTheDocument();
+        });
+
+        it('disables the cards — but never the view toggle — while the library is busy', async () => {
+            const { screen } = await import('@testing-library/react');
+            window.localStorage.setItem('cleffy:imslp-view', 'grid');
+
+            await renderBrowser({ busy: true });
+
+            const card = screen.getByRole('button', { name: /Moonlight Sonata/ });
+            expect(card).toBeDisabled();
+            expect(screen.getByRole('button', { name: 'Grid view' })).toBeEnabled();
+            expect(screen.getByRole('button', { name: 'List view' })).toBeEnabled();
+        });
     });
 });

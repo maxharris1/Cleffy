@@ -4,7 +4,7 @@
  * edge ranker's popularity prior and the Popular list cannot drift apart.
  */
 
-import type { EraId } from '@/features/imslp/searchFacets';
+import { ERA_FACETS, FORM_FACETS, INSTRUMENT_FACETS, KEY_FACETS, type EraId } from '@/features/imslp/searchFacets';
 
 export { POPULAR_WORKS } from '../../../supabase/functions/_shared/popularWorks';
 export type { PopularWork } from '../../../supabase/functions/_shared/popularWorks';
@@ -30,6 +30,30 @@ export const groupPopularByComposer = (works: PopularWork[] = POPULAR_WORKS): Co
     return [...map.entries()]
         .map(([composer, groupWorks]) => ({ composer, works: groupWorks }))
         .sort((a, b) => a.composer.localeCompare(b.composer));
+};
+
+/**
+ * Facet labels for a curated work's card tag row — only the fields the work
+ * really has, humanized through the facet tables so tags and filter chips
+ * spell things the same way. Live search hits get no tags at all: IMSLP's
+ * search payload carries no per-work metadata, and fabricating chips from the
+ * active filters would stamp the same words on every card.
+ */
+export const popularWorkTags = (work: PopularWork): string[] => {
+    const tags: string[] = [];
+    if (work.instrument) {
+        tags.push(INSTRUMENT_FACETS.find((f) => f.id === work.instrument)?.label ?? work.instrument);
+    }
+    if (work.form) {
+        tags.push(FORM_FACETS.find((f) => f.id === work.form)?.label ?? work.form);
+    }
+    if (work.era) {
+        tags.push(ERA_FACETS.find((f) => f.id === work.era)?.label ?? work.era);
+    }
+    if (work.key) {
+        tags.push(KEY_FACETS.find((f) => f.id === work.key)?.label ?? work.key);
+    }
+    return tags;
 };
 
 const setHas = (ids: Iterable<string> | undefined): Set<string> => {
