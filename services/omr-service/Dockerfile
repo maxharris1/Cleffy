@@ -1,4 +1,4 @@
-# Cleffy OMR service: Audiveris 5.6.1 (headless) + Node wrapper.
+# Cleffy OMR service: Audiveris 5.11.0 (headless) + Node wrapper.
 #
 # The Audiveris release .deb bundles its own Java runtime (jpackage), so the
 # image needs no system JDK. Audiveris OCR needs Tesseract *3.04 legacy*
@@ -21,7 +21,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates fontconfig fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-ARG AUDIVERIS_VERSION=5.6.1
+ARG AUDIVERIS_VERSION=5.11.0
 # Tesseract 3.04 eng — Audiveris runs OCR in legacy mode only.
 ARG TESSDATA_ENG_URL=https://github.com/tesseract-ocr/tessdata/raw/3.04.00/eng.traineddata
 RUN curl -fsSL -o /tmp/audiveris.deb \
@@ -35,10 +35,14 @@ RUN curl -fsSL -o /tmp/audiveris.deb \
 # at the parent (the convention older Tesseract used) makes Audiveris log
 # "Language 'eng' is not supported" as a WARN, disable OCR, and carry on — so the
 # export silently contains no <words> at all: no tempo headings, no textual
-# cresc./dim., no lyrics. Verified against 5.6.1 on a real score.
+# cresc./dim., no lyrics. Verified against 5.6.1; 5.11.0 still honors TESSDATA_PREFIX.
+# 5.11 WellKnowns.enableHiDpiScaling() JNA-loads libgtk-3 at class init. The
+# UnsatisfiedLinkError is an Error (not Exception), so -batch dies before
+# argument parsing. GDK_SCALE is the documented override that skips the probe.
 ENV AUDIVERIS_BIN=/opt/audiveris-root/opt/audiveris/bin/Audiveris \
     TESSDATA_PREFIX=/opt/tesseract-ocr/tessdata/ \
     JAVA_TOOL_OPTIONS="-Xmx3g --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED" \
+    GDK_SCALE=1 \
     NODE_ENV=production \
     PORT=8080
 

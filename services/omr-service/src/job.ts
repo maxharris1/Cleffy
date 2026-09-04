@@ -1,6 +1,6 @@
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -43,19 +43,73 @@ import type { ScoreData } from './scoreData.js';
  * svc-8 seeds the second shard of a split score with the first's tempo and
  * dynamics, so rit./a tempo/hairpins survive the page cut instead of resetting.
  * svc-9: ornaments, appoggiatura, tempo-relative graces, swing.
+ * svc-10: engine upgrade 5.6.1 → 5.11.0.
  */
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-9';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-10';
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;
-/** Cost-neutral page parallel: 2 JVMs on the existing 2 vCPU shape. */
-const PARALLEL_SHEET_MIN_PAGES = 4;
+/** Cost-neutral page parallel: 2 JVMs — only when the container can hold them. */
+export const PARALLEL_SHEET_MIN_PAGES = 4;
 const PARALLEL_SHEET_SHARDS = 2;
 const PARALLEL_SHEET_OVERLAP = 1;
+/**
+ * Two concurrent -Xmx3g heaps + OpenCV/JavaCPP + Node + /tmp need more than 8Gi.
+ * Cloud Run is 4Gi; typical Docker Desktop is ≤8Gi — both stay serial.
+ */
+export const PARALLEL_MIN_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
+const CGROUP_V2_MEMORY_MAX = '/sys/fs/cgroup/memory.max';
+const CGROUP_V1_MEMORY_LIMIT = '/sys/fs/cgroup/memory/memory.limit_in_bytes';
+/** cgroup v1 "unlimited" is a near-2^63 sentinel, not a real limit. */
+const CGROUP_UNLIMITED_FLOOR = 1e15;
 
 const HEARTBEAT_MIN_INTERVAL_MS = 10_000;
 const LEASE_HEARTBEAT_MS = 60_000;
 const COMPLETE_RETRIES = 2;
+
+/** Parse a cgroup memory.max / memory.limit_in_bytes value. Null = unlimited/unknown. */
+export const parseCgroupMemoryLimit = (raw: string): number | null => {
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed === 'max' || trimmed === '-1') {
+        return null;
+    }
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n <= 0 || n >= CGROUP_UNLIMITED_FLOOR) {
+        return null;
+    }
+    return Math.floor(n);
+};
+
+export const readContainerMemoryBytes = (): number | null => {
+    for (const path of [CGROUP_V2_MEMORY_MAX, CGROUP_V1_MEMORY_LIMIT]) {
+        try {
+            const parsed = parseCgroupMemoryLimit(readFileSync(path, 'utf8'));
+            if (parsed !== null) {
+                return parsed;
+            }
+        } catch {
+            // missing or unreadable
+        }
+    }
+    const total = totalmem();
+    return total > 0 ? total : null;
+};
+
+export const isParallelForcedOff = (raw: string | undefined): boolean => {
+    const v = raw?.trim().toLowerCase();
+    return v === '0' || v === 'false' || v === 'off';
+};
+
+/** Parallel only with enough pages and more than 8Gi of container RAM. */
+export const shouldRunParallelShards = (
+    pageCount: number,
+    containerMemoryBytes: number | null,
+    parallelEnv: string | undefined = process.env.OMR_PARALLEL,
+): boolean =>
+    pageCount >= PARALLEL_SHEET_MIN_PAGES &&
+    !isParallelForcedOff(parallelEnv) &&
+    containerMemoryBytes !== null &&
+    containerMemoryBytes > PARALLEL_MIN_MEMORY_BYTES;
 
 export interface JobRequest {
     documentId: string;
@@ -275,8 +329,33 @@ const transcribe = async (
     registerKill?: (kill: KillJvm) => void,
 ): Promise<ScoreData> => {
     const pages = timings.pageCount ?? 0;
+    const memoryBytes = readContainerMemoryBytes();
+    if (shouldRunParallelShards(pages, memoryBytes)) {
+        try {
+            return await transcribeParallel(pdfPath, workDir, timings, onSheet, registerKill);
+        } catch (err) {
+            if (
+                err instanceof JobError &&
+                err.code === ERROR_CODES.omrCrash &&
+                timings.parallelPath !== 'serial_fallback'
+            ) {
+                timings.parallelPath = 'serial_fallback';
+                timings.parallelFallbackReasons = ['omr_crash'];
+                return transcribeRange(
+                    pdfPath,
+                    join(workDir, 'out-serial'),
+                    timings,
+                    onSheet,
+                    registerKill,
+                    undefined,
+                );
+            }
+            throw err;
+        }
+    }
     if (pages >= PARALLEL_SHEET_MIN_PAGES) {
-        return transcribeParallel(pdfPath, workDir, timings, onSheet, registerKill);
+        timings.parallelPath = 'serial';
+        timings.parallelFallbackReasons = ['insufficient_memory'];
     }
     return transcribeRange(pdfPath, join(workDir, 'out'), timings, onSheet, registerKill, undefined);
 };
@@ -290,11 +369,16 @@ const transcribeParallel = async (
 ): Promise<ScoreData> => {
     const ranges = splitSheetRangesOverlapping(timings.pageCount ?? 0, PARALLEL_SHEET_SHARDS, PARALLEL_SHEET_OVERLAP);
     const kills: KillJvm[] = [];
-    registerKill?.(() => {
+    const killShards = () => {
         for (const kill of kills) {
-            kill();
+            try {
+                kill();
+            } catch {
+                // already exited
+            }
         }
-    });
+    };
+    registerKill?.(killShards);
 
     const maxSheetByShard = ranges.map(() => 0);
     const report = () => {
@@ -302,26 +386,37 @@ const transcribeParallel = async (
     };
 
     const started = Date.now();
-    const artifacts = await Promise.all(
-        ranges.map(async (sheets, index) => {
-            const outDir = join(workDir, `out-${sheets.from}-${sheets.to}`);
-            const collected = await collectRangeArtifacts(
-                pdfPath,
-                outDir,
-                timings,
-                (sheet) => {
-                    maxSheetByShard[index] = Math.max(maxSheetByShard[index]!, sheet);
-                    report();
-                },
-                (kill) => {
-                    kills.push(kill);
-                },
-                sheets,
-                /* aggregateTimings */ index === 0,
-            );
-            return { ...collected, sheets };
-        }),
-    );
+
+    let artifacts: Array<{
+        mxlBuffers: Buffer[];
+        geometry: OmrGeometry | null;
+        sheets: { from: number; to: number };
+    }>;
+    try {
+        artifacts = await Promise.all(
+            ranges.map(async (sheets, index) => {
+                const outDir = join(workDir, `out-${sheets.from}-${sheets.to}`);
+                const collected = await collectRangeArtifacts(
+                    pdfPath,
+                    outDir,
+                    timings,
+                    (sheet) => {
+                        maxSheetByShard[index] = Math.max(maxSheetByShard[index]!, sheet);
+                        report();
+                    },
+                    (kill) => {
+                        kills.push(kill);
+                    },
+                    sheets,
+                    /* aggregateTimings */ index === 0,
+                );
+                return { ...collected, sheets };
+            }),
+        );
+    } catch (err) {
+        killShards();
+        throw err;
+    }
 
     const tParse = Date.now();
     const first = artifacts[0];

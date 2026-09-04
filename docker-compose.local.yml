@@ -28,6 +28,9 @@ services:
             OMR_SERVICE_SECRET: ${CLEFFY_LOCAL_OMR_SECRET:?run scripts/local-up.sh}
             SUPABASE_URL: http://kong:8000
             SUPABASE_SERVICE_ROLE_KEY: ${CLEFFY_LOCAL_SERVICE_ROLE_KEY:?run scripts/local-up.sh}
+            # qemu/amd64-on-arm plus two -Xmx3g JVMs SIGABRT even when Docker
+            # reports plenty of RAM. Cloud Run 4Gi stays serial via the memory gate.
+            OMR_PARALLEL: '0'
         ports:
             - '${CLEFFY_LOCAL_OMR_PORT:-8091}:8080'
         networks:
