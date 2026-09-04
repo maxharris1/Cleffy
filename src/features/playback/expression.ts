@@ -1,4 +1,6 @@
-import { barTicks, beatWeight, beatsForMeasure, timeSigAt } from '@/features/playback/scoreTime';
+import { barTicks, beatWeight, beatsForMeasure, measureIndexAtTick, timeSigAt } from '@/features/playback/scoreTime';
+import { analyzeVoices, handOfVoice } from '@/features/playback/voiceAnalysis';
+import type { VoiceAnalysis } from '@/features/playback/voiceAnalysis';
 import { DEFAULT_VELOCITY, HAND_LH, HAND_RH } from '@/types/scoreData';
 import type { ScoreData, ScoreNote, ScorePedal } from '@/types/scoreData';
 
@@ -63,6 +65,18 @@ export const MELODY_LIFT = 0.06;
 export const ACCOMP_DIP = 0.02;
 /** Velocity taken off a note whose onset sits between beats of a full bar. */
 export const OFFBEAT_DIP = 0.01;
+/**
+ * Velocity taken off a voice that is repeating last bar's figure under the
+ * melody — an Alberti bass, a broken-chord wash. Six MIDI steps; uncalibrated.
+ */
+export const ACCOMPANIMENT_DIP = 6 / 127;
+/**
+ * Legato: how far past its successor's onset a note keeps sounding when the
+ * two run together in one voice, as a fraction of the note's own length…
+ */
+export const LEGATO_OVERLAP_FRACTION = 0.06;
+/** …and never more than this, so a long note's overlap does not become a smear. */
+export const LEGATO_OVERLAP_MAX_S = 0.06;
 
 /** Floor for a humanized velocity: below this a note is inaudible, not quiet. */
 export const MIN_VELOCITY = 0.05;
@@ -312,9 +326,26 @@ export interface NoteShape {
     accent: number;
     /** Velocity subtracted because this note is accompaniment under a melody. */
     dip: number;
+    /**
+     * Tick of the next note in this voice when the two run legato, so the
+     * sounding end may reach past it; -1 when the note ends on its own.
+     */
+    legatoTo: number;
+    /** Ticks past `legatoTo` the note may keep sounding, before the wall-clock cap. */
+    overlapTicks: number;
+    /** Velocity offset from phrase shaping within the melody voice. May be negative. */
+    phrase: number;
 }
 
-const emptyShape = (): NoteShape => ({ roll: 0, lift: 0, accent: 0, dip: 0 });
+const emptyShape = (): NoteShape => ({
+    roll: 0,
+    lift: 0,
+    accent: 0,
+    dip: 0,
+    legatoTo: -1,
+    overlapTicks: 0,
+    phrase: 0,
+});
 
 interface ActiveNote {
     index: number;
@@ -338,18 +369,43 @@ const evictEnded = (active: ActiveNote[], tick: number): void => {
  * to its neighbours: a chord is rolled from the bottom up the way a hand
  * actually lands on it, and voicing looks at everything still sounding — a
  * held melody note stays the tune while the other hand's figure attacks under
- * it, so those attacks are dipped and not lifted. The highest sounding pitch
- * (right hand on a tie) is the melody; it is lifted only when it attacks in
- * this group. Notes take the weight of their beat, or a small dip when they
- * sit off it in a full bar. All of it is a function of the score alone, so —
+ * it, so those attacks are dipped and not lifted. The melody is the bar's
+ * melody VOICE where the voice analysis found one (so an inner or left-hand
+ * tune sings), else the highest sounding pitch; it is lifted only when it
+ * attacks in this group. A voice repeating last bar's figure under the tune
+ * is dipped further. Notes take the weight of their beat, or a small dip when
+ * they sit off it in a full bar. A note that runs into the next of its voice
+ * is marked to overlap it. All of it is a function of the score alone, so —
  * like {@link noteJitter} — it survives seeks and loop wraps unchanged.
  *
  * The result is index-aligned with `score.notes`, which the scheduler already
  * walks by index.
  */
-export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
+export const buildNoteShapes = (
+    score: ScoreData,
+    analysis: VoiceAnalysis = analyzeVoices(score),
+): readonly NoteShape[] => {
     const notes = score.notes;
     const shapes: NoteShape[] = notes.map(emptyShape);
+
+    for (let i = 0; i < notes.length; i++) {
+        const note = notes[i];
+        const shape = shapes[i];
+        if (!note || !shape) {
+            continue;
+        }
+        if (analysis.legato[i]) {
+            const next = analysis.nextInVoice[i] ?? -1;
+            const successor = next >= 0 ? notes[next] : undefined;
+            if (successor) {
+                shape.legatoTo = successor.t;
+                shape.overlapTicks = Math.round(note.d * LEGATO_OVERLAP_FRACTION);
+            }
+        }
+        if (analysis.accompaniment[i]) {
+            shape.dip += ACCOMPANIMENT_DIP;
+        }
+    }
 
     // Beat ticks and their metrical weight, from the same beat grid the
     // metronome clicks. The click's boolean accent is unchanged; this map is
@@ -402,21 +458,46 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
             (note.h === HAND_RH ? activeRh : activeLh).push({ index: i, note });
         }
 
-        let topPitch = -Infinity;
+        // The bar's melody voice, if it is sounding here, owns the tune: its
+        // highest attacking note is lifted, and its hand is the melody hand.
+        // Otherwise the highest sounding pitch decides, as it always did.
+        const bar = measureIndexAtTick(score.measures, tick);
+        const melodyVoice = bar >= 0 ? (analysis.melodyVoiceByBar[bar] ?? -1) : -1;
         let melodyHand: 0 | 1 = HAND_LH;
-        let topIndex = -1;
-        for (const { index, note } of [...activeRh, ...activeLh]) {
-            if (note.p > topPitch || (note.p === topPitch && note.h === HAND_RH && melodyHand !== HAND_RH)) {
-                topPitch = note.p;
-                melodyHand = note.h;
-                topIndex = index;
+        let liftIndex = -1;
+        let melodyVoiceSounding = false;
+        if (melodyVoice >= 0) {
+            let bestPitch = -Infinity;
+            for (const { index, note } of [...activeRh, ...activeLh]) {
+                if (analysis.voiceOf[index] !== melodyVoice) {
+                    continue;
+                }
+                melodyVoiceSounding = true;
+                if (note.t === tick && note.p > bestPitch) {
+                    bestPitch = note.p;
+                    liftIndex = index;
+                }
+            }
+            if (melodyVoiceSounding) {
+                melodyHand = handOfVoice(melodyVoice);
             }
         }
-        const topAttacking = topIndex >= 0 && notes[topIndex]?.t === tick;
-        if (topAttacking) {
-            const topShape = shapes[topIndex];
-            if (topShape) {
-                topShape.lift = MELODY_LIFT;
+        if (!melodyVoiceSounding) {
+            let topPitch = -Infinity;
+            let topIndex = -1;
+            for (const { index, note } of [...activeRh, ...activeLh]) {
+                if (note.p > topPitch || (note.p === topPitch && note.h === HAND_RH && melodyHand !== HAND_RH)) {
+                    topPitch = note.p;
+                    melodyHand = note.h;
+                    topIndex = index;
+                }
+            }
+            liftIndex = topIndex >= 0 && notes[topIndex]?.t === tick ? topIndex : -1;
+        }
+        if (liftIndex >= 0) {
+            const liftShape = shapes[liftIndex];
+            if (liftShape) {
+                liftShape.lift = MELODY_LIFT;
             }
         }
 
@@ -438,7 +519,7 @@ export const buildNoteShapes = (score: ScoreData): readonly NoteShape[] => {
                 shape.roll = Math.min(CHORD_ROLL_MAX_S, position * CHORD_ROLL_S);
                 shape.accent = accent;
                 if (bothHands && hand !== melodyHand) {
-                    shape.dip = ACCOMP_DIP;
+                    shape.dip += ACCOMP_DIP;
                 }
             });
         }

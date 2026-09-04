@@ -4,6 +4,8 @@ import {
     ACCOMP_DIP,
     buildNoteShapes,
     clampVelocity,
+    LEGATO_OVERLAP_FRACTION,
+    LEGATO_OVERLAP_MAX_S,
     MELODY_LIFT,
     noteJitter,
     PEDAL_RELEASE_TAU_S,
@@ -791,7 +793,8 @@ describe('sustain pedal', () => {
         await dry.engine.play();
         await advance(dry.ctx, 3);
         const damped = dry.ctx.sources.find((s) => s.buffer === sampleOf(dry.buffers, 72));
-        expect(lifespanOf(damped)).toBeCloseTo(480 * SPT_120 + 0.3, 9);
+        // The pickup runs legato into the chord on the next beat, so it overlaps it by 6% of itself.
+        expect(lifespanOf(damped)).toBeCloseTo((480 + Math.round(480 * LEGATO_OVERLAP_FRACTION)) * SPT_120 + 0.3, 9);
     });
 
     it('releases a pedalled note as a free string, not as a damped one', async () => {
@@ -1241,5 +1244,94 @@ describe('velocity layers', () => {
         expect(ctx.sources[1]?.stoppedAt ?? 0).toBeLessThan(restrike + 0.1);
         expect(ctx.sources[2]?.stoppedAt ?? 0).toBeGreaterThan(restrike + 0.3);
         expect(ctx.sources[3]?.stoppedAt ?? 0).toBeGreaterThan(restrike + 0.3);
+    });
+});
+
+describe('legato', () => {
+    /**
+     * A stepwise RH line in plain-gated quarters filling bar 1 of a two-bar
+     * 4/4 score. The empty second bar keeps the unmarked-close ritardando off
+     * the notes, so a tick is the same length under every one of them.
+     */
+    const line = (d = 432): ScoreData => ({
+        ...tinyScore,
+        timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        measures: [
+            { n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.08, x1: 0.5 },
+            { n: 2, tick: 1920, dTicks: 1920, page: 0, sys: 0, x0: 0.5, x1: 0.92 },
+        ],
+        totalTicks: 3840,
+        notes: [72, 74, 76, 77].map((p, i) => ({ t: i * 480, d, p, h: 0 as const })),
+    });
+    const DAMPED_TAIL_S = 0.3;
+
+    it('lets a plain note overlap the next of its voice by 6 % of itself', async () => {
+        const { ctx, engine, buffers } = makeEngine({ score: line() });
+        await engine.play();
+        await advance(ctx, 2.5);
+        const first = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        // 432 written-and-gated ticks end at 432; the successor is at 480; +26 ticks of overlap.
+        expect(lifespanOf(first)).toBeCloseTo(
+            (480 + Math.round(432 * LEGATO_OVERLAP_FRACTION)) * SPT_120 + DAMPED_TAIL_S,
+            9,
+        );
+        // The last note of the line has no successor and ends where it is written.
+        const last = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 77));
+        expect(lifespanOf(last)).toBeCloseTo(432 * SPT_120 + DAMPED_TAIL_S, 9);
+    });
+
+    it('caps the overlap at 60 ms of wall clock', async () => {
+        // At 30 bpm a tick is 4.17 ms, so 6 % of a quarter (26 ticks) would be 108 ms.
+        const { ctx, engine, buffers } = makeEngine({ score: line(), bpm: 30 });
+        await engine.play();
+        await advance(ctx, 3);
+        const spt = 60 / (30 * 480);
+        const first = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        expect(lifespanOf(first)).toBeCloseTo((480 + Math.round(LEGATO_OVERLAP_MAX_S / spt)) * spt + DAMPED_TAIL_S, 9);
+    });
+
+    it('leaves staccato notes alone', async () => {
+        const { ctx, engine, buffers } = makeEngine({ score: line(240) });
+        await engine.play();
+        await advance(ctx, 2.5);
+        const first = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        expect(lifespanOf(first)).toBeCloseTo(240 * SPT_120 + DAMPED_TAIL_S, 9);
+    });
+
+    it('adds nothing where the pedal is already pooling the line', async () => {
+        const score: ScoreData = {
+            ...line(),
+            pedals: [
+                { tick: 0, k: 'down' },
+                { tick: 1920, k: 'up' },
+            ],
+        };
+        const { ctx, engine, buffers } = makeEngine({ score });
+        await engine.play();
+        await advance(ctx, 2.5);
+        const first = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
+        // Held to the lift and released as a free string — the pedal's job, unchanged.
+        expect(lifespanOf(first)).toBeCloseTo(1920 * SPT_120 + 5 * PEDAL_RELEASE_TAU_S, 9);
+    });
+
+    it('gives a note the same length and loudness whether reached by playing or by seeking', async () => {
+        const played = makeEngine({ score: line() });
+        await played.engine.play();
+        await advance(played.ctx, 2.5);
+        const sought = makeEngine({ score: line() });
+        sought.engine.seek(960);
+        await sought.engine.play();
+        await advance(sought.ctx, 1.5);
+        // The last two attacks of each run are E5 and F5; anchors are shared
+        // between neighbouring pitches, so pick by order rather than by sample.
+        const lastTwo = (run: typeof played) =>
+            [...run.ctx.sources].sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0)).slice(-2);
+        const fromPlay = lastTwo(played);
+        const fromSeek = lastTwo(sought);
+        expect(fromSeek).toHaveLength(2);
+        for (let i = 0; i < 2; i++) {
+            expect(lifespanOf(fromSeek[i])).toBeCloseTo(lifespanOf(fromPlay[i]), 9);
+            expect(voiceGainOf(fromSeek[i])).toBeCloseTo(voiceGainOf(fromPlay[i]), 12);
+        }
     });
 });

@@ -8,6 +8,7 @@ import {
     buildSoftClipCurve,
     clampVelocity,
     ACCOMP_DIP,
+    ACCOMPANIMENT_DIP,
     CHORD_ROLL_MAX_S,
     CHORD_ROLL_S,
     DOWNBEAT_ACCENT,
@@ -16,6 +17,7 @@ import {
     filterCutoffHz,
     JITTER_TIME_S,
     JITTER_VEL,
+    LEGATO_OVERLAP_FRACTION,
     MELODY_LIFT,
     noteJitter,
     OFFBEAT_DIP,
@@ -461,6 +463,136 @@ describe('buildNoteShapes', () => {
         expect(beforeRh[0]?.dip).toBe(0);
         expect(beforeRh[1]?.lift).toBe(MELODY_LIFT);
         expect(beforeRh[1]?.dip).toBe(0);
+    });
+
+    describe('voices (v5)', () => {
+        const plain = (written: number): number => Math.round(written * 0.9);
+        const bars = (count: number): ScoreData['measures'] =>
+            Array.from({ length: count }, (_, i) => ({
+                n: i + 1,
+                tick: i * 1920,
+                dTicks: 1920,
+                page: 0,
+                sys: 0,
+                x0: 0.1,
+                x1: 0.9,
+            }));
+        const sorted = (notes: ScoreNote[]): ScoreNote[] =>
+            [...notes].sort((a, b) => a.t - b.t || a.h - b.h || a.p - b.p);
+        const alberti = (bar: number): ScoreNote[] =>
+            [48, 55, 52, 55, 48, 55, 52, 55].map((p, i) => ({
+                t: bar * 1920 + i * 240,
+                d: plain(240),
+                p,
+                h: 1 as const,
+            }));
+        const tune = (bar: number, pitches: number[], vc?: number): ScoreNote[] =>
+            pitches.map((p, i) => ({
+                t: bar * 1920 + i * 480,
+                d: plain(480),
+                p,
+                h: 0 as const,
+                ...(vc !== undefined ? { vc } : {}),
+            }));
+
+        it('lifts the melody VOICE, not the highest note, when the slots put the tune inside the hand', () => {
+            const notes = sorted([
+                { t: 0, d: 1920 - 192, p: 84, h: 0, vc: 0 },
+                { t: 1920, d: 1920 - 192, p: 84, h: 0, vc: 0 },
+                ...tune(0, [72, 74, 76, 77], 1),
+                ...tune(1, [79, 77, 76, 74], 1),
+            ]);
+            const score: ScoreData = {
+                ...tinyScore,
+                timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+                measures: bars(2),
+                notes,
+                totalTicks: 3840,
+            };
+            const shaped = buildNoteShapes(score);
+            notes.forEach((note, i) => {
+                // Every inner-voice attack sings; the pedal tone above it does not.
+                expect(shaped[i]?.lift).toBe(note.vc === 1 ? MELODY_LIFT : 0);
+            });
+        });
+
+        it('lifts a two-voice bar\u2019s upper line and leaves the lower alone', () => {
+            const notes = sorted([...tune(0, [72, 74, 76, 77], 0), ...tune(0, [60, 62, 64, 65], 1)]);
+            const score: ScoreData = {
+                ...tinyScore,
+                timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+                measures: bars(1),
+                notes,
+                totalTicks: 1920,
+            };
+            const shaped = buildNoteShapes(score);
+            notes.forEach((note, i) => {
+                expect(shaped[i]?.lift).toBe(note.vc === 0 ? MELODY_LIFT : 0);
+                // Both voices are one hand: no accompaniment dip either way.
+                expect(shaped[i]?.dip).toBe(0);
+            });
+        });
+
+        it('dips an Alberti bass a further ACCOMPANIMENT_DIP once it repeats under the tune', () => {
+            const notes = sorted([
+                ...tune(0, [72, 74, 76, 77]),
+                ...alberti(0),
+                ...tune(1, [79, 77, 76, 74]),
+                ...alberti(1),
+            ]);
+            const score: ScoreData = {
+                ...tinyScore,
+                timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+                measures: bars(2),
+                notes,
+                totalTicks: 3840,
+            };
+            const shaped = buildNoteShapes(score);
+            notes.forEach((note, i) => {
+                if (note.h === 0) {
+                    expect(shaped[i]?.dip).toBe(0);
+                } else if (note.t < 1920) {
+                    expect(shaped[i]?.dip).toBeCloseTo(ACCOMP_DIP, 12);
+                } else {
+                    expect(shaped[i]?.dip).toBeCloseTo(ACCOMP_DIP + ACCOMPANIMENT_DIP, 12);
+                }
+            });
+        });
+
+        it('marks a legato note to overlap its successor by 6 % of itself, and a staccato one not at all', () => {
+            const legato = tune(0, [72, 74, 76, 77]);
+            const staccato = legato.map((n) => ({ ...n, d: 240 }));
+            const score = (notes: ScoreNote[]): ScoreData => ({
+                ...tinyScore,
+                timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+                measures: bars(1),
+                notes,
+                totalTicks: 1920,
+            });
+            const shapedLegato = buildNoteShapes(score(legato));
+            expect(shapedLegato.map((s) => s.legatoTo)).toEqual([480, 960, 1440, -1]);
+            expect(shapedLegato.map((s) => s.overlapTicks)).toEqual([26, 26, 26, 0]);
+            expect(Math.round(plain(480) * LEGATO_OVERLAP_FRACTION)).toBe(26);
+            const shapedStaccato = buildNoteShapes(score(staccato));
+            expect(shapedStaccato.map((s) => s.legatoTo)).toEqual([-1, -1, -1, -1]);
+        });
+
+        it('is the same on a second pass', () => {
+            const notes = sorted([
+                ...tune(0, [72, 74, 76, 77]),
+                ...alberti(0),
+                ...tune(1, [79, 77, 76, 74]),
+                ...alberti(1),
+            ]);
+            const score: ScoreData = {
+                ...tinyScore,
+                timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+                measures: bars(2),
+                notes,
+                totalTicks: 3840,
+            };
+            expect(buildNoteShapes(score)).toEqual(buildNoteShapes(score));
+        });
     });
 
     it('accents full bars and never the pickup', () => {
