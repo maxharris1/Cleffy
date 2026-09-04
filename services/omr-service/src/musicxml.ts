@@ -20,6 +20,7 @@ import {
     type AccidentalMark,
     type OrnamentKind,
 } from './ornaments.js';
+import { repairRhythm } from './rhythmRepair.js';
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
 export interface MusicalScore {
@@ -60,6 +61,11 @@ export interface MusicalScore {
      * buildScoreData bakes the long–short into the note list.
      */
     swing?: boolean;
+    /**
+     * How many bar-voices the rhythm repair edited. Service-side telemetry
+     * (`timings.rhythmRepairs`); the reader only sees `rhythm_repaired`.
+     */
+    rhythmRepairs?: number;
 }
 
 /**
@@ -692,6 +698,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
     const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings, seed });
     const notes = [...leadResult.notes];
     let swing = leadResult.swing;
+    let rhythmRepairs = leadResult.rhythmRepairs;
     for (const target of targets.slice(1)) {
         const secondary = parsePart(target.part, {
             fallbackHand: target.fallbackHand,
@@ -702,6 +709,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
         });
         notes.push(...secondary.notes);
         swing = swing || secondary.swing;
+        rhythmRepairs += secondary.rhythmRepairs;
     }
 
     if (leadStaves < 2 && targets.length === 1) {
@@ -735,6 +743,7 @@ export const parseMusicXmlString = (xml: string, tickOffset = 0, seed: ParseSeed
         dynamicCurves: leadResult.dynamicCurves,
         meterDefaultBpm: leadResult.meterDefaultBpm,
         swing,
+        rhythmRepairs,
     };
 };
 
@@ -871,7 +880,25 @@ interface PartResult {
     dynamicCurves: Array<{ staff: number } & DynamicCurve>;
     meterDefaultBpm: number;
     swing: boolean;
+    /** Bar-voices the rhythm repair edited (see rhythmRepair.ts). */
+    rhythmRepairs: number;
 }
+
+export type BeamState = 'begin' | 'continue' | 'end';
+
+/** Primary-beam state of a note; hooks and secondary beams are not group evidence. */
+const beamOf = (noteEl: Elem): BeamState | undefined => {
+    for (const beam of childElements(noteEl, 'beam')) {
+        if ((beam.getAttribute('number') ?? '1') !== '1') {
+            continue;
+        }
+        const value = (beam.textContent ?? '').trim();
+        if (value === 'begin' || value === 'continue' || value === 'end') {
+            return value;
+        }
+    }
+    return undefined;
+};
 
 /**
  * A mark's staff, when the writer said which: `null` means unattributed.
@@ -887,7 +914,7 @@ type EventStaff = number | null;
  * written after a <backup> lands near the start of the bar rather than after
  * the whole upper staff.
  */
-type RawEvent =
+export type RawEvent =
     | {
           k: 'note';
           rel: number;
@@ -904,6 +931,25 @@ type RawEvent =
           fermata: boolean;
           ornament?: { kind: OrnamentKind; accidentalMark?: AccidentalMark };
           arpeggiate?: 'up' | 'down';
+          /** Engraved <type> (quarter, eighth, …) — the rhythm repair's evidence, never trusted over <duration>. */
+          type?: string;
+          /** <dot> count. */
+          dots: number;
+          /** Primary-beam state (<beam number="1">), when the note is beamed. */
+          beam?: BeamState;
+      }
+    | {
+          /**
+           * A rest, kept so a voice's rhythm can be summed. Rests never become
+           * notes; they exist for the rhythm repair and are otherwise skipped.
+           */
+          k: 'rest';
+          rel: number;
+          dur: number;
+          staff: number;
+          voice: string;
+          /** <rest measure="yes"/> — a whole-bar rest is a bar's length by definition and never edited. */
+          measureRest: boolean;
       }
     | {
           k: 'grace';
@@ -974,7 +1020,7 @@ const NO_REPEAT_MARKS: MeasureRepeatMarks = {
 };
 
 /** Pass-1 output for one <measure>. Nothing here is padded or velocity-resolved. */
-interface RawMeasure {
+export interface RawMeasure {
     /** Position in the part's <measure> list — how secondary parts index the timeline. */
     index: number;
     /** Display number as printed (pickups are 0). */
@@ -1310,9 +1356,20 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     const isChord = firstChild(child, 'chord') !== null;
                     const durTicks = ticksOf(childInt(child, 'duration') ?? 0, divisions);
                     const start = isChord ? lastNoteStart : cursor;
-                    const isRest = firstChild(child, 'rest') !== null;
+                    const restEl = firstChild(child, 'rest');
+                    const isRest = restEl !== null;
 
                     const noteStaff = childInt(child, 'staff') ?? 1;
+                    if (isRest && durTicks > 0) {
+                        events.push({
+                            k: 'rest',
+                            rel: start,
+                            dur: durTicks,
+                            staff: noteStaff,
+                            voice: childText(child, 'voice') ?? '1',
+                            measureRest: restEl.getAttribute('measure') === 'yes',
+                        });
+                    }
                     let arts = lastArts.get(noteStaff) ?? PLAIN_ART;
                     let arp = lastArp.get(noteStaff);
                     if (!isChord) {
@@ -1337,6 +1394,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         if (midi !== null) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
                             const ornament = ornamentOf(child);
+                            const type = childText(child, 'type');
+                            const beam = beamOf(child);
                             events.push({
                                 k: 'note',
                                 rel: start,
@@ -1349,6 +1408,9 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 tieStop: tieTypes.includes('stop'),
                                 arts,
                                 fermata: child.getElementsByTagName('fermata').length > 0,
+                                dots: childElements(child, 'dot').length,
+                                ...(type ? { type } : {}),
+                                ...(beam ? { beam } : {}),
                                 ...(ornament ? { ornament } : {}),
                                 ...(arp ? { arpeggiate: arp } : {}),
                             });
@@ -2360,6 +2422,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     // Secondary parts take their barlines from the lead, so only the lead's
     // signatures are worth second-guessing.
     const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
+    // After the meter verdict — a span of consistently long bars is a misread
+    // signature, not a hundred lost dots — and before padding, which is the
+    // blunt fix for whatever the repair left alone.
+    const rhythmRepairs = repairRhythm(raws, sigs, ctx.warnings).length;
     const placements = placeMeasures(raws, sigs, ctx);
 
     const lastPlace = placements[placements.length - 1];
@@ -2752,6 +2818,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         dynamicCurves: [...curves.entries()].map(([staff, curve]) => ({ staff, ...curve })),
         meterDefaultBpm: meterDefault,
         swing,
+        rhythmRepairs,
     };
 };
 
@@ -2881,6 +2948,7 @@ export const parseMxlFiles = (files: Buffer[], seed: ParseSeed = EMPTY_SEED): Mu
         combined.totalTicks = parsed.totalTicks;
         combined.openTiesAtEnd = parsed.openTiesAtEnd;
         combined.swing = combined.swing || parsed.swing;
+        combined.rhythmRepairs = (combined.rhythmRepairs ?? 0) + (parsed.rhythmRepairs ?? 0);
         parsed.warnings.forEach((warning) => {
             if (warning !== 'tempo_defaulted') {
                 warnings.add(warning);

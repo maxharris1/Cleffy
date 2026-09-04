@@ -16,6 +16,8 @@ export interface JobTimings {
     /** Parallel path outcome when pageCount >= 4. `serial` = never started (low RAM). */
     parallelPath?: 'merged' | 'serial_fallback' | 'serial';
     parallelFallbackReasons?: string[];
+    /** Bar-voices the rhythm repair edited (musicxml.ts / rhythmRepair.ts). */
+    rhythmRepairs?: number;
 }
 
 export const emptyTimings = (): JobTimings => ({});
