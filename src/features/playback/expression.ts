@@ -87,13 +87,19 @@ export const velocityToGain = (velocity: number): number =>
     DYN_REF_GAIN * Math.pow(10, (DYN_RANGE_DB * (velocity - DEFAULT_VELOCITY)) / 20);
 
 /**
- * Brightness proxy for a single sampled velocity layer. Real piano strings get
- * brighter as they are struck harder; with one flat-velocity sample per anchor,
- * rolling the top off at low velocities is the closest honest approximation.
- * Default velocity lands at 6.4 kHz — nearly transparent — so this darkens
- * quiet playing rather than dulling everything.
+ * Residual brightness correction now that hammer timbre comes from velocity
+ * layers. At and above the soft layer (0.22) the samples already carry the
+ * right spectrum, so the filter sits fully open at 16 kHz. Below that the
+ * quietest layer is still a v4 hammer, and rolling the top off
+ * (`800 · 20^(v / 0.22)`) is what keeps a pp from sounding like a muted mf.
  */
-export const filterCutoffHz = (velocity: number): number => 800 * Math.pow(2, 4 * clamp(velocity, 0, 1));
+export const filterCutoffHz = (velocity: number): number => {
+    const v = clamp(velocity, 0, 1);
+    if (v >= 0.22) {
+        return 16_000;
+    }
+    return 800 * Math.pow(20, v / 0.22);
+};
 
 /**
  * Release time constant after the key lifts. Bass strings carry far more energy

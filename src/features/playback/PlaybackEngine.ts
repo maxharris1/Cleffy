@@ -24,8 +24,14 @@ import {
     velocityToGain,
 } from '@/features/playback/expression';
 import type { NoteShape } from '@/features/playback/expression';
-import { loadPianoBuffers, nearestAnchor, playbackRateFor } from '@/features/playback/pianoSampler';
-import type { PianoBuffers } from '@/features/playback/pianoSampler';
+import {
+    layersBracketing,
+    layersFor,
+    loadPianoBuffers,
+    nearestAnchor,
+    playbackRateFor,
+} from '@/features/playback/pianoSampler';
+import type { PianoBuffers, PianoLayer } from '@/features/playback/pianoSampler';
 import {
     beatsForMeasure,
     bpmAtTick,
@@ -204,6 +210,8 @@ export interface PianoVoiceRequest {
 
 export interface ScheduledVoice {
     source: AudioBufferSourceLike;
+    /** Every buffer source in this voice — one layer, or the two-layer crossfade. */
+    sources: AudioBufferSourceLike[];
     /** The voice's own level — cancel and ramp this to cut a note short. */
     gain: GainNodeLike;
     /** Pitch, so a re-strike can find the voice it is silencing. */
@@ -223,31 +231,33 @@ export interface ScheduledVoice {
 }
 
 /**
- * The one place a sampled piano note is built: source → lowpass → gain →
- * panner → destination. Score playback and the fingering audition both go
- * through here, so a chord auditioned in the margin is the same instrument,
- * at the same loudness, as the same chord in the score.
+ * The one place a sampled piano note is built: source(s) → (equal-power mix)
+ * → lowpass → gain → panner → destination. Neighbouring velocity layers
+ * crossfade into one filter; a single layer is the same chain as before.
+ * Score playback and the fingering audition both go through here, so a chord
+ * auditioned in the margin is the same instrument, at the same loudness, as
+ * the same chord in the score.
  *
  * Returns null when no anchor sample covers the pitch. The caller owns the
- * lifetime: wire `dispose` into `source.onended`.
+ * lifetime: wire `dispose` into `source.onended` (the dominant source).
  */
 export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice | null => {
     const { ctx, midi, destination } = request;
     const anchor = nearestAnchor(midi);
-    const sample = request.buffers.get(anchor);
-    if (!sample) {
+    const layers = layersFor(request.buffers, anchor);
+    if (layers.length === 0) {
         return null;
     }
     const velocity = clampVelocity(request.velocity);
-    // Start early by the sample's own rise time so the note is *heard* on the
-    // beat rather than just beginning there — otherwise every attack trails the
-    // click, which reads as the click rushing (pianoSampler: detectAttackLagSec).
-    // Never schedule into the past.
-    const at = Math.max(ctx.currentTime, request.startAt - sample.attackLagSec);
+    const { low, high, mix } = layersBracketing(layers, velocity);
+    const dominant = mix < 0.5 ? low : high;
+    // Start early by the dominant sample's own rise time so the note is *heard*
+    // on the beat rather than just beginning there — otherwise every attack
+    // trails the click, which reads as the click rushing
+    // (pianoSampler: detectAttackLagSec). Never schedule into the past.
+    const at = Math.max(ctx.currentTime, request.startAt - dominant.attackLagSec);
+    const rate = playbackRateFor(midi, anchor);
 
-    const source = ctx.createBufferSource();
-    source.buffer = sample.buffer;
-    source.playbackRate.value = playbackRateFor(midi, anchor);
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value = filterCutoffHz(velocity);
@@ -257,8 +267,6 @@ export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice |
     gain.gain.value = gainValue;
     const panner = ctx.createStereoPanner();
     panner.pan.value = panForMidi(midi);
-
-    source.connect(filter);
     filter.connect(gain);
     gain.connect(panner);
     panner.connect(destination);
@@ -268,14 +276,50 @@ export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice |
     const tau = request.releaseTauSec ?? releaseTauFor(midi, velocity);
     gain.gain.setValueAtTime(gainValue, endAt);
     gain.gain.setTargetAtTime(0, endAt, tau);
-    // Start from the measured onset so no codec padding is heard —
-    // decoded mp3s carry ~50 ms of it at the front.
-    source.start(at, sample.onsetSec);
     const stopsAt = endAt + Math.max(RELEASE_STOP_MIN_S, RELEASE_STOP_TAUS * tau);
-    source.stop(stopsAt);
+
+    const makeSource = (sample: PianoLayer): AudioBufferSourceLike => {
+        const source = ctx.createBufferSource();
+        source.buffer = sample.buffer;
+        source.playbackRate.value = rate;
+        return source;
+    };
+
+    const mixGains: GainNodeLike[] = [];
+    let sources: AudioBufferSourceLike[];
+    let source: AudioBufferSourceLike;
+
+    if (low === high) {
+        source = makeSource(low);
+        source.connect(filter);
+        // Start from the measured onset so no codec padding is heard —
+        // decoded mp3s carry ~50 ms of it at the front.
+        source.start(at, low.onsetSec);
+        source.stop(stopsAt);
+        sources = [source];
+    } else {
+        const sourceLow = makeSource(low);
+        const sourceHigh = makeSource(high);
+        const mixLow = ctx.createGain();
+        const mixHigh = ctx.createGain();
+        // Equal-power: cos²(m·π/2) + sin²(m·π/2) = 1, mix is the weight of high.
+        mixLow.gain.value = Math.cos((mix * Math.PI) / 2);
+        mixHigh.gain.value = Math.sin((mix * Math.PI) / 2);
+        sourceLow.connect(mixLow);
+        sourceHigh.connect(mixHigh);
+        mixLow.connect(filter);
+        mixHigh.connect(filter);
+        sourceLow.start(at, low.onsetSec);
+        sourceHigh.start(at, high.onsetSec);
+        sourceLow.stop(stopsAt);
+        sourceHigh.stop(stopsAt);
+        mixGains.push(mixLow, mixHigh);
+        sources = [sourceLow, sourceHigh];
+        source = dominant === low ? sourceLow : sourceHigh;
+    }
 
     const dispose = (): void => {
-        for (const node of [source, filter, gain, panner]) {
+        for (const node of [...sources, ...mixGains, filter, gain, panner]) {
             try {
                 node.disconnect();
             } catch {
@@ -283,7 +327,7 @@ export const schedulePianoVoice = (request: PianoVoiceRequest): ScheduledVoice |
             }
         }
     };
-    return { source, gain, midi, velocity: request.velocity, startAt: request.startAt, stopsAt, dispose };
+    return { source, sources, gain, midi, velocity: request.velocity, startAt: request.startAt, stopsAt, dispose };
 };
 
 /**
@@ -1063,7 +1107,13 @@ export class PlaybackEngine {
         try {
             voice.gain.gain.cancelScheduledValues(at);
             voice.gain.gain.setTargetAtTime(0, at, STEAL_TAU_S);
-            voice.source.stop(at + STEAL_TAU_S * RELEASE_STOP_TAUS);
+            for (const source of voice.sources) {
+                try {
+                    source.stop(at + STEAL_TAU_S * RELEASE_STOP_TAUS);
+                } catch {
+                    // never started / already stopped
+                }
+            }
         } catch {
             // never started / already stopped
         }
@@ -1145,17 +1195,19 @@ export class PlaybackEngine {
 
     private cancelActiveNotes(): void {
         const now = this.ctx?.currentTime ?? 0;
-        for (const { source, gain } of this.active) {
+        for (const { sources, gain } of this.active) {
             // Clear the voice's own release first: automation runs in time
             // order, so a key release falling inside the ramp would restore
             // full gain and the source would be cut there — the very pop the
             // ramp exists to prevent.
             gain.gain.cancelScheduledValues(now);
             gain.gain.setTargetAtTime(0, now, 0.02); // declick
-            try {
-                source.stop(now + 0.08);
-            } catch {
-                // never started / already stopped
+            for (const source of sources) {
+                try {
+                    source.stop(now + 0.08);
+                } catch {
+                    // never started / already stopped
+                }
             }
         }
         this.active.clear();

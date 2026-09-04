@@ -13,9 +13,16 @@ import {
     velocityToGain,
 } from '@/features/playback/expression';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
-import { PlaybackEngine } from '@/features/playback/PlaybackEngine';
+import { PlaybackEngine, schedulePianoVoice } from '@/features/playback/PlaybackEngine';
 import type { AudioContextLike, AudioParamLike } from '@/features/playback/PlaybackEngine';
-import { nearestAnchor, PIANO_ANCHORS } from '@/features/playback/pianoSampler';
+import {
+    LAYER_LOUD_VELOCITY,
+    LAYER_MID_VELOCITY,
+    LAYER_SOFT_VELOCITY,
+    nearestAnchor,
+    PIANO_ANCHORS,
+} from '@/features/playback/pianoSampler';
+import type { PianoBuffers } from '@/features/playback/pianoSampler';
 import { buildTempoMap, FINAL_RIT_FACTOR, secondsAtTick } from '@/features/playback/scoreTime';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY } from '@/types/scoreData';
@@ -191,8 +198,25 @@ class MockContext implements AudioContextLike {
     async close(): Promise<void> {}
 }
 
-const fakeBuffers = (attackLagSec = 0) =>
-    new Map(PIANO_ANCHORS.map((midi) => [midi, { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec }]));
+const fakeBuffers = (attackLagSec = 0): PianoBuffers =>
+    new Map(
+        PIANO_ANCHORS.map((midi) => [
+            midi,
+            [{ buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec, velocity: LAYER_MID_VELOCITY }],
+        ]),
+    );
+
+const fakeLayeredBuffers = (attackLagSec = 0): PianoBuffers =>
+    new Map(
+        PIANO_ANCHORS.map((midi) => [
+            midi,
+            [
+                { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec, velocity: LAYER_SOFT_VELOCITY },
+                { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec, velocity: LAYER_MID_VELOCITY },
+                { buffer: {} as AudioBuffer, onsetSec: 0, attackLagSec, velocity: LAYER_LOUD_VELOCITY },
+            ],
+        ]),
+    );
 
 // Graph construction order in buildGraph(): master, RH bus, LH bus, reverb
 // send, click bus. A score with pedal edges inserts a resonance send before
@@ -203,13 +227,20 @@ const REVERB_SEND = 3;
 const CLICK_BUS = 4;
 const FIRST_VOICE_GAIN = 5;
 
-const makeEngine = (overrides?: { bpm?: number; score?: typeof tinyScore; attackLagSec?: number }) => {
+const makeEngine = (overrides?: {
+    bpm?: number;
+    score?: typeof tinyScore;
+    attackLagSec?: number;
+    allLayers?: boolean;
+}) => {
     const ctx = new MockContext();
     const statuses: PlaybackStatus[] = [];
     const warnings: string[] = [];
     // One buffer map per engine, so a sample's identity names its anchor and
     // tests can pick a specific note out of the source list.
-    const buffers = fakeBuffers(overrides?.attackLagSec);
+    const buffers = overrides?.allLayers
+        ? fakeLayeredBuffers(overrides.attackLagSec)
+        : fakeBuffers(overrides?.attackLagSec);
     const engine = new PlaybackEngine({
         score: overrides?.score ?? tinyScore,
         bpm: overrides?.bpm ?? 120,
@@ -232,8 +263,8 @@ const voiceGainOf = (source: MockSource | undefined): number => voiceGainNodeOf(
 /** Seconds between a voice's attack and the point its source is torn down. */
 const lifespanOf = (source: MockSource | undefined): number => (source?.stoppedAt ?? 0) - (source?.startedAt ?? 0);
 
-const sampleOf = (buffers: ReturnType<typeof fakeBuffers>, midi: number): AudioBuffer | undefined =>
-    buffers.get(nearestAnchor(midi))?.buffer;
+const sampleOf = (buffers: PianoBuffers, midi: number): AudioBuffer | undefined =>
+    buffers.get(nearestAnchor(midi))?.[0]?.buffer;
 
 const expectConnections = (node: MockNode | undefined, ...targets: unknown[]): void => {
     expect(node?.connections).toHaveLength(targets.length);
@@ -1124,5 +1155,91 @@ describe('pedal resonance', () => {
         expectConnections(ctx.convolvers[1], ctx.gains[0]);
         const lhTargets = ctx.gains[BUS_LH]?.gain.targets ?? [];
         expect(lhTargets[lhTargets.length - 1]?.target).toBe(0);
+    });
+});
+
+describe('velocity layers', () => {
+    it('creates two equal-power sources at DEFAULT_VELOCITY when every layer is in', () => {
+        const ctx = new MockContext();
+        const dest = ctx.createGain();
+        const voice = schedulePianoVoice({
+            ctx,
+            buffers: fakeLayeredBuffers(),
+            midi: 60,
+            velocity: DEFAULT_VELOCITY,
+            startAt: 0,
+            holdSec: 0.5,
+            destination: dest,
+        });
+        expect(ctx.sources).toHaveLength(2);
+        expect(voice?.sources).toHaveLength(2);
+        const mixA = ctx.sources[0]?.connections[0] as MockGain | undefined;
+        const mixB = ctx.sources[1]?.connections[0] as MockGain | undefined;
+        const g1 = mixA?.gain.value ?? 0;
+        const g2 = mixB?.gain.value ?? 0;
+        expect(g1 * g1 + g2 * g2).toBeCloseTo(1, 10);
+        expect(g1).toBeGreaterThan(0);
+        expect(g2).toBeGreaterThan(0);
+        const filter = mixA?.connections[0] as MockFilter | undefined;
+        expect(filter?.type).toBe('lowpass');
+        expect(mixB?.connections[0]).toBe(filter);
+        const envelope = filter?.connections[0] as MockGain | undefined;
+        const panner = envelope?.connections[0] as MockPanner | undefined;
+        expect(panner).toBeInstanceOf(MockPanner);
+    });
+
+    it('creates one source when the velocity sits on the mid layer', () => {
+        const ctx = new MockContext();
+        const dest = ctx.createGain();
+        schedulePianoVoice({
+            ctx,
+            buffers: fakeLayeredBuffers(),
+            midi: 60,
+            velocity: LAYER_MID_VELOCITY,
+            startAt: 0,
+            holdSec: 0.5,
+            destination: dest,
+        });
+        expect(ctx.sources).toHaveLength(1);
+        const filter = ctx.sources[0]?.connections[0] as MockFilter | undefined;
+        expect(filter?.type).toBe('lowpass');
+    });
+
+    it('stops both sources of a two-source voice on pause', async () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [{ t: 0, d: 480, p: 60, h: 0 }],
+            totalTicks: 1920,
+            measures: [{ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.08, x1: 0.92 }],
+        };
+        const { ctx, engine } = makeEngine({ score, allLayers: true });
+        await engine.play();
+        await advance(ctx, 0.2);
+        expect(ctx.sources).toHaveLength(2);
+        engine.pause();
+        expect(ctx.sources[0]?.stoppedAt).not.toBeNull();
+        expect(ctx.sources[1]?.stoppedAt).not.toBeNull();
+        expect(ctx.sources[0]?.stoppedAt).toBeCloseTo(ctx.sources[1]?.stoppedAt ?? -1, 9);
+    });
+
+    it('stops both sources of a two-source voice when a re-strike steals it', async () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 1920, p: 60, h: 0 },
+                { t: 480, d: 480, p: 60, h: 0 },
+            ],
+            totalTicks: 1920,
+            measures: [{ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.08, x1: 0.92 }],
+        };
+        const { ctx, engine } = makeEngine({ score, allLayers: true });
+        await engine.play();
+        await advance(ctx, 1);
+        expect(ctx.sources).toHaveLength(4);
+        const restrike = ctx.sources[2]?.startedAt ?? 0;
+        expect(ctx.sources[0]?.stoppedAt ?? 0).toBeLessThan(restrike + 0.1);
+        expect(ctx.sources[1]?.stoppedAt ?? 0).toBeLessThan(restrike + 0.1);
+        expect(ctx.sources[2]?.stoppedAt ?? 0).toBeGreaterThan(restrike + 0.3);
+        expect(ctx.sources[3]?.stoppedAt ?? 0).toBeGreaterThan(restrike + 0.3);
     });
 });

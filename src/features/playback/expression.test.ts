@@ -113,12 +113,12 @@ describe('noteJitter', () => {
 });
 
 describe('filterCutoffHz', () => {
-    it('spans four octaves of brightness, transparent at the default velocity', () => {
+    it('is fully open at and above the soft layer, and darkens below it', () => {
         expect(filterCutoffHz(0)).toBe(800);
-        expect(filterCutoffHz(0.25)).toBeCloseTo(1600, 9);
-        expect(filterCutoffHz(0.5)).toBeCloseTo(3200, 9);
-        expect(filterCutoffHz(DEFAULT_VELOCITY)).toBeCloseTo(6400, 9);
-        expect(filterCutoffHz(1)).toBeCloseTo(12800, 9);
+        expect(filterCutoffHz(0.11)).toBeCloseTo(800 * Math.pow(20, 0.5), 9);
+        expect(filterCutoffHz(0.22)).toBe(16_000);
+        expect(filterCutoffHz(DEFAULT_VELOCITY)).toBe(16_000);
+        expect(filterCutoffHz(1)).toBe(16_000);
     });
 
     it('clamps out-of-range velocities rather than sweeping past Nyquist', () => {

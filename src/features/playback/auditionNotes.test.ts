@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { auditionNotes, resetAuditionState, stopAudition } from '@/features/playback/auditionNotes';
-import { resetPianoBufferCache } from '@/features/playback/pianoSampler';
+import { resetPianoBufferCache, PIANO_ANCHORS } from '@/features/playback/pianoSampler';
 
 class MockBuffer implements AudioBuffer {
     readonly length = 1000;
@@ -61,7 +61,7 @@ const voiceNodeFactories = {
     }),
 };
 
-function installAudioMocks() {
+function installAudioMocks(options?: { extras?: boolean }) {
     const sources: Array<{ start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }> = [];
     class MockContext {
         currentTime = 0;
@@ -107,10 +107,16 @@ function installAudioMocks() {
     vi.stubGlobal('AudioContext', MockContext);
     vi.stubGlobal(
         'fetch',
-        vi.fn(async () => ({
-            ok: true,
-            arrayBuffer: async () => new ArrayBuffer(8),
-        })),
+        vi.fn(async (url: string) => {
+            const extra = typeof url === 'string' && (url.includes('-soft') || url.includes('-loud'));
+            if (extra && !options?.extras) {
+                return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) };
+            }
+            return {
+                ok: true,
+                arrayBuffer: async () => new ArrayBuffer(8),
+            };
+        }),
     );
     return sources;
 }
@@ -157,6 +163,18 @@ describe('auditionNotes', () => {
         await auditionNotes([60]);
         stopAudition();
         expect(sources[0]?.stop).toHaveBeenCalled();
+    });
+
+    it('stops both sources of a two-layer audition', async () => {
+        const sources = installAudioMocks({ extras: true });
+        await auditionNotes([60]);
+        await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(PIANO_ANCHORS.length * 3));
+        await auditionNotes([64]);
+        const newest = sources.slice(-2);
+        expect(newest).toHaveLength(2);
+        stopAudition();
+        expect(newest[0]?.stop).toHaveBeenCalled();
+        expect(newest[1]?.stop).toHaveBeenCalled();
     });
 
     it('does not start voices if stopAudition runs while buffers load', async () => {
