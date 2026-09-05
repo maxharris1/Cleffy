@@ -127,8 +127,9 @@ after a beat of rest. `expression.ts` overlaps legato successors by 6 % of the n
 not when the pedal already pools), lifts the melody _voice_ rather than the top note, dips
 repeated figures 6/127, leans a phrase toward its peak ±3/127 and tapers a legato run's last two
 notes. _Tempo style_ (`Strict` / `Expressive` pill, persisted per device in `localStorage`):
-strict is byte-identical to before; expressive composes a per-beat factor curve into
-`buildTempoMap` — final rit. to 0.75 over the last 2 bars (4 in long movements), ~8 %
+strict keeps the svc-10 tempo map byte for byte (onsets and clicks; note shaping above applies
+in both styles); expressive composes a per-beat factor curve into `buildTempoMap` — final rit.
+to 0.75 over the last 2 bars (4 when the score has ≥ 64 bars), ~8 %
 broadening before movement ends / repeat seams / holds, ~4 % agogic on the first downbeat after
 a melodic rest — so click, count-in, playhead and loop wrap follow for free. _Auto-pedal_
 (service, `autoPedal.ts`): where a score has no pedal edges (or an ≥ 8-bar gap) the job infers
