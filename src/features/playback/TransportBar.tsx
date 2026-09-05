@@ -60,7 +60,7 @@ const ORDINAL: Record<number, string> = { 1: ' (1st)', 2: ' (2nd)', 3: ' (3rd)',
 
 const WARNING_COPY: Record<string, string> = {
     samples_unavailable: 'Piano sounds could not be loaded — check your connection and press play again.',
-    too_many_voices: 'Very dense passage: some notes were skipped to protect audio performance.',
+    too_many_voices: 'Very dense passage: a few ringing notes were cut short to protect audio performance.',
 };
 
 /**
