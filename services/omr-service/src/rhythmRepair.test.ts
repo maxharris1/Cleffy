@@ -24,6 +24,9 @@ const bar = (n: number, inner: string): string => `<measure number="${n}">${n ==
 
 const plain = (notated: number): number => Math.round(notated * 0.9);
 
+/** A whole bar to close the part with: the final bar of a part is allowed to be short, so it is never repaired. */
+const closing = (n: number): string => bar(n, note('G', 4, 16, { type: 'whole' }));
+
 const onsetsIn = (score: ReturnType<typeof parseMusicXmlString>, measure: number): number[] => {
     const m = score.measures[measure];
     if (!m) {
@@ -38,7 +41,7 @@ describe('rhythm repair', () => {
         // dot lost — quarter, eighth, half sums to 1680 of 1920.
         const figure = (dots: number) =>
             `${note('C', 5, dots ? 6 : 4, { type: 'quarter', dots })}${note('D', 5, 2, { type: 'eighth' })}${note('E', 5, 8, { type: 'half' })}`;
-        const score = parseMusicXmlString(wrap(bar(1, figure(1)) + bar(2, figure(0))));
+        const score = parseMusicXmlString(wrap(bar(1, figure(1)) + bar(2, figure(0)) + closing(3)));
 
         expect(score.warnings).toContain('rhythm_repaired');
         expect(score.warnings).not.toContain('measure_underfull');
@@ -61,13 +64,13 @@ describe('rhythm repair', () => {
             note('G', 5, 4, { type: 'quarter' }) +
             note('A', 5, 4, { type: 'quarter' }) +
             note('B', 5, 4, { type: 'quarter' });
-        const score = parseMusicXmlString(wrap(bar(1, group + tail)));
+        const score = parseMusicXmlString(wrap(bar(1, group + tail) + closing(2)));
 
         expect(score.warnings).toContain('rhythm_repaired');
         expect(score.warnings).not.toContain('measure_overfull');
         expect(onsetsIn(score, 0)).toEqual([0, 120, 240, 360, 480, 960, 1440]);
         expect(score.notes.find((n) => n.p === 74)).toMatchObject({ t: 120, d: plain(120) });
-        expect(score.totalTicks).toBe(1920);
+        expect(score.totalTicks).toBe(3840);
     });
 
     it('deletes a rest that was read twice, moving the chord after it back into place', () => {
@@ -76,7 +79,7 @@ describe('rhythm repair', () => {
         const chord = note('C', 4, 4, { type: 'quarter' }) + note('E', 4, 4, { type: 'quarter', chord: true });
         const whole = note('G', 4, 4) + note('A', 4, 4) + rest(4) + chord;
         const doubled = note('G', 4, 4) + note('A', 4, 4) + rest(4) + rest(4) + chord;
-        const score = parseMusicXmlString(wrap(bar(1, whole) + bar(2, doubled)));
+        const score = parseMusicXmlString(wrap(bar(1, whole) + bar(2, doubled) + closing(3)));
 
         expect(score.warnings).toContain('rhythm_repaired');
         expect(score.warnings).not.toContain('measure_overfull');
@@ -90,12 +93,52 @@ describe('rhythm repair', () => {
         const score = parseMusicXmlString(
             wrap(
                 bar(1, note('C', 4, 4) + note('D', 4, 4) + note('E', 4, 4) + rest(4)) +
-                    bar(2, note('C', 4, 4) + note('D', 4, 4) + note('E', 4, 4)),
+                    bar(2, note('C', 4, 4) + note('D', 4, 4) + note('E', 4, 4)) +
+                    closing(3),
             ),
         );
         expect(score.warnings).toContain('rhythm_repaired');
         expect(score.warnings).not.toContain('measure_underfull');
-        expect(score.measures.map((m) => m.dTicks)).toEqual([1920, 1920]);
+        expect(score.measures.map((m) => m.dTicks)).toEqual([1920, 1920, 1920]);
+    });
+
+    it('leaves the final bar of a part alone, short as it may be', () => {
+        // Pickup, a whole bar, then a three-beat final bar that the figure in
+        // bar 2 would "explain": the last bar of a part is allowed to be short.
+        const figure = note('C', 4, 4) + note('D', 4, 4) + note('E', 4, 4);
+        const score = parseMusicXmlString(
+            wrap(
+                `<measure number="0" implicit="yes">${ATTRS_44}${note('G', 4, 4)}</measure>` +
+                    bar(1, figure + rest(4)) +
+                    bar(2, figure),
+            ),
+        );
+        expect(score.warnings).not.toContain('rhythm_repaired');
+        expect(score.rhythmRepairs).toBe(0);
+        expect(score.measures.map((m) => m.dTicks)).toEqual([480, 1920, 1920]);
+    });
+
+    it('moves the directions engraved after the edit along with the notes', () => {
+        // Bar 2 lost its dot; the piano marking and the pedal on the half note
+        // were read at the half note's (early) position and must follow it.
+        const figure = (dots: number) =>
+            `${note('C', 5, dots ? 6 : 4, { type: 'quarter', dots })}${note('D', 5, 2, { type: 'eighth' })}`;
+        const half = note('E', 5, 8, { type: 'half' });
+        const directions =
+            `<direction placement="below"><direction-type><dynamics><p/></dynamics></direction-type><voice>1</voice></direction>` +
+            `<direction><direction-type><pedal type="start"/></direction-type></direction>`;
+        const score = parseMusicXmlString(
+            wrap(bar(1, figure(1) + half) + bar(2, figure(0) + directions + half) + closing(3)),
+        );
+        expect(score.rhythmRepairs).toBe(1);
+        const halfNote = score.notes.find((n) => n.t >= 1920 && n.p === 76);
+        expect(halfNote).toMatchObject({ t: 1920 + 960 });
+        // The p lands on the half note, not on the eighth that now occupies
+        // the tick it was read at.
+        const eighth = score.notes.find((n) => n.t >= 1920 && n.p === 74);
+        expect(eighth?.v).toBeUndefined();
+        expect(halfNote?.v).toBe(0.46);
+        expect(score.pedals).toEqual([{ tick: 1920 + 960, k: 'down' }]);
     });
 
     it('leaves a bar it has no evidence for to the padder', () => {
@@ -135,12 +178,14 @@ describe('rhythm repair', () => {
                         2,
                         v1(0) +
                             `<backup><duration>14</duration></backup>${note('C', 3, 8, { type: 'half', voice: 2 })}${note('G', 3, 8, { type: 'half', voice: 2 })}`,
-                    ),
+                    ) +
+                    closing(3),
             ),
         );
 
         expect(score.rhythmRepairs).toBe(1);
-        expect(score.notes.filter((n) => n.t >= 1920 && n.p < 60).map((n) => n.t - 1920)).toEqual([0, 960]);
-        expect(score.notes.filter((n) => n.t >= 1920 && n.p >= 60).map((n) => n.t - 1920)).toEqual([0, 720, 960]);
+        const inBar2 = (n: { t: number }) => n.t >= 1920 && n.t < 3840;
+        expect(score.notes.filter((n) => inBar2(n) && n.p < 60).map((n) => n.t - 1920)).toEqual([0, 960]);
+        expect(score.notes.filter((n) => inBar2(n) && n.p >= 60).map((n) => n.t - 1920)).toEqual([0, 720, 960]);
     });
 });

@@ -1433,6 +1433,26 @@ describe('ornaments, graces and swing', () => {
         ]);
     });
 
+    it('takes the breath after the whole tie chain, not after its first note', () => {
+        // Whole tied to whole, the breath mark engraved on the first: the stop
+        // comes at 3840, where the merged note ends.
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16, '<tie type="start"/><notations><tied type="start"/><articulations><breath-mark/></articulations></notations>')}</measure>` +
+                `<measure number="2">${note('C', 4, 16, '<tie type="stop"/><notations><tied type="stop"/></notations>')}</measure>` +
+                `<measure number="3">${note('D', 4, 16)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.holds).toEqual([{ tick: 3840, beats: 0.5 }]);
+        expect(score.notes[0]).toMatchObject({ t: 0, d: plain(3840), p: 60 });
+        // The same mark on the closing note means the same thing.
+        const onStop = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16, '<tie type="start"/><notations><tied type="start"/></notations>')}</measure>` +
+                `<measure number="2">${note('C', 4, 16, '<tie type="stop"/><notations><tied type="stop"/><articulations><breath-mark/></articulations></notations>')}</measure>` +
+                `<measure number="3">${note('D', 4, 16)}</measure>`,
+        );
+        expect(parseMusicXmlString(onStop).holds).toEqual([{ tick: 3840, beats: 0.5 }]);
+    });
+
     it('starts the same trill from above when the job says the piece is Baroque', () => {
         const xml = wrap(`<measure number="1">${ATTRS_44}${note('C', 4, 8, orns('trill-mark'))}</measure>`);
         const notes = parseMusicXmlString(xml, 0, undefined, { era: 'baroque' }).notes;

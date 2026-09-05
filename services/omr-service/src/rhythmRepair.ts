@@ -291,7 +291,15 @@ const candidatesFor = (items: readonly Item[], sum: number, expected: number): C
     return out;
 };
 
-const shiftFrom = (items: readonly Item[], from: number, delta: number): void => {
+/**
+ * Move everything from `boundary` on by `delta`: the voice's own later items,
+ * and the directions engraved at or after that point that belong to the same
+ * line — a dynamic written for this voice, or, where nothing else is playing
+ * on the staff (or in the bar, for staff-less marks), a grace, wedge, pedal or
+ * tempo mark. With a second voice on the staff those could as well be its, so
+ * they stay where they were read.
+ */
+const shiftFrom = (raw: RawMeasure, items: readonly Item[], from: number, boundary: number, delta: number): void => {
     for (let i = from; i < items.length; i++) {
         const item = items[i];
         if (!item) {
@@ -300,6 +308,53 @@ const shiftFrom = (items: readonly Item[], from: number, delta: number): void =>
         item.principal.rel += delta;
         for (const member of item.members) {
             member.rel += delta;
+        }
+    }
+    const sample = items[0]?.principal;
+    if (!sample) {
+        return;
+    }
+    const voices = voicesOf(raw);
+    const aloneInBar = voices.size === 1;
+    const aloneOnStaff = [...voices.keys()].filter((k) => k.startsWith(`${sample.staff}:`)).length === 1;
+    const staffAlone = (staff: number | null): boolean =>
+        staff === null ? aloneInBar : staff === sample.staff && aloneOnStaff;
+    for (const ev of raw.events) {
+        if (ev.k === 'swing' || isRhythm(ev) || ev.rel < boundary) {
+            continue;
+        }
+        switch (ev.k) {
+            case 'dyn':
+                if (
+                    ev.voice !== null
+                        ? ev.voice === sample.voice && (ev.staff === null || ev.staff === sample.staff)
+                        : staffAlone(ev.staff)
+                ) {
+                    ev.rel += delta;
+                }
+                break;
+            case 'grace':
+            case 'accentDyn':
+            case 'wedge':
+                if (staffAlone(ev.staff)) {
+                    ev.rel += delta;
+                }
+                break;
+            case 'pedal':
+            case 'tempo':
+            case 'gradual':
+                if (aloneInBar) {
+                    ev.rel += delta;
+                }
+                break;
+            case 'time':
+            case 'key':
+            case 'clef':
+                break;
+            default: {
+                const exhaustive: never = ev;
+                return exhaustive;
+            }
         }
     }
 };
@@ -326,6 +381,7 @@ const apply = (raw: RawMeasure, items: Item[], candidate: Candidate): void => {
                 return;
             }
             const delta = candidate.newDur - item.principal.dur;
+            const boundary = item.principal.rel + item.principal.dur;
             item.principal.dur = candidate.newDur;
             for (const member of item.members) {
                 member.dur = candidate.newDur;
@@ -340,7 +396,7 @@ const apply = (raw: RawMeasure, items: Item[], candidate: Candidate): void => {
                     retype(note, candidate.kind);
                 }
             }
-            shiftFrom(items, candidate.index + 1, delta);
+            shiftFrom(raw, items, candidate.index + 1, boundary, delta);
             return;
         }
         case 'insert_rest': {
@@ -368,7 +424,7 @@ const apply = (raw: RawMeasure, items: Item[], candidate: Candidate): void => {
             if (at >= 0) {
                 raw.events.splice(at, 1);
             }
-            shiftFrom(items, candidate.index + 1, -item.principal.dur);
+            shiftFrom(raw, items, candidate.index + 1, item.principal.rel + item.principal.dur, -item.principal.dur);
             return;
         }
         default: {
@@ -391,7 +447,9 @@ export const repairRhythm = (
     const repairs: RhythmRepair[] = [];
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
-        if (!raw || raw.isPickup) {
+        // Pickups are legitimately short, and so is the final bar of a part
+        // (the meter reconciliation skips it for the same reason).
+        if (!raw || raw.isPickup || pos === raws.length - 1) {
             continue;
         }
         const sig = sigs[pos] ?? raw.sig;
