@@ -1,9 +1,11 @@
+import { inferAutoPedal } from './autoPedal.js';
 import { capHolds, capPedals, capTempoEvents } from './caps.js';
+import { DEFAULT_ERA, type Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import type { StructureSummary } from './repeats.js';
 import { activeTimeSigAt } from './seamCompare.js';
 import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
-import type { ScoreData, ScoreTimeSig } from './scoreData.js';
+import type { ScoreData, ScorePedal, ScoreTimeSig } from './scoreData.js';
 
 export interface ScoreDataPart {
     score: ScoreData;
@@ -15,17 +17,65 @@ export interface ScoreDataPart {
     structure?: StructureSummary;
 }
 
+export interface MergeScoreDataOptions {
+    /** Stylistic era, which decides how an unpedalled stretch is pedalled. */
+    era?: Era;
+}
+
+/**
+ * Pedal the unmarked stretches of a joined score once, over the whole of it.
+ * Parts are built without auto-pedal (see `BuildScoreDataOptions.autoPedal`):
+ * a shard with no printed edge would otherwise pedal every bar, where the
+ * whole score only fills a gap of eight bars or more. Any inferred edge or
+ * disclosure a part does carry is discarded and re-derived here, and the
+ * disclosure follows what survives the cap. Notes at this point carry no
+ * parser gate, so staccato is read back from the note's length.
+ */
+const pedalMerged = (
+    score: Pick<ScoreData, 'notes' | 'measures' | 'timeSignatures' | 'totalTicks'>,
+    printed: readonly ScorePedal[],
+    warnings: Set<string>,
+    era: Era,
+): ScorePedal[] => {
+    warnings.delete('pedal_inferred');
+    const pedalling = inferAutoPedal(
+        {
+            notes: score.notes,
+            measures: score.measures,
+            timeSignatures: score.timeSignatures,
+            pedals: printed.filter((edge) => edge.src !== 'inferred'),
+            totalTicks: score.totalTicks,
+        },
+        era,
+    );
+    const capped = capPedals(pedalling.pedals);
+    if (capped.some((edge) => edge.src === 'inferred')) {
+        warnings.add('pedal_inferred');
+    }
+    return capped;
+};
+
 /**
  * Concatenate page-range ScoreData parts into one play-along score.
  * When ranges overlap by one page, the later part drops the overlap page and
  * may inherit time/key/clef from the earlier part.
  */
-export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
+export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreDataOptions = {}): ScoreData => {
     if (parts.length === 0) {
         throw new JobError(ERROR_CODES.internal, 'mergeScoreDataParts: no parts');
     }
+    const era = options.era ?? DEFAULT_ERA;
     if (parts.length === 1) {
-        return parts[0]!.score;
+        const only = parts[0]!.score;
+        const soloWarnings = new Set(only.warnings);
+        const pedals = pedalMerged(only, only.pedals ?? [], soloWarnings, era);
+        const solo: ScoreData = { ...only, warnings: [...soloWarnings].slice(0, 32) };
+        if (pedals.length > 0) {
+            solo.pedals = pedals;
+        } else {
+            delete solo.pedals;
+        }
+        return solo;
     }
 
     const sorted = [...parts].sort((a, b) => a.sheets.from - b.sheets.from);
@@ -76,8 +126,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
             defaultedAtOpening = score.warnings.includes('tempo_defaulted');
         }
 
-        const overlapPage0 =
-            prev && prev.sheets.to >= sheets.from ? sheets.from - 1 : null;
+        const overlapPage0 = prev && prev.sheets.to >= sheets.from ? sheets.from - 1 : null;
 
         let working = score;
         if (overlapPage0 !== null) {
@@ -107,8 +156,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
 
         const localDroppedTicks = new Set<number>();
         for (const [localIndex, measure] of working.measures.entries()) {
-            const page =
-                measure.page < 0 ? -1 : (pageMap.get(measure.page) ?? measure.page);
+            const page = measure.page < 0 ? -1 : (pageMap.get(measure.page) ?? measure.page);
             if (overlapPage0 !== null && page === overlapPage0) {
                 for (let t = measure.tick; t < measure.tick + measure.dTicks; t++) {
                     localDroppedTicks.add(t);
@@ -187,10 +235,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
         // Taken over the whole array rather than only the measures pushed above:
         // the base must clear every identity this part could have emitted, so a
         // bar skipped at the seam is still not handed out again by the next part.
-        const maxSrcIndex = working.measures.reduce(
-            (highest, m, i) => Math.max(highest, m.srcIndex ?? i),
-            -1,
-        );
+        const maxSrcIndex = working.measures.reduce((highest, m, i) => Math.max(highest, m.srcIndex ?? i), -1);
         srcBase += maxSrcIndex + 1;
 
         const keptMeasures = working.measures.filter((m) => {
@@ -198,9 +243,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
             return !(overlapPage0 !== null && page === overlapPage0);
         });
         const partTicks =
-            keptMeasures.length > 0
-                ? Math.max(...keptMeasures.map((m) => m.tick + m.dTicks))
-                : working.totalTicks;
+            keptMeasures.length > 0 ? Math.max(...keptMeasures.map((m) => m.tick + m.dTicks)) : working.totalTicks;
         tickOffset += partTicks;
         prev = part;
     }
@@ -216,7 +259,8 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
     // and the self-check below rejects the whole score when they do.
     const cappedTempos = capTempoEvents(tempos);
     const cappedHolds = capHolds(holds);
-    const cappedPedals = capPedals(pedals);
+    const totalTicks = Math.max(1, tickOffset);
+    const cappedPedals = pedalMerged({ notes, measures, timeSignatures, totalTicks }, pedals, warnings, era);
 
     const candidate: ScoreData = {
         version: SCORE_DATA_VERSION,
@@ -228,7 +272,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[]): ScoreData => {
         ...(cappedTempos.length > 0 ? { tempos: cappedTempos } : {}),
         ...(cappedHolds.length > 0 ? { holds: cappedHolds } : {}),
         ...(cappedPedals.length > 0 ? { pedals: cappedPedals } : {}),
-        totalTicks: Math.max(1, tickOffset),
+        totalTicks,
         notes,
         measures,
         systems,
@@ -284,10 +328,7 @@ export const splitSheetRangesOverlapping = (
 };
 
 /** Split 1-based page count into up to `n` contiguous sheet ranges (no overlap). */
-export const splitSheetRanges = (
-    pageCount: number,
-    n: number,
-): Array<{ from: number; to: number }> => {
+export const splitSheetRanges = (pageCount: number, n: number): Array<{ from: number; to: number }> => {
     if (pageCount < 1 || n < 1) {
         return [];
     }
@@ -335,31 +376,19 @@ export const seamIsUnsafe = (parts: ScoreDataPart[]): { unsafe: boolean; reasons
         ) {
             reasons.push(`repeat_seam sheets=${earlier.sheets.from}-${earlier.sheets.to}`);
         }
-        const earlierSig = activeTimeSigAt(
-            earlier.score.timeSignatures,
-            Math.max(0, earlier.score.totalTicks - 1),
-        );
-        const laterSig =
-            activeTimeSigAt(later.score.timeSignatures, 0) ??
-            later.score.timeSignatures[0] ??
-            null;
+        const earlierSig = activeTimeSigAt(earlier.score.timeSignatures, Math.max(0, earlier.score.totalTicks - 1));
+        const laterSig = activeTimeSigAt(later.score.timeSignatures, 0) ?? later.score.timeSignatures[0] ?? null;
         if (earlierSig && laterSig && (earlierSig.num !== laterSig.num || earlierSig.den !== laterSig.den)) {
             // Inherit may fix empty later; disagreement with an explicit later sig is unsafe.
             if (later.score.timeSignatures.some((s) => s.tick === 0)) {
-                reasons.push(
-                    `meter_seam ${earlierSig.num}/${earlierSig.den} vs ${laterSig.num}/${laterSig.den}`,
-                );
+                reasons.push(`meter_seam ${earlierSig.num}/${earlierSig.den} vs ${laterSig.num}/${laterSig.den}`);
             }
         }
     }
     return { unsafe: reasons.length > 0, reasons };
 };
 
-const dropPageFromScore = (
-    score: ScoreData,
-    absolutePage0: number,
-    sheetFrom1Based: number,
-): ScoreData => {
+const dropPageFromScore = (score: ScoreData, absolutePage0: number, sheetFrom1Based: number): ScoreData => {
     // Map local page ids → absolute, then filter absolutePage0.
     const pageMap = buildPageMap(score, sheetFrom1Based, null);
     const dropLocal = [...pageMap.entries()].find(([, abs]) => abs === absolutePage0)?.[0];
@@ -410,15 +439,11 @@ const dropPageFromScore = (
         ...(keySignatures.length > 0
             ? { keySignatures: keySignatures.map((s) => ({ ...s, tick: s.tick - shift })) }
             : { keySignatures: undefined }),
-        ...(clefs.length > 0
-            ? { clefs: clefs.map((s) => ({ ...s, tick: s.tick - shift })) }
-            : { clefs: undefined }),
+        ...(clefs.length > 0 ? { clefs: clefs.map((s) => ({ ...s, tick: s.tick - shift })) } : { clefs: undefined }),
         ...(tempos.length > 0
             ? { tempos: tempos.map((t) => ({ ...t, tick: t.tick - shift })) }
             : { tempos: undefined }),
-        ...(holds.length > 0
-            ? { holds: holds.map((h) => ({ ...h, tick: h.tick - shift })) }
-            : { holds: undefined }),
+        ...(holds.length > 0 ? { holds: holds.map((h) => ({ ...h, tick: h.tick - shift })) } : { holds: undefined }),
         ...(pedals.length > 0
             ? { pedals: pedals.map((p) => ({ ...p, tick: p.tick - shift })) }
             : { pedals: undefined }),
@@ -457,7 +482,10 @@ const maybeInheritAttributes = (
     const existingStaff = new Set((score.clefs ?? []).filter((c) => c.tick === 0).map((c) => c.staff));
     for (const [, c] of lastClefsByStaff) {
         if (!existingStaff.has(c.staff)) {
-            clefs = [{ tick: 0, staff: c.staff, sign: c.sign, ...(c.line !== undefined ? { line: c.line } : {}) }, ...clefs];
+            clefs = [
+                { tick: 0, staff: c.staff, sign: c.sign, ...(c.line !== undefined ? { line: c.line } : {}) },
+                ...clefs,
+            ];
             warnings.push('merged_inherited_clef');
         }
     }
@@ -489,11 +517,7 @@ const noteOnDroppedPage = (
 };
 
 /** Map whatever page ids the shard emitted onto absolute 0-based pages. */
-const buildPageMap = (
-    score: ScoreData,
-    sheetFrom1Based: number,
-    _overlapPage0: number | null,
-): Map<number, number> => {
+const buildPageMap = (score: ScoreData, sheetFrom1Based: number, _overlapPage0: number | null): Map<number, number> => {
     const seen = new Set<number>();
     for (const system of score.systems) {
         if (system.page >= 0) {

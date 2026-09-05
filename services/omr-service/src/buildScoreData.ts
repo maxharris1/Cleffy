@@ -64,6 +64,13 @@ const applySwing = (notes: ScoreNote[]): ScoreNote[] => {
 export interface BuildScoreDataOptions {
     /** Stylistic era, which decides how an unpedalled score is pedalled. */
     era?: Era;
+    /**
+     * Whether to pedal an unmarked stretch here. Off for a shard of a split
+     * score: a shard sees only its own pages, so it cannot tell a score that
+     * never pedals from one whose marks are all on another page, and the
+     * merge infers once over the whole score instead. Default on.
+     */
+    autoPedal?: boolean;
 }
 
 export const buildScoreData = (
@@ -201,20 +208,25 @@ export const buildScoreData = (
     // Where the engraving does not pedal, play it the way its era would. On
     // the performed timeline so a repeated passage is pedalled both times, and
     // before the cap so the inference can coarsen itself to fit under it.
-    const pedalling = inferAutoPedal(
-        {
-            notes: performed.notes,
-            measures: performed.measures,
-            timeSignatures: performed.timeSignatures,
-            pedals: performed.pedals ?? [],
-            totalTicks: performed.totalTicks,
-        },
-        options.era ?? DEFAULT_ERA,
-    );
-    if (pedalling.inferred) {
+    const pedalling =
+        options.autoPedal === false
+            ? { pedals: performed.pedals ?? [], inferred: false }
+            : inferAutoPedal(
+                  {
+                      notes: performed.notes,
+                      measures: performed.measures,
+                      timeSignatures: performed.timeSignatures,
+                      pedals: performed.pedals ?? [],
+                      totalTicks: performed.totalTicks,
+                  },
+                  options.era ?? DEFAULT_ERA,
+              );
+    const pedals = pedalling.pedals.length > 0 ? capPedals(pedalling.pedals) : undefined;
+    // Disclosed from what survives the cap, so the warning never outlives the
+    // edges it describes.
+    if (pedals?.some((edge) => edge.src === 'inferred')) {
         warnings.add('pedal_inferred');
     }
-    const pedals = pedalling.pedals.length > 0 ? capPedals(pedalling.pedals) : undefined;
 
     const candidate: ScoreData = {
         version: SCORE_DATA_VERSION,

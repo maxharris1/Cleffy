@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
 import { runAudiveris, timeoutForPages } from './audiveris.js';
-import { buildScoreData } from './buildScoreData.js';
+import { buildScoreData, type BuildScoreDataOptions } from './buildScoreData.js';
 import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
 import {
@@ -448,9 +448,12 @@ const transcribeParallel = async (
     if (!first || !second) {
         throw new JobError(ERROR_CODES.internal, 'parallel transcribe: expected two shards');
     }
-    const parsedA = parseRangeArtifacts(first.mxlBuffers, first.geometry, era);
+    // Shards are not auto-pedalled: a shard cannot tell a score that never
+    // pedals from one whose marks sit on the other shard's pages. The merge
+    // infers once, over the whole score, with the same era.
+    const parsedA = parseRangeArtifacts(first.mxlBuffers, first.geometry, era, undefined, { autoPedal: false });
     const seed = expressionSeedAt(parsedA.musical, overlapPageStartTick(parsedA.score, parsedA.musical));
-    const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, era, seed);
+    const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, era, seed, { autoPedal: false });
     timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
     recordRhythmRepairs(timings, parsedA.musical, parsedB.musical);
 
@@ -479,7 +482,7 @@ const transcribeParallel = async (
 
     timings.parallelPath = 'merged';
     timings.audiverisTotalMs = Date.now() - started;
-    return mergeScoreDataParts(parts);
+    return mergeScoreDataParts(parts, { era });
 };
 
 const transcribeRange = async (
@@ -584,9 +587,10 @@ const parseRangeArtifacts = (
     geometry: OmrGeometry | null,
     era: Era,
     seed?: ParseSeed,
+    build: Omit<BuildScoreDataOptions, 'era'> = {},
 ): { score: ScoreData; musical: MusicalScore; openTiesAtEnd: number; structure: StructureSummary } => {
     const musical = parseMxlFiles(mxlBuffers, seed, { era });
-    const score = buildScoreData(musical, geometry, { era });
+    const score = buildScoreData(musical, geometry, { ...build, era });
     return {
         score,
         musical,

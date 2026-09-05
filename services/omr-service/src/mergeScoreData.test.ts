@@ -322,6 +322,92 @@ describe('mergeScoreDataParts tempo map and fermatas', () => {
 });
 
 describe('mergeScoreDataParts pedal', () => {
+    /** `bars` bars of quarter-note chords whose harmony changes every bar. */
+    const unmarked = (bars: number, overrides: Partial<ScoreData> = {}): ScoreData =>
+        basePart({
+            totalTicks: bars * 1920,
+            measures: Array.from({ length: bars }, (_, i) => ({
+                n: i + 1,
+                tick: i * 1920,
+                dTicks: 1920,
+                page: 0,
+                sys: 0,
+                x0: 0,
+                x1: 1,
+            })),
+            notes: Array.from({ length: bars * 4 }, (_, i) => {
+                const bar = Math.floor(i / 4);
+                return [
+                    { t: i * 480, d: 480, p: 60 + (bar % 3) * 2, h: 0 as const },
+                    { t: i * 480, d: 480, p: 48 + (bar % 3) * 2, h: 1 as const },
+                ];
+            }).flat(),
+            ...overrides,
+        });
+    const inferred = (score: ScoreData): ScorePedal[] => (score.pedals ?? []).filter((p) => p.src === 'inferred');
+
+    it('pedals an unmarked score once, across both parts, and says so once', () => {
+        const merged = mergeScoreDataParts(
+            [
+                { score: unmarked(2), sheets: { from: 1, to: 2 } },
+                { score: unmarked(2, { timeSignatures: [] }), sheets: { from: 3, to: 4 } },
+            ],
+            { era: 'romantic' },
+        );
+        const edges = inferred(merged);
+        expect(edges.length).toBeGreaterThan(0);
+        expect(edges.some((p) => p.tick >= 2 * 1920)).toBe(true);
+        expect(merged.pedals).toEqual(edges);
+        expect(merged.warnings.filter((w) => w === 'pedal_inferred')).toEqual(['pedal_inferred']);
+    });
+
+    it('does not pedal a short unmarked stretch just because it fell on its own shard', () => {
+        // Serial rule: in a score that pedals, a gap under eight bars means "no
+        // pedal here". A four-bar second shard used to see no edges at all and
+        // pedal every bar.
+        const a = unmarked(2, {
+            pedals: [
+                { tick: 0, k: 'down' },
+                { tick: 3839, k: 'up' },
+            ],
+        });
+        const merged = mergeScoreDataParts(
+            [
+                { score: a, sheets: { from: 1, to: 2 } },
+                { score: unmarked(4, { timeSignatures: [] }), sheets: { from: 3, to: 4 } },
+            ],
+            { era: 'romantic' },
+        );
+        expect(inferred(merged)).toEqual([]);
+        expect(merged.pedals).toEqual(a.pedals);
+        expect(merged.warnings).not.toContain('pedal_inferred');
+    });
+
+    it('re-derives a part\u2019s own inference rather than trusting it', () => {
+        const stale = unmarked(2, {
+            pedals: [
+                { tick: 0, k: 'down', src: 'inferred' },
+                { tick: 3839, k: 'up', src: 'inferred' },
+            ],
+            warnings: ['pedal_inferred'],
+        });
+        const merged = mergeScoreDataParts(
+            [
+                { score: stale, sheets: { from: 1, to: 2 } },
+                { score: unmarked(2, { timeSignatures: [] }), sheets: { from: 3, to: 4 } },
+            ],
+            { era: 'baroque' },
+        );
+        expect(merged.pedals).toBeUndefined();
+        expect(merged.warnings).not.toContain('pedal_inferred');
+    });
+
+    it('pedals a lone part the same way, so a shard built without auto-pedal is not left dry', () => {
+        const merged = mergeScoreDataParts([{ score: unmarked(2), sheets: { from: 1, to: 2 } }], { era: 'romantic' });
+        expect(inferred(merged).length).toBeGreaterThan(0);
+        expect(merged.warnings).toContain('pedal_inferred');
+    });
+
     it('carries pedal edges across the seam at the part tick offset', () => {
         const a = basePart({
             pedals: [

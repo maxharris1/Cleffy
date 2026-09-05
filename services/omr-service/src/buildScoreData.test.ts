@@ -157,6 +157,23 @@ describe('buildScoreData auto-pedal', () => {
         expect(score.pedals).toEqual(pedalled.pedals);
         expect(score.warnings).not.toContain('pedal_inferred');
     });
+
+    it('leaves a shard unpedalled and undisclosed when asked, for the merge to pedal whole', () => {
+        const score = buildScoreData(musical, geometry, { era: 'romantic', autoPedal: false });
+        expect(score.pedals).toBeUndefined();
+        expect(score.warnings).not.toContain('pedal_inferred');
+        // Engraved edges still travel.
+        const pedalled: MusicalScore = {
+            ...musical,
+            pedals: [
+                { tick: 0, k: 'down' },
+                { tick: 3839, k: 'up' },
+            ],
+        };
+        expect(buildScoreData(pedalled, geometry, { era: 'romantic', autoPedal: false }).pedals).toEqual(
+            pedalled.pedals,
+        );
+    });
 });
 
 describe('buildScoreData structure', () => {
