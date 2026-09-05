@@ -91,6 +91,13 @@ describe('expressiveTempoCurve: final ritardando', () => {
         expect(factorAt(curve, 7200)).toBe(SECTION_BROADENING_FACTOR);
     });
 
+    it('adds nothing for a hold engraved past the end of the score', () => {
+        const plain = expressiveTempoCurve(fourFour(4));
+        const beyond = expressiveTempoCurve(fourFour(4, { holds: [{ tick: 7680 + 960, beats: 2 }] }));
+        expect(beyond).toEqual(plain);
+        expect(beyond.every((point) => point.tick <= 7680)).toBe(true);
+    });
+
     it('closes each movement of a two-movement score', () => {
         const curve = expressiveTempoCurve(
             fourFour(4, {
