@@ -364,8 +364,8 @@ export interface PlaybackEngineOptions {
     /** Strict (the default) plays the printed tempo exactly as it always has. */
     tempoStyle?: TempoStyle;
     /**
-     * Whether to play pedalling the service inferred for an unmarked score
-     * (`pedal_inferred`). Engraved pedalling always plays. Defaults to on.
+     * Whether to play pedal edges the service inferred (`src: 'inferred'`, the
+     * score also says `pedal_inferred`). Engraved edges always play. Defaults to on.
      */
     autoPedal?: boolean;
     onStatus: (status: PlaybackStatus) => void;
@@ -628,12 +628,17 @@ export class PlaybackEngine {
         return this.autoPedal;
     }
 
-    /** Engraved pedalling always plays; inferred pedalling only while auto-pedal is on. */
+    /**
+     * Engraved pedalling always plays; edges the service inferred (`src:
+     * 'inferred'`) only while auto-pedal is on. A score can carry both.
+     */
     private pedalsInForce(): readonly ScorePedal[] | undefined {
-        if (!this.autoPedal && this.score.warnings.includes('pedal_inferred')) {
-            return undefined;
+        const pedals = this.score.pedals;
+        if (this.autoPedal || !pedals) {
+            return pedals;
         }
-        return this.score.pedals;
+        const engraved = pedals.filter((edge) => edge.src !== 'inferred');
+        return engraved.length > 0 ? engraved : undefined;
     }
 
     /**

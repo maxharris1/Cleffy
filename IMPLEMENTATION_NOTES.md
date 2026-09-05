@@ -135,8 +135,9 @@ a melodic rest — so click, count-in, playhead and loop wrap follow for free. _
 them per beat from the pitch-class set, lifting for rests, staccato beats and harmonic churn;
 the era comes from the composer surname in `documents.title` (`era.ts`; unknown → Classical:
 re-catch on bass change only; Baroque → none; Romantic/modern → full rule), edges cap at 256 by
-coarsening to bars, and the score says `pedal_inferred`. The `Auto-pedal` pill drops those
-inferred edges client-side; engraved pedal is never dropped. _Rhythm repair_
+coarsening to bars, each inferred edge carries `src: 'inferred'`, and the score says
+`pedal_inferred`. The `Auto-pedal` pill drops the `inferred` edges client-side; engraved edges
+(no `src`) are never dropped, even on a score that mixes the two. _Rhythm repair_
 (`rhythmRepair.ts`): after meter reconciliation and before padding, a voice that does not sum to
 its bar gets ONE edit — dot toggle, halve/double, trailing rest, or duplicated rest removed —
 only when the sum becomes exact and either a neighbouring bar's same voice has the same onset

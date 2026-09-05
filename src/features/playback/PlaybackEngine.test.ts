@@ -1107,7 +1107,8 @@ describe('auto-pedal', () => {
         { tick: 0, k: 'down' },
         { tick: 2400, k: 'up' },
     ];
-    const inferred: ScoreData = { ...tinyScore, pedals: edges, warnings: ['pedal_inferred'] };
+    const tagged = edges.map((edge): ScorePedal => ({ ...edge, src: 'inferred' }));
+    const inferred: ScoreData = { ...tinyScore, pedals: tagged, warnings: ['pedal_inferred'] };
     const engraved: ScoreData = { ...tinyScore, pedals: edges };
     const pickupLifespan = async (score: ScoreData, autoPedal?: boolean): Promise<number> => {
         const { ctx, engine, buffers } = makeEngine({ score, autoPedal });
@@ -1125,6 +1126,32 @@ describe('auto-pedal', () => {
         const dry = await pickupLifespan({ ...tinyScore, warnings: ['pedal_inferred'] });
         expect(await pickupLifespan(inferred, false)).toBe(dry);
         expect(await pickupLifespan(engraved, false)).toBe(await pickupLifespan(engraved));
+    });
+
+    it('keeps the engraved edges of a mixed score when auto-pedal is off', async () => {
+        // Inferred pedalling under the pickup, printed pedalling under m.4's D5
+        // (tick 6240, written to 8160, pedal to 8400).
+        const printed: ScorePedal[] = [
+            { tick: 6240, k: 'down' },
+            { tick: 8400, k: 'up' },
+        ];
+        const mixed: ScoreData = { ...tinyScore, pedals: [...tagged, ...printed], warnings: ['pedal_inferred'] };
+        const printedOnly: ScoreData = { ...tinyScore, pedals: printed };
+        const d5Lifespan = async (score: ScoreData, autoPedal: boolean): Promise<number> => {
+            const { ctx, engine, buffers } = makeEngine({ score, autoPedal });
+            await engine.play();
+            // D5 sounds at 8.67 s; the next note on its sample anchor (m.7) is
+            // still outside the lookahead, so it is the latest match.
+            await advance(ctx, 10);
+            const matches = ctx.sources
+                .filter((s) => s.buffer === sampleOf(buffers, 74))
+                .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
+            return lifespanOf(matches[matches.length - 1]);
+        };
+        expect(await pickupLifespan(mixed, false)).toBe(await pickupLifespan(printedOnly, false));
+        expect(await pickupLifespan(mixed, true)).toBe(await pickupLifespan(engraved));
+        expect(await d5Lifespan(mixed, false)).toBe(await d5Lifespan(printedOnly, true));
+        expect(await d5Lifespan(mixed, false)).toBeGreaterThan(await d5Lifespan(tinyScore, false));
     });
 
     it('can be toggled before play and reports its state', async () => {

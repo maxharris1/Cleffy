@@ -170,6 +170,7 @@ const pedalRegion = (
     granularity: Granularity,
 ): ScorePedal[] => {
     const edges: ScorePedal[] = [];
+    const edge = (tick: number, k: ScorePedal['k']): ScorePedal => ({ tick, k, src: 'inferred' });
     let down = false;
     // Pitch classes ringing under the current depression, and the bass it was
     // taken on; the re-catch rule reads whichever its era listens for.
@@ -208,7 +209,7 @@ const pedalRegion = (
             const sounding = attacks.length > 0 || maxEnd > b0;
             if (!sounding) {
                 if (down) {
-                    edges.push({ tick: b0, k: 'up' });
+                    edges.push(edge(b0, 'up'));
                     down = false;
                 }
                 continue;
@@ -252,14 +253,14 @@ const pedalRegion = (
 
             if (dry) {
                 if (down) {
-                    edges.push({ tick: at, k: 'up' });
+                    edges.push(edge(at, 'up'));
                     down = false;
                 }
                 continue;
             }
             const beatBass = pitchClass(lowest);
             if (!down) {
-                edges.push({ tick: at, k: 'down' });
+                edges.push(edge(at, 'down'));
                 down = true;
                 ringing = new Set(beatSet);
                 bass = beatBass;
@@ -269,7 +270,7 @@ const pedalRegion = (
             // clear whenever a new pitch class would blur into what is ringing.
             const recatch = era === 'classical' ? beatBass !== bass : hasNewPitchClass(beatSet, ringing);
             if (recatch) {
-                edges.push({ tick: at, k: 'up' }, { tick: at, k: 'down' });
+                edges.push(edge(at, 'up'), edge(at, 'down'));
                 ringing = new Set(beatSet);
                 bass = beatBass;
             } else {
@@ -280,7 +281,7 @@ const pedalRegion = (
         }
     }
     if (down) {
-        edges.push({ tick: region.to, k: 'up' });
+        edges.push(edge(region.to, 'up'));
     }
     return edges;
 };

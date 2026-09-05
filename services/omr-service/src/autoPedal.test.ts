@@ -37,6 +37,7 @@ describe('inferAutoPedal: harmony', () => {
         const result = inferAutoPedal(s, 'romantic');
         expect(result.inferred).toBe(true);
         expect(edges(result)).toEqual(['down@0', 'up@960', 'down@960', `up@${BAR}`]);
+        expect(result.pedals.every((p) => p.src === 'inferred')).toBe(true);
     });
 
     it('does not clear for a note already ringing under the pedal', () => {
@@ -167,7 +168,10 @@ describe('inferAutoPedal: engraved pedalling', () => {
         for (const edge of inferred) {
             expect(edge.tick).toBeGreaterThanOrEqual(2 * BAR);
             expect(edge.tick).toBeLessThanOrEqual((2 + UNPEDALLED_GAP_BARS) * BAR);
+            expect(edge.src).toBe('inferred');
         }
+        // Printed edges keep their identity so the client can tell the two apart.
+        expect(result.pedals.filter((p) => p.src === undefined)).toEqual(printed);
         // The gap closes with a lift, and the printed depression on that tick follows it.
         const seam = (2 + UNPEDALLED_GAP_BARS) * BAR;
         const atSeam = result.pedals.filter((p) => p.tick === seam).map((p) => p.k);
@@ -200,7 +204,7 @@ describe('inferAutoPedal: the ceiling', () => {
         for (const edge of result.pedals) {
             expect(edge.tick % BAR).toBe(0);
         }
-        expect(result.pedals[0]).toEqual({ tick: 0, k: 'down' });
-        expect(result.pedals[result.pedals.length - 1]).toEqual({ tick: bars * BAR, k: 'up' });
+        expect(result.pedals[0]).toEqual({ tick: 0, k: 'down', src: 'inferred' });
+        expect(result.pedals[result.pedals.length - 1]).toEqual({ tick: bars * BAR, k: 'up', src: 'inferred' });
     });
 });

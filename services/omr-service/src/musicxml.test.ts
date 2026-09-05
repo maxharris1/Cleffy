@@ -1691,7 +1691,7 @@ describe('ScoreData v5 contract', () => {
         pedals: [
             { tick: 0, k: 'down' as const },
             { tick: 960, k: 'up' as const },
-            { tick: 960, k: 'down' as const },
+            { tick: 960, k: 'down' as const, src: 'inferred' as const },
         ],
         totalTicks: 1920,
         notes: [
@@ -1709,6 +1709,11 @@ describe('ScoreData v5 contract', () => {
         expect(checked.success).toBe(true);
         expect(checked.data?.pedals).toEqual(v5.pedals);
         expect(checked.data?.notes.map((n) => n.vc)).toEqual([0, 1]);
+    });
+
+    it('only knows inferred as a pedal provenance', () => {
+        const printed = scoreDataSchema.safeParse({ ...v5, pedals: [{ tick: 0, k: 'down', src: 'printed' }] });
+        expect(printed.success).toBe(false);
     });
 
     it('still reads a v4 note that carries no voice', () => {
