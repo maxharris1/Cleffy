@@ -1705,6 +1705,58 @@ describe('voices', () => {
         const score = parseMusicXmlString(wrap(bar(1, many, true)));
         expect(Math.max(...score.notes.map((n) => n.vc ?? 0))).toBe(7);
     });
+
+    describe('across a shard seam', () => {
+        // Shard A: voice 1 is the high line (slot 0), voice 2 the low (slot 1).
+        const shardA = wrap(bar(1, `${vn('G', 5, 16, 1)}${back(16)}${vn('C', 4, 16, 2)}`, true));
+        const seedFrom = (xml: string) => {
+            const musical = parseMusicXmlString(xml);
+            return expressionSeedAt(musical, musical.totalTicks);
+        };
+
+        it('keeps each engraved id on its slot when shard B lists the voices in the other order', () => {
+            // Read fresh, first appearance would hand voice 2 slot 0.
+            const shardB = wrap(bar(2, `${vn('D', 4, 16, 2)}${back(16)}${vn('A', 5, 16, 1)}`, true));
+            const fresh = parseMusicXmlString(shardB).notes.map((n) => [n.p, n.vc]);
+            expect(fresh).toEqual([
+                [62, 0],
+                [81, 1],
+            ]);
+            const seeded = parseMusicXmlString(shardB, 0, seedFrom(shardA)).notes.map((n) => [n.p, n.vc]);
+            expect(seeded).toEqual([
+                [62, 1],
+                [81, 0],
+            ]);
+        });
+
+        it('links ids renumbered at the seam to the seeded slots nearest in pitch', () => {
+            const shardB = wrap(bar(2, `${vn('D', 4, 16, 3)}${back(16)}${vn('A', 5, 16, 4)}`, true));
+            const musicalB = parseMusicXmlString(shardB, 0, seedFrom(shardA));
+            expect(musicalB.notes.map((n) => [n.p, n.vc])).toEqual([
+                [62, 1],
+                [81, 0],
+            ]);
+            expect(musicalB.warnings).not.toContain('voices_unstable');
+        });
+
+        it('seeds each parsed part from its own table, and hands the end state on', () => {
+            const seed = seedFrom(shardA);
+            expect(seed.voiceSlotsByPart).toEqual({
+                0: {
+                    1: [
+                        { id: '1', slot: 0, meanPitch: 79 },
+                        { id: '2', slot: 1, meanPitch: 60 },
+                    ],
+                },
+            });
+            const shardB = wrap(bar(2, `${vn('D', 4, 16, 2)}${back(16)}${vn('A', 5, 16, 1)}`, true));
+            const musicalB = parseMusicXmlString(shardB, 0, seed);
+            expect(musicalB.voiceSlotsByPart?.[0]?.[1]).toEqual([
+                { id: '1', slot: 0, meanPitch: 81 },
+                { id: '2', slot: 1, meanPitch: 62 },
+            ]);
+        });
+    });
 });
 
 /**
