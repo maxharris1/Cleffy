@@ -80,6 +80,8 @@ export interface MusicalScore {
      * (`timings.rhythmRepairs`); the reader only sees `rhythm_repaired`.
      */
     rhythmRepairs?: number;
+    /** Where each part's voice slots stood at the end: the next shard's seed. Service-side only. */
+    voiceSlotsByPart?: Record<number, Record<number, VoiceSlotSeed[]>>;
 }
 
 /**
@@ -90,6 +92,18 @@ export interface ParseSeed {
     tempoBpm: number | null;
     steadyBpm: number | null;
     velocityByStaff: Record<number, number>;
+    /**
+     * Voice-slot identities at the end of the previous shard, per parsed part
+     * (in target order) and staff, so a line keeps its `vc` across the seam.
+     */
+    voiceSlotsByPart?: Record<number, Record<number, VoiceSlotSeed[]>>;
+}
+
+/** One engraved voice id's slot and register where a parse left off. */
+export interface VoiceSlotSeed {
+    id: string;
+    slot: number;
+    meanPitch: number;
 }
 
 const EMPTY_SEED: ParseSeed = { tempoBpm: null, steadyBpm: null, velocityByStaff: {} };
@@ -749,11 +763,21 @@ export const parseMusicXmlString = (
     const leadStaves = countDeclaredStaves(lead);
 
     // The lead part is the timeline authority: its measures define barlines.
-    const leadResult = parsePart(lead, { fallbackHand: 0, timeline: null, tickOffset, warnings, seed, options });
+    const leadResult = parsePart(lead, {
+        fallbackHand: 0,
+        timeline: null,
+        tickOffset,
+        warnings,
+        seed,
+        options,
+        partIndex: 0,
+    });
     const notes = [...leadResult.notes];
     let swing = leadResult.swing;
     let rhythmRepairs = leadResult.rhythmRepairs;
-    for (const target of targets.slice(1)) {
+    const voiceSlotsByPart: Record<number, Record<number, VoiceSlotSeed[]>> = { 0: leadResult.voiceSlots };
+    targets.slice(1).forEach((target, i) => {
+        const partIndex = i + 1;
         const secondary = parsePart(target.part, {
             fallbackHand: target.fallbackHand,
             timeline: leadResult.measures,
@@ -761,11 +785,13 @@ export const parseMusicXmlString = (
             warnings,
             seed,
             options,
+            partIndex,
         });
         notes.push(...secondary.notes);
         swing = swing || secondary.swing;
         rhythmRepairs += secondary.rhythmRepairs;
-    }
+        voiceSlotsByPart[partIndex] = secondary.voiceSlots;
+    });
 
     if (leadStaves < 2 && targets.length === 1) {
         warnings.add('single_staff_all_rh');
@@ -799,6 +825,7 @@ export const parseMusicXmlString = (
         meterDefaultBpm: leadResult.meterDefaultBpm,
         swing,
         rhythmRepairs,
+        voiceSlotsByPart,
     };
 };
 
@@ -918,6 +945,8 @@ interface PartContext {
     warnings: Set<string>;
     seed: ParseSeed;
     options: ParseOptions;
+    /** Position among the parsed parts: which of the seed's voice-slot tables is this part's. */
+    partIndex: number;
 }
 
 interface PartResult {
@@ -938,6 +967,8 @@ interface PartResult {
     swing: boolean;
     /** Bar-voices the rhythm repair edited (see rhythmRepair.ts). */
     rhythmRepairs: number;
+    /** Voice-slot state at the part's end, per staff. */
+    voiceSlots: Record<number, VoiceSlotSeed[]>;
 }
 
 export type BeamState = 'begin' | 'continue' | 'end';
@@ -2350,8 +2381,16 @@ interface BarVoice {
  * a fresh slot for every renumbering, but it is disclosed as `voices_unstable`.
  * An id appearing with nothing lost is a voice genuinely entering, and simply
  * takes the lowest free slot.
+ *
+ * A `seed` (the previous shard's end state) pre-loads the id → slot table and
+ * each slot's register, so the shard seam is just another barline; no
+ * rhythmic hand-over credit is claimed across it. Returns the end state.
  */
-const assignVoiceSlots = (raws: readonly RawMeasure[], warnings: Set<string>): void => {
+const assignVoiceSlots = (
+    raws: readonly RawMeasure[],
+    warnings: Set<string>,
+    seed: Record<number, VoiceSlotSeed[]> = {},
+): Record<number, VoiceSlotSeed[]> => {
     /** staff → engraved voice id → slot. */
     const slotOf = new Map<number, Map<string, number>>();
     /** staff → slot → stats of the slot's last bar. */
@@ -2365,6 +2404,13 @@ const assignVoiceSlots = (raws: readonly RawMeasure[], warnings: Set<string>): v
         outer.set(staff, created);
         return created;
     };
+    for (const [staffKey, seeds] of Object.entries(seed)) {
+        const staff = Number(staffKey);
+        for (const entry of seeds) {
+            mapFor(slotOf, staff).set(entry.id, entry.slot);
+            mapFor(stats, staff).set(entry.slot, { meanPitch: entry.meanPitch, lastMeasure: -2, lastEndRel: 0 });
+        }
+    }
 
     for (const raw of raws) {
         // Gather this bar's voices per staff, in order of first appearance.
@@ -2460,6 +2506,16 @@ const assignVoiceSlots = (raws: readonly RawMeasure[], warnings: Set<string>): v
             }
         }
     }
+
+    const state: Record<number, VoiceSlotSeed[]> = {};
+    for (const [staff, slots] of slotOf) {
+        state[staff] = [...slots.entries()].map(([id, slot]) => ({
+            id,
+            slot,
+            meanPitch: stats.get(staff)?.get(slot)?.meanPitch ?? 60,
+        }));
+    }
+    return state;
 };
 
 /**
@@ -2490,7 +2546,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     let arpDirection: 'up' | 'down' | null = null;
     let swing = false;
 
-    assignVoiceSlots(raws, ctx.warnings);
+    const voiceSlots = assignVoiceSlots(raws, ctx.warnings, ctx.seed.voiceSlotsByPart?.[ctx.partIndex]);
 
     // Secondary parts take their barlines from the lead, so only the lead's
     // signatures are worth second-guessing.
@@ -2936,6 +2992,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         meterDefaultBpm: meterDefault,
         swing,
         rhythmRepairs,
+        voiceSlots,
     };
 };
 
@@ -2965,7 +3022,9 @@ export const expressionSeedAt = (musical: MusicalScore, tick: number): ParseSeed
             velocityByStaff[curve.staff] = v;
         }
     }
-    return { tempoBpm, steadyBpm, velocityByStaff };
+    // Voices are named per part, and the state at the end of the shard is the
+    // state at any seam inside its overlap page.
+    return { tempoBpm, steadyBpm, velocityByStaff, voiceSlotsByPart: musical.voiceSlotsByPart ?? {} };
 };
 
 const ticksOf = (duration: number, divisions: number): number =>
@@ -3070,6 +3129,7 @@ export const parseMxlFiles = (
         combined.openTiesAtEnd = parsed.openTiesAtEnd;
         combined.swing = combined.swing || parsed.swing;
         combined.rhythmRepairs = (combined.rhythmRepairs ?? 0) + (parsed.rhythmRepairs ?? 0);
+        combined.voiceSlotsByPart = parsed.voiceSlotsByPart;
         parsed.warnings.forEach((warning) => {
             if (warning !== 'tempo_defaulted') {
                 warnings.add(warning);
