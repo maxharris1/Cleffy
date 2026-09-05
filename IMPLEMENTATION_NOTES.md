@@ -144,7 +144,10 @@ coarsening to 1/2/4/8 bars (past that, printed edges only), each inferred edge c
 its bar gets ONE edit — dot toggle, halve/double, trailing rest, or duplicated rest removed —
 only when the sum becomes exact and either a neighbouring bar's same voice has the same onset
 pattern or the note's beam group lands on the beat grid afterwards (`rhythm_repaired`,
-`timings.rhythmRepairs`). _Smaller:_ Baroque trills and Pralltriller start on the upper
+`timings.rhythmRepairs`). Directions read at or after the edit move with the notes (a voice's
+own dynamics always; graces, wedges, pedal and tempo marks only where no other voice shares the
+staff or bar); pickups and the final bar of a part are never repaired, as in meter
+reconciliation. A breath mark on a tied note stops the clock after the merged chain. _Smaller:_ Baroque trills and Pralltriller start on the upper
 auxiliary; single-note tremolos, glissandi (chromatic run) and caesura / breath marks (½-beat
 hold) are realised. Two more velocity layers were measured and deferred: `public/audio/piano`
 is 3.0 MB for three layers (~1.0 MB each), so five would cost ~+2.0 MB. Constants are

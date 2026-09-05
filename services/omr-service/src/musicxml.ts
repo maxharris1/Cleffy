@@ -2481,6 +2481,9 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     let pendingGraces: Array<{ midi: number; hand: 0 | 1; slash: boolean }> = [];
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
     const openTies = new Map<string, GatedNote>();
+    // Tie chains with a breath mark somewhere along them: the stop comes after
+    // the chain's merged end, which is only known when it closes.
+    const breathAfter = new Set<GatedNote>();
     /** Glissando starts waiting for their target note, keyed by staff:voice. */
     const pendingGlissandi = new Map<string, ScoreNote>();
     let arpBuffer: ScoreNote[] = [];
@@ -2709,10 +2712,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         if (open) {
                             open.d += ev.dur;
                             openTies.delete(openKey);
+                            if (ev.breath && !ev.chord) {
+                                breathAfter.add(open);
+                            }
                             if (ev.tieStart) {
                                 // Chain continues under this note's identity.
                                 openTies.set(tieKey, open);
                             } else {
+                                if (breathAfter.delete(open)) {
+                                    holds.push({ tick: open.t + open.d, beats: BREATH_BEATS });
+                                }
                                 // A tie chain is one sounding event: gate it once,
                                 // here, from the marking that closes it. Doing it
                                 // per link would also corrupt resolveOpenTie above,
@@ -2834,8 +2843,13 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         holds.push({ tick: start, beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)) });
                     }
                     if (ev.breath && !ev.chord) {
-                        // A caesura or breath mark is a short stop AFTER the note.
-                        holds.push({ tick: start + ev.dur, beats: BREATH_BEATS });
+                        // A caesura or breath mark is a short stop AFTER the note —
+                        // after the whole chain, for a note that starts a tie.
+                        if (ev.tieStart) {
+                            breathAfter.add(note);
+                        } else {
+                            holds.push({ tick: start + ev.dur, beats: BREATH_BEATS });
+                        }
                     }
                     if (ev.tieStart) {
                         openTies.set(tieKey, note);
@@ -2863,6 +2877,9 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     // A tie whose stop was never engraved never reached its gating point. Close
     // it out with the plain gate so it does not sound longer than its neighbours.
     for (const open of openTies.values()) {
+        if (breathAfter.delete(open)) {
+            holds.push({ tick: open.t + open.d, beats: BREATH_BEATS });
+        }
         open.d = gateDuration(open.d, GATE_DEFAULT);
         open.gate = GATE_DEFAULT;
     }
