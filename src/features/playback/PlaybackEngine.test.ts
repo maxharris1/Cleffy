@@ -871,6 +871,52 @@ describe('tempo style', () => {
         expect(engine.getPositionTicks()).toBeCloseTo(before, 0);
     });
 
+    describe('rebuilding the map mid-flight', () => {
+        const rebuilds = {
+            style: (engine: PlaybackEngine) => engine.setTempoStyle('expressive'),
+            bpm: (engine: PlaybackEngine) => engine.setBpm(121),
+        };
+
+        for (const [name, rebuild] of Object.entries(rebuilds)) {
+            it(`keeps the promised start when the ${name} changes during the count-in`, async () => {
+                // tinyScore's count-in is 7 clicks over 3.5 s: the score starts
+                // at 0.08 + 3.5 s and must still, whatever changed meanwhile.
+                const changed = makeEngine();
+                await changed.engine.play({ countIn: true });
+                await advance(changed.ctx, 0.5);
+                expect(changed.engine.getStatus()).toBe('counting');
+                rebuild(changed.engine);
+                expect(changed.engine.getStatus()).toBe('counting');
+                await advance(changed.ctx, 3.2);
+                const firstOnset = Math.min(...changed.ctx.sources.map((s) => s.startedAt ?? Infinity));
+                expect(firstOnset).toBeGreaterThanOrEqual(0.08 + 3.5);
+                // The pickup lands exactly where the count-in promised it.
+                const control = makeEngine();
+                await control.engine.play({ countIn: true });
+                await advance(control.ctx, 3.7);
+                const controlOnset = Math.min(...control.ctx.sources.map((s) => s.startedAt ?? Infinity));
+                expect(firstOnset).toBeCloseTo(controlOnset, 6);
+                // Seven count-in clicks and not one more.
+                expect(changed.ctx.oscillators).toHaveLength(7);
+            });
+
+            it(`clicks the beat at the seam once when the ${name} changes`, async () => {
+                const { ctx, engine } = makeEngine();
+                engine.setMetronome(true);
+                await engine.play();
+                // 0.5 s in, the 0.58 s click is inside the 120 ms lookahead and
+                // already scheduled; a rebuild must not schedule it again.
+                await advance(ctx, 0.5);
+                rebuild(engine);
+                await advance(ctx, 0.3);
+                const atSeam = ctx.oscillators.filter((o) => Math.abs((o.startedAt ?? -1) - 0.58) < 0.02);
+                expect(atSeam).toHaveLength(1);
+                const all = ctx.oscillators.map((o) => o.startedAt ?? -1);
+                expect(new Set(all).size).toBe(all.length);
+            });
+        }
+    });
+
     it('wraps a loop through the closing bars on the expressive clock', async () => {
         const { ctx, engine } = makeEngine({ score: closing, bpm: 120, tempoStyle: 'expressive' });
         engine.setLoop({ startTick: 5760, endTick: 7680 });

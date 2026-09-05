@@ -666,17 +666,32 @@ export class PlaybackEngine {
     }
 
     private rebuildMap(): void {
-        const wasPlaying = this.ctx && (this.status === 'playing' || this.status === 'counting');
-        if (wasPlaying && this.ctx) {
+        if (!this.ctx || (this.status !== 'playing' && this.status !== 'counting')) {
+            this.map = this.buildMap(this.bpmValue);
+            return;
+        }
+        if (this.status === 'counting') {
+            // The count-in clicks are already in flight toward a start time the
+            // player was promised; keep it, and start the score there on the
+            // new map. Pulling the anchor to "now" would strike the first notes
+            // mid-count.
+            const { tick, ctxTime } = this.anchor;
+            this.map = this.buildMap(this.bpmValue);
+            this.anchor = this.anchorAt(tick, ctxTime);
+        } else {
             // Read the position on the OLD map before rebuilding, then re-anchor
             // on the new one, or the playhead jumps when the tempo changes.
             const positionNow = this.getPositionTicks();
             this.map = this.buildMap(this.bpmValue);
             this.anchor = this.anchorAt(positionNow, this.ctx.currentTime);
-            this.pendingAnchor = null;
+        }
+        this.pendingAnchor = null;
+        // Beat ticks do not depend on the map, so a beat already picked out but
+        // not yet clicked is still the next one; dropping it would re-schedule
+        // clicks between the anchor and it. Only a beat now behind the anchor
+        // (a pending loop wrap was just discarded) needs finding again.
+        if (this.nextBeat !== null && this.nextBeat.tick < this.anchor.tick) {
             this.nextBeat = null;
-        } else {
-            this.map = this.buildMap(this.bpmValue);
         }
     }
 
