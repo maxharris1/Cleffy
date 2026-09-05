@@ -76,7 +76,7 @@ brought the backend up, and it does not start `functions:serve`.
 | OMR worker               | http://127.0.0.1:8091                                     |
 
 Sign in as `teacher@cleffy.local` or `student@cleffy.local`, password
-`121099`. Both accounts are seeded on the Academy plan so local
+`cleffy-local-test`. Both accounts are seeded on the Academy plan so local
 feature work is not paywalled. The seeded documents carry library metadata
 only — there are no PDF bytes in the `scores` bucket, so upload a real file
 to exercise the viewer.

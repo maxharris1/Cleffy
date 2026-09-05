@@ -521,7 +521,7 @@ additional_redirect_urls = [
 ]
 
 # Seeding is off on purpose. seed.sql creates teacher@cleffy.local and
-# student@cleffy.local with the password `121099`, which is written
+# student@cleffy.local with the password `cleffy-local-test`, which is written
 # down in .cursor/README.md. That is fine on a local stack and not fine on an
 # internet-facing host. Sign up a real account on dev.cleffy.io instead.
 [remotes.dev.db.seed]

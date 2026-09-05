@@ -40,7 +40,7 @@ dev machine, which all claim the default 5432x block. They are read from
 other projects' containers, and `cleanup_supabase_state` would delete them.
 
 Accounts: `teacher@cleffy.local` / `student@cleffy.local`, password
-`121099`.
+`cleffy-local-test`.
 
 Local OMR joins the Supabase docker network on purpose: the edge runtime's
 `SUPABASE_URL` is `http://kong:8000`, so the signed storage URLs `score-analyze`

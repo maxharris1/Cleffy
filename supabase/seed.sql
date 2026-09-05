@@ -4,7 +4,7 @@
 --
 -- LOCAL DEVELOPMENT ONLY — never run against hosted Supabase.
 --
--- Test accounts (password for all: 121099):
+-- Test accounts (password for all: cleffy-local-test):
 --   teacher@cleffy.local  — owns the sample library documents; Academy plan
 --   student@cleffy.local  — second account for share / RLS; Academy plan
 -- Local billing is unlocked (Academy) so feature work is not paywalled. Hosted
@@ -60,7 +60,7 @@ with new_users as (
             'authenticated',
             'authenticated',
             'teacher@cleffy.local',
-            extensions.crypt('121099', extensions.gen_salt('bf')),
+            extensions.crypt('cleffy-local-test', extensions.gen_salt('bf')),
             now(),
             '',
             '',
@@ -80,7 +80,7 @@ with new_users as (
             'authenticated',
             'authenticated',
             'student@cleffy.local',
-            extensions.crypt('121099', extensions.gen_salt('bf')),
+            extensions.crypt('cleffy-local-test', extensions.gen_salt('bf')),
             now(),
             '',
             '',

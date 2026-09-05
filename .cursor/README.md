@@ -27,7 +27,7 @@ starts from a commit that includes this tree.
 
 ## Local test accounts
 
-Seeded by `supabase/seed.sql` (password for all: **`121099`**):
+Seeded by `supabase/seed.sql` (password for all: **`cleffy-local-test`**):
 
 | Email                 | Role hint                         | Stable user id                         |
 | --------------------- | --------------------------------- | -------------------------------------- |
