@@ -141,7 +141,8 @@ coarsening to 1/2/4/8 bars (past that, printed edges only), each inferred edge c
 `pedal_inferred`. The `Auto-pedal` pill drops the `inferred` edges client-side; engraved edges
 (no `src`) are never dropped, even on a score that mixes the two. _Rhythm repair_
 (`rhythmRepair.ts`): after meter reconciliation and before padding, a voice that does not sum to
-its bar gets ONE edit — dot toggle, halve/double, trailing rest, or duplicated rest removed —
+its bar gets ONE edit (per voice, so a bar with two broken voices gets two) — dot toggle,
+halve/double, trailing rest, or duplicated rest removed —
 only when the sum becomes exact and either a neighbouring bar's same voice has the same onset
 pattern or the note's beam group lands on the beat grid afterwards (`rhythm_repaired`,
 `timings.rhythmRepairs`). Directions read at or after the edit move with the notes (a voice's

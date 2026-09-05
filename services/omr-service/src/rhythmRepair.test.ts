@@ -166,7 +166,7 @@ describe('rhythm repair', () => {
         expect(score.warnings).toContain('measure_underfull');
     });
 
-    it('repairs at most one voice edit per bar and leaves a whole second voice alone', () => {
+    it('repairs the one voice that is short and leaves a whole second voice alone', () => {
         // Voice 1 lost a dot (figure repeats in bar 1); voice 2 is exact in both bars.
         const v1 = (dots: number) =>
             `${note('C', 5, dots ? 6 : 4, { type: 'quarter', dots })}${note('D', 5, 2, { type: 'eighth' })}${note('E', 5, 8, { type: 'half' })}`;
@@ -186,6 +186,24 @@ describe('rhythm repair', () => {
         expect(score.rhythmRepairs).toBe(1);
         const inBar2 = (n: { t: number }) => n.t >= 1920 && n.t < 3840;
         expect(score.notes.filter((n) => inBar2(n) && n.p < 60).map((n) => n.t - 1920)).toEqual([0, 960]);
+        expect(score.notes.filter((n) => inBar2(n) && n.p >= 60).map((n) => n.t - 1920)).toEqual([0, 720, 960]);
+    });
+
+    it('repairs each voice on its own evidence when both are broken', () => {
+        // Both voices of bar 2 lost the dot their bar-1 figure shows: one edit
+        // each, one repair counted per voice.
+        const upper = (dots: number) =>
+            `${note('C', 5, dots ? 6 : 4, { type: 'quarter', dots })}${note('D', 5, 2, { type: 'eighth' })}${note('E', 5, 8, { type: 'half' })}`;
+        const lower = (dots: number, back: number) =>
+            `<backup><duration>${back}</duration></backup>` +
+            `${note('C', 3, dots ? 6 : 4, { type: 'quarter', dots, voice: 2 })}${note('D', 3, 2, { type: 'eighth', voice: 2 })}${note('E', 3, 8, { type: 'half', voice: 2 })}`;
+        const score = parseMusicXmlString(
+            wrap(bar(1, upper(1) + lower(1, 16)) + bar(2, upper(0) + lower(0, 14)) + closing(3)),
+        );
+        expect(score.rhythmRepairs).toBe(2);
+        expect(score.warnings).not.toContain('measure_underfull');
+        const inBar2 = (n: { t: number }) => n.t >= 1920 && n.t < 3840;
+        expect(score.notes.filter((n) => inBar2(n) && n.p < 60).map((n) => n.t - 1920)).toEqual([0, 720, 960]);
         expect(score.notes.filter((n) => inBar2(n) && n.p >= 60).map((n) => n.t - 1920)).toEqual([0, 720, 960]);
     });
 });
