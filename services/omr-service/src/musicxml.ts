@@ -2266,30 +2266,32 @@ const resolveDynamics = (
         curve.points.sort((a, b) => a.tick - b.tick);
     }
     seedCurveStarts(curves, seed, tickOffset);
-    for (const [staff, curve] of curves) {
-        buildRamps(curve, wedges.get(staff) ?? [], endTick, barTicksAt);
-    }
 
     // A level printed against one voice belongs to that voice: its curve is the
-    // staff's with the other voices' levels taken out. Hairpins stay shared —
-    // a wedge spans the staff. The staff curve keeps every level, so a voice
-    // no dynamic was ever printed against hears what it always did.
+    // staff's with the other voices' levels taken out. A wedge spans the staff,
+    // so every voice curve gets the staff's hairpins — but interpolated from
+    // its own levels, so a voice marked f swells from f while the staff's p
+    // swells from p. The staff curve keeps every level, so a voice no dynamic
+    // was ever printed against hears what it always did.
     const voiceCurves = new Map<string, DynamicCurve>();
     for (const [staff, curve] of curves) {
-        const voiced = new Set<number>();
-        for (const point of curve.points) {
-            if (point.slot !== undefined) {
-                voiced.add(point.slot);
-            }
-        }
-        if (voiced.size === 0) {
-            continue;
-        }
-        for (const slot of slotsByStaff.get(staff) ?? []) {
-            voiceCurves.set(`${staff}:${slot}`, {
-                points: curve.points.filter((point) => point.slot === undefined || point.slot === slot),
-                ramps: curve.ramps,
-            });
+        const staffWedges = wedges.get(staff) ?? [];
+        const voiced = curve.points.some((point) => point.slot !== undefined);
+        // Split before the staff's own ramps materialise their arrival points,
+        // or a voice would inherit the staff's arrival as its hairpin target.
+        const perVoice = voiced
+            ? [...(slotsByStaff.get(staff) ?? [])].map((slot): [number, DynamicCurve] => [
+                  slot,
+                  {
+                      points: curve.points.filter((point) => point.slot === undefined || point.slot === slot),
+                      ramps: [],
+                  },
+              ])
+            : [];
+        buildRamps(curve, staffWedges, endTick, barTicksAt);
+        for (const [slot, own] of perVoice) {
+            buildRamps(own, staffWedges, endTick, barTicksAt);
+            voiceCurves.set(`${staff}:${slot}`, own);
         }
     }
     return { curves, voiceCurves, accents };
