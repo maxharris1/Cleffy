@@ -194,6 +194,41 @@ export const clickBeatTicks = (sig: ScoreTimeSig): number => {
 /** Full notated bar length of a signature, in ticks. */
 export const barTicks = (sig: ScoreTimeSig): number => sig.num * ticksPerBeat(sig.den);
 
+/** Velocity added on a full bar's downbeat — shared by note shaping, not the click. */
+export const DOWNBEAT_ACCENT = 0.025;
+/** Velocity added on the secondary strong beat of an even meter. */
+export const SECONDARY_ACCENT = 0.012;
+
+/**
+ * How much a beat contributes to a note's velocity. The metronome still uses
+ * {@link beatsForMeasure}'s boolean accent (downbeat only); this is the extra
+ * hierarchy a player puts on the page — downbeat, the half-bar in even meters
+ * of four or more beats (and in 6/8, the second dotted beat), nothing on a
+ * pickup. Two-beat simple meters (2/4, 2/2) have no secondary: beat two of a
+ * march is weak. Triple meters (3/4, 3/8, 9/8) have none either.
+ *
+ * Compound signatures are counted in the dotted beats {@link clickBeatTicks}
+ * already returns, so 6/8's secondary is the second dotted quarter (index 1)
+ * and 12/8's is index 2.
+ */
+export const beatWeight = (sig: ScoreTimeSig, beatIndex: number, isFullBar: boolean): number => {
+    if (!isFullBar) {
+        return 0;
+    }
+    if (beatIndex === 0) {
+        return DOWNBEAT_ACCENT;
+    }
+    const nBeats = barTicks(sig) / clickBeatTicks(sig);
+    // 2/4 and 2/2 click in two simple beats; 6/8 clicks in two dotted beats
+    // and keeps the secondary. clickBeatTicks equals the denominator-beat
+    // only in the simple case.
+    const simpleDuple = nBeats === 2 && clickBeatTicks(sig) === ticksPerBeat(sig.den);
+    if (nBeats % 2 === 0 && beatIndex === nBeats / 2 && !simpleDuple) {
+        return SECONDARY_ACCENT;
+    }
+    return 0;
+};
+
 export interface BeatTick {
     tick: number;
     /** True on real downbeats — never on pickups or truncated bars. */
@@ -300,10 +335,7 @@ export const measureIndexAtPagePoint = (
                 return i;
             }
             const bestMeasure = best >= 0 ? score.measures[best] : undefined;
-            if (
-                !bestMeasure ||
-                Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)
-            ) {
+            if (!bestMeasure || Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)) {
                 best = i;
             }
         }
@@ -330,28 +362,167 @@ export interface TempoMap {
     hold: number[];
 }
 
-/** Practice-tempo scaling is a single multiplier over the whole map. */
-export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: number): TempoMap => {
-    const safeScale = scale > 0 && Number.isFinite(scale) ? scale : 1;
+/** How far an unmarked close slows — reached on the last beat of the final bar. */
+export const FINAL_RIT_FACTOR = 0.85;
+
+/**
+ * Movement ends: the score's close, plus every barline where numbering restarts
+ * AND the engraved-bar identity advances. Repeats and D.C. jumps also reset
+ * `n`, but their `srcIndex` goes down, so they are not a new movement.
+ */
+export const movementEnds = (score: ScoreData): number[] => {
+    const ends = new Set<number>([score.totalTicks]);
+    const measures = score.measures;
+    for (let i = 1; i < measures.length; i++) {
+        const curr = measures[i];
+        const prev = measures[i - 1];
+        if (!curr || !prev) {
+            continue;
+        }
+        const currSrc = curr.srcIndex ?? i;
+        const prevSrc = prev.srcIndex ?? i - 1;
+        if (curr.n <= 1 && prev.n > 1 && currSrc > prevSrc) {
+            ends.add(curr.tick);
+        }
+    }
+    return [...ends].sort((a, b) => a - b);
+};
+
+/**
+ * One tempo point per beat of the last full bar before each movement end,
+ * easing linearly from the tempo in force at the barline down to
+ * {@link FINAL_RIT_FACTOR} of it on the last beat. A printed rit. (`src: 'ramp'`
+ * in the last two bars) or a fermata in the last bar already does this job, so
+ * those ends are left alone. Pickup-length last bars are skipped: there is no
+ * full bar to stretch.
+ *
+ * Points are in the score's own BPM, before any practice-tempo scale — the
+ * caller folds them in as if they had been printed.
+ */
+export const finalRitardandoPoints = (score: ScoreData, fallbackBpm: number): Array<{ tick: number; bpm: number }> => {
     const tempos = score.tempos ?? [];
     const holds = score.holds ?? [];
+    const points: Array<{ tick: number; bpm: number }> = [];
 
-    const boundaries = new Set<number>([0]);
-    for (const tempo of tempos) {
-        boundaries.add(tempo.tick);
-    }
-    for (const hold of holds) {
-        boundaries.add(hold.tick);
-    }
-    const ticks = [...boundaries].sort((a, b) => a - b);
-
-    const bpmAt = (tick: number): number => {
-        let bpm = score.defaultBpm ?? fallbackBpm;
+    const tempoInForce = (tick: number): number => {
+        let bpm = fallbackBpm;
         for (const tempo of tempos) {
             if (tempo.tick > tick) {
                 break;
             }
             bpm = tempo.bpm;
+        }
+        return bpm;
+    };
+
+    for (const end of movementEnds(score)) {
+        const prior: ScoreMeasure[] = [];
+        for (const measure of score.measures) {
+            if (measure.tick >= end) {
+                break;
+            }
+            prior.push(measure);
+        }
+        const last = prior[prior.length - 1];
+        if (!last) {
+            continue;
+        }
+        const sig = timeSigAt(score.timeSignatures, last.tick);
+        if (last.dTicks < barTicks(sig)) {
+            continue;
+        }
+        const windowStart = prior[Math.max(0, prior.length - 2)]?.tick ?? last.tick;
+        const rampInWindow = tempos.some(
+            (tempo) => tempo.src === 'ramp' && tempo.tick >= windowStart && tempo.tick < end,
+        );
+        if (rampInWindow) {
+            continue;
+        }
+        const holdInLast = holds.some(
+            (hold) => hold.tick >= last.tick && hold.tick < end && hold.tick < last.tick + last.dTicks,
+        );
+        if (holdInLast) {
+            continue;
+        }
+
+        const beat = clickBeatTicks(sig);
+        const from = tempoInForce(last.tick);
+        const target = from * FINAL_RIT_FACTOR;
+        const beats: number[] = [];
+        for (let k = 0; k < MAX_BEATS_PER_MEASURE; k++) {
+            const tick = last.tick + k * beat;
+            if (tick >= last.tick + last.dTicks) {
+                break;
+            }
+            beats.push(tick);
+        }
+        if (beats.length === 0) {
+            continue;
+        }
+        const denom = Math.max(1, beats.length - 1);
+        for (let i = 0; i < beats.length; i++) {
+            const tick = beats[i];
+            if (tick === undefined) {
+                continue;
+            }
+            const progress = beats.length === 1 ? 1 : i / denom;
+            points.push({ tick, bpm: from + (target - from) * progress });
+        }
+    }
+    return points;
+};
+
+/**
+ * A step-wise tempo multiplier laid over the printed tempo: `factor` holds
+ * from `tick` until the next point. Produced by the expressive tempo style;
+ * the strict style has none.
+ */
+export interface TempoCurvePoint {
+    tick: number;
+    factor: number;
+}
+
+/**
+ * Practice-tempo scaling is a single multiplier over the whole map.
+ *
+ * Without a `curve` the map is exactly what it always was, unmarked-close
+ * ritardando included. With one, the curve REPLACES that ritardando — it has
+ * its own — and multiplies the tempo in force wherever it is not 1.
+ */
+export const buildTempoMap = (
+    score: ScoreData,
+    scale: number,
+    fallbackBpm: number,
+    curve?: readonly TempoCurvePoint[],
+): TempoMap => {
+    const safeScale = scale > 0 && Number.isFinite(scale) ? scale : 1;
+    const tempos = score.tempos ?? [];
+    const holds = score.holds ?? [];
+    // Fold the unmarked close in before scaling, the same way a printed rit. is.
+    const rit = curve ? [] : finalRitardandoPoints(score, score.defaultBpm ?? fallbackBpm);
+    const points = [...tempos.map((tempo) => ({ tick: tempo.tick, bpm: tempo.bpm })), ...rit].sort(
+        (a, b) => a.tick - b.tick,
+    );
+
+    const boundaries = new Set<number>([0]);
+    for (const point of points) {
+        boundaries.add(point.tick);
+    }
+    for (const hold of holds) {
+        boundaries.add(hold.tick);
+    }
+    for (const point of curve ?? []) {
+        boundaries.add(point.tick);
+    }
+    const ticks = [...boundaries].sort((a, b) => a - b);
+
+    const bpmAt = (tick: number): number => {
+        let bpm = score.defaultBpm ?? fallbackBpm;
+        for (const point of points) {
+            if (point.tick > tick) {
+                break;
+            }
+            bpm = point.bpm;
         }
         return bpm;
     };
@@ -364,6 +535,16 @@ export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: numb
         }
         return beats;
     };
+    const factorAt = (tick: number): number => {
+        let factor = 1;
+        for (const point of curve ?? []) {
+            if (point.tick > tick) {
+                break;
+            }
+            factor = point.factor;
+        }
+        return factor > 0 && Number.isFinite(factor) ? factor : 1;
+    };
 
     const spt: number[] = [];
     const hold: number[] = [];
@@ -371,14 +552,16 @@ export const buildTempoMap = (score: ScoreData, scale: number, fallbackBpm: numb
     for (let i = 0; i < ticks.length; i++) {
         const tick = ticks[i] ?? 0;
         const bpm = Math.max(1, bpmAt(tick) * safeScale);
-        spt.push(secondsPerTick(bpm));
+        // The curve bends the beat, not the fermata: a hold is measured in
+        // beats of the printed tempo either way.
+        spt.push(curve ? secondsPerTick(Math.max(1, bpm * factorAt(tick))) : secondsPerTick(bpm));
         // A hold is measured in beats, so it stretches with the practice tempo.
         hold.push((holdBeatsAt(tick) * 60) / bpm);
         if (i === 0) {
             at.push(0);
         } else {
             const prev = i - 1;
-            at.push((at[prev] ?? 0) + (hold[prev] ?? 0) + ((tick - (ticks[prev] ?? 0)) * (spt[prev] ?? 0)));
+            at.push((at[prev] ?? 0) + (hold[prev] ?? 0) + (tick - (ticks[prev] ?? 0)) * (spt[prev] ?? 0));
         }
     }
     return { ticks, spt, at, hold };

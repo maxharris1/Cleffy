@@ -471,8 +471,8 @@ inherit `auth.site_url = http://localhost:5173` and every auth redirect on
 dev.cleffy.io would land on localhost.
 
 Seeding is **off** for the branch. `seed.sql` creates `teacher@cleffy.local`
-and `student@cleffy.local` with the password `cleffy-local-test`, which is
-written down in `.cursor/README.md` — fine on a local stack, not on an
+and `student@cleffy.local` with the password `cleffy-local-test`, which is written
+down in `.cursor/README.md` — fine on a local stack, not on an
 internet-facing host. Sign up a real account on dev.cleffy.io instead.
 
 Because the branch is unseeded, the `scores` bucket can no longer come from

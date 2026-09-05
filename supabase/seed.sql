@@ -3,11 +3,12 @@
 -- when [db.seed] is enabled in config.toml.
 --
 -- LOCAL DEVELOPMENT ONLY — never run against hosted Supabase.
--- No billing / plans / subscriptions tables (those are not on current `dev`).
 --
 -- Test accounts (password for all: cleffy-local-test):
---   teacher@cleffy.local  — owns the sample library documents
---   student@cleffy.local  — second account for share / RLS checks
+--   teacher@cleffy.local  — owns the sample library documents; Academy plan
+--   student@cleffy.local  — second account for share / RLS; Academy plan
+-- Local billing is unlocked (Academy) so feature work is not paywalled. Hosted
+-- environments never run this file.
 
 -- ---------------------------------------------------------------------------
 -- Storage: private scores bucket (also declared in config.toml, keep in sync)
@@ -152,3 +153,83 @@ values (
     'b0000000-0000-4000-8000-000000000001',
     'a0000000-0000-4000-8000-000000000001'
 );
+
+-- ---------------------------------------------------------------------------
+-- Local billing: Academy for seeded accounts and later non-student signups
+-- ---------------------------------------------------------------------------
+-- The three seeded documents already fill Free's cloud-score cap, and Free has
+-- no roster, so a local teacher would hit the paywall on the first upload or
+-- student add. A real subscriptions row is what get_entitlements() and the
+-- Edge Function quota path actually read — a client-only skip would still 402.
+insert into public.subscriptions (
+    stripe_subscription_id,
+    user_id,
+    tier,
+    status,
+    price_id,
+    current_period_end,
+    cancel_at_period_end,
+    mode
+)
+select
+    'sub_local_' || u.id::text,
+    u.id,
+    'academy',
+    'active',
+    null,
+    null,
+    false,
+    'test'
+from auth.users u
+where u.email in ('teacher@cleffy.local', 'student@cleffy.local')
+on conflict (stripe_subscription_id) do nothing;
+
+-- Later local signups get the same plan. Provisioned students (user_type set
+-- at create) and anonymous guests stay ungated-by-plan: the student short-
+-- circuit in get_entitlements() must still be testable, and a share-link
+-- visitor is not a customer.
+create or replace function public.local_dev_grant_academy ()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    if coalesce(new.is_anonymous, false) then
+        return new;
+    end if;
+    if coalesce(new.raw_app_meta_data ->> 'user_type', '') = 'student' then
+        return new;
+    end if;
+
+    insert into public.subscriptions (
+        stripe_subscription_id,
+        user_id,
+        tier,
+        status,
+        price_id,
+        current_period_end,
+        cancel_at_period_end,
+        mode
+    )
+    values (
+        'sub_local_' || new.id::text,
+        new.id,
+        'academy',
+        'active',
+        null,
+        null,
+        false,
+        'test'
+    )
+    on conflict (stripe_subscription_id) do nothing;
+
+    return new;
+end;
+$$;
+
+drop trigger if exists local_dev_grant_academy on auth.users;
+create trigger local_dev_grant_academy
+    after insert on auth.users
+    for each row
+    execute function public.local_dev_grant_academy ();

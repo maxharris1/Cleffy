@@ -13,9 +13,11 @@ export interface JobTimings {
     steps?: Record<string, number>;
     /** Raw step sighting counts (debug). */
     stepCounts?: Record<string, number>;
-    /** Parallel path outcome when pageCount >= 4. */
-    parallelPath?: 'merged' | 'serial_fallback';
+    /** Parallel path outcome when pageCount >= 4. `serial` = never started (low RAM). */
+    parallelPath?: 'merged' | 'serial_fallback' | 'serial';
     parallelFallbackReasons?: string[];
+    /** Bar-voices the rhythm repair edited (musicxml.ts / rhythmRepair.ts). */
+    rhythmRepairs?: number;
 }
 
 export const emptyTimings = (): JobTimings => ({});

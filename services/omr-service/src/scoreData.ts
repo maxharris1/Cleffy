@@ -7,8 +7,11 @@ import { z } from 'zod';
  */
 
 /** Writer version for newly built analyses. */
-export const SCORE_DATA_VERSION = 3;
+export const SCORE_DATA_VERSION = 5;
 export const TICKS_PER_QUARTER = 480;
+
+/** Highest voice slot a note may carry; slots are per staff, 0-based. */
+export const MAX_VOICE_SLOT = 7;
 
 /**
  * Velocity for a note the score never gave a dynamic — roughly mezzo-forte.
@@ -27,6 +30,12 @@ const scoreNoteSchema = z.object({
     p: z.number().int().min(0).max(127),
     h: z.union([z.literal(0), z.literal(1)]),
     v: z.number().min(0).max(1).optional(),
+    /**
+     * Voice slot within the hand's staff, normalised so the same slot names the
+     * same voice across barlines even where the engraving renumbered it. Absent
+     * on v1–v4 caches and read as 0. v5+.
+     */
+    vc: z.number().int().min(0).max(MAX_VOICE_SLOT).optional(),
 });
 
 /** An engraved chord column: x normalized on the page, t ticks from the measure start. */
@@ -110,6 +119,20 @@ const scoreHoldSchema = z.object({
     beats: z.number().positive().max(16),
 });
 
+/**
+ * One sustain-pedal edge. Edges rather than spans: OMR routinely loses one end
+ * of a pedal line, and a missing edge costs a single note's ring instead of
+ * invalidating a whole span. A re-catch (MusicXML `change`) is two edges on the
+ * same tick, 'up' before 'down' — order carries the meaning, so anything
+ * re-sorting this array must sort stably. v4+.
+ */
+const scorePedalSchema = z.object({
+    tick: z.number().int().nonnegative(),
+    k: z.enum(['down', 'up']),
+    /** Set on edges the service inferred (auto-pedal); absent on engraved ones. v5. */
+    src: z.enum(['inferred']).optional(),
+});
+
 export const scoreDataSchema = z.object({
     version: z.number().int(),
     ticksPerQuarter: z.literal(TICKS_PER_QUARTER),
@@ -121,6 +144,8 @@ export const scoreDataSchema = z.object({
     tempos: z.array(scoreTempoSchema).max(512).optional(),
     /** v3+; fermata holds. */
     holds: z.array(scoreHoldSchema).max(128).optional(),
+    /** v4+; sustain-pedal edges in tick order. */
+    pedals: z.array(scorePedalSchema).max(256).optional(),
     totalTicks: z.number().int().positive(),
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),
@@ -136,4 +161,5 @@ export type ScoreKeySig = z.infer<typeof scoreKeySigSchema>;
 export type ScoreClef = z.infer<typeof scoreClefSchema>;
 export type ScoreTempo = z.infer<typeof scoreTempoSchema>;
 export type ScoreHold = z.infer<typeof scoreHoldSchema>;
+export type ScorePedal = z.infer<typeof scorePedalSchema>;
 export type ScoreData = z.infer<typeof scoreDataSchema>;
