@@ -187,11 +187,13 @@ describe('TransportBar ready controls', () => {
 
     it('toggles the tempo style and remembers it on this device', async () => {
         renderBar();
-        const strict = screen.getByRole('button', { name: /strict tempo/i });
-        expect(strict).toHaveAttribute('aria-pressed', 'false');
-        await userEvent.click(strict);
+        // A stable name with the state in aria-pressed, like the pills beside it.
+        const expressive = screen.getByRole('button', { name: /expressive tempo/i });
+        expect(expressive).toHaveAttribute('aria-pressed', 'false');
+        await userEvent.click(expressive);
         expect(useViewerStore.getState().tempoStyle).toBe('expressive');
         expect(screen.getByRole('button', { name: /expressive tempo/i })).toHaveAttribute('aria-pressed', 'true');
+        expect(screen.queryByRole('button', { name: /strict tempo/i })).toBeNull();
         expect(JSON.parse(window.localStorage.getItem('cleffy:playback-prefs') ?? '{}')).toMatchObject({
             tempoStyle: 'expressive',
         });

@@ -586,7 +586,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     </button>
                     <button
                         type="button"
-                        aria-label={tempoStyle === 'expressive' ? 'Expressive tempo' : 'Strict tempo'}
+                        aria-label="Expressive tempo"
                         aria-pressed={tempoStyle === 'expressive'}
                         title={
                             tempoStyle === 'expressive'
@@ -597,9 +597,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                         className={pillButton(tempoStyle === 'expressive')}
                     >
                         <TempoStyleIcon size={14} />
-                        <span className="hidden md:inline">
-                            {tempoStyle === 'expressive' ? 'Expressive' : 'Strict'}
-                        </span>
+                        <span className="hidden md:inline">Expressive</span>
                     </button>
                     {pedalInferred && (
                         <button
