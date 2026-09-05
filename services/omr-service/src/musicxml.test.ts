@@ -1691,6 +1691,26 @@ describe('voices', () => {
         expect(level(81)).toBe(0.82);
     });
 
+    it('swells each voice from its own level under a shared hairpin', () => {
+        const staffDyn = (mark: string): string =>
+            `<direction><direction-type><dynamics><${mark}/></dynamics></direction-type><staff>1</staff></direction>`;
+        const wedge = (type: string): string =>
+            `<direction><direction-type><wedge type="${type}" number="1"/></direction-type><staff>1</staff></direction>`;
+        const xml = wrap(
+            bar(1, `${staffDyn('p')}${vn('G', 5, 16, 1)}${back(16)}${voicedDyn('f', 2)}${vn('C', 5, 16, 2)}`, true) +
+                bar(
+                    2,
+                    `${wedge('crescendo')}${vn('B', 5, 8, 1)}${vn('C', 6, 8, 1)}${back(16)}${vn('E', 5, 8, 2)}${vn('F', 5, 8, 2)}`,
+                ) +
+                bar(3, `${wedge('stop')}${vn('D', 6, 16, 1)}${back(16)}${vn('A', 5, 16, 2)}`),
+        );
+        const score = parseMusicXmlString(xml);
+        const level = (p: number): number | undefined => score.notes.find((n) => n.p === p)?.v;
+        // Voice 1 (slot 0) is the staff's p, rising to 0.62; voice 2 (slot 1) starts at its own f.
+        expect([level(83), level(84), level(86)]).toEqual([0.46, 0.54, 0.62]);
+        expect([level(76), level(77), level(81)]).toEqual([0.82, 0.91, 1]);
+    });
+
     it('treats a voiced level on a one-voice staff as the staff\u2019s level', () => {
         const xml = wrap(bar(1, `${voicedDyn('p', 1)}${vn('G', 5, 8, 1)}${vn('A', 5, 8, 1)}`, true));
         const score = parseMusicXmlString(xml);
