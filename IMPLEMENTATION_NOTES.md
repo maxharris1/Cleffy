@@ -118,8 +118,10 @@ and rit./accel./a tempo pre-discretized to a point per beat. Fermatas are clock 
 **Musicality (v5, svc-11).** _Voices:_ every note carries `vc`, a per-staff slot 0–7 the
 parser normalises from Audiveris's unstable `<voice>` ids (an id that vanishes as another
 appears is a renumbering and keeps its slot; a link that has to reach over an octave with no
-rhythmic hand-over is disclosed as `voices_unstable`); `<direction><voice>` dynamics become a
-`staff:voice` curve consulted before the staff's. _Client voice analysis_
+rhythmic hand-over is disclosed as `voices_unstable`; the slot table rides the shard seed so a
+line keeps its `vc` across `transcribeParallel` seams); `<direction><voice>` dynamics become a
+`staff:voice` curve consulted before the staff's, with the staff's hairpins interpolated from
+that voice's own level. _Client voice analysis_
 (`voiceAnalysis.ts`, pure, index-aligned): successor-in-voice, legato eligibility from
 `d / gap ≥ 0.85`, the bar's melody voice over a 9-bar window (stepwise motion, height,
 top-of-hand), accompaniment = last bar's figure repeated under another voice, phrase starts
@@ -138,8 +140,8 @@ the era comes from the composer surname in `documents.title` (`era.ts`; unknown 
 re-catch on bass change only; Baroque → none; Romantic/modern → full rule), edges cap at 256 by
 coarsening to 1/2/4/8 bars (past that, printed edges only), each inferred edge carries
 `src: 'inferred'`, and the score says
-`pedal_inferred`. The `Auto-pedal` pill drops the `inferred` edges client-side; engraved edges
-(no `src`) are never dropped, even on a score that mixes the two. _Rhythm repair_
+`pedal_inferred`. Engraved pedalling always plays: the `Auto-pedal` pill removes only the edges
+tagged `src: 'inferred'` client-side, even on a score that mixes the two. _Rhythm repair_
 (`rhythmRepair.ts`): after meter reconciliation and before padding, a voice that does not sum to
 its bar gets ONE edit (per voice, so a bar with two broken voices gets two) — dot toggle,
 halve/double, trailing rest, or duplicated rest removed —
