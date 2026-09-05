@@ -12,6 +12,7 @@
  * The same shape as `supabase/functions/_shared/imslp.ts`, plus the cookie
  * and EU handling that the edge function does not need.
  */
+/* global AbortSignal */
 
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36 cleffy-bench';
 const ORIGIN = 'https://imslp.org';

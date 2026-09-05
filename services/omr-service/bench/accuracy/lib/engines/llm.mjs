@@ -9,9 +9,11 @@
  * --spend-cap-usd or LLM_SPEND_CAP_USD, default $20) and a disk cache
  * (results/llm-cache) so re-runs are free.
  */
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { DIST_DIR, LLM_CACHE_DIR, RESULTS_DIR } from '../paths.mjs';
+import { AUDIVERIS_IMAGES } from './audiveris.mjs';
 
 const dist = (name) => import(join(DIST_DIR, name));
 
@@ -45,6 +47,10 @@ export const runLlmEngine = async ({ pdfPath, workDir, mode, model, variant, eff
     const { analyzeExperimental } = await dist('experimental/pipeline.js');
     const client = await sharedClient(spendCapUsd);
     const { geometryVariant, unit } = parseVariant(variant);
+    // Audiveris fallback (and the GRID geometry variant) run through the Docker
+    // shim, which reads the image tag from <workDir>/.image.
+    await mkdir(workDir, { recursive: true });
+    await writeFile(join(workDir, '.image'), AUDIVERIS_IMAGES['audiveris-5.6.1']);
     const spentBefore = await client.ledger.spent();
     try {
         const out = await analyzeExperimental(pdfPath, workDir, {

@@ -129,7 +129,11 @@ export const pickFallbackPages = (
     return [...pages].sort((a, b) => a - b);
 };
 
-export const analyzeExperimental = async (pdfPath: string, workDir: string, options: ExperimentalOptions): Promise<ExperimentalResult> => {
+export const analyzeExperimental = async (
+    pdfPath: string,
+    workDir: string,
+    options: ExperimentalOptions,
+): Promise<ExperimentalResult> => {
     const t0 = Date.now();
     const log = options.log ?? (() => {});
     const unit: CropUnit = options.unit ?? 'page';
@@ -164,7 +168,10 @@ export const analyzeExperimental = async (pdfPath: string, workDir: string, opti
         }
         llm = await transcribePdf(options.client, pdfPath, workDir, { ...llmOptions, geometry: cheapGeometry });
     } else {
-        [cheapGeometry, llm] = await Promise.all([geometryTask(), transcribePdf(options.client, pdfPath, workDir, llmOptions)]);
+        [cheapGeometry, llm] = await Promise.all([
+            geometryTask(),
+            transcribePdf(options.client, pdfPath, workDir, llmOptions),
+        ]);
     }
     const geometryMs = cheapGeometry?.timings.totalMs ?? 0;
     const mergeable = useGeometry ? cheapGeometry : null;
@@ -180,7 +187,9 @@ export const analyzeExperimental = async (pdfPath: string, workDir: string, opti
     const { stats } = toMusicXml(transcriptions.map((t) => t ?? { systems: [] }));
     const preMerge = mergeable ? mergeGeometry(transcriptions, mergeable).report : null;
     const failedPages = llm.pages.filter((p) => !p.transcription).map((p) => p.pageIndex);
-    const fallbackPages = fallbackEnabled ? pickFallbackPages(llm, stats, preMerge, options.fallbackBadBarShare ?? 0.34) : [];
+    const fallbackPages = fallbackEnabled
+        ? pickFallbackPages(llm, stats, preMerge, options.fallbackBadBarShare ?? 0.34)
+        : [];
     if (!fallbackEnabled) {
         for (const p of failedPages) {
             warnings.push(`page_${p + 1}_dropped`);
@@ -188,15 +197,25 @@ export const analyzeExperimental = async (pdfPath: string, workDir: string, opti
     }
 
     const t1 = Date.now();
-    const fallbackRuns = fallbackPages.length > 0 ? await runAudiverisFallback(pdfPath, workDir, toRanges(fallbackPages), { timeoutMs: options.audiverisTimeoutMs, log }) : [];
+    const fallbackRuns =
+        fallbackPages.length > 0
+            ? await runAudiverisFallback(pdfPath, workDir, toRanges(fallbackPages), {
+                  timeoutMs: options.audiverisTimeoutMs,
+                  log,
+              })
+            : [];
     const fallbackMs = Date.now() - t1;
-    const fallbackErrors = fallbackRuns.filter((r) => r.error).map((r) => `pages ${r.from + 1}-${r.to + 1}: ${r.error}`);
+    const fallbackErrors = fallbackRuns
+        .filter((r) => r.error)
+        .map((r) => `pages ${r.from + 1}-${r.to + 1}: ${r.error}`);
 
     const t2 = Date.now();
     const fallbackSet = new Set(fallbackPages);
     const docs: Buffer[] = [];
     const sheets: OmrSheet[] = [];
-    const llmPagesForMerge: Array<LlmPageTranscription | null> = transcriptions.map((t, p) => (fallbackSet.has(p) ? null : t));
+    const llmPagesForMerge: Array<LlmPageTranscription | null> = transcriptions.map((t, p) =>
+        fallbackSet.has(p) ? null : t,
+    );
     const merge = mergeable ? mergeGeometry(llmPagesForMerge, mergeable) : null;
     let signatures = { ts: '4/4', key: 0 };
     let p = 0;
@@ -228,7 +247,10 @@ export const analyzeExperimental = async (pdfPath: string, workDir: string, opti
             p += 1;
         }
         if (runPages.some((t) => t.systems.some((s) => s.measures.length > 0))) {
-            const { xml } = toMusicXml(runPages, { defaultTimeSignature: signatures.ts, defaultKeyFifths: signatures.key });
+            const { xml } = toMusicXml(runPages, {
+                defaultTimeSignature: signatures.ts,
+                defaultKeyFifths: signatures.key,
+            });
             docs.push(toMxl(xml));
             if (merge?.geometry) {
                 sheets.push(...merge.geometry.sheets.filter((s) => s.pageIndex >= start && s.pageIndex < p));
@@ -262,7 +284,14 @@ export const analyzeExperimental = async (pdfPath: string, workDir: string, opti
             totalMs: Date.now() - t0,
         },
         usage: llm.usage,
-        llm: { model: llm.model, unit: llm.unit, calls: llm.calls, cachedCalls: llm.cachedCalls, pages: stats.pages, failedPages },
+        llm: {
+            model: llm.model,
+            unit: llm.unit,
+            calls: llm.calls,
+            cachedCalls: llm.cachedCalls,
+            pages: stats.pages,
+            failedPages,
+        },
         merge: merge?.report ?? null,
         fallbackPages,
         fallbackErrors,

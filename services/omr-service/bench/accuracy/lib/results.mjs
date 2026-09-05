@@ -20,7 +20,9 @@ export const readResult = async (engine, scoreId) => {
 
 export const listEngines = async () => {
     try {
-        return (await readdir(RAW_RESULTS_DIR, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
+        return (await readdir(RAW_RESULTS_DIR, { withFileTypes: true }))
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name);
     } catch {
         return [];
     }

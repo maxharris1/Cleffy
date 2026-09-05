@@ -147,7 +147,11 @@
             "kind": "scan",
             "title": "Chopin, Op. 10 No. 3 — Schirmer/Mikuli scan",
             "gt": ["Chopin/Etudes_op_10/3"],
-            "pdf": { "type": "imslp", "file": "PMLP01969-Chopin Etudes Schirmer Mikuli Op 10 scan.pdf", "pages": [22, 25] },
+            "pdf": {
+                "type": "imslp",
+                "file": "PMLP01969-Chopin Etudes Schirmer Mikuli Op 10 scan.pdf",
+                "pages": [22, 25]
+            },
             "tags": ["scan", "dense", "inner-voices"]
         },
         {

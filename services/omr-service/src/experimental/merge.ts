@@ -77,7 +77,11 @@ const slotsFor = (m: LlmMeasure, stack: CheapStack, firstInSystem: boolean): Omr
 };
 
 const evenSplit = (x0: number, x1: number, n: number): OmrStack[] =>
-    Array.from({ length: n }, (_, i) => ({ x0: x0 + ((x1 - x0) * i) / n, x1: x0 + ((x1 - x0) * (i + 1)) / n, slots: [] }));
+    Array.from({ length: n }, (_, i) => ({
+        x0: x0 + ((x1 - x0) * i) / n,
+        x1: x0 + ((x1 - x0) * (i + 1)) / n,
+        slots: [],
+    }));
 
 const mergeSystem = (measures: LlmMeasure[], system: CheapSystem): { system: OmrSystem; merge: SystemMerge } => {
     const base = { y0: system.y0, y1: system.y1, staves: system.staves };
@@ -90,7 +94,10 @@ const mergeSystem = (measures: LlmMeasure[], system: CheapSystem): { system: Omr
             }
             return { x0: stack.x0, x1: stack.x1, slots };
         });
-        return { system: { ...base, stacks }, merge: { llmBars: measures.length, geoBars: system.stacks.length, mode: 'exact', barsWithSlots } };
+        return {
+            system: { ...base, stacks },
+            merge: { llmBars: measures.length, geoBars: system.stacks.length, mode: 'exact', barsWithSlots },
+        };
     }
     const x0 = system.stacks.length > 0 ? Math.min(...system.stacks.map((s) => s.x0)) : 0.05;
     const x1 = system.stacks.length > 0 ? Math.max(...system.stacks.map((s) => s.x1)) : 0.95;
@@ -192,7 +199,10 @@ export const mergeGeometry = (
         } else {
             pageMerge.mode = 'proportional';
             const flat = llmSystems.flatMap((s) => s.measures);
-            const counts = distribute(flat.length, sheet.systems.map((s) => s.stacks.length));
+            const counts = distribute(
+                flat.length,
+                sheet.systems.map((s) => s.stacks.length),
+            );
             let at = 0;
             sheet.systems.forEach((geo, i) => {
                 push(flat.slice(at, at + counts[i]!), geo);

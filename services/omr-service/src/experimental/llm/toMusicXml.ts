@@ -40,7 +40,26 @@ const TUPLETS: Record<string, { actual: number; normal: number }> = {
 
 const ACCIDENTAL_ALTER: Record<string, number> = { '': 0, '#': 1, '##': 2, x: 2, b: -1, bb: -2 };
 
-const DYNAMICS = new Set(['pppp', 'ppp', 'pp', 'p', 'mp', 'mf', 'f', 'ff', 'fff', 'ffff', 'sf', 'sfz', 'sffz', 'fz', 'rf', 'rfz', 'fp', 'sfp']);
+const DYNAMICS = new Set([
+    'pppp',
+    'ppp',
+    'pp',
+    'p',
+    'mp',
+    'mf',
+    'f',
+    'ff',
+    'fff',
+    'ffff',
+    'sf',
+    'sfz',
+    'sffz',
+    'fz',
+    'rf',
+    'rfz',
+    'fp',
+    'sfp',
+]);
 
 export interface Pitch {
     step: string;
@@ -123,7 +142,7 @@ export const parseVoice = (voice: string): ParsedVoice => {
             continue;
         }
         const dots = (m[4] ?? '').length;
-        const tuplet = m[5] ? TUPLETS[m[5]] ?? null : null;
+        const tuplet = m[5] ? (TUPLETS[m[5]] ?? null) : null;
         let dur = BASE_TICKS[durLetter]!;
         if (dots === 1) {
             dur *= 1.5;
@@ -134,7 +153,16 @@ export const parseVoice = (voice: string): ParsedVoice => {
             dur = (dur * tuplet.normal) / tuplet.actual;
         }
         const eventTicks = grace ? 0 : Math.max(1, Math.round(dur));
-        events.push({ grace, pitches, ticks: eventTicks, type: TYPE_NAMES[durLetter]!, dots, tuplet, tie: m[6] === '~', raw: token });
+        events.push({
+            grace,
+            pitches,
+            ticks: eventTicks,
+            type: TYPE_NAMES[durLetter]!,
+            dots,
+            tuplet,
+            tie: m[6] === '~',
+            raw: token,
+        });
         ticks += eventTicks;
     }
     return { events, ticks, errors };
@@ -201,7 +229,8 @@ export interface ToMusicXmlOptions {
     defaultKeyFifths?: number;
 }
 
-const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const esc = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const noteXml = (
     ev: VoiceEvent,
@@ -220,7 +249,9 @@ const noteXml = (
         parts.push('<chord/>');
     }
     if (pitch) {
-        parts.push(`<pitch><step>${pitch.step}</step>${pitch.alter ? `<alter>${pitch.alter}</alter>` : ''}<octave>${pitch.octave}</octave></pitch>`);
+        parts.push(
+            `<pitch><step>${pitch.step}</step>${pitch.alter ? `<alter>${pitch.alter}</alter>` : ''}<octave>${pitch.octave}</octave></pitch>`,
+        );
     } else if (measureRest !== null) {
         parts.push('<rest measure="yes"/>');
     } else {
@@ -242,21 +273,31 @@ const noteXml = (
             parts.push('<dot/>');
         }
         if (ev.tuplet) {
-            parts.push(`<time-modification><actual-notes>${ev.tuplet.actual}</actual-notes><normal-notes>${ev.tuplet.normal}</normal-notes></time-modification>`);
+            parts.push(
+                `<time-modification><actual-notes>${ev.tuplet.actual}</actual-notes><normal-notes>${ev.tuplet.normal}</normal-notes></time-modification>`,
+            );
         }
     }
     parts.push(`<staff>${staff}</staff>`);
     if (pitch && (tieStop || ev.tie)) {
-        parts.push(`<notations>${tieStop ? '<tied type="stop"/>' : ''}${ev.tie ? '<tied type="start"/>' : ''}</notations>`);
+        parts.push(
+            `<notations>${tieStop ? '<tied type="stop"/>' : ''}${ev.tie ? '<tied type="start"/>' : ''}</notations>`,
+        );
     }
     parts.push('</note>');
     return parts.join('');
 };
 
 /** A lone rest is the engraver's whole-bar rest whatever its written value. */
-const isSoleRest = (parsed: ParsedVoice): boolean => parsed.events.length === 1 && parsed.events[0]!.pitches === null && !parsed.events[0]!.grace;
+const isSoleRest = (parsed: ParsedVoice): boolean =>
+    parsed.events.length === 1 && parsed.events[0]!.pitches === null && !parsed.events[0]!.grace;
 
-const voiceXml = (parsed: ParsedVoice, voice: number, staff: number, expectedTicks: number): { xml: string; ticks: number } => {
+const voiceXml = (
+    parsed: ParsedVoice,
+    voice: number,
+    staff: number,
+    expectedTicks: number,
+): { xml: string; ticks: number } => {
     const out: string[] = [];
     if (isSoleRest(parsed)) {
         out.push(noteXml(parsed.events[0]!, null, false, voice, staff, false, expectedTicks));
@@ -270,7 +311,9 @@ const voiceXml = (parsed: ParsedVoice, voice: number, staff: number, expectedTic
             continue;
         }
         ev.pitches.forEach((pitch, i) => {
-            const tieStop = prevTied?.some((p) => p.step === pitch.step && p.alter === pitch.alter && p.octave === pitch.octave) ?? false;
+            const tieStop =
+                prevTied?.some((p) => p.step === pitch.step && p.alter === pitch.alter && p.octave === pitch.octave) ??
+                false;
             out.push(noteXml(ev, pitch, i > 0, voice, staff, tieStop, null));
         });
         if (!ev.grace) {
@@ -280,7 +323,11 @@ const voiceXml = (parsed: ParsedVoice, voice: number, staff: number, expectedTic
     return { xml: out.join(''), ticks: parsed.ticks };
 };
 
-const barlineXml = (location: 'left' | 'right', repeat: 'forward' | 'backward' | null, ending: { number: number; type: 'start' | 'stop' } | null): string => {
+const barlineXml = (
+    location: 'left' | 'right',
+    repeat: 'forward' | 'backward' | null,
+    ending: { number: number; type: 'start' | 'stop' } | null,
+): string => {
     if (!repeat && !ending) {
         return '';
     }
@@ -304,7 +351,10 @@ const barlineXml = (location: 'left' | 'right', repeat: 'forward' | 'backward' |
  * Serialize the pages of a score. `stats` describes per-bar rhythm health so a
  * caller can decide which pages deserve a fallback.
  */
-export const toMusicXml = (pages: LlmPageTranscription[], options: ToMusicXmlOptions = {}): { xml: string; stats: TranscriptionStats } => {
+export const toMusicXml = (
+    pages: LlmPageTranscription[],
+    options: ToMusicXmlOptions = {},
+): { xml: string; stats: TranscriptionStats } => {
     const measuresXml: string[] = [];
     const stats: TranscriptionStats = { measures: [], pages: [] };
     let ts = normaliseTs(options.defaultTimeSignature ?? '4/4') ?? { beats: 4, beatType: 4 };
@@ -350,7 +400,9 @@ export const toMusicXml = (pages: LlmPageTranscription[], options: ToMusicXmlOpt
                 attrs.push(`<time><beats>${ts.beats}</beats><beat-type>${ts.beatType}</beat-type></time>`);
             }
             if (isFirst) {
-                attrs.push('<staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef>');
+                attrs.push(
+                    '<staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef>',
+                );
             }
             attrs.push('</attributes>');
             body.push(attrs.join(''));
@@ -362,7 +414,9 @@ export const toMusicXml = (pages: LlmPageTranscription[], options: ToMusicXmlOpt
         }
         const dyn = m.dyn?.trim().toLowerCase();
         if (dyn && DYNAMICS.has(dyn)) {
-            body.push(`<direction placement="below"><direction-type><dynamics><${dyn}/></dynamics></direction-type><staff>1</staff></direction>`);
+            body.push(
+                `<direction placement="below"><direction-type><dynamics><${dyn}/></dynamics></direction-type><staff>1</staff></direction>`,
+            );
         }
 
         // A lone rest means "whole bar" whatever its written value, so it says
@@ -371,14 +425,35 @@ export const toMusicXml = (pages: LlmPageTranscription[], options: ToMusicXmlOpt
         const isFirst = flatIndex === 0;
         const played = [...rh, ...lh].filter((v) => !isSoleRest(v)).map((v) => v.ticks);
         const contentTicks = played.length > 0 ? Math.max(...played) : expectedTicks;
-        const pickup = isFirst && contentTicks > 0 && contentTicks < expectedTicks && played.every((t) => t <= contentTicks);
+        const pickup =
+            isFirst && contentTicks > 0 && contentTicks < expectedTicks && played.every((t) => t <= contentTicks);
         const barTicks = pickup ? contentTicks : expectedTicks;
 
         // Voices: upper staff 1..k, lower staff 5..; <backup> after each voice
         // so every voice starts at the barline, as the parser expects.
         const voiceTicks = { rh: [] as number[], lh: [] as number[] };
         const emitStaff = (voices: ParsedVoice[], staff: 1 | 2, key: 'rh' | 'lh') => {
-            const list = voices.length > 0 ? voices : [{ events: [{ grace: false, pitches: null, ticks: barTicks, type: 'whole', dots: 0, tuplet: null, tie: false, raw: 'r' }], ticks: barTicks, errors: [] }];
+            const list =
+                voices.length > 0
+                    ? voices
+                    : [
+                          {
+                              events: [
+                                  {
+                                      grace: false,
+                                      pitches: null,
+                                      ticks: barTicks,
+                                      type: 'whole',
+                                      dots: 0,
+                                      tuplet: null,
+                                      tie: false,
+                                      raw: 'r',
+                                  },
+                              ],
+                              ticks: barTicks,
+                              errors: [],
+                          },
+                      ];
             list.forEach((parsed, i) => {
                 const voiceNo = (staff === 1 ? 1 : 5) + i;
                 const { xml, ticks } = voiceXml(parsed, voiceNo, staff, barTicks);
@@ -420,7 +495,9 @@ export const toMusicXml = (pages: LlmPageTranscription[], options: ToMusicXmlOpt
         if (!pickup) {
             index += 1;
         }
-        measuresXml.push(`<measure number="${number}"${pickup ? ' implicit="yes"' : ''}>${left}${body.join('')}${right}</measure>`);
+        measuresXml.push(
+            `<measure number="${number}"${pickup ? ' implicit="yes"' : ''}>${left}${body.join('')}${right}</measure>`,
+        );
         stats.measures.push({
             page,
             system,

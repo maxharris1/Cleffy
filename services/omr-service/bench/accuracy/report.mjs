@@ -20,7 +20,7 @@ const engines = values.engines ? values.engines.split(',') : await listEngines()
 
 const rows = [];
 for (const engine of engines) {
-    let files = [];
+    let files;
     try {
         files = (await readdir(join(RAW_RESULTS_DIR, engine))).filter((f) => f.endsWith('.json'));
     } catch {
@@ -36,7 +36,7 @@ for (const engine of engines) {
             kind: r.kind,
             pages: r.pages,
             ok: r.ok,
-            error: r.ok ? '' : r.error?.message?.slice(0, 120) ?? '',
+            error: r.ok ? '' : (r.error?.message?.slice(0, 120) ?? ''),
             wallMs: r.wallMs,
             wallMsPerPage: r.pages ? Math.round(r.wallMs / r.pages) : null,
             usd: r.usd ?? 0,
@@ -57,6 +57,7 @@ for (const engine of engines) {
             barsUnderfull: m?.measures.underfull ?? null,
             geoRecall: g?.recall ?? null,
             geoXIoU: g?.xIoU ?? null,
+            scoreDataMeasures: r.scoreData?.measures ?? null,
             measuresPlaced: r.scoreData?.measuresPlaced ?? null,
             measuresWithSlots: r.scoreData?.measuresWithSlots ?? null,
             systemsWithStaves: r.scoreData?.systemsWithStaves ?? null,
@@ -66,10 +67,13 @@ for (const engine of engines) {
         });
     }
 }
-rows.sort((a, b) => a.engine.localeCompare(b.engine) || (scoreOrder.get(a.score) ?? 99) - (scoreOrder.get(b.score) ?? 99));
+rows.sort(
+    (a, b) => a.engine.localeCompare(b.engine) || (scoreOrder.get(a.score) ?? 99) - (scoreOrder.get(b.score) ?? 99),
+);
 
 const csvCols = Object.keys(rows[0] ?? { engine: '' });
-const csvEscape = (v) => (v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+const csvEscape = (v) =>
+    v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
 const csv = [csvCols.join(','), ...rows.map((r) => csvCols.map((c) => csvEscape(r[c])).join(','))].join('\n');
 await writeFile(join(RESULTS_DIR, 'summary.csv'), `${csv}\n`);
 
@@ -82,7 +86,8 @@ const median = (xs) => {
     const mid = Math.floor(s.length / 2);
     return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 };
-const fmt = (v, d = 3) => (v === null || v === undefined || Number.isNaN(v) ? '—' : typeof v === 'number' ? v.toFixed(d) : String(v));
+const fmt = (v, d = 3) =>
+    v === null || v === undefined || Number.isNaN(v) ? '—' : typeof v === 'number' ? v.toFixed(d) : String(v);
 
 const aggregate = (subset) => {
     const ok = subset.filter((r) => r.ok);
@@ -102,17 +107,35 @@ const aggregate = (subset) => {
         meanWallMsPerPage: mean(subset.map((r) => r.wallMsPerPage).filter((v) => v !== null)),
         medianWallMsPerPage: median(subset.map((r) => r.wallMsPerPage).filter((v) => v !== null)),
         totalUsd: subset.reduce((a, r) => a + (r.usd ?? 0), 0),
-        usdPerPage: subset.reduce((a, r) => a + (r.usd ?? 0), 0) / Math.max(1, subset.reduce((a, r) => a + r.pages, 0)),
+        usdPerPage:
+            subset.reduce((a, r) => a + (r.usd ?? 0), 0) /
+            Math.max(
+                1,
+                subset.reduce((a, r) => a + r.pages, 0),
+            ),
         meanGeoRecall: mean(ok.map((r) => r.geoRecall).filter((v) => v !== null)),
         meanGeoXIoU: mean(ok.map((r) => r.geoXIoU).filter((v) => v !== null)),
-        placedShare: mean(ok.map((r) => (r.barsEng ? r.measuresPlaced / r.barsEng : null)).filter((v) => v !== null)),
-        slotsShare: mean(ok.map((r) => (r.barsEng ? r.measuresWithSlots / r.barsEng : null)).filter((v) => v !== null)),
+        placedShare: mean(
+            ok
+                .map((r) => (r.scoreDataMeasures ? r.measuresPlaced / r.scoreDataMeasures : null))
+                .filter((v) => v !== null),
+        ),
+        slotsShare: mean(
+            ok
+                .map((r) => (r.scoreDataMeasures ? r.measuresWithSlots / r.scoreDataMeasures : null))
+                .filter((v) => v !== null),
+        ),
         fallbackPages: subset.reduce((a, r) => a + (r.fallbackPages ?? 0), 0),
     };
 };
 
 const summary = {};
-const md = ['# Accuracy benchmark — summary', '', `Generated ${new Date().toISOString()} from ${rows.length} runs.`, ''];
+const md = [
+    '# Accuracy benchmark — summary',
+    '',
+    `Generated ${new Date().toISOString()} from ${rows.length} runs.`,
+    '',
+];
 for (const kind of ['all', 'typeset', 'scan']) {
     md.push(`## ${kind === 'all' ? 'All scores' : `${kind} scores`}`, '');
     md.push(
@@ -168,5 +191,8 @@ md.push(
 );
 
 await writeFile(join(RESULTS_DIR, 'summary.md'), `${md.join('\n')}\n`);
-await writeFile(join(RESULTS_DIR, 'summary.json'), JSON.stringify({ generatedAt: new Date().toISOString(), engines, summary, rows }, null, 1));
+await writeFile(
+    join(RESULTS_DIR, 'summary.json'),
+    JSON.stringify({ generatedAt: new Date().toISOString(), engines, summary, rows }, null, 1),
+);
 console.log(md.join('\n'));

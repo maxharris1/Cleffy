@@ -58,10 +58,24 @@ export const runAudiverisFallback = async (
             const mxl = await Promise.all(result.mxlPaths.map((p) => readFile(p)));
             const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
             const sheets = (geometry?.sheets ?? []).filter((s) => s.pageIndex >= range.from && s.pageIndex <= range.to);
-            runs.push({ ...range, mxl, sheets, ms: Date.now() - t0, error: mxl.length === 0 ? 'No MusicXML produced' : null });
-            options.log?.(`[fallback] pages ${range.from + 1}-${range.to + 1}: ${Date.now() - t0}ms, ${mxl.length} mxl, ${sheets.length} sheets`);
+            runs.push({
+                ...range,
+                mxl,
+                sheets,
+                ms: Date.now() - t0,
+                error: mxl.length === 0 ? 'No MusicXML produced' : null,
+            });
+            options.log?.(
+                `[fallback] pages ${range.from + 1}-${range.to + 1}: ${Date.now() - t0}ms, ${mxl.length} mxl, ${sheets.length} sheets`,
+            );
         } catch (error) {
-            runs.push({ ...range, mxl: [], sheets: [], ms: Date.now() - t0, error: error instanceof Error ? error.message : String(error) });
+            runs.push({
+                ...range,
+                mxl: [],
+                sheets: [],
+                ms: Date.now() - t0,
+                error: error instanceof Error ? error.message : String(error),
+            });
             options.log?.(`[fallback] pages ${range.from + 1}-${range.to + 1} failed: ${String(error).slice(0, 200)}`);
         }
     }

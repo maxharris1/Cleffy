@@ -42,7 +42,9 @@ Rules:
 export const userPrompt = (ctx: PromptContext): string => {
     const lines = [`Transcribe this image: ${ctx.label}.`];
     if (ctx.isStart) {
-        lines.push('This is the beginning of the piece — the first bar prints the time signature and key signature; report both.');
+        lines.push(
+            'This is the beginning of the piece — the first bar prints the time signature and key signature; report both.',
+        );
     } else {
         lines.push(
             `Context carried from the previous image: time signature ${ctx.timeSignature ?? 'unknown'}, key signature ${

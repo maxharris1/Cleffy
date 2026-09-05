@@ -7,6 +7,7 @@
  *   data/imslp/<file>              raw IMSLP downloads (cached)
  * Idempotent: existing files are kept unless --force.
  */
+/* global AbortSignal */
 import { copyFile, mkdir, readFile, writeFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';

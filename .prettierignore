@@ -4,3 +4,4 @@ coverage
 node_modules
 package-lock.json
 supabase/.temp
+services/omr-service/bench/accuracy/results

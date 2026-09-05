@@ -38,7 +38,14 @@ export const geometryBoxes = (geometry) => {
     for (const sheet of geometry.sheets) {
         for (const system of sheet.systems) {
             for (const stack of system.stacks) {
-                boxes.push({ page: sheet.pageIndex, sys: sysIndex, x0: stack.x0, x1: stack.x1, y0: system.y0, y1: system.y1 });
+                boxes.push({
+                    page: sheet.pageIndex,
+                    sys: sysIndex,
+                    x0: stack.x0,
+                    x1: stack.x1,
+                    y0: system.y0,
+                    y1: system.y1,
+                });
             }
             sysIndex++;
         }
@@ -49,11 +56,26 @@ export const geometryBoxes = (geometry) => {
 const referenceFor = async (score) => {
     const mpos = await loadReferenceBoxes(score);
     if (mpos) {
-        return { boxes: mpos, source: 'musescore-mpos', systems: new Set(mpos.map((b) => `${b.page}:${b.y0.toFixed(3)}`)).size };
+        return {
+            boxes: mpos,
+            source: 'musescore-mpos',
+            systems: new Set(mpos.map((b) => `${b.page}:${b.y0.toFixed(3)}`)).size,
+        };
     }
     const base = await readResult('audiveris-5.6.1', score.id);
     if (base?.ok) {
-        return { boxes: base.boxes, source: 'audiveris-5.6.1', systems: base.systems.length };
+        // ScoreData bars are unrolled through repeats; the same printed bar can
+        // appear several times, so dedupe to physical boxes.
+        const seen = new Set();
+        const boxes = base.boxes.filter((b) => {
+            const key = `${b.page}:${b.sys}:${b.x0.toFixed(4)}:${b.x1.toFixed(4)}`;
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
+        return { boxes, source: 'audiveris-5.6.1', systems: base.systems.length };
     }
     return null;
 };
@@ -70,10 +92,16 @@ for (const score of scores) {
         await writeFile(join(dir, '.image'), 'cleffy-omr:5.6.1');
         process.stdout.write(`[${score.id}] ${variant} ... `);
         try {
-            const geometry = variant === 'cv' ? await extractCvGeometry(pdfPath, dir) : await extractGridGeometry(pdfPath, dir);
+            const geometry =
+                variant === 'cv' ? await extractCvGeometry(pdfPath, dir) : await extractGridGeometry(pdfPath, dir);
             const boxes = geometryBoxes(geometry);
             const systems = geometry.sheets.reduce((n, s) => n + s.systems.length, 0);
-            const withCols = boxes.length === 0 ? 0 : geometry.sheets.flatMap((s) => s.systems.flatMap((y) => y.stacks)).filter((st) => st.columns.length > 0).length;
+            const withCols =
+                boxes.length === 0
+                    ? 0
+                    : geometry.sheets
+                          .flatMap((s) => s.systems.flatMap((y) => y.stacks))
+                          .filter((st) => st.columns.length > 0).length;
             const cmp = ref ? compareGeometry(boxes, ref.boxes) : null;
             rows.push({
                 scoreId: score.id,
@@ -92,10 +120,18 @@ for (const score of scores) {
             });
             console.log(
                 `${geometry.timings.totalMs} ms, ${systems} sys / ${boxes.length} bars` +
-                    (cmp ? ` | ref ${ref.systems} sys / ${ref.boxes.length} bars, recall ${cmp.recall} xIoU ${cmp.meanXIou}` : ' | no reference'),
+                    (cmp
+                        ? ` | ref ${ref.systems} sys / ${ref.boxes.length} bars, recall ${cmp.recall} xIoU ${cmp.meanXIou}`
+                        : ' | no reference'),
             );
         } catch (error) {
-            rows.push({ scoreId: score.id, kind: score.kind, variant, ok: false, error: String(error?.message ?? error) });
+            rows.push({
+                scoreId: score.id,
+                kind: score.kind,
+                variant,
+                ok: false,
+                error: String(error?.message ?? error),
+            });
             console.log(`FAIL ${String(error?.message ?? error).slice(0, 160)}`);
         }
         await rm(dir, { recursive: true, force: true });
@@ -126,7 +162,13 @@ for (const r of rows) {
 for (const variant of variants) {
     const ok = rows.filter((r) => r.ok && r.variant === variant && r.geometry);
     const mean = (f) => ok.reduce((a, r) => a + f(r), 0) / Math.max(1, ok.length);
-    lines.push('', `**${variant}**: ${ok.length} scores, mean recall ${fmt(mean((r) => r.geometry.recall))}, mean xIoU ${fmt(mean((r) => r.geometry.meanXIou))}, mean ms/page ${fmt(mean((r) => r.totalMs / r.pages), 0)}, systems exact ${ok.filter((r) => r.systems === r.reference.systems).length}/${ok.length}, bar count exact ${ok.filter((r) => r.measures === r.reference.measures).length}/${ok.length}`);
+    lines.push(
+        '',
+        `**${variant}**: ${ok.length} scores, mean recall ${fmt(mean((r) => r.geometry.recall))}, mean xIoU ${fmt(mean((r) => r.geometry.meanXIou))}, mean ms/page ${fmt(
+            mean((r) => r.totalMs / r.pages),
+            0,
+        )}, systems exact ${ok.filter((r) => r.systems === r.reference.systems).length}/${ok.length}, bar count exact ${ok.filter((r) => r.measures === r.reference.measures).length}/${ok.length}`,
+    );
 }
 await writeFile(join(RESULTS_DIR, 'geometry.md'), `${lines.join('\n')}\n`);
 console.log('wrote results/geometry.md');

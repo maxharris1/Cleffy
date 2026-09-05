@@ -5,7 +5,8 @@ import { promisify } from 'node:util';
 
 import type { CheapGeometry } from '../geometry/types.js';
 import { renderPdfPages } from '../render.js';
-import { AnthropicTranscriber, type Effort } from './anthropic.js';
+import type { AnthropicTranscriber } from './anthropic.js';
+import { type Effort } from './anthropic.js';
 import type { LlmUsage } from './ledger.js';
 import type { LlmPageTranscription } from './schema.js';
 
@@ -105,7 +106,27 @@ const renderBand = async (
     const prefix = join(outDir, name);
     await run(
         'pdftoppm',
-        ['-r', String(dpi), '-png', '-gray', '-f', String(pageIndex + 1), '-l', String(pageIndex + 1), '-x', '0', '-y', String(top), '-W', String(widthPx), '-H', String(bottom - top), '-singlefile', pdfPath, prefix],
+        [
+            '-r',
+            String(dpi),
+            '-png',
+            '-gray',
+            '-f',
+            String(pageIndex + 1),
+            '-l',
+            String(pageIndex + 1),
+            '-x',
+            '0',
+            '-y',
+            String(top),
+            '-W',
+            String(widthPx),
+            '-H',
+            String(bottom - top),
+            '-singlefile',
+            pdfPath,
+            prefix,
+        ],
         { timeout: 120_000 },
     );
     return `${prefix}.png`;
@@ -140,7 +161,7 @@ export const transcribePdf = async (
     const model = options.model;
 
     const crops: Crop[] = [];
-    let renderMs = 0;
+    let renderMs: number;
     if (unit === 'page') {
         const r0 = Date.now();
         const outDir = join(workDir, 'llm-pages');
@@ -195,7 +216,9 @@ export const transcribePdf = async (
 
     const pageCount = Math.max(0, ...crops.map((c) => c.pageIndex + 1));
     const label = (c: Crop) =>
-        unit === 'page' ? `page ${c.pageIndex + 1} of ${pageCount}` : `system ${c.systemIndex + 1} of ${c.systemCount} on page ${c.pageIndex + 1} of ${pageCount}`;
+        unit === 'page'
+            ? `page ${c.pageIndex + 1} of ${pageCount}`
+            : `system ${c.systemIndex + 1} of ${c.systemCount} on page ${c.pageIndex + 1} of ${pageCount}`;
 
     const results = new Map<Crop, Awaited<ReturnType<AnthropicTranscriber['transcribe']>> | Error>();
     let context = { ts: null as string | null, key: null as number | null };
@@ -207,7 +230,13 @@ export const transcribePdf = async (
                 imagePng,
                 model,
                 effort: options.effort,
-                context: { label: label(crop), timeSignature: context.ts, keyFifths: context.key, isStart, singleSystem: unit === 'system' },
+                context: {
+                    label: label(crop),
+                    timeSignature: context.ts,
+                    keyFifths: context.key,
+                    isStart,
+                    singleSystem: unit === 'system',
+                },
             });
             results.set(crop, res);
             return res;
@@ -244,7 +273,15 @@ export const transcribePdf = async (
         if (mine.length === 0) {
             continue;
         }
-        const page: PageTranscript = { pageIndex: p, transcription: null, error: null, calls: 0, cachedCalls: 0, usage: ZERO_USAGE, callMs: 0 };
+        const page: PageTranscript = {
+            pageIndex: p,
+            transcription: null,
+            error: null,
+            calls: 0,
+            cachedCalls: 0,
+            usage: ZERO_USAGE,
+            callMs: 0,
+        };
         const systems: LlmPageTranscription['systems'] = [];
         const errors: string[] = [];
         for (const crop of mine) {

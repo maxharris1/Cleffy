@@ -209,13 +209,9 @@ export const compareTranscripts = (gt, eng, options = {}) => {
     let barsExact = 0;
     let barsOver = 0;
     let barsUnder = 0;
-    let engNotesInAligned = 0;
-    let gtNotesInAligned = 0;
     for (const [gi, ei] of alignment.pairs) {
         const g = gtBuckets[gi];
         const e = engBuckets[ei];
-        gtNotesInAligned += g.length;
-        engNotesInAligned += e.length;
         const strict = matchNotes(g, e, 'rel', tol, false);
         tpStrict += strict.length;
         tpAnyHand += matchNotes(g, e, 'rel', tol, true).length;

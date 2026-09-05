@@ -150,7 +150,10 @@ const parseGridSheet = (xml: string, pageIndex: number): CheapSheet | null => {
             const first = staves[0]!;
             const left = Math.min(...staves.map((s) => s.left));
             const right = Math.max(...staves.map((s) => s.right));
-            const xs = collapse([...first.bars].sort((a, b) => a - b), interline * 1.1);
+            const xs = collapse(
+                [...first.bars].sort((a, b) => a - b),
+                interline * 1.1,
+            );
             if (xs.length === 0 || xs[0]! > left + interline * 1.5) {
                 xs.unshift(left);
             }
@@ -168,7 +171,7 @@ const parseGridSheet = (xml: string, pageIndex: number): CheapSheet | null => {
             }
             const top = Math.min(...staves.map((s) => s.top));
             const bottom = Math.max(...staves.map((s) => s.bottom));
-            const staffH = (first.bottom - first.top) || interline * 4;
+            const staffH = first.bottom - first.top || interline * 4;
             systems.push({
                 y0: Math.max(0, (top - staffH) / height),
                 y1: Math.min(1, (bottom + staffH) / height),

@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { type LedgerEntry, type LlmUsage, ResponseCache, SpendLedger, requestHash } from './ledger.js';
+import type { SpendLedger } from './ledger.js';
+import { type LedgerEntry, type LlmUsage, ResponseCache, requestHash } from './ledger.js';
 import { type PromptContext, SYSTEM_PROMPT, userPrompt } from './prompt.js';
 import { type LlmPageTranscription, TRANSCRIBE_TOOL } from './schema.js';
 
@@ -14,13 +15,14 @@ const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
 
 /** USD per million tokens (platform.claude.com/docs/en/about-claude/pricing, Sep 2026). */
-export const PRICES_PER_MTOK: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-    'claude-sonnet-5': { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-    'claude-opus-5': { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-    'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-    'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
-    'claude-haiku-4-5': { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
-};
+export const PRICES_PER_MTOK: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> =
+    {
+        'claude-sonnet-5': { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+        'claude-opus-5': { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+        'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+        'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+        'claude-haiku-4-5': { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+    };
 
 export const DEFAULT_MODEL = process.env.LLM_NOTES_MODEL ?? 'claude-sonnet-5';
 
@@ -145,16 +147,34 @@ export class AnthropicTranscriber {
                 {
                     role: 'user',
                     content: [
-                        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: req.imagePng.toString('base64') } },
+                        {
+                            type: 'image',
+                            source: { type: 'base64', media_type: 'image/png', data: req.imagePng.toString('base64') },
+                        },
                         { type: 'text', text: user },
                     ],
                 },
             ],
         };
-        const key = requestHash([model, effort, String(maxTokens), SYSTEM_PROMPT, JSON.stringify(TRANSCRIBE_TOOL), user, req.imagePng]);
+        const key = requestHash([
+            model,
+            effort,
+            String(maxTokens),
+            SYSTEM_PROMPT,
+            JSON.stringify(TRANSCRIBE_TOOL),
+            user,
+            req.imagePng,
+        ]);
         const hit = await this.cache.get<CachedCall>(key);
         if (hit) {
-            await this.ledger.record({ ...hit.usage, at: new Date().toISOString(), model, label: req.context.label, ms: 0, cached: true });
+            await this.ledger.record({
+                ...hit.usage,
+                at: new Date().toISOString(),
+                model,
+                label: req.context.label,
+                ms: 0,
+                cached: true,
+            });
             return { ...hit, cached: true };
         }
 
@@ -164,7 +184,14 @@ export class AnthropicTranscriber {
             const response = await this.post(body, req.context.label);
             const ms = Date.now() - t0;
             const usage = toUsage(model, response.usage);
-            const entry: LedgerEntry = { ...usage, at: new Date().toISOString(), model, label: req.context.label, ms, cached: false };
+            const entry: LedgerEntry = {
+                ...usage,
+                at: new Date().toISOString(),
+                model,
+                label: req.context.label,
+                ms,
+                cached: false,
+            };
             await this.ledger.record(entry);
             this.log(
                 `[llm] ${req.context.label}: ${ms}ms in=${usage.inputTokens} out=${usage.outputTokens} $${usage.usd.toFixed(4)} stop=${response.stop_reason ?? '?'}`,
@@ -175,7 +202,10 @@ export class AnthropicTranscriber {
             }
             const tool = response.content?.find((c) => c.type === 'tool_use' && c.name === TRANSCRIBE_TOOL.name);
             if (!tool || typeof tool.input !== 'object' || tool.input === null) {
-                throw new LlmResponseError(`No ${TRANSCRIBE_TOOL.name} tool call in response (${req.context.label})`, usage);
+                throw new LlmResponseError(
+                    `No ${TRANSCRIBE_TOOL.name} tool call in response (${req.context.label})`,
+                    usage,
+                );
             }
             const transcription = tool.input as LlmPageTranscription;
             if (!Array.isArray(transcription.systems)) {
@@ -215,7 +245,8 @@ export class AnthropicTranscriber {
                     throw lastError;
                 }
                 const retryAfter = Number(res.headers.get('retry-after'));
-                const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * 2 ** (attempt - 1);
+                const waitMs =
+                    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * 2 ** (attempt - 1);
                 this.log(`[llm] ${label}: ${res.status}, retry ${attempt}/${this.maxAttempts} in ${waitMs}ms`);
                 await sleep(waitMs);
             } catch (error) {

@@ -11,7 +11,14 @@ describe('parseVoice', () => {
     it('reads pitches, chords, rests, dots, tuplets, graces and ties', () => {
         const v = parseVoice('C4:q [E4 G#4]:e. r:s gD5:s A5:e/3~ Bb3:x..');
         expect(v.errors).toEqual([]);
-        expect(v.events.map((e) => e.ticks)).toEqual([Q, Q * 0.75, Q / 4, 0, Math.round((Q / 2) * (2 / 3)), Math.round((Q / 16) * 1.75)]);
+        expect(v.events.map((e) => e.ticks)).toEqual([
+            Q,
+            Q * 0.75,
+            Q / 4,
+            0,
+            Math.round((Q / 2) * (2 / 3)),
+            Math.round((Q / 16) * 1.75),
+        ]);
         expect(v.events[1]!.pitches).toEqual([
             { step: 'E', alter: 0, octave: 4 },
             { step: 'G', alter: 1, octave: 4 },
@@ -39,16 +46,48 @@ describe('parseVoice', () => {
     });
 });
 
-const page = (measures: LlmPageTranscription['systems'][number]['measures']): LlmPageTranscription => ({ systems: [{ measures }] });
+const page = (measures: LlmPageTranscription['systems'][number]['measures']): LlmPageTranscription => ({
+    systems: [{ measures }],
+});
 
 describe('toMusicXml', () => {
     it('round-trips through the production parser with hands, ties, repeats and a pickup', () => {
         const pages = [
             page([
                 { n: 1, ts: '3/4', key: 1, tempo: 96, rep: null, ending: null, dyn: 'p', rh: ['D5:q'], lh: ['r:q'] },
-                { n: 2, ts: null, key: null, tempo: null, rep: 'start', ending: null, dyn: null, rh: ['G4:q~ G4:q B4:q', 'r:q D4:h'], lh: ['[G2 D3]:h.'] },
-                { n: 3, ts: null, key: null, tempo: null, rep: 'end', ending: 1, dyn: null, rh: ['A4:h.'], lh: ['r:h.'] },
-                { n: 4, ts: null, key: null, tempo: null, rep: null, ending: 2, dyn: null, rh: ['G4:h.'], lh: ['G2:h.'] },
+                {
+                    n: 2,
+                    ts: null,
+                    key: null,
+                    tempo: null,
+                    rep: 'start',
+                    ending: null,
+                    dyn: null,
+                    rh: ['G4:q~ G4:q B4:q', 'r:q D4:h'],
+                    lh: ['[G2 D3]:h.'],
+                },
+                {
+                    n: 3,
+                    ts: null,
+                    key: null,
+                    tempo: null,
+                    rep: 'end',
+                    ending: 1,
+                    dyn: null,
+                    rh: ['A4:h.'],
+                    lh: ['r:h.'],
+                },
+                {
+                    n: 4,
+                    ts: null,
+                    key: null,
+                    tempo: null,
+                    rep: null,
+                    ending: 2,
+                    dyn: null,
+                    rh: ['G4:h.'],
+                    lh: ['G2:h.'],
+                },
             ]),
         ];
         const { xml, stats } = toMusicXml(pages);
@@ -86,9 +125,39 @@ describe('toMusicXml', () => {
     it('flags overfull and underfull bars and parse errors per page', () => {
         const pages = [
             page([
-                { n: 1, ts: '4/4', key: 0, tempo: null, rep: null, ending: null, dyn: null, rh: ['C4:w'], lh: ['C3:w'] },
-                { n: 2, ts: null, key: null, tempo: null, rep: null, ending: null, dyn: null, rh: ['C4:w C4:q'], lh: ['C3:h'] },
-                { n: 3, ts: null, key: null, tempo: null, rep: null, ending: null, dyn: null, rh: ['C4:q ??'], lh: ['r:w'] },
+                {
+                    n: 1,
+                    ts: '4/4',
+                    key: 0,
+                    tempo: null,
+                    rep: null,
+                    ending: null,
+                    dyn: null,
+                    rh: ['C4:w'],
+                    lh: ['C3:w'],
+                },
+                {
+                    n: 2,
+                    ts: null,
+                    key: null,
+                    tempo: null,
+                    rep: null,
+                    ending: null,
+                    dyn: null,
+                    rh: ['C4:w C4:q'],
+                    lh: ['C3:h'],
+                },
+                {
+                    n: 3,
+                    ts: null,
+                    key: null,
+                    tempo: null,
+                    rep: null,
+                    ending: null,
+                    dyn: null,
+                    rh: ['C4:q ??'],
+                    lh: ['r:w'],
+                },
             ]),
         ];
         const { stats } = toMusicXml(pages);
@@ -98,7 +167,21 @@ describe('toMusicXml', () => {
     });
 
     it('treats a lone rest as a whole-bar rest whatever its written value', () => {
-        const pages = [page([{ n: 1, ts: '6/8', key: 0, tempo: null, rep: null, ending: null, dyn: null, rh: ['r:w'], lh: ['C3:q. C3:q.'] }])];
+        const pages = [
+            page([
+                {
+                    n: 1,
+                    ts: '6/8',
+                    key: 0,
+                    tempo: null,
+                    rep: null,
+                    ending: null,
+                    dyn: null,
+                    rh: ['r:w'],
+                    lh: ['C3:q. C3:q.'],
+                },
+            ]),
+        ];
         const { xml, stats } = toMusicXml(pages);
         expect(stats.measures[0]!.rh).toEqual([3 * Q]);
         const musical = parseMusicXmlString(xml);

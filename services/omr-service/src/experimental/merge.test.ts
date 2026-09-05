@@ -4,7 +4,17 @@ import type { CheapGeometry, CheapStack } from './geometry/types.js';
 import type { LlmMeasure, LlmPageTranscription } from './llm/schema.js';
 import { measureOnsets, mergeGeometry } from './merge.js';
 
-const bar = (rh: string[], lh: string[] = ['r:w']): LlmMeasure => ({ n: 0, ts: null, key: null, tempo: null, rep: null, ending: null, dyn: null, rh, lh });
+const bar = (rh: string[], lh: string[] = ['r:w']): LlmMeasure => ({
+    n: 0,
+    ts: null,
+    key: null,
+    tempo: null,
+    rep: null,
+    ending: null,
+    dyn: null,
+    rh,
+    lh,
+});
 
 const stack = (x0: number, x1: number, columns: number[] = []): CheapStack => ({ x0, x1, slots: [], columns });
 
@@ -21,7 +31,9 @@ const geometry = (systems: CheapStack[][]): CheapGeometry => ({
     ],
 });
 
-const page = (systems: LlmMeasure[][]): LlmPageTranscription => ({ systems: systems.map((measures) => ({ measures })) });
+const page = (systems: LlmMeasure[][]): LlmPageTranscription => ({
+    systems: systems.map((measures) => ({ measures })),
+});
 
 describe('measureOnsets', () => {
     it('unions onsets across voices and staves, skipping graces', () => {

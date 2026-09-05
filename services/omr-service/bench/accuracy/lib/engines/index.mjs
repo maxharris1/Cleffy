@@ -21,5 +21,7 @@ export const getEngine = (name, options = {}) => {
             },
         };
     }
-    throw new Error(`Unknown engine ${name}. Known: ${Object.keys(AUDIVERIS_IMAGES).join(', ')}, llm-notes, llm-geo, geo-only`);
+    throw new Error(
+        `Unknown engine ${name}. Known: ${Object.keys(AUDIVERIS_IMAGES).join(', ')}, llm-notes, llm-geo, geo-only`,
+    );
 };

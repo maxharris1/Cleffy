@@ -42,7 +42,10 @@ const { values } = parseArgs({
 const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
 const only = values.scores ? new Set(values.scores.split(',')) : null;
 const scores = manifest.scores.filter((s) => (!only || only.has(s.id)) && (!values.kind || s.kind === values.kind));
-const engineNames = values.engines.split(',').map((s) => s.trim()).filter(Boolean);
+const engineNames = values.engines
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 const { getEngine } = await import('./lib/engines/index.mjs');
 
@@ -63,7 +66,12 @@ const summarizeScoreData = (scoreData) => ({
 });
 
 for (const engineName of engineNames) {
-    const engine = getEngine(engineName, { model: values.model, variant: values.variant, effort: values.effort, spendCapUsd: values['spend-cap-usd'] });
+    const engine = getEngine(engineName, {
+        model: values.model,
+        variant: values.variant,
+        effort: values.effort,
+        spendCapUsd: values['spend-cap-usd'],
+    });
     const resultsKey = values.tag ? `${engineName}+${values.tag}` : engineName;
     console.log(`=== engine ${resultsKey}`);
     for (const score of scores) {
@@ -97,7 +105,12 @@ for (const engineName of engineNames) {
                 scoreData: summarizeScoreData(out.scoreData),
                 transcript,
                 boxes,
-                systems: out.scoreData.systems.map((s) => ({ page: s.page, y0: s.y0, y1: s.y1, staves: s.staves?.length ?? 0 })),
+                systems: out.scoreData.systems.map((s) => ({
+                    page: s.page,
+                    y0: s.y0,
+                    y1: s.y1,
+                    staves: s.staves?.length ?? 0,
+                })),
                 metrics: compareTranscripts(toTranscript(gt), transcript),
                 geometryVsReference: refBoxes ? compareGeometry(boxes, refBoxes) : null,
                 extra: out.extra ?? null,

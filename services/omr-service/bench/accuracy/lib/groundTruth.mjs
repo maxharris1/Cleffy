@@ -78,7 +78,9 @@ const loadReferenceBoxesForId = async (id) => {
     const heightUnits = (size.height / 72) * MPOS_UNITS_PER_INCH;
     const boxes = [];
     let pages = 0;
-    for (const m of xml.matchAll(/<element id="(\d+)" x="([\d.]+)" y="([\d.]+)" sx="([\d.]+)" sy="([\d.]+)" page="(\d+)"/g)) {
+    for (const m of xml.matchAll(
+        /<element id="(\d+)" x="([\d.]+)" y="([\d.]+)" sx="([\d.]+)" sy="([\d.]+)" page="(\d+)"/g,
+    )) {
         const [, id, x, y, sx, sy, page] = m;
         const p = Number(page);
         pages = Math.max(pages, p + 1);
