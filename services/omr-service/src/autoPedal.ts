@@ -1,6 +1,7 @@
 import { MAX_PEDAL_EDGES } from './caps.js';
 import type { Era } from './era.js';
-import { MAX_VOICE_SLOT, TICKS_PER_QUARTER, type ScoreNote, type ScorePedal, type ScoreTimeSig } from './scoreData.js';
+import { GATE_STACCATO, type GatedNote } from './musicxml.js';
+import { MAX_VOICE_SLOT, TICKS_PER_QUARTER, type ScorePedal, type ScoreTimeSig } from './scoreData.js';
 
 /**
  * Sustain pedalling for a score that does not mark any — most engravings of
@@ -18,13 +19,12 @@ import { MAX_VOICE_SLOT, TICKS_PER_QUARTER, type ScoreNote, type ScorePedal, typ
 
 /** A pedal-less stretch shorter than this, in a piece that does pedal, means "no pedal here". */
 export const UNPEDALLED_GAP_BARS = 8;
-/** The gate a staccato dot applies to a note's length (see musicxml.ts). */
-export const STACCATO_GATE_MAX = 0.5;
 /** More harmony changes than this inside one beat and the foot gives up. */
 export const MAX_SET_CHANGES_PER_BEAT = 2;
 
 export interface AutoPedalScore {
-    notes: readonly ScoreNote[];
+    /** Parser output keeps each note's articulation gate; older or synthetic notes carry none. */
+    notes: readonly GatedNote[];
     measures: ReadonlyArray<{ tick: number; dTicks: number }>;
     timeSignatures: readonly ScoreTimeSig[];
     pedals: readonly ScorePedal[];
@@ -80,24 +80,39 @@ const timeSigAt = (sigs: readonly ScoreTimeSig[], tick: number): ScoreTimeSig =>
     return current;
 };
 
+/** Tick order; where a lift and a depression share a tick, the lift comes first — a re-catch. */
+const byEdgeOrder = (a: ScorePedal, b: ScorePedal): number => {
+    if (a.tick !== b.tick) {
+        return a.tick - b.tick;
+    }
+    if (a.k === b.k) {
+        return 0;
+    }
+    return a.k === 'up' ? -1 : 1;
+};
+
 /**
  * Stretches where the pedal is up and nothing says otherwise. With no marks at
  * all, the whole score; with marks, the gaps of at least
- * {@link UNPEDALLED_GAP_BARS} bars between a lift and the next depression.
+ * {@link UNPEDALLED_GAP_BARS} bars before the first depression and between a
+ * lift and the next depression.
  */
 const unpedalledRegions = (score: AutoPedalScore): Region[] => {
     if (score.pedals.length === 0) {
         return [{ from: 0, to: score.totalTicks }];
     }
-    const edges = [...score.pedals].sort((a, b) => a.tick - b.tick);
+    const edges = [...score.pedals].sort(byEdgeOrder);
     const gaps: Region[] = [];
     let down = false;
     let from = 0;
     for (const edge of edges) {
+        if (!down && edge.tick > from) {
+            // The pedal was up from `from` to here, whichever edge this is: a
+            // depression ends the gap, a lift with nothing down before it
+            // (OMR lost the depression) does too.
+            gaps.push({ from, to: edge.tick });
+        }
         if (edge.k === 'down') {
-            if (!down && edge.tick > from) {
-                gaps.push({ from, to: edge.tick });
-            }
             down = true;
         } else {
             from = edge.tick;
@@ -113,17 +128,19 @@ const unpedalledRegions = (score: AutoPedalScore): Region[] => {
 };
 
 /**
- * Whether a note was engraved staccato, read back from its gated length.
- * `d` is the notated length times a gate — {@link STACCATO_GATE_MAX} for a
- * dot, half that for a wedge, 0.9 for a plain note — and the notated length
- * is the gap to the next onset in the voice, or that gap less a rest of the
- * same or three times the note's length. A plain note before a rest lands
- * on 0.45 of its gap, never on a half, so the exact match tells them apart
- * where a threshold on the ratio could not.
+ * Whether a note was engraved staccato, read back from its gated length, for
+ * notes that carry no `gate` of their own. `d` is the notated length times a
+ * gate — {@link GATE_STACCATO} for a dot, half that for a wedge, 0.9 for a
+ * plain note — and the notated length is the gap to the next onset in the
+ * voice, or that gap less a rest of the same or three times the note's
+ * length. A plain note before a rest lands on 0.45 of its gap, never on a
+ * half, so the exact match tells them apart where a threshold on the ratio
+ * could not. A slurred note before an equal rest (gate 1, half its gap) is
+ * the case this cannot tell apart, which is why the parser stamps the gate.
  */
 const isStaccatoLength = (d: number, gap: number): boolean => {
     for (const span of [gap, gap / 2, gap / 4]) {
-        if (Math.round(span * STACCATO_GATE_MAX) === d || Math.round(span * STACCATO_GATE_MAX * 0.5) === d) {
+        if (Math.round(span * GATE_STACCATO) === d || Math.round(span * GATE_STACCATO * 0.5) === d) {
             return true;
         }
     }
@@ -131,10 +148,11 @@ const isStaccatoLength = (d: number, gap: number): boolean => {
 };
 
 /**
- * Per note, whether it is staccato. Chord members share a successor; a
- * voice's last note has none and reads as sustained.
+ * Per note, whether it is staccato: by the articulation gate the parser
+ * stamped where there is one, else read back from the length. Chord members
+ * share a successor; a voice's last note has none and reads as sustained.
  */
-const staccatoFlags = (notes: readonly ScoreNote[]): boolean[] => {
+const staccatoFlags = (notes: readonly GatedNote[]): boolean[] => {
     const flags = new Array<boolean>(notes.length).fill(false);
     const byVoice = new Map<number, number[]>();
     notes.forEach((note, index) => {
@@ -153,6 +171,10 @@ const staccatoFlags = (notes: readonly ScoreNote[]): boolean[] => {
             }
             while (next < indices.length && (notes[indices[next] ?? 0]?.t ?? 0) <= note.t) {
                 next += 1;
+            }
+            if (note.gate !== undefined) {
+                flags[index] = note.gate <= GATE_STACCATO;
+                continue;
             }
             const successor = next < indices.length ? notes[indices[next] ?? 0] : undefined;
             if (successor && successor.t > note.t) {
@@ -211,7 +233,7 @@ const windowsOf = (score: AutoPedalScore, region: Region, step: Step): Window[] 
 /** Pedal one unpedalled region, changing at most once per window. */
 const pedalRegion = (
     score: AutoPedalScore,
-    notes: readonly ScoreNote[],
+    notes: readonly GatedNote[],
     staccato: readonly boolean[],
     region: Region,
     era: Era,
@@ -232,21 +254,26 @@ const pedalRegion = (
     for (const { b0, b1, beat } of windowsOf(score, region, step)) {
         // The churn rule is per beat; a coarser window tolerates proportionally more.
         const maxChanges = MAX_SET_CHANGES_PER_BEAT * Math.max(1, (b1 - b0) / beat);
+        // A window straddling the region's edge only judges the part inside
+        // it: an attack under a printed depression must not take an inferred
+        // one, and an attack past a printed lift is that lift's business.
+        const from = Math.max(b0, region.from);
+        const to = Math.min(b1, region.to);
         const attacks: number[] = [];
         while (cursor < notes.length && (notes[cursor]?.t ?? Infinity) < b1) {
             const note = notes[cursor];
             if (note) {
-                if (note.t >= b0) {
+                if (note.t >= from && note.t < to) {
                     attacks.push(cursor);
                 }
                 maxEnd = Math.max(maxEnd, note.t + note.d);
             }
             cursor += 1;
         }
-        const sounding = attacks.length > 0 || maxEnd > b0;
+        const sounding = attacks.length > 0 || maxEnd > from;
         if (!sounding) {
             if (down) {
-                edges.push(edge(b0, 'up'));
+                edges.push(edge(from, 'up'));
                 down = false;
             }
             continue;
@@ -320,17 +347,6 @@ const pedalRegion = (
         edges.push(edge(region.to, 'up'));
     }
     return edges;
-};
-
-/** Tick order; where a lift and a depression share a tick, the lift comes first — a re-catch. */
-const byEdgeOrder = (a: ScorePedal, b: ScorePedal): number => {
-    if (a.tick !== b.tick) {
-        return a.tick - b.tick;
-    }
-    if (a.k === b.k) {
-        return 0;
-    }
-    return a.k === 'up' ? -1 : 1;
 };
 
 export const inferAutoPedal = (score: AutoPedalScore, era: Era): AutoPedalResult => {

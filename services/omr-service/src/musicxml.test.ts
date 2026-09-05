@@ -123,8 +123,8 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 0, d: plain(1920), p: 72, h: 0, vc: 0 },
-            { t: 0, d: plain(1920), p: 36, h: 1, vc: 0 },
+            { t: 0, d: plain(1920), p: 72, h: 0, vc: 0, gate: 0.9 },
+            { t: 0, d: plain(1920), p: 36, h: 1, vc: 0, gate: 0.9 },
         ]);
         expect(score.warnings).not.toContain('single_staff_all_rh');
     });
@@ -187,8 +187,8 @@ describe('parseMusicXmlString', () => {
         const score = parseMusicXmlString(xml);
         expect(score.warnings).toContain('multi_part_collapsed');
         expect(score.notes).toEqual([
-            { t: 0, d: plain(1920), p: 60, h: 0, vc: 0 },
-            { t: 0, d: plain(1920), p: 48, h: 1, vc: 0 },
+            { t: 0, d: plain(1920), p: 60, h: 0, vc: 0, gate: 0.9 },
+            { t: 0, d: plain(1920), p: 48, h: 1, vc: 0, gate: 0.9 },
         ]);
     });
 
@@ -206,7 +206,7 @@ describe('parseMusicXmlString', () => {
                 <note><pitch><step>F</step><octave>4</octave><alter>1</alter></pitch><duration>16</duration><voice>1</voice></note>
             </measure>`,
         );
-        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(1920), p: 66, h: 0, vc: 0 }]);
+        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(1920), p: 66, h: 0, vc: 0, gate: 0.9 }]);
     });
 
     it('plays grace notes as crushed attacks stealing time before their principal', () => {
@@ -221,7 +221,7 @@ describe('parseMusicXmlString', () => {
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
             { t: 419, d: 61, p: 62, h: 0, v: 0.6, vc: 0 }, // acciaccatura — never gated; 96 bpm → 61 ticks
-            { t: 480, d: plain(480), p: 64, h: 0, vc: 0 },
+            { t: 480, d: plain(480), p: 64, h: 0, vc: 0, gate: 0.9 },
         ]);
         expect(score.warnings).not.toContain('grace_notes_skipped');
     });
@@ -238,8 +238,8 @@ describe('parseMusicXmlString', () => {
         );
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
-            { t: 0, d: plain(480), p: 60, h: 0, v: 0.46, vc: 0 },
-            { t: 480, d: plain(480), p: 62, h: 0, v: 0.82, vc: 0 },
+            { t: 0, d: plain(480), p: 60, h: 0, v: 0.46, vc: 0, gate: 0.9 },
+            { t: 480, d: plain(480), p: 62, h: 0, v: 0.82, vc: 0, gate: 0.9 },
         ]);
     });
 
@@ -267,7 +267,7 @@ describe('parseMusicXmlString', () => {
                 <note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>3</voice><tie type="stop"/></note>
             </measure>`,
         );
-        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(3840), p: 72, h: 0, vc: 0 }]);
+        expect(parseMusicXmlString(xml).notes).toEqual([{ t: 0, d: plain(3840), p: 72, h: 0, vc: 0, gate: 0.9 }]);
     });
 
     it('refuses to merge a "tie" whose halves are not rhythmically adjacent', () => {
@@ -283,8 +283,8 @@ describe('parseMusicXmlString', () => {
         );
         // The open half ends at 960 but the "stop" starts at 1920 — two notes.
         expect(parseMusicXmlString(xml).notes).toEqual([
-            { t: 0, d: plain(960), p: 72, h: 0, vc: 0 },
-            { t: 1920, d: plain(960), p: 72, h: 0, vc: 0 },
+            { t: 0, d: plain(960), p: 72, h: 0, vc: 0, gate: 0.9 },
+            { t: 1920, d: plain(960), p: 72, h: 0, vc: 0, gate: 0.9 },
         ]);
     });
 
@@ -589,6 +589,17 @@ describe('articulation', () => {
                 `<notations><slur type="stop" number="1"/></notations></note>`,
         );
         expect(durs(xml)[0]).toBe(336); // 480 * 0.7
+    });
+
+    it('stamps each note with the gate it applied, a tie chain with the gate that closed it', () => {
+        const xml = oneBar(
+            `${note('C', 4, 4, arts('staccato'))}${note('D', 4, 4, slur('start'))}` +
+                `${note('E', 4, 4, '<tie type="start"/><notations><tied type="start"/><slur type="stop" number="1"/></notations>')}` +
+                `${note('E', 4, 4, '<tie type="stop"/><notations><tied type="stop"/><articulations><staccato/></articulations></notations>')}`,
+        );
+        const notes = parseMusicXmlString(xml).notes;
+        expect(notes.map((n) => n.gate)).toEqual([0.5, 1, 0.5]);
+        expect(notes[2]?.d).toBe(480); // two quarters tied, gated once by the closing dot
     });
 
     it('does not shorten notes under a slur, but releases the one that ends it', () => {
@@ -1470,7 +1481,7 @@ describe('ornaments, graces and swing', () => {
         const score = parseMusicXmlString(xml);
         expect(score.notes).toEqual([
             { t: 0, d: 240, p: 62, h: 0, v: 0.6, vc: 0 },
-            { t: 240, d: plain(240), p: 64, h: 0, vc: 0 },
+            { t: 240, d: plain(240), p: 64, h: 0, vc: 0, gate: 0.9 },
         ]);
     });
 

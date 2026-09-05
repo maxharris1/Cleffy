@@ -108,6 +108,18 @@ describe('buildScoreData', () => {
         expect(score.warnings).toContain('measure_geometry_mismatch');
     });
 
+    it('keeps the parser\u2019s articulation gates to itself', () => {
+        const gated: MusicalScore = {
+            ...musical,
+            notes: musical.notes.map((n) => ({ ...n, gate: 0.5 })),
+        };
+        const score = buildScoreData(gated, geometry);
+        expect(score.notes.length).toBe(musical.notes.length);
+        for (const n of score.notes) {
+            expect(n).not.toHaveProperty('gate');
+        }
+    });
+
     it('rejects a score with nothing playable', () => {
         expect(() => buildScoreData({ ...musical, notes: [] }, geometry)).toThrowError(JobError);
     });
