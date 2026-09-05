@@ -361,7 +361,10 @@ export interface LoopRegion {
 export interface PlaybackEngineOptions {
     score: ScoreData;
     bpm: number;
-    /** Strict (the default) plays the printed tempo exactly as it always has. */
+    /**
+     * Strict (the default) keeps the svc-10 tempo map byte for byte; note
+     * shaping (legato, dips, phrase) applies in both styles.
+     */
     tempoStyle?: TempoStyle;
     /**
      * Whether to play pedal edges the service inferred (`src: 'inferred'`, the
@@ -643,7 +646,9 @@ export class PlaybackEngine {
 
     /**
      * The tempo map for the current practice tempo and style. Strict passes no
-     * curve, so it builds the very same map it did before styles existed.
+     * curve, so it builds the very same map it did before styles existed —
+     * onsets and clicks land where svc-10 put them; what the notes do once
+     * struck is the expression layer's business in either style.
      */
     private buildMap(bpm: number): TempoMap {
         switch (this.tempoStyle) {

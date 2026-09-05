@@ -142,7 +142,9 @@ describe('analyzeVoices', () => {
             expect(analysis.melodyVoiceByBar).toEqual([rh, rh]);
         });
 
-        it('lets a walking left-hand tune win over repeated right-hand chords', () => {
+        it('keeps the tune in repeated right-hand chords over a walking bass', () => {
+            // One voice per hand: the bass walks, but it is never the top of
+            // the texture and the chords above are what the ear follows.
             const chords: ScoreNote[] = [];
             const bass: ScoreNote[] = [];
             const line = [48, 50, 52, 53, 55, 53, 52, 50];
@@ -158,7 +160,22 @@ describe('analyzeVoices', () => {
                 }
             }
             const analysis = analyzeVoices(scoreOf(sortNotes([...chords, ...bass]), 2));
-            const lh = voiceKey({ t: 0, d: 1, p: 48, h: 1 });
+            const rh = voiceKey({ t: 0, d: 1, p: 72, h: 0 });
+            expect(analysis.melodyVoiceByBar).toEqual([rh, rh]);
+        });
+
+        it('lets a left-hand tenor tune win when it weaves around a static right-hand pedal tone', () => {
+            // The RH holds E4; the LH line walks up through and back below it,
+            // so it is the top of the texture more often than not and beats
+            // the pedal tone by more than the margin.
+            const notes = sortNotes([
+                { t: 0, d: 1920 - 192, p: 64, h: 0 },
+                { t: 1920, d: 1920 - 192, p: 64, h: 0 },
+                ...[60, 62, 64, 65].map((p, i) => ({ t: i * 480, d: plain(480), p, h: 1 as const })),
+                ...[67, 65, 64, 62].map((p, i) => ({ t: 1920 + i * 480, d: plain(480), p, h: 1 as const })),
+            ]);
+            const analysis = analyzeVoices(scoreOf(notes, 2));
+            const lh = voiceKey({ t: 0, d: 1, p: 60, h: 1 });
             expect(analysis.melodyVoiceByBar).toEqual([lh, lh]);
         });
 
@@ -176,10 +193,12 @@ describe('analyzeVoices', () => {
         });
 
         it('follows an inner voice when the slots say the tune moved there', () => {
-            // Voice 1 walks stepwise inside the hand; voice 0 holds a pedal tone above it.
+            // Voice 1 walks stepwise inside the hand, around the E5 pedal tone
+            // voice 0 holds; the pedal tone's mean pitch is the higher, but it
+            // is not the tune.
             const notes = sortNotes([
-                { t: 0, d: 1920 - 192, p: 84, h: 0, vc: 0 },
-                { t: 1920, d: 1920 - 192, p: 84, h: 0, vc: 0 },
+                { t: 0, d: 1920 - 192, p: 76, h: 0, vc: 0 },
+                { t: 1920, d: 1920 - 192, p: 76, h: 0, vc: 0 },
                 ...tune(0, [72, 74, 76, 77], 1),
                 ...tune(1, [79, 77, 76, 74], 1),
             ]);

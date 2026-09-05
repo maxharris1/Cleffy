@@ -1,5 +1,5 @@
 import { clickBeatTicks, measureIndexAtTick, timeSigAt } from '@/features/playback/scoreTime';
-import { HAND_RH, MAX_VOICE_SLOT } from '@/types/scoreData';
+import { MAX_VOICE_SLOT } from '@/types/scoreData';
 import type { ScoreData, ScoreNote } from '@/types/scoreData';
 
 /**
@@ -28,6 +28,12 @@ export const MELODY_WINDOW_BARS = 8;
 export const LEGATO_RATIO_MIN = 0.85;
 /** Share of a bar's intervals that must recur for the bar to be "the same figure again". */
 export const FIGURE_INTERVAL_MATCH = 0.7;
+/**
+ * How far another voice's melody score must beat the highest-pitched voice's
+ * to take the tune from it. The ear defaults to the top of the texture; a
+ * walking bass under repeated chords is not a tune just because it moves.
+ */
+export const MELODY_MARGIN = 0.1;
 /** A rest at least this fraction of the note's own length, and at least a beat, ends a phrase. */
 const PHRASE_GAP_FRACTION = 0.15;
 
@@ -65,7 +71,7 @@ interface VoiceBarStats {
     stepwiseTicks: number;
     /** Σ pitch · duration. */
     pitchTicks: number;
-    /** Onsets at which the voice held the highest sounding note of its hand. */
+    /** Onsets at which the voice held the highest note sounding anywhere in the texture. */
     topOnsets: number;
 }
 
@@ -74,8 +80,8 @@ const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 /**
  * Score a voice's claim to the tune over a window: duration-weighted stepwise
  * motion (melodies walk, accompaniments leap or repeat), pitch height, and how
- * often it is the top of its own hand. The weights are uncalibrated; ASAP-style
- * performance data could set them.
+ * often it is the top of the whole texture. The weights are uncalibrated;
+ * ASAP-style performance data could set them.
  */
 const melodyScore = (stats: readonly VoiceBarStats[]): number => {
     let ticks = 0;
@@ -234,10 +240,9 @@ export const analyzeVoices = (score: ScoreData): VoiceAnalysis => {
                 sounding.push({ index: i, note });
             }
         }
-        const topByHand: [number, number] = [-Infinity, -Infinity];
+        let topSounding = -Infinity;
         for (const { note } of sounding) {
-            const hand = note.h === HAND_RH ? 0 : 1;
-            topByHand[hand] = Math.max(topByHand[hand], note.p);
+            topSounding = Math.max(topSounding, note.p);
         }
 
         // One entry per voice attacking in this group.
@@ -280,7 +285,7 @@ export const analyzeVoices = (score: ScoreData): VoiceAnalysis => {
             if (step) {
                 stats.stepwiseTicks += entry.ticks;
             }
-            if (entry.top === topByHand[handOfVoice(key)]) {
+            if (entry.top === topSounding) {
                 stats.topOnsets += 1;
             }
             barStats.set(key, stats);
@@ -288,10 +293,11 @@ export const analyzeVoices = (score: ScoreData): VoiceAnalysis => {
         start = end;
     }
 
-    // Melody voice per bar: the best-scoring voice over the window starting
-    // one bar back. Every voice heard in the window is a candidate, and the
-    // bar before is in it because a tune held across a barline has no onset
-    // in the bar it is held through, and is still the tune there.
+    // Melody voice per bar: the highest-pitched voice over the window starting
+    // one bar back, unless another voice out-scores it by MELODY_MARGIN. Every
+    // voice heard in the window is a candidate, and the bar before is in it
+    // because a tune held across a barline has no onset in the bar it is held
+    // through, and is still the tune there.
     const melodyVoiceByBar = measures.map((_, bar) => {
         const windowEnd = Math.min(measures.length, bar + MELODY_WINDOW_BARS);
         const perVoice = new Map<number, VoiceBarStats[]>();
@@ -302,27 +308,34 @@ export const analyzeVoices = (score: ScoreData): VoiceAnalysis => {
                 perVoice.set(key, list);
             }
         }
-        let best = -1;
-        let bestScore = -Infinity;
-        let bestHeight = -Infinity;
-        for (const [key, stats] of perVoice) {
-            const value = melodyScore(stats);
-            const height =
+        const candidates = [...perVoice].map(([key, stats]) => ({
+            key,
+            value: melodyScore(stats),
+            height:
                 stats.reduce((sum, s) => sum + s.pitchTicks, 0) /
                 Math.max(
                     1,
                     stats.reduce((sum, s) => sum + s.ticks, 0),
-                );
-            if (
-                value > bestScore ||
-                (value === bestScore && (height > bestHeight || (height === bestHeight && key < best)))
-            ) {
-                best = key;
-                bestScore = value;
-                bestHeight = height;
+                ),
+        }));
+        const highest = candidates.reduce<(typeof candidates)[number] | undefined>(
+            (top, c) => (!top || c.height > top.height || (c.height === top.height && c.key < top.key) ? c : top),
+            undefined,
+        );
+        if (!highest) {
+            return -1;
+        }
+        let best = highest;
+        for (const c of candidates) {
+            const beatsDefault = c.value >= highest.value + MELODY_MARGIN;
+            const beatsBest =
+                c.value > best.value ||
+                (c.value === best.value && (c.height > best.height || (c.height === best.height && c.key < best.key)));
+            if (c !== highest && beatsDefault && (best === highest || beatsBest)) {
+                best = c;
             }
         }
-        return best;
+        return best.key;
     });
 
     // Accompaniment: a voice repeating last bar's figure under a different melody voice.

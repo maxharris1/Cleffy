@@ -14,6 +14,7 @@ import {
     RESONANCE_WET,
     velocityToGain,
 } from '@/features/playback/expression';
+import svc10Timeline from '@/features/playback/fixtures/svc10-timeline.json';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { PlaybackEngine, schedulePianoVoice } from '@/features/playback/PlaybackEngine';
 import type { AudioContextLike, AudioParamLike } from '@/features/playback/PlaybackEngine';
@@ -798,12 +799,6 @@ describe('tempo style', () => {
         ]).flat(),
     };
 
-    const timeline = (ctx: MockContext) => ({
-        onsets: ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b),
-        gains: ctx.sources.map((s) => voiceGainOf(s)).sort((a, b) => a - b),
-        clicks: ctx.oscillators.map((o) => o.startedAt ?? -1).sort((a, b) => a - b),
-    });
-
     it('clicks each beat exactly once, through the last beat to the end', async () => {
         // Regression: after the final beat the cursor used to fall back to the
         // anchor and re-fire every past click on every scheduler tick.
@@ -816,18 +811,27 @@ describe('tempo style', () => {
         expect(new Set(clicks).size).toBe(16);
     });
 
-    it('strict is byte-identical to giving no style at all', async () => {
-        const plain = makeEngine({ score: closing, bpm: 120 });
-        const strict = makeEngine({ score: closing, bpm: 120, tempoStyle: 'strict' });
-        for (const { engine } of [plain, strict]) {
+    it('strict (and no style at all) schedules every note and click at the svc-10 time', async () => {
+        // fixtures/svc10-timeline.json was recorded once from the svc-10
+        // engine (commit 8862482) with this file's harness: makeEngine({ bpm:
+        // 120 }) on tinyScore, metronome on, advance(ctx, 16), sources sorted
+        // by start then stop, click times deduplicated (svc-10 re-fired past
+        // clicks after the last beat). Onsets and clicks are the tempo map and
+        // must not move; the recorded stops are reference only — v5's legato
+        // overlap and phrase shaping lengthen notes in both styles, and gains
+        // differ likewise (the expression tests cover both).
+        for (const tempoStyle of [undefined, 'strict' as const]) {
+            const { ctx, engine } = makeEngine({ bpm: 120, ...(tempoStyle ? { tempoStyle } : {}) });
             engine.setMetronome(true);
+            await engine.play();
+            await advance(ctx, 16);
+            const onsets = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
+            expect(onsets).toHaveLength(svc10Timeline.notes.length);
+            onsets.forEach((onset, i) => expect(onset).toBeCloseTo(svc10Timeline.notes[i]?.start ?? -1, 9));
+            const clicks = ctx.oscillators.map((o) => o.startedAt ?? -1).sort((a, b) => a - b);
+            expect(clicks).toHaveLength(svc10Timeline.clicks.length);
+            clicks.forEach((click, i) => expect(click).toBeCloseTo(svc10Timeline.clicks[i] ?? -1, 9));
         }
-        await plain.engine.play();
-        await strict.engine.play();
-        await advance(plain.ctx, 12);
-        await advance(strict.ctx, 12);
-        expect(timeline(strict.ctx)).toEqual(timeline(plain.ctx));
-        expect(plain.ctx.sources.length).toBe(closing.notes.length);
     });
 
     it('expressive eases the last beat to 0.75 of the tempo, clicks included', async () => {

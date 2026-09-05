@@ -499,9 +499,10 @@ describe('buildNoteShapes', () => {
             }));
 
         it('lifts the melody VOICE, not the highest note, when the slots put the tune inside the hand', () => {
+            // Voice 1 weaves around the E5 pedal tone voice 0 holds.
             const notes = sorted([
-                { t: 0, d: 1920 - 192, p: 84, h: 0, vc: 0 },
-                { t: 1920, d: 1920 - 192, p: 84, h: 0, vc: 0 },
+                { t: 0, d: 1920 - 192, p: 76, h: 0, vc: 0 },
+                { t: 1920, d: 1920 - 192, p: 76, h: 0, vc: 0 },
                 ...tune(0, [72, 74, 76, 77], 1),
                 ...tune(1, [79, 77, 76, 74], 1),
             ]);
@@ -514,7 +515,7 @@ describe('buildNoteShapes', () => {
             };
             const shaped = buildNoteShapes(score);
             notes.forEach((note, i) => {
-                // Every inner-voice attack sings; the pedal tone above it does not.
+                // Every inner-voice attack sings; the pedal tone does not, even where it is the higher.
                 expect(shaped[i]?.lift).toBe(note.vc === 1 ? MELODY_LIFT : 0);
             });
         });
