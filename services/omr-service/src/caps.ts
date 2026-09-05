@@ -47,10 +47,7 @@ const isRampLanding = (events: readonly ScoreTempo[], i: number): boolean => {
  * dropped by the truncation of last resort, which needs more than `max`
  * printed tempos in one score to trigger at all.
  */
-export const capTempoEvents = (
-    tempos: readonly ScoreTempo[],
-    max = MAX_TEMPO_EVENTS,
-): ScoreTempo[] => {
+export const capTempoEvents = (tempos: readonly ScoreTempo[], max = MAX_TEMPO_EVENTS): ScoreTempo[] => {
     let kept: ScoreTempo[] = [...tempos];
     while (kept.length > max) {
         let seen = 0;
@@ -92,16 +89,23 @@ export const capHolds = (holds: readonly ScoreHold[], max = MAX_HOLDS): ScoreHol
 };
 
 /**
- * Bring pedal edges under the ceiling, keeping the earliest for the same reason
- * fermatas do — plus one thing they do not need. A cut that lands on a `down`
- * leaves the pedal depressed for every bar after it, washing the tail of the
- * score into one chord, so an orphaned last depression goes with the cut.
+ * Bring pedal edges under the ceiling. Inferred edges go first, all of them:
+ * they are a guess the engraving never made, and each inferred region closes
+ * with its own lift, so removing them together leaves the printed edges
+ * consistent. Printed edges over the ceiling keep the earliest for the same
+ * reason fermatas do — plus one thing they do not need. A cut that lands on a
+ * `down` leaves the pedal depressed for every bar after it, washing the tail
+ * of the score into one chord, so an orphaned last depression goes with the cut.
  */
 export const capPedals = (pedals: readonly ScorePedal[], max = MAX_PEDAL_EDGES): ScorePedal[] => {
     if (pedals.length <= max) {
         return [...pedals];
     }
-    const kept = pedals.slice(0, max);
+    const printed = pedals.filter((edge) => edge.src !== 'inferred');
+    if (printed.length <= max) {
+        return printed;
+    }
+    const kept = printed.slice(0, max);
     if (kept[kept.length - 1]?.k === 'down') {
         kept.pop();
     }

@@ -38,11 +38,25 @@ export interface AutoPedalResult {
     inferred: boolean;
 }
 
-type Granularity = 'beat' | 'bar';
+/** How often the pedal may change: every felt beat, or every so many bars. */
+type Step = 'beat' | number;
+/**
+ * Coarsening ladder for scores whose beat-level pedalling would breach the
+ * edge ceiling: a change per bar, then per 2, 4 and 8 bars. Past that the
+ * inference gives up and the score keeps only its printed edges.
+ */
+const COARSENING: readonly Step[] = ['beat', 1, 2, 4, 8];
 
 interface Region {
     from: number;
     to: number;
+}
+
+/** One stretch the pedal is judged over: its bounds and the felt beat at its start. */
+interface Window {
+    b0: number;
+    b1: number;
+    beat: number;
 }
 
 const SLOTS_PER_HAND = MAX_VOICE_SLOT + 1;
@@ -160,14 +174,48 @@ const hasNewPitchClass = (set: ReadonlySet<number>, against: ReadonlySet<number>
     return false;
 };
 
-/** Pedal one unpedalled region at the given granularity. */
+/** The windows of one region at the given step, in tick order. */
+const windowsOf = (score: AutoPedalScore, region: Region, step: Step): Window[] => {
+    const windows: Window[] = [];
+    const overlaps = (b0: number, b1: number): boolean => b1 > region.from && b0 < region.to;
+    if (step === 'beat') {
+        for (const measure of score.measures) {
+            const barEnd = measure.tick + measure.dTicks;
+            if (!overlaps(measure.tick, barEnd)) {
+                continue;
+            }
+            const beat = beatTicks(timeSigAt(score.timeSignatures, measure.tick));
+            for (let b0 = measure.tick; b0 < barEnd; b0 += beat) {
+                const b1 = Math.min(b0 + beat, barEnd);
+                if (overlaps(b0, b1)) {
+                    windows.push({ b0, b1, beat });
+                }
+            }
+        }
+        return windows;
+    }
+    for (let i = 0; i < score.measures.length; i += step) {
+        const first = score.measures[i];
+        const last = score.measures[Math.min(i + step, score.measures.length) - 1];
+        if (!first || !last) {
+            continue;
+        }
+        const b1 = last.tick + last.dTicks;
+        if (overlaps(first.tick, b1)) {
+            windows.push({ b0: first.tick, b1, beat: beatTicks(timeSigAt(score.timeSignatures, first.tick)) });
+        }
+    }
+    return windows;
+};
+
+/** Pedal one unpedalled region, changing at most once per window. */
 const pedalRegion = (
     score: AutoPedalScore,
     notes: readonly ScoreNote[],
     staccato: readonly boolean[],
     region: Region,
     era: Era,
-    granularity: Granularity,
+    step: Step,
 ): ScorePedal[] => {
     const edges: ScorePedal[] = [];
     const edge = (tick: number, k: ScorePedal['k']): ScorePedal => ({ tick, k, src: 'inferred' });
@@ -181,102 +229,90 @@ const pedalRegion = (
     // tell a held note from a rest.
     let maxEnd = 0;
 
-    for (const measure of score.measures) {
-        const barEnd = measure.tick + measure.dTicks;
-        if (barEnd <= region.from || measure.tick >= region.to) {
+    for (const { b0, b1, beat } of windowsOf(score, region, step)) {
+        // The churn rule is per beat; a coarser window tolerates proportionally more.
+        const maxChanges = MAX_SET_CHANGES_PER_BEAT * Math.max(1, (b1 - b0) / beat);
+        const attacks: number[] = [];
+        while (cursor < notes.length && (notes[cursor]?.t ?? Infinity) < b1) {
+            const note = notes[cursor];
+            if (note) {
+                if (note.t >= b0) {
+                    attacks.push(cursor);
+                }
+                maxEnd = Math.max(maxEnd, note.t + note.d);
+            }
+            cursor += 1;
+        }
+        const sounding = attacks.length > 0 || maxEnd > b0;
+        if (!sounding) {
+            if (down) {
+                edges.push(edge(b0, 'up'));
+                down = false;
+            }
             continue;
         }
-        const beat = beatTicks(timeSigAt(score.timeSignatures, measure.tick));
-        const step = granularity === 'bar' ? measure.dTicks : beat;
-        // The churn rule is per beat; a coarser step tolerates proportionally more.
-        const maxChanges = MAX_SET_CHANGES_PER_BEAT * Math.max(1, step / beat);
-        for (let b0 = measure.tick; b0 < barEnd; b0 += step) {
-            const b1 = Math.min(b0 + step, barEnd);
-            if (b1 <= region.from || b0 >= region.to) {
-                continue;
-            }
-            const attacks: number[] = [];
-            while (cursor < notes.length && (notes[cursor]?.t ?? Infinity) < b1) {
-                const note = notes[cursor];
-                if (note) {
-                    if (note.t >= b0) {
-                        attacks.push(cursor);
-                    }
-                    maxEnd = Math.max(maxEnd, note.t + note.d);
-                }
-                cursor += 1;
-            }
-            const sounding = attacks.length > 0 || maxEnd > b0;
-            if (!sounding) {
-                if (down) {
-                    edges.push(edge(b0, 'up'));
-                    down = false;
-                }
-                continue;
-            }
-            if (attacks.length === 0) {
-                continue; // a note held across the beat: leave the foot where it is
-            }
+        if (attacks.length === 0) {
+            continue; // a note held across the beat: leave the foot where it is
+        }
 
-            let dots = 0;
-            let changes = 0;
-            let lastOnset = -1;
-            let lastSet: Set<number> | null = null;
-            let set = new Set<number>();
-            let lowest = Infinity;
-            const beatSet = new Set<number>();
-            for (const index of attacks) {
-                const note = notes[index];
-                if (!note) {
-                    continue;
-                }
-                if (staccato[index]) {
-                    dots += 1;
-                }
-                if (note.t !== lastOnset) {
-                    if (lastSet && hasNewPitchClass(set, lastSet)) {
-                        changes += 1;
-                    }
-                    lastSet = set;
-                    set = new Set<number>();
-                    lastOnset = note.t;
-                }
-                set.add(pitchClass(note.p));
-                beatSet.add(pitchClass(note.p));
-                lowest = Math.min(lowest, note.p);
+        let dots = 0;
+        let changes = 0;
+        let lastOnset = -1;
+        let lastSet: Set<number> | null = null;
+        let set = new Set<number>();
+        let lowest = Infinity;
+        const beatSet = new Set<number>();
+        for (const index of attacks) {
+            const note = notes[index];
+            if (!note) {
+                continue;
             }
-            if (lastSet && hasNewPitchClass(set, lastSet)) {
-                changes += 1;
+            if (staccato[index]) {
+                dots += 1;
             }
-            const dry = dots * 2 > attacks.length || changes > maxChanges;
-            const at = notes[attacks[0] ?? 0]?.t ?? b0;
+            if (note.t !== lastOnset) {
+                if (lastSet && hasNewPitchClass(set, lastSet)) {
+                    changes += 1;
+                }
+                lastSet = set;
+                set = new Set<number>();
+                lastOnset = note.t;
+            }
+            set.add(pitchClass(note.p));
+            beatSet.add(pitchClass(note.p));
+            lowest = Math.min(lowest, note.p);
+        }
+        if (lastSet && hasNewPitchClass(set, lastSet)) {
+            changes += 1;
+        }
+        const dry = dots * 2 > attacks.length || changes > maxChanges;
+        const at = notes[attacks[0] ?? 0]?.t ?? b0;
 
-            if (dry) {
-                if (down) {
-                    edges.push(edge(at, 'up'));
-                    down = false;
-                }
-                continue;
+        if (dry) {
+            if (down) {
+                edges.push(edge(at, 'up'));
+                down = false;
             }
-            const beatBass = pitchClass(lowest);
-            if (!down) {
-                edges.push(edge(at, 'down'));
-                down = true;
-                ringing = new Set(beatSet);
-                bass = beatBass;
-                continue;
-            }
-            // Classical pedalling clears only when the bass moves; later styles
-            // clear whenever a new pitch class would blur into what is ringing.
-            const recatch = era === 'classical' ? beatBass !== bass : hasNewPitchClass(beatSet, ringing);
-            if (recatch) {
-                edges.push(edge(at, 'up'), edge(at, 'down'));
-                ringing = new Set(beatSet);
-                bass = beatBass;
-            } else {
-                for (const pc of beatSet) {
-                    ringing.add(pc);
-                }
+            continue;
+        }
+        const beatBass = pitchClass(lowest);
+        if (!down) {
+            edges.push(edge(at, 'down'));
+            down = true;
+            ringing = new Set(beatSet);
+            bass = beatBass;
+            continue;
+        }
+        // Classical pedalling clears only when the bass moves; later styles
+        // clear whenever a new pitch class would blur into what is ringing.
+        const recatch = era === 'classical' ? beatBass !== bass : hasNewPitchClass(beatSet, ringing);
+        if (recatch) {
+            edges.push(edge(at, 'up'), edge(at, 'down'));
+            ringing = new Set(beatSet);
+            bass = beatBass;
+        } else {
+            for (const pc of beatSet) {
+                ringing.add(pc);
             }
         }
     }
@@ -310,16 +346,16 @@ export const inferAutoPedal = (score: AutoPedalScore, era: Era): AutoPedalResult
     }
     const notes = [...score.notes].sort((a, b) => a.t - b.t);
     const staccato = staccatoFlags(notes);
-    const infer = (granularity: Granularity): ScorePedal[] =>
-        regions.flatMap((region) => pedalRegion(score, notes, staccato, region, era, granularity));
-
-    let inferred = infer('beat');
-    if (score.pedals.length + inferred.length > MAX_PEDAL_EDGES) {
-        // Over the schema ceiling: a change per bar is coarser but still pedalling.
-        inferred = infer('bar');
+    for (const step of COARSENING) {
+        const inferred = regions.flatMap((region) => pedalRegion(score, notes, staccato, region, era, step));
+        if (score.pedals.length + inferred.length > MAX_PEDAL_EDGES) {
+            continue; // over the schema ceiling: try a coarser step, still pedalling
+        }
+        if (inferred.length === 0) {
+            return untouched;
+        }
+        return { pedals: [...score.pedals, ...inferred].sort(byEdgeOrder), inferred: true };
     }
-    if (inferred.length === 0) {
-        return untouched;
-    }
-    return { pedals: [...score.pedals, ...inferred].sort(byEdgeOrder), inferred: true };
+    // Even a change per eight bars would breach the ceiling: printed edges only.
+    return untouched;
 };
