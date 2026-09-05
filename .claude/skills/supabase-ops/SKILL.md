@@ -21,6 +21,7 @@ Production dashboard: https://supabase.com/dashboard/project/jibgwgosihadbjgxdsf
 npm run local:up          # Supabase + OMR worker; --no-omr to skip OMR
 npm run dev:local         # Vite :5173
 npm run functions:serve   # edge functions
+npm run imslp:sync        # warm the IMSLP chip index (~15 min; chips say "still building" until then)
 npm run local:status      # health check
 npm run local:down
 ```

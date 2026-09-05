@@ -1,11 +1,13 @@
 import { useOutletContext } from 'react-router';
 
+import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { ImslpBrowser } from '@/features/imslp/ImslpBrowser';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { ErrorText } from '@/ui/ErrorText';
 
 export const SearchPage = () => {
-    const { uploading, onUpload, onImportImslp, uploadError } = useOutletContext<LibraryOutletContext>();
+    const { uploading, onUpload, onImportImslp, uploadError, uploadLimit, openPricing } =
+        useOutletContext<LibraryOutletContext>();
 
     return (
         <div>
@@ -16,6 +18,9 @@ export const SearchPage = () => {
                 </p>
             </header>
 
+            {/* Quota refusals get the amber upgrade card, not red error text —
+                same split as LibraryPage. */}
+            {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-4" /> : null}
             {uploadError ? <ErrorText className="mt-4">{uploadError}</ErrorText> : null}
 
             <ImslpBrowser busy={uploading} onImportFile={onUpload} onImportImslp={onImportImslp} showHeading={false} />

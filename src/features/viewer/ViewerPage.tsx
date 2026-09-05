@@ -15,6 +15,7 @@ import {
     isCloudDocId,
     loadDocumentBytes,
     loadDocumentOffline,
+    prefetchDocumentBytes,
 } from '@/features/library/documentsService';
 import { TransportBar } from '@/features/playback/TransportBar';
 import { usePlayback } from '@/features/playback/usePlayback';
@@ -27,6 +28,7 @@ import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
+import { perfMark } from '@/lib/perf';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
@@ -53,7 +55,25 @@ interface CloudDocState {
     doc: DocumentRow;
     role: MemberRole | null;
     bytes: ArrayBuffer;
+    /**
+     * A warm Dexie paint the server hasn't confirmed yet. The cached role may
+     * overstate today's access, and RLS discards (not retries) an annotation
+     * flushed under a role that turned out read-only — so writes and sync wait
+     * until the fetch settles. Cleared by the server response, or by the
+     * offline fallback, where the last-known role is the best truth available.
+     */
+    provisional?: boolean;
 }
+
+const isTransportFailure = (err: unknown): boolean => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return true;
+    }
+    if (err instanceof TypeError) {
+        return true;
+    }
+    return err instanceof Error && /failed to fetch/i.test(err.message);
+};
 
 const CloudViewer = ({ docId }: { docId: string }) => {
     const { session, loading } = useSession();
@@ -85,42 +105,130 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         if (!doc) {
             return;
         }
-        const bytes = await loadDocumentBytes(doc);
+        const bytes = await loadDocumentBytes(doc, { userId });
         setState((prev) => (prev ? { ...prev, doc, bytes } : prev));
         setStaleBytes(false);
-    }, [docId]);
+    }, [docId, userId]);
 
     // Play-along: analysis lifecycle + the audio engine for this document.
     const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, true);
     const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
 
     useEffect(() => {
-        if (!userId) {
-            return;
-        }
         let cancelled = false;
         (async () => {
-            try {
-                const doc = await fetchDocument(docId);
-                if (!doc) {
-                    throw new Error('Score not found — it may have been deleted, or your access was revoked.');
-                }
-                const [role, bytes] = await Promise.all([fetchMyRole(docId, userId), loadDocumentBytes(doc)]);
-                const withPages = await ensureDocumentPageCount(doc, bytes).catch(() => doc);
-                if (!cancelled) {
-                    setState({ doc: withPages, role, bytes });
-                }
-            } catch (err) {
-                // No network? A previously-cached score still opens (plan §offline).
-                const fallback = await loadDocumentOffline(docId).catch(() => null);
-                if (!cancelled) {
-                    if (fallback) {
-                        setState({ doc: fallback.doc, role: fallback.role, bytes: fallback.bytes });
-                    } else {
-                        setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
-                    }
-                }
+            // No session yet: on an SPA navigation the session is known
+            // synchronously, and a cold start resolves it from local storage in
+            // milliseconds — the effect re-runs then. Painting earlier would
+            // show cached scores to a browser that turns out to be signed out.
+            if (!userId) {
+                return;
             }
+
+            // Warm open: paint from Dexie immediately (provisionally — see
+            // CloudDocState), then refresh in the background. A hung confirm
+            // stays read-only: lifting provisional on a timer would grant a
+            // cached role the server never vouched for.
+            // Prefetch leaves in the same tick as the Dexie read; a hit ignores
+            // that download, a miss reuses it.
+            const prefetch = prefetchDocumentBytes(docId);
+            const offline = await loadDocumentOffline(docId, userId).catch(() => null);
+            if (!cancelled && offline) {
+                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes, provisional: true });
+                perfMark('viewer-cache-paint');
+            }
+
+            const [docResult, roleResult] = await Promise.allSettled([fetchDocument(docId), fetchMyRole(docId, userId)]);
+            if (cancelled) {
+                return;
+            }
+
+            if (docResult.status === 'fulfilled') {
+                const confirmedDoc = docResult.value;
+                if (!confirmedDoc) {
+                    // The server ANSWERED, and the answer is no: deleted, or this
+                    // account was never (or is no longer) a member. Drop the paint
+                    // even if the role request rejected — a role throw must not
+                    // keep another account's PDF on a shared device.
+                    setState(null);
+                    setLoadError('Score not found — it may have been deleted, or your access was revoked.');
+                    return;
+                }
+                const confirmedRole = roleResult.status === 'fulfilled' ? roleResult.value : null;
+                if (roleResult.status === 'fulfilled') {
+                    setState((prev) =>
+                        prev?.provisional
+                            ? {
+                                  ...prev,
+                                  doc: { ...prev.doc, archived_at: confirmedDoc.archived_at },
+                                  role: confirmedRole,
+                                  provisional: false,
+                              }
+                            : prev,
+                    );
+                    perfMark('viewer-confirmed');
+                }
+                try {
+                    const bytes = await loadDocumentBytes(confirmedDoc, {
+                        preloaded: offline
+                            ? {
+                                  bytes: offline.bytes,
+                                  contentRev: offline.doc.content_rev ?? 0,
+                                  archivedAt: offline.doc.archived_at,
+                              }
+                            : undefined,
+                        prefetch: offline ? undefined : prefetch,
+                        userId,
+                    });
+                    const withPages = await ensureDocumentPageCount(confirmedDoc, bytes).catch(() => confirmedDoc);
+                    if (!cancelled) {
+                        setState((prev) => ({
+                            doc: withPages,
+                            role: confirmedRole ?? prev?.role ?? 'viewer',
+                            bytes:
+                                prev &&
+                                prev.doc.id === withPages.id &&
+                                (prev.doc.content_rev ?? 0) >= (withPages.content_rev ?? 0)
+                                    ? prev.bytes
+                                    : bytes,
+                            provisional: roleResult.status !== 'fulfilled' ? true : undefined,
+                        }));
+                        setLoadError(null);
+                    }
+                } catch (err) {
+                    if (cancelled) {
+                        return;
+                    }
+                    if (offline) {
+                        setState({
+                            doc: { ...offline.doc, archived_at: confirmedDoc.archived_at },
+                            role: confirmedRole ?? offline.role,
+                            bytes: offline.bytes,
+                            provisional: roleResult.status !== 'fulfilled' ? true : undefined,
+                        });
+                        return;
+                    }
+                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                }
+                return;
+            }
+
+            const bothTransport =
+                isTransportFailure(docResult.reason) &&
+                roleResult.status === 'rejected' &&
+                isTransportFailure(roleResult.reason);
+            if (offline && bothTransport && offline.cachedRole) {
+                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
+                return;
+            }
+            if (offline) {
+                // Stay provisional: a PostgREST throw is not "the server never
+                // answered", and a missing stored role must not grant writes.
+                return;
+            }
+            setLoadError(
+                docResult.reason instanceof Error ? docResult.reason.message : 'Could not open this score.',
+            );
         })();
 
         // Resist storage eviction — annotations and cached scores must survive
@@ -164,7 +272,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             </main>
         );
     }
-    if (!state || !userId) {
+    if (!state) {
         return (
             <main className="flex min-h-full items-center justify-center p-8">
                 <LoadingText>Opening score…</LoadingText>
@@ -172,6 +280,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         );
     }
 
+    // Session may still be resolving on a warm Dexie open — paint the PDF anyway.
+    const resolvedUserId = userId ?? session?.user.id ?? '';
     // Past the plan's score cap. RLS refuses every annotation write on an archived
     // score (annotations_insert/annotations_update both test document_is_archived),
     // and a refusal is not transient, so the sync engine discards the op — a whole
@@ -180,14 +290,18 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // CachedPdf.archivedAt current for exactly this, so the offline open (which
     // synthesizes its row from the cache) reads it too.
     const archived = state.doc.archived_at !== null;
-    const readOnly = archived || (state.role !== 'owner' && state.role !== 'editor');
+    const readOnly =
+        archived ||
+        (state.role !== 'owner' && state.role !== 'editor') ||
+        !resolvedUserId ||
+        state.provisional === true;
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
 
     return (
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
-                <PresenceBar peers={peers} selfUserId={userId} />
+                <PresenceBar peers={peers} selfUserId={resolvedUserId} />
                 <SyncDot status={syncStatus} />
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
@@ -196,7 +310,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : readOnly ? (
                     <Badge>view only</Badge>
                 ) : null}
-                {annotationStore && state.role === 'owner' ? (
+                {annotationStore && !state.provisional && state.role === 'owner' ? (
                     <ImportScanButton
                         store={annotationStore}
                         docId={docId}
@@ -226,8 +340,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     Notes
                 </button>
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
-                <ShareExportMenu docId={docId} title={state.doc.title} />
-                {state.role === 'owner' ? (
+                {!state.provisional ? <ShareExportMenu docId={docId} title={state.doc.title} /> : null}
+                {!state.provisional && state.role === 'owner' ? (
                     <Button size="sm" onClick={() => setShareOpen(true)}>
                         Invite
                     </Button>
@@ -255,16 +369,23 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         readOnly={readOnly}
                         onStoreReady={onStoreReady}
                         playback={playbackFeature}
-                        sync={{
-                            userId,
-                            name: displayNameOf(session),
-                            isAnonymous: Boolean(session?.user.is_anonymous),
-                            canWrite: !readOnly,
-                            onStatus,
-                            onPeers,
-                            onDocReplaced,
-                            onScoreAnalysis: applyBroadcast,
-                        }}
+                        sync={
+                            // Not while provisional: the engine would start,
+                            // then tear down and restart when the confirmed
+                            // role lands a beat later.
+                            resolvedUserId && !state.provisional
+                                ? {
+                                      userId: resolvedUserId,
+                                      name: displayNameOf(session),
+                                      isAnonymous: Boolean(session?.user.is_anonymous),
+                                      canWrite: !readOnly,
+                                      onStatus,
+                                      onPeers,
+                                      onDocReplaced,
+                                      onScoreAnalysis: applyBroadcast,
+                                  }
+                                : undefined
+                        }
                     />
                 </PdfProvider>
             </div>
@@ -277,7 +398,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 warning={warning}
                 onDismissWarning={dismissWarning}
             />
-            {shareOpen ? <ShareDialog docId={docId} userId={userId} onClose={() => setShareOpen(false)} /> : null}
+            {shareOpen && resolvedUserId ? (
+                <ShareDialog docId={docId} userId={resolvedUserId} onClose={() => setShareOpen(false)} />
+            ) : null}
             {notesOpen ? (
                 <NotesPanel
                     documentId={docId}

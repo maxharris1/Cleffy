@@ -3248,3 +3248,845 @@ create table public.imslp_file_licenses (
 alter table public.imslp_file_licenses enable row level security;
 -- Zero policies — service_role only, like score_cache.
 grant all on public.imslp_file_licenses to service_role;
+
+-- ===== supabase/migrations/20260830120000_library_bootstrap_and_perf.sql =====
+-- Perceived-load performance:
+--  1. library_bootstrap() — one round-trip for library shell + page data.
+--  2. RLS initplan: wrap auth.uid() in (select …) for favorites + document_role.
+--  3. Index omr_jobs(created_by) for enqueue / active-job counts.
+
+-- ---------------------------------------------------------------------------
+-- library_bootstrap
+-- ---------------------------------------------------------------------------
+-- SECURITY DEFINER so we can assemble a single JSON payload, but every select
+-- is scoped to auth.uid() explicitly (RLS is bypassed under definer). Matches
+-- documents_select / favorites / library_tags / document_tags visibility.
+
+create or replace function public.library_bootstrap ()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := (select auth.uid());
+    v_rows jsonb;
+    v_count int;
+    v_favorites jsonb;
+    v_tags jsonb;
+    v_document_tags jsonb;
+    v_entitlements jsonb;
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '42501';
+    end if;
+
+    with visible as (
+        select
+            d.id,
+            d.owner_id,
+            d.title,
+            d.storage_path,
+            d.page_count,
+            d.content_rev,
+            d.created_at,
+            d.updated_at,
+            d.archived_at
+        from public.documents d
+        where d.owner_id = v_uid
+           or exists (
+                select 1
+                from public.document_members m
+                where m.document_id = d.id
+                  and m.user_id = v_uid
+            )
+        order by d.updated_at desc
+        limit 101
+    ),
+    counted as (
+        select count(*)::int as total from visible
+    ),
+    page as (
+        select * from visible limit 100
+    )
+    select
+        coalesce(
+            (select jsonb_agg(to_jsonb(p) order by p.updated_at desc) from page p),
+            '[]'::jsonb
+        ),
+        (select total from counted)
+    into v_rows, v_count;
+
+    select coalesce(jsonb_agg(f.document_id), '[]'::jsonb)
+    into v_favorites
+    from public.document_favorites f
+    where f.user_id = v_uid;
+
+    select coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'id', t.id,
+                'user_id', t.user_id,
+                'name', t.name,
+                'created_at', t.created_at
+            )
+            order by t.name asc
+        ),
+        '[]'::jsonb
+    )
+    into v_tags
+    from public.library_tags t
+    where t.user_id = v_uid;
+
+    select coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'document_id', dt.document_id,
+                'tag_id', dt.tag_id
+            )
+        ),
+        '[]'::jsonb
+    )
+    into v_document_tags
+    from public.document_tags dt
+    join public.library_tags t on t.id = dt.tag_id
+    where t.user_id = v_uid;
+
+    v_entitlements := public.get_entitlements ();
+
+    return jsonb_build_object(
+        'documents', v_rows,
+        'has_more', v_count > 100,
+        'favorite_ids', v_favorites,
+        'tags', v_tags,
+        'document_tags', v_document_tags,
+        'entitlements', v_entitlements
+    );
+end;
+$$;
+
+revoke all on function public.library_bootstrap () from public;
+revoke all on function public.library_bootstrap () from anon;
+grant execute on function public.library_bootstrap () to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- RLS initplan fixes
+-- ---------------------------------------------------------------------------
+create or replace function public.document_role (doc uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select role from public.document_members
+    where document_id = doc and user_id = (select auth.uid());
+$$;
+
+drop policy if exists favorites_select on public.document_favorites;
+create policy favorites_select on public.document_favorites for select to authenticated
+using (user_id = (select auth.uid()));
+
+drop policy if exists favorites_insert on public.document_favorites;
+create policy favorites_insert on public.document_favorites for insert to authenticated
+with check (
+    user_id = (select auth.uid())
+    and public.document_role (document_id) is not null
+);
+
+drop policy if exists favorites_delete on public.document_favorites;
+create policy favorites_delete on public.document_favorites for delete to authenticated
+using (user_id = (select auth.uid()));
+
+-- ---------------------------------------------------------------------------
+-- omr_jobs.created_by — filtered by enqueue / active-job count
+-- ---------------------------------------------------------------------------
+create index if not exists omr_jobs_created_by_idx
+    on public.omr_jobs (created_by);
+
+-- ===== supabase/migrations/20260831090000_imslp_category_members.sql =====
+-- Cached IMSLP category membership for Walker-style chip browse.
+-- Filled by imslp-category-sync (paged categorymembers); read by imslp-search
+-- via imslp_intersect_categories. Until a snapshot is `ok`, search bootstraps
+-- from the curated Popular list plus a small extras set.
+
+create table public.imslp_category_members (
+    category text not null,
+    page_title text not null,
+    page_id bigint,
+    last_seen_at timestamptz not null default now(),
+    primary key (category, page_title)
+);
+
+create index imslp_category_members_title_idx on public.imslp_category_members (page_title);
+
+create table public.imslp_category_snapshots (
+    category text primary key,
+    status text not null check (status in ('ok', 'partial', 'error')),
+    member_count integer not null default 0,
+    resume_token text,
+    synced_at timestamptz not null default now()
+);
+
+alter table public.imslp_category_members enable row level security;
+alter table public.imslp_category_snapshots enable row level security;
+
+revoke all on table public.imslp_category_members from public;
+revoke all on table public.imslp_category_members from anon;
+revoke all on table public.imslp_category_members from authenticated;
+revoke all on table public.imslp_category_snapshots from public;
+revoke all on table public.imslp_category_snapshots from anon;
+revoke all on table public.imslp_category_snapshots from authenticated;
+
+grant all on table public.imslp_category_members to service_role;
+grant all on table public.imslp_category_snapshots to service_role;
+
+-- AND of OR-clauses: each jsonb array is a set of categories (instrument ∪ arr).
+create or replace function public.imslp_intersect_categories (p_clauses jsonb)
+    returns table (page_title text)
+    language plpgsql
+    stable
+    set search_path = public
+as $$
+declare
+    clause jsonb;
+    first_clause boolean := true;
+    sql text := '';
+    cats text[];
+begin
+    if p_clauses is null
+        or jsonb_typeof(p_clauses) <> 'array'
+        or jsonb_array_length(p_clauses) = 0 then
+        return;
+    end if;
+
+    for clause in select value from jsonb_array_elements(p_clauses)
+    loop
+        if jsonb_typeof(clause) <> 'array' or jsonb_array_length(clause) = 0 then
+            return;
+        end if;
+        select coalesce(array_agg(value), '{}') into cats
+        from jsonb_array_elements_text(clause);
+        if first_clause then
+            sql := format(
+                'select m.page_title from public.imslp_category_members m where m.category = any (%L)',
+                cats
+            );
+            first_clause := false;
+        else
+            sql := sql || format(
+                ' intersect select m.page_title from public.imslp_category_members m where m.category = any (%L)',
+                cats
+            );
+        end if;
+    end loop;
+
+    return query execute sql;
+end;
+$$;
+
+revoke all on function public.imslp_intersect_categories (jsonb) from public;
+revoke all on function public.imslp_intersect_categories (jsonb) from anon;
+revoke all on function public.imslp_intersect_categories (jsonb) from authenticated;
+grant execute on function public.imslp_intersect_categories (jsonb) to service_role;
+
+-- ===== supabase/migrations/20260902120000_imslp_category_index.sql =====
+-- IMSLP category membership index: cached Category Walker intersections.
+-- Filled by the imslp-sync edge function (resumable categorymembers pager);
+-- read by imslp-search via imslp_browse / imslp_index_ready /
+-- imslp_titles_in_categories. Snapshots roll over by generation so a
+-- mid-category failure leaves the previous ok generation live.
+--
+-- Vault secrets imslp_sync_url + imslp_sync_secret must be created
+-- out-of-band (see SETUP_SUPABASE.md). If missing, the cron tick is a no-op.
+--
+-- Supersedes 20260831090000 (imslp_category_snapshots + imslp_intersect_categories).
+
+drop function if exists public.imslp_intersect_categories (jsonb);
+drop table if exists public.imslp_category_snapshots;
+drop table if exists public.imslp_category_members;
+drop table if exists public.imslp_category_sync;
+
+create table public.imslp_category_members (
+    category text not null,
+    page_title text not null,
+    page_id int not null,
+    sort_key text,
+    touched timestamptz,
+    generation int not null,
+    primary key (category, generation, page_title)
+);
+
+create index imslp_category_members_cat_gen_title
+    on public.imslp_category_members (category, generation, page_title);
+
+create index imslp_category_members_cat_gen_touched
+    on public.imslp_category_members (category, generation, touched desc);
+
+alter table public.imslp_category_members enable row level security;
+-- Zero policies — service_role only, like imslp_file_licenses.
+grant all on public.imslp_category_members to service_role;
+
+create table public.imslp_category_sync (
+    category text primary key,
+    state text not null default 'never'
+        check (state in ('never', 'building', 'ok', 'failed')),
+    active_generation int not null default 0,
+    building_generation int not null default 0,
+    cmcontinue text,
+    pages_done int not null default 0,
+    last_error text,
+    completed_at timestamptz,
+    updated_at timestamptz not null default now()
+);
+
+alter table public.imslp_category_sync enable row level security;
+grant all on public.imslp_category_sync to service_role;
+
+-- Browse: each group is a UNION of its categories at that category's
+-- active_generation; groups are INTERSECTed. total is a window count so
+-- the caller can page and show a status line.
+create or replace function public.imslp_browse (
+    groups jsonb,
+    sort text,
+    lim int,
+    off int
+)
+returns table (
+    page_title text,
+    page_id int,
+    touched timestamptz,
+    total bigint
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    with bounds as (
+        select
+            case
+                when sort in ('title', 'recent', 'relevance') then sort
+                else 'relevance'
+            end as sort_key,
+            least(greatest(coalesce(lim, 50), 1), 300) as page_lim,
+            greatest(coalesce(off, 0), 0) as page_off
+    ),
+    group_cats as (
+        select
+            g.ordinality::int as group_idx,
+            cat.value as category
+        from jsonb_array_elements(coalesce(groups, '[]'::jsonb)) with ordinality as g (value, ordinality)
+        cross join lateral jsonb_array_elements_text(g.value) as cat (value)
+        where jsonb_typeof(g.value) = 'array'
+    ),
+    group_count as (
+        select count(distinct group_idx)::int as n from group_cats
+    ),
+    members as (
+        select
+            gc.group_idx,
+            m.page_title,
+            m.page_id,
+            m.touched
+        from group_cats gc
+        join public.imslp_category_sync s
+            on s.category = gc.category
+        join public.imslp_category_members m
+            on m.category = gc.category
+            and m.generation = s.active_generation
+        where s.active_generation > 0
+    ),
+    per_group as (
+        select distinct group_idx, page_title, page_id, touched
+        from members
+    ),
+    intersected as (
+        select
+            pg.page_title,
+            min(pg.page_id) as page_id,
+            max(pg.touched) as touched
+        from per_group pg
+        cross join group_count gc
+        where gc.n > 0
+        group by pg.page_title, gc.n
+        having count(distinct pg.group_idx) = gc.n
+    ),
+    ordered as (
+        select
+            i.page_title,
+            i.page_id,
+            i.touched,
+            count(*) over () as total,
+            b.sort_key
+        from intersected i
+        cross join bounds b
+    )
+    select
+        o.page_title,
+        o.page_id,
+        o.touched,
+        o.total
+    from ordered o
+    cross join bounds b
+    order by
+        case when b.sort_key = 'recent' then o.touched end desc nulls last,
+        case when b.sort_key = 'relevance' then char_length(o.page_title) end asc,
+        o.page_title asc
+    limit (select page_lim from bounds)
+    offset (select page_off from bounds);
+$$;
+
+-- Categories in the argument list that have no ok snapshot yet.
+create or replace function public.imslp_index_ready (categories text[])
+returns text[]
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select coalesce(array_agg(c order by c), '{}'::text[])
+    from unnest(coalesce(categories, '{}'::text[])) as c
+    where not exists (
+        select 1
+        from public.imslp_category_sync s
+        where s.category = c
+          and s.state = 'ok'
+          and s.active_generation > 0
+    );
+$$;
+
+-- Membership lookup for typed-search hard filters (cache first).
+create or replace function public.imslp_titles_in_categories (
+    titles text[],
+    categories text[]
+)
+returns table (
+    page_title text,
+    category text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select m.page_title, m.category
+    from public.imslp_category_members m
+    join public.imslp_category_sync s
+        on s.category = m.category
+        and m.generation = s.active_generation
+    where s.state = 'ok'
+      and s.active_generation > 0
+      and m.page_title = any (coalesce(titles, '{}'::text[]))
+      and m.category = any (coalesce(categories, '{}'::text[]));
+$$;
+
+revoke all on function public.imslp_browse (jsonb, text, int, int) from public, anon, authenticated;
+grant execute on function public.imslp_browse (jsonb, text, int, int) to service_role;
+
+revoke all on function public.imslp_index_ready (text[]) from public, anon, authenticated;
+grant execute on function public.imslp_index_ready (text[]) to service_role;
+
+revoke all on function public.imslp_titles_in_categories (text[], text[]) from public, anon, authenticated;
+grant execute on function public.imslp_titles_in_categories (text[], text[]) to service_role;
+
+-- Hosted refresh: same pg_cron + pg_net + vault pattern as omr_sweep.
+-- Extensions are already enabled by 20260806140000_omr_cron.sql.
+create or replace function public.imslp_sync_tick ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    sync_url text;
+    sync_secret text;
+begin
+    select decrypted_secret into sync_url
+    from vault.decrypted_secrets
+    where name = 'imslp_sync_url'
+    limit 1;
+
+    select decrypted_secret into sync_secret
+    from vault.decrypted_secrets
+    where name = 'imslp_sync_secret'
+    limit 1;
+
+    if sync_url is null or sync_secret is null or length(trim(sync_url)) = 0 then
+        raise notice 'imslp_sync_tick: vault secrets imslp_sync_url/imslp_sync_secret missing — skip';
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(sync_url, '/'),
+        headers := jsonb_build_object(
+            'Content-Type', 'application/json',
+            'x-imslp-sync-secret', sync_secret
+        ),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.imslp_sync_tick () from public, anon, authenticated;
+grant execute on function public.imslp_sync_tick () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid)
+    from cron.job
+    where jobname = 'imslp-sync';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('imslp-sync', '*/2 * * * *', $$select public.imslp_sync_tick ()$$);
+
+-- ===== supabase/migrations/20260902130000_thumbnails.sql =====
+-- Server-stored library thumbnails.
+--
+-- The library used to draw a cover only for scores whose PDF this device had
+-- already downloaded — pdf.js rendering the first page from the Dexie cache. A
+-- fresh browser therefore showed a placeholder for every score until each was
+-- opened. Edge Functions cannot render PDFs (no canvas), so the client that
+-- already renders a first page — on upload, on import, or on any device that
+-- holds the bytes — publishes that render once, and every other device
+-- downloads a ~40 KB image instead of a multi-megabyte PDF.
+--
+--  1. documents.thumb_rev — the content_rev the published cover was rendered
+--     from; null means none yet (a fresh upload is content_rev 0, so 0 has
+--     to be a real revision). Read by the library list, written by the owner
+--     after a successful publish (documents_update is owner-only).
+--  2. library_bootstrap() carries the new column.
+--  3. A private `thumbnails` bucket, object path `{documentId}/{rev}.jpg`,
+--     with the same membership policies as `scores`: members read, owner
+--     writes. The bucket row is attempted here and documented in
+--     SETUP_SUPABASE.md, because hosted projects can refuse storage.buckets
+--     writes from migrations (see the `scores` note in 20260801160754_rls).
+
+alter table public.documents
+    add column if not exists thumb_rev integer;
+
+-- ---------------------------------------------------------------------------
+-- library_bootstrap — same body as 20260830120000, plus d.thumb_rev
+-- ---------------------------------------------------------------------------
+create or replace function public.library_bootstrap ()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := (select auth.uid());
+    v_rows jsonb;
+    v_count int;
+    v_favorites jsonb;
+    v_tags jsonb;
+    v_document_tags jsonb;
+    v_entitlements jsonb;
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '42501';
+    end if;
+
+    with visible as (
+        select
+            d.id,
+            d.owner_id,
+            d.title,
+            d.storage_path,
+            d.page_count,
+            d.content_rev,
+            d.thumb_rev,
+            d.created_at,
+            d.updated_at,
+            d.archived_at
+        from public.documents d
+        where d.owner_id = v_uid
+           or exists (
+                select 1
+                from public.document_members m
+                where m.document_id = d.id
+                  and m.user_id = v_uid
+            )
+        order by d.updated_at desc
+        limit 101
+    ),
+    counted as (
+        select count(*)::int as total from visible
+    ),
+    page as (
+        select * from visible limit 100
+    )
+    select
+        coalesce(
+            (select jsonb_agg(to_jsonb(p) order by p.updated_at desc) from page p),
+            '[]'::jsonb
+        ),
+        (select total from counted)
+    into v_rows, v_count;
+
+    select coalesce(jsonb_agg(f.document_id), '[]'::jsonb)
+    into v_favorites
+    from public.document_favorites f
+    where f.user_id = v_uid;
+
+    select coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'id', t.id,
+                'user_id', t.user_id,
+                'name', t.name,
+                'created_at', t.created_at
+            )
+            order by t.name asc
+        ),
+        '[]'::jsonb
+    )
+    into v_tags
+    from public.library_tags t
+    where t.user_id = v_uid;
+
+    select coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'document_id', dt.document_id,
+                'tag_id', dt.tag_id
+            )
+        ),
+        '[]'::jsonb
+    )
+    into v_document_tags
+    from public.document_tags dt
+    join public.library_tags t on t.id = dt.tag_id
+    where t.user_id = v_uid;
+
+    v_entitlements := public.get_entitlements ();
+
+    return jsonb_build_object(
+        'documents', v_rows,
+        'has_more', v_count > 100,
+        'favorite_ids', v_favorites,
+        'tags', v_tags,
+        'document_tags', v_document_tags,
+        'entitlements', v_entitlements
+    );
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- thumbnails bucket + policies
+-- ---------------------------------------------------------------------------
+do $$
+begin
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('thumbnails', 'thumbnails', false, 2097152, array['image/jpeg'])
+    on conflict (id) do nothing;
+exception
+    when insufficient_privilege then
+        -- Hosted projects may refuse storage.buckets writes from a migration
+        -- (SQLSTATE 42501); the dashboard step in SETUP_SUPABASE.md creates
+        -- the bucket by hand. Any other error must fail the migration.
+        raise notice 'thumbnails bucket not created here (%): create it in the dashboard', sqlerrm;
+end;
+$$;
+
+drop policy if exists thumbnails_read on storage.objects;
+create policy thumbnails_read on storage.objects for select to authenticated
+using (
+    bucket_id = 'thumbnails'
+    and public.document_role (((storage.foldername (name))[1])::uuid) is not null
+);
+
+drop policy if exists thumbnails_insert on storage.objects;
+create policy thumbnails_insert on storage.objects for insert to authenticated
+with check (
+    bucket_id = 'thumbnails'
+    and public.document_role (((storage.foldername (name))[1])::uuid) = 'owner'
+);
+
+drop policy if exists thumbnails_update on storage.objects;
+create policy thumbnails_update on storage.objects for update to authenticated
+using (
+    bucket_id = 'thumbnails'
+    and public.document_role (((storage.foldername (name))[1])::uuid) = 'owner'
+);
+
+drop policy if exists thumbnails_delete on storage.objects;
+create policy thumbnails_delete on storage.objects for delete to authenticated
+using (
+    bucket_id = 'thumbnails'
+    and public.document_role (((storage.foldername (name))[1])::uuid) = 'owner'
+);
+
+-- ===== supabase/migrations/20260903090000_imslp_browse_title_filters.sql =====
+-- imslp_browse: apply key-chip title filters inside the intersection and let the
+-- curated Popular list lead the relevance order.
+--
+-- Key has no IMSLP category, so imslp-search used to filter the returned page by
+-- title after paging: Piano · C major reported total 62,947 with zero rows on the
+-- first page. title_filters (case-insensitive regexes, any-of) now narrow the
+-- intersection before total/limit/offset are computed. popular_titles puts the
+-- curated works first under `relevance`; shortest title was the only prior.
+
+drop function if exists public.imslp_browse (jsonb, text, int, int);
+
+create or replace function public.imslp_browse (
+    groups jsonb,
+    sort text,
+    lim int,
+    off int,
+    title_filters text[] default '{}'::text[],
+    popular_titles text[] default '{}'::text[]
+)
+returns table (
+    page_title text,
+    page_id int,
+    touched timestamptz,
+    total bigint
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    with bounds as (
+        select
+            case
+                when sort in ('title', 'recent', 'relevance') then sort
+                else 'relevance'
+            end as sort_key,
+            least(greatest(coalesce(lim, 50), 1), 300) as page_lim,
+            greatest(coalesce(off, 0), 0) as page_off,
+            coalesce(title_filters, '{}'::text[]) as filters,
+            coalesce(popular_titles, '{}'::text[]) as popular
+    ),
+    group_cats as (
+        select
+            g.ordinality::int as group_idx,
+            cat.value as category
+        from jsonb_array_elements(coalesce(groups, '[]'::jsonb)) with ordinality as g (value, ordinality)
+        cross join lateral jsonb_array_elements_text(g.value) as cat (value)
+        where jsonb_typeof(g.value) = 'array'
+    ),
+    group_count as (
+        select count(distinct group_idx)::int as n from group_cats
+    ),
+    members as (
+        select
+            gc.group_idx,
+            m.page_title,
+            m.page_id,
+            m.touched
+        from group_cats gc
+        join public.imslp_category_sync s
+            on s.category = gc.category
+        join public.imslp_category_members m
+            on m.category = gc.category
+            and m.generation = s.active_generation
+        where s.active_generation > 0
+    ),
+    per_group as (
+        select distinct group_idx, page_title, page_id, touched
+        from members
+    ),
+    intersected as (
+        select
+            pg.page_title,
+            min(pg.page_id) as page_id,
+            max(pg.touched) as touched
+        from per_group pg
+        cross join group_count gc
+        where gc.n > 0
+        group by pg.page_title, gc.n
+        having count(distinct pg.group_idx) = gc.n
+    ),
+    narrowed as (
+        select i.*
+        from intersected i
+        cross join bounds b
+        where cardinality(b.filters) = 0
+           or exists (
+               select 1
+               from unnest(b.filters) as f (pattern)
+               where i.page_title ~* f.pattern
+           )
+    ),
+    ordered as (
+        select
+            n.page_title,
+            n.page_id,
+            n.touched,
+            count(*) over () as total,
+            (n.page_title = any (b.popular)) as is_popular,
+            b.sort_key
+        from narrowed n
+        cross join bounds b
+    )
+    select
+        o.page_title,
+        o.page_id,
+        o.touched,
+        o.total
+    from ordered o
+    cross join bounds b
+    order by
+        case when b.sort_key = 'recent' then o.touched end desc nulls last,
+        case when b.sort_key = 'relevance' then o.is_popular end desc,
+        case when b.sort_key = 'relevance' then char_length(o.page_title) end asc,
+        o.page_title asc
+    limit (select page_lim from bounds)
+    offset (select page_off from bounds);
+$$;
+
+revoke all on function public.imslp_browse (jsonb, text, int, int, text[], text[]) from public, anon, authenticated;
+grant execute on function public.imslp_browse (jsonb, text, int, int, text[], text[]) to service_role;
+
+-- ===== supabase/migrations/20260903091000_imslp_index_ready_live_snapshot.sql =====
+-- A category is ready while it has a live snapshot (active_generation > 0),
+-- whatever its sync state. imslp_index_ready and imslp_titles_in_categories
+-- required state = 'ok', so during every refresh tick the category being
+-- rebuilt (For piano first, ~3 minutes) read as missing: chips fell back to
+-- "Index still building" and typed search to live MediaWiki category checks,
+-- even though generation-based rollover keeps the previous snapshot serving.
+-- imslp_browse already reads active_generation only.
+
+create or replace function public.imslp_index_ready (categories text[])
+returns text[]
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select coalesce(array_agg(c order by c), '{}'::text[])
+    from unnest(coalesce(categories, '{}'::text[])) as c
+    where not exists (
+        select 1
+        from public.imslp_category_sync s
+        where s.category = c
+          and s.active_generation > 0
+    );
+$$;
+
+create or replace function public.imslp_titles_in_categories (
+    titles text[],
+    categories text[]
+)
+returns table (
+    page_title text,
+    category text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select m.page_title, m.category
+    from public.imslp_category_members m
+    join public.imslp_category_sync s
+        on s.category = m.category
+        and m.generation = s.active_generation
+    where s.active_generation > 0
+      and m.page_title = any (coalesce(titles, '{}'::text[]))
+      and m.category = any (coalesce(categories, '{}'::text[]));
+$$;

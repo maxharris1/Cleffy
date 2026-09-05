@@ -16,6 +16,9 @@ export const MAX_PDF_BYTES = 50 * 1024 * 1024;
 /** Cookies that skip IMSLP's JS redirect interstitial + disclaimer confirm. */
 const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
 
+/** Bound every MW call — a slow IMSLP must not hang the invocation to the worker wall-clock. */
+const MW_TIMEOUT_MS = 10_000;
+
 export const mwFetch = async (params: Record<string, string>): Promise<unknown> => {
     const url = new URL(IMSLP_API);
     for (const [k, v] of Object.entries(params)) {
@@ -23,20 +26,56 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
     }
     url.searchParams.set('format', 'json');
 
-    const res = await fetch(url.toString(), {
-        headers: {
-            'User-Agent': USER_AGENT,
-            Accept: 'application/json',
-        },
-    });
+    let res: Response;
+    try {
+        res = await fetch(url.toString(), {
+            headers: {
+                'User-Agent': USER_AGENT,
+                Accept: 'application/json',
+            },
+            signal: AbortSignal.timeout(MW_TIMEOUT_MS),
+        });
+    } catch (err) {
+        if (err instanceof DOMException && err.name === 'TimeoutError') {
+            throw new Error('IMSLP API timeout', { cause: err });
+        }
+        throw err;
+    }
     if (!res.ok) {
         throw new Error(`IMSLP API HTTP ${res.status}`);
     }
-    return res.json();
+    const payload: unknown = await res.json();
+    if (payload && typeof payload === 'object' && 'error' in payload) {
+        const err = (payload as { error: unknown }).error;
+        if (err) {
+            const info =
+                typeof err === 'object' && err && 'info' in err && typeof (err as { info: unknown }).info === 'string'
+                    ? (err as { info: string }).info
+                    : 'IMSLP API error';
+            throw new Error(info);
+        }
+    }
+    return payload;
 };
 
 export const workPageUrl = (title: string): string =>
     `${IMSLP_ORIGIN}/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`;
+
+/**
+ * Rendered work page HTML via action=parse — the only place IMSLP exposes
+ * per-file license tags with their regional Non-PD flags. Null on any failure
+ * so callers degrade to license-unknown instead of failing the lookup.
+ */
+export const fetchWorkPageHtml = async (title: string): Promise<string | null> => {
+    try {
+        const data = (await mwFetch({ action: 'parse', page: title, prop: 'text' })) as {
+            parse?: { text?: { '*'?: string } };
+        };
+        return data.parse?.text?.['*'] ?? null;
+    } catch {
+        return null;
+    }
+};
 
 export const imagefromIndexUrl = (filename: string): string =>
     `${IMSLP_ORIGIN}/wiki/Special:ImagefromIndex/${encodeURIComponent(filename)}`;

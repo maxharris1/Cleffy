@@ -1,17 +1,38 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
+    COMPOSER_FACETS,
+    FORM_FACETS,
+    categoriesInGroups,
+    categoryGroupsFor,
     facetBoost,
     facetTokens,
+    hardFilterGroups,
     hasActiveFilters,
+    keyTitlePatterns,
     parseFilters,
     parseSort,
-    primaryBrowseCategory,
     titleMatchesFilters,
+    type RelaxedConstraint,
     type SearchFilters,
-    type SearchSort,
-} from '../_shared/facets.ts';
-import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, workPageUrl } from '../_shared/imslp.ts';
-import { aliasTitlesForQuery, buildSearchVariants, scoreTitleMatch, tokenizeQuery } from '../_shared/search.ts';
+} from '../_shared/searchFacetData.ts';
+import { browseFromIndex as queryBrowseIndex, type BrowseRpcClient } from '../_shared/imslpBrowse.ts';
+import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, serviceClient, workPageUrl } from '../_shared/imslp.ts';
+import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
+import {
+    aliasTitlesForQuery,
+    buildSearchVariants,
+    correctTokens,
+    extractPeriod,
+    foldAccents,
+    markTitlesUnverified,
+    mergeAndRank,
+    titlesForCachedMembership,
+    tokenizeQuery,
+    type PeriodEraId,
+    type RankBatch,
+    type RankedHit,
+    type SearchVariant,
+} from '../_shared/search.ts';
 
 interface SearchHit {
     title: string;
@@ -25,12 +46,51 @@ interface MwSearchHit {
     title: string;
     pageid: number;
     snippet?: string;
+    timestamp?: string;
 }
 
-interface MwCategoryMember {
-    title: string;
-    pageid: number;
+interface TitleResolution {
+    resolvedTitles: Map<string, string>;
+    resolvedPageIds: Map<string, number>;
+    /** folded resolved title → hard-filter categories the page belongs to */
+    categoryHits: Map<string, Set<string>>;
+    /** folded titles of chunks whose category lookup failed — unknown, not non-members */
+    unverified: Set<string>;
 }
+
+/** Folded titles of the curated list — the ranking's popularity prior. */
+const POPULAR_TITLES = new Set(POPULAR_WORKS.map((w) => foldAccents(w.title)));
+
+/** Vocabulary the typo corrector snaps near-miss tokens to. */
+const CORRECTION_VOCAB: Set<string> = (() => {
+    const vocab = new Set<string>();
+    const add = (word: string) => {
+        const folded = foldAccents(word);
+        if (folded.length >= 4) {
+            vocab.add(folded);
+        }
+    };
+    for (const work of POPULAR_WORKS) {
+        add(work.composer);
+    }
+    for (const facet of COMPOSER_FACETS) {
+        facet.tokens.forEach(add);
+    }
+    for (const facet of FORM_FACETS) {
+        facet.tokens.forEach(add);
+    }
+    for (const alias of WORK_ALIASES) {
+        for (const key of alias.keys) {
+            key.split(' ').forEach(add);
+        }
+    }
+    for (const word of ['major', 'minor', 'piano', 'violin', 'cello', 'orchestra', 'quartet', 'quintet', 'variations']) {
+        add(word);
+    }
+    return vocab;
+})();
+
+const uniq = <T,>(values: T[]): T[] => [...new Set(values)];
 
 /** MediaWiki caps srlimit at 50 — page with sroffset to fill larger limits. */
 const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
@@ -42,6 +102,10 @@ const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
             action: 'query',
             list: 'search',
             srsearch: q,
+            // Body-text search: MW 1.18 defaults to title-only, which misses
+            // nicknames and multi-word queries; text mode also returns MW's own
+            // relevance order, which the ranker blends in via rankBonus.
+            srwhat: 'text',
             srnamespace: '0',
             srlimit: String(batch),
             sroffset: String(offset),
@@ -63,48 +127,94 @@ const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
     return hits;
 };
 
-/** MediaWiki caps cmlimit at 50 — page with cmcontinue. */
-const mwCategoryMembers = async (
-    categoryTitle: string,
-    limit: number,
-    sort: SearchSort,
-): Promise<MwCategoryMember[]> => {
-    const members: MwCategoryMember[] = [];
-    let cmcontinue: string | undefined;
-    while (members.length < limit) {
-        const params: Record<string, string> = {
-            action: 'query',
-            list: 'categorymembers',
-            cmtitle: `Category:${categoryTitle}`,
-            cmnamespace: '0',
-            cmtype: 'page',
-            cmlimit: String(Math.min(50, limit - members.length)),
-        };
-        if (sort === 'recent') {
-            params['cmsort'] = 'timestamp';
-            params['cmdir'] = 'desc';
-        } else {
-            params['cmsort'] = 'sortkey';
-            params['cmdir'] = 'asc';
-        }
-        if (cmcontinue) {
-            params['cmcontinue'] = cmcontinue;
-        }
-        const data = (await mwFetch(params)) as {
-            query?: { categorymembers?: MwCategoryMember[] };
-            continue?: { cmcontinue?: string };
-        };
-        const page = data.query?.categorymembers ?? [];
-        if (page.length === 0) {
-            break;
-        }
-        members.push(...page);
-        cmcontinue = data.continue?.cmcontinue;
-        if (!cmcontinue) {
-            break;
-        }
+/**
+ * Resolve redirects and (when live categories remain) check membership via
+ * prop=categories. Cache-backed categories are filled separately.
+ */
+const resolveTitles = async (titles: string[], hardCategories: string[]): Promise<TitleResolution> => {
+    const resolution: TitleResolution = {
+        resolvedTitles: new Map(),
+        resolvedPageIds: new Map(),
+        categoryHits: new Map(),
+        unverified: new Set(),
+    };
+    if (titles.length === 0) {
+        return resolution;
     }
-    return members;
+    const chunks: string[][] = [];
+    for (let i = 0; i < titles.length; i += 40) {
+        chunks.push(titles.slice(i, i + 40));
+    }
+    await Promise.all(
+        chunks.map(async (chunk) => {
+            try {
+                const params: Record<string, string> = {
+                    action: 'query',
+                    titles: chunk.join('|'),
+                    redirects: '1',
+                };
+                if (hardCategories.length > 0) {
+                    params['prop'] = 'categories';
+                    params['clcategories'] = hardCategories.map((c) => `Category:${c}`).join('|');
+                    params['cllimit'] = 'max';
+                }
+                const data = (await mwFetch(params)) as {
+                    query?: {
+                        redirects?: Array<{ from: string; to: string }>;
+                        pages?: Record<
+                            string,
+                            {
+                                title?: string;
+                                pageid?: number;
+                                missing?: boolean;
+                                categories?: Array<{ title?: string }>;
+                            }
+                        >;
+                    };
+                };
+                for (const r of data.query?.redirects ?? []) {
+                    resolution.resolvedTitles.set(r.from, r.to);
+                }
+                for (const page of Object.values(data.query?.pages ?? {})) {
+                    if (page.missing || !page.title) {
+                        continue;
+                    }
+                    if (typeof page.pageid === 'number') {
+                        resolution.resolvedPageIds.set(page.title, page.pageid);
+                    }
+                    if (page.categories?.length) {
+                        const names = new Set<string>();
+                        for (const cat of page.categories) {
+                            const name = cat.title?.replace(/^Category:/i, '').trim();
+                            if (name) {
+                                names.add(name);
+                            }
+                        }
+                        if (names.size > 0) {
+                            resolution.categoryHits.set(foldAccents(page.title), names);
+                        }
+                    }
+                }
+            } catch {
+                if (hardCategories.length > 0) {
+                    for (const title of chunk) {
+                        resolution.unverified.add(foldAccents(title));
+                    }
+                }
+            }
+        }),
+    );
+    return resolution;
+};
+
+const mergeCategoryHits = (into: Map<string, Set<string>>, title: string, category: string) => {
+    const folded = foldAccents(title);
+    const existing = into.get(folded);
+    if (existing) {
+        existing.add(category);
+    } else {
+        into.set(folded, new Set([category]));
+    }
 };
 
 const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
@@ -115,32 +225,92 @@ const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     imslpUrl: workPageUrl(title),
 });
 
-const browseByFilters = async (filters: SearchFilters, limit: number, sort: SearchSort): Promise<SearchHit[]> => {
-    const category = primaryBrowseCategory(filters);
-    if (category) {
-        const members = await mwCategoryMembers(category, Math.max(limit * 2, 100), sort);
-        const filtered = members
-            .filter((m) => titleMatchesFilters(m.title, filters))
-            .slice(0, limit)
-            .map((m) => toHit(m.title, m.pageid));
-        if (sort === 'relevance') {
-            // Mild preference for shorter / more specific titles when browsing.
-            return [...filtered].sort((a, b) => a.title.length - b.title.length || a.title.localeCompare(b.title));
-        }
-        return filtered;
+const periodSource = (
+    queryEras: PeriodEraId[],
+    chipEras: PeriodEraId[],
+): 'query' | 'chip' | 'both' | null => {
+    if (queryEras.length === 0 && chipEras.length === 0) {
+        return null;
     }
+    if (queryEras.length > 0 && chipEras.length > 0) {
+        return 'both';
+    }
+    return queryEras.length > 0 ? 'query' : 'chip';
+};
 
-    // Era / key-only: seed search with facet tokens.
-    const tokens = facetTokens(filters);
-    if (tokens.length === 0) {
+const browseFromIndex = async (
+    filters: SearchFilters,
+    limit: number,
+    offset: number,
+    sort: ReturnType<typeof parseSort>,
+): Promise<{
+    results: SearchHit[];
+    total: number;
+    indexReady: boolean;
+    hasMore: boolean;
+    notReady: string[];
+}> => {
+    const groups = categoryGroupsFor(filters);
+    const needed = categoriesInGroups(groups);
+    const browsed = await queryBrowseIndex(serviceClient() as BrowseRpcClient | null, {
+        groups,
+        needed,
+        sort,
+        limit,
+        offset,
+        titleFilters: keyTitlePatterns(filters),
+        popularTitles: POPULAR_WORKS.map((w) => w.title),
+    });
+    return {
+        results: browsed.rows.map((row) => toHit(row.page_title, row.page_id)),
+        total: browsed.total,
+        indexReady: browsed.indexReady,
+        hasMore: browsed.hasMore,
+        notReady: browsed.notReady,
+    };
+};
+
+const fillCachedMembership = async (
+    titles: string[],
+    cachedCategories: string[],
+    resolution: TitleResolution,
+): Promise<void> => {
+    if (titles.length === 0 || cachedCategories.length === 0) {
+        return;
+    }
+    const admin = serviceClient();
+    if (!admin) {
+        markTitlesUnverified(titles, resolution.unverified);
+        return;
+    }
+    const { data, error } = await admin.rpc('imslp_titles_in_categories', {
+        titles,
+        categories: cachedCategories,
+    });
+    if (error || !Array.isArray(data)) {
+        markTitlesUnverified(titles, resolution.unverified);
+        return;
+    }
+    for (const row of data as Array<{ page_title?: string; category?: string }>) {
+        if (row.page_title && row.category) {
+            mergeCategoryHits(resolution.categoryHits, row.page_title, row.category);
+        }
+    }
+};
+
+const categoriesMissingSnapshot = async (categories: string[]): Promise<string[]> => {
+    if (categories.length === 0) {
         return [];
     }
-    const seedQuery = tokens.slice(0, 2).join(' ');
-    const hits = await mwSearch(seedQuery, limit);
-    return hits
-        .filter((h) => titleMatchesFilters(h.title, filters))
-        .slice(0, limit)
-        .map((h) => toHit(h.title, h.pageid, (h.snippet ?? '').replace(/<[^>]+>/g, '')));
+    const admin = serviceClient();
+    if (!admin) {
+        return [...categories];
+    }
+    const { data, error } = await admin.rpc('imslp_index_ready', { categories });
+    if (error || !Array.isArray(data)) {
+        return [...categories];
+    }
+    return data as string[];
 };
 
 Deno.serve(async (req) => {
@@ -156,7 +326,13 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { q?: string; limit?: number; filters?: unknown; sort?: unknown };
+    let body: {
+        q?: string;
+        limit?: number;
+        offset?: number;
+        filters?: unknown;
+        sort?: unknown;
+    };
     try {
         body = await req.json();
     } catch {
@@ -172,158 +348,200 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Query must be at least 2 characters' }, 400);
     }
 
-    // Per-request MW pages are 50; we paginate up to this cap.
-    const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 100);
+    const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 300);
+    const offset = Math.min(Math.max(Number(body.offset) || 0, 0), 10_000);
 
     try {
-        // Empty / short query with filters → category browse or seeded search.
         if (q.length < 2 && activeFilters) {
-            const results = await browseByFilters(filters, limit, sort);
-            return jsonResponse({ results, total: results.length, mode: 'browse' });
+            const browsed = await browseFromIndex(filters, limit, offset, sort);
+            return jsonResponse({
+                results: browsed.results,
+                total: browsed.total,
+                mode: 'browse',
+                indexReady: browsed.indexReady,
+                hasMore: browsed.hasMore,
+                notReady: browsed.notReady,
+                filterRelaxed: false,
+                relaxed: [],
+                period: null,
+            });
         }
 
-        const tokens = tokenizeQuery(q);
-        const variants = buildSearchVariants(q);
-        for (const tok of facetTokens(filters)) {
-            if (tok.length >= 2 && variants.length < 8) {
-                variants.push(q.length >= 2 ? `${tok} ${q}` : tok);
-                variants.push(tok);
-            }
-        }
-        // Dedupe variants
-        const seenVariant = new Set<string>();
-        const uniqueVariants: string[] = [];
-        for (const v of variants) {
-            const key = v.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-            if (!key || seenVariant.has(key)) {
-                continue;
-            }
-            seenVariant.add(key);
-            uniqueVariants.push(v);
-            if (uniqueVariants.length >= 8) {
-                break;
-            }
-        }
+        const extracted = extractPeriod(q);
+        const queryEras = filters.ignoreQueryPeriod ? [] : extracted.eraIds;
+        const chipEras = (filters.eras ?? []) as PeriodEraId[];
+        const eraIds = uniq<PeriodEraId>([...queryEras, ...chipEras]);
+        const searchQ = extracted.rest.length > 0 ? extracted.rest : q;
+        const typedFilters: SearchFilters = { ...filters, eras: eraIds };
+
+        // Hard groups: instrument, era, form, composer. Relaxation drops era
+        // then instrument only; forms and composers stay required.
+        const instrumentGroups = hardFilterGroups({ instruments: typedFilters.instruments });
+        const eraGroups = hardFilterGroups({ eras: typedFilters.eras });
+        const allGroups = categoryGroupsFor(typedFilters);
+        const hardCategories = allGroups.flat();
+        const missingSnapshots = await categoriesMissingSnapshot(hardCategories);
+        const liveCategories = hardCategories.filter((c) => missingSnapshots.includes(c));
+        const cachedCategories = hardCategories.filter((c) => !missingSnapshots.includes(c));
+
+        let tokens = tokenizeQuery(searchQ);
+        let aliasTitles = aliasTitlesForQuery(q, WORK_ALIASES);
+        const variants = buildSearchVariants(searchQ, { aliasTitles, facetTokens: facetTokens(typedFilters) });
 
         const perQuery = Math.min(50, Math.max(limit, 30));
-        const batches = await Promise.all(
-            uniqueVariants.map(async (variant) => {
+        let variantFailures = 0;
+        let lastVariantError: unknown;
+        const batches: RankBatch[] = await Promise.all(
+            variants.map(async (variant: SearchVariant) => {
                 try {
-                    return await mwSearch(variant, perQuery);
-                } catch {
-                    return [] as MwSearchHit[];
+                    return { variant, hits: await mwSearch(variant.q, perQuery) };
+                } catch (err) {
+                    variantFailures += 1;
+                    lastVariantError = err;
+                    return { variant, hits: [] as MwSearchHit[] };
                 }
             }),
         );
-
-        const rawByTitle = new Map<string, MwSearchHit>();
-        for (const batch of batches) {
-            for (const hit of batch) {
-                if (!rawByTitle.has(hit.title)) {
-                    rawByTitle.set(hit.title, hit);
-                }
-            }
-        }
-
-        for (const title of aliasTitlesForQuery(q)) {
-            if (!rawByTitle.has(title)) {
-                rawByTitle.set(title, { title, pageid: 0, snippet: '' });
-            }
-        }
-
-        const rawHits = [...rawByTitle.values()];
-
-        const resolvedTitles = new Map<string, string>();
-        const resolvedPageIds = new Map<string, number>();
-        if (rawHits.length > 0) {
-            try {
-                const titles = rawHits.map((h) => h.title);
-                for (let i = 0; i < titles.length; i += 40) {
-                    const chunk = titles.slice(i, i + 40);
-                    const redirectData = (await mwFetch({
-                        action: 'query',
-                        titles: chunk.join('|'),
-                        redirects: '1',
-                    })) as {
-                        query?: {
-                            redirects?: Array<{ from: string; to: string }>;
-                            pages?: Record<string, { title?: string; pageid?: number; missing?: boolean }>;
-                        };
-                    };
-                    for (const r of redirectData.query?.redirects ?? []) {
-                        resolvedTitles.set(r.from, r.to);
-                    }
-                    for (const page of Object.values(redirectData.query?.pages ?? {})) {
-                        if (page.missing || !page.title) {
-                            continue;
-                        }
-                        if (typeof page.pageid === 'number') {
-                            resolvedPageIds.set(page.title, page.pageid);
-                        }
-                    }
-                }
-            } catch {
-                // keep unresolved titles
-            }
-        }
-
-        const aliasBoost = new Set(aliasTitlesForQuery(q));
-        const scoreTokens = [...tokens, ...facetTokens(filters)];
-        const merged = new Map<string, SearchHit & { score: number }>();
-
-        for (const hit of rawHits) {
-            const title = resolvedTitles.get(hit.title) ?? hit.title;
-            if (activeFilters && !titleMatchesFilters(title, filters)) {
-                // Soft filter: still allow but don't skip entirely when query is strong —
-                // only hard-filter when composer category is set.
-                if (filters.composerCategory) {
-                    const surname = filters.composerCategory.split(',')[0]?.trim().toLowerCase() ?? '';
-                    const folded = title.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-                    if (surname && !folded.includes(surname)) {
-                        continue;
-                    }
-                }
-            }
-            const pageid = resolvedPageIds.get(title) ?? hit.pageid;
-            let score = scoreTitleMatch(title, scoreTokens);
-            score += facetBoost(title, filters);
-            if (aliasBoost.has(title)) {
-                score += 50;
-            }
-            if (foldEquals(hit.title, q) || foldEquals(title, q)) {
-                score += 5;
-            }
-
-            const existing = merged.get(title);
-            if (!existing || score > existing.score) {
-                merged.set(title, {
-                    title,
-                    pageid,
-                    snippet: (hit.snippet ?? '').replace(/<[^>]+>/g, ''),
-                    composer: parseComposerFromTitle(title),
-                    imslpUrl: workPageUrl(title),
-                    score,
+        const pushAliasBatch = (titles: string[]) => {
+            if (titles.length > 0) {
+                batches.push({
+                    variant: { q: '__alias__', weight: 0 },
+                    hits: titles.map((title) => ({ title, pageid: 0 })),
                 });
             }
+        };
+        pushAliasBatch(aliasTitles);
+        if (variants.length > 0 && variantFailures === variants.length && aliasTitles.length === 0) {
+            throw lastVariantError instanceof Error ? lastVariantError : new Error('IMSLP search failed');
         }
 
-        const ranked = [...merged.values()];
+        const collectTitles = (): string[] => {
+            const seen = new Set<string>();
+            for (const batch of batches) {
+                for (const hit of batch.hits) {
+                    seen.add(hit.title);
+                }
+            }
+            return [...seen];
+        };
+
+        const resolution = await resolveTitles(collectTitles(), liveCategories);
+        const fillMembership = async (titles: string[]) => {
+            await fillCachedMembership(
+                titlesForCachedMembership(titles, resolution.resolvedTitles),
+                cachedCategories,
+                resolution,
+            );
+        };
+        await fillMembership(collectTitles());
+
+        const rank = (requiredGroups: string[][]): RankedHit[] => {
+            const ranked = mergeAndRank(batches, {
+                query: searchQ,
+                tokens,
+                aliasTitles,
+                popularTitles: POPULAR_TITLES,
+                resolvedTitles: resolution.resolvedTitles,
+                resolvedPageIds: resolution.resolvedPageIds,
+                categoryHits: resolution.categoryHits,
+                unverifiedTitles: resolution.unverified,
+                requiredGroups,
+                extraScore: (title) => facetBoost(title, typedFilters),
+            });
+            if ((typedFilters.keys ?? []).length === 0) {
+                return ranked;
+            }
+            return ranked.filter((h) => titleMatchesFilters(h.title, typedFilters));
+        };
+
+        let ranked = rank(allGroups);
+
+        if (ranked.length < 5) {
+            const corrected = correctTokens(tokens, CORRECTION_VOCAB);
+            if (corrected) {
+                const correctedQ = corrected.join(' ');
+                try {
+                    batches.push({ variant: { q: correctedQ, weight: 0.9 }, hits: await mwSearch(correctedQ, perQuery) });
+                } catch {
+                    // corrected query is best-effort
+                }
+                const correctedAliases = aliasTitlesForQuery(correctedQ, WORK_ALIASES).filter(
+                    (t) => !aliasTitles.includes(t),
+                );
+                pushAliasBatch(correctedAliases);
+                aliasTitles = [...aliasTitles, ...correctedAliases];
+                tokens = [...new Set([...tokens, ...corrected])];
+
+                const unresolved = collectTitles().filter(
+                    (t) => !resolution.resolvedPageIds.has(t) && !resolution.resolvedTitles.has(t),
+                );
+                const extra = await resolveTitles(unresolved, liveCategories);
+                for (const t of unresolved) {
+                    resolution.unverified.delete(foldAccents(t));
+                }
+                for (const [from, to] of extra.resolvedTitles) {
+                    resolution.resolvedTitles.set(from, to);
+                }
+                for (const [title, id] of extra.resolvedPageIds) {
+                    resolution.resolvedPageIds.set(title, id);
+                }
+                for (const [title, cats] of extra.categoryHits) {
+                    resolution.categoryHits.set(title, cats);
+                }
+                for (const title of extra.unverified) {
+                    resolution.unverified.add(title);
+                }
+                await fillMembership(unresolved);
+                ranked = rank(allGroups);
+            }
+        }
+
+        // Too few survivors: let go of the era first (the softer axis), then the
+        // instrument, and only when doing so actually finds more. Forms and
+        // composers stay hard.
+        const relaxed: RelaxedConstraint[] = [];
+        if (eraGroups.length > 0 && ranked.length < 5) {
+            const withoutEra = rank(categoryGroupsFor({ ...typedFilters, eras: undefined }));
+            if (withoutEra.length > ranked.length) {
+                ranked = withoutEra;
+                relaxed.push('era');
+            }
+        }
+        if (instrumentGroups.length > 0 && ranked.length < 5) {
+            const withoutInstrument = rank(
+                categoryGroupsFor({ ...typedFilters, eras: undefined, instruments: undefined }),
+            );
+            if (withoutInstrument.length > ranked.length) {
+                ranked = withoutInstrument;
+                relaxed.push('instrument');
+                if (eraGroups.length > 0 && !relaxed.includes('era')) {
+                    relaxed.push('era');
+                }
+            }
+        }
+
         if (sort === 'title') {
             ranked.sort((a, b) => a.title.localeCompare(b.title));
         } else if (sort === 'recent') {
-            // Search API doesn't give reliable add dates; fall back to relevance.
-            ranked.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
-        } else {
-            ranked.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+            ranked.sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? '') || b.score - a.score);
         }
 
-        const results = ranked.slice(0, limit).map(({ score: _score, ...rest }) => rest);
+        const page = ranked.slice(offset, offset + limit);
+        const filterRelaxed = relaxed.length > 0;
+        const results = page.map((h) => toHit(h.title, h.pageid, h.snippet));
+        const source = periodSource(queryEras, chipEras);
 
-        return jsonResponse({ results, total: results.length, mode: 'search' });
+        return jsonResponse({
+            results,
+            total: ranked.length,
+            mode: 'search',
+            filterRelaxed,
+            relaxed,
+            indexReady: true,
+            hasMore: ranked.length > offset + page.length,
+            period: source ? { eraIds, source } : null,
+        });
     } catch (err) {
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP search failed' }, 502);
     }
 });
-
-const foldEquals = (a: string, b: string): boolean =>
-    a.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase() === b.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();

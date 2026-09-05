@@ -269,6 +269,43 @@ body {
 }
 
 /*
+ * fieldClassName sets outline-none (its resting look carries the border), which
+ * also suppressed the global :focus-visible ring — leaving only a 10%-opacity
+ * glow. Class+pseudo beats the utility, so keyboard focus gets a real ring.
+ */
+.landing-input:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+}
+
+/*
+ * Same label-wraps-sr-only-input pattern for any other file picker (e.g. the
+ * IMSLP hand-off): the input stays tabbable, the label wears the ring.
+ */
+.label-focus-ring {
+    position: relative;
+}
+
+.label-focus-ring:has(:focus-visible) {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+}
+
+/* Indeterminate progress: a sweeping segment for work with no byte count. */
+.progress-indeterminate {
+    animation: progress-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+    from {
+        transform: translateX(-100%);
+    }
+    to {
+        transform: translateX(300%);
+    }
+}
+
+/*
  * How much of the viewport the sticky top bar owns: one 4rem row, plus a
  * second row for the nav strip below sm. Anything inside the shell that sticks
  * to the top of the page has to start below it, or it parks itself out of
@@ -331,14 +368,16 @@ body {
     }
 }
 
-/* IMSLP find panel: sticky search + view transitions. */
+/* IMSLP find panel: sticky search + view transitions. Paper-tinted like the
+   shell header, so the page doesn't stack three different near-whites. */
 .imslp-search-sticky {
     position: sticky;
     top: 0;
     z-index: 1;
     padding-bottom: 0.25rem;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 70%, rgba(255, 255, 255, 0.55) 100%);
+    background: color-mix(in srgb, var(--color-paper) 88%, transparent);
     backdrop-filter: blur(6px);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent);
 }
 
 .imslp-panel-view {
@@ -363,39 +402,6 @@ body {
     border-radius: 0.15em;
 }
 
-.imslp-facet-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.35rem 0.5rem;
-}
-
-.imslp-facet-tag {
-    border: none;
-    background: transparent;
-    padding: 0;
-    font-size: 0.75rem;
-    line-height: 1.25;
-    color: var(--color-stone-500);
-    cursor: pointer;
-    text-underline-offset: 0.2em;
-}
-
-.imslp-facet-tag:hover:not(:disabled) {
-    color: var(--color-stone-700);
-}
-
-.imslp-facet-tag--active {
-    color: var(--color-ink);
-    font-weight: 600;
-    text-decoration: underline;
-}
-
-.imslp-facet-tag:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
 @media (prefers-reduced-motion: reduce) {
     .landing-hero,
     .landing-rule,
@@ -406,6 +412,11 @@ body {
     .library-empty,
     .imslp-panel-view {
         animation: none;
+    }
+
+    /* Keep the activity signal, drop the sweep. */
+    .progress-indeterminate {
+        animation-duration: 3.5s;
     }
 
     /* The hero demo settles to its finished, fully-annotated state. */

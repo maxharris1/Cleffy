@@ -1,5 +1,5 @@
 import { parseLimitResponse } from '@/features/billing/limitErrors';
-import type { SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
+import type { EraId, RelaxedConstraint, SearchFilters, SearchSort } from '@/features/imslp/searchFacets';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 
 export interface ImslpSearchHit {
@@ -12,15 +12,46 @@ export interface ImslpSearchHit {
 
 export interface ImslpSearchOptions {
     limit?: number;
+    offset?: number;
     filters?: SearchFilters;
     sort?: SearchSort;
+    /** Cancels the request (the panel aborts superseded searches). */
+    signal?: AbortSignal;
 }
+
+export interface ImslpPeriod {
+    eraIds: EraId[];
+    source: 'query' | 'chip' | 'both';
+}
+
+export interface ImslpSearchResponse {
+    results: ImslpSearchHit[];
+    /** True when a hard filter matched too little and was relaxed to a boost. */
+    filterRelaxed: boolean;
+    relaxed: RelaxedConstraint[];
+    total: number;
+    hasMore: boolean;
+    indexReady: boolean;
+    period: ImslpPeriod | null;
+    mode?: 'browse' | 'search';
+    notReady?: string[];
+}
+
+export type ImslpEditionLicense = 'pd' | 'cc' | 'non-pd' | 'unknown';
 
 export interface ImslpEdition {
     filename: string;
     size: number | null;
     mime: string | null;
     openUrl: string;
+    /** License fields are optional so older function responses still parse. */
+    license?: ImslpEditionLicense;
+    /** Verbatim IMSLP tag, e.g. "Creative Commons Attribution 4.0". */
+    licenseLabel?: string | null;
+    /** Verbatim regional flag, e.g. "Non-PD US". */
+    restriction?: string | null;
+    /** Server verdict: Cleffy can fetch this file directly. */
+    downloadable?: boolean;
 }
 
 export interface ImslpWorkDetail {
@@ -30,7 +61,7 @@ export interface ImslpWorkDetail {
     editions: ImslpEdition[];
 }
 
-const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream'] as const;
+const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream', 'non_pd', 'license_unknown'] as const;
 type FallbackCode = (typeof FALLBACK_CODES)[number];
 
 export type ImslpDownloadFallback = {
@@ -89,21 +120,106 @@ const parseDownloadFallback = (body: unknown): ImslpDownloadFallback | null => {
     return { ok: false, code: code as FallbackCode, message, openUrl, filename };
 };
 
-export const searchImslp = async (q: string, options: ImslpSearchOptions | number = 100): Promise<ImslpSearchHit[]> => {
+/** Completed searches, so repeated queries don't re-fan-out against IMSLP. */
+const SEARCH_CACHE = new Map<string, { at: number; response: ImslpSearchResponse }>();
+const SEARCH_CACHE_MAX = 30;
+const SEARCH_CACHE_TTL_MS = 5 * 60_000;
+const SEARCH_TIMEOUT_MS = 15_000;
+
+const searchCacheKey = (
+    q: string,
+    limit: number,
+    offset: number,
+    filters: SearchFilters | undefined,
+    sort: SearchSort | undefined,
+) =>
+    JSON.stringify([
+        q.trim().toLowerCase(),
+        limit,
+        offset,
+        filters?.composerCategories ?? [],
+        filters?.instruments ?? [],
+        filters?.forms ?? [],
+        filters?.keys ?? [],
+        filters?.eras ?? [],
+        filters?.ignoreQueryPeriod === true,
+        sort ?? 'relevance',
+    ]);
+
+export const searchImslp = async (
+    q: string,
+    options: ImslpSearchOptions | number = 100,
+): Promise<ImslpSearchResponse> => {
     const opts: ImslpSearchOptions = typeof options === 'number' ? { limit: options } : options;
     const limit = opts.limit ?? 100;
-    const { data, error } = await getSupabase().functions.invoke<{ results: ImslpSearchHit[] }>('imslp-search', {
-        body: {
-            q,
-            limit,
-            filters: opts.filters,
-            sort: opts.sort,
-        },
-    });
-    if (error) {
-        throw new Error(await functionErrorMessage(error));
+    const offset = opts.offset ?? 0;
+
+    const key = searchCacheKey(q, limit, offset, opts.filters, opts.sort);
+    const cached = SEARCH_CACHE.get(key);
+    if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) {
+        // Re-insert to keep recently used entries alive under the size cap.
+        SEARCH_CACHE.delete(key);
+        SEARCH_CACHE.set(key, cached);
+        return cached.response;
     }
-    return data?.results ?? [];
+
+    const supabase = getSupabase();
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    if (!accessToken) {
+        throw new Error('Not signed in');
+    }
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
+
+    const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+    const response = await fetch(`${projectUrl}/functions/v1/imslp-search`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            apikey: anonKey,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ q, limit, offset, filters: opts.filters, sort: opts.sort }),
+        signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
+    });
+    if (!response.ok) {
+        throw new Error(await messageFromJsonBody(response));
+    }
+    const body = (await response.json()) as {
+        results?: ImslpSearchHit[];
+        filterRelaxed?: boolean;
+        relaxed?: RelaxedConstraint[];
+        total?: number;
+        hasMore?: boolean;
+        indexReady?: boolean;
+        period?: ImslpPeriod | null;
+        mode?: 'browse' | 'search';
+        notReady?: string[];
+    };
+    const relaxed = Array.isArray(body.relaxed)
+        ? body.relaxed.filter((v): v is RelaxedConstraint => v === 'instrument' || v === 'era')
+        : [];
+    const result: ImslpSearchResponse = {
+        results: body.results ?? [],
+        filterRelaxed: body.filterRelaxed === true || relaxed.length > 0,
+        relaxed,
+        total: typeof body.total === 'number' ? body.total : (body.results?.length ?? 0),
+        hasMore: body.hasMore === true,
+        indexReady: body.indexReady !== false,
+        period: body.period ?? null,
+        mode: body.mode,
+        notReady: Array.isArray(body.notReady) ? body.notReady : [],
+    };
+    if (result.indexReady) {
+        SEARCH_CACHE.set(key, { at: Date.now(), response: result });
+        if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
+            const oldest = SEARCH_CACHE.keys().next().value;
+            if (oldest !== undefined) {
+                SEARCH_CACHE.delete(oldest);
+            }
+        }
+    }
+    return result;
 };
 
 export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> => {
@@ -128,6 +244,7 @@ export const importImslpPdfToStorage = async (
     filename: string,
     documentId: string,
     acceptedDisclaimer: boolean,
+    workTitle?: string,
 ): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
@@ -144,7 +261,7 @@ export const importImslpPdfToStorage = async (
             apikey: anonKey,
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ filename, documentId, acceptedDisclaimer }),
+        body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
     });
 
     // Smart-import quota exhausted. Surfaced as the same typed error the other
