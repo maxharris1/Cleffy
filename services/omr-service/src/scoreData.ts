@@ -129,6 +129,8 @@ const scoreHoldSchema = z.object({
 const scorePedalSchema = z.object({
     tick: z.number().int().nonnegative(),
     k: z.enum(['down', 'up']),
+    /** Set on edges the service inferred (auto-pedal); absent on engraved ones. v5. */
+    src: z.enum(['inferred']).optional(),
 });
 
 export const scoreDataSchema = z.object({

@@ -117,7 +117,7 @@ describe('buildScoreData auto-pedal', () => {
     it('pedals an unmarked score by its era and says so', () => {
         const score = buildScoreData(musical, geometry, { era: 'romantic' });
         expect(score.warnings).toContain('pedal_inferred');
-        expect(score.pedals?.[0]).toEqual({ tick: 0, k: 'down' });
+        expect(score.pedals?.[0]).toEqual({ tick: 0, k: 'down', src: 'inferred' });
         expect(score.pedals?.[score.pedals.length - 1]?.k).toBe('up');
     });
 
