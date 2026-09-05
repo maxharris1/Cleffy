@@ -29,8 +29,16 @@ import { repairRhythm } from './rhythmRepair.js';
 const BREATH_BEATS = 0.5;
 
 /** Musical content extracted from MusicXML — geometry-free (that comes from the .omr). */
+/**
+ * A note as this parser emits it: ScoreData's shape plus the articulation
+ * gate it applied to `d`, so the auto-pedal can read staccato directly rather
+ * than guess it back from lengths. Never reaches the client — `scoreDataSchema`
+ * strips unknown keys when buildScoreData validates.
+ */
+export type GatedNote = ScoreNote & { gate?: number };
+
 export interface MusicalScore {
-    notes: ScoreNote[];
+    notes: GatedNote[];
     /** In score order; geometry is zipped on later. */
     measures: Array<{ n: number; tick: number; dTicks: number }>;
     timeSignatures: ScoreTimeSig[];
@@ -423,7 +431,7 @@ const applyWordStructure = (text: string, repeat: MeasureRepeatMarks): void => {
  * portato, which is its own row.
  */
 const GATE_STACCATISSIMO = 0.25;
-const GATE_STACCATO = 0.5;
+export const GATE_STACCATO = 0.5;
 const GATE_PORTATO = 0.7;
 const GATE_DEFAULT = 0.9;
 const GATE_LEGATO = 1;
@@ -2472,7 +2480,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     /** Grace notes buffered until their principal note arrives. */
     let pendingGraces: Array<{ midi: number; hand: 0 | 1; slash: boolean }> = [];
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
-    const openTies = new Map<string, ScoreNote>();
+    const openTies = new Map<string, GatedNote>();
     /** Glissando starts waiting for their target note, keyed by staff:voice. */
     const pendingGlissandi = new Map<string, ScoreNote>();
     let arpBuffer: ScoreNote[] = [];
@@ -2710,6 +2718,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                                 // per link would also corrupt resolveOpenTie above,
                                 // which matches on where an open note ENDS.
                                 open.d = gateDuration(open.d, ev.arts.gate);
+                                open.gate = ev.arts.gate;
                             }
                         }
                         break;
@@ -2767,7 +2776,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     const boost = Math.max(accents.has(`${ev.staff}:${start}`) ? 0.2 : 0, ev.arts.boost);
                     const velocity =
                         boost > 0 ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + boost)) : sustained;
-                    const note: ScoreNote = {
+                    const note: GatedNote = {
                         t: principalStart,
                         // Held notes are gated when their chain closes, not here.
                         d: ev.tieStart ? principalNotated : gateDuration(principalNotated, ev.arts.gate),
@@ -2775,6 +2784,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         h: hand,
                         ...(velocity !== undefined ? { v: velocity } : {}),
                         vc,
+                        gate: ev.arts.gate,
                     };
                     // A tie chain is one sounding event: skip ornaments on tied notes
                     // rather than spelling them on a length we do not yet know.
@@ -2854,6 +2864,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     // it out with the plain gate so it does not sound longer than its neighbours.
     for (const open of openTies.values()) {
         open.d = gateDuration(open.d, GATE_DEFAULT);
+        open.gate = GATE_DEFAULT;
     }
 
     if (pendingGraces.length > 0) {

@@ -115,7 +115,8 @@ describe('key-signature fixture (G major, real Audiveris 5.6.1 artifact)', () =>
     const musical = parseMxlFiles([keysig]);
 
     it('applies the key signature (F→F♯), honors accidentals, keeps naturals', () => {
-        expect(musical.notes).toEqual([
+        expect(musical.notes.every((n) => n.gate === 0.9)).toBe(true);
+        expect(musical.notes.map(({ gate: _gate, ...note }) => note)).toEqual([
             { t: 0, d: plain(480), p: 78, h: 0, vc: 0 }, // F♯5 purely from the key signature
             { t: 0, d: plain(960), p: 50, h: 1, vc: 0 }, // D3 stays natural
             { t: 480, d: plain(480), p: 79, h: 0, vc: 0 }, // G5

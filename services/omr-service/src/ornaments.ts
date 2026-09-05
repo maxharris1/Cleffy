@@ -57,6 +57,11 @@ const neighbours = (
     return { upper: clampMidi(upper), lower: clampMidi(lower) };
 };
 
+/**
+ * A realised note keeps the principal's identity but not the parser's internal
+ * `gate`: the auto-pedal then judges these notes by their lengths, which is
+ * fine — an ornament's notes are as long as the ornament makes them.
+ */
 const clone = (note: ScoreNote, over: Partial<ScoreNote>): ScoreNote => ({
     t: over.t ?? note.t,
     d: over.d ?? note.d,
