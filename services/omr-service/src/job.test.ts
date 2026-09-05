@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    ENGINE_VERSION,
     PARALLEL_MIN_MEMORY_BYTES,
     PARALLEL_SHEET_MIN_PAGES,
+    cacheKeyFor,
     parseCgroupMemoryLimit,
     shouldRunParallelShards,
 } from './job.js';
@@ -44,5 +46,22 @@ describe('shouldRunParallelShards', () => {
     it('honors OMR_PARALLEL=0 even on a large container', () => {
         expect(shouldRunParallelShards(19, 16 * GIB, '0')).toBe(false);
         expect(shouldRunParallelShards(19, 16 * GIB, 'off')).toBe(false);
+    });
+});
+
+describe('cacheKeyFor', () => {
+    it('keys the cache by era as well as engine, since the era comes from the title, not the PDF', () => {
+        const eras = ['baroque', 'classical', 'romantic', 'modern'] as const;
+        const keys = eras.map((era) => cacheKeyFor(ENGINE_VERSION, era));
+        expect(new Set(keys).size).toBe(eras.length);
+        for (const key of keys) {
+            expect(key.startsWith(ENGINE_VERSION)).toBe(true);
+        }
+    });
+
+    it('leaves the bare engine version parseable for the client generation check', () => {
+        // The client reads `+svc-N` anchored at the end of documents.engine_version.
+        expect(ENGINE_VERSION).toMatch(/\+svc-\d+$/);
+        expect(cacheKeyFor(ENGINE_VERSION, 'classical')).not.toMatch(/\+svc-\d+$/);
     });
 });

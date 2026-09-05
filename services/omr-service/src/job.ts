@@ -49,6 +49,16 @@ import type { ScoreData } from './scoreData.js';
  */
 export const ENGINE_VERSION = 'audiveris-5.11.0+svc-11';
 
+/**
+ * The `score_cache` key for one engine and one era. The era comes from the
+ * document's title, not from the PDF, and it changes the output (how an
+ * unmarked score is pedalled, how a Baroque trill is spelled), so two
+ * documents that share a PDF under different titles need two entries. Only
+ * the cache reads this: what is written to `engine_version` on the document
+ * stays the bare ENGINE_VERSION, which the client parses for its generation.
+ */
+export const cacheKeyFor = (engineVersion: string, era: Era): string => `${engineVersion}#era=${era}`;
+
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;
 /** Cost-neutral page parallel: 2 JVMs — only when the container can hold them. */
@@ -251,7 +261,11 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         timings.pageCount = Math.max(adapters.pageCount, observedPages ?? 0);
 
         const hash = sha256Hex(pdfBytes);
-        const cached = await cacheLookup(hash, ENGINE_VERSION);
+        // Resolved before the lookup: the era is part of the key, because the
+        // same PDF under a Bach title and a Chopin title must not share pedalling.
+        const era = adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
+        const cacheKey = cacheKeyFor(ENGINE_VERSION, era);
+        const cached = await cacheLookup(hash, cacheKey);
         if (cached) {
             timings.cacheHit = true;
             const ok = await adapters.onReady(cached.score, timings);
@@ -263,9 +277,6 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             return false;
         }
 
-        // Looked up only on a cache miss: a cached score already carries its
-        // pedalling, and every document sharing that PDF shares it too.
-        const era = adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
         const score = await transcribe(
             pdfPath,
             workDir,
@@ -285,7 +296,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             return false;
         }
 
-        await cacheStore(hash, ENGINE_VERSION, score);
+        await cacheStore(hash, cacheKey, score);
         const ok = await adapters.onReady(score, timings);
         logJob(adapters.documentId, timings, score, ok);
         return ok;
