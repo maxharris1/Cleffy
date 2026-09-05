@@ -2556,7 +2556,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     // After the meter verdict — a span of consistently long bars is a misread
     // signature, not a hundred lost dots — and before padding, which is the
     // blunt fix for whatever the repair left alone.
-    const rhythmRepairs = repairRhythm(raws, sigs, ctx.warnings).length;
+    const rhythmRepairs = repairRhythm(raws, sigs, ctx.warnings);
     const placements = placeMeasures(raws, sigs, ctx);
 
     const lastPlace = placements[placements.length - 1];

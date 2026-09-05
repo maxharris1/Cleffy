@@ -104,7 +104,10 @@ const finalRitSpans = (score: ScoreData): Span[] => {
 const broadeningSpans = (score: ScoreData): Span[] => {
     const boundaries = new Set<number>([...movementEnds(score), ...jumpSeams(score), score.totalTicks]);
     for (const hold of score.holds ?? []) {
-        boundaries.add(hold.tick);
+        // A hold engraved past the last note (a final-barline fermata) has no beat before it to broaden.
+        if (hold.tick < score.totalTicks) {
+            boundaries.add(hold.tick);
+        }
     }
     const spans: Span[] = [];
     for (const boundary of boundaries) {

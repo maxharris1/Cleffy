@@ -606,10 +606,6 @@ export class PlaybackEngine {
         this.rebuildMap();
     }
 
-    getTempoStyle(): TempoStyle {
-        return this.tempoStyle;
-    }
-
     /**
      * Play or drop the pedalling the service inferred. Notes already sounding
      * keep the ends they were scheduled with; everything from here on reads
@@ -625,10 +621,6 @@ export class PlaybackEngine {
         if (this.ctx && (this.status === 'playing' || this.status === 'counting')) {
             this.syncResonanceFrom(this.getPositionTicks(), this.ctx.currentTime, true);
         }
-    }
-
-    getAutoPedal(): boolean {
-        return this.autoPedal;
     }
 
     /**

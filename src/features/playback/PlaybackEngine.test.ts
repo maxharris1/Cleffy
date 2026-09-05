@@ -865,7 +865,6 @@ describe('tempo style', () => {
         await advance(ctx, 3);
         const before = engine.getPositionTicks();
         engine.setTempoStyle('expressive');
-        expect(engine.getTempoStyle()).toBe('expressive');
         expect(engine.getPositionTicks()).toBeCloseTo(before, 0);
         engine.setTempoStyle('strict');
         expect(engine.getPositionTicks()).toBeCloseTo(before, 0);
@@ -1204,11 +1203,9 @@ describe('auto-pedal', () => {
         expect(await d5Lifespan(mixed, false)).toBeGreaterThan(await d5Lifespan(tinyScore, false));
     });
 
-    it('can be toggled before play and reports its state', async () => {
+    it('can be toggled before play', async () => {
         const { ctx, engine, buffers } = makeEngine({ score: inferred });
-        expect(engine.getAutoPedal()).toBe(true);
         engine.setAutoPedal(false);
-        expect(engine.getAutoPedal()).toBe(false);
         await engine.play();
         await advance(ctx, 3);
         const pickup = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));

@@ -28,15 +28,7 @@ type NoteEvent = Extract<RawEvent, { k: 'note' }>;
 type RestEvent = Extract<RawEvent, { k: 'rest' }>;
 type RhythmEvent = NoteEvent | RestEvent;
 
-export type RhythmEditKind = 'add_dot' | 'remove_dot' | 'halve' | 'double' | 'insert_rest' | 'delete_rest';
-
-export interface RhythmRepair {
-    /** Position in the part's measure list. */
-    measure: number;
-    /** `staff:voice` as engraved. */
-    voice: string;
-    kind: RhythmEditKind;
-}
+type RhythmEditKind = 'add_dot' | 'remove_dot' | 'halve' | 'double' | 'insert_rest' | 'delete_rest';
 
 /** Note types in halving order; a doubled whole or a halved 128th is not notation. */
 const TYPE_ORDER = ['whole', 'half', 'quarter', 'eighth', '16th', '32nd', '64th', '128th'];
@@ -436,15 +428,11 @@ const apply = (raw: RawMeasure, items: Item[], candidate: Candidate): void => {
 
 /**
  * Repair the bars of one part in place. `sigs` are the per-bar EFFECTIVE
- * signatures (after meter reconciliation). Returns the edits made; the caller
- * counts them and raises `rhythm_repaired`.
+ * signatures (after meter reconciliation). Returns how many bar-voices were
+ * edited and raises `rhythm_repaired` when any was.
  */
-export const repairRhythm = (
-    raws: readonly RawMeasure[],
-    sigs: ReadonlyArray<Sig>,
-    warnings: Set<string>,
-): RhythmRepair[] => {
-    const repairs: RhythmRepair[] = [];
+export const repairRhythm = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Sig>, warnings: Set<string>): number => {
+    let repairs = 0;
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         // Pickups are legitimately short, and so is the final bar of a part
@@ -472,7 +460,7 @@ export const repairRhythm = (
                 continue;
             }
             apply(raw, items, chosen);
-            repairs.push({ measure: pos, voice: key, kind: chosen.kind });
+            repairs += 1;
             edited = true;
         }
         if (edited) {
@@ -485,7 +473,7 @@ export const repairRhythm = (
             raw.contentTicks = content;
         }
     }
-    if (repairs.length > 0) {
+    if (repairs > 0) {
         warnings.add('rhythm_repaired');
     }
     return repairs;

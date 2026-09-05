@@ -49,7 +49,7 @@ describe('mergeScoreDataParts', () => {
     it('offsets ticks and remaps pages across sheet ranges', () => {
         const a = basePart({});
         const b = basePart({
-            notes: [{ t: 0, d: 480, p: 62, h: 0 }],
+            notes: [{ t: 0, d: 480, p: 62, h: 0, vc: 1 }],
             measures: [{ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0, x1: 1 }],
             systems: [{ page: 0, y0: 0.2, y1: 0.5 }],
             timeSignatures: [],
@@ -60,6 +60,8 @@ describe('mergeScoreDataParts', () => {
         ]);
         expect(merged.totalTicks).toBe(3840);
         expect(merged.notes.map((n) => n.t)).toEqual([0, 1920]);
+        // Shifting a shard's notes keeps every other field, the voice slot included.
+        expect(merged.notes[1]).toEqual({ t: 1920, d: 480, p: 62, h: 0, vc: 1 });
         expect(merged.measures.map((m) => m.n)).toEqual([1, 2]);
         expect(merged.measures.map((m) => m.page)).toEqual([0, 2]);
         expect(merged.systems.map((s) => s.page)).toEqual([0, 2]);
