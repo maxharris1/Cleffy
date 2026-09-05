@@ -1,12 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { MAX_HOLDS, MAX_TEMPO_EVENTS, capHolds, capPedals, capTempoEvents } from './caps.js';
-import {
-    mergeScoreDataParts,
-    seamIsUnsafe,
-    splitSheetRanges,
-    splitSheetRangesOverlapping,
-} from './mergeScoreData.js';
+import { mergeScoreDataParts, seamIsUnsafe, splitSheetRanges, splitSheetRangesOverlapping } from './mergeScoreData.js';
 import type { StructureSummary } from './repeats.js';
 import { SCORE_DATA_VERSION, TICKS_PER_QUARTER } from './scoreData.js';
 import type { ScoreData, ScoreHold, ScorePedal, ScoreTempo } from './scoreData.js';
@@ -555,6 +550,24 @@ describe('capPedals', () => {
             k: i % 2 === 0 ? 'down' : 'up',
         }));
         expect(capPedals(pedals, 5)).toEqual(pedals.slice(0, 4));
+    });
+
+    it('sheds inferred edges before touching printed ones, wherever they fall', () => {
+        const printed: ScorePedal[] = [
+            { tick: 0, k: 'down' },
+            { tick: 480, k: 'up' },
+            { tick: 9600, k: 'down' },
+            { tick: 9999, k: 'up' },
+        ];
+        const inferred: ScorePedal[] = Array.from({ length: 6 }, (_, i) => ({
+            tick: 960 + i * 480,
+            k: i % 2 === 0 ? 'down' : 'up',
+            src: 'inferred',
+        }));
+        const mixed = [...printed.slice(0, 2), ...inferred, ...printed.slice(2)];
+        expect(capPedals(mixed, 5)).toEqual(printed);
+        // Printed edges alone over the cap still cut from the tail.
+        expect(capPedals(mixed, 3)).toEqual(printed.slice(0, 2));
     });
 });
 

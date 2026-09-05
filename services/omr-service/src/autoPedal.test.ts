@@ -207,4 +207,45 @@ describe('inferAutoPedal: the ceiling', () => {
         expect(result.pedals[0]).toEqual({ tick: 0, k: 'down', src: 'inferred' });
         expect(result.pedals[result.pedals.length - 1]).toEqual({ tick: bars * BAR, k: 'up', src: 'inferred' });
     });
+
+    /** Bar `i` sounds the triad a fifth above bar `i - 1`: every bar, and every few bars, brings new pitch classes. */
+    const fifthsCycle = (bars: number): ScoreNote[] =>
+        Array.from({ length: bars * 4 }, (_, i) => {
+            const root = 60 + ((7 * Math.floor(i / 4)) % 12);
+            return chord(i * BEAT, [root, root + 4, root + 7], root - 12);
+        }).flat();
+
+    it('coarsens past the bar until the whole movement fits, never truncating its tail', () => {
+        // 300 bars: per bar 600 edges, per 2 bars 300, per 4 bars ~150 — the
+        // first rung under the ceiling, so the last bars are pedalled too.
+        const bars = 300;
+        const result = inferAutoPedal(score(fifthsCycle(bars), bars), 'romantic');
+        expect(result.inferred).toBe(true);
+        expect(result.pedals.length).toBeLessThanOrEqual(MAX_PEDAL_EDGES);
+        expect(result.pedals.length).toBeGreaterThan(100);
+        for (const edge of result.pedals) {
+            expect(edge.tick % (4 * BAR)).toBe(0);
+        }
+        const lastDown = result.pedals.filter((p) => p.k === 'down').pop();
+        expect(lastDown?.tick).toBe((bars - 4) * BAR);
+        expect(result.pedals[result.pedals.length - 1]).toEqual({ tick: bars * BAR, k: 'up', src: 'inferred' });
+    });
+
+    it('gives up and keeps only the printed edges when even eight-bar pedalling breaches the ceiling', () => {
+        // The harmony moves every eight bars between two chords sharing no
+        // pitch class, so every rung of the ladder hears the same 137
+        // changes: 1100 bars → 276 edges, over at any step.
+        const bars = 1100;
+        const Fsharp = [66, 70, 73];
+        const notes = Array.from({ length: bars * 4 }, (_, i) =>
+            Math.floor(i / 32) % 2 === 0 ? chord(i * BEAT, C, 48) : chord(i * BEAT, Fsharp, 54),
+        ).flat();
+        const printed: ScorePedal[] = [
+            { tick: 0, k: 'down' },
+            { tick: 2 * BAR, k: 'up' },
+        ];
+        const result = inferAutoPedal(score(notes, bars, printed), 'romantic');
+        expect(result.inferred).toBe(false);
+        expect(result.pedals).toEqual(printed);
+    });
 });
