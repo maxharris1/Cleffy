@@ -811,6 +811,25 @@ describe('tempo style', () => {
         expect(new Set(clicks).size).toBe(16);
     });
 
+    it('switched on mid-play, clicks from the playhead rather than every beat since the anchor', async () => {
+        // Regression: setMetronome cleared the beat cursor without re-anchoring,
+        // so the next scheduler tick re-fired every beat since the last play
+        // or seek, all at once and all in the past.
+        const { ctx, engine } = makeEngine({ score: closing, bpm: 120 });
+        await engine.play();
+        await advance(ctx, 2);
+        expect(ctx.oscillators).toHaveLength(0);
+        engine.setMetronome(true);
+        await advance(ctx, 0.6);
+        const clicks = ctx.oscillators.map((o) => o.startedAt ?? -1);
+        expect(clicks.length).toBeGreaterThan(0);
+        expect(clicks.length).toBeLessThanOrEqual(2);
+        for (const at of clicks) {
+            expect(at).toBeGreaterThanOrEqual(2 - 1e-6);
+        }
+        expect(new Set(clicks).size).toBe(clicks.length);
+    });
+
     it('strict (and no style at all) schedules every note and click at the svc-10 time', async () => {
         // fixtures/svc10-timeline.json was recorded once from the svc-10
         // engine (commit 8862482) with this file's harness: makeEngine({ bpm:

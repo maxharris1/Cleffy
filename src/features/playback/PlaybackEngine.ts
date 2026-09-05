@@ -1181,9 +1181,19 @@ export class PlaybackEngine {
         }
     }
 
-    /** Where beat scheduling should begin: the scheduling anchor's tick. */
+    /**
+     * Where beat scheduling should begin. The anchor's tick, so a beat sitting
+     * exactly on a seek or a loop start still clicks; while playing, never
+     * behind the playhead, since the metronome can be switched on long after
+     * the last re-anchor and every beat in between would otherwise fire at
+     * once. A pending loop wrap anchors ahead of the playhead and stays as is.
+     */
     private schedulingPositionFloor(): number {
-        return (this.pendingAnchor ?? this.anchor).tick;
+        const anchorTick = (this.pendingAnchor ?? this.anchor).tick;
+        if (this.pendingAnchor === null && this.status === 'playing') {
+            return Math.max(anchorTick, this.getPositionTicks());
+        }
+        return anchorTick;
     }
 
     private firstBeatAtOrAfter(tick: number): BeatTick | null {
