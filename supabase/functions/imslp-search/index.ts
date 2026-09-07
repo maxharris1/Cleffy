@@ -8,7 +8,6 @@ import {
     facetTokens,
     hardFilterGroups,
     hasActiveFilters,
-    keyTitlePatterns,
     parseFilters,
     parseSort,
     titleMatchesFilters,
@@ -258,7 +257,6 @@ const browseFromIndex = async (
         sort,
         limit,
         offset,
-        titleFilters: keyTitlePatterns(filters),
         popularTitles: POPULAR_WORKS.map((w) => w.title),
     });
     return {
