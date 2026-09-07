@@ -38,8 +38,9 @@ export interface ScoreAnalysisStatusRow {
  * mark-less shard B; era stamped on the analysis.
  * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
  * parts, and zips geometry per system so the playhead stays on the bar.
+ * svc-14 skips staff-less cover/blank pages instead of failing the book.
  */
-export const CURRENT_ENGINE_GENERATION = 13;
+export const CURRENT_ENGINE_GENERATION = 14;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires

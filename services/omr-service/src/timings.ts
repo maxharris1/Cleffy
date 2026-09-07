@@ -20,6 +20,8 @@ export interface JobTimings {
     rhythmRepairs?: number;
     /** Key events the key-signature repair dropped (musicxml.ts / keyRepair.ts). */
     keyRepairs?: number;
+    /** 1-based PDF pages Audiveris flagged invalid (no staves) and we skipped. */
+    invalidSheets?: number[];
 }
 
 export const emptyTimings = (): JobTimings => ({});

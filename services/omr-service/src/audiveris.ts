@@ -4,6 +4,9 @@ import { join } from 'node:path';
 
 import { ERROR_CODES, JobError } from './errors.js';
 
+/** 1-based inclusive Audiveris sheet range (`-sheets N-M`). */
+export type SheetRange = { from: number; to: number };
+
 export interface AudiverisResult {
     mxlPaths: string[];
     omrPath: string | null;
@@ -16,12 +19,16 @@ export interface AudiverisResult {
     /** Elapsed ms attributed to each step (time since previous step sighting). */
     stepDurationsMs: Record<string, number>;
     audiverisTotalMs: number;
+    /** 1-based PDF pages Audiveris flagged as invalid (no staves). */
+    invalidSheets: number[];
+    /** Process exit code; 0 on success. Non-zero with invalidSheets is recoverable. */
+    exitCode: number;
 }
 
 export interface AudiverisOptions {
     timeoutMs: number;
-    /** 1-based inclusive sheet range (`-sheets N-M`). */
-    sheets?: { from: number; to: number };
+    /** 1-based inclusive sheet range(s) (`-sheets N-M` or `-sheets 2-4 6-8`). */
+    sheets?: SheetRange | SheetRange[];
     /** Extra CLI args inserted before `--` (overrides/extends env). */
     extraArgs?: string[];
     /** Called with the highest sheet number seen in the log so far. */
@@ -29,6 +36,12 @@ export interface AudiverisOptions {
     /** Receives a killer for the JVM process group (lease loss / abandon). */
     onSpawned?: (kill: () => void) => void;
 }
+
+export type AudiverisRunner = (
+    inputPath: string,
+    outDir: string,
+    options: AudiverisOptions,
+) => Promise<AudiverisResult>;
 
 const AUDIVERIS_BIN = process.env.AUDIVERIS_BIN ?? '/opt/audiveris/bin/Audiveris';
 
@@ -54,6 +67,8 @@ export const PLAY_ALONG_AUDIVERIS_OPTIONS = [
 
 const STEP_RE = /\b(LOAD|BINARY|GRID|HEADERS|STEMS|BEAMS|LEDGERS|HEADS|TEXTS|SYMBOLS|SLURS|CURVES|PAGES|REDUCTION|SHEET)\b/gi;
 const SHEET_RE = /sheet#(\d+)/gi;
+const INVALID_SHEET_RE = /Sheet \S+#(\d+) flagged as invalid/gi;
+const LOG_TAIL_MAX = 2048;
 
 /** Split AUDIVERIS_EXTRA_OPTS on whitespace; supports simple double-quoted tokens. */
 export const parseExtraOpts = (raw: string | undefined): string[] => {
@@ -82,16 +97,75 @@ export const buildAudiverisArgs = (
     if (options.extraArgs?.length) {
         args.push(...options.extraArgs);
     }
-    if (options.sheets) {
-        const { from, to } = options.sheets;
-        if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) {
-            throw new JobError(ERROR_CODES.internal, `Invalid sheets range ${from}-${to}`);
-        }
-        // One token: "N-M" (Audiveris rejects spaces around the hyphen).
-        args.push('-sheets', from === to ? String(from) : `${from}-${to}`);
+    const ranges = normalizeSheetRanges(options.sheets);
+    if (ranges.length > 0) {
+        // One `-sheets` then one token per range. Audiveris rejects spaces
+        // around the hyphen inside a token (`2-4`, not `2 - 4`).
+        args.push('-sheets', ...ranges.map(formatSheetRange));
     }
     args.push('--', pdfPath);
     return args;
+};
+
+export const normalizeSheetRanges = (sheets: AudiverisOptions['sheets']): SheetRange[] => {
+    if (!sheets) {
+        return [];
+    }
+    return (Array.isArray(sheets) ? sheets : [sheets]).map(assertSheetRange);
+};
+
+const assertSheetRange = (range: SheetRange): SheetRange => {
+    const { from, to } = range;
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) {
+        throw new JobError(ERROR_CODES.internal, `Invalid sheets range ${from}-${to}`);
+    }
+    return range;
+};
+
+export const formatSheetRange = (range: SheetRange): string =>
+    range.from === range.to ? String(range.from) : `${range.from}-${range.to}`;
+
+/**
+ * Drop excluded 1-based sheet numbers from one or more inclusive ranges,
+ * splitting around holes (`1-8` minus `[1,5]` → `[{2,4},{6,8}]`).
+ */
+export const sheetRangesExcluding = (
+    range: SheetRange | SheetRange[],
+    exclude: readonly number[],
+): SheetRange[] => {
+    const skip = new Set(exclude.filter((n) => Number.isInteger(n) && n >= 1));
+    const out: SheetRange[] = [];
+    for (const { from, to } of normalizeSheetRanges(range)) {
+        let start: number | null = null;
+        for (let sheet = from; sheet <= to; sheet++) {
+            if (skip.has(sheet)) {
+                if (start !== null) {
+                    out.push({ from: start, to: sheet - 1 });
+                    start = null;
+                }
+            } else if (start === null) {
+                start = sheet;
+            }
+        }
+        if (start !== null) {
+            out.push({ from: start, to });
+        }
+    }
+    return out;
+};
+
+/** Sheets Audiveris flagged as having no regularly spaced staff lines. */
+export const parseInvalidSheets = (text: string): number[] => {
+    const found = new Set<number>();
+    // Fresh regex: a shared /g lastIndex would skip matches on later chunks.
+    const re = new RegExp(INVALID_SHEET_RE.source, INVALID_SHEET_RE.flags);
+    for (const match of text.matchAll(re)) {
+        const sheet = Number.parseInt(match[1] ?? '0', 10);
+        if (sheet >= 1) {
+            found.add(sheet);
+        }
+    }
+    return [...found].sort((a, b) => a - b);
 };
 
 /**
@@ -118,6 +192,9 @@ export const runAudiveris = async (
     let lastStepName: string | null = null;
 
     const argv = buildAudiverisArgs(pdfPath, outDir, options);
+    const invalidSheetSet = new Set<number>();
+    let logTail = '';
+    let exitCode = 0;
 
     await new Promise<void>((resolve, reject) => {
         const child = spawn(AUDIVERIS_BIN, argv, {
@@ -158,6 +235,10 @@ export const runAudiveris = async (
         let maxSheet = 0;
         const scan = (chunk: Buffer) => {
             const text = chunk.toString('utf8');
+            logTail = (logTail + text).slice(-LOG_TAIL_MAX);
+            for (const sheet of parseInvalidSheets(text)) {
+                invalidSheetSet.add(sheet);
+            }
             const now = Date.now();
             for (const match of text.matchAll(SHEET_RE)) {
                 const sheet = Number.parseInt(match[1] ?? '0', 10);
@@ -190,10 +271,16 @@ export const runAudiveris = async (
             finish(new JobError(ERROR_CODES.omrCrash, `Could not start Audiveris: ${err.message}`)),
         );
         child.on('exit', (code, signal) => {
+            exitCode = code ?? 1;
             if (code === 0) {
                 finish(null);
+            } else if (invalidSheetSet.size > 0) {
+                // Staff-less pages make batch -export refuse the whole book.
+                // Recovery (re-export / re-run minus those pages) is the caller's job.
+                finish(null);
             } else if (!done) {
-                finish(new JobError(ERROR_CODES.omrCrash, `Audiveris exited with ${code ?? signal}`));
+                const reason = `Audiveris exited with ${code ?? signal}`;
+                finish(new JobError(ERROR_CODES.omrCrash, logTail ? `${reason}\n${logTail}` : reason));
             }
         });
     });
@@ -217,7 +304,85 @@ export const runAudiveris = async (
         stepCounts,
         stepDurationsMs,
         audiverisTotalMs: ended - started,
+        invalidSheets: [...invalidSheetSet].sort((a, b) => a - b),
+        exitCode,
     };
+};
+
+export interface TolerantAudiverisOptions extends AudiverisOptions {
+    /** Used when `sheets` is omitted: the requested 1-based range is `1..pageCount`. */
+    pageCount: number;
+}
+
+/**
+ * Run Audiveris, and if staff-less pages make batch export refuse the book,
+ * recover: re-export the saved `.omr` without those sheets, else re-run the
+ * PDF with `-sheets` excluding them. All-invalid books become `no_staves_found`.
+ */
+export const runAudiverisTolerant = async (
+    pdfPath: string,
+    outDir: string,
+    options: TolerantAudiverisOptions,
+    run: AudiverisRunner = runAudiveris,
+): Promise<AudiverisResult> => {
+    const first = await run(pdfPath, outDir, options);
+    if (first.mxlPaths.length > 0) {
+        return first;
+    }
+
+    const requested = requestedSheetRanges(options);
+    const validRanges = sheetRangesExcluding(requested, first.invalidSheets);
+    if (first.invalidSheets.length === 0) {
+        throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML');
+    }
+    if (validRanges.length === 0) {
+        throw new JobError(ERROR_CODES.noStavesFound, 'All sheets flagged invalid (no staves)');
+    }
+
+    const recovered = await recoverWithoutInvalidSheets(pdfPath, outDir, options, first, validRanges, run);
+    return {
+        ...recovered,
+        invalidSheets: first.invalidSheets,
+        audiverisTotalMs: first.audiverisTotalMs + recovered.audiverisTotalMs,
+    };
+};
+
+const requestedSheetRanges = (options: TolerantAudiverisOptions): SheetRange[] => {
+    const explicit = normalizeSheetRanges(options.sheets);
+    if (explicit.length > 0) {
+        return explicit;
+    }
+    const pages = Number.isInteger(options.pageCount) && options.pageCount >= 1 ? options.pageCount : 1;
+    return [{ from: 1, to: pages }];
+};
+
+const recoverWithoutInvalidSheets = async (
+    pdfPath: string,
+    outDir: string,
+    options: TolerantAudiverisOptions,
+    first: AudiverisResult,
+    validRanges: SheetRange[],
+    run: AudiverisRunner,
+): Promise<AudiverisResult> => {
+    const retryOptions: AudiverisOptions = { ...options, sheets: validRanges };
+    if (first.omrPath) {
+        try {
+            const reexport = await run(first.omrPath, join(outDir, 'reexport'), retryOptions);
+            if (reexport.mxlPaths.length > 0) {
+                return reexport;
+            }
+        } catch (err) {
+            if (!(err instanceof JobError && err.code === ERROR_CODES.omrCrash)) {
+                throw err;
+            }
+        }
+    }
+
+    const retry = await run(pdfPath, join(outDir, 'retry'), retryOptions);
+    if (retry.mxlPaths.length === 0) {
+        throw new JobError(ERROR_CODES.omrCrash, 'Audiveris produced no MusicXML after skipping invalid sheets');
+    }
+    return retry;
 };
 
 /** Find produced artifacts wherever Audiveris put them (layout differs across versions). */
