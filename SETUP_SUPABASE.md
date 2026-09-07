@@ -228,18 +228,38 @@ select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp
 select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
 ```
 
-**Without those two secrets the cron tick is a silent no-op** and every chip
-beyond the default Piano shows "Index still building" forever. Rollout order
-for a fresh project (each step is required):
+Chip browse reads `public.imslp_works`: one row per IMSLP work with the array
+of taxonomy categories (instrumentation, era, form, key, composer) it belongs
+to. The walker pages each category with MediaWiki
+`generator=categorymembers` + `prop=categories` + `clcategories=<taxonomy>`, so
+one pass over `For piano` records every piano work's other facets at once, and
+a browse is exact as soon as any one of its selected chips has been walked
+completely. Typed search stays on live MediaWiki search.
 
-1. `npx supabase db push` — brings `imslp_category_members`, `imslp_category_sync`,
-   `imslp_browse` (with `title_filters` / `popular_titles`), `imslp_index_ready`,
-   `imslp_titles_in_categories`, `imslp_sync_tick` and the `imslp-sync` cron job.
-2. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
+**Seed the mirror once per environment** (~3,500 IMSLP requests: each
+500-page batch needs two `clcategories` chunks of 50, ~1 h at 1 req/s or ~30
+min with `--delay 400`) so no chip ever shows "Index still building":
+
+```bash
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY=<service role key> \
+npm run imslp:seed
+```
+
+It is resumable (interrupt and rerun), takes `--category "<name>"` to walk one
+category, and `--dry-run` to walk IMSLP without writing. The cron tick is then
+only a refresh; without the two vault secrets it is a silent no-op and the
+mirror simply never refreshes. Rollout order for a fresh project:
+
+1. `npx supabase db push` — brings `imslp_works`, `imslp_category_sync`,
+   `imslp_browse_works`, `imslp_index_ready`, `imslp_titles_in_categories`,
+   `imslp_prune_anchor`, `imslp_sync_tick` and the `imslp-sync` cron job.
+2. `npm run imslp:seed` against the project (above).
+3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
    `npx supabase functions deploy imslp-search`.
-3. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
-4. The two `vault.create_secret` statements above.
-5. Verify the walk is happening:
+4. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
+5. The two `vault.create_secret` statements above.
+6. Verify the refresh is ticking:
 
     ```sql
     select category, state, pages_done, completed_at
@@ -247,17 +267,17 @@ for a fresh project (each step is required):
     order by updated_at desc;
     ```
 
-    Each tick pages one category (up to 50 pages of 500 titles at ~1 req/s, so
-    ~50 s). The index builds `For piano` and `For piano (arr)` first, then eras,
-    forms, the other instruments and finally composers, so Piano · Baroque /
-    Piano · Nocturne answer about 6 minutes after the first tick and the whole
-    49-category taxonomy is `ok` within ~30 minutes. Until a chip's categories
-    are `ok` the panel says "IMSLP index is still being built for …" rather
-    than guessing.
+    Each tick spends up to 60 MediaWiki requests on one category (batches of
+    500 pages, usually 4 requests each) and resumes where it left off. The
+    order is `For piano` / `For piano (arr)`, eras, forms, keys, the other
+    instruments, then composers, so a cold cron with no seed still answers
+    Piano · anything after the first ~15 minutes and covers the whole taxonomy
+    in about two hours. Until a browse's chips are covered the panel says "IMSLP
+    index is still being built for …" rather than guessing.
 
-Locally the cron does not fire (no vault secrets); run `npm run imslp:sync`
-after `functions:serve` to walk the taxonomy once (~15 min), or with `--once`
-for a single tick.
+Locally the cron does not fire (no vault secrets); with the stack up, run
+`npm run imslp:seed` (no env needed — it targets the local API port from
+`supabase/config.toml` with the public demo service key).
 
 The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `SELF_URL` (its public base URL for drain-chain self-pokes). Without any of
