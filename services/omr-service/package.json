@@ -11,7 +11,8 @@
         "test": "vitest run",
         "test:watch": "vitest",
         "check:engine-version": "node scripts/check-engine-version.mjs",
-        "eval": "node dist/eval/cli.js"
+        "eval": "node dist/eval/cli.js",
+        "eval:moonlight": "bash eval/moonlight.sh"
     },
     "dependencies": {
         "@supabase/supabase-js": "^2.111.0",
@@ -22,6 +23,8 @@
     "devDependencies": {
         "@types/adm-zip": "^0.5.7",
         "@types/node": "^22.10.0",
+        "midi-file": "^1.2.4",
+        "tsx": "^4.23.13",
         "typescript": "^6.0.3",
         "vitest": "^4.1.10"
     }

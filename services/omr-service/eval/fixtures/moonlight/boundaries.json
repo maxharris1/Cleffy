@@ -1,0 +1,5 @@
+[
+    { "name": "I. Adagio sostenuto", "midi": "moonlight1.mid", "beats": 4, "pickupBeats": 0 },
+    { "name": "II. Allegretto", "midi": "moonlight2.mid", "beats": 3, "pickupBeats": 0 },
+    { "name": "III. Presto agitato", "midi": "moonlight3.mid", "beats": 4, "pickupBeats": 0 }
+]
