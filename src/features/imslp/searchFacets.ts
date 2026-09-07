@@ -90,7 +90,8 @@ export const filtersToStatusParts = (filters: SearchFilters): string[] => {
 
 /**
  * Chip labels for IMSLP category titles the server reports (e.g. notReady),
- * so copy says "Piano and Nocturne" rather than "For piano (arr)". Unknown
+ * so copy says "Piano and Nocturne" rather than "For piano (arr)". Key
+ * categories share their label ("C major"). Unknown
  * categories fall back to their own title; duplicates collapse.
  */
 export const labelsForCategories = (categories: string[]): string[] => {
@@ -102,7 +103,7 @@ export const labelsForCategories = (categories: string[]): string[] => {
     };
     for (const raw of categories) {
         const category = raw.replace(/\s*\(arr\)$/i, '');
-        const facet = [...INSTRUMENT_FACETS, ...FORM_FACETS, ...ERA_FACETS, ...COMPOSER_FACETS].find(
+        const facet = [...INSTRUMENT_FACETS, ...FORM_FACETS, ...KEY_FACETS, ...ERA_FACETS, ...COMPOSER_FACETS].find(
             (f) => f.category === category,
         );
         push(facet?.label ?? raw);
