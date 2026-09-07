@@ -2,43 +2,48 @@ import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
     applyPageResult,
     categoriesToSync,
-    parseMemberPage,
     pickNextCategory,
     planTick,
+    toWorkRow,
+    walkCategoryBatch,
     type CategorySyncRow,
-    type MemberPageResult,
 } from '../_shared/categorySync.ts';
 import { mwFetch, serviceClient } from '../_shared/imslp.ts';
 import {
+    ALL_TAXONOMY_CATEGORIES,
     COMPOSER_FACETS,
     ERA_FACETS,
     FORM_FACETS,
     INSTRUMENT_BY_ID,
     INSTRUMENT_FACETS,
+    KEY_FACETS,
 } from '../_shared/searchFacetData.ts';
 
 /**
- * Hosted IMSLP category-index refresh. Deployed with verify_jwt = false
+ * Hosted refresh of the IMSLP works mirror. Deployed with verify_jwt = false
  * (see supabase/config.toml) because pg_cron / pg_net have no Supabase JWT —
  * the request is authenticated by x-imslp-sync-secret or a service-role bearer.
  *
- * Each tick pages one category (up to 50 MW pages of 500 at ~1 req/s) into a
- * building generation. The previous ok snapshot stays live until the pager
- * finishes.
+ * Each tick walks one category for up to REQUESTS_PER_TICK MediaWiki calls:
+ * generator batches of 500 pages (about four requests each — the taxonomy is
+ * asked for in two clcategories chunks of 50), each page tagged with every
+ * taxonomy category it belongs to, upserted into imslp_works. The category's sync row
+ * rolls its generation over when the walk completes; pages the walk did not
+ * see lose that category (imslp_prune_anchor). scripts/imslp-seed.ts runs the
+ * same walk in one go for a cold environment.
  */
 
-const PAGES_PER_TICK = 50;
-const PAGE_DELAY_MS = 1000;
-// IMSLP serves the anonymous maximum of 500 per page; 50 would take ~5 hours
-// to walk the taxonomy on the 2-minute cron.
-const CM_LIMIT = 500;
+// ~60 requests at ~0.5s each plus the delay stays well under the edge wall clock.
+const REQUESTS_PER_TICK = 60;
+const REQUEST_DELAY_MS = 700;
 
-// The search panel opens piano-scoped, so For piano gates every chip browse.
+// The search panel opens piano-scoped, so For piano is the first anchor.
 const SYNC_CATEGORIES = categoriesToSync(
     COMPOSER_FACETS,
     INSTRUMENT_FACETS,
     FORM_FACETS,
     ERA_FACETS,
+    KEY_FACETS,
     INSTRUMENT_BY_ID['piano']?.category,
 );
 
@@ -57,22 +62,6 @@ const authorized = (req: Request): boolean => {
 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-const fetchMemberPage = async (category: string, cmcontinue: string | null): Promise<MemberPageResult> => {
-    const params: Record<string, string> = {
-        action: 'query',
-        list: 'categorymembers',
-        cmtitle: `Category:${category}`,
-        cmnamespace: '0',
-        cmtype: 'page',
-        cmprop: 'title|ids|sortkeyprefix|timestamp',
-        cmlimit: String(CM_LIMIT),
-    };
-    if (cmcontinue) {
-        params['cmcontinue'] = cmcontinue;
-    }
-    return parseMemberPage(await mwFetch(params));
-};
 
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
@@ -98,18 +87,21 @@ Deno.serve(async (req) => {
     const existing = (rows ?? []) as CategorySyncRow[];
     const category = pickNextCategory(SYNC_CATEGORIES, existing);
     if (!category) {
-        return jsonResponse({ ok: true, category: null, pages: 0 });
+        return jsonResponse({ ok: true, category: null, requests: 0 });
     }
 
     const previous = existing.find((r) => r.category === category);
     const plan = planTick(category, previous);
     const now = new Date().toISOString();
+    // A resumed generation keeps its original start; a new one opens now.
+    const buildingStartedAt = plan.cmcontinue && previous?.building_started_at ? previous.building_started_at : now;
 
     const { error: startError } = await admin.from('imslp_category_sync').upsert({
         category,
         state: 'building',
         active_generation: previous?.active_generation ?? 0,
         building_generation: plan.generation,
+        building_started_at: buildingStartedAt,
         cmcontinue: plan.cmcontinue,
         pages_done: plan.pagesDone,
         last_error: null,
@@ -121,28 +113,26 @@ Deno.serve(async (req) => {
     }
 
     let cursor = plan.cmcontinue;
-    let pagesFetched = 0;
+    let requestsSpent = 0;
     let pagesDone = plan.pagesDone;
     let lastDecision = applyPageResult(plan, previous, [], cursor ?? 'pending', null);
 
     try {
-        for (let i = 0; i < PAGES_PER_TICK; i++) {
-            if (i > 0) {
-                await sleep(PAGE_DELAY_MS);
+        while (requestsSpent < REQUESTS_PER_TICK) {
+            if (requestsSpent > 0) {
+                await sleep(REQUEST_DELAY_MS);
             }
-            const { members, cmcontinue } = await fetchMemberPage(category, cursor);
-            pagesFetched += 1;
-            if (members.length > 0) {
-                const { error: writeError } = await admin.from('imslp_category_members').upsert(
-                    members.map((m) => ({
-                        category,
-                        page_title: m.title,
-                        page_id: m.pageid,
-                        sort_key: m.sortkeyprefix ?? null,
-                        touched: m.timestamp ?? null,
-                        generation: plan.generation,
-                    })),
-                    { onConflict: 'category,generation,page_title' },
+            const batch = await walkCategoryBatch(mwFetch, {
+                category,
+                clcategories: ALL_TAXONOMY_CATEGORIES,
+                gcmcontinue: cursor,
+            });
+            requestsSpent += batch.requests;
+            if (batch.members.length > 0) {
+                const seenAt = new Date().toISOString();
+                const { error: writeError } = await admin.from('imslp_works').upsert(
+                    batch.members.map((m) => toWorkRow(category, m, seenAt)),
+                    { onConflict: 'page_id' },
                 );
                 if (writeError) {
                     throw new Error(writeError.message);
@@ -151,13 +141,13 @@ Deno.serve(async (req) => {
             const stepped = applyPageResult(
                 { ...plan, pagesDone, cmcontinue: cursor },
                 previous,
-                members,
-                cmcontinue,
+                batch.members,
+                batch.gcmcontinue,
                 null,
             );
             lastDecision = stepped;
             pagesDone = stepped.pagesDone;
-            cursor = cmcontinue;
+            cursor = batch.gcmcontinue;
             if (stepped.kind !== 'continue') {
                 break;
             }
@@ -178,6 +168,7 @@ Deno.serve(async (req) => {
         state,
         active_generation: lastDecision.activeGeneration,
         building_generation: lastDecision.buildingGeneration,
+        building_started_at: buildingStartedAt,
         cmcontinue: lastDecision.cmcontinue,
         pages_done: lastDecision.pagesDone,
         last_error: lastDecision.lastError,
@@ -188,22 +179,21 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: finishError.message }, 500);
     }
 
-    // Rollover the sync row first so a failed generation delete cannot leave
-    // the index pointing at a generation that was already removed.
-    if (lastDecision.kind === 'complete' && lastDecision.deleteGenerationsBefore !== null) {
-        await admin
-            .from('imslp_category_members')
-            .delete()
-            .eq('category', category)
-            .lt('generation', lastDecision.deleteGenerationsBefore);
+    // Rollover the sync row first so a failed prune cannot leave the mirror
+    // serving from a generation the row no longer names.
+    let pruned: number | null = null;
+    if (lastDecision.kind === 'complete') {
+        const { data } = await admin.rpc('imslp_prune_anchor', { anchor: category, before: buildingStartedAt });
+        pruned = typeof data === 'number' ? data : null;
     }
 
     return jsonResponse({
         ok: lastDecision.kind !== 'failed',
         category,
         state,
-        pages: pagesFetched,
+        requests: requestsSpent,
         pagesDone: lastDecision.pagesDone,
         cmcontinue: lastDecision.cmcontinue,
+        pruned,
     });
 });
