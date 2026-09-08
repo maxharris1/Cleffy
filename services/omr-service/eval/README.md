@@ -31,6 +31,10 @@ service's Docker image:
 ```bash
 docker build -t cleffy-omr services/omr-service
 docker run --rm -v "$PWD/tmp:/m" --entrypoint /opt/audiveris-root/opt/audiveris/bin/Audiveris cleffy-omr \
-    -batch -export -output /m/out -option Book.Lyrics=false -- /m/moonlight-a4.pdf
+    -batch -export -output /m/out \
+    -option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false \
+    -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true \
+    -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true \
+    -- /m/moonlight-a4.pdf
 npm run eval:moonlight -- --dir tmp/out
 ```

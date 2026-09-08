@@ -33,10 +33,21 @@ export interface AudiverisOptions {
 const AUDIVERIS_BIN = process.env.AUDIVERIS_BIN ?? '/opt/audiveris/bin/Audiveris';
 
 /**
- * Play-along needs notes + measure geometry, not lyric OCR.
- * Cost-neutral: less TEXTS work → fewer CPU-seconds on the same instance shape.
+ * Play-along defaults. Constant keys are `enclosingClass.field` as Audiveris
+ * registers them (`org.audiveris.omr.sheet.ProcessingSwitches.lyrics`, not
+ * the undocumented `Book.Lyrics`). `implicitTuplets` is the one that restores
+ * dropped triplet groups; `fingerings` stops fingering digits competing as
+ * tuplet signs; `lyrics=false` is the old TEXTS skip under its real name.
  */
-export const PLAY_ALONG_AUDIVERIS_OPTIONS = ['-option', 'Book.Lyrics=false'] as const;
+const SWITCH = 'org.audiveris.omr.sheet.ProcessingSwitches';
+export const PLAY_ALONG_AUDIVERIS_OPTIONS = [
+    '-option',
+    `${SWITCH}.lyrics=false`,
+    '-option',
+    `${SWITCH}.implicitTuplets=true`,
+    '-option',
+    `${SWITCH}.fingerings=true`,
+] as const;
 
 const STEP_RE = /\b(LOAD|BINARY|GRID|HEADERS|STEMS|BEAMS|LEDGERS|HEADS|TEXTS|SYMBOLS|SLURS|CURVES|PAGES|REDUCTION|SHEET)\b/gi;
 const SHEET_RE = /sheet#(\d+)/gi;
