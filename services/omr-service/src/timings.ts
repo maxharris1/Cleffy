@@ -18,6 +18,8 @@ export interface JobTimings {
     parallelFallbackReasons?: string[];
     /** Bar-voices the rhythm repair edited (musicxml.ts / rhythmRepair.ts). */
     rhythmRepairs?: number;
+    /** Key events the key-signature repair dropped (musicxml.ts / keyRepair.ts). */
+    keyRepairs?: number;
 }
 
 export const emptyTimings = (): JobTimings => ({});

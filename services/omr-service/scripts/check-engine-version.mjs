@@ -36,6 +36,7 @@ const WATCHED = [
     'services/omr-service/src/autoPedal.ts',
     'services/omr-service/src/era.ts',
     'services/omr-service/src/rhythmRepair.ts',
+    'services/omr-service/src/keyRepair.ts',
     'src/types/scoreData.ts',
 ];
 
