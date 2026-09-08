@@ -36,8 +36,10 @@ export interface ScoreAnalysisStatusRow {
  * svc-11 carries voices, infers pedal for unmarked scores and repairs misread bars (ScoreData v5).
  * svc-12: auto-pedal only for wholly unmarked scores; per-voice dynamics survive a
  * mark-less shard B; era stamped on the analysis.
+ * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
+ * parts, and zips geometry per system so the playhead stays on the bar.
  */
-export const CURRENT_ENGINE_GENERATION = 12;
+export const CURRENT_ENGINE_GENERATION = 13;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires
