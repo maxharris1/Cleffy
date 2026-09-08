@@ -51,8 +51,7 @@ const isNote = (ev: RawEvent): ev is NoteEvent => ev.k === 'note';
 const keysIn = (raw: RawMeasure): KeyEvent[] => raw.events.filter(isKey);
 
 /** 1-based MusicXML staff ↔ 0-based key.staff. */
-const noteOnStaff = (noteStaff: number, staff: 0 | 1 | null): boolean =>
-    staff === null || noteStaff === staff + 1;
+const noteOnStaff = (noteStaff: number, staff: 0 | 1 | null): boolean => staff === null || noteStaff === staff + 1;
 
 const fifthsInForce = (partFifths: number, staffFifths: Array<number | undefined>, staff: 0 | 1): number =>
     staffFifths[staff] ?? partFifths;

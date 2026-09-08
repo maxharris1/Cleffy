@@ -1,12 +1,12 @@
 {
-    "recordedAt": "2026-09-07T17:33:51.415Z",
-    "engine": "audiveris-5.11.0+svc-11",
+    "recordedAt": "2026-09-08T17:54:39.261Z",
+    "engine": "audiveris-5.11.0+svc-12",
     "movements": [
         {
             "name": "I. Adagio sostenuto",
             "bars": 69,
-            "passing": 16,
-            "noteRecall": 0.8126
+            "passing": 69,
+            "noteRecall": 0.9991
         },
         {
             "name": "II. Allegretto",
@@ -17,8 +17,8 @@
         {
             "name": "III. Presto agitato",
             "bars": 201,
-            "passing": 127,
-            "noteRecall": 0.8215
+            "passing": 140,
+            "noteRecall": 0.8536
         }
     ]
 }
