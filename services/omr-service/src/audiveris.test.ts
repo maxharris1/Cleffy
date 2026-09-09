@@ -28,6 +28,15 @@ describe('buildAudiverisArgs', () => {
                 '/in.pdf',
             ]);
             expect(buildAudiverisArgs('/in.pdf', '/out', { sheets: { from: 3, to: 3 } })).toContain('3');
+            expect(PLAY_ALONG_AUDIVERIS_OPTIONS).toEqual([
+                '-option',
+                'org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false',
+                '-option',
+                'org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true',
+                '-option',
+                'org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true',
+            ]);
+            expect(PLAY_ALONG_AUDIVERIS_OPTIONS.join(' ')).not.toMatch(/Book\.Lyrics/);
         } finally {
             if (prev === undefined) {
                 delete process.env.AUDIVERIS_EXTRA_OPTS;

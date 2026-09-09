@@ -393,6 +393,15 @@ describe('analysis warnings', () => {
         expect(screen.getByText(/sustain pedal is played by ear for the style/i)).toBeInTheDocument();
     });
 
+    it('explains svc-12 key repair, ghost fill, and clef/dynamic suspects', async () => {
+        withWarnings(['key_signature_repaired', 'ghost_part_filled', 'clef_suspect', 'dynamic_suspect']);
+        await userEvent.click(screen.getByRole('button', { name: /4 things to know/i }));
+        expect(screen.getByText(/key signature looked misread and was restored/i)).toBeInTheDocument();
+        expect(screen.getByText(/filled from a staff the recognizer had split off/i)).toBeInTheDocument();
+        expect(screen.getByText(/missing a clef change/i)).toBeInTheDocument();
+        expect(screen.getByText(/sudden loud marking in a pianissimo movement/i)).toBeInTheDocument();
+    });
+
     it('ignores codes it has no copy for rather than leaking them raw', () => {
         withWarnings(['something_new_from_the_service']);
         expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();

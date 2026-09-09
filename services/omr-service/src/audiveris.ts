@@ -35,9 +35,12 @@ const AUDIVERIS_BIN = process.env.AUDIVERIS_BIN ?? '/opt/audiveris/bin/Audiveris
 /**
  * Play-along defaults. Constant keys are `enclosingClass.field` as Audiveris
  * registers them (`org.audiveris.omr.sheet.ProcessingSwitches.lyrics`, not
- * the undocumented `Book.Lyrics`). `implicitTuplets` is the one that restores
- * dropped triplet groups; `fingerings` stops fingering digits competing as
- * tuplet signs; `lyrics=false` is the old TEXTS skip under its real name.
+ * the undocumented `Book.Lyrics`, which is a no-op). These apply to every
+ * live job: unmarked tuplets are a known Audiveris drop (Schubert D.780 No.1,
+ * Moonlight I), and fingering digits otherwise compete as tuplet signs.
+ * `implicitTuplets` can invent 3:2 on beamed groups that are not printed
+ * tuplets; that is accepted product risk, not a Moonlight-only experiment,
+ * and the Moonlight pitch-recall report does not validate rhythm.
  */
 const SWITCH = 'org.audiveris.omr.sheet.ProcessingSwitches';
 export const PLAY_ALONG_AUDIVERIS_OPTIONS = [

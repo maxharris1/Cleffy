@@ -38,6 +38,8 @@ export interface ScoreAnalysisStatusRow {
  * mark-less shard B; era stamped on the analysis.
  * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
  * parts, and zips geometry per system so the playhead stays on the bar.
+ * PR #34 also claims generation 12; the second merge must bump so Dexie does
+ * not keep serving the first of page-skip vs Moonlight repairs as current.
  */
 export const CURRENT_ENGINE_GENERATION = 13;
 

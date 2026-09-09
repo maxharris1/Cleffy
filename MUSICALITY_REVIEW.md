@@ -1,26 +1,36 @@
 # Musicality review — OMR → ScoreData → playback
 
-> **Addendum — 2026-09-08 (svc-12, Moonlight accuracy).** The play-along gate is
-> per-bar pitch recall against the Mutopia edition (`npm run eval:moonlight`): every
-> engraved bar must keep ≥ 90% of that bar’s reference notes at the right pitch
-> (DTW-aligned). The PDF used here is Mutopia’s LilyPond `moonlight-a4.pdf` (one
-> Audiveris movement file, 334 engraved bars), not the IMSLP scan the original
-> audit quoted (6/69, 42/61, ~95/201).
+> **Addendum — 2026-09-08 (svc-12, Moonlight accuracy).** A Moonlight-only
+> diagnostic (`npm run eval:moonlight`) reports per-bar pitch-multiset recall
+> against the Mutopia edition, DTW-aligned. That is a follow-along metric, not
+> an OMR accuracy gate for tuplets, and it is not in CI. The PDF used here is
+> Mutopia’s LilyPond `moonlight-a4.pdf` (one Audiveris movement file, 334
+> engraved bars), not the IMSLP scan the original audit quoted (6/69, 42/61,
+> ~95/201). Engraved indexes are pinned in `eval/fixtures/moonlight/boundaries.json`
+> (I `0–68` gated, II `69–128` report-only, III `129–329` report-only) because
+> Audiveris numbers the first Allegretto bar as a second `number="69"`.
 >
-> | movement            | svc-11 baseline (no tuplets) | svc-12 (`implicitTuplets` + parser) | gate |
+> | movement            | svc-11 baseline (no tuplets) | svc-12 (`implicitTuplets` + parser) | role |
 > | ------------------- | ---------------------------- | ----------------------------------- | ---- |
-> | I. Adagio sostenuto | 16/69 bars, 81.3% notes      | **69/69 bars, 99.9% notes**         | pass |
-> | II. Allegretto      | 10/60 bars, 68.9% notes      | 10/60 bars, 68.9% notes             | fail |
-> | III. Presto agitato | 127/201 bars, 82.2% notes    | 140/201 bars, 85.4% notes           | fail |
+> | I. Adagio sostenuto | 16/69 bars, 81.3% notes      | **69/69 bars, 99.9% notes**         | gated (pitch recall) |
+> | II. Allegretto      | 10/60 bars, 68.9% notes      | 10/60 bars, 68.9% notes             | report |
+> | III. Presto agitato | 127/201 bars, 82.2% notes    | 140/201 bars, 85.4% notes           | report |
 >
 > **What actually moved the needle.** `ProcessingSwitches.implicitTuplets=true` is
-> the mvt I result — the opening triplets were dropped as 3×eighths. `Book.Lyrics=false`
+> the mvt I result — the opening triplets were dropped as 3×eighths. That switch
+> is a product-wide play-along default (unmarked tuplets are a known Audiveris
+> drop; see No. 1 below), not a Moonlight-only experiment. `Book.Lyrics=false`
 > is a silent no-op; the real switch is `ProcessingSwitches.lyrics`. Fingerings is on
 > so digits do not compete as tuplet signs. Parser work that this edition did not
-> need to fire (LilyPond keys and a single Piano part are already clean):
+> fire (LilyPond keys and a single Piano part are already clean) — coverage is
+> synthetic MusicXML, not this PDF:
 > `key_signature_repaired`, `ghost_part_filled`, `clef_suspect`, `dynamic_suspect`.
 > D.C./Fine and `. Presto agitato.` → 172 are covered by tests; this export unrolls
 > `:||` (`repeats_unrolled`) and does not emit `jumps_performed`.
+>
+> The general corpus eval CLI (`src/eval/`, `npm run eval`) lives on
+> `mh/omr-accuracy-eval` (PR #33). PR #34 also claims svc-12; the second merge
+> must bump to svc-13.
 >
 > **Residual, this edition.**
 >
