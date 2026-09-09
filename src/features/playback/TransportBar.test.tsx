@@ -162,6 +162,19 @@ describe('TransportBar ready controls', () => {
         expect(useViewerStore.getState().bpm).toBe(40); // clamped at BPM_MIN
     });
 
+    it('shows the sounding tempo during playback, and +/− still edits the practice tempo', async () => {
+        setStore(() => {
+            useViewerStore.getState().setBpm(120);
+            useViewerStore.getState().setPlaybackStatus('playing');
+            useViewerStore.getState().setSoundingBpm(90);
+        });
+        renderBar();
+        expect(screen.getByLabelText('Tempo in beats per minute')).toHaveValue('90');
+        await userEvent.click(screen.getByRole('button', { name: 'Faster' }));
+        expect(useViewerStore.getState().bpm).toBe(121);
+        expect(screen.getByLabelText('Tempo in beats per minute')).toHaveValue('90');
+    });
+
     it('bpm can be typed, and commits clamped on blur', async () => {
         renderBar();
         const field = screen.getByRole('textbox', { name: /tempo in beats per minute/i });
@@ -459,6 +472,8 @@ describe('tempo disclosure and stale analyses', () => {
     it('does not offer a re-run the deployed worker cannot better', () => {
         ready({}, tinyScore, `audiveris-5.6.1+svc-${DEPLOYED_ENGINE_GENERATION}`);
         expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+        expect(screen.queryByText(/older version of the analysis/i)).toBeNull();
+        expect(screen.queryByText(/regenerate it to pick up the improvements/i)).toBeNull();
     });
 
     it('offers a re-run for an analysis with no engine stamp at all', () => {
@@ -470,6 +485,21 @@ describe('tempo disclosure and stale analyses', () => {
 
     it('does not offer a re-run to someone who cannot start one', () => {
         ready({ role: 'viewer' }, tinyScore, 'audiveris-5.6.1+svc-2');
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+    });
+
+    it('does not offer a re-run for an era mismatch while the deployed worker is still svc-6', () => {
+        ready(
+            { documentTitle: 'Ballade (Chopin, Frédéric)' },
+            { ...tinyScore, era: 'baroque' },
+            'audiveris-5.6.1+svc-6',
+        );
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+        expect(screen.queryByText(/older version of the analysis/i)).toBeNull();
+    });
+
+    it('does not offer a re-run when the analysis has no era stamp', () => {
+        ready({ documentTitle: 'Ballade (Chopin, Frédéric)' }, tinyScore, 'audiveris-5.6.1+svc-6');
         expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
     });
 });

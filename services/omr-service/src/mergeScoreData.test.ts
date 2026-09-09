@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { MAX_HOLDS, MAX_TEMPO_EVENTS, capHolds, capPedals, capTempoEvents } from './caps.js';
 import { mergeScoreDataParts, seamIsUnsafe, splitSheetRanges, splitSheetRangesOverlapping } from './mergeScoreData.js';
 import type { StructureSummary } from './repeats.js';
-import { SCORE_DATA_VERSION, TICKS_PER_QUARTER } from './scoreData.js';
+import { SCORE_DATA_VERSION, SCORE_DATA_WRITE_VERSION, TICKS_PER_QUARTER } from './scoreData.js';
 import type { ScoreData, ScoreHold, ScorePedal, ScoreTempo } from './scoreData.js';
 
 const basePart = (overrides: Partial<ScoreData>): ScoreData => ({
@@ -359,12 +359,13 @@ describe('mergeScoreDataParts pedal', () => {
         expect(edges.some((p) => p.tick >= 2 * 1920)).toBe(true);
         expect(merged.pedals).toEqual(edges);
         expect(merged.warnings.filter((w) => w === 'pedal_inferred')).toEqual(['pedal_inferred']);
+        expect(merged.version).toBe(SCORE_DATA_WRITE_VERSION);
+        expect(SCORE_DATA_WRITE_VERSION).toBe(3);
     });
 
     it('does not pedal a short unmarked stretch just because it fell on its own shard', () => {
-        // Serial rule: in a score that pedals, a gap under eight bars means "no
-        // pedal here". A four-bar second shard used to see no edges at all and
-        // pedal every bar.
+        // A score that marks any pedal is left as engraved. A four-bar second
+        // shard used to see no edges at all and pedal every bar.
         const a = unmarked(2, {
             pedals: [
                 { tick: 0, k: 'down' },
@@ -375,6 +376,26 @@ describe('mergeScoreDataParts pedal', () => {
             [
                 { score: a, sheets: { from: 1, to: 2 } },
                 { score: unmarked(4, { timeSignatures: [] }), sheets: { from: 3, to: 4 } },
+            ],
+            { era: 'romantic' },
+        );
+        expect(inferred(merged)).toEqual([]);
+        expect(merged.pedals).toEqual(a.pedals);
+        expect(merged.warnings).not.toContain('pedal_inferred');
+        expect(merged.era).toBe('romantic');
+    });
+
+    it('does not invent sustain across a long dry stretch of an engraved score', () => {
+        const a = unmarked(2, {
+            pedals: [
+                { tick: 0, k: 'down' },
+                { tick: 3839, k: 'up' },
+            ],
+        });
+        const merged = mergeScoreDataParts(
+            [
+                { score: a, sheets: { from: 1, to: 2 } },
+                { score: unmarked(10, { timeSignatures: [] }), sheets: { from: 3, to: 4 } },
             ],
             { era: 'romantic' },
         );

@@ -4,7 +4,7 @@ import { DEFAULT_ERA, type Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import type { StructureSummary } from './repeats.js';
 import { activeTimeSigAt } from './seamCompare.js';
-import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
+import { SCORE_DATA_WRITE_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
 import type { ScoreData, ScorePedal, ScoreTimeSig } from './scoreData.js';
 
 export interface ScoreDataPart {
@@ -26,10 +26,10 @@ export interface MergeScoreDataOptions {
  * Pedal the unmarked stretches of a joined score once, over the whole of it.
  * Parts are built without auto-pedal (see `BuildScoreDataOptions.autoPedal`):
  * a shard with no printed edge would otherwise pedal every bar, where the
- * whole score only fills a gap of eight bars or more. Any inferred edge or
- * disclosure a part does carry is discarded and re-derived here, and the
- * disclosure follows what survives the cap. Notes at this point carry no
- * parser gate, so staccato is read back from the note's length.
+ * whole score only infers when the engraving is silent throughout. Any
+ * inferred edge or disclosure a part does carry is discarded and re-derived
+ * here, and the disclosure follows what survives the cap. Notes at this
+ * point carry no parser gate, so staccato is read back from the note's length.
  */
 const pedalMerged = (
     score: Pick<ScoreData, 'notes' | 'measures' | 'timeSignatures' | 'totalTicks'>,
@@ -69,7 +69,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
         const only = parts[0]!.score;
         const soloWarnings = new Set(only.warnings);
         const pedals = pedalMerged(only, only.pedals ?? [], soloWarnings, era);
-        const solo: ScoreData = { ...only, warnings: [...soloWarnings].slice(0, 32) };
+        const solo: ScoreData = { ...only, warnings: [...soloWarnings].slice(0, 32), era };
         if (pedals.length > 0) {
             solo.pedals = pedals;
         } else {
@@ -263,7 +263,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
     const cappedPedals = pedalMerged({ notes, measures, timeSignatures, totalTicks }, pedals, warnings, era);
 
     const candidate: ScoreData = {
-        version: SCORE_DATA_VERSION,
+        version: SCORE_DATA_WRITE_VERSION,
         ticksPerQuarter: TICKS_PER_QUARTER,
         defaultBpm,
         timeSignatures,
@@ -272,6 +272,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
         ...(cappedTempos.length > 0 ? { tempos: cappedTempos } : {}),
         ...(cappedHolds.length > 0 ? { holds: cappedHolds } : {}),
         ...(cappedPedals.length > 0 ? { pedals: cappedPedals } : {}),
+        era,
         totalTicks,
         notes,
         measures,

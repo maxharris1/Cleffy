@@ -1,3 +1,4 @@
+import { eraOfTitle, type Era } from '@/features/playback/era';
 import { getSupabase } from '@/lib/supabase';
 import { getDb } from '@/sync/db';
 import type { CachedScoreAnalysis } from '@/sync/db';
@@ -33,8 +34,10 @@ export interface ScoreAnalysisStatusRow {
  * svc-9 realises ornaments, appoggiaturas, tempo-relative graces and swing.
  * svc-10 is the Audiveris 5.11.0 recognizer — a new engine changes what a PDF sounds like.
  * svc-11 carries voices, infers pedal for unmarked scores and repairs misread bars (ScoreData v5).
+ * svc-12: auto-pedal only for wholly unmarked scores; per-voice dynamics survive a
+ * mark-less shard B; era stamped on the analysis.
  */
-export const CURRENT_ENGINE_GENERATION = 11;
+export const CURRENT_ENGINE_GENERATION = 12;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires
@@ -44,11 +47,15 @@ export const CURRENT_ENGINE_GENERATION = 11;
  * of the reader's metered omr_runs, the old engine answers from its cache with
  * the very row that prompted the offer, and the banner comes straight back.
  * So the offer is capped at this number, and this number moves only in the
- * release that ships the matching OMR image.
+ * release that ships the matching OMR image. `/healthz` reports ENGINE_VERSION
+ * so score-analyze can refuse a charge even if this constant lags.
  */
 export const DEPLOYED_ENGINE_GENERATION = 6;
 
-const engineGeneration = (engineVersion: string | null): number | null => {
+/** First generation whose output depends on the document title's era. */
+export const ERA_AWARE_ENGINE_GENERATION = 11;
+
+export const engineGeneration = (engineVersion: string | null): number | null => {
     const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');
     if (!match?.[1]) {
         return null;
@@ -57,21 +64,41 @@ const engineGeneration = (engineVersion: string | null): number | null => {
     return Number.isFinite(parsed) ? parsed : null;
 };
 
+export interface AnalysisStaleOptions {
+    /** Era stamped on the stored ScoreData, if any. */
+    era?: Era | null;
+    /** Live document title, used to re-derive the era. */
+    title?: string | null;
+}
+
 /**
  * True when this analysis predates the current engine AND the deployed worker
- * could actually better it. A re-run is only ever offered when clicking the
- * button produces something newer than what the reader already has.
+ * could actually better it, or when the title's era no longer matches the
+ * stamp and the deployed worker is era-aware. A re-run is only ever offered
+ * when clicking the button produces something newer than what the reader already has.
  */
-export const analysisIsStale = (engineVersion: string | null): boolean => {
+export const analysisIsStaleAgainst = (
+    engineVersion: string | null,
+    offerableGeneration: number,
+    options: AnalysisStaleOptions = {},
+): boolean => {
     const generation = engineGeneration(engineVersion);
-    const offerable = Math.min(CURRENT_ENGINE_GENERATION, DEPLOYED_ENGINE_GENERATION);
-    // Absent or unreadable means it predates version stamping, so it is the
-    // oldest data there is. This is only ever asked of a READY analysis, where
-    // a missing stamp cannot mean "not finished yet". Five rows in the live
-    // database are in exactly this state and would otherwise never be offered
-    // a re-run — the documents most in need of one.
-    return generation === null || generation < offerable;
+    const engineStale = generation === null || generation < offerableGeneration;
+    const stamped = options.era;
+    const eraStale =
+        offerableGeneration >= ERA_AWARE_ENGINE_GENERATION &&
+        stamped !== undefined &&
+        stamped !== null &&
+        eraOfTitle(options.title) !== stamped;
+    return engineStale || eraStale;
 };
+
+export const analysisIsStale = (engineVersion: string | null, options: AnalysisStaleOptions = {}): boolean =>
+    analysisIsStaleAgainst(
+        engineVersion,
+        Math.min(CURRENT_ENGINE_GENERATION, DEPLOYED_ENGINE_GENERATION),
+        options,
+    );
 
 /** A processing row untouched for this long is a lost job (service died/recycled). */
 export const STALE_PROCESSING_MS = 20 * 60 * 1000;

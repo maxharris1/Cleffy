@@ -161,6 +161,12 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!result.ok && result.code === 'already_running') {
             return;
         }
+        if (!result.ok && result.code === 'already_current') {
+            // Worker cannot improve this row — stay on the ready analysis,
+            // do not flash a failure or spend a credit.
+            void applyStatus(docId);
+            return;
+        }
         // backlog_full — show copy, Generate/Retry remains available via failed UI.
         if (!result.ok && result.code === 'backlog_full') {
             setState({ kind: 'failed', code: 'backlog_full' });
@@ -169,7 +175,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!result.ok) {
             setState({ kind: 'failed', code: result.code ?? 'internal' });
         }
-    }, [docId]);
+    }, [docId, applyStatus]);
 
     const refresh = useCallback(() => {
         void applyStatus(docId);

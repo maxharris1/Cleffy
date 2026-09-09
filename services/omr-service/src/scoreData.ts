@@ -6,8 +6,15 @@ import { z } from 'zod';
  * up as scores silently failing to parse client-side).
  */
 
-/** Writer version for newly built analyses. */
+/** Highest schema this writer understands. Extra v4/v5 fields are optional. */
 export const SCORE_DATA_VERSION = 5;
+/**
+ * Version stamped on newly written payloads. origin/dev readers reject
+ * version > 3 wholesale, so a stamp of 5 would make play-along `internal`
+ * on any unrefreshed tab or on production until that client ships. 3 is
+ * a valid v3 document plus optional extensions those readers strip.
+ */
+export const SCORE_DATA_WRITE_VERSION = 3;
 export const TICKS_PER_QUARTER = 480;
 
 /** Highest voice slot a note may carry; slots are per staff, 0-based. */
@@ -146,6 +153,11 @@ export const scoreDataSchema = z.object({
     holds: z.array(scoreHoldSchema).max(128).optional(),
     /** v4+; sustain-pedal edges in tick order. */
     pedals: z.array(scorePedalSchema).max(256).optional(),
+    /**
+     * Era used when this analysis was built (document title at job time).
+     * Optional on caches that predate it. v5+.
+     */
+    era: z.enum(['baroque', 'classical', 'romantic', 'modern']).optional(),
     totalTicks: z.number().int().positive(),
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),

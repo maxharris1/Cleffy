@@ -180,7 +180,7 @@ describe('inferAutoPedal: engraved pedalling', () => {
         expect(result.pedals).toEqual(printed);
     });
 
-    it('fills only a long unpedalled gap, handing back to the printed depression', () => {
+    it('does not invent sustain in a long unpedalled gap of an engraved score', () => {
         const printed: ScorePedal[] = [
             { tick: 0, k: 'down' },
             { tick: 2 * BAR, k: 'up' },
@@ -188,40 +188,15 @@ describe('inferAutoPedal: engraved pedalling', () => {
             { tick: bars * BAR - 1, k: 'up' },
         ];
         const result = inferAutoPedal(score(notes, bars, printed), 'romantic');
-        expect(result.inferred).toBe(true);
-        const inferred = result.pedals.filter((p) => !printed.includes(p));
-        expect(inferred.length).toBeGreaterThan(0);
-        for (const edge of inferred) {
-            expect(edge.tick).toBeGreaterThanOrEqual(2 * BAR);
-            expect(edge.tick).toBeLessThanOrEqual((2 + UNPEDALLED_GAP_BARS) * BAR);
-            expect(edge.src).toBe('inferred');
-        }
-        // Printed edges keep their identity so the client can tell the two apart.
-        expect(result.pedals.filter((p) => p.src === undefined)).toEqual(printed);
-        // The gap closes with a lift, and the printed depression on that tick follows it.
-        const seam = (2 + UNPEDALLED_GAP_BARS) * BAR;
-        const atSeam = result.pedals.filter((p) => p.tick === seam).map((p) => p.k);
-        expect(atSeam).toEqual(['up', 'down']);
-        // Tick order throughout.
-        for (let i = 1; i < result.pedals.length; i++) {
-            expect(result.pedals[i]?.tick ?? 0).toBeGreaterThanOrEqual(result.pedals[i - 1]?.tick ?? 0);
-        }
+        expect(result.inferred).toBe(false);
+        expect(result.pedals).toEqual(printed);
     });
 });
 
 describe('inferAutoPedal: region edges', () => {
-    /** Walk the merged edges: never two depressions or two lifts in a row. */
-    const expectWellFormed = (pedals: readonly ScorePedal[]): void => {
-        let down = false;
-        for (const edge of pedals) {
-            expect(edge.k).toBe(down ? 'up' : 'down');
-            down = edge.k === 'down';
-        }
-    };
-
     it('does not take the pedal for a beat that began under a printed depression', () => {
-        // The printed lift at 4080 falls mid-beat; the attack at 3840 sounds
-        // under the printed pedal and must not start an inferred one.
+        // The printed lift at 4080 falls mid-beat; with engraved edges present
+        // the whole score is left as written — including the long dry gap.
         const bars = 14;
         const notes = Array.from({ length: bars * 4 }, (_, i) =>
             chord(i * BEAT, i % 2 === 0 ? C : F, i % 2 === 0 ? 48 : 53),
@@ -233,17 +208,11 @@ describe('inferAutoPedal: region edges', () => {
             { tick: bars * BAR, k: 'up' },
         ];
         const result = inferAutoPedal(score(notes, bars, printed), 'romantic');
-        expect(result.inferred).toBe(true);
-        expectWellFormed(result.pedals);
-        const inferred = result.pedals.filter((p) => p.src === 'inferred');
-        expect(inferred[0]).toEqual({ tick: 4320, k: 'down', src: 'inferred' });
-        for (const edge of inferred) {
-            expect(edge.tick).toBeGreaterThanOrEqual(4080);
-            expect(edge.tick).toBeLessThanOrEqual(23280);
-        }
+        expect(result.inferred).toBe(false);
+        expect(result.pedals).toEqual(printed);
     });
 
-    it('pedals the stretch before a lift whose depression the engraving lost', () => {
+    it('does not invent a depression the engraving lost', () => {
         const bars = 12;
         const notes = Array.from({ length: bars * 4 }, (_, i) =>
             chord(i * BEAT, i % 2 === 0 ? C : F, i % 2 === 0 ? 48 : 53),
@@ -254,13 +223,8 @@ describe('inferAutoPedal: region edges', () => {
             { tick: bars * BAR, k: 'up' },
         ];
         const result = inferAutoPedal(score(notes, bars, printed), 'romantic');
-        expect(result.inferred).toBe(true);
-        const inferred = result.pedals.filter((p) => p.src === 'inferred');
-        expect(inferred[0]).toEqual({ tick: 0, k: 'down', src: 'inferred' });
-        expect(inferred[inferred.length - 1]).toEqual({ tick: 10 * BAR, k: 'up', src: 'inferred' });
-        for (const edge of inferred) {
-            expect(edge.tick).toBeLessThanOrEqual(10 * BAR);
-        }
+        expect(result.inferred).toBe(false);
+        expect(result.pedals).toEqual(printed);
     });
 });
 

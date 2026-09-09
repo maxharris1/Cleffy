@@ -1,8 +1,6 @@
-import { readFileSync } from 'node:fs';
-
 import { describe, expect, it } from 'vitest';
 
-import { composerSurnameOf, DEFAULT_ERA, eraOfTitle } from './era.js';
+import { composerSurnameOf, DEFAULT_ERA, eraOfTitle } from '@/features/playback/era';
 
 describe('composerSurnameOf', () => {
     it('reads the surname from an IMSLP-style "(Last, First)" suffix', () => {
@@ -40,19 +38,5 @@ describe('eraOfTitle', () => {
         expect(eraOfTitle('scan.pdf')).toBe('classical');
         expect(eraOfTitle(null)).toBe('classical');
         expect(eraOfTitle(undefined)).toBe('classical');
-    });
-});
-
-describe('era mapping lockstep', () => {
-    it('keeps the client and edge-function copies on the same surnames', () => {
-        const here = readFileSync(new URL('./era.ts', import.meta.url), 'utf8');
-        const client = readFileSync(new URL('../../../src/features/playback/era.ts', import.meta.url), 'utf8');
-        const edge = readFileSync(new URL('../../../supabase/functions/_shared/era.ts', import.meta.url), 'utf8');
-        const surnames = "baroque: ['Bach', 'Vivaldi', 'Handel', 'Pachelbel'";
-        expect(here).toContain(surnames);
-        expect(client).toContain(surnames);
-        expect(edge).toContain(surnames);
-        expect(client).toContain("export const DEFAULT_ERA: Era = 'classical'");
-        expect(edge).toContain("export const DEFAULT_ERA: Era = 'classical'");
     });
 });

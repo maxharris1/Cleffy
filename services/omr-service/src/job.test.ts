@@ -32,7 +32,7 @@ describe('shouldRunParallelShards', () => {
         expect(shouldRunParallelShards(PARALLEL_SHEET_MIN_PAGES - 1, 16 * GIB)).toBe(false);
     });
 
-    it('stays serial on Cloud Run 4Gi and typical 8Gi Docker', () => {
+    it('stays serial at 4Gi and at the 8Gi floor; 16Gi Cloud Run is parallel', () => {
         expect(shouldRunParallelShards(19, 4 * GIB)).toBe(false);
         expect(shouldRunParallelShards(19, PARALLEL_MIN_MEMORY_BYTES)).toBe(false);
         expect(shouldRunParallelShards(19, null)).toBe(false);

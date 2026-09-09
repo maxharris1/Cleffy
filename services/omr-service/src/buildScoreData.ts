@@ -5,7 +5,7 @@ import { ERROR_CODES, JobError } from './errors.js';
 import type { MusicalScore } from './musicxml.js';
 import type { OmrGeometry } from './omrGeometry.js';
 import { planRepeats, resolveJump, unrollRepeats } from './repeats.js';
-import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
+import { SCORE_DATA_WRITE_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
 import type { ScoreData, ScoreMeasure, ScoreNote, ScoreSystem } from './scoreData.js';
 
 /**
@@ -229,7 +229,7 @@ export const buildScoreData = (
     }
 
     const candidate: ScoreData = {
-        version: SCORE_DATA_VERSION,
+        version: SCORE_DATA_WRITE_VERSION,
         ticksPerQuarter: TICKS_PER_QUARTER,
         defaultBpm: musical.defaultBpm,
         timeSignatures: performed.timeSignatures,
@@ -238,6 +238,7 @@ export const buildScoreData = (
         ...(tempos ? { tempos } : {}),
         ...(holds ? { holds } : {}),
         ...(pedals && pedals.length > 0 ? { pedals } : {}),
+        era: options.era ?? DEFAULT_ERA,
         totalTicks: performed.totalTicks,
         notes: performed.notes,
         measures: performed.measures,

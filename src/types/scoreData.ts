@@ -17,8 +17,17 @@ import { z } from 'zod';
  * KEEP IN LOCKSTEP with services/omr-service/src/scoreData.ts.
  */
 
-/** Current writer version. Readers accept 1 through 5 (see parseScoreData). */
+/** Highest schema this reader understands. Extra v4/v5 fields are optional. */
 export const SCORE_DATA_VERSION = 5;
+/**
+ * Version stamped on newly written payloads. origin/dev (and any cached SPA
+ * still on that bundle) rejects version > 3 as parseScoreData → null, so a
+ * writer that stamps 5 is fatal to those readers even when every added field
+ * is optional and would otherwise strip. 3 keeps the row playable; this
+ * reader still picks up `vc` / `pedals[].src` / `era` because those fields
+ * are optional on every version.
+ */
+export const SCORE_DATA_WRITE_VERSION = 3;
 /** Oldest ScoreData version the client still serves from cache. */
 export const SCORE_DATA_MIN_VERSION = 1;
 
@@ -184,6 +193,11 @@ export const scoreDataSchema = z.object({
     holds: z.array(scoreHoldSchema).max(128).optional(),
     /** v4+; sustain-pedal edges in tick order. */
     pedals: z.array(scorePedalSchema).max(256).optional(),
+    /**
+     * Era the worker used when building this analysis (title at job time).
+     * Optional: v1–v4 caches and svc-6 rows have none. v5+.
+     */
+    era: z.enum(['baroque', 'classical', 'romantic', 'modern']).optional(),
     totalTicks: z.number().int().positive(),
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
-import { parseScoreData, SCORE_DATA_VERSION, tempoIsInferred } from '@/types/scoreData';
+import { parseScoreData, SCORE_DATA_VERSION, SCORE_DATA_WRITE_VERSION, tempoIsInferred } from '@/types/scoreData';
 import type { ScoreData, ScorePedal } from '@/types/scoreData';
 
 /**
@@ -92,6 +93,41 @@ describe('parseScoreData', () => {
 
         expect(parseScoreData(payload({ version: SCORE_DATA_VERSION + 1 }))).toBeNull();
         expect(warn).toHaveBeenCalled();
+    });
+
+    it('reads v5 fields off a WRITE_VERSION payload that origin/dev still accepts', () => {
+        const v3Reader = z.object({
+            version: z.number().int(),
+            ticksPerQuarter: z.literal(480),
+            defaultBpm: z.number().positive().nullable(),
+            timeSignatures: z.array(z.object({ tick: z.number(), num: z.number(), den: z.number() })),
+            totalTicks: z.number().int().positive(),
+            notes: z.array(
+                z.object({
+                    t: z.number().int(),
+                    d: z.number().int(),
+                    p: z.number().int(),
+                    h: z.union([z.literal(0), z.literal(1)]),
+                    v: z.number().optional(),
+                }),
+            ),
+            measures: z.array(z.unknown()),
+            systems: z.array(z.unknown()),
+            warnings: z.array(z.string()),
+        });
+        const raw = payload({
+            version: SCORE_DATA_WRITE_VERSION,
+            notes: [{ t: 0, d: 480, p: 60, h: 0, vc: 2 }],
+            pedals: [{ tick: 0, k: 'down', src: 'inferred' }],
+            era: 'baroque',
+        });
+        expect(SCORE_DATA_WRITE_VERSION).toBe(3);
+        expect(v3Reader.safeParse(raw).success).toBe(true);
+        const parsed = parseScoreData(raw);
+        expect(parsed?.version).toBe(3);
+        expect(parsed?.notes[0]?.vc).toBe(2);
+        expect(parsed?.pedals?.[0]?.src).toBe('inferred');
+        expect(parsed?.era).toBe('baroque');
     });
 
     /**

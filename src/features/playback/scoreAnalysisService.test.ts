@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import {
     analysisIsStale,
+    analysisIsStaleAgainst,
     CURRENT_ENGINE_GENERATION,
     DEPLOYED_ENGINE_GENERATION,
+    ERA_AWARE_ENGINE_GENERATION,
     fetchScoreAnalysisFull,
     fetchScoreAnalysisStatus,
     isProcessingStale,
@@ -176,6 +178,38 @@ describe('analysisIsStale', () => {
         // was bumped ahead of CURRENT_ENGINE_GENERATION and readers would be
         // offered re-runs whose payloads this bundle may reject wholesale.
         expect(DEPLOYED_ENGINE_GENERATION).toBeLessThanOrEqual(CURRENT_ENGINE_GENERATION);
+    });
+
+    it('does not offer an era re-run while the deployed worker is not era-aware', () => {
+        expect(
+            analysisIsStale('audiveris-5.6.1+svc-6', {
+                era: 'baroque',
+                title: 'Ballade (Chopin, Frédéric)',
+            }),
+        ).toBe(false);
+    });
+
+    it('offers a re-run when the title era no longer matches the stamp, once the worker is era-aware', () => {
+        expect(
+            analysisIsStaleAgainst('audiveris-5.11.0+svc-11', ERA_AWARE_ENGINE_GENERATION, {
+                era: 'baroque',
+                title: 'Ballade (Chopin, Frédéric)',
+            }),
+        ).toBe(true);
+        expect(
+            analysisIsStaleAgainst('audiveris-5.11.0+svc-11', ERA_AWARE_ENGINE_GENERATION, {
+                era: 'baroque',
+                title: 'Inventions (Bach, Johann Sebastian)',
+            }),
+        ).toBe(false);
+    });
+
+    it('does not treat a missing era stamp as stale once the generation is current', () => {
+        expect(
+            analysisIsStaleAgainst('audiveris-5.11.0+svc-11', ERA_AWARE_ENGINE_GENERATION, {
+                title: 'Ballade (Chopin, Frédéric)',
+            }),
+        ).toBe(false);
     });
 });
 

@@ -11,13 +11,12 @@ import { MAX_VOICE_SLOT, TICKS_PER_QUARTER, type ScorePedal, type ScoreTimeSig }
  * the fingers are changing chords faster than a foot can follow.
  *
  * This works on the performed timeline (repeats already unrolled) and only
- * where the engraving is silent: everywhere when there are no pedal marks at
- * all, otherwise in the stretches of at least {@link UNPEDALLED_GAP_BARS}
- * bars between a lift and the next depression, where a marked-up piece has
- * simply stopped saying.
+ * where the engraving is silent: the whole score when there are no pedal
+ * marks at all. A score that marks any pedal is left as engraved — a dry
+ * stretch of eight bars in Chopin is a dry stretch, not an invitation.
  */
 
-/** A pedal-less stretch shorter than this, in a piece that does pedal, means "no pedal here". */
+/** Historical gap heuristic. Inference no longer fills engraved scores at all. */
 export const UNPEDALLED_GAP_BARS = 8;
 /** More harmony changes than this inside one beat and the foot gives up. */
 export const MAX_SET_CHANGES_PER_BEAT = 2;
@@ -93,38 +92,14 @@ const byEdgeOrder = (a: ScorePedal, b: ScorePedal): number => {
 
 /**
  * Stretches where the pedal is up and nothing says otherwise. With no marks at
- * all, the whole score; with marks, the gaps of at least
- * {@link UNPEDALLED_GAP_BARS} bars before the first depression and between a
- * lift and the next depression.
+ * all, the whole score. With any printed edge, none — engraved pedalling is
+ * left alone, including long dry gaps.
  */
 const unpedalledRegions = (score: AutoPedalScore): Region[] => {
     if (score.pedals.length === 0) {
         return [{ from: 0, to: score.totalTicks }];
     }
-    const edges = [...score.pedals].sort(byEdgeOrder);
-    const gaps: Region[] = [];
-    let down = false;
-    let from = 0;
-    for (const edge of edges) {
-        if (!down && edge.tick > from) {
-            // The pedal was up from `from` to here, whichever edge this is: a
-            // depression ends the gap, a lift with nothing down before it
-            // (OMR lost the depression) does too.
-            gaps.push({ from, to: edge.tick });
-        }
-        if (edge.k === 'down') {
-            down = true;
-        } else {
-            from = edge.tick;
-            down = false;
-        }
-    }
-    if (!down && score.totalTicks > from) {
-        gaps.push({ from, to: score.totalTicks });
-    }
-    return gaps.filter(
-        (gap) => score.measures.filter((m) => m.tick >= gap.from && m.tick < gap.to).length >= UNPEDALLED_GAP_BARS,
-    );
+    return [];
 };
 
 /**

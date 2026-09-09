@@ -42,6 +42,11 @@ export const DEFAULT_BPM = 100;
 interface PlaybackSlice {
     playbackStatus: PlaybackStatus;
     bpm: number;
+    /**
+     * Tempo actually sounding at the playhead, or null when stopped.
+     * The practice tempo (`bpm`) is what +/− edits; this is the readout.
+     */
+    soundingBpm: number | null;
     /** Index into ScoreData.measures (not the printed number), null before playback. */
     currentMeasureIndex: number | null;
     muteRH: boolean;
@@ -59,6 +64,7 @@ interface PlaybackSlice {
     autoPedal: boolean;
     setPlaybackStatus: (playbackStatus: PlaybackStatus) => void;
     setBpm: (bpm: number) => void;
+    setSoundingBpm: (soundingBpm: number | null) => void;
     setCurrentMeasureIndex: (currentMeasureIndex: number | null) => void;
     setHandMuted: (hand: 0 | 1, muted: boolean) => void;
     setHandVolume: (hand: 0 | 1, volume: number) => void;
@@ -97,6 +103,7 @@ const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
 const INITIAL_PLAYBACK = {
     playbackStatus: 'idle',
     bpm: DEFAULT_BPM,
+    soundingBpm: null,
     currentMeasureIndex: null,
     muteRH: false,
     muteLH: false,
@@ -134,6 +141,7 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     ...readPlaybackPrefs(),
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),
+    setSoundingBpm: (soundingBpm) => set({ soundingBpm }),
     setCurrentMeasureIndex: (currentMeasureIndex) => set({ currentMeasureIndex }),
     setHandMuted: (hand, muted) => set(hand === 0 ? { muteRH: muted } : { muteLH: muted }),
     setHandVolume: (hand, volume) => {

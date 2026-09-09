@@ -46,8 +46,11 @@ import type { ScoreData } from './scoreData.js';
  * svc-9: ornaments, appoggiatura, tempo-relative graces, swing.
  * svc-10: engine upgrade 5.6.1 → 5.11.0.
  * svc-11: voices (ScoreData v5), per-voice dynamics, auto-pedal, rhythm repair, Baroque ornaments.
+ * svc-12: auto-pedal only for wholly unmarked scores; per-voice dynamics survive a
+ * mark-less shard B; era stamped on the analysis; wire version 3 so v3 readers
+ * still parse the optional v5 fields.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-11';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-12';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
@@ -56,6 +59,8 @@ export const ENGINE_VERSION = 'audiveris-5.11.0+svc-11';
  * documents that share a PDF under different titles need two entries. Only
  * the cache reads this: what is written to `engine_version` on the document
  * stays the bare ENGINE_VERSION, which the client parses for its generation.
+ * The resolved era is also stamped on ScoreData so a same-document title
+ * edit can mark the row stale without a schema migration.
  */
 export const cacheKeyFor = (engineVersion: string, era: Era): string => `${engineVersion}#era=${era}`;
 
@@ -67,7 +72,7 @@ const PARALLEL_SHEET_SHARDS = 2;
 const PARALLEL_SHEET_OVERLAP = 1;
 /**
  * Two concurrent -Xmx3g heaps + OpenCV/JavaCPP + Node + /tmp need more than 8Gi.
- * Cloud Run is 4Gi; typical Docker Desktop is ≤8Gi — both stay serial.
+ * Typical Docker Desktop is ≤8Gi and stays serial; Cloud Run is deployed at 16Gi.
  */
 export const PARALLEL_MIN_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
 const CGROUP_V2_MEMORY_MAX = '/sys/fs/cgroup/memory.max';

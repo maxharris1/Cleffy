@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { buildScoreData } from './buildScoreData.js';
 import { mergeScoreDataParts } from './mergeScoreData.js';
 import { parseMusicXmlString, parseMxlFiles, expressionSeedAt } from './musicxml.js';
-import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
+import { SCORE_DATA_VERSION, SCORE_DATA_WRITE_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
 
 const wrap = (measures: string, extraParts = ''): string => `<?xml version="1.0"?>
 <score-partwise version="4.0">
@@ -1776,6 +1776,29 @@ describe('voices', () => {
                 { id: '2', slot: 1, meanPitch: 62 },
             ]);
         });
+
+        it('keeps per-voice levels on a mark-less shard B', () => {
+            const voicedA = wrap(
+                bar(
+                    1,
+                    `${voicedDyn('f', 1)}${vn('G', 5, 16, 1)}${back(16)}${voicedDyn('p', 2)}${vn('C', 5, 16, 2)}`,
+                    true,
+                ),
+            );
+            const seed = seedFrom(voicedA);
+            expect(seed.velocityByVoice?.['1:0']).toBe(0.82);
+            expect(seed.velocityByVoice?.['1:1']).toBe(0.46);
+
+            const shardB = wrap(bar(2, `${vn('A', 5, 16, 1)}${back(16)}${vn('D', 5, 16, 2)}`, true));
+            const seeded = parseMusicXmlString(shardB, 0, seed);
+            const level = (p: number): number | undefined => seeded.notes.find((n) => n.p === p)?.v;
+            expect(level(81)).toBe(0.82);
+            expect(level(74)).toBe(0.46);
+
+            const fresh = parseMusicXmlString(shardB);
+            expect(fresh.notes.find((n) => n.p === 81)?.v).toBeUndefined();
+            expect(fresh.notes.find((n) => n.p === 74)?.v).toBeUndefined();
+        });
     });
 });
 
@@ -1808,6 +1831,7 @@ describe('ScoreData v5 contract', () => {
 
     it('writes and validates version 5, voices and all', () => {
         expect(SCORE_DATA_VERSION).toBe(5);
+        expect(SCORE_DATA_WRITE_VERSION).toBe(3);
         const checked = scoreDataSchema.safeParse(v5);
         expect(checked.success).toBe(true);
         expect(checked.data?.pedals).toEqual(v5.pedals);
@@ -1843,7 +1867,9 @@ describe('ScoreData v5 contract', () => {
         // guards — one copy of the contract moving without the other.
         const client = readFileSync(new URL('../../../src/types/scoreData.ts', import.meta.url), 'utf8');
         expect(client).toContain(`export const SCORE_DATA_VERSION = ${SCORE_DATA_VERSION};`);
+        expect(client).toContain(`export const SCORE_DATA_WRITE_VERSION = ${SCORE_DATA_WRITE_VERSION};`);
         expect(client).toContain('pedals: z.array(scorePedalSchema).max(256).optional(),');
         expect(client).toContain('vc: z.number().int().min(0).max(MAX_VOICE_SLOT).optional(),');
+        expect(client).toContain("era: z.enum(['baroque', 'classical', 'romantic', 'modern']).optional(),");
     });
 });

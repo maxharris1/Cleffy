@@ -68,6 +68,12 @@ export interface MusicalScore {
      * Per-staff dynamic curves after hairpin interpolation. Service-side only.
      */
     dynamicCurves?: Array<{ staff: number } & DynamicCurve>;
+    /**
+     * Per-voice dynamic curves (`staff:slot`) after hairpin interpolation.
+     * Service-side only; carried in the shard seed so a mark-less shard B
+     * keeps shard A's per-voice levels.
+     */
+    voiceCurves?: Array<{ staff: number; slot: number } & DynamicCurve>;
     /** Meter-based opening pulse, whether or not anything printed a tempo. */
     meterDefaultBpm?: number;
     /**
@@ -92,6 +98,11 @@ export interface ParseSeed {
     tempoBpm: number | null;
     steadyBpm: number | null;
     velocityByStaff: Record<number, number>;
+    /**
+     * Per-voice levels (`${staff}:${slot}`) in force at the seed tick, so a
+     * mark-less second shard does not collapse every voice to the staff curve.
+     */
+    velocityByVoice?: Record<string, number>;
     /**
      * Voice-slot identities at the end of the previous shard, per parsed part
      * (in target order) and staff, so a line keeps its `vc` across the seam.
@@ -822,6 +833,7 @@ export const parseMusicXmlString = (
         openTiesAtEnd: leadResult.openTiesAtEnd,
         tempoMarks: leadResult.tempoMarks,
         dynamicCurves: leadResult.dynamicCurves,
+        voiceCurves: leadResult.voiceCurves,
         meterDefaultBpm: leadResult.meterDefaultBpm,
         swing,
         rhythmRepairs,
@@ -963,6 +975,7 @@ interface PartResult {
     openTiesAtEnd: number;
     tempoMarks: TempoMark[];
     dynamicCurves: Array<{ staff: number } & DynamicCurve>;
+    voiceCurves: Array<{ staff: number; slot: number } & DynamicCurve>;
     meterDefaultBpm: number;
     swing: boolean;
     /** Bar-voices the rhythm repair edited (see rhythmRepair.ts). */
@@ -2123,7 +2136,9 @@ const resolveDynamics = (
     }
     if (marks.length === 0) {
         seedCurveStarts(curves, seed, tickOffset);
-        return { curves, voiceCurves: new Map(), accents };
+        const voiceCurves = new Map<string, DynamicCurve>();
+        seedVoiceCurveStarts(voiceCurves, seed, tickOffset);
+        return { curves, voiceCurves, accents };
     }
     marks.sort((a, b) => a.tick - b.tick);
     for (const list of onsets.values()) {
@@ -2294,6 +2309,7 @@ const resolveDynamics = (
             voiceCurves.set(`${staff}:${slot}`, own);
         }
     }
+    seedVoiceCurveStarts(voiceCurves, seed, tickOffset);
     return { curves, voiceCurves, accents };
 };
 
@@ -2308,6 +2324,24 @@ const seedCurveStarts = (curves: Map<number, DynamicCurve>, seed: ParseSeed, tic
             curve.points.push({ tick: tickOffset, v });
             curve.points.sort((a, b) => a.tick - b.tick);
         }
+    }
+};
+
+/** Resume per-voice levels from a prior shard when this parse printed none. */
+const seedVoiceCurveStarts = (
+    voiceCurves: Map<string, DynamicCurve>,
+    seed: ParseSeed,
+    tickOffset: number,
+): void => {
+    for (const [key, v] of Object.entries(seed.velocityByVoice ?? {})) {
+        const existing = voiceCurves.get(key);
+        if (existing && pointValueAt(existing.points, tickOffset) !== undefined) {
+            continue;
+        }
+        const curve = existing ?? { points: [], ramps: [] };
+        curve.points.push({ tick: tickOffset, v });
+        curve.points.sort((a, b) => a.tick - b.tick);
+        voiceCurves.set(key, curve);
     }
 };
 
@@ -2991,6 +3025,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         openTiesAtEnd: openTies.size,
         tempoMarks: ctx.timeline ? [] : tempoMarks,
         dynamicCurves: [...curves.entries()].map(([staff, curve]) => ({ staff, ...curve })),
+        voiceCurves: [...voiceCurves.entries()].map(([key, curve]) => {
+            const [staffRaw, slotRaw] = key.split(':');
+            return { staff: Number(staffRaw), slot: Number(slotRaw), ...curve };
+        }),
         meterDefaultBpm: meterDefault,
         swing,
         rhythmRepairs,
@@ -3024,9 +3062,16 @@ export const expressionSeedAt = (musical: MusicalScore, tick: number): ParseSeed
             velocityByStaff[curve.staff] = v;
         }
     }
+    const velocityByVoice: Record<string, number> = {};
+    for (const curve of musical.voiceCurves ?? []) {
+        const v = velocityAt(curve, tick);
+        if (v !== undefined) {
+            velocityByVoice[`${curve.staff}:${curve.slot}`] = v;
+        }
+    }
     // Voices are named per part, and the state at the end of the shard is the
     // state at any seam inside its overlap page.
-    return { tempoBpm, steadyBpm, velocityByStaff, voiceSlotsByPart: musical.voiceSlotsByPart ?? {} };
+    return { tempoBpm, steadyBpm, velocityByStaff, velocityByVoice, voiceSlotsByPart: musical.voiceSlotsByPart ?? {} };
 };
 
 const ticksOf = (duration: number, divisions: number): number =>
@@ -3086,6 +3131,7 @@ export const parseMxlFiles = (
         openTiesAtEnd: 0,
         tempoMarks: [],
         dynamicCurves: [],
+        voiceCurves: [],
         swing: false,
     };
     const warnings = new Set<string>();
@@ -3122,6 +3168,7 @@ export const parseMxlFiles = (
         combined.repeats.push(...parsed.repeats);
         combined.tempoMarks = [...(combined.tempoMarks ?? []), ...(parsed.tempoMarks ?? [])];
         combined.dynamicCurves = [...(combined.dynamicCurves ?? []), ...(parsed.dynamicCurves ?? [])];
+        combined.voiceCurves = [...(combined.voiceCurves ?? []), ...(parsed.voiceCurves ?? [])];
         if (combined.defaultBpm === null && parsed.defaultBpm !== null) {
             combined.defaultBpm = parsed.defaultBpm;
             defaultedAtOpening = parsed.warnings.includes('tempo_defaulted');

@@ -82,7 +82,8 @@ describe('buildScoreData', () => {
         ]);
         expect(score.defaultBpm).toBe(88);
         expect(score.warnings).toContain('grace_notes_skipped');
-        expect(score.version).toBe(5);
+        expect(score.version).toBe(3);
+        expect(score.era).toBe('classical');
     });
 
     it('degrades to geometry-less measures when the .omr is unusable', () => {
@@ -145,7 +146,7 @@ describe('buildScoreData auto-pedal', () => {
         expect(score.warnings).not.toContain('pedal_inferred');
     });
 
-    it('does not second-guess engraved pedalling', () => {
+    it('does not second-guess engraved pedalling, including a long dry middle', () => {
         const pedalled: MusicalScore = {
             ...musical,
             pedals: [
@@ -156,6 +157,7 @@ describe('buildScoreData auto-pedal', () => {
         const score = buildScoreData(pedalled, geometry, { era: 'romantic' });
         expect(score.pedals).toEqual(pedalled.pedals);
         expect(score.warnings).not.toContain('pedal_inferred');
+        expect(score.era).toBe('romantic');
     });
 
     it('leaves a shard unpedalled and undisclosed when asked, for the merge to pedal whole', () => {

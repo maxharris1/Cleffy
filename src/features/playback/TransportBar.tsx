@@ -1,13 +1,13 @@
 import { useMemo, useState } from 'react';
 
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
+import type { Era } from '@/features/playback/era';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import { BPM_MAX, BPM_MIN, useViewerStore } from '@/state/store';
 import type { MemberRole } from '@/types/database';
-import { hasLeftHand } from '@/types/scoreData';
-import type { ScoreData } from '@/types/scoreData';
+import { hasLeftHand, type ScoreData } from '@/types/scoreData';
 import {
     ChevronDownIcon,
     ChevronLeftIcon,
@@ -37,6 +37,8 @@ export interface TransportBarProps {
     pageCount: number | null;
     warning: string | null;
     onDismissWarning: () => void;
+    /** Live document title, so an era-stamped analysis can go stale on rename. */
+    documentTitle?: string | null;
 }
 
 const ERROR_COPY: Record<string, string> = {
@@ -158,8 +160,17 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
  * else in the system ever re-analyzes a document, so without this every fix
  * lands only on scores uploaded afterwards.
  */
-const StaleAnalysisNotice = (props: { engineVersion: string | null; canManage: boolean; onGenerate: () => void }) => {
-    if (!props.canManage || !analysisIsStale(props.engineVersion)) {
+const StaleAnalysisNotice = (props: {
+    engineVersion: string | null;
+    era?: Era | null;
+    title?: string | null;
+    canManage: boolean;
+    onGenerate: () => void;
+}) => {
+    if (
+        !props.canManage ||
+        !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })
+    ) {
         return null;
     }
     return (
@@ -272,6 +283,7 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
     const { score, getEngine, warning, onDismissWarning } = props;
     const playbackStatus = useViewerStore((s) => s.playbackStatus);
     const bpm = useViewerStore((s) => s.bpm);
+    const soundingBpm = useViewerStore((s) => s.soundingBpm);
     const currentMeasureIndex = useViewerStore((s) => s.currentMeasureIndex);
     const muteRH = useViewerStore((s) => s.muteRH);
     const muteLH = useViewerStore((s) => s.muteLH);
@@ -411,6 +423,8 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
 
             <StaleAnalysisNotice
                 engineVersion={props.state.kind === 'ready' ? props.state.engineVersion : null}
+                era={score.era}
+                title={props.documentTitle}
                 canManage={props.role === 'owner' || props.role === 'editor'}
                 onGenerate={props.onGenerate}
             />
@@ -533,7 +547,8 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 {/* Practice controls — collapsible on phones */}
                 <div className={`${expanded ? 'flex' : 'hidden'} flex-wrap items-center gap-x-2 gap-y-1 sm:flex`}>
                     <TempoControl
-                        bpm={bpm}
+                        bpm={soundingBpm ?? bpm}
+                        practiceBpm={bpm}
                         onBpm={setBpm}
                         compound={isCompoundMeter(score)}
                         estimate={tempoEstimate(score)}
@@ -705,11 +720,13 @@ const TEMPO_ESTIMATE_COPY: Record<TempoEstimate, { control: string; badge: strin
  */
 const TempoControl = ({
     bpm,
+    practiceBpm,
     onBpm,
     compound,
     estimate,
 }: {
     bpm: number;
+    practiceBpm: number;
     onBpm: (bpm: number) => void;
     compound: boolean;
     estimate: TempoEstimate | null;
@@ -730,7 +747,12 @@ const TempoControl = ({
             title={estimate ? TEMPO_ESTIMATE_COPY[estimate].control : 'Tempo (quarter note BPM)'}
         >
             <span className="text-sm text-stone-500">♩=</span>
-            <button type="button" aria-label="Slower" onClick={() => onBpm(bpm - 1)} className={squareButton(false)}>
+            <button
+                type="button"
+                aria-label="Slower"
+                onClick={() => onBpm(practiceBpm - 1)}
+                className={squareButton(false)}
+            >
                 −
             </button>
             <input
@@ -748,16 +770,21 @@ const TempoControl = ({
                     } else if (e.key === 'ArrowUp') {
                         e.preventDefault();
                         setDraft(null);
-                        onBpm(bpm + 1);
+                        onBpm(practiceBpm + 1);
                     } else if (e.key === 'ArrowDown') {
                         e.preventDefault();
                         setDraft(null);
-                        onBpm(bpm - 1);
+                        onBpm(practiceBpm - 1);
                     }
                 }}
                 className="w-11 rounded-md border border-stone-200 bg-white py-0.5 text-center text-sm tabular-nums text-stone-700 focus:border-accent focus:outline-none"
             />
-            <button type="button" aria-label="Faster" onClick={() => onBpm(bpm + 1)} className={squareButton(false)}>
+            <button
+                type="button"
+                aria-label="Faster"
+                onClick={() => onBpm(practiceBpm + 1)}
+                className={squareButton(false)}
+            >
                 +
             </button>
             {compound ? <span className="ml-0.5 text-xs text-stone-400">(♩· = {Math.round(bpm / 1.5)})</span> : null}
