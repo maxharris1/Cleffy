@@ -6,63 +6,82 @@ description: Score Cleffy OMR output against a notation-quantized MIDI source of
 # OMR accuracy eval
 
 Objective measurement of `ScoreData` against LilyPond-typeset MIDI. The comparison
-is bar-aligned (DTW on pitch multisets). Parser changes re-score in seconds from
-cached Audiveris artifacts; an Audiveris upgrade or `--force-audiveris` re-runs
-the engine.
+is bar-aligned (DTW on pitch multisets). Parser changes re-score from cached
+Audiveris artifacts; an Audiveris upgrade or `--force-audiveris` re-runs the
+engine.
+
+This is a **measurement** harness (`services/omr-service/src/eval`). Do not
+change production parser files from this skill. Sibling PR #31 has a different
+Moonlight eval under `services/omr-service/eval/` with incomparable metrics;
+do not land both scorers.
+
+CI (`omr-service` job) runs typecheck, vitest (including eval unit tests and a
+toy `--from artifacts` CLI exec), and build. It does **not** run Audiveris or
+score Moonlight. A green CI job is not an accuracy gate for corpus pieces.
 
 ## Prerequisites
 
 ```bash
-npm run local:up                 # Supabase + cleffy-local-omr (skip --no-omr if scoring --from pdf)
 cd services/omr-service
 npm run build                    # dist/eval/cli.js
 ```
 
-`--from document` needs `supabase_db_cleffy`. `--from pdf` / `audiveris` need
-`cleffy-local-omr`. Override with `CLEFFY_DB_CONTAINER` / `CLEFFY_OMR_CONTAINER`.
+`--from document` needs `supabase_db_cleffy` and is local-only (docker exec as
+`postgres` after a `documents` join; status must be `ready`). `--from pdf` /
+`audiveris` need `cleffy-local-omr` **and** a `pdf.sha256` pin. Override
+containers with `CLEFFY_DB_CONTAINER` / `CLEFFY_OMR_CONTAINER`.
+
+Do not embed a live `score_analyses` document UUID in this skill or in corpus
+JSON. Document ids are checkout-specific and `--from document` cannot write a
+`baseline-*` oracle.
 
 ## Loop
+
+Fetch the Mutopia MIDI zip **once** (hash-pinned). Do not put Audiveris in a
+rebuild loop. Do not `--force-audiveris` unless the engine or PDF actually
+changed.
 
 ```bash
 cd services/omr-service
 npm run build
 npm run eval -- fetch --piece moonlight
-# once per PDF + Audiveris version + option set (~5 min):
-npm run eval -- audiveris --piece moonlight
-# after every parser edit:
-npm run build
+# only when the PDF pin or ENGINE_VERSION / options change (~5 min JVM):
+# npm run eval -- audiveris --piece moonlight
 npm run eval -- run --piece moonlight --from artifacts eval/cache/artifacts/<key> \
-  --baseline eval/results/moonlight/baseline-svc-11.json
+  --baseline eval/results/moonlight/baseline-<engine>.json
 ```
 
-What is already in local Supabase (the analysis the app stored):
+`--from pdf` / `audiveris` refuse an unpinned PDF (Moonlight has no `pdf.sha256`
+until you vendor the 14-page extract). IMSLP is not fetched from this CLI.
+
+`--from artifacts` and `--from document` never hit the network. If the Mutopia
+zip is missing, run `fetch` first.
+
+`--out <filename>` writes `eval/results/<slug>/<basename>` only (`..` and `/`
+are rejected). Refresh a committed oracle **only** from artifacts with a
+non-null `artifactHash`:
 
 ```bash
-npm run eval -- run --piece moonlight \
-  --from document dcca6082-3b58-42a6-a643-de6f196ef9f9 \
-  --baseline eval/results/moonlight/baseline-svc-11.json
-```
-
-`--from pdf` runs Audiveris if the cache key misses (or with `--force-audiveris`).
-The results JSON records `audiverisCacheHit` and `artifactHash`. Two result files
-are a parser-only delta only when their artifact hashes match.
-
-`--out <filename>` writes `eval/results/<slug>/<filename>` instead of the
-timestamped default. Use it to refresh the committed baseline:
-
-```bash
-npm run eval -- run --piece moonlight \
-  --from document dcca6082-3b58-42a6-a643-de6f196ef9f9 \
+npm run eval -- run --piece moonlight --from artifacts eval/cache/artifacts/<key> \
   --out baseline-svc-11.json
 ```
 
-`eval/results/moonlight/baseline-svc-11.json` is the 2026-09-07 document
-snapshot (I 68.5 / II 92.2 / III 75.5 pitch). This Cloud checkout has no
-`score_analyses` row, so that file was written from the audit headlines.
-Re-run the command above on a host that has the analysis to replace it with
-a live `--from document` result (per-bar detail included).
+`--from document <uuid> --out baseline-*.json` is refused. So is any baseline
+write whose `artifactHash` is null.
 
-Exit code 1 when a headline metric regresses more than `--tolerance` (default 0.5).
+There is no committed Moonlight baseline on this branch until a real artifacts
+run produces one (including the `bars` map). The toy piece
+`eval/results/toy/baseline.json` is the CI-gated example: it is an output of
+this scorer.
+
+Exit code 1 when a headline metric regresses more than `--tolerance` (default
+0.5 **percentage points** on rates, and 0.5 on integer counts such as `merge2`),
+or when `artifactHash` mismatches (engine/options delta, not parser-only).
+Exit code 2 when either hash is null (not a parser-only verdict).
+
+Headlines include composite, overall pitch/exact/missing, `movementCountOk`,
+`metersOk`, per-movement pitch, tempo-in-range, wrong-key bars, `merge2`,
+`refOnly`, and printed-bar count (absolute).
 
 ## Metrics
 
@@ -80,6 +99,9 @@ Exit code 1 when a headline metric regresses more than `--tolerance` (default 0.
 
 Structure is the mean of movement-count match, meter match, per-movement
 performed-bar match (when declared), and key stability.
+
+`barsAtCorrectLength` is counted on the **deduped printed-bar** list, so it
+cannot exceed `omrPrintedBars`. A baseline that violates that is rejected.
 
 ## Failure taxonomy (Moonlight)
 
@@ -99,18 +121,19 @@ movement seam.
 ## Adding a corpus entry
 
 1. Prefer Mutopia (LilyPond, CC-licensed, notation-quantized MIDI).
-2. Copy `eval/corpus/moonlight.json`. Set `slug`, PDF URL, reference zip URL.
-3. `sha256` the zip (required). Pin the PDF hash once you have the file;
-   IMSLP often needs a browser. A file already at
-   `eval/cache/downloads/<slug>.pdf` is used as-is.
-4. For each movement, read the `.ly`: `\time`, `\key`, `\partial`,
-   `\repeat volta`. `pickupQuarters` is the anacrusis in quarter-notes.
-   `printedBars` must equal the bar count the MIDI produces (verify with
-   `run` — `refBars` in the summary). `repeatsUnfoldedInMidi` is almost
-   always `false`. `performedBars` is how many bars a correct *performance*
-   of the page should play (unfolded repeats + D.C.).
+2. Copy `eval/corpus/moonlight.json`. Set `slug` (kebab-case), PDF URL, reference zip URL.
+3. `sha256` the zip (required). Pin `pdf.sha256` before `--from pdf`. Place an
+   IMSLP scan by hand at `eval/cache/downloads/<slug>.pdf` after accepting their
+   terms in a browser — this CLI will not cookie-bypass IMSLP.
+4. For each movement, `midi` must be a basename (`moonlight1.mid`, no `..`).
+   Read the `.ly`: `\time`, `\key`, `\partial`, `\repeat volta`.
+   `pickupQuarters` is the anacrusis in quarter-notes. `printedBars` must equal
+   the bar count the MIDI produces (verify with `run` — `refBars` in the
+   summary). `repeatsUnfoldedInMidi` is almost always `false`. `performedBars`
+   is how many bars a correct *performance* of the page should play.
 5. `editionNotes` records staff≠hand quirks, missing clefs, dense fingerings.
-6. `npm run eval -- fetch --piece <slug>` then `run`.
+   Do not embed document UUIDs.
+6. `npm run eval -- fetch --piece <slug>` then `run --from artifacts …`.
 
 ## Caveats
 
@@ -118,5 +141,6 @@ movement seam.
 - Mutopia MIDI does not unfold repeats. Pitch comparison is on printed bars;
   `performedBars` is the separate structural check.
 - Grace notes in the MIDI are ordinary short notes; OMR may drop them.
-- `eval/cache/` is gitignored. Commit `eval/corpus/` and
-  `eval/results/<slug>/baseline-*.json`.
+- `eval/cache/` is gitignored. Commit `eval/corpus/`, `eval/fixtures/`, and
+  `eval/results/<slug>/baseline-*.json` only when `artifactHash` is non-null
+  and `barsAtCorrectLength ≤ omrPrintedBars`.
