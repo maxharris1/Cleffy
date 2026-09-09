@@ -3,6 +3,7 @@ import {
     COMPOSER_FACETS,
     FORM_FACETS,
     categoriesInGroups,
+    browseCategoryGroupsFor,
     categoryGroupsFor,
     facetBoost,
     facetTokens,
@@ -249,7 +250,7 @@ const browseFromIndex = async (
     hasMore: boolean;
     notReady: string[];
 }> => {
-    const groups = categoryGroupsFor(filters);
+    const groups = browseCategoryGroupsFor(filters);
     const needed = categoriesInGroups(groups);
     const browsed = await queryBrowseIndex(serviceClient() as BrowseRpcClient | null, {
         groups,

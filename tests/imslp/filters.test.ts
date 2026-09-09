@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     ALL_TAXONOMY_CATEGORIES,
+    browseCategoryGroupsFor,
     categoryGroupsFor,
     categoriesInGroups,
     ERA_FACETS,
@@ -138,16 +139,22 @@ describe('categoryGroupsFor', () => {
         ).toEqual([['Bach, Johann Sebastian', 'Beethoven, Ludwig van']]);
     });
 
-    it('emits a key group bound to the IMSLP key category', () => {
+    it('does not put keys in typed-search groups — those stay title-only', () => {
         expect(categoryGroupsFor({ instruments: ['piano'], keys: ['c-minor', 'c-sharp-minor'] })).toEqual([
+            ['For piano', 'For piano (arr)'],
+        ]);
+    });
+
+    it('browse groups bind key chips to IMSLP key categories', () => {
+        expect(browseCategoryGroupsFor({ instruments: ['piano'], keys: ['c-minor', 'c-sharp-minor'] })).toEqual([
             ['For piano', 'For piano (arr)'],
             ['C minor', 'C-sharp minor'],
         ]);
     });
 
-    it('orders groups composer, instrument, form, key, era', () => {
+    it('orders browse groups composer, instrument, form, key, era', () => {
         expect(
-            categoryGroupsFor({
+            browseCategoryGroupsFor({
                 composerCategories: ['Chopin, Frédéric'],
                 instruments: ['piano'],
                 forms: ['nocturne'],
@@ -287,8 +294,8 @@ const WORKS: WorkFixture[] = [
     { title: 'Structures I (Boulez, Pierre)', categories: ['For piano', 'Modern'] },
 ];
 
-const browse = (rpc: BrowseRpcClient | null, filters: Parameters<typeof categoryGroupsFor>[0]) => {
-    const groups = categoryGroupsFor(filters);
+const browse = (rpc: BrowseRpcClient | null, filters: Parameters<typeof browseCategoryGroupsFor>[0]) => {
+    const groups = browseCategoryGroupsFor(filters);
     return browseFromIndex(rpc, {
         groups,
         needed: categoriesInGroups(groups),
@@ -326,6 +333,17 @@ describe('browseFromIndex (mocked RPC over the works mirror)', () => {
     it('a key chip narrows by category membership, not by title text', async () => {
         const result = await browse(fakeBrowseRpc(WORKS, allReady), { instruments: ['piano'], keys: ['d-minor'] });
         expect(result.rows.map((r) => r.page_title)).toEqual(['Sonata in D minor, K.9 (Scarlatti, Domenico)']);
+    });
+
+    it('typed search does not require key membership — Goldberg has no "G major" in the title', () => {
+        const goldberg = 'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)';
+        expect(categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] })).toEqual([
+            ['For piano', 'For piano (arr)'],
+        ]);
+        expect(titleMatchesFilters(goldberg, { keys: ['g-major'] })).toBe(false);
+        expect(browseWorks(browseCategoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] }), WORKS)).toEqual([
+            goldberg,
+        ]);
     });
 
     it('is ready as soon as one selected group is fully walked — its rows carry the other facets', async () => {

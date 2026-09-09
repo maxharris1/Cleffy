@@ -215,68 +215,78 @@ const instrumentCategories = (id: string): string[] => {
     return [category, `${category} (arr)`];
 };
 
-/**
- * One UNION group per active dimension (OR within, AND across). Instrument
- * groups include the "(arr)" variant.
- */
-export const categoryGroupsFor = (filters: SearchFilters): string[][] => {
+const groupForDimension = (dimension: FacetDimension, filters: SearchFilters): string[] => {
+    switch (dimension) {
+        case 'composer':
+            return [...(filters.composerCategories ?? [])];
+        case 'instrument': {
+            const cats: string[] = [];
+            for (const id of filters.instruments ?? []) {
+                cats.push(...instrumentCategories(id));
+            }
+            return cats;
+        }
+        case 'form': {
+            const cats: string[] = [];
+            for (const id of filters.forms ?? []) {
+                const category = FORM_BY_ID[id]?.category;
+                if (category) {
+                    cats.push(category);
+                }
+            }
+            return cats;
+        }
+        case 'key': {
+            const cats: string[] = [];
+            for (const id of filters.keys ?? []) {
+                const category = KEY_BY_ID[id]?.category;
+                if (category) {
+                    cats.push(category);
+                }
+            }
+            return cats;
+        }
+        case 'era': {
+            const cats: string[] = [];
+            for (const id of filters.eras ?? []) {
+                const category = ERA_BY_ID[id]?.category;
+                if (category) {
+                    cats.push(category);
+                }
+            }
+            return cats;
+        }
+        default: {
+            const _exhaustive: never = dimension;
+            return _exhaustive;
+        }
+    }
+};
+
+const groupsForDimensions = (filters: SearchFilters, dimensions: FacetDimension[]): string[][] => {
     const groups: string[][] = [];
-
-    if (filters.composerCategories && filters.composerCategories.length > 0) {
-        groups.push([...filters.composerCategories]);
-    }
-
-    if (filters.instruments && filters.instruments.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.instruments) {
-            cats.push(...instrumentCategories(id));
-        }
+    for (const dimension of dimensions) {
+        const cats = groupForDimension(dimension, filters);
         if (cats.length > 0) {
             groups.push(cats);
         }
     }
-
-    if (filters.forms && filters.forms.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.forms) {
-            const category = FORM_BY_ID[id]?.category;
-            if (category) {
-                cats.push(category);
-            }
-        }
-        if (cats.length > 0) {
-            groups.push(cats);
-        }
-    }
-
-    if (filters.keys && filters.keys.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.keys) {
-            const category = KEY_BY_ID[id]?.category;
-            if (category) {
-                cats.push(category);
-            }
-        }
-        if (cats.length > 0) {
-            groups.push(cats);
-        }
-    }
-
-    if (filters.eras && filters.eras.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.eras) {
-            const category = ERA_BY_ID[id]?.category;
-            if (category) {
-                cats.push(category);
-            }
-        }
-        if (cats.length > 0) {
-            groups.push(cats);
-        }
-    }
-
     return groups;
 };
+
+/**
+ * Typed-search membership groups (OR within, AND across). Keys stay off this
+ * list: production search matches key chips against the title
+ * (`titleMatchesFilters`), not IMSLP category membership.
+ */
+export const categoryGroupsFor = (filters: SearchFilters): string[][] =>
+    groupsForDimensions(filters, ['composer', 'instrument', 'form', 'era']);
+
+/**
+ * Chip browse groups. Key chips bind to IMSLP key categories (C major, …).
+ */
+export const browseCategoryGroupsFor = (filters: SearchFilters): string[][] =>
+    groupsForDimensions(filters, ['composer', 'instrument', 'form', 'key', 'era']);
 
 /** Flattened categories from groups — used to ask which snapshots are missing. */
 export const categoriesInGroups = (groups: string[][]): string[] => {
