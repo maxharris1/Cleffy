@@ -38,7 +38,7 @@ export const keyAlter = (step: number, fifths: number): number => {
 interface Drop {
     /** Measure index of the dropped key. */
     from: number;
-    /** Last measure to re-spell (inclusive); the reverting key's measure, or the part end. */
+    /** Last measure to re-spell (inclusive): next kept key minus one, or the part end. */
     to: number;
     /** Staff to re-spell, or both when the dropped key was whole-part. */
     staff: 0 | 1 | null;
@@ -55,6 +55,21 @@ const noteOnStaff = (noteStaff: number, staff: 0 | 1 | null): boolean => staff =
 
 const fifthsInForce = (partFifths: number, staffFifths: Array<number | undefined>, staff: 0 | 1): number =>
     staffFifths[staff] ?? partFifths;
+
+/** First later measure that still carries a kept key on `staff` (or any whole-part key). */
+const nextKeptKeyMeasure = (raws: readonly RawMeasure[], from: number, staff: 0 | 1 | null): number | null => {
+    for (let pos = from + 1; pos < raws.length; pos++) {
+        const raw = raws[pos];
+        if (!raw) {
+            continue;
+        }
+        const hit = keysIn(raw).some((k) => k.staff === null || staff === null || k.staff === staff);
+        if (hit) {
+            return pos;
+        }
+    }
+    return null;
+};
 
 /**
  * Re-spell notes on `staff` from `from` through `to` that have no printed
@@ -139,6 +154,8 @@ export const repairKeySignatures = (raws: readonly RawMeasure[], warnings: Set<s
             const partChange = keys.some((k) => k.staff === null && k.fifths === key.fifths);
             if (key.fifths !== otherNow && !peer && !partChange) {
                 dropped.add(key);
+                // `to` is clipped to the next kept key after the scan; until then
+                // the open interval is the part end.
                 drops.push({ from: pos, to: raws.length - 1, staff: key.staff, trueFifths: otherNow });
             }
         }
@@ -183,9 +200,14 @@ export const repairKeySignatures = (raws: readonly RawMeasure[], warnings: Set<s
     if (drops.length === 0) {
         return 0;
     }
-    // A later drop on the same staff shortens an open interval so we don't
-    // re-spell past a key we have already decided was real.
+    // Dropped keys are already gone from `raws`. A later kept key on this staff
+    // (or a whole-part key) ends the respell so a real modulation is not dragged
+    // back into the misread's fifths.
     for (const drop of drops) {
+        const stop = nextKeptKeyMeasure(raws, drop.from, drop.staff);
+        if (stop !== null) {
+            drop.to = Math.max(drop.from, stop - 1);
+        }
         respell(raws, drop);
     }
     warnings.add('key_signature_repaired');

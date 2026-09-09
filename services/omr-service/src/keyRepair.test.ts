@@ -55,11 +55,35 @@ describe('key-signature repair', () => {
         expect(score.warnings).toContain('key_signature_repaired');
         expect(score.keySignatures).toEqual([{ tick: 0, fifths: 4 }]);
         // G2 = 43, G♯2 = 44. The pedal in bars 2 and 3 must be sharp again.
-        // The closing bar is only there so rhythm repair has a bar to skip;
-        // key repair re-spells through the part end, so that C2 is not a pedal.
+        // No later kept key, so respell continues through the closing bar: that
+        // C2 is under four sharps and is not part of the pedal assertion.
         const pedal = score.notes.filter((n) => n.h === 1 && n.t < 3 * 1920);
         expect(pedal.map((n) => n.p)).toEqual([44, 44, 44]);
         expect(score.keyRepairs).toBeGreaterThan(0);
+    });
+
+    it('stops respelling at a later kept both-staff key, not at the part end', () => {
+        // Staff-2 C major in bar 2 is a misread (drop, restore G♯). Bar 3 is a
+        // genuine whole-part C major that does not snap back. Bar 4's C2 must
+        // stay C2 — four-sharps respell through the part end would make it C♯.
+        const xml = wrap(
+            `<measure number="1">${ATTRS(4)}${note('C', 4, 16, 1, { alter: 1 })}<backup><duration>16</duration></backup>${note('G', 2, 16, 2, { alter: 1 })}</measure>` +
+                `<measure number="2"><attributes><key number="2"><fifths>0</fifths></key></attributes>${note('C', 4, 16, 1, { alter: 1 })}<backup><duration>16</duration></backup>${note('G', 2, 16, 2)}</measure>` +
+                `<measure number="3"><print new-system="yes"/><attributes><key><fifths>0</fifths></key></attributes>${note('C', 4, 16, 1)}<backup><duration>16</duration></backup>${note('C', 2, 16, 2)}</measure>` +
+                `<measure number="4">${note('C', 4, 16, 1)}<backup><duration>16</duration></backup>${note('C', 2, 16, 2)}</measure>` +
+                `<measure number="5">${note('C', 4, 16, 1)}<backup><duration>16</duration></backup>${note('C', 2, 16, 2)}</measure>` +
+                `<measure number="6">${note('C', 4, 16, 1)}<backup><duration>16</duration></backup>${note('C', 2, 16, 2)}</measure>` +
+                closing(7),
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('key_signature_repaired');
+        expect(score.keySignatures).toEqual([
+            { tick: 0, fifths: 4 },
+            { tick: 2 * 1920, fifths: 0 },
+        ]);
+        const lh = score.notes.filter((n) => n.h === 1);
+        // bar1 G♯2, bar2 G♯2 (restored), then C2 naturals — not C♯2 (37).
+        expect(lh.map((n) => n.p)).toEqual([44, 44, 36, 36, 36, 36, 36]);
     });
 
     it('keeps a printed natural under a repaired key', () => {
