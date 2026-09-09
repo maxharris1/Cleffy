@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
+import { DEPLOYED_ENGINE_GENERATION } from '@/features/playback/scoreAnalysisService';
 import { TransportBar } from '@/features/playback/TransportBar';
 import type { TransportBarProps } from '@/features/playback/TransportBar';
 import { useViewerStore } from '@/state/store';
@@ -446,6 +447,17 @@ describe('tempo disclosure and stale analyses', () => {
 
     it('says nothing when the analysis is current', () => {
         ready();
+        expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
+    });
+
+    /**
+     * The client's generation runs ahead of the deployed OMR image (the image
+     * ships from main only). A row at the deployed generation must not be
+     * offered a re-run: the click would spend a metered omr_runs credit and
+     * the old worker would answer from its cache with the very same row.
+     */
+    it('does not offer a re-run the deployed worker cannot better', () => {
+        ready({}, tinyScore, `audiveris-5.6.1+svc-${DEPLOYED_ENGINE_GENERATION}`);
         expect(screen.queryByRole('button', { name: /regenerate it/i })).toBeNull();
     });
 

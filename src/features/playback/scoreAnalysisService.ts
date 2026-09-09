@@ -36,6 +36,18 @@ export interface ScoreAnalysisStatusRow {
  */
 export const CURRENT_ENGINE_GENERATION = 11;
 
+/**
+ * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires
+ * only on main, so this client routinely ships understanding generations the
+ * live Cloud Run cannot write yet. A regenerate offer gated on
+ * CURRENT_ENGINE_GENERATION alone is then a paid no-op: the click spends one
+ * of the reader's metered omr_runs, the old engine answers from its cache with
+ * the very row that prompted the offer, and the banner comes straight back.
+ * So the offer is capped at this number, and this number moves only in the
+ * release that ships the matching OMR image.
+ */
+export const DEPLOYED_ENGINE_GENERATION = 6;
+
 const engineGeneration = (engineVersion: string | null): number | null => {
     const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');
     if (!match?.[1]) {
@@ -45,15 +57,20 @@ const engineGeneration = (engineVersion: string | null): number | null => {
     return Number.isFinite(parsed) ? parsed : null;
 };
 
-/** True when this analysis predates the current engine and could be improved. */
+/**
+ * True when this analysis predates the current engine AND the deployed worker
+ * could actually better it. A re-run is only ever offered when clicking the
+ * button produces something newer than what the reader already has.
+ */
 export const analysisIsStale = (engineVersion: string | null): boolean => {
     const generation = engineGeneration(engineVersion);
+    const offerable = Math.min(CURRENT_ENGINE_GENERATION, DEPLOYED_ENGINE_GENERATION);
     // Absent or unreadable means it predates version stamping, so it is the
     // oldest data there is. This is only ever asked of a READY analysis, where
     // a missing stamp cannot mean "not finished yet". Five rows in the live
     // database are in exactly this state and would otherwise never be offered
     // a re-run — the documents most in need of one.
-    return generation === null || generation < CURRENT_ENGINE_GENERATION;
+    return generation === null || generation < offerable;
 };
 
 /** A processing row untouched for this long is a lost job (service died/recycled). */
