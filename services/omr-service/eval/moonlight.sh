@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Gate the Moonlight Sonata transcription against the Mutopia reference.
+# Moonlight diagnostic — per-bar pitch recall against the Mutopia reference.
+# This is not the corpus eval CLI (that lives in src/eval/ on the
+# omr-accuracy-eval branch). Exit 0 when every *gated* movement in
+# fixtures/moonlight/boundaries.json meets the pitch-recall bar. II and III
+# are report-only on the committed baseline.
 #
-#   npm run eval:moonlight                      # ScoreData from local Postgres
-#   npm run eval:moonlight -- --score out.json  # ScoreData from a file
-#   npm run eval:moonlight -- --dir audiveris-out/   # build from Audiveris artifacts first
+#   npm run eval:moonlight -- --score out.json
+#   npm run eval:moonlight -- --dir audiveris-out/
+#   EVAL_DOCUMENT_ID=<uuid> npm run eval:moonlight   # local Postgres, UUID required
 #
-# Postgres mode picks the newest ready analysis whose document title mentions
-# "moonlight" (override with EVAL_DOCUMENT_ID). Any further arguments are
-# passed to compareToReference.ts (--gate, --json, --record-baseline).
+# Further arguments are passed to compareToReference.ts (--gate, --json, --record-baseline).
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DB_CONTAINER="${EVAL_DB_CONTAINER:-supabase_db_cleffy}"
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 score_args=()
 passthrough=()
 
@@ -23,8 +26,13 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --dir)
+            if [ -z "${2:-}" ] || [ ! -d "$2" ]; then
+                echo "--dir must be an existing directory" >&2
+                exit 2
+            fi
+            dir="$(cd "$2" && pwd)"
             tmp="$(mktemp /tmp/moonlight-score.XXXXXX.json)"
-            npx tsx eval/buildFromArtifacts.ts --dir "$2" --out "$tmp"
+            npx tsx eval/buildFromArtifacts.ts --dir "$dir" --out "$tmp"
             score_args=(--score "$tmp")
             shift 2
             ;;
@@ -36,18 +44,21 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${#score_args[@]}" -eq 0 ]; then
-    if [ -n "${EVAL_DOCUMENT_ID:-}" ]; then
-        where="sa.document_id = '${EVAL_DOCUMENT_ID}'"
-    else
-        where="d.title ilike '%moonlight%'"
+    if [ -z "${EVAL_DOCUMENT_ID:-}" ]; then
+        echo "postgres mode requires EVAL_DOCUMENT_ID (a UUID). Title search is not used." >&2
+        echo "pass --score or --dir instead." >&2
+        exit 2
+    fi
+    if [[ ! "$EVAL_DOCUMENT_ID" =~ $UUID_RE ]]; then
+        echo "EVAL_DOCUMENT_ID is not a UUID" >&2
+        exit 2
     fi
     query="select sa.score::text from public.score_analyses sa
-           join public.documents d on d.id = sa.document_id
-           where sa.status = 'ready' and sa.score is not null and ${where}
+           where sa.status = 'ready' and sa.score is not null and sa.document_id = :'doc_id'::uuid
            order by sa.updated_at desc limit 1"
-    score_json="$(docker exec "$DB_CONTAINER" psql -U postgres -d postgres -Atc "$query")"
+    score_json="$(docker exec "$DB_CONTAINER" psql -U postgres -d postgres -At -v doc_id="$EVAL_DOCUMENT_ID" -c "$query")"
     if [ -z "$score_json" ]; then
-        echo "no ready Moonlight analysis in $DB_CONTAINER (set EVAL_DOCUMENT_ID, or pass --score / --dir)" >&2
+        echo "no ready analysis for $EVAL_DOCUMENT_ID in $DB_CONTAINER (or pass --score / --dir)" >&2
         exit 2
     fi
     printf '%s' "$score_json" | npx tsx eval/compareToReference.ts --score - "${passthrough[@]}"

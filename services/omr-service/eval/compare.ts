@@ -8,9 +8,8 @@ import type { ScoreData } from '../src/scoreData.js';
  * The question asked of every engraved bar is "what fraction of the notes
  * the reference has in this bar did the transcription put somewhere in the
  * same bar, at the right pitch?" — recall of pitch multisets, nothing about
- * onset inside the bar, because a bar whose rhythm is wrong but whose notes
- * are there is a bar the reader can still follow, and a bar with the notes
- * missing is not.
+ * onset, duration, or voice inside the bar. That is a follow-along metric, not
+ * an OMR accuracy gate for tuplets.
  *
  * Bars are aligned by dynamic time warping rather than by number, so a bar
  * Audiveris merged with its neighbour (or split in two) costs that bar and
@@ -33,6 +32,11 @@ export interface MovementBoundary {
      */
     lo?: number;
     hi?: number;
+    /**
+     * When true (the default), this movement must meet `gate` for `CompareResult.pass`.
+     * When false, the movement is still scored and printed — it does not fail the run.
+     */
+    gated?: boolean;
 }
 
 /** A bar's pitches as a multiset. */
@@ -73,12 +77,18 @@ export interface MovementResult {
     noteRecall: number;
     /** Score bars that aligned to nothing in the reference. */
     extraScoreBars: number;
+    /** Whether this movement is part of `CompareResult.pass`. */
+    gated: boolean;
 }
 
 export interface CompareResult {
     movements: MovementResult[];
     gate: number;
-    /** Every bar of every movement at or above the gate. */
+    /**
+     * Every *gated* movement has every bar at or above the gate. Ungated
+     * movements are reported only. False when nothing is gated, so a report-only
+     * run cannot print PASS.
+     */
     pass: boolean;
 }
 
@@ -288,6 +298,9 @@ export const alignBars = (
                 relax(1, 1, 1 - recall(r0.pitches, s0.pitches), 'match');
             }
             if (r0 && r1 && s0) {
+                // Pitch-bag recall of the union, not onset or duration: a score
+                // bar that contains both reference bars' pitches scores a merge
+                // as complete even when the triplet rhythm is wrong.
                 const both = bagUnion([r0.pitches, r1.pitches]);
                 relax(2, 1, 2 * (1 - recall(both, s0.pitches)) + RESHAPE_COST, 'merge');
             }
@@ -436,7 +449,7 @@ export const compareScore = (input: CompareInput): CompareResult => {
     if (segments) {
         for (const [index, movement] of refByMovement.entries()) {
             const aligned = alignBars(movement.bars, segments[index] ?? []);
-            movements.push(summarize(movement.boundary.name, aligned.bars, aligned.extra, gate));
+            movements.push(summarize(movement.boundary, aligned.bars, aligned.extra, gate));
         }
     } else {
         const allRef = refByMovement.flatMap((movement) => movement.bars);
@@ -445,7 +458,7 @@ export const compareScore = (input: CompareInput): CompareResult => {
         for (const movement of refByMovement) {
             const slice = aligned.bars.slice(offset, offset + movement.bars.length);
             offset += movement.bars.length;
-            movements.push(summarize(movement.boundary.name, slice, 0, gate));
+            movements.push(summarize(movement.boundary, slice, 0, gate));
         }
         const last = movements[movements.length - 1];
         if (last) {
@@ -453,10 +466,15 @@ export const compareScore = (input: CompareInput): CompareResult => {
         }
     }
 
-    return { movements, gate, pass: movements.every((movement) => movement.passing === movement.bars.length) };
+    const gated = movements.filter((movement) => movement.gated);
+    return {
+        movements,
+        gate,
+        pass: gated.length > 0 && gated.every((movement) => movement.passing === movement.bars.length),
+    };
 };
 
-const summarize = (name: string, bars: BarResult[], extra: number, gate: number): MovementResult => {
+const summarize = (boundary: MovementBoundary, bars: BarResult[], extra: number, gate: number): MovementResult => {
     let refNotes = 0;
     let found = 0;
     let passing = 0;
@@ -467,5 +485,12 @@ const summarize = (name: string, bars: BarResult[], extra: number, gate: number)
             passing += 1;
         }
     }
-    return { name, bars, passing, noteRecall: refNotes === 0 ? 1 : found / refNotes, extraScoreBars: extra };
+    return {
+        name: boundary.name,
+        bars,
+        passing,
+        noteRecall: refNotes === 0 ? 1 : found / refNotes,
+        extraScoreBars: extra,
+        gated: boundary.gated !== false,
+    };
 };

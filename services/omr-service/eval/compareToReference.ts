@@ -12,19 +12,21 @@ import {
 } from './compare.js';
 
 /**
- * Gate a ScoreData against a reference edition.
+ * Report a ScoreData against a reference edition.
  *
  *   npx tsx eval/compareToReference.ts --score score.json [--fixtures eval/fixtures/moonlight]
  *                                      [--gate 0.9] [--json out.json] [--record-baseline]
  *
  * `--score -` reads the ScoreData JSON from stdin (how `npm run eval:moonlight`
- * feeds it from Postgres). Exit status is 1 when any bar of any movement is
- * under the gate, so the run doubles as a regression check.
+ * feeds it from Postgres). Exit status is 1 when any *gated* movement has a bar
+ * under the gate. Ungated movements are printed as report-only. This binary is
+ * a Moonlight diagnostic, not the corpus eval CLI in src/eval/.
  *
  * The fixture directory holds `boundaries.json` (one entry per movement, see
  * MovementBoundary), the reference MIDIs it names, and optionally
  * `baseline.json` — the last recorded result, printed alongside the new one so
- * a change is read as a delta and not an absolute.
+ * a change is read as a delta and not an absolute. `--record-baseline` writes
+ * that file even when gated movements fail; it is a changelog.
  */
 
 interface Baseline {
@@ -65,8 +67,9 @@ const printMovement = (movement: MovementResult, gate: number, baseline: Baselin
         previous === undefined
             ? ''
             : ` (baseline ${previous.passing}/${previous.bars} bars, ${pct(previous.noteRecall)} notes)`;
+    const role = movement.gated ? 'GATE' : 'report';
     console.log(
-        `${movement.name}: ${movement.passing}/${movement.bars.length} bars >= ${pct(gate)}, note recall ${pct(movement.noteRecall)}${delta}`,
+        `[${role}] ${movement.name}: ${movement.passing}/${movement.bars.length} bars >= ${pct(gate)}, note recall ${pct(movement.noteRecall)}${delta}`,
     );
     if (movement.extraScoreBars > 0) {
         console.log(`  ${movement.extraScoreBars} score bar(s) aligned to nothing in the reference`);
@@ -112,8 +115,10 @@ const main = (): void => {
     }
     const totalBars = result.movements.reduce((acc, movement) => acc + movement.bars.length, 0);
     const totalPassing = result.movements.reduce((acc, movement) => acc + movement.passing, 0);
+    const gatedBars = result.movements.filter((m) => m.gated).reduce((acc, m) => acc + m.bars.length, 0);
+    const gatedPassing = result.movements.filter((m) => m.gated).reduce((acc, m) => acc + m.passing, 0);
     console.log(
-        `${result.pass ? 'PASS' : 'FAIL'}: ${totalPassing}/${totalBars} bars at or above the ${pct(gate)} gate`,
+        `${result.pass ? 'PASS' : 'FAIL'}: gated ${gatedPassing}/${gatedBars} bars at or above the ${pct(gate)} bar (${totalPassing}/${totalBars} all movements, pitch-bag recall only)`,
     );
 
     const jsonOut = argValue('--json');
