@@ -1919,13 +1919,14 @@ describe('ghost-part fill', () => {
         `<measure number="${n}">${first ? `<attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>` : ''}<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>16</duration><voice>1</voice></note></measure>`;
 
     it('fills empty grand-staff bars from unused single-staff parts, keyed by measure number', () => {
-        // Lead (P3) has four bars, 20 and 21 empty. Ghosts have those numbers
-        // plus an extra bar the lead does not — positional zip would miss them.
+        // Bass Voice is listed first so hand assignment cannot be "first unused
+        // → RH". Lead (P3) has four bars, 20 and 21 empty. Ghosts have those
+        // numbers plus an extra bar the lead does not — positional zip would miss them.
         const xml = `<?xml version="1.0"?>
 <score-partwise version="4.0">
   <part-list>${partList}</part-list>
-  <part id="P1">${staffBar(19, 'G', 5, true)}${staffBar(20, 'A', 5)}${staffBar(21, 'B', 5)}${staffBar(22, 'C', 6)}${staffBar(23, 'D', 6)}</part>
-  <part id="P2">${staffBar(19, 'G', 2, true)}${staffBar(20, 'A', 2)}${staffBar(21, 'B', 2)}${staffBar(22, 'C', 3)}${staffBar(23, 'D', 3)}</part>
+  <part id="P1">${staffBar(19, 'G', 2, true)}${staffBar(20, 'A', 2)}${staffBar(21, 'B', 2)}${staffBar(22, 'C', 3)}${staffBar(23, 'D', 3)}</part>
+  <part id="P2">${staffBar(19, 'G', 5, true)}${staffBar(20, 'A', 5)}${staffBar(21, 'B', 5)}${staffBar(22, 'C', 6)}${staffBar(23, 'D', 6)}</part>
   <part id="P3">
     <measure number="19"><attributes><divisions>4</divisions><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>
     <measure number="20"><note><rest measure="yes"/><duration>16</duration><staff>1</staff></note></measure>
@@ -1949,6 +1950,36 @@ describe('ghost-part fill', () => {
         ]);
         // The extra ghost bar 23 must not leak in — the lead has no bar 23.
         expect(score.notes.some((n) => n.p === 86 || n.p === 50)).toBe(false);
+    });
+
+    it('does not fill a genuine rest bar from a sparse unused Voice part', () => {
+        const pianoBars = Array.from({ length: 12 }, (_, i) => {
+            const n = i + 1;
+            if (n === 1) {
+                return `<measure number="1"><attributes><divisions>4</divisions><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>`;
+            }
+            if (n === 2) {
+                return `<measure number="2"><note><rest measure="yes"/><duration>16</duration><staff>1</staff></note></measure>`;
+            }
+            return `<measure number="${n}"><note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>`;
+        }).join('');
+        const xml = `<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+    <score-part id="P2"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes><note><rest measure="yes"/><duration>16</duration></note></measure>
+    <measure number="2"><note><pitch><step>A</step><octave>4</octave></pitch><duration>16</duration><voice>1</voice></note></measure>
+  </part>
+  <part id="P2">${pianoBars}</part>
+</score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('multi_part_collapsed');
+        expect(score.warnings).not.toContain('ghost_part_filled');
+        const bar2 = score.notes.filter((n) => n.t >= 1920 && n.t < 3840);
+        expect(bar2).toEqual([]);
     });
 });
 

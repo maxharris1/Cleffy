@@ -793,7 +793,7 @@ export const parseMusicXmlString = (
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No <part> elements');
     }
 
-    const targets = selectPartTargets(root, parts, warnings);
+    const { targets, ghostSources } = selectPartTargets(root, parts, warnings);
     const lead = targets[0]?.part;
     if (!lead) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No lead part');
@@ -833,17 +833,15 @@ export const parseMusicXmlString = (
         voiceSlotsByPart[partIndex] = secondary.voiceSlots;
     });
 
-    const selected = new Set(targets.map((t) => t.part));
-    const unused = parts.filter((part) => !selected.has(part) && countDeclaredStaves(part) < 2);
     const emptyLead = leadResult.measures.filter(
         (measure) => !leadResult.notes.some((n) => n.t >= measure.tick && n.t < measure.tick + measure.dTicks),
     );
-    if (unused.length > 0 && emptyLead.length > 0) {
+    if (ghostSources.length > 0 && emptyLead.length > 0) {
         const byNumber = new Map(emptyLead.map((measure) => [measure.n, measure]));
         let filled = 0;
-        unused.forEach((part, i) => {
-            const ghost = parsePart(part, {
-                fallbackHand: i === 0 ? 0 : 1,
+        ghostSources.forEach((source, i) => {
+            const ghost = parsePart(source.part, {
+                fallbackHand: fallbackHandForPart(source.part),
                 timeline: leadResult.measures,
                 timelineByNumber: byNumber,
                 tickOffset,
@@ -902,6 +900,12 @@ export const parseMusicXmlString = (
     };
 };
 
+interface PartSelection {
+    targets: PartParseTarget[];
+    /** Unused single-staff parts that are not sparse noise. */
+    ghostSources: PartCandidate[];
+}
+
 /**
  * Choose which MusicXML parts feed playback/fingering.
  *
@@ -909,8 +913,10 @@ export const parseMusicXmlString = (
  * 2. Else densest non-noise single-staff parts, pairing a second as LH when present.
  * 3. Noise = sparse pitched content (< 10% of max) and/or vocal-ish names when a
  *    denser part exists — never merge those notes into the piano timeline.
+ *    Ghost-fill may recover unused *non-noise* single-staff parts into empty
+ *    lead bars; noise leftovers stay out (a genuine rest is not a missing staff).
  */
-const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): PartParseTarget[] => {
+const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): PartSelection => {
     const names = partNameById(root);
     const candidates: PartCandidate[] = parts.map((part, index) => {
         const id = part.getAttribute('id') ?? '';
@@ -958,10 +964,46 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
         warnings.add('multi_part_collapsed');
     }
 
-    return selected.map((c, i) => ({
-        part: c.part,
-        fallbackHand: (i === 0 ? 0 : 1) as 0 | 1,
-    }));
+    const selectedParts = new Set(selected.map((c) => c.part));
+    const ghostSources = candidates.filter((c) => !selectedParts.has(c.part) && c.staves < 2 && !isNoise(c));
+
+    return {
+        targets: selected.map((c, i) => ({
+            part: c.part,
+            fallbackHand: (i === 0 ? 0 : 1) as 0 | 1,
+        })),
+        ghostSources,
+    };
+};
+
+/** Below C4 → LH, otherwise RH. Clef is the fallback when the part has no pitches. */
+const fallbackHandForPart = (part: Elem): 0 | 1 => {
+    for (const measure of childElements(part, 'measure')) {
+        for (const noteEl of childElements(measure, 'note')) {
+            if (firstChild(noteEl, 'rest') || firstChild(noteEl, 'grace')) {
+                continue;
+            }
+            const pitch = firstChild(noteEl, 'pitch');
+            const midi = pitch ? midiFromPitch(pitch) : null;
+            if (midi !== null) {
+                return midi < 60 ? 1 : 0;
+            }
+        }
+    }
+    for (const measure of childElements(part, 'measure')) {
+        for (const attrs of childElements(measure, 'attributes')) {
+            for (const clef of childElements(attrs, 'clef')) {
+                const sign = (childText(clef, 'sign') ?? '').toUpperCase();
+                if (sign === 'F') {
+                    return 1;
+                }
+                if (sign === 'G' || sign === 'C') {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 0;
 };
 
 /** Map score-part id → printed part-name (empty when absent). */
