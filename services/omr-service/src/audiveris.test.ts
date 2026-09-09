@@ -351,7 +351,7 @@ describe('runAudiverisTolerant', () => {
     it('kills the previous JVM before a recovery spawn and shrinks the timeout', async () => {
         const killed: string[] = [];
         const timeouts: number[] = [];
-        const run = vi.fn<AudiverisRunner>(async (input, outDir, options) => {
+        const run = vi.fn<AudiverisRunner>(async (input, _outDir, options) => {
             timeouts.push(options.timeoutMs);
             options.onSpawned?.(() => killed.push(input));
             if (input.endsWith('.omr')) {
