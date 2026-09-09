@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ERROR_CODES, JobError } from './errors.js';
 import {
     ENGINE_VERSION,
     PARALLEL_MIN_MEMORY_BYTES,
@@ -163,6 +164,57 @@ describe('collectRangeArtifacts', () => {
                 dir,
                 expect.objectContaining({ pageCount: 8 }),
             );
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('maps a shard-local all-invalid no_staves_found to omr_crash so serial fallback can run', async () => {
+        runAudiverisTolerant.mockRejectedValue(new JobError(ERROR_CODES.noStavesFound, 'All sheets flagged invalid'));
+        const timings = emptyTimings();
+        timings.pageCount = 4;
+        await expect(
+            collectRangeArtifacts('/in.pdf', '/tmp/omr-shard', timings, () => undefined, undefined, { from: 1, to: 2 }, true),
+        ).rejects.toMatchObject({ code: ERROR_CODES.omrCrash });
+    });
+
+    it('keeps no_staves_found when the whole book is staff-less', async () => {
+        runAudiverisTolerant.mockRejectedValue(new JobError(ERROR_CODES.noStavesFound, 'All sheets flagged invalid'));
+        const timings = emptyTimings();
+        timings.pageCount = 3;
+        await expect(
+            collectRangeArtifacts('/in.pdf', '/tmp/omr-book', timings, () => undefined, undefined, undefined, true),
+        ).rejects.toMatchObject({ code: ERROR_CODES.noStavesFound });
+    });
+
+    it('passes post-skip sheet bounds so merge does not remap onto the cover', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'omr-art-'));
+        const mxlPath = join(dir, 'a.mxl');
+        await writeFile(mxlPath, '<score-partwise/>');
+        try {
+            runAudiverisTolerant.mockResolvedValue({
+                mxlPaths: [mxlPath],
+                omrPath: null,
+                jvmStartToFirstSheetMs: 1,
+                perSheetMs: [2],
+                stepCounts: {},
+                stepDurationsMs: {},
+                audiverisTotalMs: 9,
+                invalidSheets: [1],
+                exitCode: 0,
+            });
+            const timings = emptyTimings();
+            timings.pageCount = 5;
+            const artifacts = await collectRangeArtifacts(
+                '/in.pdf',
+                dir,
+                timings,
+                () => undefined,
+                undefined,
+                { from: 1, to: 5 },
+                true,
+            );
+            expect(artifacts.sheets).toEqual({ from: 2, to: 5 });
         } finally {
             await rm(dir, { recursive: true, force: true });
         }

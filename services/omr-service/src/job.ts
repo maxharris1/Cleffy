@@ -6,7 +6,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
-import { runAudiverisTolerant, timeoutForPages } from './audiveris.js';
+import { runAudiverisTolerant, sheetRangesExcluding, timeoutForPages, type AudiverisResult } from './audiveris.js';
 import { buildScoreData, type BuildScoreDataOptions } from './buildScoreData.js';
 import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
@@ -234,7 +234,15 @@ export const runClaimedJob = async (
                 await failJob(job.id, workerId, code);
             },
             registerKill: (kill) => {
-                killJvm = kill;
+                const prev = killJvm;
+                killJvm = () => {
+                    try {
+                        prev?.();
+                    } catch {
+                        // previous process already gone
+                    }
+                    kill();
+                };
             },
             isAbandoned: () => abandoned,
             resolveEra: () => eraForDocument(job.document_id),
@@ -443,7 +451,7 @@ const transcribeParallel = async (
                     sheets,
                     /* aggregateTimings */ index === 0,
                 );
-                return { ...collected, sheets };
+                return { ...collected, sheets: collected.sheets ?? sheets };
             }),
         );
     } catch (err) {
@@ -563,15 +571,31 @@ export const collectRangeArtifacts = async (
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
     aggregateTimings: boolean,
-): Promise<{ mxlBuffers: Buffer[]; geometry: OmrGeometry | null; invalidSheets: number[] }> => {
+): Promise<{
+    mxlBuffers: Buffer[];
+    geometry: OmrGeometry | null;
+    invalidSheets: number[];
+    sheets: { from: number; to: number } | undefined;
+}> => {
     await mkdir(outDir, { recursive: true });
-    const result = await runAudiverisTolerant(pdfPath, outDir, {
-        timeoutMs: timeoutForPages(timings.pageCount ?? null),
-        pageCount: timings.pageCount ?? 0,
-        sheets,
-        onSheetProgress: onSheet,
-        onSpawned: registerKill,
-    });
+    let result: AudiverisResult;
+    try {
+        result = await runAudiverisTolerant(pdfPath, outDir, {
+            timeoutMs: timeoutForPages(timings.pageCount ?? null),
+            pageCount: timings.pageCount ?? 0,
+            sheets,
+            onSheetProgress: onSheet,
+            onSpawned: registerKill,
+        });
+    } catch (err) {
+        // A shard whose requested range is all staff-less would otherwise throw
+        // permanent no_staves_found for the job. Map it to omr_crash so
+        // transcribe() can serial-fallback over the whole book.
+        if (sheets && err instanceof JobError && err.code === ERROR_CODES.noStavesFound) {
+            throw new JobError(ERROR_CODES.omrCrash, 'Shard range produced no staves; falling back to serial');
+        }
+        throw err;
+    }
     if (aggregateTimings) {
         timings.jvmStartToFirstSheetMs = result.jvmStartToFirstSheetMs ?? undefined;
         timings.perSheetMs = result.perSheetMs;
@@ -584,12 +608,21 @@ export const collectRangeArtifacts = async (
     }
 
     if (result.mxlPaths.length === 0) {
+        if (sheets) {
+            throw new JobError(ERROR_CODES.omrCrash, 'Shard range produced no MusicXML; falling back to serial');
+        }
         throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML');
     }
 
+    const remaining = sheets ? sheetRangesExcluding(sheets, result.invalidSheets) : [];
+    const effectiveSheets =
+        remaining.length > 0
+            ? { from: remaining[0]!.from, to: remaining[remaining.length - 1]!.to }
+            : sheets;
+
     const mxlBuffers = await Promise.all(result.mxlPaths.map((path) => readFile(path)));
     const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
-    return { mxlBuffers, geometry, invalidSheets: result.invalidSheets };
+    return { mxlBuffers, geometry, invalidSheets: result.invalidSheets, sheets: effectiveSheets };
 };
 
 export const unionSheetNumbers = (

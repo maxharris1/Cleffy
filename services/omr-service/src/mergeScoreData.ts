@@ -532,8 +532,13 @@ const buildPageMap = (score: ScoreData, sheetFrom1Based: number, _overlapPage0: 
     }
     const ordered = [...seen].sort((a, b) => a - b);
     const map = new Map<number, number>();
+    // Local shard pages start at 0 and must be dense-remapped onto the sheet
+    // range. Geometry from the .omr already carries absolute PDF pageIndex
+    // (sheet#N − 1); after a skip those ids have holes, and packing them onto
+    // sheets.from + i draws the playhead on the cover.
+    const local = ordered.length > 0 && ordered[0] === 0;
     ordered.forEach((page, i) => {
-        map.set(page, sheetFrom1Based - 1 + i);
+        map.set(page, local ? sheetFrom1Based - 1 + i : page);
     });
     return map;
 };

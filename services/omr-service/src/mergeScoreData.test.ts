@@ -69,6 +69,37 @@ describe('mergeScoreDataParts', () => {
         expect(merged.warnings).toContain('merged_inherited_time_signature');
     });
 
+    it('keeps absolute geometry page ids after a skipped cover so the playhead is not on page 1', () => {
+        const a = basePart({
+            totalTicks: 3840,
+            notes: [
+                { t: 0, d: 480, p: 60, h: 0 },
+                { t: 1920, d: 480, p: 61, h: 0 },
+            ],
+            measures: [
+                { n: 1, tick: 0, dTicks: 1920, page: 1, sys: 0, x0: 0, x1: 1 },
+                { n: 2, tick: 1920, dTicks: 1920, page: 2, sys: 1, x0: 0, x1: 1 },
+            ],
+            systems: [
+                { page: 1, y0: 0.1, y1: 0.3 },
+                { page: 2, y0: 0.1, y1: 0.3 },
+            ],
+        });
+        const b = basePart({
+            timeSignatures: [],
+            totalTicks: 1920,
+            notes: [{ t: 0, d: 480, p: 62, h: 0 }],
+            measures: [{ n: 1, tick: 0, dTicks: 1920, page: 4, sys: 0, x0: 0, x1: 1 }],
+            systems: [{ page: 4, y0: 0.2, y1: 0.5 }],
+        });
+        const merged = mergeScoreDataParts([
+            { score: a, sheets: { from: 1, to: 3 } },
+            { score: b, sheets: { from: 5, to: 8 } },
+        ]);
+        expect(merged.measures.map((m) => m.page)).toEqual([1, 2, 4]);
+        expect(merged.systems.map((s) => s.page)).toEqual([1, 2, 4]);
+    });
+
     it('drops overlap page from the later part and inherits meter', () => {
         const a = basePart({
             timeSignatures: [{ tick: 0, num: 3, den: 4 }],
