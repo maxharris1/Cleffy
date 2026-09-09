@@ -11,7 +11,21 @@ describe('loadCorpusEntry', () => {
             [3, 4],
             [4, 4],
         ]);
-        expect(entry.reference.sha256).toHaveLength(64);
+        expect(entry.reference.source).toBe('mutopia');
+        if (entry.reference.source === 'mutopia') {
+            expect(entry.reference.sha256).toHaveLength(64);
+        }
         expect(entry.movements[1]?.pickupQuarters).toBe(1);
+        expect(entry.pdf.sha256).toBeUndefined();
+    });
+
+    it('rejects a path-traversal slug before reading a file', () => {
+        expect(() => loadCorpusEntry('../../package')).toThrow(/kebab-case|Invalid corpus slug/);
+    });
+
+    it('loads the toy fixture corpus', () => {
+        const entry = loadCorpusEntry('toy');
+        expect(entry.reference.source).toBe('fixture');
+        expect(entry.movements[0]?.midi).toBe('toy.mid');
     });
 });

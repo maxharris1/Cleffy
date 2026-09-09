@@ -6,10 +6,11 @@ import { promisify } from 'node:util';
 
 import { PLAY_ALONG_AUDIVERIS_OPTIONS, parseExtraOpts } from '../audiveris.js';
 import { buildScoreData } from '../buildScoreData.js';
+import { ENGINE_VERSION } from '../job.js';
 import { parseMxlFiles } from '../musicxml.js';
 import { parseOmrGeometry } from '../omrGeometry.js';
 import { scoreDataSchema, type ScoreData } from '../scoreData.js';
-import { sha256File, sha256Files } from './hash.js';
+import { sha256Buffer, sha256File, sha256Files } from './hash.js';
 import { artifactsCacheDir } from './paths.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,10 +45,11 @@ const walkFiles = (dir: string, depth = 0): string[] => {
 export const optionsFingerprint = (): string =>
     [...PLAY_ALONG_AUDIVERIS_OPTIONS, ...parseExtraOpts(process.env.AUDIVERIS_EXTRA_OPTS)].join(' ');
 
-const cacheKey = (pdfSha: string, version: string): string => {
-    const opts = optionsFingerprint().replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 48);
-    const ver = version.replace(/[^a-zA-Z0-9._+-]+/g, '_').slice(0, 32);
-    return `${pdfSha.slice(0, 16)}-${ver}-${opts || 'default'}`;
+/** Full PDF sha256 + ENGINE_VERSION (+svc-N) + sha256 of the option vector. */
+export const artifactCacheKey = (pdfSha: string, options: string = optionsFingerprint()): string => {
+    const ver = ENGINE_VERSION.replace(/[^a-zA-Z0-9._+-]+/g, '_');
+    const optHash = sha256Buffer(Buffer.from(options));
+    return `${pdfSha}-${ver}-${optHash}`;
 };
 
 export const parseScoreJson = (raw: unknown): ScoreData => {
@@ -72,7 +74,7 @@ export const fromArtifacts = async (dir: string, source: CandidateSource = 'arti
     return {
         score,
         source,
-        engineVersion: null,
+        engineVersion: ENGINE_VERSION,
         audiverisVersion: null,
         audiverisOptions: optionsFingerprint(),
         audiverisCacheHit: null,
@@ -97,10 +99,9 @@ export const readAudiverisVersion = async (): Promise<string> => {
             .split('\n')
             .map((s) => s.trim())
             .find((s) => /\d+\.\d+/.test(s));
-        const match = line?.match(/(\d+\.\d+(?:\.\d+)?)/);
-        return match?.[1] ?? line ?? 'unknown';
+        return line ?? ENGINE_VERSION;
     } catch {
-        return process.env.AUDIVERIS_VERSION ?? 'unknown';
+        return ENGINE_VERSION;
     }
 };
 
@@ -165,37 +166,70 @@ const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath
 
 export const fromPdf = async (pdfPath: string, force = false): Promise<Candidate> => {
     const pdfSha = sha256File(pdfPath);
-    const version = await readAudiverisVersion();
-    const dest = join(artifactsCacheDir(), cacheKey(pdfSha, version));
+    const options = optionsFingerprint();
+    const dest = join(artifactsCacheDir(), artifactCacheKey(pdfSha, options));
     const hit = !force && cacheReady(dest);
+    const dockerVersion = await readAudiverisVersion();
     if (!hit) {
         await mkdir(dest, { recursive: true });
         await runAudiverisInContainer(pdfPath, dest, join(dest, 'audiveris.log'));
-        await writeFile(join(dest, 'meta.json'), JSON.stringify({ pdfSha, version, options: optionsFingerprint() }));
+        await writeFile(
+            join(dest, 'meta.json'),
+            JSON.stringify({ pdfSha, engineVersion: ENGINE_VERSION, audiverisVersion: dockerVersion, options }),
+        );
     }
     const candidate = await fromArtifacts(dest, 'pdf');
     return {
         ...candidate,
-        audiverisVersion: version,
+        engineVersion: ENGINE_VERSION,
+        audiverisVersion: dockerVersion,
         audiverisCacheHit: hit,
     };
 };
 
+export const DOCUMENT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const assertDocumentReady = (status: string, title: string, ownerId: string): void => {
+    if (status !== 'ready') {
+        throw new Error(`score_analyses status is '${status}', not ready (title=${title || '?'})`);
+    }
+    if (!title.trim()) {
+        throw new Error('document title is empty');
+    }
+    if (!ownerId.trim()) {
+        throw new Error('document has no owner_id');
+    }
+};
+
+export const documentMetaSql = (documentId: string): string =>
+    `select sa.status, coalesce(sa.engine_version, ''), d.title, d.owner_id::text ` +
+    `from score_analyses sa join documents d on d.id = sa.document_id ` +
+    `where sa.document_id='${documentId}'`;
+
 export const fromDocument = async (documentId: string): Promise<Candidate> => {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(documentId)) {
+    if (!DOCUMENT_ID_RE.test(documentId)) {
         throw new Error(`document id is not a UUID: ${documentId}`);
     }
-    const { stdout: engineOut } = await dockerExec(dbContainer(), [
+    const { stdout: metaOut } = await dockerExec(dbContainer(), [
         'psql',
         '-U',
         'postgres',
         '-d',
         'postgres',
         '-At',
+        '-F',
+        '\t',
         '-c',
-        `select coalesce(engine_version, '') from score_analyses where document_id='${documentId}'`,
+        documentMetaSql(documentId),
     ]);
-    const engineVersion = engineOut.trim() || null;
+    const metaLine = metaOut.trim().split('\n')[0];
+    if (!metaLine) {
+        throw new Error(`no ready score_analyses+documents row for ${documentId}`);
+    }
+    const [status, engineRaw, title, ownerId] = metaLine.split('\t');
+    assertDocumentReady(status ?? '', title ?? '', ownerId ?? '');
+    const engineVersion = engineRaw?.trim() || null;
+    process.stderr.write(`document ${documentId} title=${title} owner=${ownerId} engine=${engineVersion ?? '—'}\n`);
 
     const tmp = join(artifactsCacheDir(), `document-${documentId}.json`);
     await mkdir(artifactsCacheDir(), { recursive: true });
@@ -212,7 +246,7 @@ export const fromDocument = async (documentId: string): Promise<Candidate> => {
                 'postgres',
                 '-At',
                 '-c',
-                `select score::text from score_analyses where document_id='${documentId}'`,
+                `select score::text from score_analyses where document_id='${documentId}' and status='ready'`,
             ],
             { stdio: ['ignore', 'pipe', 'pipe'] },
         );

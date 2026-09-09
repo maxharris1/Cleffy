@@ -47,9 +47,10 @@
         }
     ],
     "editionNotes": [
-        "The Cleffy document dcca6082-3b58-42a6-a643-de6f196ef9f9 is a 14-page extract of Peters (Köhler/Ruthardt), Sonaten Bd.1 pp.248–261, plate 9452. IMSLP #895428 is that edition (the public scan may include extra cover pages).",
+        "The public IMSLP #895428 scan may include extra cover pages. Do not fetch it from this CLI; vendor a 14-page extract and pin pdf.sha256 before --from pdf.",
         "Upper staff is printed in bass clef from I bar 40; this edition never prints the treble clef the theme's return at 42–43 needs.",
         "Mutopia MIDI is notation-quantized and does not unfold repeats. Compare printed bars, not performed length, against the MIDI.",
-        "Fingerings are dense; Audiveris often reads a '3' as a tuplet or a cluster as ff."
+        "Fingerings are dense; Audiveris often reads a '3' as a tuplet or a cluster as ff.",
+        "There is no committed Moonlight baseline on this branch. A regression oracle must come from --from artifacts with a non-null artifactHash; never --out baseline-* from --from document."
     ]
 }

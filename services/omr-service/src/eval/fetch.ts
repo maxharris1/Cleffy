@@ -1,24 +1,43 @@
 import { mkdir, writeFile } from 'node:fs/promises';
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve, sep } from 'node:path';
 
 import AdmZip from 'adm-zip';
 
 import { sha256File } from './hash.js';
 import type { CorpusEntry } from './manifest.js';
-import { downloadsDir } from './paths.js';
+import { downloadsDir, fixturesDir } from './paths.js';
 
 export interface FetchedCorpus {
     pdfPath: string | null;
     midiDir: string;
 }
 
+export interface FetchOptions {
+    /** Network GET is only for the `fetch` command. `run` never downloads. */
+    allowNetwork?: boolean;
+    /** `midi` skips the PDF entirely (artifacts / document). */
+    mode?: 'midi' | 'all';
+}
+
+const EVAL_UA = 'cleffy-omr-eval/0.1 (https://github.com/maxharris1/Cleffy)';
+
+const isImslp = (url: string): boolean => {
+    try {
+        return /(?:^|\.)imslp\.org$/i.test(new URL(url).hostname);
+    } catch {
+        return false;
+    }
+};
+
 const download = async (url: string, dest: string): Promise<void> => {
+    if (isImslp(url)) {
+        throw new Error(
+            `Refusing to fetch ${url} (IMSLP). Place the file at ${dest} after accepting their terms in a browser, and pin pdf.sha256.`,
+        );
+    }
     const res = await fetch(url, {
-        headers: {
-            'User-Agent': 'cleffy-omr-eval/0.1 (https://github.com/maxharris1/sheet_music_scribbler)',
-            Cookie: 'imslpdisclaimeraccepted=yes',
-        },
+        headers: { 'User-Agent': EVAL_UA },
         redirect: 'follow',
     });
     if (!res.ok) {
@@ -39,47 +58,114 @@ const download = async (url: string, dest: string): Promise<void> => {
     );
 };
 
-const assertSha = (path: string, expected: string | undefined, label: string): void => {
-    if (!expected) {
-        return;
-    }
+export const assertSha = (path: string, expected: string, label: string): void => {
     const got = sha256File(path);
     if (got !== expected) {
         throw new Error(`${label} sha256 mismatch: expected ${expected}, got ${got} (${path})`);
     }
 };
 
-export const fetchCorpus = async (entry: CorpusEntry): Promise<FetchedCorpus> => {
+const insideDir = (dir: string, candidate: string): boolean => {
+    const root = resolve(dir) + sep;
+    const full = resolve(candidate);
+    return full.startsWith(root) || full === resolve(dir);
+};
+
+/** Flatten zip entries to `destDir/<basename>` and refuse `..` / absolute paths. */
+export const extractZipSafely = (zipPath: string, destDir: string): void => {
+    mkdirSync(destDir, { recursive: true });
+    const zip = new AdmZip(zipPath);
+    for (const entry of zip.getEntries()) {
+        if (entry.isDirectory) {
+            continue;
+        }
+        const raw = entry.entryName.replace(/\\/g, '/');
+        if (raw.startsWith('/') || raw.split('/').includes('..')) {
+            throw new Error(`refusing zip entry '${entry.entryName}' (path traversal)`);
+        }
+        const name = basename(raw);
+        if (name === '' || name === '.' || name === '..') {
+            throw new Error(`refusing zip entry '${entry.entryName}'`);
+        }
+        const dest = join(destDir, name);
+        if (!insideDir(destDir, dest)) {
+            throw new Error(`refusing zip entry '${entry.entryName}' (escapes ${destDir})`);
+        }
+        writeFileSync(dest, entry.getData());
+    }
+};
+
+const resolveMutopiaMidi = async (entry: CorpusEntry, allowNetwork: boolean): Promise<string> => {
+    if (entry.reference.source !== 'mutopia') {
+        throw new Error(`resolveMutopiaMidi called for ${entry.reference.source}`);
+    }
     const root = downloadsDir();
     await mkdir(root, { recursive: true });
-    const pdfPath = join(root, `${entry.slug}.pdf`);
     const zipPath = join(root, `${entry.slug}-mids.zip`);
     const midiDir = join(root, `${entry.slug}-midi`);
-
     if (!existsSync(zipPath)) {
+        if (!allowNetwork) {
+            throw new Error(
+                `reference zip missing at ${zipPath}. Run \`npm run eval -- fetch --piece ${entry.slug}\` first.`,
+            );
+        }
         await download(entry.reference.url, zipPath);
     }
     assertSha(zipPath, entry.reference.sha256, 'reference zip');
-    const zip = new AdmZip(zipPath);
-    zip.extractAllTo(midiDir, true);
+    extractZipSafely(zipPath, midiDir);
+    return midiDir;
+};
 
-    let pdf: string | null = null;
-    if (existsSync(pdfPath)) {
-        assertSha(pdfPath, entry.pdf.sha256, 'pdf');
-        pdf = pdfPath;
-    } else {
-        try {
-            await download(entry.pdf.url, pdfPath);
-            assertSha(pdfPath, entry.pdf.sha256, 'pdf');
-            pdf = pdfPath;
-        } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
+const resolveFixtureMidi = (entry: CorpusEntry): string => {
+    const midiDir = join(fixturesDir(), entry.slug);
+    if (!existsSync(midiDir)) {
+        throw new Error(`fixture MIDI dir missing: ${midiDir}`);
+    }
+    return midiDir;
+};
+
+const resolvePdf = async (entry: CorpusEntry, allowNetwork: boolean): Promise<string | null> => {
+    const pdfPath = join(downloadsDir(), `${entry.slug}.pdf`);
+    const pin = entry.pdf.sha256;
+    if (!pin) {
+        if (existsSync(pdfPath)) {
             process.stderr.write(
-                `PDF fetch skipped (${reason}). --from pdf needs ${pdfPath}. --from document does not.\n`,
+                `PDF at ${pdfPath} is unpinned (no pdf.sha256). --from pdf will refuse it.\n`,
             );
         }
+        return null;
+    }
+    if (existsSync(pdfPath)) {
+        assertSha(pdfPath, pin, 'pdf');
+        return pdfPath;
+    }
+    if (!allowNetwork) {
+        return null;
+    }
+    try {
+        await download(entry.pdf.url, pdfPath);
+        assertSha(pdfPath, pin, 'pdf');
+        return pdfPath;
+    } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`PDF fetch skipped (${reason}). --from pdf needs ${pdfPath}.\n`);
+        return null;
+    }
+};
+
+export const fetchCorpus = async (entry: CorpusEntry, options: FetchOptions = {}): Promise<FetchedCorpus> => {
+    const allowNetwork = options.allowNetwork === true;
+    const mode = options.mode ?? 'all';
+    const midiDir =
+        entry.reference.source === 'fixture'
+            ? resolveFixtureMidi(entry)
+            : await resolveMutopiaMidi(entry, allowNetwork);
+
+    if (mode === 'midi') {
+        return { pdfPath: null, midiDir };
     }
 
+    const pdf = await resolvePdf(entry, allowNetwork);
     return { pdfPath: pdf, midiDir };
 };
 
@@ -88,7 +174,7 @@ const findNamed = (dir: string, filename: string, depth = 0): string | null => {
         return null;
     }
     const direct = join(dir, filename);
-    if (existsSync(direct)) {
+    if (existsSync(direct) && insideDir(dir, direct)) {
         return direct;
     }
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -104,9 +190,13 @@ const findNamed = (dir: string, filename: string, depth = 0): string | null => {
 };
 
 export const midiPath = (fetched: FetchedCorpus, filename: string): string => {
-    const found = findNamed(fetched.midiDir, filename);
+    const name = basename(filename);
+    if (name !== filename || filename.includes('..')) {
+        throw new Error(`MIDI filename must be a basename (got ${filename})`);
+    }
+    const found = findNamed(fetched.midiDir, name);
     if (!found) {
-        throw new Error(`MIDI ${filename} not in ${fetched.midiDir}`);
+        throw new Error(`MIDI ${name} not in ${fetched.midiDir}`);
     }
     return found;
 };

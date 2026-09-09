@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { z } from 'zod';
 
 import { corpusDir } from './paths.js';
@@ -19,10 +19,19 @@ const tempoRangeSchema = z.object({
     max: z.number().positive(),
 });
 
+const midiBasenameSchema = z
+    .string()
+    .regex(/^[A-Za-z0-9._-]+\.mid$/i, 'midi must be a basename ending in .mid (no path separators)');
+
+const slugSchema = z
+    .string()
+    .min(1)
+    .regex(/^[a-z0-9][a-z0-9-]*$/, 'slug must be kebab-case');
+
 const movementSchema = z.object({
     name: z.string().min(1),
-    /** Filename inside the reference zip (e.g. `moonlight1.mid`). */
-    midi: z.string().min(1),
+    /** Basename inside the reference zip or fixture dir (e.g. `moonlight1.mid`). */
+    midi: midiBasenameSchema,
     meter: meterSchema,
     /** Pickup length in quarter-notes. 0 when the first bar is complete. */
     pickupQuarters: z.number().nonnegative(),
@@ -42,23 +51,27 @@ const movementSchema = z.object({
 
 const pdfSchema = z.object({
     url: z.string().url(),
-    /** Pin once the file is in hand; fetch verifies when present. */
+    /** Required before `--from pdf`; fetch refuses an unpinned file. */
     sha256: sha256Schema.optional(),
     pages: z.number().int().positive(),
 });
 
-const referenceSchema = z.object({
+const mutopiaReferenceSchema = z.object({
     source: z.literal('mutopia'),
     url: z.string().url(),
     sha256: sha256Schema,
     license: z.string().min(1),
 });
 
+const fixtureReferenceSchema = z.object({
+    source: z.literal('fixture'),
+    license: z.string().min(1),
+});
+
+const referenceSchema = z.discriminatedUnion('source', [mutopiaReferenceSchema, fixtureReferenceSchema]);
+
 export const corpusEntrySchema = z.object({
-    slug: z
-        .string()
-        .min(1)
-        .regex(/^[a-z0-9][a-z0-9-]*$/, 'slug must be kebab-case'),
+    slug: slugSchema,
     title: z.string().min(1),
     pdf: pdfSchema,
     reference: referenceSchema,
@@ -70,8 +83,20 @@ export type CorpusMeter = z.infer<typeof meterSchema>;
 export type CorpusMovement = z.infer<typeof movementSchema>;
 export type CorpusEntry = z.infer<typeof corpusEntrySchema>;
 
+export const assertSlug = (slug: string): string => {
+    const parsed = slugSchema.safeParse(slug);
+    if (!parsed.success) {
+        throw new Error(`Invalid corpus slug '${slug}': ${parsed.error.issues[0]?.message}`);
+    }
+    return parsed.data;
+};
+
 export const loadCorpusEntry = (slug: string): CorpusEntry => {
-    const path = join(corpusDir(), `${slug}.json`);
+    const safe = assertSlug(slug);
+    const path = join(corpusDir(), `${safe}.json`);
+    if (basename(path) !== `${safe}.json`) {
+        throw new Error(`Corpus slug escaped the corpus directory: ${slug}`);
+    }
     let raw: unknown;
     try {
         raw = JSON.parse(readFileSync(path, 'utf8'));
@@ -81,10 +106,10 @@ export const loadCorpusEntry = (slug: string): CorpusEntry => {
     const parsed = corpusEntrySchema.safeParse(raw);
     if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        throw new Error(`Invalid corpus entry ${slug}: ${issue?.path.join('.')}: ${issue?.message}`);
+        throw new Error(`Invalid corpus entry ${safe}: ${issue?.path.join('.')}: ${issue?.message}`);
     }
-    if (parsed.data.slug !== slug) {
-        throw new Error(`Corpus slug mismatch: file is '${parsed.data.slug}', asked for '${slug}'`);
+    if (parsed.data.slug !== safe) {
+        throw new Error(`Corpus slug mismatch: file is '${parsed.data.slug}', asked for '${safe}'`);
     }
     return parsed.data;
 };

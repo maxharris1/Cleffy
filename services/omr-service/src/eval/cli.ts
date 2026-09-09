@@ -4,9 +4,17 @@ import { parseArgs } from 'node:util';
 import { fromArtifacts, fromDocument, fromPdf, type Candidate } from './candidate.js';
 import { compareScore } from './compare.js';
 import { fetchCorpus, midiPath } from './fetch.js';
-import { loadCorpusEntry } from './manifest.js';
+import { loadCorpusEntry, type CorpusEntry } from './manifest.js';
 import { notesFromMidi } from './midiRef.js';
-import { attachRecord, diffBaseline, formatDeltas, formatSummary, loadBaseline, writeResult } from './report.js';
+import {
+    attachRecord,
+    diffBaseline,
+    formatDeltas,
+    formatSummary,
+    IncomparableBaselineError,
+    loadBaseline,
+    writeResult,
+} from './report.js';
 import { segmentMovements } from './segment.js';
 
 const usage = `Usage:
@@ -14,14 +22,40 @@ const usage = `Usage:
   node dist/eval/cli.js audiveris --piece <slug> [--force-audiveris]
   node dist/eval/cli.js run --piece <slug> --from pdf|artifacts <dir>|document <id>
        [--baseline <json>] [--out <filename>] [--tolerance 0.5] [--force-audiveris] [--json]
+
+  node dist/eval/cli.js --help
+
+CI runs eval unit tests (including this CLI on a committed toy fixture). It does
+not run Audiveris or score Moonlight. A green omr-service job is not an accuracy
+gate for corpus pieces that need the engine.
+
+--from document cannot --out a baseline-* file. Commit a baseline only from
+--from artifacts with a non-null artifactHash.
 `;
 
-const fail = (message: string): never => {
+type Command = 'fetch' | 'audiveris' | 'run' | 'help';
+
+const fail = (message: string, code = 1): never => {
     process.stderr.write(`${message}\n`);
-    process.exit(1);
+    process.exit(code);
 };
 
-const loadRefs = async (entry: ReturnType<typeof loadCorpusEntry>, midiDir: string) => {
+const asCommand = (raw: string | undefined): Command | undefined => {
+    if (raw === undefined) {
+        return undefined;
+    }
+    switch (raw) {
+        case 'fetch':
+        case 'audiveris':
+        case 'run':
+        case 'help':
+            return raw;
+        default:
+            return undefined;
+    }
+};
+
+const loadRefs = async (entry: CorpusEntry, midiDir: string) => {
     const refs = [];
     for (const movement of entry.movements) {
         const buf = await readFile(midiPath({ pdfPath: null, midiDir }, movement.midi));
@@ -31,7 +65,7 @@ const loadRefs = async (entry: ReturnType<typeof loadCorpusEntry>, midiDir: stri
 };
 
 const runCompare = async (
-    entry: ReturnType<typeof loadCorpusEntry>,
+    entry: CorpusEntry,
     candidate: Candidate,
     midiDir: string,
     jsonOnly: boolean,
@@ -52,9 +86,17 @@ const runCompare = async (
     if (!baselinePath) {
         return 0;
     }
-    const deltas = diffBaseline(loadBaseline(baselinePath), record, tolerance);
-    process.stdout.write(`${formatDeltas(deltas)}\n`);
-    return deltas.some((d) => d.regressed) ? 1 : 0;
+    try {
+        const deltas = diffBaseline(loadBaseline(baselinePath), record, tolerance);
+        process.stdout.write(`${formatDeltas(deltas)}\n`);
+        return deltas.some((d) => d.regressed) ? 1 : 0;
+    } catch (err) {
+        if (err instanceof IncomparableBaselineError) {
+            process.stderr.write(`${err.message}\n`);
+            return err.exitCode;
+        }
+        throw err;
+    }
 };
 
 const main = async (): Promise<number> => {
@@ -67,12 +109,24 @@ const main = async (): Promise<number> => {
             out: { type: 'string' },
             tolerance: { type: 'string', default: '0.5' },
             json: { type: 'boolean', default: false },
+            help: { type: 'boolean', short: 'h', default: false },
             'force-audiveris': { type: 'boolean', default: false },
         },
     });
-    const command = positionals[0];
+    if (values.help === true) {
+        process.stdout.write(usage);
+        return 0;
+    }
+    const command = asCommand(positionals[0]);
     const slug = values.piece;
-    if (command === undefined || slug === undefined) {
+    if (command === undefined || (command !== 'help' && slug === undefined)) {
+        return fail(usage);
+    }
+    if (command === 'help') {
+        process.stdout.write(usage);
+        return 0;
+    }
+    if (slug === undefined) {
         return fail(usage);
     }
     const entry = loadCorpusEntry(slug);
@@ -83,15 +137,18 @@ const main = async (): Promise<number> => {
 
     switch (command) {
         case 'fetch': {
-            const fetched = await fetchCorpus(entry);
+            const fetched = await fetchCorpus(entry, { allowNetwork: true, mode: 'all' });
             process.stdout.write(`midi ${fetched.midiDir}\npdf ${fetched.pdfPath ?? '(missing)'}\n`);
             return 0;
         }
         case 'audiveris': {
-            const fetched = await fetchCorpus(entry);
+            const fetched = await fetchCorpus(entry, { allowNetwork: false, mode: 'all' });
             const pdfPath = fetched.pdfPath;
+            if (entry.pdf.sha256 === undefined) {
+                return fail('pdf.sha256 is required before --from pdf / audiveris; pin the file you actually scored');
+            }
             if (pdfPath === null) {
-                return fail('PDF is not in the cache; fetch it or copy the file into eval/cache/downloads/<slug>.pdf');
+                return fail('PDF is not in the cache; copy the pinned file into eval/cache/downloads/<slug>.pdf');
             }
             const candidate = await fromPdf(pdfPath, values['force-audiveris'] === true);
             process.stdout.write(
@@ -104,43 +161,56 @@ const main = async (): Promise<number> => {
             if (from === undefined) {
                 return fail('--from pdf | artifacts <dir> | document <id>');
             }
-            const fetched = await fetchCorpus(entry);
             let candidate: Candidate;
+            let midiDir: string;
             if (from === 'pdf') {
+                if (entry.pdf.sha256 === undefined) {
+                    return fail(
+                        'pdf.sha256 is required before --from pdf; pin the file you actually scored',
+                    );
+                }
+                const fetched = await fetchCorpus(entry, { allowNetwork: false, mode: 'all' });
                 const pdfPath = fetched.pdfPath;
                 if (pdfPath === null) {
                     return fail(
-                        'PDF is not in the cache; fetch it or copy the file into eval/cache/downloads/<slug>.pdf',
+                        'PDF is not in the cache; copy the pinned file into eval/cache/downloads/<slug>.pdf',
                     );
                 }
                 candidate = await fromPdf(pdfPath, values['force-audiveris'] === true);
+                midiDir = fetched.midiDir;
             } else if (from === 'artifacts') {
                 const dir = positionals[1];
                 if (dir === undefined) {
                     return fail('--from artifacts requires a directory argument');
                 }
+                const fetched = await fetchCorpus(entry, { allowNetwork: false, mode: 'midi' });
                 candidate = await fromArtifacts(dir);
+                midiDir = fetched.midiDir;
             } else if (from === 'document') {
                 const id = positionals[1];
                 if (id === undefined) {
                     return fail('--from document requires a document UUID');
                 }
+                const fetched = await fetchCorpus(entry, { allowNetwork: false, mode: 'midi' });
                 candidate = await fromDocument(id);
+                midiDir = fetched.midiDir;
             } else {
                 return fail(`unknown --from ${from}`);
             }
             return runCompare(
                 entry,
                 candidate,
-                fetched.midiDir,
+                midiDir,
                 values.json === true,
                 values.baseline,
                 values.out,
                 tolerance,
             );
         }
-        default:
-            return fail(usage);
+        default: {
+            const exhaustive: never = command;
+            return fail(`unknown command ${exhaustive}`);
+        }
     }
 };
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ScoreData } from '../scoreData.js';
 import { SCORE_DATA_VERSION, TICKS_PER_QUARTER } from '../scoreData.js';
-import { compareScore, pitchSim } from './compare.js';
+import { compareScore, pitchSim, ALIGN_SKIP_COST } from './compare.js';
 import type { CorpusEntry } from './manifest.js';
 import type { RefNote } from './midiRef.js';
 import { segmentMovements } from './segment.js';
@@ -93,6 +93,7 @@ describe('compareScore', () => {
         expect(mov?.merge2).toBe(1);
         expect(mov?.refNotes).toBe(6);
         expect(mov?.pitchMatch).toBeCloseTo((4 / 6) * 100, 5);
+        expect(mov?.barsAtCorrectLength ?? 99).toBeLessThanOrEqual(mov?.omrPrintedBars ?? 0);
     });
 
     it('pitchSim is 1 for identical multisets', () => {
@@ -102,5 +103,9 @@ describe('compareScore', () => {
         ];
         expect(pitchSim(notes, notes)).toBe(1);
         expect(pitchSim(notes, [{ onsetQ: 0, pitch: 61, hand: 0 }])).toBe(0);
+    });
+
+    it('skip is strictly dearer than a zero-similarity match', () => {
+        expect(ALIGN_SKIP_COST).toBeGreaterThan(1);
     });
 });

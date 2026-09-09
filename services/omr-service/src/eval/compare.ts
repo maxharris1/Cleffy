@@ -89,6 +89,15 @@ type PathStep = { kind: AlignKind; ri: number[]; oj: number[] };
 
 const INF = 1e9;
 
+/**
+ * A zero-similarity 1:1 match costs `1 - 0 = 1`. Skip must be strictly dearer
+ * or DTW prefers leaving a bar unpaired over aligning two dissimilar bars.
+ * merge2 pays that skip on top of the combined mismatch so a mediocre two-bar
+ * swallow is not cheaper than two honest matches.
+ */
+export const ALIGN_SKIP_COST = 1.1;
+export const ALIGN_MERGE2_EXTRA = ALIGN_SKIP_COST;
+
 const countPitches = (notes: readonly BarNote[]): Map<number, number> => {
     const map = new Map<number, number>();
     for (const note of notes) {
@@ -205,17 +214,17 @@ const alignBars = (ref: BarNote[][], omr: BarNote[][]): PathStep[] => {
                 }
             }
             if (i < n) {
-                set(i + 1, j, here + 0.9, { kind: 'ref_only', ri: [i], oj: [] });
+                set(i + 1, j, here + ALIGN_SKIP_COST, { kind: 'ref_only', ri: [i], oj: [] });
             }
             if (j < m) {
-                set(i, j + 1, here + 0.9, { kind: 'omr_only', ri: [], oj: [j] });
+                set(i, j + 1, here + ALIGN_SKIP_COST, { kind: 'omr_only', ri: [], oj: [j] });
             }
             if (i + 1 < n && j < m) {
                 const a = ref[i];
                 const b = ref[i + 1];
                 const o = omr[j];
                 if (a && b && o) {
-                    set(i + 2, j + 1, here + (1 - pitchSim([...a, ...b], o)) + 0.3, {
+                    set(i + 2, j + 1, here + (1 - pitchSim([...a, ...b], o)) + ALIGN_MERGE2_EXTRA, {
                         kind: 'merge2',
                         ri: [i, i + 1],
                         oj: [j],

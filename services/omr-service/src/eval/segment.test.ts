@@ -75,4 +75,56 @@ describe('segmentMovements', () => {
         expect(result.metersOk).toBe(false);
         expect(result.slices.every((s) => !s.meterOk)).toBe(true);
     });
+
+    it('does not bind a later movement to a meter flicker inside an earlier one', () => {
+        const result = segmentMovements(
+            score([
+                { tick: 0, num: 2, den: 2 },
+                { tick: 500, num: 4, den: 4 },
+                { tick: 3000, num: 3, den: 4 },
+                { tick: 8000, num: 4, den: 4 },
+            ]),
+            entry([
+                { num: 2, den: 2 },
+                { num: 3, den: 4 },
+                { num: 4, den: 4 },
+            ]),
+        );
+        expect(result.movementCountOk).toBe(false);
+        expect(result.metersOk).toBe(true);
+        expect(result.slices.map((s) => [s.lo, s.hi])).toEqual([
+            [0, 3000],
+            [3000, 8000],
+            [8000, 10_000],
+        ]);
+    });
+
+    it('prefers tempo-heading seams when extra 4/4 signatures would steal a later 4/4 movement', () => {
+        const result = segmentMovements(
+            {
+                ...score(
+                    [
+                        { tick: 0, num: 4, den: 4 },
+                        { tick: 500, num: 4, den: 4 },
+                        { tick: 8000, num: 4, den: 4 },
+                    ],
+                    12_000,
+                ),
+                tempos: [
+                    { tick: 0, bpm: 66, src: 'word' },
+                    { tick: 8000, bpm: 172, src: 'word' },
+                ],
+            },
+            entry([
+                { num: 4, den: 4 },
+                { num: 4, den: 4 },
+            ]),
+        );
+        expect(result.movementCountOk).toBe(false);
+        expect(result.metersOk).toBe(true);
+        expect(result.slices.map((s) => [s.lo, s.hi])).toEqual([
+            [0, 8000],
+            [8000, 12_000],
+        ]);
+    });
 });
