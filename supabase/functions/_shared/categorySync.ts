@@ -4,8 +4,9 @@
  * NO imports — loaded by Deno (with the `.ts` extension), by vitest (without
  * it) and by the Node seed script (`--experimental-strip-types`). The hosts do
  * I/O and persistence; this module decides which category to page, which
- * generation to write, when a snapshot rolls over, and how one MediaWiki
- * generator batch is fetched and merged.
+ * generation to write into the building table, when that snapshot promotes
+ * onto the live `imslp_works` mirror, and how one MediaWiki generator batch
+ * is fetched and merged.
  */
 
 export type SyncState = 'never' | 'building' | 'ok' | 'failed';
@@ -20,9 +21,36 @@ export interface CategorySyncRow {
     last_error: string | null;
     completed_at: string | null;
     updated_at: string | null;
-    /** When the building generation opened — prune boundary once it completes. */
+    /** When the building generation opened. */
     building_started_at?: string | null;
 }
+
+/** Skip a `building` row whose `updated_at` is still inside this window — another tick holds it. */
+export const BUILDING_LEASE_MS = 90_000;
+
+const CATEGORY_NAME_RE = /^[\p{L}\p{M}0-9,.'\- ()]+$/u;
+
+/** Category titles go into MW query params, never the host; still reject URL-like junk. */
+export const isSafeCategoryName = (name: string): boolean => {
+    if (name.length === 0 || name.length > 80) {
+        return false;
+    }
+    if (name.includes('://') || name.includes('|') || name.includes('\n')) {
+        return false;
+    }
+    return CATEGORY_NAME_RE.test(name);
+};
+
+export const tickInFlight = (row: CategorySyncRow | undefined, nowMs: number): boolean => {
+    if (!row || row.state !== 'building' || !row.updated_at) {
+        return false;
+    }
+    const updated = Date.parse(row.updated_at);
+    if (!Number.isFinite(updated)) {
+        return false;
+    }
+    return nowMs - updated >= 0 && nowMs - updated < BUILDING_LEASE_MS;
+};
 
 export interface FacetCategorySource {
     category?: string;
@@ -95,7 +123,11 @@ const completedMs = (row: CategorySyncRow | undefined): number => {
  * order of `categories`, so a cold index builds the default-instrument
  * intersections before the long composer tail.
  */
-export const pickNextCategory = (categories: string[], rows: CategorySyncRow[]): string | null => {
+export const pickNextCategory = (
+    categories: string[],
+    rows: CategorySyncRow[],
+    nowMs: number = Date.now(),
+): string | null => {
     if (categories.length === 0) {
         return null;
     }
@@ -104,8 +136,11 @@ export const pickNextCategory = (categories: string[], rows: CategorySyncRow[]):
         byCategory.set(row.category, row);
     }
 
-    const rank = (category: string): [number, number] => {
+    const rank = (category: string): [number, number] | null => {
         const row = byCategory.get(category);
+        if (tickInFlight(row, nowMs)) {
+            return null;
+        }
         if (!row || row.state === 'never' || row.state === 'building') {
             return [0, completedMs(row)];
         }
@@ -119,6 +154,9 @@ export const pickNextCategory = (categories: string[], rows: CategorySyncRow[]):
     let bestKey: [number, number] | null = null;
     for (const category of categories) {
         const key = rank(category);
+        if (!key) {
+            continue;
+        }
         if (!bestKey || key[0] < bestKey[0] || (key[0] === bestKey[0] && key[1] < bestKey[1])) {
             best = category;
             bestKey = key;
@@ -330,11 +368,28 @@ export interface WorkRow {
     seen_at: string;
 }
 
+export interface BuildingWorkRow extends WorkRow {
+    generation: number;
+    anchor: string;
+}
+
+export const unionCategories = (...lists: string[][]): string[] => {
+    const out: string[] = [];
+    for (const list of lists) {
+        for (const category of list) {
+            if (category && !out.includes(category)) {
+                out.push(category);
+            }
+        }
+    }
+    return out;
+};
+
 /**
- * One imslp_works upsert row. The walked category is always a membership,
+ * One building-table upsert row. The walked category is always a membership,
  * even when the clcategories list omitted it. Same composer rule as
  * imslp.ts parseComposerFromTitle, repeated here because this module must
- * stay import-free for the Node seed script.
+ * stay import-free for the Node seed script (`scripts/imslp-seed.mjs`).
  */
 export const toWorkRow = (category: string, m: GeneratorMember, seenAt: string): WorkRow => {
     const composer = m.title.match(/\(([^)]+)\)\s*$/)?.[1]?.trim() ?? null;
@@ -342,11 +397,22 @@ export const toWorkRow = (category: string, m: GeneratorMember, seenAt: string):
         page_id: m.pageid,
         page_title: m.title,
         composer,
-        categories: m.categories.includes(category) ? m.categories : [category, ...m.categories],
+        categories: m.categories.includes(category) ? [...m.categories] : [category, ...m.categories],
         touched: m.touched ?? null,
         seen_at: seenAt,
     };
 };
+
+export const toBuildingRow = (
+    category: string,
+    generation: number,
+    m: GeneratorMember,
+    seenAt: string,
+): BuildingWorkRow => ({
+    ...toWorkRow(category, m, seenAt),
+    generation,
+    anchor: category,
+});
 
 export type MwFetchJson = (params: Record<string, string>) => Promise<unknown>;
 
@@ -375,6 +441,8 @@ export interface WalkBatchOptions {
     clcategories: string[];
     gcmcontinue: string | null;
     batchSize?: number;
+    /** Sleep this many ms *between* MediaWiki calls (clcategories chunks and clcontinue). */
+    delayMs?: number;
 }
 
 export interface WalkBatchResult {
@@ -392,7 +460,20 @@ export interface WalkBatchResult {
  * as "not a member". The fetcher is injected: `mwFetch` in Deno, a
  * proxy-aware fetch in Node.
  */
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const assertCategoryName = (name: string, label: string): void => {
+    if (!isSafeCategoryName(name)) {
+        throw new Error(`refusing IMSLP category ${label}`);
+    }
+};
+
 export const walkCategoryBatch = async (fetchJson: MwFetchJson, opts: WalkBatchOptions): Promise<WalkBatchResult> => {
+    assertCategoryName(opts.category, 'title');
+    for (const category of opts.clcategories) {
+        assertCategoryName(category, 'clcategories');
+    }
+    const delayMs = opts.delayMs ?? 0;
     const base: Record<string, string> = {
         action: 'query',
         generator: 'categorymembers',
@@ -407,26 +488,44 @@ export const walkCategoryBatch = async (fetchJson: MwFetchJson, opts: WalkBatchO
         base['gcmcontinue'] = opts.gcmcontinue;
     }
     const fetchPage = async (params: Record<string, string>): Promise<GeneratorPageResult> => {
-        const page = parseGeneratorPage(await fetchJson(params));
-        if (page.warnings) {
-            throw new Error(`IMSLP API warning: ${page.warnings}`);
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const page = parseGeneratorPage(await fetchJson(params));
+                if (page.warnings) {
+                    throw new Error(`IMSLP API warning: ${page.warnings}`);
+                }
+                return page;
+            } catch (err) {
+                lastError = err;
+                const message = err instanceof Error ? err.message : '';
+                if (attempt < 3 && /HTTP 429|timeout/i.test(message)) {
+                    await sleep(delayMs > 0 ? delayMs * attempt : 2000 * attempt);
+                    continue;
+                }
+                throw err;
+            }
         }
-        return page;
+        throw lastError instanceof Error ? lastError : new Error('IMSLP request failed');
     };
 
     let requests = 0;
     let members: GeneratorMember[] = [];
-    // Every response of the batch names the same next generator page; keep
-    // the first so a follow-up that omits it cannot end the walk early.
+    // MW 1.18 query-continue: take gcmcontinue from any chunk (not only the
+    // first) and echo it on clcontinue follow-ups as a sibling token.
     let nextGcm: string | null = null;
-    let first = true;
+    const pause = async () => {
+        if (requests > 0 && delayMs > 0) {
+            await sleep(delayMs);
+        }
+    };
     for (const categories of chunk(opts.clcategories, MW_MULTIVALUE_LIMIT)) {
         const params = { ...base, clcategories: categories.map((c) => `Category:${c}`).join('|') };
+        await pause();
         requests += 1;
         let page = await fetchPage(params);
-        if (first) {
+        if (page.gcmcontinue) {
             nextGcm = page.gcmcontinue;
-            first = false;
         }
         members = mergeGeneratorPages(members, page.members);
         let followups = 0;
@@ -435,8 +534,17 @@ export const walkCategoryBatch = async (fetchJson: MwFetchJson, opts: WalkBatchO
             if (followups > MAX_CL_FOLLOWUPS) {
                 throw new Error(`IMSLP clcontinue did not settle after ${MAX_CL_FOLLOWUPS} follow-ups`);
             }
+            await pause();
             requests += 1;
-            page = await fetchPage({ ...params, clcontinue: page.clcontinue });
+            const follow: Record<string, string> = { ...params, clcontinue: page.clcontinue };
+            const gcm = page.gcmcontinue ?? nextGcm ?? opts.gcmcontinue;
+            if (gcm) {
+                follow['gcmcontinue'] = gcm;
+            }
+            page = await fetchPage(follow);
+            if (page.gcmcontinue) {
+                nextGcm = page.gcmcontinue;
+            }
             members = mergeGeneratorPages(members, page.members);
         }
     }
@@ -455,8 +563,10 @@ export interface RolloverDecision {
 }
 
 /**
- * Completion/rollover: a finished page with no continue token replaces the
- * live snapshot; a mid-category failure keeps the previous active generation.
+ * Completion/rollover: a finished page with no continue token is ready to
+ * promote onto the live snapshot; a mid-category failure keeps the previous
+ * active generation. An empty first page with no continue is a genuine empty
+ * category (fetch errors throw before this) and completes so the chip is ready.
  */
 export const applyPageResult = (
     plan: TickPlan,
@@ -485,20 +595,6 @@ export const applyPageResult = (
             cmcontinue: nextContinue,
             pagesDone,
             lastError: null,
-            deleteGenerationsBefore: null,
-        };
-    }
-    // An empty first page with no continue is a failed fetch (error JSON,
-    // truncated body), not a real empty category. A later empty last page
-    // after members were stored still completes.
-    if (page.length === 0 && plan.pagesDone === 0) {
-        return {
-            kind: 'failed',
-            activeGeneration: previous?.active_generation ?? 0,
-            buildingGeneration: plan.generation,
-            cmcontinue: plan.cmcontinue,
-            pagesDone: plan.pagesDone,
-            lastError: 'empty first page',
             deleteGenerationsBefore: null,
         };
     }

@@ -1,7 +1,7 @@
 -- IMSLP works mirror: one row per work page with the taxonomy categories it
 -- belongs to, replacing the per-category membership table.
 --
--- The walker (scripts/imslp-seed.ts one-shot, imslp-sync cron refresh) pages
+-- The walker (scripts/imslp-seed.mjs one-shot, imslp-sync cron refresh) pages
 -- each taxonomy category with generator=categorymembers + prop=categories +
 -- clcategories=<every taxonomy category>, so a single pass over "For piano"
 -- records each piano work's era, forms, keys and composer flags at once.

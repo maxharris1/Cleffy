@@ -5,15 +5,19 @@ import { describe, expect, it } from 'vitest';
 
 import {
     applyPageResult,
+    BUILDING_LEASE_MS,
     categoriesToSync,
     GENERATOR_BATCH_SIZE,
     MW_MULTIVALUE_LIMIT,
+    isSafeCategoryName,
     mergeGeneratorPages,
     parseGeneratorPage,
     parseMemberPage,
     pickNextCategory,
     planTick,
+    toBuildingRow,
     toWorkRow,
+    unionCategories,
     walkCategoryBatch,
     type CategoryMemberPage,
     type CategorySyncRow,
@@ -229,13 +233,16 @@ describe('walkCategoryBatch', () => {
         expect(calls[0]).not.toHaveProperty('clcontinue');
         expect(calls[1]).toMatchObject({ clcontinue: '3809|Chopin, Frédéric' });
         expect(calls[1]?.['clcategories']).toBe(calls[0]?.['clcategories']);
+        expect(calls[1]?.['gcmcontinue']).toBe(parseGeneratorPage(chopinPage1).gcmcontinue);
         expect(calls[2]?.['clcategories']).toBe(asParam(ALL_TAXONOMY_CATEGORIES.slice(MW_MULTIVALUE_LIMIT)));
         expect(calls[2]).not.toHaveProperty('clcontinue');
         expect(calls[3]).toMatchObject({ clcontinue: '3809|Chopin, Frédéric' });
+        expect(calls[3]?.['gcmcontinue']).toBe(parseGeneratorPage(chopinPage1).gcmcontinue);
         for (const call of calls) {
             expect(call['clcategories']?.split('|').length).toBeLessThanOrEqual(MW_MULTIVALUE_LIMIT);
-            expect(call).not.toHaveProperty('gcmcontinue');
         }
+        expect(calls[0]).not.toHaveProperty('gcmcontinue');
+        expect(calls[2]).not.toHaveProperty('gcmcontinue');
     });
 
     it('keeps the generator cursor on every chunk of a resumed batch', async () => {
@@ -302,6 +309,40 @@ describe('walkCategoryBatch', () => {
         expect(result.members).toHaveLength(1);
         expect([...(result.members[0]?.categories ?? [])].sort()).toEqual(['C-sharp minor', 'For piano', 'Romantic']);
     });
+
+    it('takes gcmcontinue from a later clcategories chunk when the first omits it', async () => {
+        let firstCl: string | null = null;
+        const fetchJson = async (params: Record<string, string>) => {
+            const cl = params['clcategories'] ?? '';
+            if (!firstCl) {
+                firstCl = cl;
+            }
+            return {
+                query: {
+                    pages: { '1': { pageid: 1, title: 'A (B, C)', categories: [{ title: 'Category:For piano' }] } },
+                },
+                ...(cl === firstCl
+                    ? {}
+                    : { 'query-continue': { categorymembers: { gcmcontinue: 'page|from-second-chunk' } } }),
+            };
+        };
+        const result = await walkCategoryBatch(fetchJson, {
+            category: 'For piano',
+            clcategories: ALL_TAXONOMY_CATEGORIES,
+            gcmcontinue: null,
+        });
+        expect(result.gcmcontinue).toBe('page|from-second-chunk');
+    });
+
+    it('rejects a category name that could smuggle a URL into the MW query', async () => {
+        await expect(
+            walkCategoryBatch(async () => ({}), {
+                category: 'https://evil.example/api.php',
+                clcategories: ['For piano'],
+                gcmcontinue: null,
+            }),
+        ).rejects.toThrow(/refusing IMSLP category/);
+    });
 });
 
 describe('toWorkRow', () => {
@@ -331,6 +372,34 @@ describe('toWorkRow', () => {
             categories: ['For piano'],
             touched: null,
         });
+        expect(
+            toBuildingRow(
+                'For piano',
+                2,
+                { pageid: 8, title: 'Untitled', categories: ['For piano'] },
+                'now',
+            ),
+        ).toMatchObject({ generation: 2, anchor: 'For piano', page_id: 8 });
+    });
+});
+
+describe('unionCategories / isSafeCategoryName', () => {
+    it('unions without last-writer-wins replacement', () => {
+        expect(unionCategories(['For piano', 'Baroque'], ['For piano', 'G major'])).toEqual([
+            'For piano',
+            'Baroque',
+            'G major',
+        ]);
+    });
+
+    it('accepts taxonomy names and rejects URL-like values', () => {
+        expect(isSafeCategoryName('Chopin, Frédéric')).toBe(true);
+        expect(isSafeCategoryName('For piano (arr)')).toBe(true);
+        expect(isSafeCategoryName('Early 20th century')).toBe(true);
+        expect(isSafeCategoryName('C-sharp minor')).toBe(true);
+        expect(ALL_TAXONOMY_CATEGORIES.every(isSafeCategoryName)).toBe(true);
+        expect(isSafeCategoryName('https://imslp.org/api.php')).toBe(false);
+        expect(isSafeCategoryName('Foo|Bar')).toBe(false);
     });
 });
 
@@ -390,6 +459,43 @@ describe('pickNextCategory / planTick', () => {
             row({ category: 'Baroque', state: 'never' }),
         ]);
         expect(next).toBe('Baroque');
+    });
+
+    it('skips a building row still inside the lease so overlapping ticks do not share a walk', () => {
+        const now = Date.parse('2026-09-09T12:00:00Z');
+        const next = pickNextCategory(
+            ['For piano', 'Baroque'],
+            [
+                row({
+                    category: 'For piano',
+                    state: 'building',
+                    building_generation: 2,
+                    updated_at: new Date(now - 1_000).toISOString(),
+                }),
+                row({ category: 'Baroque', state: 'never' }),
+            ],
+            now,
+        );
+        expect(next).toBe('Baroque');
+        expect(BUILDING_LEASE_MS).toBeGreaterThan(60_000);
+    });
+
+    it('resumes a stale building row after the lease expires', () => {
+        const now = Date.parse('2026-09-09T12:00:00Z');
+        const next = pickNextCategory(
+            ['For piano', 'Baroque'],
+            [
+                row({
+                    category: 'For piano',
+                    state: 'building',
+                    building_generation: 2,
+                    updated_at: new Date(now - BUILDING_LEASE_MS - 1).toISOString(),
+                }),
+                row({ category: 'Baroque', state: 'never' }),
+            ],
+            now,
+        );
+        expect(next).toBe('For piano');
     });
 
     it('resumes a building generation at its cursor', () => {
@@ -459,14 +565,14 @@ describe('applyPageResult rollover', () => {
         expect(decision.deleteGenerationsBefore).toBeNull();
     });
 
-    it('empty first page with no continue keeps the previous generation', () => {
+    it('empty first page with no continue is a genuine empty category and completes', () => {
         const cold = planTick('Baroque', previous);
         expect(cold.pagesDone).toBe(0);
         const decision = applyPageResult(cold, previous, [], null, null);
-        expect(decision.kind).toBe('failed');
-        expect(decision.activeGeneration).toBe(1);
-        expect(decision.deleteGenerationsBefore).toBeNull();
-        expect(decision.lastError).toBe('empty first page');
+        expect(decision.kind).toBe('complete');
+        expect(decision.activeGeneration).toBe(2);
+        expect(decision.deleteGenerationsBefore).toBe(2);
+        expect(decision.lastError).toBeNull();
     });
 
     it('MediaWiki error JSON is a failed tick, not a complete snapshot', () => {

@@ -228,17 +228,20 @@ select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp
 select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
 ```
 
-Chip browse reads `public.imslp_works`: one row per IMSLP work with the array
-of taxonomy categories (instrumentation, era, form, key, composer) it belongs
-to. The walker pages each category with MediaWiki
-`generator=categorymembers` + `prop=categories` + `clcategories=<taxonomy>`, so
-one pass over `For piano` records every piano work's other facets at once, and
-a browse is exact as soon as any one of its selected chips has been walked
-completely. Typed search stays on live MediaWiki search.
+Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
+work with the array of taxonomy categories it belongs to. Refresh ticks write
+`imslp_works_building` and only promote after a category walk completes, so a
+mid-rebuild failure leaves the previous snapshot serving. The walker pages
+each category with MediaWiki `generator=categorymembers` + `prop=categories`
++ `clcategories=<taxonomy>`, so one pass over `For piano` records every piano
+work's other facets at once, and a browse is exact as soon as any one of its
+selected chips has been walked completely. Typed search stays on live
+MediaWiki search; key chips there still match the title.
 
 **Seed the mirror once per environment** (~3,500 IMSLP requests: each
-500-page batch needs two `clcategories` chunks of 50, ~1 h at 1 req/s or ~30
-min with `--delay 400`) so no chip ever shows "Index still building":
+500-page batch needs two `clcategories` chunks of 50; `--delay` sleeps between
+*every* MediaWiki call, including those chunks, ~1 h at the 1000 ms default).
+Do not drop `--delay` below 1000 against anonymous IMSLP:
 
 ```bash
 SUPABASE_URL=https://<project-ref>.supabase.co \
@@ -251,9 +254,10 @@ category, and `--dry-run` to walk IMSLP without writing. The cron tick is then
 only a refresh; without the two vault secrets it is a silent no-op and the
 mirror simply never refreshes. Rollout order for a fresh project:
 
-1. `npx supabase db push` — brings `imslp_works`, `imslp_category_sync`,
-   `imslp_browse_works`, `imslp_index_ready`, `imslp_titles_in_categories`,
-   `imslp_prune_anchor`, `imslp_sync_tick` and the `imslp-sync` cron job.
+1. `npx supabase db push` — brings `imslp_works`, `imslp_works_building`,
+   `imslp_category_sync`, `imslp_browse` / `imslp_browse_works`,
+   `imslp_index_ready`, `imslp_titles_in_categories`, `imslp_promote_anchor`,
+   `imslp_sync_tick` and the `imslp-sync` cron job.
 2. `npm run imslp:seed` against the project (above).
 3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
    `npx supabase functions deploy imslp-search`.

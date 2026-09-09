@@ -18,6 +18,19 @@ const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSe
 
 /** Bound every MW call — a slow IMSLP must not hang the invocation to the worker wall-clock. */
 const MW_TIMEOUT_MS = 10_000;
+const MW_429_ATTEMPTS = 3;
+
+const retryAfterMs = (res: Response): number => {
+    const raw = res.headers.get('Retry-After');
+    if (!raw) {
+        return 2000;
+    }
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return Math.min(Math.max(seconds * 1000, 500), 30_000);
+    }
+    return 2000;
+};
 
 export const mwFetch = async (params: Record<string, string>): Promise<unknown> => {
     const url = new URL(IMSLP_API);
@@ -26,36 +39,49 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
     }
     url.searchParams.set('format', 'json');
 
-    let res: Response;
-    try {
-        res = await fetch(url.toString(), {
-            headers: {
-                'User-Agent': USER_AGENT,
-                Accept: 'application/json',
-            },
-            signal: AbortSignal.timeout(MW_TIMEOUT_MS),
-        });
-    } catch (err) {
-        if (err instanceof DOMException && err.name === 'TimeoutError') {
-            throw new Error('IMSLP API timeout', { cause: err });
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= MW_429_ATTEMPTS; attempt++) {
+        let res: Response;
+        try {
+            res = await fetch(url.toString(), {
+                headers: {
+                    'User-Agent': USER_AGENT,
+                    Accept: 'application/json',
+                },
+                signal: AbortSignal.timeout(MW_TIMEOUT_MS),
+            });
+        } catch (err) {
+            if (err instanceof DOMException && err.name === 'TimeoutError') {
+                lastError = new Error('IMSLP API timeout', { cause: err });
+                if (attempt < MW_429_ATTEMPTS) {
+                    await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+                    continue;
+                }
+                throw lastError;
+            }
+            throw err;
         }
-        throw err;
-    }
-    if (!res.ok) {
-        throw new Error(`IMSLP API HTTP ${res.status}`);
-    }
-    const payload: unknown = await res.json();
-    if (payload && typeof payload === 'object' && 'error' in payload) {
-        const err = (payload as { error: unknown }).error;
-        if (err) {
-            const info =
-                typeof err === 'object' && err && 'info' in err && typeof (err as { info: unknown }).info === 'string'
-                    ? (err as { info: string }).info
-                    : 'IMSLP API error';
-            throw new Error(info);
+        if (res.status === 429 && attempt < MW_429_ATTEMPTS) {
+            await new Promise((resolve) => setTimeout(resolve, retryAfterMs(res)));
+            continue;
         }
+        if (!res.ok) {
+            throw new Error(`IMSLP API HTTP ${res.status}`);
+        }
+        const payload: unknown = await res.json();
+        if (payload && typeof payload === 'object' && 'error' in payload) {
+            const err = (payload as { error: unknown }).error;
+            if (err) {
+                const info =
+                    typeof err === 'object' && err && 'info' in err && typeof (err as { info: unknown }).info === 'string'
+                        ? (err as { info: string }).info
+                        : 'IMSLP API error';
+                throw new Error(info);
+            }
+        }
+        return payload;
     }
-    return payload;
+    throw lastError instanceof Error ? lastError : new Error('IMSLP API timeout');
 };
 
 export const workPageUrl = (title: string): string =>

@@ -4,7 +4,7 @@ import {
     categoriesToSync,
     pickNextCategory,
     planTick,
-    toWorkRow,
+    toBuildingRow,
     walkCategoryBatch,
     type CategorySyncRow,
 } from '../_shared/categorySync.ts';
@@ -27,9 +27,10 @@ import {
  * Each tick walks one category for up to REQUESTS_PER_TICK MediaWiki calls:
  * generator batches of 500 pages (about four requests each — the taxonomy is
  * asked for in two clcategories chunks of 50), each page tagged with every
- * taxonomy category it belongs to, upserted into imslp_works. The category's sync row
- * rolls its generation over when the walk completes; pages the walk did not
- * see lose that category (imslp_prune_anchor). scripts/imslp-seed.ts runs the
+ * taxonomy category it belongs to, upserted into imslp_works_building. The
+ * live imslp_works snapshot is unchanged until the walk completes, then
+ * imslp_promote_anchor unions the generation and prunes the walked anchor
+ * from pages this generation did not see. scripts/imslp-seed.mjs runs the
  * same walk in one go for a cold environment.
  */
 
@@ -93,7 +94,6 @@ Deno.serve(async (req) => {
     const previous = existing.find((r) => r.category === category);
     const plan = planTick(category, previous);
     const now = new Date().toISOString();
-    // A resumed generation keeps its original start; a new one opens now.
     const buildingStartedAt = plan.cmcontinue && previous?.building_started_at ? previous.building_started_at : now;
 
     const { error: startError } = await admin.from('imslp_category_sync').upsert({
@@ -126,13 +126,14 @@ Deno.serve(async (req) => {
                 category,
                 clcategories: ALL_TAXONOMY_CATEGORIES,
                 gcmcontinue: cursor,
+                delayMs: REQUEST_DELAY_MS,
             });
             requestsSpent += batch.requests;
             if (batch.members.length > 0) {
                 const seenAt = new Date().toISOString();
-                const { error: writeError } = await admin.from('imslp_works').upsert(
-                    batch.members.map((m) => toWorkRow(category, m, seenAt)),
-                    { onConflict: 'page_id' },
+                const { error: writeError } = await admin.from('imslp_works_building').upsert(
+                    batch.members.map((m) => toBuildingRow(category, plan.generation, m, seenAt)),
+                    { onConflict: 'page_id,generation,anchor' },
                 );
                 if (writeError) {
                     throw new Error(writeError.message);
@@ -151,6 +152,21 @@ Deno.serve(async (req) => {
             if (stepped.kind !== 'continue') {
                 break;
             }
+            const { error: cursorError } = await admin.from('imslp_category_sync').upsert({
+                category,
+                state: 'building',
+                active_generation: previous?.active_generation ?? 0,
+                building_generation: plan.generation,
+                building_started_at: buildingStartedAt,
+                cmcontinue: cursor,
+                pages_done: pagesDone,
+                last_error: null,
+                completed_at: previous?.completed_at ?? null,
+                updated_at: new Date().toISOString(),
+            });
+            if (cursorError) {
+                throw new Error(cursorError.message);
+            }
         }
     } catch (err) {
         lastDecision = applyPageResult(
@@ -160,6 +176,25 @@ Deno.serve(async (req) => {
             cursor,
             err instanceof Error ? err.message : 'sync failed',
         );
+    }
+
+    let pruned: number | null = null;
+    if (lastDecision.kind === 'complete') {
+        const { data, error: promoteError } = await admin.rpc('imslp_promote_anchor', {
+            anchor: category,
+            generation: plan.generation,
+        });
+        if (promoteError) {
+            lastDecision = applyPageResult(
+                { ...plan, pagesDone, cmcontinue: cursor },
+                previous,
+                [],
+                cursor,
+                promoteError.message,
+            );
+        } else {
+            pruned = typeof data === 'number' ? data : null;
+        }
     }
 
     const state = lastDecision.kind === 'complete' ? 'ok' : lastDecision.kind === 'failed' ? 'failed' : 'building';
@@ -177,14 +212,6 @@ Deno.serve(async (req) => {
     });
     if (finishError) {
         return jsonResponse({ error: finishError.message }, 500);
-    }
-
-    // Rollover the sync row first so a failed prune cannot leave the mirror
-    // serving from a generation the row no longer names.
-    let pruned: number | null = null;
-    if (lastDecision.kind === 'complete') {
-        const { data } = await admin.rpc('imslp_prune_anchor', { anchor: category, before: buildingStartedAt });
-        pruned = typeof data === 'number' ? data : null;
     }
 
     return jsonResponse({

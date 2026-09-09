@@ -11,15 +11,15 @@
  * four requests; the whole taxonomy is ~3,500 requests (~1 h at 1 req/s).
  *
  * Per category it opens a new generation in imslp_category_sync, upserts
- * batches into imslp_works as they arrive, and on completion marks the row
- * `ok` and prunes the category from pages this walk did not see. Interrupt it
+ * batches into imslp_works_building as they arrive, and on completion
+ * promotes that generation onto the live imslp_works snapshot. Interrupt it
  * and run again: a `building` row resumes at its cmcontinue cursor.
  *
  * Usage:
  *   npm run imslp:seed                                   # every category
  *   npm run imslp:seed -- --category "Chopin, Frédéric"  # one (repeatable)
  *   npm run imslp:seed -- --dry-run --category Nocturnes # walk, write nothing
- *   npm run imslp:seed -- --delay 500                    # ms between requests
+ *   npm run imslp:seed -- --delay 1000                   # ms between MW calls
  *
  * Env:  SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY. When both are unset the
  *       local stack is assumed (port from supabase/config.toml, public demo
@@ -38,7 +38,7 @@ import {
     applyPageResult,
     categoriesToSync,
     planTick,
-    toWorkRow,
+    toBuildingRow,
     walkCategoryBatch,
 } from '../supabase/functions/_shared/categorySync.ts';
 import {
@@ -124,6 +124,14 @@ const mwFetch = async (params) => {
                 signal: AbortSignal.timeout(20_000),
             });
             if (!res.ok) {
+                if (res.status === 429 && attempt < MW_RETRIES) {
+                    const retryAfter = Number(res.headers.get('Retry-After'));
+                    const waitMs = Number.isFinite(retryAfter) && retryAfter >= 0
+                        ? Math.min(Math.max(retryAfter * 1000, 500), 30_000)
+                        : 2000 * attempt;
+                    await sleep(waitMs);
+                    continue;
+                }
                 throw new Error(`IMSLP API HTTP ${res.status}`);
             }
             const payload = await res.json();
@@ -167,17 +175,17 @@ const makeDb = ({ url, key }) => {
                 headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
                 body: JSON.stringify(row),
             }),
-        upsertWorks: async (rows) => {
+        upsertBuilding: async (rows) => {
             for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
-                await request('/imslp_works?on_conflict=page_id', {
+                await request('/imslp_works_building?on_conflict=page_id,generation,anchor', {
                     method: 'POST',
                     headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
                     body: JSON.stringify(rows.slice(i, i + UPSERT_CHUNK)),
                 });
             }
         },
-        prune: (anchor, before) =>
-            request('/rpc/imslp_prune_anchor', { method: 'POST', body: JSON.stringify({ anchor, before }) }),
+        promote: (anchor, generation) =>
+            request('/rpc/imslp_promote_anchor', { method: 'POST', body: JSON.stringify({ anchor, generation }) }),
     };
 };
 
@@ -216,6 +224,7 @@ const seedCategory = async (category, { db, dryRun, delayMs }) => {
                 category,
                 clcategories: ALL_TAXONOMY_CATEGORIES,
                 gcmcontinue: cursor,
+                delayMs,
             });
             requests += batch.requests;
             for (const m of batch.members) {
@@ -225,7 +234,7 @@ const seedCategory = async (category, { db, dryRun, delayMs }) => {
             }
             if (batch.members.length > 0 && !dryRun) {
                 const seenAt = new Date().toISOString();
-                await db.upsertWorks(batch.members.map((m) => toWorkRow(category, m, seenAt)));
+                await db.upsertBuilding(batch.members.map((m) => toBuildingRow(category, plan.generation, m, seenAt)));
             }
             decision = applyPageResult(
                 { ...plan, pagesDone, cmcontinue: cursor },
@@ -268,23 +277,58 @@ const seedCategory = async (category, { db, dryRun, delayMs }) => {
 
     const state = decision.kind === 'complete' ? 'ok' : decision.kind === 'failed' ? 'failed' : 'building';
     if (!dryRun) {
-        await db.upsertSync({
-            category,
-            state,
-            active_generation: decision.activeGeneration,
-            building_generation: decision.buildingGeneration,
-            building_started_at: startedAt,
-            cmcontinue: decision.cmcontinue,
-            pages_done: decision.pagesDone,
-            last_error: decision.lastError,
-            completed_at: decision.kind === 'complete' ? new Date().toISOString() : (previous?.completed_at ?? null),
-            updated_at: new Date().toISOString(),
-        });
         if (decision.kind === 'complete') {
-            const pruned = await db.prune(category, startedAt);
-            console.log(
-                `[imslp-seed] ${category}: ok, ${decision.pagesDone} pages, ${requests} requests, pruned ${pruned}`,
-            );
+            try {
+                const pruned = await db.promote(category, plan.generation);
+                await db.upsertSync({
+                    category,
+                    state: 'ok',
+                    active_generation: decision.activeGeneration,
+                    building_generation: decision.buildingGeneration,
+                    building_started_at: startedAt,
+                    cmcontinue: decision.cmcontinue,
+                    pages_done: decision.pagesDone,
+                    last_error: null,
+                    completed_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                });
+                console.log(
+                    `[imslp-seed] ${category}: ok, ${decision.pagesDone} pages, ${requests} requests, pruned ${pruned}`,
+                );
+            } catch (err) {
+                decision = applyPageResult(
+                    { ...plan, pagesDone, cmcontinue: cursor },
+                    previous,
+                    [],
+                    cursor,
+                    err instanceof Error ? err.message : 'promote failed',
+                );
+                await db.upsertSync({
+                    category,
+                    state: 'failed',
+                    active_generation: previous?.active_generation ?? 0,
+                    building_generation: plan.generation,
+                    building_started_at: startedAt,
+                    cmcontinue: decision.cmcontinue,
+                    pages_done: decision.pagesDone,
+                    last_error: decision.lastError,
+                    completed_at: previous?.completed_at ?? null,
+                    updated_at: new Date().toISOString(),
+                });
+            }
+        } else {
+            await db.upsertSync({
+                category,
+                state,
+                active_generation: decision.activeGeneration,
+                building_generation: decision.buildingGeneration,
+                building_started_at: startedAt,
+                cmcontinue: decision.cmcontinue,
+                pages_done: decision.pagesDone,
+                last_error: decision.lastError,
+                completed_at: previous?.completed_at ?? null,
+                updated_at: new Date().toISOString(),
+            });
         }
     }
     if (decision.kind === 'failed') {
