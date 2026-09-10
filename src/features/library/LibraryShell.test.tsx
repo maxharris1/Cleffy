@@ -140,4 +140,9 @@ describe('LibraryShell', () => {
         expect(await screen.findByText('library page')).toBeInTheDocument();
         expect(screen.queryByRole('menu', { name: 'Account' })).not.toBeInTheDocument();
     });
+
+    it('pads the chrome for the iPhone status bar', () => {
+        renderShell();
+        expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');
+    });
 });

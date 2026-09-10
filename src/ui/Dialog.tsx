@@ -104,7 +104,9 @@ export const Dialog = ({ label, onClose, children, withHeader = true, sheet = fa
                 tabIndex={-1}
                 onClick={(event) => event.stopPropagation()}
                 className={`w-full max-w-md rounded-2xl border border-stone-200 bg-white p-5 shadow-xl outline-none ${
-                    sheet ? 'max-h-[80vh] overflow-auto' : ''
+                    sheet
+                        ? 'max-h-[80vh] overflow-auto pb-[max(1.25rem,var(--safe-bottom))] pl-[max(1.25rem,var(--safe-left))] pr-[max(1.25rem,var(--safe-right))]'
+                        : ''
                 }`}
             >
                 {withHeader ? (

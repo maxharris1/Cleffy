@@ -19,6 +19,7 @@ import {
     RefreshCw,
     Repeat,
     Settings2,
+    Share,
     SkipBack,
     Square,
     Star,
@@ -54,6 +55,7 @@ export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);
 export const SettingsIcon = withBrandStroke(Settings2);
 export const UploadIcon = withBrandStroke(Upload);
+export const ShareIcon = withBrandStroke(Share);
 export const LayoutGridIcon = withBrandStroke(LayoutGrid);
 export const ListIcon = withBrandStroke(List);
 
