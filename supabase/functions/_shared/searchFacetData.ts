@@ -7,8 +7,9 @@
  * runtimes read one definition and cannot drift from each other.
  *
  * Era chips bind to IMSLP period categories (Baroque, Classical, Romantic,
- * Early 20th century, Modern). Key is a title constraint only — it has no
- * work category.
+ * Early 20th century, Modern). Key chips bind to IMSLP key categories
+ * (C major, C-sharp minor, …) for browse; typed search still checks keys
+ * against the title because MediaWiki hits arrive without categories.
  */
 
 export type FacetDimension = 'composer' | 'instrument' | 'form' | 'key' | 'era';
@@ -88,16 +89,16 @@ export const FORM_FACETS: FacetValueData[] = [
 // Symbol spellings (E♭, C♯) are not duplicated as tokens: foldAccents maps
 // ♭ → "-flat" and ♯ → "-sharp", so a typed symbol matches these spellings.
 export const KEY_FACETS: FacetValueData[] = [
-    { id: 'c-major', label: 'C major', tokens: ['C major'] },
-    { id: 'g-major', label: 'G major', tokens: ['G major'] },
-    { id: 'd-major', label: 'D major', tokens: ['D major'] },
-    { id: 'a-major', label: 'A major', tokens: ['A major'] },
-    { id: 'e-flat-major', label: 'E-flat major', tokens: ['E-flat major'] },
-    { id: 'a-minor', label: 'A minor', tokens: ['A minor'] },
-    { id: 'd-minor', label: 'D minor', tokens: ['D minor'] },
-    { id: 'e-minor', label: 'E minor', tokens: ['E minor'] },
-    { id: 'c-minor', label: 'C minor', tokens: ['C minor'] },
-    { id: 'c-sharp-minor', label: 'C-sharp minor', tokens: ['C-sharp minor'] },
+    { id: 'c-major', label: 'C major', category: 'C major', tokens: ['C major'] },
+    { id: 'g-major', label: 'G major', category: 'G major', tokens: ['G major'] },
+    { id: 'd-major', label: 'D major', category: 'D major', tokens: ['D major'] },
+    { id: 'a-major', label: 'A major', category: 'A major', tokens: ['A major'] },
+    { id: 'e-flat-major', label: 'E-flat major', category: 'E-flat major', tokens: ['E-flat major'] },
+    { id: 'a-minor', label: 'A minor', category: 'A minor', tokens: ['A minor'] },
+    { id: 'd-minor', label: 'D minor', category: 'D minor', tokens: ['D minor'] },
+    { id: 'e-minor', label: 'E minor', category: 'E minor', tokens: ['E minor'] },
+    { id: 'c-minor', label: 'C minor', category: 'C minor', tokens: ['C minor'] },
+    { id: 'c-sharp-minor', label: 'C-sharp minor', category: 'C-sharp minor', tokens: ['C-sharp minor'] },
 ];
 
 export const ERA_FACETS: FacetValueData[] = [
@@ -126,6 +127,41 @@ export const ERA_IDS: ReadonlySet<string> = new Set(ERA_FACETS.map((e) => e.id))
 
 /** Server cap per dimension; the UI stops offering more chips at this count. */
 export const MAX_FILTERS_PER_DIMENSION = 6;
+
+/**
+ * Every browsable IMSLP category the taxonomy names, instrument "(arr)"
+ * variants included. The mirror walker asks MediaWiki for exactly these per
+ * page (clcategories), so one pass over a category records every facet.
+ */
+export const ALL_TAXONOMY_CATEGORIES: string[] = (() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const add = (category: string | undefined) => {
+        if (category && !seen.has(category)) {
+            seen.add(category);
+            out.push(category);
+        }
+    };
+    for (const facet of COMPOSER_FACETS) {
+        add(facet.category);
+    }
+    for (const facet of INSTRUMENT_FACETS) {
+        add(facet.category);
+        if (facet.category) {
+            add(`${facet.category} (arr)`);
+        }
+    }
+    for (const facet of FORM_FACETS) {
+        add(facet.category);
+    }
+    for (const facet of KEY_FACETS) {
+        add(facet.category);
+    }
+    for (const facet of ERA_FACETS) {
+        add(facet.category);
+    }
+    return out;
+})();
 
 /** Same accidental map as CHAR_FOLDS in search.ts — this file cannot import it. */
 const ACCIDENTAL_FOLDS: Record<string, string> = {
@@ -179,55 +215,78 @@ const instrumentCategories = (id: string): string[] => {
     return [category, `${category} (arr)`];
 };
 
-/**
- * One UNION group per active dimension (OR within, AND across). Instrument
- * groups include the "(arr)" variant. Key produces no group — title only.
- */
-export const categoryGroupsFor = (filters: SearchFilters): string[][] => {
+const groupForDimension = (dimension: FacetDimension, filters: SearchFilters): string[] => {
+    switch (dimension) {
+        case 'composer':
+            return [...(filters.composerCategories ?? [])];
+        case 'instrument': {
+            const cats: string[] = [];
+            for (const id of filters.instruments ?? []) {
+                cats.push(...instrumentCategories(id));
+            }
+            return cats;
+        }
+        case 'form': {
+            const cats: string[] = [];
+            for (const id of filters.forms ?? []) {
+                const category = FORM_BY_ID[id]?.category;
+                if (category) {
+                    cats.push(category);
+                }
+            }
+            return cats;
+        }
+        case 'key': {
+            const cats: string[] = [];
+            for (const id of filters.keys ?? []) {
+                const category = KEY_BY_ID[id]?.category;
+                if (category) {
+                    cats.push(category);
+                }
+            }
+            return cats;
+        }
+        case 'era': {
+            const cats: string[] = [];
+            for (const id of filters.eras ?? []) {
+                const category = ERA_BY_ID[id]?.category;
+                if (category) {
+                    cats.push(category);
+                }
+            }
+            return cats;
+        }
+        default: {
+            const _exhaustive: never = dimension;
+            return _exhaustive;
+        }
+    }
+};
+
+const groupsForDimensions = (filters: SearchFilters, dimensions: FacetDimension[]): string[][] => {
     const groups: string[][] = [];
-
-    if (filters.composerCategories && filters.composerCategories.length > 0) {
-        groups.push([...filters.composerCategories]);
-    }
-
-    if (filters.instruments && filters.instruments.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.instruments) {
-            cats.push(...instrumentCategories(id));
-        }
+    for (const dimension of dimensions) {
+        const cats = groupForDimension(dimension, filters);
         if (cats.length > 0) {
             groups.push(cats);
         }
     }
-
-    if (filters.forms && filters.forms.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.forms) {
-            const category = FORM_BY_ID[id]?.category;
-            if (category) {
-                cats.push(category);
-            }
-        }
-        if (cats.length > 0) {
-            groups.push(cats);
-        }
-    }
-
-    if (filters.eras && filters.eras.length > 0) {
-        const cats: string[] = [];
-        for (const id of filters.eras) {
-            const category = ERA_BY_ID[id]?.category;
-            if (category) {
-                cats.push(category);
-            }
-        }
-        if (cats.length > 0) {
-            groups.push(cats);
-        }
-    }
-
     return groups;
 };
+
+/**
+ * Typed-search membership groups (OR within, AND across). Keys stay off this
+ * list: production search matches key chips against the title
+ * (`titleMatchesFilters`), not IMSLP category membership.
+ */
+export const categoryGroupsFor = (filters: SearchFilters): string[][] =>
+    groupsForDimensions(filters, ['composer', 'instrument', 'form', 'era']);
+
+/**
+ * Chip browse groups. Key chips bind to IMSLP key categories (C major, …).
+ */
+export const browseCategoryGroupsFor = (filters: SearchFilters): string[][] =>
+    groupsForDimensions(filters, ['composer', 'instrument', 'form', 'key', 'era']);
 
 /** Flattened categories from groups — used to ask which snapshots are missing. */
 export const categoriesInGroups = (groups: string[][]): string[] => {
@@ -300,22 +359,6 @@ export const facetTokens = (filters: SearchFilters): string[] => {
         }
     }
     return out;
-};
-
-/**
- * Key has no IMSLP category, so browse narrows the intersection by title inside
- * imslp_browse. One case-insensitive Postgres regex per key chip, word-bounded so
- * "C major" does not match "C-sharp major".
- */
-export const keyTitlePatterns = (filters: SearchFilters): string[] => {
-    const patterns: string[] = [];
-    for (const id of filters.keys ?? []) {
-        for (const token of KEY_BY_ID[id]?.tokens ?? []) {
-            const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            patterns.push(`\\m${escaped}\\M`);
-        }
-    }
-    return patterns;
 };
 
 /**
