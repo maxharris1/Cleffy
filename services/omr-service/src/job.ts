@@ -51,10 +51,6 @@ import type { ScoreData } from './scoreData.js';
  * still parse the optional v5 fields.
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
- *
- * PR #34 (`mh/skip-non-musical-omr-pages`) also claims svc-12. This branch
- * keeps 12: the second merge must bump to svc-13 so score_cache does not serve
- * the first PR's ScoreData as current. Do not "fix" #34 here.
  */
 export const ENGINE_VERSION = 'audiveris-5.11.0+svc-13';
 

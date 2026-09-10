@@ -393,7 +393,7 @@ describe('analysis warnings', () => {
         expect(screen.getByText(/sustain pedal is played by ear for the style/i)).toBeInTheDocument();
     });
 
-    it('explains svc-12 key repair, ghost fill, and clef/dynamic suspects', async () => {
+    it('explains svc-13 key repair, ghost fill, and clef/dynamic suspects', async () => {
         withWarnings(['key_signature_repaired', 'ghost_part_filled', 'clef_suspect', 'dynamic_suspect']);
         await userEvent.click(screen.getByRole('button', { name: /4 things to know/i }));
         expect(screen.getByText(/key signature looked misread and was restored/i)).toBeInTheDocument();
@@ -413,7 +413,7 @@ describe('tempo disclosure and stale analyses', () => {
     const ready = (
         over: Partial<Parameters<typeof renderBar>[0]> = {},
         score = tinyScore,
-        engine: string | null = 'audiveris-5.11.0+svc-12',
+        engine: string | null = 'audiveris-5.11.0+svc-13',
     ) =>
         renderBar({
             state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },

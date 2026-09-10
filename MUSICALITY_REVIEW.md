@@ -29,8 +29,8 @@
 > `:||` (`repeats_unrolled`) and does not emit `jumps_performed`.
 >
 > The general corpus eval CLI (`src/eval/`, `npm run eval`) lives on
-> `mh/omr-accuracy-eval` (PR #33). PR #34 also claims svc-12; the second merge
-> must bump to svc-13.
+> `mh/omr-accuracy-eval` (PR #33, merged). This musical change is svc-13;
+> PR #34 must bump to svc-14.
 >
 > **Residual, this edition.**
 >
