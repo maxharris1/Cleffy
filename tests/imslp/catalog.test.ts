@@ -103,8 +103,9 @@ describe('imslp catalog file', () => {
         const dir = mkdtempSync(join(tmpdir(), 'imslp-catalog-sql-'));
         const names = writeCatalogSql(catalog, { migrationsDir: dir, maxBytes: 2500 });
         expect(names.length).toBe(parts.length);
-        expect(names[0]).toBe('20260910160000_imslp_works_catalog.sql');
-        expect(existsSync(join(dir, names[0]))).toBe(true);
+        const first = names[0];
+        expect(first).toBe('20260910160000_imslp_works_catalog.sql');
+        expect(first && existsSync(join(dir, first))).toBe(true);
     });
 });
 
