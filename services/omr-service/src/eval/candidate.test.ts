@@ -9,7 +9,7 @@ describe('artifactCacheKey', () => {
     it('includes the full PDF digest and ENGINE_VERSION (+svc-N)', () => {
         const key = artifactCacheKey(sha, '-option Book.Lyrics=false');
         expect(key.startsWith(sha)).toBe(true);
-        expect(key).toContain('svc-11');
+        expect(key).toContain(ENGINE_VERSION.match(/svc-\d+$/)?.[0]);
         expect(ENGINE_VERSION).toMatch(/\+svc-\d+$/);
         expect(key).toContain(ENGINE_VERSION.replace(/[^a-zA-Z0-9._+-]+/g, '_'));
         expect(key.length).toBeGreaterThan(sha.length + ENGINE_VERSION.length);
