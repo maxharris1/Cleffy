@@ -169,6 +169,10 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         code: 'measure_geometry_mismatch',
         text: 'Bars stopped lining up with the page partway through; the playhead hides there.',
     },
+    {
+        code: 'pages_skipped',
+        text: 'Some pages had no readable music and were skipped.',
+    },
 ];
 
 /**

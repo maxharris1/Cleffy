@@ -402,6 +402,12 @@ describe('analysis warnings', () => {
         expect(screen.getByText(/sudden loud marking in a pianissimo movement/i)).toBeInTheDocument();
     });
 
+    it('discloses that staff-less pages were skipped', async () => {
+        withWarnings(['pages_skipped']);
+        await userEvent.click(screen.getByRole('button', { name: /1 thing to know/i }));
+        expect(screen.getByText(/no readable music and were skipped/i)).toBeInTheDocument();
+    });
+
     it('ignores codes it has no copy for rather than leaking them raw', () => {
         withWarnings(['something_new_from_the_service']);
         expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
@@ -413,7 +419,7 @@ describe('tempo disclosure and stale analyses', () => {
     const ready = (
         over: Partial<Parameters<typeof renderBar>[0]> = {},
         score = tinyScore,
-        engine: string | null = 'audiveris-5.11.0+svc-13',
+        engine: string | null = 'audiveris-5.11.0+svc-14',
     ) =>
         renderBar({
             state: { kind: 'ready', score, bpmDefault: 90, bpmOverride: null, engineVersion: engine },

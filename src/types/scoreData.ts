@@ -202,7 +202,7 @@ export const scoreDataSchema = z.object({
     notes: z.array(scoreNoteSchema).max(50_000),
     measures: z.array(scoreMeasureSchema).max(2_000),
     systems: z.array(scoreSystemSchema).max(500),
-    /** Machine-readable degradation notes, e.g. 'repeats_ignored', 'single_staff_all_rh'. */
+    /** Machine-readable degradation notes, e.g. 'repeats_ignored', 'single_staff_all_rh', 'pages_skipped'. */
     warnings: z.array(z.string().max(64)).max(32),
 });
 
