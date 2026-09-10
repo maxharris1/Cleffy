@@ -231,34 +231,46 @@ select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secr
 Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
 work with the array of taxonomy categories it belongs to. Refresh ticks write
 `imslp_works_building` and only promote after a category walk completes, so a
-mid-rebuild failure leaves the previous snapshot serving. The walker pages
-each category with MediaWiki `generator=categorymembers` + `prop=categories`
-+ `clcategories=<taxonomy>`, so one pass over `For piano` records every piano
-work's other facets at once, and a browse is exact as soon as any one of its
-selected chips has been walked completely. Typed search stays on live
-MediaWiki search; key chips there still match the title.
+mid-rebuild failure leaves the previous snapshot serving. Typed search stays on
+live MediaWiki search; key chips there still match the title. Chip browse keys
+are IMSLP key categories on the mirror.
 
-**Seed the mirror once per environment** (~3,500 IMSLP requests: each
-500-page batch needs two `clcategories` chunks of 50; `--delay` sleeps between
-*every* MediaWiki call, including those chunks, ~1 h at the 1000 ms default).
-Do not drop `--delay` below 1000 against anonymous IMSLP:
+The chip index is a **committed catalog** in the repo
+(`scripts/data/imslp-works-catalog.jsonl.gz` + `imslp-works-sync.json`).
+`db push` loads it (the `*_imslp_works_catalog.sql` migration(s); split if
+a single file would exceed ~40MB). Locally, `npm run imslp:seed` upserts
+the same files and does **not** call IMSLP.
+
+To rebuild the catalog after a taxonomy change (talks to IMSLP, ~3,500
+requests, ~1 h at `--delay 1000`; do not go below 1000):
 
 ```bash
+npm run imslp:export-catalog
+```
+
+That overwrites the gzip jsonl/sync files and regenerates the catalog
+migration(s).
+Interrupt and rerun: a checkpoint at `scripts/data/.imslp-export-progress.json`
+resumes (gitignored). Then commit the new files.
+
+```bash
+# load the committed catalog into the local stack (no IMSLP)
+npm run imslp:seed
+# or a hosted project:
 SUPABASE_URL=https://<project-ref>.supabase.co \
 SUPABASE_SERVICE_ROLE_KEY=<service role key> \
 npm run imslp:seed
 ```
 
-It is resumable (interrupt and rerun), takes `--category "<name>"` to walk one
-category, and `--dry-run` to walk IMSLP without writing. The cron tick is then
-only a refresh; without the two vault secrets it is a silent no-op and the
-mirror simply never refreshes. Rollout order for a fresh project:
+`--dry-run` prints counts without writing. The cron tick is only a refresh
+after the catalog is loaded; without the two vault secrets it is a silent
+no-op. Rollout for a fresh project:
 
-1. `npx supabase db push` — brings `imslp_works`, `imslp_works_building`,
-   `imslp_category_sync`, `imslp_browse` / `imslp_browse_works`,
-   `imslp_index_ready`, `imslp_titles_in_categories`, `imslp_promote_anchor`,
-   `imslp_sync_tick` and the `imslp-sync` cron job.
-2. `npm run imslp:seed` against the project (above).
+1. `npx supabase db push` — schema plus the catalog insert. A SQL-editor
+   paste of `scripts/apply-migrations.sql` may hit size limits; prefer
+   `db push` or `psql -f`.
+2. (Optional) `npm run imslp:seed` if you need to reload the catalog without
+   re-running migrations.
 3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
    `npx supabase functions deploy imslp-search`.
 4. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
@@ -273,11 +285,8 @@ mirror simply never refreshes. Rollout order for a fresh project:
 
     Each tick spends up to 60 MediaWiki requests on one category (batches of
     500 pages, usually 4 requests each) and resumes where it left off. The
-    order is `For piano` / `For piano (arr)`, eras, forms, keys, the other
-    instruments, then composers, so a cold cron with no seed still answers
-    Piano · anything after the first ~15 minutes and covers the whole taxonomy
-    in about two hours. Until a browse's chips are covered the panel says "IMSLP
-    index is still being built for …" rather than guessing.
+    committed catalog already answers every chip; cron keeps membership from
+    going stale.
 
 Locally the cron does not fire (no vault secrets); with the stack up, run
 `npm run imslp:seed` (no env needed — it targets the local API port from

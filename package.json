@@ -11,6 +11,7 @@
         "local:status": "bash .cursor/health-check.sh",
         "functions:serve": "bash scripts/supabase.sh functions serve --env-file supabase/functions/.env --no-verify-jwt",
         "imslp:seed": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/imslp-seed.mjs",
+        "imslp:export-catalog": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/imslp-export-catalog.mjs",
         "build": "tsc --noEmit && vite build",
         "preview": "vite preview",
         "typecheck": "tsc --noEmit",

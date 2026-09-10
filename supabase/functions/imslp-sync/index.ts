@@ -30,8 +30,9 @@ import {
  * taxonomy category it belongs to, upserted into imslp_works_building. The
  * live imslp_works snapshot is unchanged until the walk completes, then
  * imslp_promote_anchor unions the generation and prunes the walked anchor
- * from pages this generation did not see. scripts/imslp-seed.mjs runs the
- * same walk in one go for a cold environment.
+ * from pages this generation did not see. npm run imslp:seed loads the
+ * committed catalog; npm run imslp:export-catalog is the IMSLP walk that
+ * regenerates that file.
  */
 
 // ~60 requests at ~0.5s each plus the delay stays well under the edge wall clock.

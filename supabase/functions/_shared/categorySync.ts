@@ -558,8 +558,6 @@ export interface RolloverDecision {
     cmcontinue: string | null;
     pagesDone: number;
     lastError: string | null;
-    /** Generations to delete after a successful rollover (older than the new active). */
-    deleteGenerationsBefore: number | null;
 }
 
 /**
@@ -584,7 +582,6 @@ export const applyPageResult = (
             cmcontinue: plan.cmcontinue,
             pagesDone: plan.pagesDone,
             lastError: error,
-            deleteGenerationsBefore: null,
         };
     }
     if (nextContinue) {
@@ -595,7 +592,6 @@ export const applyPageResult = (
             cmcontinue: nextContinue,
             pagesDone,
             lastError: null,
-            deleteGenerationsBefore: null,
         };
     }
     return {
@@ -605,6 +601,5 @@ export const applyPageResult = (
         cmcontinue: null,
         pagesDone,
         lastError: null,
-        deleteGenerationsBefore: plan.generation,
     };
 };

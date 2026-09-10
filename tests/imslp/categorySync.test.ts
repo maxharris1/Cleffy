@@ -531,11 +531,10 @@ describe('applyPageResult rollover', () => {
         pages_done: 50,
     });
 
-    it('complete replaces the snapshot and marks older generations for delete', () => {
+    it('complete promotes the building generation to active', () => {
         const decision = applyPageResult(plan, previous, [page('Toccata (Bach, Johann Sebastian)', 1)], null, null);
         expect(decision.kind).toBe('complete');
         expect(decision.activeGeneration).toBe(2);
-        expect(decision.deleteGenerationsBefore).toBe(2);
         expect(decision.cmcontinue).toBeNull();
     });
 
@@ -553,7 +552,6 @@ describe('applyPageResult rollover', () => {
         expect(decision.buildingGeneration).toBe(2);
         expect(decision.cmcontinue).toBe('page|80');
         expect(decision.lastError).toBe('IMSLP API HTTP 429');
-        expect(decision.deleteGenerationsBefore).toBeNull();
     });
 
     it('continue persists the cursor without rolling over', () => {
@@ -562,7 +560,6 @@ describe('applyPageResult rollover', () => {
         expect(decision.activeGeneration).toBe(1);
         expect(decision.buildingGeneration).toBe(2);
         expect(decision.cmcontinue).toBe('page|100');
-        expect(decision.deleteGenerationsBefore).toBeNull();
     });
 
     it('empty first page with no continue is a genuine empty category and completes', () => {
@@ -571,7 +568,6 @@ describe('applyPageResult rollover', () => {
         const decision = applyPageResult(cold, previous, [], null, null);
         expect(decision.kind).toBe('complete');
         expect(decision.activeGeneration).toBe(2);
-        expect(decision.deleteGenerationsBefore).toBe(2);
         expect(decision.lastError).toBeNull();
     });
 
@@ -580,7 +576,6 @@ describe('applyPageResult rollover', () => {
         const decision = applyPageResult(cold, previous, [], null, 'out of service');
         expect(decision.kind).toBe('failed');
         expect(decision.activeGeneration).toBe(1);
-        expect(decision.deleteGenerationsBefore).toBeNull();
         expect(decision.lastError).toBe('out of service');
     });
 
@@ -595,6 +590,5 @@ describe('applyPageResult rollover', () => {
         const decision = applyPageResult(mid, previous, [], null, null);
         expect(decision.kind).toBe('complete');
         expect(decision.activeGeneration).toBe(2);
-        expect(decision.deleteGenerationsBefore).toBe(2);
     });
 });
