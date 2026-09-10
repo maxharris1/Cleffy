@@ -16,13 +16,14 @@ import {
     shouldRunParallelShards,
     unionSheetNumbers,
 } from './job.js';
+import type * as audiveris from './audiveris.js';
 import type { ScoreData } from './scoreData.js';
 import { emptyTimings } from './timings.js';
 
 const runAudiverisTolerant = vi.fn();
 
 vi.mock('./audiveris.js', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('./audiveris.js')>();
+    const actual = await importOriginal<typeof audiveris>();
     return {
         ...actual,
         runAudiverisTolerant: (...args: unknown[]) => runAudiverisTolerant(...args),
