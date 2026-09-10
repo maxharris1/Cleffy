@@ -88,7 +88,7 @@ const dockerExec = async (container: string, args: string[]): Promise<{ stdout: 
         return await execFileAsync('docker', ['exec', container, ...args], { maxBuffer: 32 * 1024 * 1024 });
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`docker exec ${container} failed: ${message}`);
+        throw new Error(`docker exec ${container} failed: ${message}`, { cause: err });
     }
 };
 
