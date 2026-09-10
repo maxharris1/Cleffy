@@ -1,0 +1,28 @@
+{
+    "slug": "toy",
+    "title": "Toy two-bar 4/4",
+    "pdf": {
+        "url": "https://example.test/toy.pdf",
+        "pages": 1
+    },
+    "reference": {
+        "source": "fixture",
+        "license": "test fixture"
+    },
+    "movements": [
+        {
+            "name": "I",
+            "midi": "toy.mid",
+            "meter": { "num": 4, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 2,
+            "expectedFifths": 0,
+            "expectedTempo": { "min": 90, "max": 110 },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 2
+        }
+    ],
+    "editionNotes": [
+        "Committed MusicXML + MIDI for CLI tests. Not a musicality claim. --from pdf is intentionally unpinned."
+    ]
+}

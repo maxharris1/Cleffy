@@ -10,7 +10,8 @@
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
         "test:watch": "vitest",
-        "check:engine-version": "node scripts/check-engine-version.mjs"
+        "check:engine-version": "node scripts/check-engine-version.mjs",
+        "eval": "node dist/eval/cli.js"
     },
     "dependencies": {
         "@supabase/supabase-js": "^2.111.0",
