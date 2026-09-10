@@ -258,13 +258,16 @@ export const writeCatalogSql = (catalog, { migrationsDir = MIGRATIONS_DIR, maxBy
 
 export const rebuildApplyMigrations = () => {
     const files = existsSync(MIGRATIONS_DIR)
-        ? [...readdirSync(MIGRATIONS_DIR)].filter((name) => name.endsWith('.sql')).sort()
+        ? [...readdirSync(MIGRATIONS_DIR)]
+              .filter((name) => name.endsWith('.sql') && !isCatalogSqlName(name))
+              .sort()
         : [];
     const parts = [
         '-- Combined migrations for the Supabase SQL editor (generated from supabase/migrations/*.sql)',
         '',
         '-- Paste and run this whole file once in: Dashboard → SQL Editor → New query',
-        '-- A large catalog insert may exceed the SQL editor paste limit — use `npx supabase db push` or `psql -f`.',
+        '-- Catalog inserts (*_imslp_works_catalog.sql) are omitted: they exceed the SQL editor',
+        '-- paste limit. Apply those with `npx supabase db push` or `psql -f`.',
         '',
     ];
     for (const name of files) {

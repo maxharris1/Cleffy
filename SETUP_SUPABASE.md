@@ -238,8 +238,10 @@ are IMSLP key categories on the mirror.
 The chip index is a **committed catalog** in the repo
 (`scripts/data/imslp-works-catalog.jsonl.gz` + `imslp-works-sync.json`).
 `db push` loads it (the `*_imslp_works_catalog.sql` migration(s); split if
-a single file would exceed ~40MB). Locally, `npm run imslp:seed` upserts
-the same files and does **not** call IMSLP.
+a single file would exceed ~40MB). Those files are **not** in
+`scripts/apply-migrations.sql` — a SQL-editor paste cannot carry ~48MB of
+inserts. Locally, `npm run imslp:seed` upserts the same files and does **not**
+call IMSLP.
 
 To rebuild the catalog after a taxonomy change (talks to IMSLP, ~3,500
 requests, ~1 h at `--delay 1000`; do not go below 1000):
@@ -266,9 +268,9 @@ npm run imslp:seed
 after the catalog is loaded; without the two vault secrets it is a silent
 no-op. Rollout for a fresh project:
 
-1. `npx supabase db push` — schema plus the catalog insert. A SQL-editor
-   paste of `scripts/apply-migrations.sql` may hit size limits; prefer
-   `db push` or `psql -f`.
+1. `npx supabase db push` — schema plus the catalog insert. Do not paste
+   `scripts/apply-migrations.sql` expecting the catalog: that mirror is
+   schema-only. Use `db push` or `psql -f` for `*_imslp_works_catalog.sql`.
 2. (Optional) `npm run imslp:seed` if you need to reload the catalog without
    re-running migrations.
 3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
