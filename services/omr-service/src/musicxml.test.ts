@@ -986,6 +986,15 @@ describe('tempo', () => {
         expect(bpmOf('Vivacissimo')).toBe(168);
     });
 
+    it('reads a heading through the punctuation OCR leaves in front of it', () => {
+        // The Moonlight's finale arrived as ". Presto agitato." and played at
+        // the 4/4 meter default instead of Presto.
+        expect(bpmOf('. Presto agitato.')).toBe(172);
+        expect(bpmOf('- Allegro')).toBe(132);
+        // Still anchored: a term inside a sentence is not a heading.
+        expect(bpmOf('con Allegro spirito')).toBeUndefined();
+    });
+
     it('reads German and French headings, diacritics and all', () => {
         expect(bpmOf('Langsam')).toBe(54);
         expect(bpmOf('Lebhaft')).toBe(132);
@@ -1245,6 +1254,32 @@ describe('jump structure', () => {
         expect(marksOf(bar(`${ATTRS_44}${words('To Coda')}`))[0]).toMatchObject({ toCoda: true });
         expect(marksOf(bar(`${ATTRS_44}${words('Fine.')}`))[0]).toMatchObject({ fine: true });
         expect(marksOf(bar(`${ATTRS_44}${words('Coda')}`))[0]).toMatchObject({ codaTarget: true });
+    });
+
+    it('reads a D.C. named after the section it returns to, and a Fine behind OCR debris', () => {
+        // The Moonlight's Allegretto prints "Allegretto da capo." over the last
+        // bar of the Trio and "Fine." with a fingering digit fused to it.
+        expect(marksOf(bar(`${ATTRS_44}${words('Allegretto da capo.')}`))[0]?.jump).toEqual({ kind: 'dc', al: null });
+        expect(marksOf(bar(`${ATTRS_44}${words('Menuetto D.C.')}`))[0]?.jump).toEqual({ kind: 'dc', al: null });
+        expect(marksOf(bar(`${ATTRS_44}${words('Allegretto D. C.')}`))[0]?.jump).toEqual({ kind: 'dc', al: null });
+        expect(marksOf(bar(`${ATTRS_44}${words('3Fine.')}`))[0]).toMatchObject({ fine: true });
+        expect(marksOf(bar(`${ATTRS_44}${words('. Fine')}`))[0]).toMatchObject({ fine: true });
+        // One leading word, not a sentence.
+        expect(marksOf(bar(`${ATTRS_44}${words('then the Menuetto da capo')}`))[0]?.jump ?? null).toBeNull();
+    });
+
+    it('performs an "Allegretto da capo." over a printed "3Fine." as D.C. al Fine', () => {
+        // Allegretto of 3 bars ending in Fine, Trio of 2 bars ending in the
+        // D.C.: the performance is 3 + 2 + 3 bars and stops at the Fine.
+        const bars =
+            bar(`${ATTRS_44}${note('C', 4, 16)}`) +
+            bar(note('D', 4, 16)) +
+            bar(`${words('3Fine.')}${note('E', 4, 16)}`) +
+            bar(note('F', 4, 16)) +
+            bar(`${words('Allegretto da capo.')}${note('G', 4, 16)}`);
+        const score = buildScoreData(parseMusicXmlString(wrap(bars)), null);
+        expect(score.measures.map((m) => m.n)).toEqual([1, 2, 3, 4, 5, 1, 2, 3]);
+        expect(score.warnings).toContain('jumps_performed');
     });
 
     it('does not let the "al Fine" inside a jump become a Fine of its own', () => {
@@ -1871,5 +1906,110 @@ describe('ScoreData v5 contract', () => {
         expect(client).toContain('pedals: z.array(scorePedalSchema).max(256).optional(),');
         expect(client).toContain('vc: z.number().int().min(0).max(MAX_VOICE_SLOT).optional(),');
         expect(client).toContain("era: z.enum(['baroque', 'classical', 'romantic', 'modern']).optional(),");
+    });
+});
+
+describe('ghost-part fill', () => {
+    const partList =
+        '<score-part id="P1"><part-name>Voice</part-name></score-part>' +
+        '<score-part id="P2"><part-name>Voice</part-name></score-part>' +
+        '<score-part id="P3"><part-name>Piano</part-name></score-part>';
+
+    const staffBar = (n: number, step: string, octave: number, first = false): string =>
+        `<measure number="${n}">${first ? `<attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>` : ''}<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>16</duration><voice>1</voice></note></measure>`;
+
+    it('fills empty grand-staff bars from unused single-staff parts, keyed by measure number', () => {
+        // Bass Voice is listed first so hand assignment cannot be "first unused
+        // → RH". Lead (P3) has four bars, 20 and 21 empty. Ghosts have those
+        // numbers plus an extra bar the lead does not — positional zip would miss them.
+        const xml = `<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list>${partList}</part-list>
+  <part id="P1">${staffBar(19, 'G', 2, true)}${staffBar(20, 'A', 2)}${staffBar(21, 'B', 2)}${staffBar(22, 'C', 3)}${staffBar(23, 'D', 3)}</part>
+  <part id="P2">${staffBar(19, 'G', 5, true)}${staffBar(20, 'A', 5)}${staffBar(21, 'B', 5)}${staffBar(22, 'C', 6)}${staffBar(23, 'D', 6)}</part>
+  <part id="P3">
+    <measure number="19"><attributes><divisions>4</divisions><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>
+    <measure number="20"><note><rest measure="yes"/><duration>16</duration><staff>1</staff></note></measure>
+    <measure number="21"><note><rest measure="yes"/><duration>16</duration><staff>1</staff></note></measure>
+    <measure number="22"><note><pitch><step>E</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>
+  </part>
+</score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('ghost_part_filled');
+        expect(score.warnings).toContain('multi_part_collapsed');
+        // Bars 20 and 21 (indices 1 and 2) recovered A5/B5 in RH and A2/B2 in LH.
+        const bar20 = score.notes.filter((n) => n.t >= 1920 && n.t < 3840);
+        const bar21 = score.notes.filter((n) => n.t >= 3840 && n.t < 5760);
+        expect(bar20.map((n) => [n.p, n.h]).sort()).toEqual([
+            [45, 1],
+            [81, 0],
+        ]);
+        expect(bar21.map((n) => [n.p, n.h]).sort()).toEqual([
+            [47, 1],
+            [83, 0],
+        ]);
+        // The extra ghost bar 23 must not leak in — the lead has no bar 23.
+        expect(score.notes.some((n) => n.p === 86 || n.p === 50)).toBe(false);
+    });
+
+    it('does not fill a genuine rest bar from a sparse unused Voice part', () => {
+        const pianoBars = Array.from({ length: 12 }, (_, i) => {
+            const n = i + 1;
+            if (n === 1) {
+                return `<measure number="1"><attributes><divisions>4</divisions><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>`;
+            }
+            if (n === 2) {
+                return `<measure number="2"><note><rest measure="yes"/><duration>16</duration><staff>1</staff></note></measure>`;
+            }
+            return `<measure number="${n}"><note><pitch><step>C</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note></measure>`;
+        }).join('');
+        const xml = `<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Voice</part-name></score-part>
+    <score-part id="P2"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes><note><rest measure="yes"/><duration>16</duration></note></measure>
+    <measure number="2"><note><pitch><step>A</step><octave>4</octave></pitch><duration>16</duration><voice>1</voice></note></measure>
+  </part>
+  <part id="P2">${pianoBars}</part>
+</score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('multi_part_collapsed');
+        expect(score.warnings).not.toContain('ghost_part_filled');
+        const bar2 = score.notes.filter((n) => n.t >= 1920 && n.t < 3840);
+        expect(bar2).toEqual([]);
+    });
+});
+
+describe('disclosure heuristics', () => {
+    const words = (text: string): string =>
+        `<direction><direction-type><words>${text}</words></direction-type></direction>`;
+
+    it('flags a bar whose upper staff sounds entirely below the lower staff', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44.replace('</attributes>', '<staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>')}` +
+                `<note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice><type>eighth</type><beam number="1">begin</beam><staff>1</staff></note>` +
+                `<note><pitch><step>D</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice><type>eighth</type><beam number="1">end</beam><staff>1</staff></note>` +
+                `<backup><duration>8</duration></backup>` +
+                `<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>2</voice><type>eighth</type><beam number="1">begin</beam><staff>2</staff></note>` +
+                `<note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><voice>2</voice><type>eighth</type><beam number="1">end</beam><staff>2</staff></note>` +
+                `</measure><measure number="2">${note('C', 4, 16)}</measure>`,
+        );
+        expect(parseMusicXmlString(xml).warnings).toContain('clef_suspect');
+    });
+
+    it('clamps a sudden ff in a sempre pianissimo movement', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${words('Adagio sostenuto sempre pianissimo')}` +
+                `<direction><direction-type><dynamics><pp/></dynamics></direction-type></direction>${note('C', 4, 16)}</measure>` +
+                `<measure number="2"><direction><direction-type><dynamics><ff/></dynamics></direction-type></direction>${note('C', 4, 16)}</measure>` +
+                `<measure number="3">${note('C', 4, 16)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('dynamic_suspect');
+        const loud = score.notes.filter((n) => n.t >= 1920);
+        expect(loud.every((n) => (n.v ?? 1) < 0.5)).toBe(true);
     });
 });

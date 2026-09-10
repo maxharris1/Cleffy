@@ -49,8 +49,10 @@ import type { ScoreData } from './scoreData.js';
  * svc-12: auto-pedal only for wholly unmarked scores; per-voice dynamics survive a
  * mark-less shard B; era stamped on the analysis; wire version 3 so v3 readers
  * still parse the optional v5 fields.
+ * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
+ * key-signature repair; ghost-part fill; per-system geometry zip.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-12';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-13';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
@@ -584,6 +586,10 @@ const recordRhythmRepairs = (timings: JobTimings, ...parsed: MusicalScore[]): vo
     const count = parsed.reduce((acc, musical) => acc + (musical.rhythmRepairs ?? 0), 0);
     if (count > 0) {
         timings.rhythmRepairs = (timings.rhythmRepairs ?? 0) + count;
+    }
+    const keys = parsed.reduce((acc, musical) => acc + (musical.keyRepairs ?? 0), 0);
+    if (keys > 0) {
+        timings.keyRepairs = (timings.keyRepairs ?? 0) + keys;
     }
 };
 

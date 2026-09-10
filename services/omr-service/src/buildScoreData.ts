@@ -54,6 +54,121 @@ const applySwing = (notes: ScoreNote[]): ScoreNote[] => {
     return out;
 };
 
+type Stack = { page: number; sys: number; x0: number; x1: number; slots: Array<{ x: number; t: number }> };
+type MusicalMeasure = { n: number; tick: number; dTicks: number; sysBreak?: boolean };
+
+const slotsOf = (group: readonly Stack[], dTicks: number): Array<{ x: number; t: number }> => {
+    let offset = 0;
+    const out: Array<{ x: number; t: number }> = [];
+    for (const stack of group) {
+        for (const slot of stack.slots) {
+            const t = slot.t + offset;
+            if (t < dTicks) {
+                out.push({ x: slot.x, t });
+            }
+        }
+        const last = stack.slots[stack.slots.length - 1];
+        if (last) {
+            offset += last.t;
+        }
+    }
+    return out;
+};
+
+const measureFromStacks = (measure: MusicalMeasure, index: number, group: readonly Stack[]): ScoreMeasure => {
+    const first = group[0];
+    const last = group[group.length - 1] ?? first;
+    const slots = group.length > 0 ? slotsOf(group, measure.dTicks) : [];
+    return {
+        n: measure.n,
+        tick: measure.tick,
+        dTicks: measure.dTicks,
+        srcIndex: index,
+        page: first ? first.page : -1,
+        sys: first ? first.sys : -1,
+        x0: first ? first.x0 : 0,
+        x1: last ? last.x1 : 0,
+        ...(slots.length > 0 ? { sl: slots } : {}),
+    };
+};
+
+/**
+ * Zip stacks to measures system-by-system. A merged bar (fewer measures than
+ * stacks in that system) spans the leftover stacks so a mismatch on page 2
+ * does not shift the playhead for the rest of the piece.
+ */
+const zipMeasuresToStacks = (
+    musicalMeasures: readonly MusicalMeasure[],
+    stacks: readonly Stack[],
+    warnings: Set<string>,
+): ScoreMeasure[] => {
+    const laterBreak = musicalMeasures.some((measure, i) => i > 0 && measure.sysBreak);
+    if (!laterBreak) {
+        if (stacks.length > 0 && stacks.length !== musicalMeasures.length) {
+            warnings.add('measure_geometry_mismatch');
+        }
+        return musicalMeasures.map((measure, index) =>
+            measureFromStacks(measure, index, stacks[index] ? [stacks[index]!] : []),
+        );
+    }
+    const stackSystems: Stack[][] = [];
+    for (const stack of stacks) {
+        const prev = stackSystems[stackSystems.length - 1];
+        if (prev?.[0] && prev[0].page === stack.page && prev[0].sys === stack.sys) {
+            prev.push(stack);
+        } else {
+            stackSystems.push([stack]);
+        }
+    }
+    const measureSystems: Array<{ measure: MusicalMeasure; index: number }[]> = [];
+    let current: Array<{ measure: MusicalMeasure; index: number }> = [];
+    for (const [index, measure] of musicalMeasures.entries()) {
+        if (measure.sysBreak && current.length > 0) {
+            measureSystems.push(current);
+            current = [];
+        }
+        current.push({ measure, index });
+    }
+    if (current.length > 0) {
+        measureSystems.push(current);
+    }
+
+    const out: ScoreMeasure[] = [];
+    const n = Math.max(measureSystems.length, stackSystems.length);
+    for (let s = 0; s < n; s++) {
+        const mGroup = measureSystems[s] ?? [];
+        const sGroup = stackSystems[s] ?? [];
+        if (sGroup.length !== mGroup.length && (sGroup.length > 0 || mGroup.length > 0) && stacks.length > 0) {
+            warnings.add('measure_geometry_mismatch');
+        }
+        if (mGroup.length === 0) {
+            continue;
+        }
+        if (sGroup.length === mGroup.length) {
+            for (let i = 0; i < mGroup.length; i++) {
+                const entry = mGroup[i]!;
+                out.push(measureFromStacks(entry.measure, entry.index, sGroup[i] ? [sGroup[i]!] : []));
+            }
+            continue;
+        }
+        if (sGroup.length > mGroup.length) {
+            // Merged bar: the last measure spans the leftover stacks.
+            for (let i = 0; i < mGroup.length; i++) {
+                const entry = mGroup[i]!;
+                const group = i < mGroup.length - 1 ? (sGroup[i] ? [sGroup[i]!] : []) : sGroup.slice(i);
+                out.push(measureFromStacks(entry.measure, entry.index, group));
+            }
+            continue;
+        }
+        // More measures than stacks: extras get no geometry.
+        for (let i = 0; i < mGroup.length; i++) {
+            const entry = mGroup[i]!;
+            out.push(measureFromStacks(entry.measure, entry.index, sGroup[i] ? [sGroup[i]!] : []));
+        }
+    }
+    return out;
+};
+
 /**
  * Zip musical content (MusicXML) with measure geometry (.omr) into the final
  * ScoreData. Both come from the same Audiveris engine model, so geometric
@@ -112,29 +227,7 @@ export const buildScoreData = (
         warnings.add('no_geometry');
     }
 
-    if (geometry && stacks.length !== musical.measures.length) {
-        warnings.add('measure_geometry_mismatch');
-    }
-
-    const measures: ScoreMeasure[] = musical.measures.map((measure, index) => {
-        const stack = stacks[index];
-        // Chord columns must fit inside the measure's own timeline — an OMR
-        // rhythm misread otherwise drags the playhead outside the bar.
-        const slots = stack ? stack.slots.filter((slot) => slot.t < measure.dTicks) : [];
-        return {
-            n: measure.n,
-            tick: measure.tick,
-            dTicks: measure.dTicks,
-            // Identity of the engraved bar. Trivially the index today; once
-            // repeats are unrolled, several entries will share one.
-            srcIndex: index,
-            page: stack ? stack.page : -1,
-            sys: stack ? stack.sys : -1,
-            x0: stack ? stack.x0 : 0,
-            x1: stack ? stack.x1 : 0,
-            ...(slots.length > 0 ? { sl: slots } : {}),
-        };
-    });
+    const measures: ScoreMeasure[] = zipMeasuresToStacks(musical.measures, stacks, warnings);
 
     // Unroll AFTER the geometry zip: both the secondary-part timeline and the
     // stacks-to-measures pairing above are positional, so duplicating measures

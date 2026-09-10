@@ -124,6 +124,142 @@ describe('buildScoreData', () => {
     it('rejects a score with nothing playable', () => {
         expect(() => buildScoreData({ ...musical, notes: [] }, geometry)).toThrowError(JobError);
     });
+
+    it('a merged bar in one system does not shift later systems', () => {
+        // Three systems: 2+2+2 measures. The middle system has an extra stack
+        // (Audiveris split a bar). Positional zip would hand that leftover to
+        // the next system's first bar and slide everything after it.
+        const bars = 6;
+        const score = buildScoreData(
+            {
+                ...musical,
+                notes: Array.from({ length: bars }, (_, i) => ({ t: i * 1920, d: 480, p: 60, h: 0 as const })),
+                measures: Array.from({ length: bars }, (_, i) => ({
+                    n: i + 1,
+                    tick: i * 1920,
+                    dTicks: 1920,
+                    ...(i === 2 || i === 4 ? { sysBreak: true } : {}),
+                })),
+                totalTicks: bars * 1920,
+                warnings: [],
+            },
+            {
+                sheets: [
+                    {
+                        pageIndex: 0,
+                        widthPx: 1000,
+                        heightPx: 1000,
+                        systems: [
+                            {
+                                y0: 0.05,
+                                y1: 0.2,
+                                staves: [],
+                                stacks: [
+                                    { x0: 0.1, x1: 0.4, slots: [] },
+                                    { x0: 0.4, x1: 0.8, slots: [] },
+                                ],
+                            },
+                            {
+                                y0: 0.25,
+                                y1: 0.4,
+                                staves: [],
+                                stacks: [
+                                    { x0: 0.1, x1: 0.3, slots: [] },
+                                    { x0: 0.3, x1: 0.55, slots: [] },
+                                    { x0: 0.55, x1: 0.9, slots: [] },
+                                ],
+                            },
+                            {
+                                y0: 0.45,
+                                y1: 0.6,
+                                staves: [],
+                                stacks: [
+                                    { x0: 0.1, x1: 0.45, slots: [] },
+                                    { x0: 0.45, x1: 0.85, slots: [] },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        );
+        expect(score.measures.map((m) => ({ n: m.n, sys: m.sys, page: m.page, x0: m.x0, x1: m.x1 }))).toEqual([
+            { n: 1, sys: 0, page: 0, x0: 0.1, x1: 0.4 },
+            { n: 2, sys: 0, page: 0, x0: 0.4, x1: 0.8 },
+            { n: 3, sys: 1, page: 0, x0: 0.1, x1: 0.3 },
+            { n: 4, sys: 1, page: 0, x0: 0.3, x1: 0.9 },
+            { n: 5, sys: 2, page: 0, x0: 0.1, x1: 0.45 },
+            { n: 6, sys: 2, page: 0, x0: 0.45, x1: 0.85 },
+        ]);
+        expect(score.warnings).toContain('measure_geometry_mismatch');
+    });
+
+    it('a movement-seam sysBreak keeps the next file on its own systems', () => {
+        // Two "files": 2 measures then 2, with a forced break at the join.
+        // Movement 1's last system has a leftover stack; that must not become
+        // movement 2 bar 1.
+        const score = buildScoreData(
+            {
+                ...musical,
+                notes: [
+                    { t: 0, d: 480, p: 60, h: 0 },
+                    { t: 1920, d: 480, p: 62, h: 0 },
+                    { t: 3840, d: 480, p: 64, h: 0 },
+                    { t: 5760, d: 480, p: 65, h: 0 },
+                ],
+                measures: [
+                    { n: 1, tick: 0, dTicks: 1920 },
+                    { n: 2, tick: 1920, dTicks: 1920 },
+                    { n: 1, tick: 3840, dTicks: 1920, sysBreak: true },
+                    { n: 2, tick: 5760, dTicks: 1920 },
+                ],
+                totalTicks: 7680,
+                warnings: [],
+            },
+            {
+                sheets: [
+                    {
+                        pageIndex: 0,
+                        widthPx: 1000,
+                        heightPx: 1000,
+                        systems: [
+                            {
+                                y0: 0.1,
+                                y1: 0.3,
+                                staves: [],
+                                stacks: [
+                                    { x0: 0.1, x1: 0.4, slots: [] },
+                                    { x0: 0.4, x1: 0.65, slots: [] },
+                                    { x0: 0.65, x1: 0.95, slots: [] },
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        pageIndex: 1,
+                        widthPx: 1000,
+                        heightPx: 1000,
+                        systems: [
+                            {
+                                y0: 0.1,
+                                y1: 0.3,
+                                staves: [],
+                                stacks: [
+                                    { x0: 0.12, x1: 0.5, slots: [] },
+                                    { x0: 0.5, x1: 0.88, slots: [] },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        );
+        expect(score.measures[0]).toMatchObject({ n: 1, page: 0, sys: 0, x0: 0.1, x1: 0.4 });
+        expect(score.measures[1]).toMatchObject({ n: 2, page: 0, sys: 0, x0: 0.4, x1: 0.95 });
+        expect(score.measures[2]).toMatchObject({ n: 1, page: 1, sys: 1, x0: 0.12, x1: 0.5 });
+        expect(score.measures[3]).toMatchObject({ n: 2, page: 1, sys: 1, x0: 0.5, x1: 0.88 });
+        expect(score.warnings).toContain('measure_geometry_mismatch');
+    });
 });
 
 describe('buildScoreData auto-pedal', () => {

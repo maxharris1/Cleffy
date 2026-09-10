@@ -24,6 +24,7 @@ import {
     type OrnamentKind,
 } from './ornaments.js';
 import { repairRhythm } from './rhythmRepair.js';
+import { repairKeySignatures } from './keyRepair.js';
 
 /** A caesura / breath mark stops the clock this long, in beats. */
 const BREATH_BEATS = 0.5;
@@ -40,7 +41,7 @@ export type GatedNote = ScoreNote & { gate?: number };
 export interface MusicalScore {
     notes: GatedNote[];
     /** In score order; geometry is zipped on later. */
-    measures: Array<{ n: number; tick: number; dTicks: number }>;
+    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }>;
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
@@ -86,6 +87,11 @@ export interface MusicalScore {
      * (`timings.rhythmRepairs`); the reader only sees `rhythm_repaired`.
      */
     rhythmRepairs?: number;
+    /**
+     * How many key events the key-signature repair dropped.
+     * (`timings.keyRepairs`); the reader sees `key_signature_repaired`.
+     */
+    keyRepairs?: number;
     /** Where each part's voice slots stood at the end: the next shard's seed. Service-side only. */
     voiceSlotsByPart?: Record<number, Record<number, VoiceSlotSeed[]>>;
 }
@@ -126,6 +132,8 @@ export interface ParseOptions {
 }
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+/** C=0 … B=6, for key-signature spelling. */
+const STEP_INDEX: Record<string, number> = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 };
 
 /** Sustained dynamic marks → velocity levels (perceptual spread pp…fff). */
 const DYNAMIC_LEVELS: Record<string, number> = {
@@ -310,7 +318,9 @@ const gradualTargetFactor = (text: string, kind: 'rit' | 'accel'): number => {
  * character words around them then shade the average.
  */
 const tempoFromWords = (raw: string): number | null => {
-    const text = foldDiacritics(raw);
+    // OCR leaves stray punctuation in front of a heading (". Presto agitato."
+    // from a dot the layout put there); the anchored match must not see it.
+    const text = foldDiacritics(raw).replace(/^[\s.,;:'"\-\u2013\u2014]+/, '');
     if (!TEMPO_HEADING_RE.test(text)) {
         return null;
     }
@@ -364,12 +374,18 @@ const meterDefaultBpm = (sig: { num: number; den: number }): number => {
  * would be consumed as a Fine and the piece would stop where it should turn
  * back. And Fine and Coda match the WHOLE string only: "fine" is an ordinary
  * Italian word, and a substring match would end the movement inside a phrase.
+ *
+ * A D.C. may be preceded by ONE word — the section it returns to, as in
+ * "Allegretto da capo." or "Menuetto D.C." — but not by a sentence, so prose
+ * that happens to mention a da capo is still not a jump. And a Fine may carry
+ * the OCR debris a nearby fingering or dot leaves in front of it ("3Fine."),
+ * since a lone word at a final barline is not a place a lyric would be.
  */
-const JUMP_DC_RE = /^\s*(?:d\.?\s?c\.?|da\s+capo)\b/i;
+const JUMP_DC_RE = /^\s*(?:[a-z]+\.?\s+)?(?:d\.?\s?c\.?|da\s+capo)\b/i;
 const JUMP_DS_RE = /^\s*(?:d\.?\s?s\.?|dal\s+segno)\b/i;
 const AL_FINE_RE = /\bal\s+fine\b/i;
 const AL_CODA_RE = /\bal(?:la)?\s+coda\b/i;
-const FINE_RE = /^\s*fine\s*[.!]?\s*$/i;
+const FINE_RE = /^\s*[\d.,'"]*\s*fine\s*[.!]?\s*$/i;
 const TO_CODA_RE = /^\s*to\s+coda\b/i;
 const CODA_WORD_RE = /^\s*coda\s*$/i;
 
@@ -659,22 +675,33 @@ const childInt = (parent: Elem, name: string): number | null => {
     return Number.isFinite(value) ? value : null;
 };
 
-/** MIDI pitch from a <pitch> element (null for unpitched). */
-const midiFromPitch = (pitch: Elem): number | null => {
-    const step = childText(pitch, 'step');
+/** MIDI pitch and the spelling a key-signature repair may have to rewrite. */
+const pitchOf = (
+    pitch: Elem,
+    accidental: boolean,
+): { midi: number; spell: { step: number; octave: number; alter: number; explicit: boolean } } | null => {
+    const stepLetter = childText(pitch, 'step');
     const octave = childInt(pitch, 'octave');
-    if (!step || octave === null) {
+    if (!stepLetter || octave === null) {
         return null;
     }
-    const semitone = STEP_SEMITONES[step.toUpperCase()];
-    if (semitone === undefined) {
+    const letter = stepLetter.toUpperCase();
+    const semitone = STEP_SEMITONES[letter];
+    const step = STEP_INDEX[letter];
+    if (semitone === undefined || step === undefined) {
         return null;
     }
     const alterText = childText(pitch, 'alter');
     const alter = alterText ? Math.round(Number.parseFloat(alterText)) : 0;
     const midi = (octave + 1) * 12 + semitone + alter;
-    return midi >= 0 && midi <= 127 ? midi : null;
+    if (midi < 0 || midi > 127) {
+        return null;
+    }
+    return { midi, spell: { step, octave, alter, explicit: accidental } };
 };
+
+/** MIDI pitch from a <pitch> element (null for unpitched). */
+const midiFromPitch = (pitch: Elem): number | null => pitchOf(pitch, false)?.midi ?? null;
 
 /** Extract the (first) score XML from a compressed .mxl container. */
 const MAX_MXL_ENTRY_BYTES = 8 * 1024 * 1024;
@@ -766,7 +793,7 @@ export const parseMusicXmlString = (
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No <part> elements');
     }
 
-    const targets = selectPartTargets(root, parts, warnings);
+    const { targets, ghostSources } = selectPartTargets(root, parts, warnings);
     const lead = targets[0]?.part;
     if (!lead) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No lead part');
@@ -786,6 +813,7 @@ export const parseMusicXmlString = (
     const notes = [...leadResult.notes];
     let swing = leadResult.swing;
     let rhythmRepairs = leadResult.rhythmRepairs;
+    let keyRepairs = leadResult.keyRepairs;
     const voiceSlotsByPart: Record<number, Record<number, VoiceSlotSeed[]>> = { 0: leadResult.voiceSlots };
     targets.slice(1).forEach((target, i) => {
         const partIndex = i + 1;
@@ -801,8 +829,38 @@ export const parseMusicXmlString = (
         notes.push(...secondary.notes);
         swing = swing || secondary.swing;
         rhythmRepairs += secondary.rhythmRepairs;
+        keyRepairs += secondary.keyRepairs;
         voiceSlotsByPart[partIndex] = secondary.voiceSlots;
     });
+
+    const emptyLead = leadResult.measures.filter(
+        (measure) => !leadResult.notes.some((n) => n.t >= measure.tick && n.t < measure.tick + measure.dTicks),
+    );
+    if (ghostSources.length > 0 && emptyLead.length > 0) {
+        const byNumber = new Map(emptyLead.map((measure) => [measure.n, measure]));
+        let filled = 0;
+        ghostSources.forEach((source, i) => {
+            const ghost = parsePart(source.part, {
+                fallbackHand: fallbackHandForPart(source.part),
+                timeline: leadResult.measures,
+                timelineByNumber: byNumber,
+                tickOffset,
+                warnings,
+                seed,
+                options,
+                partIndex: targets.length + i,
+            });
+            for (const note of ghost.notes) {
+                if (emptyLead.some((measure) => note.t >= measure.tick && note.t < measure.tick + measure.dTicks)) {
+                    notes.push(note);
+                    filled += 1;
+                }
+            }
+        });
+        if (filled > 0) {
+            warnings.add('ghost_part_filled');
+        }
+    }
 
     if (leadStaves < 2 && targets.length === 1) {
         warnings.add('single_staff_all_rh');
@@ -837,9 +895,16 @@ export const parseMusicXmlString = (
         meterDefaultBpm: leadResult.meterDefaultBpm,
         swing,
         rhythmRepairs,
+        keyRepairs,
         voiceSlotsByPart,
     };
 };
+
+interface PartSelection {
+    targets: PartParseTarget[];
+    /** Unused single-staff parts that are not sparse noise. */
+    ghostSources: PartCandidate[];
+}
 
 /**
  * Choose which MusicXML parts feed playback/fingering.
@@ -848,8 +913,10 @@ export const parseMusicXmlString = (
  * 2. Else densest non-noise single-staff parts, pairing a second as LH when present.
  * 3. Noise = sparse pitched content (< 10% of max) and/or vocal-ish names when a
  *    denser part exists — never merge those notes into the piano timeline.
+ *    Ghost-fill may recover unused *non-noise* single-staff parts into empty
+ *    lead bars; noise leftovers stay out (a genuine rest is not a missing staff).
  */
-const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): PartParseTarget[] => {
+const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): PartSelection => {
     const names = partNameById(root);
     const candidates: PartCandidate[] = parts.map((part, index) => {
         const id = part.getAttribute('id') ?? '';
@@ -897,10 +964,46 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
         warnings.add('multi_part_collapsed');
     }
 
-    return selected.map((c, i) => ({
-        part: c.part,
-        fallbackHand: (i === 0 ? 0 : 1) as 0 | 1,
-    }));
+    const selectedParts = new Set(selected.map((c) => c.part));
+    const ghostSources = candidates.filter((c) => !selectedParts.has(c.part) && c.staves < 2 && !isNoise(c));
+
+    return {
+        targets: selected.map((c, i) => ({
+            part: c.part,
+            fallbackHand: (i === 0 ? 0 : 1) as 0 | 1,
+        })),
+        ghostSources,
+    };
+};
+
+/** Below C4 → LH, otherwise RH. Clef is the fallback when the part has no pitches. */
+const fallbackHandForPart = (part: Elem): 0 | 1 => {
+    for (const measure of childElements(part, 'measure')) {
+        for (const noteEl of childElements(measure, 'note')) {
+            if (firstChild(noteEl, 'rest') || firstChild(noteEl, 'grace')) {
+                continue;
+            }
+            const pitch = firstChild(noteEl, 'pitch');
+            const midi = pitch ? midiFromPitch(pitch) : null;
+            if (midi !== null) {
+                return midi < 60 ? 1 : 0;
+            }
+        }
+    }
+    for (const measure of childElements(part, 'measure')) {
+        for (const attrs of childElements(measure, 'attributes')) {
+            for (const clef of childElements(attrs, 'clef')) {
+                const sign = (childText(clef, 'sign') ?? '').toUpperCase();
+                if (sign === 'F') {
+                    return 1;
+                }
+                if (sign === 'G' || sign === 'C') {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 0;
 };
 
 /** Map score-part id → printed part-name (empty when absent). */
@@ -953,6 +1056,11 @@ interface PartContext {
     fallbackHand: 0 | 1;
     /** Barline authority from the lead part (secondary parts snap to it). */
     timeline: Array<{ n: number; tick: number; dTicks: number }> | null;
+    /**
+     * Ghost-part fill: snap each ghost measure to the lead bar of the same
+     * printed number, because the lead and the ghosts can disagree on count.
+     */
+    timelineByNumber?: Map<number, { n: number; tick: number; dTicks: number }>;
     tickOffset: number;
     warnings: Set<string>;
     seed: ParseSeed;
@@ -963,7 +1071,7 @@ interface PartContext {
 
 interface PartResult {
     notes: ScoreNote[];
-    measures: Array<{ n: number; tick: number; dTicks: number }>;
+    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }>;
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
@@ -980,6 +1088,8 @@ interface PartResult {
     swing: boolean;
     /** Bar-voices the rhythm repair edited (see rhythmRepair.ts). */
     rhythmRepairs: number;
+    /** Key events the key-signature repair dropped (see keyRepair.ts). */
+    keyRepairs: number;
     /** Voice-slot state at the part's end, per staff. */
     voiceSlots: Record<number, VoiceSlotSeed[]>;
 }
@@ -1043,6 +1153,12 @@ export type RawEvent =
           dots: number;
           /** Primary-beam state (<beam number="1">), when the note is beamed. */
           beam?: BeamState;
+          /**
+           * What the page wrote, before any key-signature repair. `explicit`
+           * is a printed <accidental>; those keep their pitch when a surrounding
+           * key is dropped.
+           */
+          spell?: { step: number; octave: number; alter: number; explicit: boolean };
       }
     | {
           /**
@@ -1075,7 +1191,7 @@ export type RawEvent =
     | { k: 'gradual'; rel: number; kind: 'step'; amount: number; becomesSteady: boolean }
     | { k: 'pedal'; rel: number; kind: 'down' | 'up' | 'change' }
     | { k: 'time'; rel: number; num: number; den: number }
-    | { k: 'key'; rel: number; fifths: number }
+    | { k: 'key'; rel: number; fifths: number; staff: 0 | 1 | null }
     | { k: 'clef'; rel: number; staff: 0 | 1; sign: 'G' | 'F' | 'C'; line: number }
     | { k: 'swing' };
 
@@ -1139,6 +1255,10 @@ export interface RawMeasure {
     /** Document order, preserved: resolution may reorder, scanning must not. */
     events: RawEvent[];
     repeat: MeasureRepeatMarks;
+    /** A system or page break starts here — geometry zips system-by-system. */
+    newSystem: boolean;
+    /** <words> in this bar, for heading-sensitive disclosure (pp / Fine / …). */
+    words: string[];
 }
 
 /** The optional <staff> child of a <direction>; null when unattributed. */
@@ -1169,12 +1289,20 @@ const scanPart = (part: Elem): RawMeasure[] => {
         }
         const events: RawEvent[] = [];
         const repeat: MeasureRepeatMarks = { ...NO_REPEAT_MARKS };
+        const measureWords: string[] = [];
         let cursor = 0;
         let maxCursor = 0;
         let lastNoteStart = 0;
+        let newSystem = index === 0;
 
         for (const child of childElements(measure)) {
             switch (child.nodeName) {
+                case 'print': {
+                    if (child.getAttribute('new-system') === 'yes' || child.getAttribute('new-page') === 'yes') {
+                        newSystem = true;
+                    }
+                    break;
+                }
                 case 'attributes': {
                     const declaredDivisions = childInt(child, 'divisions');
                     if (declaredDivisions && declaredDivisions > 0) {
@@ -1189,12 +1317,15 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             events.push({ k: 'time', rel: cursor, num, den });
                         }
                     }
-                    const key = firstChild(child, 'key');
-                    if (key) {
+                    for (const key of childElements(child, 'key')) {
                         const fifths = childInt(key, 'fifths');
-                        if (fifths !== null && fifths >= -7 && fifths <= 7) {
-                            events.push({ k: 'key', rel: cursor, fifths });
+                        if (fifths === null || fifths < -7 || fifths > 7) {
+                            continue;
                         }
+                        const numberAttr = key.getAttribute('number');
+                        const staffNum = numberAttr ? Number.parseInt(numberAttr, 10) : NaN;
+                        const staff: 0 | 1 | null = Number.isFinite(staffNum) ? (staffNum >= 2 ? 1 : 0) : null;
+                        events.push({ k: 'key', rel: cursor, fifths, staff });
                     }
                     for (const clefEl of childElements(child, 'clef')) {
                         const signRaw = (childText(clefEl, 'sign') ?? '').toUpperCase();
@@ -1247,6 +1378,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     for (let w = 0; w < allWords.length; w++) {
                         const text = (allWords.item(w) as Elem | null)?.textContent ?? '';
                         if (text) {
+                            measureWords.push(text);
                             applyWordStructure(text, repeat);
                             if (/\bswing\b/i.test(foldDiacritics(text))) {
                                 events.push({ k: 'swing' });
@@ -1496,8 +1628,9 @@ const scanPart = (part: Elem): RawMeasure[] => {
 
                     if (!isRest && durTicks > 0) {
                         const pitch = firstChild(child, 'pitch');
-                        const midi = pitch ? midiFromPitch(pitch) : null;
-                        if (midi !== null) {
+                        const accidental = firstChild(child, 'accidental') !== null;
+                        const parsed = pitch ? pitchOf(pitch, accidental) : null;
+                        if (parsed) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
                             const ornament = ornamentOf(child);
                             const type = childText(child, 'type');
@@ -1509,7 +1642,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 k: 'note',
                                 rel: start,
                                 dur: durTicks,
-                                midi,
+                                midi: parsed.midi,
                                 staff: noteStaff,
                                 voice: childText(child, 'voice') ?? '1',
                                 chord: isChord,
@@ -1519,6 +1652,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 fermata: child.getElementsByTagName('fermata').length > 0,
                                 breath: artNames.has('caesura') || artNames.has('breath-mark'),
                                 dots: childElements(child, 'dot').length,
+                                spell: parsed.spell,
                                 ...(type ? { type } : {}),
                                 ...(beam ? { beam } : {}),
                                 ...(tremolo !== undefined ? { tremolo } : {}),
@@ -1553,6 +1687,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
             sig: { ...currentSig },
             events,
             repeat,
+            newSystem,
+            words: measureWords,
         });
     }
 
@@ -1832,6 +1968,8 @@ interface MeasurePlacement {
     dTicks: number;
     /** Ticks inserted after the real content — open ties stretch across it. */
     pad: number;
+    /** Ghost measure whose number is not an empty lead bar — emit nothing. */
+    skip?: boolean;
 }
 
 /**
@@ -1853,7 +1991,14 @@ const placeMeasures = (
             continue;
         }
         const sig = sigs[pos] ?? raw.sig;
-        if (ctx.timeline) {
+        const numbered = ctx.timelineByNumber?.get(raw.n);
+        if (ctx.timelineByNumber && !numbered) {
+            out.push({ tick: measureStart, dTicks: 1, pad: 0, skip: true });
+            continue;
+        }
+        if (numbered) {
+            measureStart = numbered.tick;
+        } else if (ctx.timeline) {
             const slot = ctx.timeline[raw.index];
             if (slot) {
                 measureStart = slot.tick;
@@ -1865,7 +2010,12 @@ const placeMeasures = (
         const contentLen = raw.contentTicks;
         let length = contentLen;
         let pad = 0;
-        if (ctx.timeline) {
+        if (numbered) {
+            length = numbered.dTicks;
+            if (length > contentLen) {
+                pad = length - contentLen;
+            }
+        } else if (ctx.timeline) {
             length = ctx.timeline[raw.index]?.dTicks ?? length;
             // Lead timeline may be longer after underfull padding — extend open
             // ties so secondary-part cross-bar ties still sound past the pad.
@@ -2554,6 +2704,83 @@ const assignVoiceSlots = (
     return state;
 };
 
+const LEVEL_VALUES = [0.2, 0.26, 0.34, 0.46, 0.58, 0.7, 0.82, 0.92, 1];
+
+const levelIndexOf = (v: number): number => {
+    let best = 0;
+    for (let i = 1; i < LEVEL_VALUES.length; i++) {
+        const cur = LEVEL_VALUES[i];
+        const bestVal = LEVEL_VALUES[best];
+        if (cur !== undefined && bestVal !== undefined && Math.abs(cur - v) < Math.abs(bestVal - v)) {
+            best = i;
+        }
+    }
+    return best;
+};
+
+/**
+ * A jump of three or more dynamic levels with no hairpin, in a movement that
+ * opened "sempre pianissimo" / "pp", is almost always a misread `f`/`ff`.
+ * Clamp to the prevailing level and disclose.
+ */
+const discloseDynamics = (raws: readonly RawMeasure[], warnings: Set<string>): void => {
+    const heading = raws
+        .slice(0, 4)
+        .flatMap((raw) => raw.words)
+        .join(' ');
+    if (!/sempre\s+pianissimo|\bpp\b/i.test(heading)) {
+        return;
+    }
+    let lastV: number | null = null;
+    let sawWedge = false;
+    for (const raw of raws) {
+        for (const ev of raw.events) {
+            if (ev.k === 'wedge') {
+                sawWedge = true;
+                continue;
+            }
+            if (ev.k !== 'dyn') {
+                continue;
+            }
+            if (lastV !== null && !sawWedge && Math.abs(levelIndexOf(ev.v) - levelIndexOf(lastV)) >= 3) {
+                ev.v = lastV;
+                warnings.add('dynamic_suspect');
+            } else {
+                lastV = ev.v;
+            }
+            sawWedge = false;
+        }
+    }
+};
+
+/**
+ * Every upper-staff note sounding below every lower-staff note, with beams
+ * on both staves: the clef on one staff was almost certainly omitted. Disclose
+ * rather than transpose — the pitches may still be right under a real 8va.
+ */
+const discloseClefs = (raws: readonly RawMeasure[], warnings: Set<string>): void => {
+    for (const raw of raws) {
+        const upper: Array<{ midi: number; beam?: string }> = [];
+        const lower: Array<{ midi: number; beam?: string }> = [];
+        for (const ev of raw.events) {
+            if (ev.k !== 'note') {
+                continue;
+            }
+            (ev.staff >= 2 ? lower : upper).push(ev);
+        }
+        if (upper.length === 0 || lower.length === 0) {
+            continue;
+        }
+        const maxUpper = Math.max(...upper.map((n) => n.midi));
+        const minLower = Math.min(...lower.map((n) => n.midi));
+        const beamed = upper.some((n) => n.beam) && lower.some((n) => n.beam);
+        if (maxUpper < minLower && beamed) {
+            warnings.add('clef_suspect');
+            return;
+        }
+    }
+};
+
 /**
  * Pass 2 — assign absolute ticks, merge ties, pad, and resolve velocities.
  * Events are walked in document order, which is what dynamics currently key off;
@@ -2562,7 +2789,7 @@ const assignVoiceSlots = (
  */
 const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult => {
     const notes: ScoreNote[] = [];
-    const measures: Array<{ n: number; tick: number; dTicks: number }> = [];
+    const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }> = [];
     const timeSignatures: ScoreTimeSig[] = [];
     const keySignatures: ScoreKeySig[] = [];
     const clefs: ScoreClef[] = [];
@@ -2584,6 +2811,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
 
     const voiceSlots = assignVoiceSlots(raws, ctx.warnings, ctx.seed.voiceSlotsByPart?.[ctx.partIndex]);
 
+    // Drop single-staff and one-system-and-back key misreads before the meter
+    // is judged: a staff that was read in C major against a 4-sharp part
+    // looks like a short bar of naturals, which is the wrong diagnosis.
+    const keyRepairs = repairKeySignatures(raws, ctx.warnings);
     // Secondary parts take their barlines from the lead, so only the lead's
     // signatures are worth second-guessing.
     const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
@@ -2630,7 +2861,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         const place = placements[pos];
-        if (!raw || !place) {
+        if (!raw || !place || place.skip) {
             continue;
         }
         for (const ev of raw.events) {
@@ -2672,6 +2903,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
     }
+    if (!ctx.timeline) {
+        discloseDynamics(raws, ctx.warnings);
+        discloseClefs(raws, ctx.warnings);
+    }
     const { curves, voiceCurves, accents } = resolveDynamics(
         raws,
         placements,
@@ -2687,7 +2922,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         const place = placements[pos];
-        if (!raw || !place) {
+        if (!raw || !place || place.skip) {
             continue;
         }
         const sig = sigs[pos] ?? raw.sig;
@@ -2963,7 +3198,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
 
-        measures.push({ n: raw.n, tick: place.tick, dTicks: place.dTicks });
+        measures.push({ n: raw.n, tick: place.tick, dTicks: place.dTicks, ...(raw.newSystem ? { sysBreak: true } : {}) });
     }
 
     // A tie whose stop was never engraved never reached its gating point. Close
@@ -3032,6 +3267,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         meterDefaultBpm: meterDefault,
         swing,
         rhythmRepairs,
+        keyRepairs,
         voiceSlots,
     };
 };
@@ -3147,7 +3383,11 @@ export const parseMxlFiles = (
         // ritardando floor. Only the first file of a shard carries the seed.
         const parsed = parseMusicXmlString(extractMxl(file), tickOffset, index === 0 ? seed : EMPTY_SEED, options);
         combined.notes.push(...parsed.notes);
-        combined.measures.push(...parsed.measures);
+        combined.measures.push(
+            ...parsed.measures.map((measure, i) =>
+                index > 0 && i === 0 ? { ...measure, sysBreak: true } : measure,
+            ),
+        );
         combined.timeSignatures.push(...parsed.timeSignatures);
         combined.keySignatures.push(...parsed.keySignatures);
         combined.clefs.push(...parsed.clefs);
@@ -3178,6 +3418,7 @@ export const parseMxlFiles = (
         combined.openTiesAtEnd = parsed.openTiesAtEnd;
         combined.swing = combined.swing || parsed.swing;
         combined.rhythmRepairs = (combined.rhythmRepairs ?? 0) + (parsed.rhythmRepairs ?? 0);
+        combined.keyRepairs = (combined.keyRepairs ?? 0) + (parsed.keyRepairs ?? 0);
         combined.voiceSlotsByPart = parsed.voiceSlotsByPart;
         parsed.warnings.forEach((warning) => {
             if (warning !== 'tempo_defaulted') {

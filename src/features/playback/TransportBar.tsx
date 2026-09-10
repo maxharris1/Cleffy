@@ -111,6 +111,22 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'A few bars did not add up and one note or rest in each was corrected to fit. Check those bars against the page.',
     },
     {
+        code: 'key_signature_repaired',
+        text: 'A key signature looked misread and was restored to match the other staff. Check accidentals in those bars against the page.',
+    },
+    {
+        code: 'ghost_part_filled',
+        text: 'A few empty bars were filled from a staff the recognizer had split off as a separate part.',
+    },
+    {
+        code: 'clef_suspect',
+        text: 'One staff may be missing a clef change — notes there may sound in the wrong octave.',
+    },
+    {
+        code: 'dynamic_suspect',
+        text: 'A sudden loud marking in a pianissimo movement looked like a misread and was ignored.',
+    },
+    {
         code: 'voices_unstable',
         text: 'The voices within a hand could not always be followed from bar to bar, so legato and voicing may waver there.',
     },

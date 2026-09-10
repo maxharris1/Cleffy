@@ -33,10 +33,24 @@ export interface AudiverisOptions {
 const AUDIVERIS_BIN = process.env.AUDIVERIS_BIN ?? '/opt/audiveris/bin/Audiveris';
 
 /**
- * Play-along needs notes + measure geometry, not lyric OCR.
- * Cost-neutral: less TEXTS work → fewer CPU-seconds on the same instance shape.
+ * Play-along defaults. Constant keys are `enclosingClass.field` as Audiveris
+ * registers them (`org.audiveris.omr.sheet.ProcessingSwitches.lyrics`, not
+ * the undocumented `Book.Lyrics`, which is a no-op). These apply to every
+ * live job: unmarked tuplets are a known Audiveris drop (Schubert D.780 No.1,
+ * Moonlight I), and fingering digits otherwise compete as tuplet signs.
+ * `implicitTuplets` can invent 3:2 on beamed groups that are not printed
+ * tuplets; that is accepted product risk, not a Moonlight-only experiment,
+ * and the Moonlight pitch-recall report does not validate rhythm.
  */
-export const PLAY_ALONG_AUDIVERIS_OPTIONS = ['-option', 'Book.Lyrics=false'] as const;
+const SWITCH = 'org.audiveris.omr.sheet.ProcessingSwitches';
+export const PLAY_ALONG_AUDIVERIS_OPTIONS = [
+    '-option',
+    `${SWITCH}.lyrics=false`,
+    '-option',
+    `${SWITCH}.implicitTuplets=true`,
+    '-option',
+    `${SWITCH}.fingerings=true`,
+] as const;
 
 const STEP_RE = /\b(LOAD|BINARY|GRID|HEADERS|STEMS|BEAMS|LEDGERS|HEADS|TEXTS|SYMBOLS|SLURS|CURVES|PAGES|REDUCTION|SHEET)\b/gi;
 const SHEET_RE = /sheet#(\d+)/gi;
