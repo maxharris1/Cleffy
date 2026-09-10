@@ -156,7 +156,6 @@ const mergeMember = (works, category, member, seenAt) => {
 };
 
 const walkCategory = async (category, progress, delayMs) => {
-    const previousDone = progress.sync[category];
     const resume =
         progress.inProgress && progress.inProgress.category === category
             ? progress.inProgress
