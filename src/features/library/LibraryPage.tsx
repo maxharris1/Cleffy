@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
+import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
 import {
     deleteDocument,
     listDocuments,
@@ -464,6 +465,7 @@ export const LibraryPage = () => {
     return (
         <FileDropZone disabled={uploading} onFile={(file) => void onUpload(file).catch(() => undefined)}>
             <div>
+                <HomeScreenPromptBanner />
                 {/*
                   No upload button in the header: the shell's top bar carries a
                   persistent one and the shelf ends in an "Add a score" tile. The

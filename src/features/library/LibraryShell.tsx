@@ -230,7 +230,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         <main className="paper-page min-h-full">
             {/* Translucent so the paper wash reads through; sticky so upload
                 progress and the account menu stay reachable from any page. */}
-            <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur">
+            <header className="sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur">
                 <div
                     className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
                 >
