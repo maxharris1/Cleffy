@@ -12,10 +12,10 @@ const STORAGE_KEY = 'cleffy:playback-prefs';
 /**
  * Strict by default: the play-along is a practice reference before it is a
  * performance, and a beat that lands where the metronome says is what a
- * learner counts against. Inferred pedal is on: an unmarked piano score is
- * almost always played with pedal.
+ * learner counts against. Inferred pedal is off: unmarked sustain smears
+ * the grid unless the listener asks for it.
  */
-export const DEFAULT_PLAYBACK_PREFS: PlaybackPrefs = { tempoStyle: 'strict', autoPedal: true };
+export const DEFAULT_PLAYBACK_PREFS: PlaybackPrefs = { tempoStyle: 'strict', autoPedal: false };
 
 const isTempoStyle = (value: unknown): value is TempoStyle => value === 'strict' || value === 'expressive';
 

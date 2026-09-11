@@ -6,6 +6,7 @@ describe('error taxonomy (mirrors SQL omr_error_is_permanent)', () => {
     it('classifies permanent vs transient', () => {
         expect(isPermanentError(ERROR_CODES.tooLarge)).toBe(true);
         expect(isPermanentError(ERROR_CODES.noStavesFound)).toBe(true);
+        expect(isPermanentError(ERROR_CODES.scoreUnusable)).toBe(true);
         expect(isPermanentError(ERROR_CODES.downloadFailed)).toBe(false);
         expect(isPermanentError(ERROR_CODES.workerLost)).toBe(false);
     });

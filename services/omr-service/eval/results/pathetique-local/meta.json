@@ -1,0 +1,9 @@
+{
+  "side": "local",
+  "engineVersion": "audiveris-5.11.0+svc-18",
+  "audiverisVersion": "- Version:      5.11.0",
+  "pdfSha256": "8d1f6b5f93127abbb04f050d95a7bfd37febd81829df64ce513b8ba6798f8ebd",
+  "pdfBytes": 1440200,
+  "artifactHash": "f90ae46ef1c9c385c56be71dc22528421f7b02947ae0dbd73cc6d1d3b0174b53",
+  "artifactDir": "/Users/maxharris/Projects/Cleffy/services/omr-service/eval/cache/artifacts/8d1f6b5f93127abbb04f050d95a7bfd37febd81829df64ce513b8ba6798f8ebd-audiveris-5.11.0+svc-18-70115b6766485bc3d380ec66f10be4cde4283e4f6031a606a671c9575aa2883f"
+}

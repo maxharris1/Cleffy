@@ -1,0 +1,27 @@
+{
+  "slug": "fur-elise",
+  "title": "Beethoven — Für Elise, WoO 59",
+  "pdfIdentical": null,
+  "prod": {
+    "engineVersion": null,
+    "composite": 61.37016574585636,
+    "pitchMatch": 71.27071823204422,
+    "exact": 30.718232044198896,
+    "missing": 198,
+    "extra": 194,
+    "overfullBars": 5,
+    "overfullTicks": 1680,
+    "pdfSha256": null
+  },
+  "local": {
+    "engineVersion": null,
+    "composite": 62.90055248618785,
+    "pitchMatch": 73.59116022099448,
+    "exact": 32.15469613259668,
+    "missing": 179,
+    "extra": 178,
+    "overfullBars": 3,
+    "overfullTicks": 1560,
+    "pdfSha256": null
+  }
+}

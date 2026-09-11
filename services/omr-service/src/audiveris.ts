@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { ERROR_CODES, JobError } from './errors.js';
@@ -19,10 +21,14 @@ export interface AudiverisResult {
     /** Elapsed ms attributed to each step (time since previous step sighting). */
     stepDurationsMs: Record<string, number>;
     audiverisTotalMs: number;
-    /** 1-based PDF pages skipped as staff-less (covers/blanks), not low-DPI music. */
+    /** 1-based PDF pages skipped as staff-less covers/blanks or failed stubs. */
     invalidSheets: number[];
-    /** Process exit code; 0 on success. Non-zero is recoverable only for staff-less export refusal. */
+    /** Subset of invalidSheets that logged `Error processing stub`. */
+    failedStubSheets: number[];
+    /** Process exit code; 0 on success. Non-zero is recoverable for skippable export refusal. */
     exitCode: number;
+    /** Sheet groups from `Book reaching PAGE on sheets:[…]` (split unnamed scores). */
+    scoreSheetGroups: SheetRange[];
 }
 
 export interface AudiverisOptions {
@@ -75,10 +81,17 @@ const STAFFLESS_RE =
 /** Same `flagged as invalid` line is also used for muddy music (Audiveris#272). Fail closed. */
 const LOW_DPI_RE = /picture resolution is too low/i;
 const EXPORT_REFUSED_RE = /Could not export since transcription did not complete successfully/i;
-const JVM_CRASH_RE =
-    /NullPointerException|OutOfMemoryError|FileSystemAlreadyExistsException|Java heap space|Exception in thread|SIGSEGV|\bSIGKILL\b|\bKilled\b/i;
+const FAILED_STUB_RE = /Error processing stub/i;
+/** Bracket prefix on an Audiveris line: `[original#11]`, `[#11]`. */
+const STUB_BRACKET_RE = /\[(?:[^\]#\n]*#)?(\d+)\]/;
+/** True JVM death — not a per-stub NPE/IAE the book kept going after. */
+const HARD_JVM_KILL_RE =
+    /OutOfMemoryError|FileSystemAlreadyExistsException|Java heap space|Exception in thread|SIGSEGV|\bSIGKILL\b|\bKilled\b/i;
+const UNSCOPED_NPE_RE = /NullPointerException/i;
+const STACK_LINE_RE = /^(?:\s+at |Caused by:|\s+java\.|java\.)/;
 const LOG_TAIL_MAX = 8192;
 const LOG_DECISION_MAX = 65_536;
+export const AUDIVERIS_LOG_REL = join('.cache', 'AudiverisLtd', 'audiveris', 'log');
 
 /** Split AUDIVERIS_EXTRA_OPTS on whitespace; supports simple double-quoted tokens. */
 export const parseExtraOpts = (raw: string | undefined): string[] => {
@@ -217,7 +230,103 @@ export const parseSkippableInvalidSheets = (text: string): number[] => {
     return [...flagged].filter((sheet) => staffless.has(sheet) && !lowDpi.has(sheet)).sort((a, b) => a - b);
 };
 
+/**
+ * Sheets whose stub aborted (`Error processing stub`) after Audiveris isolated
+ * the failure to that page. The book continues; batch export then refuses.
+ */
+export const parseFailedStubSheets = (text: string): number[] => {
+    const found = new Set<number>();
+    for (const line of text.split(/\r?\n/)) {
+        if (!FAILED_STUB_RE.test(line)) {
+            continue;
+        }
+        const match = line.match(STUB_BRACKET_RE);
+        const sheet = Number.parseInt(match?.[1] ?? '0', 10);
+        if (sheet >= 1) {
+            found.add(sheet);
+        }
+    }
+    return [...found].sort((a, b) => a - b);
+};
+
+export const parseSkippableSheets = (text: string): number[] =>
+    unionSheetNumbers(parseSkippableInvalidSheets(text), parseFailedStubSheets(text));
+
+/**
+ * Contiguous sheet groups from `Book reaching PAGE on sheets:[1, 2, 3]`.
+ * Audiveris logs one of these per unnamed score when it shards a book.
+ */
+export const parseScoreSheetGroups = (text: string): SheetRange[] => {
+    const ranges: SheetRange[] = [];
+    const re = /reaching PAGE on sheets:\[([0-9,\s]+)\]/gi;
+    for (const match of text.matchAll(re)) {
+        const sheets = [...(match[1] ?? '').matchAll(/\d+/g)]
+            .map((m) => Number.parseInt(m[0], 10))
+            .filter((n) => Number.isInteger(n) && n >= 1);
+        ranges.push(...contiguousRangesFromSheets(sheets));
+    }
+    return uniqueSheetRanges(ranges);
+};
+
+const contiguousRangesFromSheets = (sheets: readonly number[]): SheetRange[] => {
+    const unique = [...new Set(sheets)].sort((a, b) => a - b);
+    if (unique.length === 0) {
+        return [];
+    }
+    const out: SheetRange[] = [];
+    let start = unique[0]!;
+    let prev = unique[0]!;
+    for (let i = 1; i < unique.length; i++) {
+        const sheet = unique[i]!;
+        if (sheet === prev + 1) {
+            prev = sheet;
+            continue;
+        }
+        out.push({ from: start, to: prev });
+        start = sheet;
+        prev = sheet;
+    }
+    out.push({ from: start, to: prev });
+    return out;
+};
+
+export const uniqueSheetRanges = (ranges: readonly SheetRange[]): SheetRange[] => {
+    const seen = new Set<string>();
+    const out: SheetRange[] = [];
+    for (const range of ranges) {
+        const key = `${range.from}-${range.to}`;
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        out.push(range);
+    }
+    return out.sort((a, b) => a.from - b.from || a.to - b.to);
+};
+
 export const logShowsExportRefusal = (text: string): boolean => EXPORT_REFUSED_RE.test(text);
+
+/** Drop `Error processing stub` stacks so a per-stub NPE is not treated as JVM death. */
+export const stripStubErrorBlocks = (text: string): string => {
+    const out: string[] = [];
+    let inStub = false;
+    for (const line of text.split(/\r?\n/)) {
+        if (FAILED_STUB_RE.test(line)) {
+            inStub = true;
+            continue;
+        }
+        if (inStub) {
+            if (STACK_LINE_RE.test(line) || UNSCOPED_NPE_RE.test(line)) {
+                continue;
+            }
+            inStub = false;
+        }
+        if (!inStub) {
+            out.push(line);
+        }
+    }
+    return out.join('\n');
+};
 
 export const logShowsJvmCrash = (text: string, exitCode: number): boolean => {
     switch (exitCode) {
@@ -226,26 +335,63 @@ export const logShowsJvmCrash = (text: string, exitCode: number): boolean => {
         case 139:
             return true;
         default:
-            return JVM_CRASH_RE.test(text);
+            return HARD_JVM_KILL_RE.test(text);
     }
 };
 
+export const logShowsUnscopedNpe = (text: string): boolean => UNSCOPED_NPE_RE.test(stripStubErrorBlocks(text));
+
 /**
- * Non-zero exit is recoverable only when batch export refused the book because
- * of staff-less sheets — not because a later NPE/OOM happened after SCALE
- * flagged page 1, and not because a music page was too low-DPI.
+ * Recover when export refused because of staff-less covers and/or failed stubs.
+ * Fail closed on hard JVM death, low-DPI flagged music, and an NPE that is not
+ * the cause of an `Error processing stub`.
  */
 export const isRecoverableInvalidSheetFailure = (text: string, exitCode: number): boolean => {
     if (exitCode === 0 || logShowsJvmCrash(text, exitCode) || !logShowsExportRefusal(text)) {
         return false;
     }
+    if (logShowsUnscopedNpe(text)) {
+        return false;
+    }
     const flagged = parseInvalidSheets(text);
-    const skippable = parseSkippableInvalidSheets(text);
-    return skippable.length > 0 && flagged.every((sheet) => skippable.includes(sheet));
+    const staffless = parseSkippableInvalidSheets(text);
+    const skippable = parseSkippableSheets(text);
+    return skippable.length > 0 && flagged.every((sheet) => staffless.includes(sheet));
 };
 
 const unionSheetNumbers = (left: readonly number[], right: readonly number[]): number[] =>
     [...new Set([...left, ...right])].filter((n) => Number.isInteger(n) && n >= 1).sort((a, b) => a - b);
+
+export const sheetCountInRanges = (ranges: readonly SheetRange[]): number =>
+    ranges.reduce((n, range) => n + (range.to - range.from + 1), 0);
+
+/** Recovery must still cover the remaining sheets after a long first pass. */
+export const recoveryTimeoutMs = (leftoverMs: number, remainingSheetCount: number): number =>
+    Math.max(Math.max(1, leftoverMs), timeoutForPages(remainingSheetCount));
+
+/** Newest `$HOME/.cache/AudiverisLtd/audiveris/log/*.log` — 5.11 often skips stdout. */
+export const readNewestAudiverisLog = (home = homedir()): string => {
+    const dir = join(home, AUDIVERIS_LOG_REL);
+    let names: string[];
+    try {
+        names = readdirSync(dir).filter((name) => name.endsWith('.log'));
+    } catch {
+        return '';
+    }
+    if (names.length === 0) {
+        return '';
+    }
+    names.sort();
+    const newest = names[names.length - 1];
+    if (!newest) {
+        return '';
+    }
+    try {
+        return readFileSync(join(dir, newest), 'utf8');
+    } catch {
+        return '';
+    }
+};
 
 /**
  * Run Audiveris headless on a PDF: transcribe + export MusicXML (-export)
@@ -272,6 +418,7 @@ export const runAudiveris = async (
 
     const argv = buildAudiverisArgs(pdfPath, outDir, options);
     const skippableSheetSet = new Set<number>();
+    const scoreSheetGroupsAcc: SheetRange[] = [];
     let logTail = '';
     let decisionLog = '';
     let lineCarry = '';
@@ -314,8 +461,11 @@ export const runAudiveris = async (
         }, options.timeoutMs);
 
         const ingest = (text: string) => {
-            for (const sheet of parseSkippableInvalidSheets(text)) {
+            for (const sheet of parseSkippableSheets(text)) {
                 skippableSheetSet.add(sheet);
+            }
+            for (const range of parseScoreSheetGroups(text)) {
+                scoreSheetGroupsAcc.push(range);
             }
         };
 
@@ -374,6 +524,11 @@ export const runAudiveris = async (
             }
             ingest(logTail);
             ingest(decisionLog);
+            const fileLog = readNewestAudiverisLog();
+            if (fileLog) {
+                decisionLog = (decisionLog + fileLog).slice(-LOG_DECISION_MAX);
+                ingest(fileLog);
+            }
             if (code === 0) {
                 finish(null);
                 return;
@@ -412,7 +567,9 @@ export const runAudiveris = async (
         stepDurationsMs,
         audiverisTotalMs: ended - started,
         invalidSheets: [...skippableSheetSet].sort((a, b) => a - b),
+        failedStubSheets: parseFailedStubSheets(decisionLog),
         exitCode,
+        scoreSheetGroups: uniqueSheetRanges(scoreSheetGroupsAcc),
     };
 };
 
@@ -422,10 +579,11 @@ export interface TolerantAudiverisOptions extends AudiverisOptions {
 }
 
 /**
- * Run Audiveris, and if staff-less pages make batch export refuse the book,
- * recover: re-export the saved `.omr` without those sheets, else re-run the
- * PDF with `-sheets` excluding them. All-invalid books become `no_staves_found`.
- * Leftover MusicXML from a non-zero exit is ignored — never stored as READY.
+ * Run Audiveris, and if staff-less pages or failed stubs make batch export
+ * refuse the book, recover: re-export the saved `.omr` with `-sheets`
+ * excluding them, else re-run the PDF with `-sheets` excluding them.
+ * All-invalid books become `no_staves_found`. Leftover MusicXML from a
+ * non-zero exit is ignored — never stored as READY.
  */
 export const runAudiverisTolerant = async (
     pdfPath: string,
@@ -458,14 +616,13 @@ export const runAudiverisTolerant = async (
         }
         return run(inputPath, attemptDir, {
             ...attemptOptions,
-            timeoutMs: remainingTimeoutMs(),
             onSpawned: (kill) => {
                 killers.push(kill);
             },
         });
     };
 
-    const first = await runAttempt(pdfPath, outDir, options);
+    const first = await runAttempt(pdfPath, outDir, { ...options, timeoutMs: remainingTimeoutMs() });
     if (first.exitCode === 0 && first.mxlPaths.length > 0) {
         return first;
     }
@@ -477,7 +634,7 @@ export const runAudiverisTolerant = async (
     const requested = requestedSheetRanges(options);
     const validRanges = sheetRangesExcluding(requested, first.invalidSheets);
     if (first.exitCode !== 0 && first.invalidSheets.length === 0) {
-        throw new JobError(ERROR_CODES.omrCrash, 'Audiveris exited non-zero with no staff-less sheets to skip');
+        throw new JobError(ERROR_CODES.omrCrash, 'Audiveris exited non-zero with no skippable sheets');
     }
     if (first.invalidSheets.length === 0) {
         throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML');
@@ -486,10 +643,22 @@ export const runAudiverisTolerant = async (
         throw new JobError(ERROR_CODES.noStavesFound, 'All sheets flagged invalid (no staves)');
     }
 
-    const recovered = await recoverWithoutInvalidSheets(pdfPath, outDir, options, first, validRanges, runAttempt);
+    const recovered = await recoverWithoutInvalidSheets(
+        pdfPath,
+        outDir,
+        options,
+        first,
+        validRanges,
+        runAttempt,
+        recoveryTimeoutMs(remainingTimeoutMs(), sheetCountInRanges(validRanges)),
+    );
     return {
         ...recovered,
         invalidSheets: unionSheetNumbers(first.invalidSheets, recovered.invalidSheets),
+        scoreSheetGroups: uniqueSheetRanges([
+            ...(first.scoreSheetGroups ?? []),
+            ...(recovered.scoreSheetGroups ?? []),
+        ]),
         audiverisTotalMs: first.audiverisTotalMs + recovered.audiverisTotalMs,
     };
 };
@@ -515,6 +684,7 @@ const isRetryableRecoveryError = (err: unknown): boolean => {
         case ERROR_CODES.tooLarge:
         case ERROR_CODES.pageCountUnknown:
         case ERROR_CODES.noStavesFound:
+        case ERROR_CODES.scoreUnusable:
         case ERROR_CODES.musicXmlParseFailed:
         case ERROR_CODES.queueFull:
         case ERROR_CODES.backlogFull:
@@ -536,8 +706,9 @@ const recoverWithoutInvalidSheets = async (
     first: AudiverisResult,
     validRanges: SheetRange[],
     run: AudiverisRunner,
+    timeoutMs: number,
 ): Promise<AudiverisResult> => {
-    const retryOptions: AudiverisOptions = { ...options, sheets: validRanges };
+    const retryOptions: AudiverisOptions = { ...options, sheets: validRanges, timeoutMs };
     if (first.omrPath) {
         try {
             const reexport = await run(first.omrPath, join(outDir, 'reexport'), retryOptions);

@@ -142,6 +142,9 @@ describe('assertBaselineWritable', () => {
         expect(() => assertBaselineWritable({ ...rec, candidateSource: 'document' }, 'baseline.json')).toThrow(
             /document/,
         );
+        expect(() => assertBaselineWritable({ ...rec, candidateSource: 'score' }, 'baseline.json')).toThrow(
+            /score/,
+        );
         expect(() => assertBaselineWritable({ ...rec, artifactHash: null }, 'baseline-svc-11.json')).toThrow(
             /artifactHash/,
         );

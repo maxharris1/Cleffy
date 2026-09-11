@@ -46,6 +46,25 @@ describe('splitSheetRangesOverlapping', () => {
 });
 
 describe('mergeScoreDataParts', () => {
+    it('keeps both meters when stitching a 4/4 range and a 3/8 range', () => {
+        const a = basePart({
+            timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        });
+        const b = basePart({
+            timeSignatures: [{ tick: 0, num: 3, den: 8 }],
+            notes: [{ t: 0, d: 480, p: 76, h: 0 }],
+        });
+        const merged = mergeScoreDataParts([
+            { score: a, sheets: { from: 1, to: 10 } },
+            { score: b, sheets: { from: 13, to: 17 } },
+        ]);
+        expect(merged.timeSignatures).toEqual([
+            { tick: 0, num: 4, den: 4 },
+            { tick: 1920, num: 3, den: 8 },
+        ]);
+        expect(merged.notes.map((n) => n.p)).toEqual([60, 76]);
+    });
+
     it('offsets ticks and remaps pages across sheet ranges', () => {
         const a = basePart({});
         const b = basePart({
@@ -386,10 +405,9 @@ describe('mergeScoreDataParts pedal', () => {
             { era: 'romantic' },
         );
         const edges = inferred(merged);
-        expect(edges.length).toBeGreaterThan(0);
-        expect(edges.some((p) => p.tick >= 2 * 1920)).toBe(true);
-        expect(merged.pedals).toEqual(edges);
-        expect(merged.warnings.filter((w) => w === 'pedal_inferred')).toEqual(['pedal_inferred']);
+        expect(edges).toEqual([]);
+        expect(merged.pedals).toBeUndefined();
+        expect(merged.warnings).not.toContain('pedal_inferred');
         expect(merged.version).toBe(SCORE_DATA_WRITE_VERSION);
         expect(SCORE_DATA_WRITE_VERSION).toBe(3);
     });
@@ -454,10 +472,10 @@ describe('mergeScoreDataParts pedal', () => {
         expect(merged.warnings).not.toContain('pedal_inferred');
     });
 
-    it('pedals a lone part the same way, so a shard built without auto-pedal is not left dry', () => {
+    it('leaves a lone unmarked part dry — inferred pedals are not written', () => {
         const merged = mergeScoreDataParts([{ score: unmarked(2), sheets: { from: 1, to: 2 } }], { era: 'romantic' });
-        expect(inferred(merged).length).toBeGreaterThan(0);
-        expect(merged.warnings).toContain('pedal_inferred');
+        expect(inferred(merged)).toEqual([]);
+        expect(merged.warnings).not.toContain('pedal_inferred');
     });
 
     it('carries pedal edges across the seam at the part tick offset', () => {

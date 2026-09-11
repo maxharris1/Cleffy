@@ -1,0 +1,3006 @@
+{
+  "slug": "fur-elise",
+  "title": "Beethoven — Für Elise, WoO 59",
+  "movements": [
+    {
+      "name": "Poco moto",
+      "refBars": 105,
+      "omrPrintedBars": 106,
+      "omrPerformedBars": 106,
+      "refNotes": 905,
+      "omrNotes": 931,
+      "pitchMatch": 69.39226519337016,
+      "exact": 29.392265193370164,
+      "missing": 203,
+      "extra": 229,
+      "octave": 27,
+      "semitone": 47,
+      "handErr": 6,
+      "barsImperfect": 97,
+      "refOnly": 0,
+      "omrOnly": 1,
+      "merge2": 0,
+      "barsAtCorrectLength": 87,
+      "melodySurvival": 27.586206896551722,
+      "melodyTotal": 58,
+      "melodyFound": 16,
+      "barsUnderWrongKey": 0,
+      "tempoInRange": false,
+      "tempoBpm": 96,
+      "performedBarsMatch": null,
+      "velocityDistinct": 3
+    }
+  ],
+  "overall": {
+    "refNotes": 905,
+    "omrNotes": 931,
+    "pitchMatch": 69.39226519337016,
+    "exact": 29.392265193370164,
+    "missing": 203,
+    "extra": 229,
+    "octave": 27,
+    "semitone": 47,
+    "velocityDistinct": 3
+  },
+  "structure": {
+    "movementCountOk": true,
+    "metersOk": true,
+    "warnings": [
+      "voices_unstable",
+      "key_signature_repaired",
+      "rhythm_repaired",
+      "measure_overfull",
+      "measure_underfull",
+      "dynamics_not_staff_split",
+      "tempo_defaulted",
+      "repeats_ignored"
+    ]
+  },
+  "bars": {
+    "Poco moto": [
+      {
+        "kind": "match",
+        "refBars": [
+          0
+        ],
+        "omrNs": [
+          0
+        ],
+        "sim": 1,
+        "dTicks": [
+          240
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 2,
+        "exact": 0,
+        "refCount": 2,
+        "omrCount": 2
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          1
+        ],
+        "omrNs": [
+          1
+        ],
+        "sim": 0.7692307692307693,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [
+          72
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 5,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          2
+        ],
+        "omrNs": [
+          2
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 7,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          3
+        ],
+        "omrNs": [
+          3
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 7,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          4
+        ],
+        "omrNs": [
+          4
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 7,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          5
+        ],
+        "omrNs": [
+          5
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 6,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          6
+        ],
+        "omrNs": [
+          6
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 7,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          7
+        ],
+        "omrNs": [
+          7
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 7,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          8
+        ],
+        "omrNs": [
+          8
+        ],
+        "sim": 0.7272727272727273,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 4,
+        "refCount": 7,
+        "omrCount": 4
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          9
+        ],
+        "omrNs": [
+          9
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          48,
+          55
+        ],
+        "extra": [
+          69,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          10
+        ],
+        "omrNs": [
+          10
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          74,
+          43
+        ],
+        "extra": [
+          76,
+          48
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          11
+        ],
+        "omrNs": [
+          11
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          1800
+        ],
+        "missing": [
+          72,
+          45,
+          52
+        ],
+        "extra": [
+          59,
+          43,
+          55
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          12
+        ],
+        "omrNs": [
+          12
+        ],
+        "sim": 0.6666666666666666,
+        "dTicks": [
+          2040
+        ],
+        "missing": [
+          40
+        ],
+        "extra": [
+          38,
+          38
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 8
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          13
+        ],
+        "omrNs": [
+          13
+        ],
+        "sim": 0.35294117647058826,
+        "dTicks": [
+          2100
+        ],
+        "missing": [
+          76,
+          76
+        ],
+        "extra": [
+          71,
+          40,
+          48,
+          48,
+          55,
+          59,
+          43
+        ],
+        "octave": 1,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 3,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 11
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          14
+        ],
+        "omrNs": [
+          14
+        ],
+        "sim": 0.5,
+        "dTicks": [
+          1440
+        ],
+        "missing": [],
+        "extra": [
+          64,
+          67,
+          71,
+          72
+        ],
+        "octave": 0,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 10
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          15
+        ],
+        "omrNs": [
+          15
+        ],
+        "sim": 0.7692307692307693,
+        "dTicks": [
+          1800
+        ],
+        "missing": [],
+        "extra": [
+          72
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 1,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          16
+        ],
+        "omrNs": [
+          16
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          17
+        ],
+        "omrNs": [
+          17
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          18
+        ],
+        "omrNs": [
+          18
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          45
+        ],
+        "extra": [
+          40
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          19
+        ],
+        "omrNs": [
+          19
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          75
+        ],
+        "extra": [
+          72,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          20
+        ],
+        "omrNs": [
+          20
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          21
+        ],
+        "omrNs": [
+          21
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          22
+        ],
+        "omrNs": [
+          22
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45
+        ],
+        "extra": [
+          71,
+          40
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          23
+        ],
+        "omrNs": [
+          23
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          24
+        ],
+        "omrNs": [
+          24
+        ],
+        "sim": 0.7567567567567568,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          72,
+          65,
+          58,
+          60
+        ],
+        "extra": [
+          62
+        ],
+        "octave": 1,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 14,
+        "exact": 6,
+        "refCount": 20,
+        "omrCount": 17
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          25
+        ],
+        "omrNs": [
+          25
+        ],
+        "sim": 0.7368421052631579,
+        "dTicks": [
+          1200
+        ],
+        "missing": [
+          76
+        ],
+        "extra": [
+          72,
+          65
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 3,
+        "refCount": 9,
+        "omrCount": 10
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          26
+        ],
+        "omrNs": [
+          26
+        ],
+        "sim": 0.6086956521739131,
+        "dTicks": [
+          960
+        ],
+        "missing": [
+          81
+        ],
+        "extra": [
+          58,
+          71
+        ],
+        "octave": 3,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 3,
+        "refCount": 11,
+        "omrCount": 12
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          27
+        ],
+        "omrNs": [
+          27
+        ],
+        "sim": 0.8387096774193549,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          70,
+          57
+        ],
+        "extra": [
+          64,
+          81,
+          79
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 13,
+        "exact": 7,
+        "refCount": 15,
+        "omrCount": 16
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          28
+        ],
+        "omrNs": [
+          28
+        ],
+        "sim": 0.96,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          72
+        ],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 12,
+        "exact": 5,
+        "refCount": 13,
+        "omrCount": 12
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          29
+        ],
+        "omrNs": [
+          29
+        ],
+        "sim": 0.7777777777777778,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76
+        ],
+        "extra": [
+          72
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 4,
+        "refCount": 9,
+        "omrCount": 9
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          30
+        ],
+        "omrNs": [
+          30
+        ],
+        "sim": 0.7272727272727273,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          72,
+          55
+        ],
+        "extra": [
+          57,
+          52
+        ],
+        "octave": 1,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 8,
+        "exact": 1,
+        "refCount": 11,
+        "omrCount": 11
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          31
+        ],
+        "omrNs": [
+          31
+        ],
+        "sim": 0.56,
+        "dTicks": [
+          1620
+        ],
+        "missing": [
+          79,
+          79
+        ],
+        "extra": [
+          55,
+          50,
+          59
+        ],
+        "octave": 2,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 4,
+        "refCount": 12,
+        "omrCount": 13
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          32
+        ],
+        "omrNs": [
+          32
+        ],
+        "sim": 0.46511627906976744,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          84,
+          83,
+          65,
+          65,
+          67,
+          67,
+          64,
+          64,
+          62
+        ],
+        "extra": [
+          40,
+          43,
+          43,
+          45,
+          45,
+          47,
+          47,
+          47,
+          41
+        ],
+        "octave": 2,
+        "semitone": 0,
+        "handErr": 1,
+        "pitchMatched": 10,
+        "exact": 6,
+        "refCount": 22,
+        "omrCount": 21
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          33
+        ],
+        "omrNs": [
+          33
+        ],
+        "sim": 0.7692307692307693,
+        "dTicks": [
+          1620
+        ],
+        "missing": [
+          79
+        ],
+        "extra": [
+          76,
+          55,
+          59,
+          64,
+          83,
+          48
+        ],
+        "octave": 1,
+        "semitone": 0,
+        "handErr": 1,
+        "pitchMatched": 15,
+        "exact": 4,
+        "refCount": 17,
+        "omrCount": 22
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          34
+        ],
+        "omrNs": [
+          34
+        ],
+        "sim": 0.47619047619047616,
+        "dTicks": [
+          960
+        ],
+        "missing": [
+          76,
+          84,
+          83,
+          67,
+          67,
+          65,
+          65,
+          64,
+          64,
+          62
+        ],
+        "extra": [
+          41,
+          41,
+          45,
+          45,
+          47,
+          47,
+          47,
+          43
+        ],
+        "octave": 2,
+        "semitone": 0,
+        "handErr": 1,
+        "pitchMatched": 10,
+        "exact": 6,
+        "refCount": 22,
+        "omrCount": 20
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          35
+        ],
+        "omrNs": [
+          35
+        ],
+        "sim": 0.7222222222222222,
+        "dTicks": [
+          1200
+        ],
+        "missing": [
+          77,
+          76,
+          75,
+          59,
+          56
+        ],
+        "extra": [
+          79,
+          40,
+          43,
+          84,
+          83
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 13,
+        "exact": 2,
+        "refCount": 18,
+        "omrCount": 18
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          36
+        ],
+        "omrNs": [
+          36
+        ],
+        "sim": 0.782608695652174,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [
+          76,
+          75,
+          56,
+          59,
+          77
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 9,
+        "exact": 8,
+        "refCount": 9,
+        "omrCount": 14
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          37
+        ],
+        "omrNs": [
+          37
+        ],
+        "sim": 1,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 4,
+        "omrCount": 4
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          38
+        ],
+        "omrNs": [
+          38
+        ],
+        "sim": 0.8888888888888888,
+        "dTicks": [
+          840
+        ],
+        "missing": [
+          75
+        ],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 2,
+        "refCount": 5,
+        "omrCount": 4
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          39
+        ],
+        "omrNs": [
+          39
+        ],
+        "sim": 0.5,
+        "dTicks": [
+          1200
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 3,
+        "handErr": 0,
+        "pitchMatched": 3,
+        "exact": 1,
+        "refCount": 6,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          40
+        ],
+        "omrNs": [
+          40
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          74,
+          72
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          41
+        ],
+        "omrNs": [
+          41
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          42
+        ],
+        "omrNs": [
+          42
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          45
+        ],
+        "extra": [
+          40
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          43
+        ],
+        "omrNs": [
+          43
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          75
+        ],
+        "extra": [
+          72,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          44
+        ],
+        "omrNs": [
+          44
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          45
+        ],
+        "omrNs": [
+          45
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          46
+        ],
+        "omrNs": [
+          46
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45
+        ],
+        "extra": [
+          71,
+          40
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          47
+        ],
+        "omrNs": [
+          47
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          48,
+          55
+        ],
+        "extra": [
+          69,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          48
+        ],
+        "omrNs": [
+          48
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          74,
+          43
+        ],
+        "extra": [
+          76,
+          48
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          49
+        ],
+        "omrNs": [
+          49
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          72,
+          45,
+          52
+        ],
+        "extra": [
+          74,
+          43,
+          55
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          50
+        ],
+        "omrNs": [
+          50
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          40
+        ],
+        "extra": [
+          45
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          51
+        ],
+        "omrNs": [
+          51
+        ],
+        "sim": 0.42857142857142855,
+        "dTicks": [
+          1560
+        ],
+        "missing": [
+          76,
+          76
+        ],
+        "extra": [
+          71,
+          40,
+          43,
+          59
+        ],
+        "octave": 1,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 3,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 8
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          52
+        ],
+        "omrNs": [
+          52
+        ],
+        "sim": 0.25,
+        "dTicks": [
+          1200
+        ],
+        "missing": [
+          75,
+          75,
+          76
+        ],
+        "extra": [
+          55,
+          55,
+          48,
+          52,
+          52,
+          53,
+          72
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 2,
+        "exact": 0,
+        "refCount": 6,
+        "omrCount": 10
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          53
+        ],
+        "omrNs": [
+          53
+        ],
+        "sim": 0.6666666666666666,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          75,
+          76
+        ],
+        "extra": [
+          54,
+          55
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 4,
+        "refCount": 6,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          54
+        ],
+        "omrNs": [
+          54
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          55
+        ],
+        "omrNs": [
+          55
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          56
+        ],
+        "omrNs": [
+          56
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          45
+        ],
+        "extra": [
+          40
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          57
+        ],
+        "omrNs": [
+          57
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          75
+        ],
+        "extra": [
+          72,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          58
+        ],
+        "omrNs": [
+          58
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          59
+        ],
+        "omrNs": [
+          59
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          60
+        ],
+        "omrNs": [
+          60
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          45
+        ],
+        "extra": [
+          71,
+          40,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          61
+        ],
+        "omrNs": [
+          61
+        ],
+        "sim": 0.7058823529411765,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          64,
+          67,
+          73
+        ],
+        "extra": [],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 10,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          62
+        ],
+        "omrNs": [
+          62
+        ],
+        "sim": 0.631578947368421,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [
+          67
+        ],
+        "octave": 0,
+        "semitone": 3,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 9,
+        "omrCount": 10
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          63
+        ],
+        "omrNs": [
+          63
+        ],
+        "sim": 0.8461538461538461,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 1,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 11,
+        "exact": 6,
+        "refCount": 13,
+        "omrCount": 13
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          64
+        ],
+        "omrNs": [
+          64
+        ],
+        "sim": 0.6923076923076923,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          72
+        ],
+        "extra": [
+          74,
+          65,
+          67
+        ],
+        "octave": 0,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 9,
+        "exact": 6,
+        "refCount": 12,
+        "omrCount": 14
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          65
+        ],
+        "omrNs": [
+          65
+        ],
+        "sim": 0.631578947368421,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          74,
+          65,
+          38,
+          38
+        ],
+        "extra": [
+          69,
+          72,
+          76
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 10,
+        "omrCount": 9
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          66
+        ],
+        "omrNs": [
+          66
+        ],
+        "sim": 0.7567567567567568,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          60,
+          69
+        ],
+        "extra": [
+          74
+        ],
+        "octave": 0,
+        "semitone": 3,
+        "handErr": 0,
+        "pitchMatched": 14,
+        "exact": 10,
+        "refCount": 19,
+        "omrCount": 18
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          67
+        ],
+        "omrNs": [
+          67
+        ],
+        "sim": 0.8484848484848485,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [
+          66
+        ],
+        "octave": 0,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 14,
+        "exact": 12,
+        "refCount": 16,
+        "omrCount": 17
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          68
+        ],
+        "omrNs": [
+          68
+        ],
+        "sim": 0.9142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          33
+        ],
+        "extra": [
+          40,
+          40
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 16,
+        "exact": 6,
+        "refCount": 17,
+        "omrCount": 18
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          69
+        ],
+        "omrNs": [
+          69
+        ],
+        "sim": 0.6666666666666666,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          64,
+          67,
+          73
+        ],
+        "extra": [
+          60
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 10,
+        "omrCount": 8
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          70
+        ],
+        "omrNs": [
+          70
+        ],
+        "sim": 0.631578947368421,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69
+        ],
+        "extra": [
+          67,
+          71
+        ],
+        "octave": 0,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 9,
+        "omrCount": 10
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          71
+        ],
+        "omrNs": [
+          71
+        ],
+        "sim": 0.88,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [
+          69
+        ],
+        "octave": 1,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 11,
+        "exact": 6,
+        "refCount": 12,
+        "omrCount": 13
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          72
+        ],
+        "omrNs": [
+          72
+        ],
+        "sim": 0.8,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 8,
+        "exact": 6,
+        "refCount": 10,
+        "omrCount": 10
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          73
+        ],
+        "omrNs": [
+          73
+        ],
+        "sim": 0.75,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          67
+        ],
+        "extra": [
+          77
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 6,
+        "refCount": 8,
+        "omrCount": 8
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          74
+        ],
+        "omrNs": [
+          74
+        ],
+        "sim": 0.8,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          65,
+          62,
+          70
+        ],
+        "extra": [
+          67,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 10,
+        "exact": 7,
+        "refCount": 13,
+        "omrCount": 12
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          75
+        ],
+        "omrNs": [
+          75
+        ],
+        "sim": 0.75,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          68
+        ],
+        "extra": [
+          70
+        ],
+        "octave": 0,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 9,
+        "exact": 6,
+        "refCount": 12,
+        "omrCount": 12
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          76
+        ],
+        "omrNs": [
+          76
+        ],
+        "sim": 0.6086956521739131,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          60
+        ],
+        "extra": [
+          62,
+          47
+        ],
+        "octave": 0,
+        "semitone": 3,
+        "handErr": 0,
+        "pitchMatched": 7,
+        "exact": 4,
+        "refCount": 11,
+        "omrCount": 12
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          77
+        ],
+        "omrNs": [
+          77
+        ],
+        "sim": 0.25,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          56,
+          52
+        ],
+        "extra": [
+          60,
+          69,
+          48
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 1,
+        "exact": 0,
+        "refCount": 4,
+        "omrCount": 4
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          78
+        ],
+        "omrNs": [
+          78
+        ],
+        "sim": 0.25,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          60,
+          33
+        ],
+        "extra": [
+          71,
+          52
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 1,
+        "exact": 0,
+        "refCount": 4,
+        "omrCount": 4
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          79
+        ],
+        "omrNs": [
+          79
+        ],
+        "sim": 0.8571428571428571,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          72,
+          76
+        ],
+        "extra": [
+          33
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 3,
+        "pitchMatched": 12,
+        "exact": 5,
+        "refCount": 15,
+        "omrCount": 13
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          80
+        ],
+        "omrNs": [
+          80
+        ],
+        "sim": 0.8,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 3,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 12,
+        "exact": 5,
+        "refCount": 15,
+        "omrCount": 15
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          81
+        ],
+        "omrNs": [
+          81
+        ],
+        "sim": 0.4,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          93,
+          94,
+          92
+        ],
+        "extra": [
+          69,
+          72,
+          76
+        ],
+        "octave": 6,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 6,
+        "exact": 3,
+        "refCount": 15,
+        "omrCount": 15
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          82
+        ],
+        "omrNs": [
+          82
+        ],
+        "sim": 0.38095238095238093,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          85,
+          84
+        ],
+        "extra": [
+          57,
+          60,
+          64,
+          81,
+          80
+        ],
+        "octave": 1,
+        "semitone": 2,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 9,
+        "omrCount": 12
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          83
+        ],
+        "omrNs": [
+          83
+        ],
+        "sim": 0.5882352941176471,
+        "dTicks": [
+          1500
+        ],
+        "missing": [
+          81,
+          76,
+          75
+        ],
+        "extra": [
+          79,
+          85,
+          84,
+          83
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 8,
+        "omrCount": 9
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          84
+        ],
+        "omrNs": [
+          84
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          74,
+          72
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          85
+        ],
+        "omrNs": [
+          85
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          86
+        ],
+        "omrNs": [
+          86
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          45
+        ],
+        "extra": [
+          40
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          87
+        ],
+        "omrNs": [
+          87
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          75
+        ],
+        "extra": [
+          72,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          88
+        ],
+        "omrNs": [
+          88
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          89
+        ],
+        "omrNs": [
+          89
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          90
+        ],
+        "omrNs": [
+          90
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45
+        ],
+        "extra": [
+          71,
+          40
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          91
+        ],
+        "omrNs": [
+          91
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          48,
+          55
+        ],
+        "extra": [
+          69,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          92
+        ],
+        "omrNs": [
+          92
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          74,
+          43
+        ],
+        "extra": [
+          76,
+          48
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          93
+        ],
+        "omrNs": [
+          93
+        ],
+        "sim": 0.5714285714285714,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          72,
+          45,
+          52
+        ],
+        "extra": [
+          74,
+          43,
+          55
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          94
+        ],
+        "omrNs": [
+          94
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          40
+        ],
+        "extra": [
+          45
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          95
+        ],
+        "omrNs": [
+          95
+        ],
+        "sim": 0.4,
+        "dTicks": [
+          1560
+        ],
+        "missing": [
+          76,
+          76
+        ],
+        "extra": [
+          71,
+          40,
+          43,
+          55,
+          59
+        ],
+        "octave": 1,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 3,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 9
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          96
+        ],
+        "omrNs": [
+          96
+        ],
+        "sim": 0.16666666666666666,
+        "dTicks": [
+          780
+        ],
+        "missing": [
+          88,
+          75,
+          75,
+          76
+        ],
+        "extra": [
+          55,
+          55,
+          54,
+          72
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 1,
+        "exact": 0,
+        "refCount": 6,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          97
+        ],
+        "omrNs": [
+          97
+        ],
+        "sim": 0.6666666666666666,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          75,
+          76
+        ],
+        "extra": [
+          54,
+          55
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 4,
+        "refCount": 6,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          98
+        ],
+        "omrNs": [
+          98
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          99
+        ],
+        "omrNs": [
+          99
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          100
+        ],
+        "omrNs": [
+          100
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          45
+        ],
+        "extra": [
+          40
+        ],
+        "octave": 0,
+        "semitone": 1,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          101
+        ],
+        "omrNs": [
+          101
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          76,
+          75
+        ],
+        "extra": [
+          72,
+          45,
+          52
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 2,
+        "refCount": 6,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          102
+        ],
+        "omrNs": [
+          102
+        ],
+        "sim": 0.6153846153846154,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          69,
+          45,
+          52
+        ],
+        "extra": [
+          76,
+          75
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 4,
+        "exact": 1,
+        "refCount": 7,
+        "omrCount": 6
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          103
+        ],
+        "omrNs": [
+          103
+        ],
+        "sim": 0.7142857142857143,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          71,
+          40
+        ],
+        "extra": [
+          69,
+          45
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 5,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 7
+      },
+      {
+        "kind": "omr_only",
+        "refBars": [],
+        "omrNs": [
+          104
+        ],
+        "sim": 0,
+        "dTicks": [
+          720
+        ],
+        "missing": [],
+        "extra": [
+          71,
+          71,
+          40,
+          52,
+          56,
+          64,
+          72
+        ],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 0,
+        "exact": 0,
+        "refCount": 0,
+        "omrCount": 7
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          104
+        ],
+        "omrNs": [
+          105
+        ],
+        "sim": 0.6,
+        "dTicks": [
+          720
+        ],
+        "missing": [
+          64,
+          72,
+          71,
+          56
+        ],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 3,
+        "exact": 0,
+        "refCount": 7,
+        "omrCount": 3
+      }
+    ]
+  },
+  "composite": 60.2707182320442,
+  "generatedAt": "2026-09-10T21:27:32.412Z",
+  "engineVersion": "audiveris-5.11.0+svc-16",
+  "candidateSource": "document",
+  "audiverisCacheHit": null,
+  "artifactHash": null,
+  "audiverisVersion": "audiveris-5.11.0+svc-16",
+  "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true"
+}

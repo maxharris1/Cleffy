@@ -1,0 +1,27 @@
+{
+  "slug": "pathetique",
+  "title": "Beethoven — Piano Sonata No. 8, Op. 13 (Pathétique)",
+  "pdfIdentical": true,
+  "prod": {
+    "engineVersion": "audiveris-5.6.1+svc-4",
+    "composite": 67.29784933279952,
+    "pitchMatch": 78.04554765634414,
+    "exact": 62.248463670321726,
+    "missing": 1554,
+    "extra": 474,
+    "overfullBars": 130,
+    "overfullTicks": 39080,
+    "pdfSha256": "8d1f6b5f93127abbb04f050d95a7bfd37febd81829df64ce513b8ba6798f8ebd"
+  },
+  "local": {
+    "engineVersion": "audiveris-5.11.0+svc-18",
+    "composite": 69.60053640353094,
+    "pitchMatch": 80.68441980961562,
+    "exact": 66.33329316785155,
+    "missing": 1316,
+    "extra": 648,
+    "overfullBars": 131,
+    "overfullTicks": 89360,
+    "pdfSha256": "8d1f6b5f93127abbb04f050d95a7bfd37febd81829df64ce513b8ba6798f8ebd"
+  }
+}

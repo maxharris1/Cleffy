@@ -362,13 +362,14 @@ export interface PlaybackEngineOptions {
     score: ScoreData;
     bpm: number;
     /**
-     * Strict (the default) keeps the svc-10 tempo map byte for byte; note
-     * shaping (legato, dips, phrase) applies in both styles.
+     * Strict (the default) is the printed grid: onsets on the tick, no
+     * unmarked close, no humanize. Expressive adds the tempo curve and
+     * note shaping.
      */
     tempoStyle?: TempoStyle;
     /**
      * Whether to play pedal edges the service inferred (`src: 'inferred'`, the
-     * score also says `pedal_inferred`). Engraved edges always play. Defaults to on.
+     * score also says `pedal_inferred`). Engraved edges always play. Defaults to off.
      */
     autoPedal?: boolean;
     onStatus: (status: PlaybackStatus) => void;
@@ -451,7 +452,7 @@ export class PlaybackEngine {
         // note in isolation at the moment that note is scheduled.
         this.analysis = analyzeVoices(options.score);
         this.shapes = buildNoteShapes(options.score, this.analysis);
-        this.autoPedal = options.autoPedal ?? true;
+        this.autoPedal = options.autoPedal ?? false;
         this.pedals = this.pedalsInForce();
         this.pedalEnds = buildPedalEnds(options.score.notes, this.pedals, options.score.totalTicks);
         this.tempoStyle = options.tempoStyle ?? 'strict';
@@ -637,19 +638,32 @@ export class PlaybackEngine {
     }
 
     /**
-     * The tempo map for the current practice tempo and style. Strict passes no
-     * curve, so it builds the very same map it did before styles existed —
-     * onsets and clicks land where svc-10 put them; what the notes do once
-     * struck is the expression layer's business in either style.
+     * The tempo map for the current practice tempo and style. Strict passes an
+     * empty curve so the clock stays on the printed grid; expressive lays its
+     * rit / broadening / agogic curve over that grid.
      */
     private buildMap(bpm: number): TempoMap {
         switch (this.tempoStyle) {
             case 'strict':
-                return buildTempoMap(this.score, this.scaleFor(bpm), bpm);
+                return buildTempoMap(this.score, this.scaleFor(bpm), bpm, []);
             case 'expressive': {
                 this.expressiveCurve ??= expressiveTempoCurve(this.score, this.analysis);
                 return buildTempoMap(this.score, this.scaleFor(bpm), bpm, this.expressiveCurve);
             }
+            default: {
+                const exhaustive: never = this.tempoStyle;
+                return exhaustive;
+            }
+        }
+    }
+
+    /** Humanize, roll, lift and legato belong to expressive; Strict stays on the tick. */
+    private humanizes(): boolean {
+        switch (this.tempoStyle) {
+            case 'strict':
+                return false;
+            case 'expressive':
+                return true;
             default: {
                 const exhaustive: never = this.tempoStyle;
                 return exhaustive;
@@ -903,9 +917,12 @@ export class PlaybackEngine {
     /**
      * The transport shows an absolute BPM, but with a tempo map it means "the
      * printed opening tempo, rescaled" — the whole map moves by one factor.
+     * Only a tempo printed at tick 0 is an opening. `defaultBpm` and a late
+     * `tempos[0]` are guesses or later headings, not the Grave of the first page.
      */
     private scaleFor(bpm: number): number {
-        const nominal = this.score.tempos?.[0]?.bpm ?? this.score.defaultBpm ?? bpm;
+        const opening = this.score.tempos?.find((tempo) => tempo.tick === 0);
+        const nominal = opening?.bpm ?? bpm;
         return nominal > 0 ? bpm / nominal : 1;
     }
 
@@ -972,7 +989,7 @@ export class PlaybackEngine {
         const shape = this.shapes[index];
         // Legato overlap is only worth adding where the pedal is not already
         // pooling the line: a damper held off the string makes the overlap moot.
-        if (shape && shape.legatoTo >= 0 && pedalEnd <= written) {
+        if (this.humanizes() && shape && shape.legatoTo >= 0 && pedalEnd <= written) {
             const cap = Math.round(LEGATO_OVERLAP_MAX_S / sptAtTick(this.map, note.t));
             return Math.min(Math.max(pedalEnd, shape.legatoTo + Math.min(shape.overlapTicks, cap)), regionEnd);
         }
@@ -987,11 +1004,14 @@ export class PlaybackEngine {
      */
     private velocityFor(index: number, note: ScoreNote): number {
         const shape = this.shapes[index];
+        const written = (note.v ?? DEFAULT_VELOCITY) + (shape?.accent ?? 0);
+        if (!this.humanizes()) {
+            return written;
+        }
         return (
-            (note.v ?? DEFAULT_VELOCITY) +
+            written +
             noteJitter(note.t, note.p, note.h).dv +
             (shape?.lift ?? 0) +
-            (shape?.accent ?? 0) +
             (shape?.phrase ?? 0) -
             (shape?.dip ?? 0)
         );
@@ -999,6 +1019,9 @@ export class PlaybackEngine {
 
     /** Seconds a note's attack is pushed late: its chord roll plus its jitter. */
     private attackOffsetFor(index: number, note: ScoreNote): number {
+        if (!this.humanizes()) {
+            return 0;
+        }
         return (this.shapes[index]?.roll ?? 0) + noteJitter(note.t, note.p, note.h).dt;
     }
 

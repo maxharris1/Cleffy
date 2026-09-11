@@ -1,0 +1,13 @@
+{
+  "side": "prod",
+  "documentId": "830f0d29-320d-4270-b5d0-767766a512ca",
+  "title": "Piano Sonata No.8, Op.13 (Beethoven, Ludwig van)",
+  "storagePath": "830f0d29-320d-4270-b5d0-767766a512ca/original.pdf",
+  "engineVersion": "audiveris-5.6.1+svc-4",
+  "audiverisVersion": "audiveris-5.6.1+svc-4",
+  "pdfSha256": "8d1f6b5f93127abbb04f050d95a7bfd37febd81829df64ce513b8ba6798f8ebd",
+  "pdfBytes": 1440200,
+  "hostedProject": "jibgwgosihadbjgxdsfe",
+  "fetchedAt": "2026-09-10T22:59:34.528Z",
+  "readOnly": true
+}

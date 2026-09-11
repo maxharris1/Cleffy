@@ -99,7 +99,7 @@ const evalRecordSchema = z.object({
     bars: z.record(z.string(), z.array(z.unknown())),
     generatedAt: z.string(),
     engineVersion: z.string().nullable(),
-    candidateSource: z.enum(['pdf', 'artifacts', 'document']),
+    candidateSource: z.enum(['pdf', 'artifacts', 'document', 'score']),
     audiverisCacheHit: z.boolean().nullable(),
     artifactHash: z.string().nullable(),
     audiverisVersion: z.string().nullable(),
@@ -198,6 +198,9 @@ export const assertBaselineWritable = (record: EvalRecord, filename: string): vo
     }
     if (record.candidateSource === 'document') {
         throw new Error('refusing to write a baseline-* oracle from --from document');
+    }
+    if (record.candidateSource === 'score') {
+        throw new Error('refusing to write a baseline-* oracle from --from score');
     }
     if (!record.artifactHash) {
         throw new Error('refusing to write a baseline-* oracle without a non-null artifactHash');

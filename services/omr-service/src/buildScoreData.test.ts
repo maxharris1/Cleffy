@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildScoreData } from './buildScoreData.js';
 import { JobError } from './errors.js';
 import type { MusicalScore } from './musicxml.js';
-import type { OmrGeometry } from './omrGeometry.js';
+import { countOmrStacks, type OmrGeometry } from './omrGeometry.js';
 
 const musical: MusicalScore = {
     notes: [
@@ -84,6 +84,11 @@ describe('buildScoreData', () => {
         expect(score.warnings).toContain('grace_notes_skipped');
         expect(score.version).toBe(3);
         expect(score.era).toBe('classical');
+    });
+
+    it('counts .omr stacks for leftover-part concatenation', () => {
+        expect(countOmrStacks(geometry)).toBe(2);
+        expect(countOmrStacks({ sheets: [] })).toBe(0);
     });
 
     it('degrades to geometry-less measures when the .omr is unusable', () => {
@@ -263,16 +268,22 @@ describe('buildScoreData', () => {
 });
 
 describe('buildScoreData auto-pedal', () => {
-    it('pedals an unmarked score by its era and says so', () => {
+    it('does not pedal an unmarked score unless asked', () => {
         const score = buildScoreData(musical, geometry, { era: 'romantic' });
+        expect(score.pedals).toBeUndefined();
+        expect(score.warnings).not.toContain('pedal_inferred');
+    });
+
+    it('pedals an unmarked score by its era when autoPedal is on', () => {
+        const score = buildScoreData(musical, geometry, { era: 'romantic', autoPedal: true });
         expect(score.warnings).toContain('pedal_inferred');
         expect(score.pedals?.[0]).toEqual({ tick: 0, k: 'down', src: 'inferred' });
         expect(score.pedals?.[score.pedals.length - 1]?.k).toBe('up');
     });
 
-    it('defaults to Classical pedalling when no era is given', () => {
-        expect(buildScoreData(musical, geometry).pedals).toEqual(
-            buildScoreData(musical, geometry, { era: 'classical' }).pedals,
+    it('defaults to Classical pedalling when no era is given and autoPedal is on', () => {
+        expect(buildScoreData(musical, geometry, { autoPedal: true }).pedals).toEqual(
+            buildScoreData(musical, geometry, { era: 'classical', autoPedal: true }).pedals,
         );
     });
 

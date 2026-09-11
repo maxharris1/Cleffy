@@ -129,6 +129,11 @@ const EMPTY_SEED: ParseSeed = { tempoBpm: null, steadyBpm: null, velocityByStaff
 export interface ParseOptions {
     /** Stylistic period, from the composer: shapes how ornaments are spelled. */
     era?: Era;
+    /**
+     * Measure-stack count from the companion `.omr`. Leftover grand-staff
+     * parts concatenate onto the lead when the lead is far shorter than this.
+     */
+    geometryStackCount?: number;
 }
 
 const STEP_SEMITONES: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -761,7 +766,11 @@ interface PartCandidate {
     staves: number;
     pitchedNotes: number;
     nameScore: number;
+    measureCount: number;
 }
+
+/** Concat leftover grands when the lead has fewer than this fraction of the comparison. */
+const SHORT_PART_FRACTION = 0.5;
 
 /**
  * Parse one exported MusicXML document (score-partwise) into musical content.
@@ -773,7 +782,8 @@ interface PartCandidate {
  *
  * Part selection is piano-primary: prefer a grand-staff / Piano-named part over
  * document order so Audiveris "Voice" dummy parts (and art-song vocal lines)
- * do not become the play-along timeline.
+ * do not become the play-along timeline. Extra grand-staff parts from a split
+ * book are appended as later timeline, not paired as a second hand.
  */
 export const parseMusicXmlString = (
     xml: string,
@@ -793,7 +803,7 @@ export const parseMusicXmlString = (
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No <part> elements');
     }
 
-    const { targets, ghostSources } = selectPartTargets(root, parts, warnings);
+    const { targets, concatParts, ghostSources } = selectPartTargets(root, parts, warnings, options);
     const lead = targets[0]?.part;
     if (!lead) {
         throw new JobError(ERROR_CODES.musicXmlParseFailed, 'No lead part');
@@ -811,6 +821,17 @@ export const parseMusicXmlString = (
         partIndex: 0,
     });
     const notes = [...leadResult.notes];
+    const measures = [...leadResult.measures];
+    const timeSignatures = [...leadResult.timeSignatures];
+    const keySignatures = [...leadResult.keySignatures];
+    const clefs = [...leadResult.clefs];
+    const tempos = [...leadResult.tempos];
+    const holds = [...leadResult.holds];
+    const pedals = [...leadResult.pedals];
+    const repeats = [...leadResult.repeats];
+    const tempoMarks = [...leadResult.tempoMarks];
+    const dynamicCurves = [...leadResult.dynamicCurves];
+    const voiceCurves = [...leadResult.voiceCurves];
     let swing = leadResult.swing;
     let rhythmRepairs = leadResult.rhythmRepairs;
     let keyRepairs = leadResult.keyRepairs;
@@ -848,7 +869,7 @@ export const parseMusicXmlString = (
                 warnings,
                 seed,
                 options,
-                partIndex: targets.length + i,
+                partIndex: targets.length + concatParts.length + i,
             });
             for (const note of ghost.notes) {
                 if (emptyLead.some((measure) => note.t >= measure.tick && note.t < measure.tick + measure.dTicks)) {
@@ -862,36 +883,81 @@ export const parseMusicXmlString = (
         }
     }
 
-    if (leadStaves < 2 && targets.length === 1) {
+    if (leadStaves < 2 && targets.length === 1 && concatParts.length === 0) {
         warnings.add('single_staff_all_rh');
     }
 
-    notes.sort((a, b) => a.t - b.t || a.h - b.h || a.p - b.p);
-    const lastMeasure = leadResult.measures[leadResult.measures.length - 1];
+    const lastLeadMeasure = measures[measures.length - 1];
     // The lead part's final barline is the end of the timeline, but a secondary
     // part can run past it — playback stops at totalTicks, so anything beyond
     // would silently never sound.
-    let totalTicks = lastMeasure ? lastMeasure.tick + lastMeasure.dTicks : tickOffset;
+    let totalTicks = lastLeadMeasure ? lastLeadMeasure.tick + lastLeadMeasure.dTicks : tickOffset;
     for (const note of notes) {
         totalTicks = Math.max(totalTicks, note.t + note.d);
     }
+
+    let openTiesAtEnd = leadResult.openTiesAtEnd;
+    concatParts.forEach((extra, i) => {
+        const extraWarnings = new Set<string>();
+        const partIndex = targets.length + i;
+        const extraResult = parsePart(extra.part, {
+            fallbackHand: 0,
+            timeline: null,
+            tickOffset: totalTicks,
+            warnings: extraWarnings,
+            seed: EMPTY_SEED,
+            options,
+            partIndex,
+        });
+        for (const warning of extraWarnings) {
+            if (warning !== 'tempo_defaulted') {
+                warnings.add(warning);
+            }
+        }
+        extraResult.measures.forEach((measure, measureIndex) => {
+            measures.push(measureIndex === 0 ? { ...measure, sysBreak: true } : measure);
+        });
+        notes.push(...extraResult.notes);
+        timeSignatures.push(...extraResult.timeSignatures);
+        keySignatures.push(...extraResult.keySignatures);
+        clefs.push(...extraResult.clefs);
+        tempos.push(...extraResult.tempos);
+        holds.push(...extraResult.holds);
+        pedals.push(...extraResult.pedals);
+        repeats.push(...extraResult.repeats);
+        tempoMarks.push(...extraResult.tempoMarks);
+        dynamicCurves.push(...extraResult.dynamicCurves);
+        voiceCurves.push(...extraResult.voiceCurves);
+        swing = swing || extraResult.swing;
+        rhythmRepairs += extraResult.rhythmRepairs;
+        keyRepairs += extraResult.keyRepairs;
+        openTiesAtEnd = extraResult.openTiesAtEnd;
+        voiceSlotsByPart[partIndex] = extraResult.voiceSlots;
+        const lastExtra = extraResult.measures[extraResult.measures.length - 1];
+        totalTicks = lastExtra ? lastExtra.tick + lastExtra.dTicks : totalTicks;
+        for (const note of extraResult.notes) {
+            totalTicks = Math.max(totalTicks, note.t + note.d);
+        }
+    });
+
+    notes.sort((a, b) => a.t - b.t || a.h - b.h || a.p - b.p);
     return {
         notes,
-        measures: leadResult.measures,
-        timeSignatures: leadResult.timeSignatures,
-        keySignatures: leadResult.keySignatures,
-        clefs: leadResult.clefs,
-        tempos: leadResult.tempos,
-        holds: leadResult.holds,
-        pedals: leadResult.pedals,
-        repeats: leadResult.repeats,
+        measures,
+        timeSignatures,
+        keySignatures,
+        clefs,
+        tempos,
+        holds,
+        pedals,
+        repeats,
         defaultBpm: leadResult.defaultBpm,
         totalTicks,
         warnings: [...warnings],
-        openTiesAtEnd: leadResult.openTiesAtEnd,
-        tempoMarks: leadResult.tempoMarks,
-        dynamicCurves: leadResult.dynamicCurves,
-        voiceCurves: leadResult.voiceCurves,
+        openTiesAtEnd,
+        tempoMarks,
+        dynamicCurves,
+        voiceCurves,
         meterDefaultBpm: leadResult.meterDefaultBpm,
         swing,
         rhythmRepairs,
@@ -902,6 +968,8 @@ export const parseMusicXmlString = (
 
 interface PartSelection {
     targets: PartParseTarget[];
+    /** Grand-staff parts appended after the lead (split-book unnamed scores). */
+    concatParts: PartCandidate[];
     /** Unused single-staff parts that are not sparse noise. */
     ghostSources: PartCandidate[];
 }
@@ -909,14 +977,21 @@ interface PartSelection {
 /**
  * Choose which MusicXML parts feed playback/fingering.
  *
- * 1. Grand staff (staves ≥ 2) or strongly Piano-named → richest such part alone.
- * 2. Else densest non-noise single-staff parts, pairing a second as LH when present.
- * 3. Noise = sparse pitched content (< 10% of max) and/or vocal-ish names when a
+ * 1. Grand staff (staves ≥ 2) or strongly Piano-named → richest such part as lead.
+ * 2. When that lead is far shorter than other grands or the `.omr` stack count,
+ *    append remaining 2-staff (non-Voice) parts in document order.
+ * 3. Else densest non-noise single-staff parts, pairing a second as LH when present.
+ * 4. Noise = sparse pitched content (< 10% of max) and/or vocal-ish names when a
  *    denser part exists — never merge those notes into the piano timeline.
  *    Ghost-fill may recover unused *non-noise* single-staff parts into empty
  *    lead bars; noise leftovers stay out (a genuine rest is not a missing staff).
  */
-const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): PartSelection => {
+const selectPartTargets = (
+    root: Elem,
+    parts: Elem[],
+    warnings: Set<string>,
+    options: ParseOptions = {},
+): PartSelection => {
     const names = partNameById(root);
     const candidates: PartCandidate[] = parts.map((part, index) => {
         const id = part.getAttribute('id') ?? '';
@@ -930,7 +1005,15 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
         if (NOISE_NAME_RE.test(name)) {
             nameScore -= 2;
         }
-        return { part, index, name, staves, pitchedNotes, nameScore };
+        return {
+            part,
+            index,
+            name,
+            staves,
+            pitchedNotes,
+            nameScore,
+            measureCount: childElements(part, 'measure').length,
+        };
     });
 
     const maxPitched = Math.max(0, ...candidates.map((c) => c.pitchedNotes));
@@ -943,9 +1026,19 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
     const grands = candidates.filter((c) => c.staves >= 2 || (c.nameScore > 0 && !isNoise(c))).sort(rank);
 
     let selected: PartCandidate[];
+    let concatParts: PartCandidate[] = [];
     if (grands[0]) {
         // Piano product rule: one grand/piano timeline — do not pair leftover Voices.
         selected = [grands[0]];
+        const leftovers = candidates.filter(
+            (c) => c.staves >= 2 && c.nameScore >= 0 && !isNoise(c) && c.part !== grands[0]!.part,
+        );
+        if (shouldConcatLeftoverGrands(grands[0], leftovers, options.geometryStackCount ?? 0)) {
+            const timeline = [grands[0], ...leftovers].sort((a, b) => a.index - b.index);
+            selected = [timeline[0]!];
+            concatParts = timeline.slice(1);
+            warnings.add('parts_concatenated');
+        }
     } else {
         const usable = candidates.filter((c) => !isNoise(c));
         const pool = (usable.length > 0 ? usable : candidates).slice().sort(rank);
@@ -960,11 +1053,12 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
         }
     }
 
-    if (parts.length > selected.length) {
+    const usedCount = selected.length + concatParts.length;
+    if (parts.length > usedCount) {
         warnings.add('multi_part_collapsed');
     }
 
-    const selectedParts = new Set(selected.map((c) => c.part));
+    const selectedParts = new Set([...selected, ...concatParts].map((c) => c.part));
     const ghostSources = candidates.filter((c) => !selectedParts.has(c.part) && c.staves < 2 && !isNoise(c));
 
     return {
@@ -972,8 +1066,30 @@ const selectPartTargets = (root: Elem, parts: Elem[], warnings: Set<string>): Pa
             part: c.part,
             fallbackHand: (i === 0 ? 0 : 1) as 0 | 1,
         })),
+        concatParts,
         ghostSources,
     };
+};
+
+const shouldConcatLeftoverGrands = (
+    lead: PartCandidate,
+    leftovers: PartCandidate[],
+    geometryStackCount: number,
+): boolean => {
+    if (leftovers.length === 0) {
+        return false;
+    }
+    const all = [lead, ...leftovers];
+    const minMeasures = Math.min(...all.map((c) => c.measureCount));
+    const maxMeasures = Math.max(...all.map((c) => c.measureCount));
+    const maxOther = Math.max(...leftovers.map((c) => c.measureCount));
+    if (lead.measureCount < maxOther * SHORT_PART_FRACTION) {
+        return true;
+    }
+    if (minMeasures < maxMeasures * SHORT_PART_FRACTION) {
+        return true;
+    }
+    return geometryStackCount > 0 && lead.measureCount < geometryStackCount * SHORT_PART_FRACTION;
 };
 
 /** Below C4 → LH, otherwise RH. Clef is the fallback when the part has no pitches. */
@@ -2030,7 +2146,9 @@ const placeMeasures = (
             length = expected;
         } else if (!raw.isPickup && length > expected) {
             ctx.warnings.add('measure_overfull');
-            // Keep content length so note onsets stay consistent with the timeline.
+            // Keep the meter length so an overfull bar does not insert time.
+            // Notes may overlap the next barline; ornaments stay inside.
+            length = expected;
         }
 
         out.push({ tick: measureStart, dTicks: length, pad });
@@ -3053,7 +3171,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                                 // here, from the marking that closes it. Doing it
                                 // per link would also corrupt resolveOpenTie above,
                                 // which matches on where an open note ENDS.
-                                open.d = gateDuration(open.d, ev.arts.gate);
+                                open.d = snapDurationTicks(gateDuration(open.d, ev.arts.gate));
                                 open.gate = ev.arts.gate;
                             }
                         }
@@ -3112,10 +3230,11 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     const boost = Math.max(accents.has(`${ev.staff}:${start}`) ? 0.2 : 0, ev.arts.boost);
                     const velocity =
                         boost > 0 ? roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) + boost)) : sustained;
+                    const notated = snapDurationTicks(principalNotated);
                     const note: GatedNote = {
                         t: principalStart,
                         // Held notes are gated when their chain closes, not here.
-                        d: ev.tieStart ? principalNotated : gateDuration(principalNotated, ev.arts.gate),
+                        d: snapDurationTicks(ev.tieStart ? notated : gateDuration(notated, ev.arts.gate)),
                         p: ev.midi,
                         h: hand,
                         ...(velocity !== undefined ? { v: velocity } : {}),
@@ -3207,7 +3326,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         if (breathAfter.delete(open)) {
             holds.push({ tick: open.t + open.d, beats: BREATH_BEATS });
         }
-        open.d = gateDuration(open.d, GATE_DEFAULT);
+        open.d = snapDurationTicks(gateDuration(open.d, GATE_DEFAULT));
         open.gate = GATE_DEFAULT;
     }
 
@@ -3221,17 +3340,14 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         timeSignatures.push({ tick: ctx.tickOffset, num: finalSig.num, den: finalSig.den });
     }
 
-    // Nothing printed a number, nothing printed a word: the meter is the last
-    // evidence there is. Deliberately NOT a tempos[] entry — deployed clients
-    // validate that array against a closed `src` enum and would reject the whole
-    // score over a new value, so a guess this weak travels as defaultBpm plus a
-    // warning, which every version of the client already tolerates. Concatenated
-    // movements re-emit it as a src-less tempos[] point in parseMxlFiles, so a
-    // later movement does not inherit the previous one's ritardando floor.
+    // Nothing printed a number, nothing printed a word: disclose the guess,
+    // but do not write it as defaultBpm or a tempos[] clock event. A meter
+    // default used to open Pathétique Grave at 145; prod stays at the
+    // practice BPM until a heading at tick 0.
     const meterDefault = meterDefaultBpm(timeSignatures[0] ?? sigs[0] ?? { num: 4, den: 4 });
-    let defaultBpm = tempos[0]?.bpm ?? null;
+    const openingPrinted = tempos.find((tempo) => tempo.tick === ctx.tickOffset);
+    const defaultBpm = openingPrinted?.bpm ?? null;
     if (defaultBpm === null && !ctx.timeline) {
-        defaultBpm = meterDefault;
         ctx.warnings.add('tempo_defaulted');
     }
 
@@ -3313,6 +3429,27 @@ export const expressionSeedAt = (musical: MusicalScore, tick: number): ParseSeed
 const ticksOf = (duration: number, divisions: number): number =>
     Math.max(0, Math.round((duration * TICKS_PER_QUARTER) / Math.max(1, divisions)));
 
+/** Binary note values in ticks, 16th and longer. A 32nd (60) is not a near-miss of a 16th. */
+const DURATION_GRIDS = [120, 240, 480, 960, 1920, 3840] as const;
+/** How far below a grid value still counts as a near-miss, not a shorter value. */
+const DURATION_SNAP_BELOW = 12;
+
+/**
+ * Snap a duration up onto the written grid without moving the attack.
+ * 108 (a 16th short by a comma) becomes 120; a 60-tick 32nd is left alone.
+ */
+export const snapDurationTicks = (d: number): number => {
+    if (!(d > 0) || !Number.isFinite(d)) {
+        return d;
+    }
+    for (const grid of DURATION_GRIDS) {
+        if (d < grid && grid - d <= DURATION_SNAP_BELOW) {
+            return grid;
+        }
+    }
+    return d;
+};
+
 /** Quarters spanned by a MusicXML <beat-unit> (+ optional <beat-unit-dot>s). */
 const BEAT_UNIT_QUARTERS: Record<string, number> = {
     whole: 4,
@@ -3391,17 +3528,10 @@ export const parseMxlFiles = (
         combined.timeSignatures.push(...parsed.timeSignatures);
         combined.keySignatures.push(...parsed.keySignatures);
         combined.clefs.push(...parsed.clefs);
-        // A heading-less movement has no tempos[] entry at its first tick, so
-        // without a point here it would inherit the previous movement's last
-        // pulse — including a ritardando floor. Re-emit the meter default the
-        // parser already computed, with no `src` (the client enum is closed).
-        const startTick = parsed.measures[0]?.tick ?? tickOffset;
-        const hasOpeningTempo = parsed.tempos.some((t) => t.tick <= startTick);
-        // The opening of the whole score still travels as defaultBpm: a src-less
-        // point at tick 0 would look printed to the client and hide the guess.
-        if (!hasOpeningTempo && parsed.meterDefaultBpm !== undefined && tickOffset > 0) {
-            combined.tempos.push({ tick: startTick, bpm: parsed.meterDefaultBpm });
-        }
+        // A heading-less later movement used to get a meter-default tempos[]
+        // point so it would not inherit the previous ritardando floor. That
+        // guess is a warning, not a clock event — the practice BPM holds until
+        // a printed heading at that tick.
         combined.tempos.push(...parsed.tempos);
         combined.holds.push(...parsed.holds);
         combined.pedals = [...(combined.pedals ?? []), ...(parsed.pedals ?? [])];
@@ -3409,7 +3539,7 @@ export const parseMxlFiles = (
         combined.tempoMarks = [...(combined.tempoMarks ?? []), ...(parsed.tempoMarks ?? [])];
         combined.dynamicCurves = [...(combined.dynamicCurves ?? []), ...(parsed.dynamicCurves ?? [])];
         combined.voiceCurves = [...(combined.voiceCurves ?? []), ...(parsed.voiceCurves ?? [])];
-        if (combined.defaultBpm === null && parsed.defaultBpm !== null) {
+        if (index === 0) {
             combined.defaultBpm = parsed.defaultBpm;
             defaultedAtOpening = parsed.warnings.includes('tempo_defaulted');
             combined.meterDefaultBpm = parsed.meterDefaultBpm;

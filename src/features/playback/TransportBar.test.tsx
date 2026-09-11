@@ -9,6 +9,28 @@ import { TransportBar } from '@/features/playback/TransportBar';
 import type { TransportBarProps } from '@/features/playback/TransportBar';
 import { useViewerStore } from '@/state/store';
 
+/**
+ * Node's `localStorage` getter returns undefined unless started with
+ * --localstorage-file; under vitest jsdom, `window` is globalThis so that
+ * getter shadows jsdom's Storage. Prefs writes swallow the miss; these
+ * tests need a store they can read back.
+ */
+const memoryStorage = (): Storage => {
+    const entries = new Map<string, string>();
+    return {
+        get length() {
+            return entries.size;
+        },
+        key: (i: number) => [...entries.keys()][i] ?? null,
+        getItem: (k: string) => entries.get(k) ?? null,
+        setItem: (k: string, v: string) => void entries.set(k, String(v)),
+        removeItem: (k: string) => void entries.delete(k),
+        clear: () => entries.clear(),
+    };
+};
+
+vi.stubGlobal('localStorage', memoryStorage());
+
 const makeEngine = () => {
     return {
         play: vi.fn(async () => {}),
@@ -79,6 +101,13 @@ describe('TransportBar states', () => {
         renderBar({ state: { kind: 'failed', code: 'queue_full' }, role: 'viewer' });
         expect(screen.getByText(/busy/i)).toBeInTheDocument();
         expect(screen.queryAllByRole('button', { name: /retry/i })).toHaveLength(1);
+    });
+
+    it('maps score_unusable to unreadable-score copy, not a crash', () => {
+        renderBar({ state: { kind: 'failed', code: 'score_unusable' }, role: 'editor' });
+        expect(screen.getByText(/this score is unreadable\. sorry, try another edition/i)).toBeInTheDocument();
+        expect(screen.queryByText(/crashed/i)).toBeNull();
+        expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
     });
 });
 
@@ -231,11 +260,11 @@ describe('TransportBar ready controls', () => {
             },
         });
         const pedal = screen.getByRole('button', { name: /auto-pedal/i });
-        expect(pedal).toHaveAttribute('aria-pressed', 'true');
+        expect(pedal).toHaveAttribute('aria-pressed', 'false');
         await userEvent.click(pedal);
-        expect(useViewerStore.getState().autoPedal).toBe(false);
-        expect(screen.getByRole('button', { name: /auto-pedal/i })).toHaveAttribute('aria-pressed', 'false');
-        setStore(() => useViewerStore.getState().setAutoPedal(true));
+        expect(useViewerStore.getState().autoPedal).toBe(true);
+        expect(screen.getByRole('button', { name: /auto-pedal/i })).toHaveAttribute('aria-pressed', 'true');
+        setStore(() => useViewerStore.getState().setAutoPedal(false));
     });
 
     it('disables the left hand for single-staff scores', () => {
@@ -405,7 +434,13 @@ describe('analysis warnings', () => {
     it('discloses that staff-less pages were skipped', async () => {
         withWarnings(['pages_skipped']);
         await userEvent.click(screen.getByRole('button', { name: /1 thing to know/i }));
-        expect(screen.getByText(/no readable music and were skipped/i)).toBeInTheDocument();
+        expect(screen.getByText(/could not be read and were skipped/i)).toBeInTheDocument();
+    });
+
+    it('discloses concatenated leftover piano parts', async () => {
+        withWarnings(['parts_concatenated']);
+        await userEvent.click(screen.getByRole('button', { name: /1 thing to know/i }));
+        expect(screen.getByText(/split this piano score into several parts/i)).toBeInTheDocument();
     });
 
     it('ignores codes it has no copy for rather than leaking them raw', () => {

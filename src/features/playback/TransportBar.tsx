@@ -47,6 +47,7 @@ const ERROR_COPY: Record<string, string> = {
     no_staves_found: "Couldn't find readable music in this PDF.",
     omr_timeout: 'Analysis took too long and was stopped.',
     omr_crash: 'The music-recognition engine crashed on this score.',
+    score_unusable: 'This score is unreadable. Sorry, try another edition.',
     musicxml_parse_failed: 'The recognized music could not be converted.',
     queue_full: 'The analysis service is busy — try again in a few minutes.',
     backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
@@ -147,6 +148,10 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
         text: 'The pieces in this file play back to back as one, so bar numbers restart partway through.',
     },
     {
+        code: 'parts_concatenated',
+        text: 'The recognizer split this piano score into several parts, which play back to back as one.',
+    },
+    {
         code: 'multi_part_collapsed',
         text: 'This score has more parts than two hands — only the main one is played.',
     },
@@ -171,7 +176,7 @@ const SCORE_WARNING_COPY: Array<{ code: string; text: string }> = [
     },
     {
         code: 'pages_skipped',
-        text: 'Some pages had no readable music and were skipped.',
+        text: 'Some pages could not be read and were skipped.',
     },
 ];
 
@@ -625,8 +630,8 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                         aria-pressed={tempoStyle === 'expressive'}
                         title={
                             tempoStyle === 'expressive'
-                                ? 'Expressive: eases into endings, breathes at phrases — tap for strict time'
-                                : 'Strict: exactly the printed tempo — tap to let the tempo breathe'
+                                ? 'Expressive: eases into endings, breathes at phrases — tap for the printed grid'
+                                : 'Strict: printed time on the grid — tap to let the tempo breathe'
                         }
                         onClick={() => setTempoStyle(tempoStyle === 'expressive' ? 'strict' : 'expressive')}
                         className={pillButton(tempoStyle === 'expressive')}

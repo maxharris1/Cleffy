@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildScoreData } from './buildScoreData.js';
 import { mergeScoreDataParts } from './mergeScoreData.js';
-import { parseMusicXmlString, parseMxlFiles, expressionSeedAt } from './musicxml.js';
+import { parseMusicXmlString, parseMxlFiles, expressionSeedAt, snapDurationTicks } from './musicxml.js';
 import { SCORE_DATA_VERSION, SCORE_DATA_WRITE_VERSION, TICKS_PER_QUARTER, scoreDataSchema } from './scoreData.js';
 
 const wrap = (measures: string, extraParts = ''): string => `<?xml version="1.0"?>
@@ -26,6 +26,49 @@ const note = (step: string, octave: number, duration: number, extra = ''): strin
  * constants, so the intent stays legible.
  */
 const plain = (notated: number): number => Math.round(notated * 0.9);
+
+describe('snapDurationTicks', () => {
+    it('snaps Elise-style 108-tick 16ths up to 120 without moving other values', () => {
+        expect(snapDurationTicks(108)).toBe(120);
+        expect(Array.from({ length: 573 }, () => snapDurationTicks(108)).every((d) => d === 120)).toBe(true);
+        expect(snapDurationTicks(60)).toBe(60);
+        expect(snapDurationTicks(120)).toBe(120);
+        expect(snapDurationTicks(228)).toBe(240);
+        expect(snapDurationTicks(216)).toBe(216);
+        expect(snapDurationTicks(468)).toBe(480);
+        expect(snapDurationTicks(480)).toBe(480);
+    });
+
+    it('leaves attacks in place when a near-miss duration is snapped in a parse', () => {
+        // divisions=40 so duration 9 is 108 ticks. Two 16ths at t=0 and t=108.
+        const xml = wrap(
+            `<measure><attributes><divisions>40</divisions><time><beats>3</beats><beat-type>8</beat-type></time></attributes>` +
+                `<note><pitch><step>E</step><octave>5</octave></pitch><duration>9</duration><voice>1</voice></note>` +
+                `<note><pitch><step>D</step><octave>5</octave></pitch><duration>9</duration><voice>1</voice></note>` +
+                `</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.notes.map((n) => n.t)).toEqual([0, 108]);
+        expect(score.notes.map((n) => n.d)).toEqual([120, 120]);
+        expect(score.notes.map((n) => n.p)).toEqual([76, 74]);
+    });
+});
+
+describe('overfull bars keep meter length', () => {
+    it('exports dTicks of the signature when content is 2100 in 3/8', () => {
+        // divisions=16: duration 70 → 2100 ticks. 3/8 is 720.
+        const xml = wrap(
+            `<measure><attributes><divisions>16</divisions><time><beats>3</beats><beat-type>8</beat-type></time></attributes>` +
+                `<note><pitch><step>C</step><octave>4</octave></pitch><duration>70</duration><voice>1</voice></note>` +
+                `</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures[0]?.dTicks).toBe(720);
+        expect(score.warnings).toContain('measure_overfull');
+        expect(score.notes[0]?.t).toBe(0);
+        expect(score.notes[0]?.p).toBe(60);
+    });
+});
 
 describe('parseMusicXmlString', () => {
     it('reads tempo from <sound tempo>', () => {
@@ -190,6 +233,87 @@ describe('parseMusicXmlString', () => {
             { t: 0, d: plain(1920), p: 60, h: 0, vc: 0, gate: 0.9 },
             { t: 0, d: plain(1920), p: 48, h: 1, vc: 0, gate: 0.9 },
         ]);
+    });
+
+    it('appends leftover grand-staff parts instead of keeping only the first piano timeline', () => {
+        const pianoAttrs = (beats: number, beatType: number): string =>
+            `<attributes><divisions>4</divisions><staves>2</staves><time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time></attributes>`;
+        const pianoBar = (n: number, step: string, attrs?: string): string =>
+            `<measure number="${n}">${attrs ?? ''}${note(step, 5, 16, '<staff>1</staff>')}<backup><duration>16</duration></backup>${note('C', 3, 16, '<staff>2</staff>')}</measure>`;
+        const firstBars = Array.from({ length: 33 }, (_, i) =>
+            pianoBar(i + 1, 'C', i === 0 ? pianoAttrs(4, 4) : undefined),
+        ).join('');
+        const laterBars =
+            Array.from({ length: 4 }, (_, i) => pianoBar(i + 1, 'D', i === 0 ? pianoAttrs(3, 4) : undefined)).join('') +
+            Array.from({ length: 4 }, (_, i) => pianoBar(i + 5, 'E', i === 0 ? pianoAttrs(3, 8) : undefined)).join('');
+        const xml = `<?xml version="1.0"?>
+          <score-partwise version="4.0">
+            <part-list>
+              <score-part id="P1"><part-name>Voice</part-name></score-part>
+              <score-part id="P2"><part-name>Piano</part-name></score-part>
+              <score-part id="P3"><part-name>Piano</part-name></score-part>
+            </part-list>
+            <part id="P1"><measure number="1">${ATTRS_44}${note('A', 4, 16)}</measure></part>
+            <part id="P2">${firstBars}</part>
+            <part id="P3">${laterBars}</part>
+          </score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('parts_concatenated');
+        expect(score.warnings).toContain('multi_part_collapsed');
+        expect(score.measures).toHaveLength(41);
+        expect(score.timeSignatures).toEqual(
+            expect.arrayContaining([
+                { tick: 0, num: 4, den: 4 },
+                { tick: 33 * 1920, num: 3, den: 4 },
+                expect.objectContaining({ num: 3, den: 8 }),
+            ]),
+        );
+        expect(score.notes.some((n) => n.p === 74)).toBe(true);
+        expect(score.notes.some((n) => n.p === 76)).toBe(true);
+        expect(score.notes.every((n) => n.p !== 69)).toBe(true);
+    });
+
+    it('does not concatenate two equal-length piano grands (keeps the richest)', () => {
+        const pianoAttrs = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
+        const bar = (step: string, extraNotes = ''): string =>
+            `<measure>${pianoAttrs}${note(step, 5, 16, '<staff>1</staff>')}${extraNotes}<backup><duration>16</duration></backup>${note('C', 3, 16, '<staff>2</staff>')}</measure>`;
+        const xml = `<?xml version="1.0"?>
+          <score-partwise version="4.0">
+            <part-list>
+              <score-part id="P1"><part-name>Piano</part-name></score-part>
+              <score-part id="P2"><part-name>Piano</part-name></score-part>
+            </part-list>
+            <part id="P1">${bar('C')}${bar('D')}</part>
+            <part id="P2">${bar('E', note('G', 5, 16, '<staff>1</staff>'))}${bar('F')}</part>
+          </score-partwise>`;
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).not.toContain('parts_concatenated');
+        expect(score.warnings).toContain('multi_part_collapsed');
+        expect(score.measures).toHaveLength(2);
+        expect(score.notes.some((n) => n.p === 76)).toBe(true);
+        expect(score.notes.every((n) => n.p !== 72)).toBe(true);
+    });
+
+    it('concatenates equal-length leftover grands when the lead is far below .omr stacks', () => {
+        const pianoAttrs = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
+        const bar = (step: string): string =>
+            `<measure>${pianoAttrs}${note(step, 5, 16, '<staff>1</staff>')}<backup><duration>16</duration></backup>${note('C', 3, 16, '<staff>2</staff>')}</measure>`;
+        const xml = `<?xml version="1.0"?>
+          <score-partwise version="4.0">
+            <part-list>
+              <score-part id="P1"><part-name>Piano</part-name></score-part>
+              <score-part id="P2"><part-name>Piano</part-name></score-part>
+            </part-list>
+            <part id="P1">${bar('C')}${bar('D')}</part>
+            <part id="P2">${bar('E')}${bar('F')}</part>
+          </score-partwise>`;
+        const score = parseMusicXmlString(xml, 0, { tempoBpm: null, steadyBpm: null, velocityByStaff: {} }, {
+            geometryStackCount: 20,
+        });
+        expect(score.warnings).toContain('parts_concatenated');
+        expect(score.measures).toHaveLength(4);
+        expect(score.notes.some((n) => n.p === 76)).toBe(true);
+        expect(score.notes.some((n) => n.p === 77)).toBe(true);
     });
 
     it('flags a lone single-staff part as all right hand', () => {
@@ -1027,22 +1151,28 @@ describe('tempo', () => {
             parseMusicXmlString(wrap(meterBar(num, den, true) + meterBar(num, den, false)));
 
         it('guesses an opening pulse from the meter when nothing prints a tempo', () => {
-            expect(unmarked(6, 8).defaultBpm).toBe(84);
-            expect(unmarked(9, 8).defaultBpm).toBe(84);
-            expect(unmarked(12, 8).defaultBpm).toBe(84);
-            expect(unmarked(3, 8).defaultBpm).toBe(96);
-            expect(unmarked(2, 2).defaultBpm).toBe(112);
-            expect(unmarked(3, 4).defaultBpm).toBe(108);
-            expect(unmarked(2, 4).defaultBpm).toBe(100);
-            expect(unmarked(4, 4).defaultBpm).toBe(96);
+            expect(unmarked(6, 8).meterDefaultBpm).toBe(84);
+            expect(unmarked(9, 8).meterDefaultBpm).toBe(84);
+            expect(unmarked(12, 8).meterDefaultBpm).toBe(84);
+            expect(unmarked(3, 8).meterDefaultBpm).toBe(96);
+            expect(unmarked(2, 2).meterDefaultBpm).toBe(112);
+            expect(unmarked(3, 4).meterDefaultBpm).toBe(108);
+            expect(unmarked(2, 4).meterDefaultBpm).toBe(100);
+            expect(unmarked(4, 4).meterDefaultBpm).toBe(96);
+            for (const [num, den] of [
+                [6, 8],
+                [3, 8],
+                [4, 4],
+            ] as const) {
+                expect(unmarked(num, den).defaultBpm).toBe(null);
+            }
         });
 
-        it('discloses the guess without inventing a tempo entry for it', () => {
+        it('discloses the guess without inventing a tempo entry or defaultBpm for it', () => {
             const score = unmarked(4, 4);
             expect(score.warnings).toContain('tempo_defaulted');
-            // A new tempos[].src value would be rejected wholesale by the strict
-            // enum in every deployed client, so the guess travels as defaultBpm.
             expect(score.tempos).toEqual([]);
+            expect(score.defaultBpm).toBe(null);
         });
 
         it('does not guess when the score prints a tempo of any kind', () => {
@@ -1084,7 +1214,7 @@ describe('parseMxlFiles warning aggregation', () => {
 
     it('keeps the disclosure when the opening movement is the one that guessed', () => {
         const score = parseMxlFiles([unmarked, marked]);
-        expect(score.defaultBpm).toBe(96);
+        expect(score.defaultBpm).toBe(null);
         expect(score.warnings).toContain('tempo_defaulted');
         // The second movement's printed 132 still travels, at its own offset.
         expect(score.tempos.map((t) => t.bpm)).toEqual([132]);
@@ -1097,7 +1227,7 @@ describe('parseMxlFiles warning aggregation', () => {
         expect(score.warnings).not.toContain('tempo_defaulted');
     });
 
-    it('gives a heading-less later movement its own meter default, not the previous rit. floor', () => {
+    it('does not write a meter-default clock event for a heading-less later movement', () => {
         const withContainer = (xml: string): Buffer => {
             const zip = new AdmZip();
             zip.addFile('score.xml', Buffer.from(xml, 'utf8'));
@@ -1113,11 +1243,31 @@ describe('parseMxlFiles warning aggregation', () => {
         const movement1 = withContainer(wrap(bar(`${ATTRS_44}${words('Presto')}`) + bar(words('rit.'))));
         const movement2 = withContainer(wrap(bar(ATTRS_44) + bar()));
         const score = parseMxlFiles([movement1, movement2]);
-        const opening = score.tempos.find((t) => t.tick === 3840);
-        expect(opening).toEqual({ tick: 3840, bpm: 96 });
-        expect(opening?.src).toBeUndefined();
-        // Presto (172) ramped, but movement 2 must not sit at that floor.
-        expect(Math.min(...score.tempos.filter((t) => t.tick < 3840).map((t) => t.bpm))).toBe(129);
+        expect(score.tempos.find((t) => t.tick === 3840)).toBeUndefined();
+        expect(score.tempos.every((t) => t.tick < 3840)).toBe(true);
+    });
+
+    it('keeps later-file meters when concatenating multiple .mxl files', () => {
+        const piano = (beats: number, beatType: number, step: string): string =>
+            `<?xml version="1.0"?>
+            <score-partwise version="4.0">
+              <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+              <part id="P1"><measure number="1">
+                <attributes><divisions>4</divisions><staves>2</staves>
+                  <time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>
+                </attributes>
+                ${note(step, 5, 16, '<staff>1</staff>')}
+                <backup><duration>16</duration></backup>
+                ${note('C', 3, 16, '<staff>2</staff>')}
+              </measure></part>
+            </score-partwise>`;
+        const score = parseMxlFiles([mxl(piano(4, 4, 'C')), mxl(piano(3, 8, 'E'))]);
+        expect(score.warnings).toContain('multiple_movements_concatenated');
+        expect(score.timeSignatures).toEqual([
+            { tick: 0, num: 4, den: 4 },
+            { tick: 1920, num: 3, den: 8 },
+        ]);
+        expect(score.measures).toHaveLength(2);
     });
 });
 

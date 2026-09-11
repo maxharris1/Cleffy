@@ -1,0 +1,224 @@
+{
+  "piece": "Beethoven \u2014 F\u00fcr Elise, WoO 59",
+  "slug": "fur-elise",
+  "constraint": "Cannot audition speakers. MIDI sounding-envelope gaps are the energy-gap proxy. No fluidsynth/timidity/sf2; WAV skipped.",
+  "mutopia": {
+    "label": "Mutopia",
+    "notes": 905,
+    "duration_q": 156.5,
+    "duration_s": 130.42,
+    "tempo0_bpm": 72.0,
+    "tempos": [
+      {
+        "tick": 0,
+        "bpm": 72.0
+      }
+    ],
+    "notes_per_sec": 6.939,
+    "notes_per_quarter": 5.783,
+    "sounding_coverage": 0.99,
+    "silence_ge_0.5q": 2,
+    "silence_ge_1q": 1,
+    "silence_ge_1.5q": 0,
+    "silence_ge_4q": 0,
+    "longest_silences_q": [
+      {
+        "dur_q": 1.0,
+        "start_q": 116.0,
+        "end_q": 117.0
+      },
+      {
+        "dur_q": 0.5,
+        "start_q": 115.0,
+        "end_q": 115.5
+      }
+    ],
+    "gap_hist": [
+      [
+        "0.5\u20131 q",
+        1
+      ],
+      [
+        "1\u20131.5 q",
+        1
+      ],
+      [
+        "1.5\u20132 q",
+        0
+      ],
+      [
+        "2\u20134 q",
+        0
+      ],
+      [
+        "4\u20138 q",
+        0
+      ],
+      [
+        ">8 q",
+        0
+      ]
+    ],
+    "median_ioi_q": 0.25,
+    "p95_ioi_q": 0.25,
+    "max_ioi_q": 1.5
+  },
+  "prod": {
+    "label": "Prod",
+    "notes": 901,
+    "duration_q": 160.5,
+    "duration_s": 100.31,
+    "tempo0_bpm": 96.0,
+    "tempos": [
+      {
+        "tick": 0,
+        "bpm": 96.0
+      }
+    ],
+    "notes_per_sec": 8.982,
+    "notes_per_quarter": 5.614,
+    "sounding_coverage": 0.984,
+    "silence_ge_0.5q": 3,
+    "silence_ge_1q": 1,
+    "silence_ge_1.5q": 0,
+    "silence_ge_4q": 0,
+    "longest_silences_q": [
+      {
+        "dur_q": 1.0,
+        "start_q": 119.25,
+        "end_q": 120.25
+      },
+      {
+        "dur_q": 0.5,
+        "start_q": 12.0,
+        "end_q": 12.5
+      },
+      {
+        "dur_q": 0.5,
+        "start_q": 118.25,
+        "end_q": 118.75
+      }
+    ],
+    "gap_hist": [
+      [
+        "0.5\u20131 q",
+        2
+      ],
+      [
+        "1\u20131.5 q",
+        1
+      ],
+      [
+        "1.5\u20132 q",
+        0
+      ],
+      [
+        "2\u20134 q",
+        0
+      ],
+      [
+        "4\u20138 q",
+        0
+      ],
+      [
+        ">8 q",
+        0
+      ]
+    ],
+    "median_ioi_q": 0.25,
+    "p95_ioi_q": 0.25,
+    "max_ioi_q": 2.0
+  },
+  "local": {
+    "label": "Local",
+    "notes": 904,
+    "duration_q": 160.2,
+    "duration_s": 100.12,
+    "tempo0_bpm": 96.0,
+    "tempos": [
+      {
+        "tick": 0,
+        "bpm": 96.0
+      }
+    ],
+    "notes_per_sec": 9.029,
+    "notes_per_quarter": 5.643,
+    "sounding_coverage": 0.907,
+    "silence_ge_0.5q": 5,
+    "silence_ge_1q": 3,
+    "silence_ge_1.5q": 0,
+    "silence_ge_4q": 0,
+    "longest_silences_q": [
+      {
+        "dur_q": 1.05,
+        "start_q": 119.7,
+        "end_q": 120.75
+      },
+      {
+        "dur_q": 1.0,
+        "start_q": 39.0,
+        "end_q": 40.0
+      },
+      {
+        "dur_q": 1.0,
+        "start_q": 44.5,
+        "end_q": 45.5
+      },
+      {
+        "dur_q": 0.78,
+        "start_q": 11.72,
+        "end_q": 12.5
+      },
+      {
+        "dur_q": 0.6,
+        "start_q": 118.65,
+        "end_q": 119.25
+      }
+    ],
+    "gap_hist": [
+      [
+        "0.5\u20131 q",
+        2
+      ],
+      [
+        "1\u20131.5 q",
+        3
+      ],
+      [
+        "1.5\u20132 q",
+        0
+      ],
+      [
+        "2\u20134 q",
+        0
+      ],
+      [
+        "4\u20138 q",
+        0
+      ],
+      [
+        ">8 q",
+        0
+      ]
+    ],
+    "median_ioi_q": 0.25,
+    "p95_ioi_q": 0.25,
+    "max_ioi_q": 1.5
+  },
+  "empty_windows_prod_vs_mutopia": {
+    "win_q": 2.0,
+    "windows": 81,
+    "empty_while_ref": 0,
+    "empty_q": 0.0,
+    "sparse_while_ref": 2,
+    "empty_starts_q": []
+  },
+  "empty_windows_local_vs_mutopia": {
+    "win_q": 2.0,
+    "windows": 81,
+    "empty_while_ref": 0,
+    "empty_q": 0.0,
+    "sparse_while_ref": 2,
+    "empty_starts_q": []
+  }
+}

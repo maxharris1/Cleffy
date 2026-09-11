@@ -44,8 +44,8 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
         // 15 stacks ↔ 15 measures, so nothing geometric to report. The warnings
         // are about tempo — Audiveris never recognized the ♩=n text — and the
         // pedalling this unmarked score was given.
-        expect(score.warnings).toEqual(['tempo_defaulted', 'pedal_inferred']);
-        expect(score.pedals?.length ?? 0).toBeGreaterThan(0);
+        expect(score.warnings).toEqual(['tempo_defaulted']);
+        expect(score.pedals).toBeUndefined();
         for (const [index, measure] of score.measures.entries()) {
             expect(measure.sys, `measure ${index} has geometry`).toBeGreaterThanOrEqual(0);
             expect(measure.x1).toBeGreaterThan(measure.x0);
@@ -85,7 +85,7 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
         // No tempo evidence of any kind survived the OMR, so the meter decides:
         // 4/4 reads as a moderate 96, erring slow, and says so rather than
         // leaving the reader to wonder where the number came from.
-        expect(score.defaultBpm).toBe(96);
+        expect(score.defaultBpm).toBe(null);
         expect(score.warnings).toContain('tempo_defaulted');
     });
 

@@ -54,6 +54,13 @@ export interface OmrGeometry {
     sheets: OmrSheet[];
 }
 
+/** Engraved measure stacks across every recovered sheet. */
+export const countOmrStacks = (geometry: OmrGeometry): number =>
+    geometry.sheets.reduce(
+        (n, sheet) => n + sheet.systems.reduce((m, system) => m + system.stacks.length, 0),
+        0,
+    );
+
 type Elem = NonNullable<ReturnType<DOMParser['parseFromString']>['documentElement']>;
 
 const childElements = (parent: Elem, name?: string): Elem[] => {

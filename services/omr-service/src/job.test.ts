@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import AdmZip from 'adm-zip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ERROR_CODES, JobError } from './errors.js';
@@ -9,14 +10,19 @@ import {
     ENGINE_VERSION,
     PARALLEL_MIN_MEMORY_BYTES,
     PARALLEL_SHEET_MIN_PAGES,
+    assertScoreUsable,
     cacheKeyFor,
     collectRangeArtifacts,
     parseCgroupMemoryLimit,
+    planMovementRanges,
     recordInvalidSheets,
+    scoreIsPlayable,
     shouldRunParallelShards,
+    transcribeAndMergeSheetRanges,
     unionSheetNumbers,
 } from './job.js';
 import type * as audiveris from './audiveris.js';
+import { timeoutForPages } from './audiveris.js';
 import type { ScoreData } from './scoreData.js';
 import { emptyTimings } from './timings.js';
 
@@ -144,6 +150,7 @@ describe('collectRangeArtifacts', () => {
                 stepDurationsMs: {},
                 audiverisTotalMs: 9,
                 invalidSheets: [1],
+                failedStubSheets: [],
                 exitCode: 0,
             });
             const timings = emptyTimings();
@@ -202,6 +209,7 @@ describe('collectRangeArtifacts', () => {
                 stepDurationsMs: {},
                 audiverisTotalMs: 9,
                 invalidSheets: [1],
+                failedStubSheets: [],
                 exitCode: 0,
             });
             const timings = emptyTimings();
@@ -216,6 +224,310 @@ describe('collectRangeArtifacts', () => {
                 true,
             );
             expect(artifacts.sheets).toEqual({ from: 2, to: 5 });
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('returns every .mxl in filename order, not only the first', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'omr-art-'));
+        const first = join(dir, 'a.mxl');
+        const second = join(dir, 'b.mxl');
+        await writeFile(first, 'one');
+        await writeFile(second, 'two');
+        try {
+            runAudiverisTolerant.mockResolvedValue({
+                mxlPaths: [first, second],
+                omrPath: null,
+                jvmStartToFirstSheetMs: 1,
+                perSheetMs: [2],
+                stepCounts: {},
+                stepDurationsMs: {},
+                audiverisTotalMs: 9,
+                invalidSheets: [],
+                failedStubSheets: [],
+                exitCode: 0,
+                scoreSheetGroups: [],
+            });
+            const timings = emptyTimings();
+            timings.pageCount = 8;
+            const artifacts = await collectRangeArtifacts(
+                '/in.pdf',
+                dir,
+                timings,
+                () => undefined,
+                undefined,
+                undefined,
+                true,
+            );
+            expect(artifacts.mxlBuffers).toHaveLength(2);
+            expect(artifacts.mxlBuffers[0]?.toString()).toBe('one');
+            expect(artifacts.mxlBuffers[1]?.toString()).toBe('two');
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('uses timeoutForPages of the range when timeoutPageCount is set', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'omr-art-'));
+        const mxlPath = join(dir, 'a.mxl');
+        await writeFile(mxlPath, '<score-partwise/>');
+        try {
+            runAudiverisTolerant.mockResolvedValue({
+                mxlPaths: [mxlPath],
+                omrPath: null,
+                jvmStartToFirstSheetMs: 1,
+                perSheetMs: [2],
+                stepCounts: {},
+                stepDurationsMs: {},
+                audiverisTotalMs: 9,
+                invalidSheets: [],
+                failedStubSheets: [],
+                exitCode: 0,
+                scoreSheetGroups: [],
+            });
+            const timings = emptyTimings();
+            timings.pageCount = 20;
+            await collectRangeArtifacts(
+                '/in.pdf',
+                dir,
+                timings,
+                () => undefined,
+                undefined,
+                { from: 1, to: 6 },
+                true,
+                6,
+            );
+            expect(runAudiverisTolerant).toHaveBeenCalledWith(
+                '/in.pdf',
+                dir,
+                expect.objectContaining({ timeoutMs: timeoutForPages(6), pageCount: 20 }),
+            );
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('planMovementRanges', () => {
+    it('splits Tempest valid sheets around failed stubs', () => {
+        expect(planMovementRanges(20, [11, 12, 18, 19], false)).toEqual([
+            { from: 1, to: 10 },
+            { from: 13, to: 17 },
+            { from: 20, to: 20 },
+        ]);
+    });
+
+    it('does not invent ranges that include failed stubs', () => {
+        const ranges = planMovementRanges(20, [11, 12, 18, 19], false);
+        const sheets = ranges.flatMap((range) => {
+            const out: number[] = [];
+            for (let sheet = range.from; sheet <= range.to; sheet++) {
+                out.push(sheet);
+            }
+            return out;
+        });
+        expect(sheets).not.toContain(11);
+        expect(sheets).not.toContain(12);
+        expect(sheets).not.toContain(18);
+        expect(sheets).not.toContain(19);
+    });
+
+    it('returns no re-run when the first export is already playable', () => {
+        expect(planMovementRanges(20, [11, 12, 18, 19], true)).toEqual([]);
+    });
+
+    it('uses PAGE log groups and keeps uncovered valid leftover sheets', () => {
+        expect(
+            planMovementRanges(20, [11, 12, 18, 19], false, [
+                { from: 1, to: 6 },
+                { from: 7, to: 10 },
+            ]),
+        ).toEqual([
+            { from: 1, to: 6 },
+            { from: 7, to: 10 },
+            { from: 13, to: 17 },
+            { from: 20, to: 20 },
+        ]);
+    });
+});
+
+const TEMPEST_GEOMETRY_PAGES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19];
+
+const scoreWithPageCoverage = (
+    geometryPages: readonly number[],
+    soundingPages: readonly number[],
+    extras: Partial<ScoreData> = {},
+): ScoreData => {
+    const systems = geometryPages.flatMap((page) => [
+        { page, y0: 0.1, y1: 0.22 },
+        { page, y0: 0.28, y1: 0.4 },
+        { page, y0: 0.46, y1: 0.58 },
+        { page, y0: 0.64, y1: 0.76 },
+        { page, y0: 0.82, y1: 0.94 },
+        { page, y0: 0.95, y1: 0.99 },
+    ]);
+    const measures = soundingPages.map((page, i) => ({
+        n: i + 1,
+        tick: i * 480,
+        dTicks: 480,
+        page,
+        sys: 0,
+        x0: 0,
+        x1: 1,
+    }));
+    const notes = soundingPages.map((_, i) => ({ t: i * 480, d: 480, p: 60, h: 0 as const }));
+    return {
+        version: 3,
+        ticksPerQuarter: 480,
+        defaultBpm: 90,
+        timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        totalTicks: Math.max(480, soundingPages.length * 480),
+        notes: notes.length > 0 ? notes : [{ t: 0, d: 480, p: 60, h: 0 }],
+        measures:
+            measures.length > 0
+                ? measures
+                : [{ n: 1, tick: 0, dTicks: 480, page: -1, sys: -1, x0: 0, x1: 1 }],
+        systems,
+        warnings: [],
+        ...extras,
+    } as ScoreData;
+};
+
+describe('score playback usability gate', () => {
+    it('accepts a Tempest-shaped book once concatenated parts cover every recovered page', () => {
+        const score = scoreWithPageCoverage(TEMPEST_GEOMETRY_PAGES, TEMPEST_GEOMETRY_PAGES, {
+            warnings: ['parts_concatenated', 'multi_part_collapsed', 'pages_skipped'],
+        });
+        expect(scoreIsPlayable(score)).toBe(true);
+        expect(() => assertScoreUsable(score)).not.toThrow();
+    });
+
+    it('rejects a Tempest-shaped book: many systems, notes on one recovered page', () => {
+        const score = scoreWithPageCoverage(TEMPEST_GEOMETRY_PAGES, [0], {
+            warnings: ['measure_geometry_mismatch', 'multi_part_collapsed', 'pages_skipped'],
+        });
+        expect(score.systems).toHaveLength(96);
+        expect(scoreIsPlayable(score)).toBe(false);
+        try {
+            assertScoreUsable(score);
+            throw new Error('expected score_unusable');
+        } catch (err) {
+            expect(err).toBeInstanceOf(JobError);
+            expect(err).toMatchObject({ code: ERROR_CODES.scoreUnusable });
+        }
+    });
+
+    it('rejects one silent recovered music page', () => {
+        const sounding = TEMPEST_GEOMETRY_PAGES.slice(0, -1);
+        const score = scoreWithPageCoverage(TEMPEST_GEOMETRY_PAGES, sounding);
+        expect(scoreIsPlayable(score)).toBe(false);
+        expect(() => assertScoreUsable(score)).toThrow(JobError);
+    });
+
+    it('accepts Moonlight-shaped full coverage of recovered pages', () => {
+        const musicPages = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        const score = scoreWithPageCoverage(musicPages, musicPages);
+        expect(scoreIsPlayable(score)).toBe(true);
+        expect(() => assertScoreUsable(score)).not.toThrow();
+    });
+
+    it('accepts a staff-less cover skip when remaining pages have notes', () => {
+        const musicPages = [1, 2, 3, 4, 5];
+        const score = scoreWithPageCoverage(musicPages, musicPages, { warnings: ['pages_skipped'] });
+        expect(scoreIsPlayable(score)).toBe(true);
+        expect(() => assertScoreUsable(score)).not.toThrow();
+    });
+
+    it('accepts no-geometry scores that still have notes', () => {
+        const score = scoreWithPageCoverage([], [0], {
+            systems: [],
+            measures: [{ n: 1, tick: 0, dTicks: 480, page: -1, sys: -1, x0: 0, x1: 1 }],
+            warnings: ['no_geometry'],
+        });
+        expect(scoreIsPlayable(score)).toBe(true);
+    });
+
+    it('requires every recovered geometry page to have notes', () => {
+        const pages = [0, 1, 2, 3];
+        expect(scoreIsPlayable(scoreWithPageCoverage(pages, pages))).toBe(true);
+        expect(scoreIsPlayable(scoreWithPageCoverage(pages, [0, 1, 2]))).toBe(false);
+    });
+});
+
+describe('transcribeAndMergeSheetRanges', () => {
+    beforeEach(() => {
+        runAudiverisTolerant.mockReset();
+    });
+
+    const mxlFromXml = (xml: string): Buffer => {
+        const zip = new AdmZip();
+        zip.addFile('score.xml', Buffer.from(xml, 'utf8'));
+        return zip.toBuffer();
+    };
+
+    const oneBar = (beats: number, beatType: number, step: string): string =>
+        `<?xml version="1.0"?>
+        <score-partwise version="4.0">
+          <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+          <part id="P1"><measure number="1">
+            <attributes><divisions>4</divisions><staves>2</staves>
+              <time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>
+            </attributes>
+            <note><pitch><step>${step}</step><octave>5</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note>
+            <backup><duration>16</duration></backup>
+            <note><pitch><step>C</step><octave>3</octave></pitch><duration>16</duration><voice>1</voice><staff>2</staff></note>
+          </measure></part>
+        </score-partwise>`;
+
+    it('merges per-range ScoreData and keeps a later 3/8', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'omr-mv-'));
+        const firstPath = join(dir, 'first.mxl');
+        const secondPath = join(dir, 'second.mxl');
+        await writeFile(firstPath, mxlFromXml(oneBar(4, 4, 'C')));
+        await writeFile(secondPath, mxlFromXml(oneBar(3, 8, 'E')));
+        try {
+            runAudiverisTolerant.mockImplementation(async (_pdf: string, outDir: string) => {
+                const path = String(outDir).includes('13-17') ? secondPath : firstPath;
+                return {
+                    mxlPaths: [path],
+                    omrPath: null,
+                    jvmStartToFirstSheetMs: 1,
+                    perSheetMs: [2],
+                    stepCounts: {},
+                    stepDurationsMs: {},
+                    audiverisTotalMs: 9,
+                    invalidSheets: [],
+                    failedStubSheets: [],
+                    exitCode: 0,
+                    scoreSheetGroups: [],
+                };
+            });
+            const timings = emptyTimings();
+            timings.pageCount = 20;
+            const score = await transcribeAndMergeSheetRanges(
+                '/in.pdf',
+                dir,
+                timings,
+                'classical',
+                () => undefined,
+                undefined,
+                [
+                    { from: 1, to: 10 },
+                    { from: 13, to: 17 },
+                ],
+            );
+            expect(runAudiverisTolerant).toHaveBeenCalledTimes(2);
+            const timeouts = runAudiverisTolerant.mock.calls.map((call) => call[2]?.timeoutMs);
+            expect(timeouts).toEqual([timeoutForPages(10), timeoutForPages(5)]);
+            expect(score.timeSignatures).toEqual(
+                expect.arrayContaining([
+                    { tick: 0, num: 4, den: 4 },
+                    expect.objectContaining({ num: 3, den: 8 }),
+                ]),
+            );
+            expect(score.notes.some((n) => n.p === 72)).toBe(true);
+            expect(score.notes.some((n) => n.p === 76)).toBe(true);
         } finally {
             await rm(dir, { recursive: true, force: true });
         }

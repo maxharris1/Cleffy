@@ -20,6 +20,9 @@ starts from a commit that includes this tree.
 
 - **OMR** (`services/omr-service`) is **not** started. Play-along analysis that
   needs Audiveris will not run in this environment unless you start it by hand.
+  Hosted vs local OMR shootout (same PDF bytes) is in `.claude/skills/omr-eval/SKILL.md`
+  (Shootout): this VM may fetch prod ScoreData and compare two `score.json` files;
+  run the local engine half on a machine with `cleffy-omr`.
 - **Hosted / live Supabase** is never linked or mutated by these scripts.
 - **Stripe** env is not seeded here. Local billing is unlocked: `seed.sql`
   grants an Academy subscription to the test accounts so feature work is not

@@ -1,0 +1,600 @@
+{
+  "piece": "Beethoven \u2014 F\u00fcr Elise, WoO 59",
+  "engine": "from score.json",
+  "coverage": {
+    "notes": 931,
+    "rh": 527,
+    "lh": 404,
+    "measures": 106,
+    "systems": 18,
+    "pagesInMeasures": [
+      0,
+      1,
+      2
+    ],
+    "pagesInSystems": [
+      0,
+      1,
+      2
+    ],
+    "totalTicks": 88260,
+    "totalTicksQuarters": 183.875,
+    "midiQuarters": 156.5,
+    "keySignatures": null,
+    "tempos": [],
+    "defaultBpm": 96,
+    "timeSignatures": [
+      {
+        "den": 8,
+        "num": 3,
+        "tick": 0
+      }
+    ],
+    "warnings": [
+      "voices_unstable",
+      "key_signature_repaired",
+      "rhythm_repaired",
+      "measure_overfull",
+      "measure_underfull",
+      "dynamics_not_staff_split",
+      "tempo_defaulted",
+      "repeats_ignored"
+    ],
+    "holds": [
+      {
+        "tick": 59940,
+        "beats": 0.5
+      }
+    ],
+    "clefs": [
+      {
+        "line": 2,
+        "sign": "G",
+        "tick": 0,
+        "staff": 0
+      },
+      {
+        "line": 4,
+        "sign": "F",
+        "tick": 0,
+        "staff": 1
+      },
+      {
+        "line": 2,
+        "sign": "G",
+        "tick": 13380,
+        "staff": 1
+      },
+      {
+        "line": 4,
+        "sign": "F",
+        "tick": 16620,
+        "staff": 1
+      },
+      {
+        "line": 2,
+        "sign": "G",
+        "tick": 30480,
+        "staff": 1
+      },
+      {
+        "line": 4,
+        "sign": "F",
+        "tick": 30480,
+        "staff": 1
+      }
+    ]
+  },
+  "measureLengths": {
+    "expected3_8": 720,
+    "dTicksHistogram": {
+      "240": 1,
+      "720": 87,
+      "780": 1,
+      "840": 1,
+      "960": 2,
+      "1200": 4,
+      "1440": 1,
+      "1500": 1,
+      "1560": 2,
+      "1620": 2,
+      "1800": 2,
+      "2040": 1,
+      "2100": 1
+    },
+    "overfullCount": 18,
+    "underfullCount": 1,
+    "emptyCount": 0,
+    "geomMissingCount": 0,
+    "silenceAfterLastNoteCount": 7,
+    "overfull": [
+      {
+        "n": 11,
+        "page": 0,
+        "dTicks": 1800,
+        "over": 1080,
+        "notes": 7
+      },
+      {
+        "n": 12,
+        "page": 0,
+        "dTicks": 2040,
+        "over": 1320,
+        "notes": 8
+      },
+      {
+        "n": 13,
+        "page": 0,
+        "dTicks": 2100,
+        "over": 1380,
+        "notes": 11
+      },
+      {
+        "n": 14,
+        "page": 0,
+        "dTicks": 1440,
+        "over": 720,
+        "notes": 10
+      },
+      {
+        "n": 15,
+        "page": 0,
+        "dTicks": 1800,
+        "over": 1080,
+        "notes": 7
+      },
+      {
+        "n": 25,
+        "page": 0,
+        "dTicks": 1200,
+        "over": 480,
+        "notes": 10
+      },
+      {
+        "n": 26,
+        "page": 0,
+        "dTicks": 960,
+        "over": 240,
+        "notes": 12
+      },
+      {
+        "n": 31,
+        "page": 0,
+        "dTicks": 1620,
+        "over": 900,
+        "notes": 13
+      },
+      {
+        "n": 33,
+        "page": 0,
+        "dTicks": 1620,
+        "over": 900,
+        "notes": 22
+      },
+      {
+        "n": 34,
+        "page": 0,
+        "dTicks": 960,
+        "over": 240,
+        "notes": 20
+      },
+      {
+        "n": 35,
+        "page": 0,
+        "dTicks": 1200,
+        "over": 480,
+        "notes": 18
+      },
+      {
+        "n": 38,
+        "page": 1,
+        "dTicks": 840,
+        "over": 120,
+        "notes": 4
+      },
+      {
+        "n": 39,
+        "page": 1,
+        "dTicks": 1200,
+        "over": 480,
+        "notes": 6
+      },
+      {
+        "n": 51,
+        "page": 1,
+        "dTicks": 1560,
+        "over": 840,
+        "notes": 8
+      },
+      {
+        "n": 52,
+        "page": 1,
+        "dTicks": 1200,
+        "over": 480,
+        "notes": 10
+      },
+      {
+        "n": 83,
+        "page": 2,
+        "dTicks": 1500,
+        "over": 780,
+        "notes": 9
+      },
+      {
+        "n": 95,
+        "page": 2,
+        "dTicks": 1560,
+        "over": 840,
+        "notes": 9
+      },
+      {
+        "n": 96,
+        "page": 2,
+        "dTicks": 780,
+        "over": 60,
+        "notes": 6
+      }
+    ],
+    "underfull": [
+      {
+        "n": 0,
+        "page": 0,
+        "dTicks": 240,
+        "short": 480,
+        "notes": 2
+      }
+    ],
+    "empty": [],
+    "geomMissing": [],
+    "silenceWorst": [
+      {
+        "n": 78,
+        "page": 2,
+        "gapTicks": 504,
+        "notes": 4
+      },
+      {
+        "n": 105,
+        "page": 2,
+        "gapTicks": 504,
+        "notes": 3
+      },
+      {
+        "n": 12,
+        "page": 0,
+        "gapTicks": 372,
+        "notes": 8
+      },
+      {
+        "n": 8,
+        "page": 0,
+        "gapTicks": 288,
+        "notes": 4
+      },
+      {
+        "n": 77,
+        "page": 2,
+        "gapTicks": 288,
+        "notes": 4
+      },
+      {
+        "n": 83,
+        "page": 2,
+        "gapTicks": 252,
+        "notes": 9
+      },
+      {
+        "n": 57,
+        "page": 1,
+        "gapTicks": 132,
+        "notes": 7
+      }
+    ],
+    "extraTicksVsIdealBars": 11940,
+    "pickupLike": [
+      {
+        "n": 0,
+        "sl": [
+          {
+            "t": 0,
+            "x": 0.18105192178017532
+          },
+          {
+            "t": 120,
+            "x": 0.2026298044504383
+          }
+        ],
+        "x0": 0.12002697235333783,
+        "x1": 0.21712744436952125,
+        "sys": 0,
+        "page": 0,
+        "tick": 0,
+        "dTicks": 240,
+        "srcIndex": 0
+      }
+    ]
+  },
+  "tempo": {
+    "defaultBpm": 96,
+    "tempo_defaulted": true,
+    "omrTempos": [],
+    "midiTemposQuarterBpm": [
+      {
+        "tick": 0,
+        "bpm": 72.0
+      }
+    ],
+    "expectedMutopiaQuarterBpm": 72,
+    "bpmJumpsGte8": []
+  },
+  "chords": {
+    "sameOnsetGroups": 154,
+    "staggerClustersDt11to79": 59,
+    "staggerExamples": [
+      {
+        "t": 26460,
+        "dt": 60,
+        "p": [
+          69,
+          67
+        ],
+        "h": 0,
+        "measure": 28
+      },
+      {
+        "t": 26520,
+        "dt": 60,
+        "p": [
+          67,
+          69
+        ],
+        "h": 0,
+        "measure": 28
+      },
+      {
+        "t": 26580,
+        "dt": 60,
+        "p": [
+          69,
+          70
+        ],
+        "h": 0,
+        "measure": 28
+      },
+      {
+        "t": 26640,
+        "dt": 60,
+        "p": [
+          70,
+          72
+        ],
+        "h": 0,
+        "measure": 28
+      },
+      {
+        "t": 28740,
+        "dt": 60,
+        "p": [
+          65,
+          48
+        ],
+        "h": 1,
+        "measure": 31
+      },
+      {
+        "t": 29760,
+        "dt": 60,
+        "p": [
+          72,
+          79
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 29820,
+        "dt": 60,
+        "p": [
+          79,
+          67
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 29880,
+        "dt": 60,
+        "p": [
+          67,
+          79
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 29940,
+        "dt": 60,
+        "p": [
+          79,
+          69
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30000,
+        "dt": 60,
+        "p": [
+          69,
+          79
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30060,
+        "dt": 60,
+        "p": [
+          79,
+          71
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30120,
+        "dt": 60,
+        "p": [
+          71,
+          79
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30180,
+        "dt": 60,
+        "p": [
+          79,
+          72
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30240,
+        "dt": 60,
+        "p": [
+          72,
+          79
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30300,
+        "dt": 60,
+        "p": [
+          79,
+          74
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30360,
+        "dt": 60,
+        "p": [
+          74,
+          79
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30420,
+        "dt": 60,
+        "p": [
+          79,
+          76
+        ],
+        "h": 0,
+        "measure": 32
+      },
+      {
+        "t": 30480,
+        "dt": 60,
+        "p": [
+          76,
+          79
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30540,
+        "dt": 60,
+        "p": [
+          79,
+          84
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30600,
+        "dt": 60,
+        "p": [
+          84,
+          83
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30660,
+        "dt": 60,
+        "p": [
+          83,
+          81
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30720,
+        "dt": 60,
+        "p": [
+          81,
+          79
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30780,
+        "dt": 60,
+        "p": [
+          79,
+          77
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30840,
+        "dt": 60,
+        "p": [
+          77,
+          76
+        ],
+        "h": 0,
+        "measure": 33
+      },
+      {
+        "t": 30900,
+        "dt": 60,
+        "p": [
+          76,
+          74
+        ],
+        "h": 0,
+        "measure": 33
+      }
+    ],
+    "engineHumanizeTicksAt96bpm": 10
+  },
+  "seams": {
+    "pages_skipped": false,
+    "parts_concatenated": false,
+    "multi_part_collapsed": false,
+    "pageCount": 3,
+    "parallelShardMinPages": 4
+  },
+  "midiRef": {
+    "notes": 905,
+    "tpq": 384,
+    "maxTick": 60096
+  },
+  "exportedMidi": "/Users/maxharris/Projects/Cleffy/services/omr-service/eval/results/fur-elise/omr-from-scoredata.mid"
+}

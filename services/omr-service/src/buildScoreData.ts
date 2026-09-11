@@ -180,10 +180,9 @@ export interface BuildScoreDataOptions {
     /** Stylistic era, which decides how an unpedalled score is pedalled. */
     era?: Era;
     /**
-     * Whether to pedal an unmarked stretch here. Off for a shard of a split
-     * score: a shard sees only its own pages, so it cannot tell a score that
-     * never pedals from one whose marks are all on another page, and the
-     * merge infers once over the whole score instead. Default on.
+     * Whether to pedal an unmarked stretch here. Off by default: inferred
+     * sustain is a guess, not engraving, and hosted clients must stay dry.
+     * Pass true only for tests that still exercise inference.
      */
     autoPedal?: boolean;
 }
@@ -302,9 +301,8 @@ export const buildScoreData = (
     // the performed timeline so a repeated passage is pedalled both times, and
     // before the cap so the inference can coarsen itself to fit under it.
     const pedalling =
-        options.autoPedal === false
-            ? { pedals: performed.pedals ?? [], inferred: false }
-            : inferAutoPedal(
+        options.autoPedal === true
+            ? inferAutoPedal(
                   {
                       notes: performed.notes,
                       measures: performed.measures,
@@ -313,7 +311,8 @@ export const buildScoreData = (
                       totalTicks: performed.totalTicks,
                   },
                   options.era ?? DEFAULT_ERA,
-              );
+              )
+            : { pedals: performed.pedals ?? [], inferred: false };
     const pedals = pedalling.pedals.length > 0 ? capPedals(pedalling.pedals) : undefined;
     // Disclosed from what survives the cap, so the warning never outlives the
     // edges it describes.

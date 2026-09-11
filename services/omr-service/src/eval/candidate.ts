@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { PLAY_ALONG_AUDIVERIS_OPTIONS, parseExtraOpts } from '../audiveris.js';
@@ -15,7 +15,7 @@ import { artifactsCacheDir } from './paths.js';
 
 const execFileAsync = promisify(execFile);
 
-export type CandidateSource = 'pdf' | 'artifacts' | 'document';
+export type CandidateSource = 'pdf' | 'artifacts' | 'document' | 'score';
 
 export interface Candidate {
     score: ScoreData;
@@ -274,6 +274,38 @@ export const fromDocument = async (documentId: string): Promise<Candidate> => {
     return {
         score,
         source: 'document',
+        engineVersion,
+        audiverisVersion: engineVersion,
+        audiverisOptions: optionsFingerprint(),
+        audiverisCacheHit: null,
+        artifactHash: null,
+        artifactDir: null,
+    };
+};
+
+/** Load a dumped ScoreData JSON (hosted fetch or a previous local run). */
+export const fromScoreFile = async (scorePath: string): Promise<Candidate> => {
+    const raw: unknown = JSON.parse(await readFile(scorePath, 'utf8'));
+    const score = parseScoreJson(raw);
+    let engineVersion: string | null = null;
+    const metaPath = join(dirname(scorePath), 'meta.json');
+    if (existsSync(metaPath)) {
+        try {
+            const meta: unknown = JSON.parse(await readFile(metaPath, 'utf8'));
+            if (meta !== null && typeof meta === 'object') {
+                const rec = meta as Record<string, unknown>;
+                const ev = rec.engine_version ?? rec.engineVersion;
+                if (typeof ev === 'string' && ev.trim()) {
+                    engineVersion = ev.trim();
+                }
+            }
+        } catch {
+            // sibling meta.json is optional
+        }
+    }
+    return {
+        score,
+        source: 'score',
         engineVersion,
         audiverisVersion: engineVersion,
         audiverisOptions: optionsFingerprint(),

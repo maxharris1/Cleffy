@@ -1,0 +1,42 @@
+{
+    "slug": "tempest",
+    "title": "Beethoven — Piano Sonata No. 17, Op. 31 No. 2 (Tempest)",
+    "pdf": {
+        "url": "https://imslp.org/wiki/Piano_Sonata_No.17,_Op.31_No.2_(Beethoven,_Ludwig_van)",
+        "pages": 20
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/O31/LVB_Sonate_31no2_1/LVB_Sonate_31no2_1.mid",
+        "sha256": "36e585dfcc8aed0f2f547af9241ab51cfe814b64eb5a182fc505063438002ee0",
+        "license": "Public Domain (Mutopia 2008/08/12-1509 and 2016/11/08-1510, Stelios Samelis after Breitkopf & Härtel 1862–1865). Local zip is the two movement MIDIs, not a Mutopia-hosted archive. Movement III has no Mutopia MIDI."
+    },
+    "movements": [
+        {
+            "name": "I. Largo - Allegro",
+            "midi": "tempest1.mid",
+            "meter": { "num": 4, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 228,
+            "expectedFifths": -1,
+            "expectedTempo": { "min": 35, "max": 80 },
+            "repeatsUnfoldedInMidi": false
+        },
+        {
+            "name": "II. Adagio",
+            "midi": "tempest2.mid",
+            "meter": { "num": 3, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 105,
+            "expectedFifths": -2,
+            "expectedTempo": { "min": 35, "max": 55 },
+            "repeatsUnfoldedInMidi": false
+        }
+    ],
+    "editionNotes": [
+        "Mutopia has no 3rd-movement MIDI (Allegretto, 3/8). KernScores/craigsapp encodings exist but are a different edition (Durand 1915) and are not used here.",
+        "The local reference zip is eval/cache/downloads/tempest-mids.zip (tempest1.mid + tempest2.mid). Do not run fetch against the MIDI url in reference.url — that field only satisfies the mutopia schema.",
+        "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle.",
+        "The 20-page Breitkopf scan used for this local document is not vendored; pdf.sha256 is intentionally unset."
+    ]
+}

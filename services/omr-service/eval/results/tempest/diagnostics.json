@@ -1,0 +1,1212 @@
+{
+  "overfull": [
+    [
+      3,
+      0,
+      2160,
+      240,
+      7
+    ],
+    [
+      15,
+      0,
+      2640,
+      720,
+      9
+    ],
+    [
+      19,
+      0,
+      2880,
+      960,
+      8
+    ],
+    [
+      24,
+      0,
+      2040,
+      120,
+      8
+    ],
+    [
+      31,
+      0,
+      2400,
+      480,
+      0
+    ]
+  ],
+  "silenceAfterLastNote": [
+    [
+      1,
+      0,
+      1200,
+      8
+    ],
+    [
+      2,
+      0,
+      1044,
+      6
+    ],
+    [
+      4,
+      0,
+      1140,
+      8
+    ],
+    [
+      5,
+      0,
+      1200,
+      8
+    ],
+    [
+      6,
+      -1,
+      960,
+      13
+    ],
+    [
+      7,
+      0,
+      1200,
+      6
+    ],
+    [
+      8,
+      0,
+      1200,
+      6
+    ],
+    [
+      9,
+      0,
+      1200,
+      8
+    ],
+    [
+      10,
+      0,
+      1044,
+      13
+    ],
+    [
+      11,
+      0,
+      960,
+      6
+    ],
+    [
+      12,
+      0,
+      1200,
+      6
+    ],
+    [
+      13,
+      0,
+      1200,
+      8
+    ],
+    [
+      14,
+      0,
+      960,
+      11
+    ],
+    [
+      16,
+      0,
+      1200,
+      10
+    ],
+    [
+      17,
+      0,
+      760,
+      18
+    ],
+    [
+      18,
+      0,
+      1200,
+      4
+    ],
+    [
+      19,
+      0,
+      1440,
+      8
+    ],
+    [
+      20,
+      0,
+      1020,
+      9
+    ],
+    [
+      21,
+      0,
+      960,
+      8
+    ],
+    [
+      22,
+      0,
+      528,
+      6
+    ],
+    [
+      23,
+      0,
+      1140,
+      10
+    ],
+    [
+      24,
+      0,
+      1440,
+      8
+    ],
+    [
+      25,
+      0,
+      480,
+      2
+    ],
+    [
+      27,
+      -1,
+      960,
+      7
+    ]
+  ],
+  "emptyMeasures": [
+    [
+      28,
+      0,
+      1920
+    ],
+    [
+      29,
+      0,
+      1920
+    ],
+    [
+      30,
+      0,
+      1920
+    ],
+    [
+      31,
+      0,
+      2400
+    ],
+    [
+      32,
+      -1,
+      1920
+    ],
+    [
+      33,
+      -1,
+      1920
+    ]
+  ],
+  "extraTicks": 2520,
+  "emptyTicks": 12000,
+  "flam32": [
+    {
+      "m": 15,
+      "page": 0,
+      "h": 0,
+      "span": 60,
+      "pitches": [
+        62,
+        65,
+        74
+      ],
+      "ts": [
+        180,
+        240,
+        240
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "h": 0,
+      "span": 40,
+      "pitches": [
+        77,
+        78
+      ],
+      "ts": [
+        480,
+        520
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "h": 0,
+      "span": 60,
+      "pitches": [
+        74,
+        75
+      ],
+      "ts": [
+        580,
+        640
+      ]
+    },
+    {
+      "m": 24,
+      "page": 0,
+      "h": 1,
+      "span": 60,
+      "pitches": [
+        57,
+        57
+      ],
+      "ts": [
+        240,
+        300
+      ]
+    }
+  ],
+  "staggeredClusters": [
+    {
+      "m": 1,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        0,
+        120
+      ],
+      "pitches": [
+        55,
+        55,
+        62
+      ]
+    },
+    {
+      "m": 1,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        360,
+        480
+      ],
+      "pitches": [
+        70,
+        74
+      ]
+    },
+    {
+      "m": 2,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        1920,
+        2040
+      ],
+      "pitches": [
+        51,
+        58
+      ]
+    },
+    {
+      "m": 2,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        2280,
+        2400
+      ],
+      "pitches": [
+        67,
+        70
+      ]
+    },
+    {
+      "m": 3,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        5160,
+        5280
+      ],
+      "pitches": [
+        64,
+        76
+      ]
+    },
+    {
+      "m": 4,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        6180,
+        6300
+      ],
+      "pitches": [
+        57,
+        62
+      ]
+    },
+    {
+      "m": 4,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        6420,
+        6540
+      ],
+      "pitches": [
+        65,
+        69
+      ]
+    },
+    {
+      "m": 5,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        7920,
+        8040
+      ],
+      "pitches": [
+        45,
+        45,
+        53
+      ]
+    },
+    {
+      "m": 5,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        8280,
+        8360
+      ],
+      "pitches": [
+        62,
+        69
+      ]
+    },
+    {
+      "m": 6,
+      "page": -1,
+      "hand": 1,
+      "nNotes": 4,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        9840,
+        9960
+      ],
+      "pitches": [
+        45,
+        45,
+        52,
+        52
+      ]
+    },
+    {
+      "m": 6,
+      "page": -1,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        10080,
+        10200
+      ],
+      "pitches": [
+        55,
+        55,
+        57
+      ]
+    },
+    {
+      "m": 6,
+      "page": -1,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        10200,
+        10320
+      ],
+      "pitches": [
+        61,
+        73
+      ]
+    },
+    {
+      "m": 7,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        11760,
+        11880
+      ],
+      "pitches": [
+        50,
+        53
+      ]
+    },
+    {
+      "m": 7,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        12000,
+        12120
+      ],
+      "pitches": [
+        57,
+        62
+      ]
+    },
+    {
+      "m": 8,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        13680,
+        13800
+      ],
+      "pitches": [
+        79,
+        80
+      ]
+    },
+    {
+      "m": 8,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        13920,
+        14040
+      ],
+      "pitches": [
+        77,
+        78
+      ]
+    },
+    {
+      "m": 8,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        14160,
+        14280
+      ],
+      "pitches": [
+        75,
+        76
+      ]
+    },
+    {
+      "m": 9,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        15600,
+        15720
+      ],
+      "pitches": [
+        45,
+        45,
+        53
+      ]
+    },
+    {
+      "m": 9,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        15960,
+        16040
+      ],
+      "pitches": [
+        62,
+        69
+      ]
+    },
+    {
+      "m": 10,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 5,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        17520,
+        17640
+      ],
+      "pitches": [
+        45,
+        45,
+        52,
+        52,
+        55
+      ]
+    },
+    {
+      "m": 10,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        17820,
+        17940
+      ],
+      "pitches": [
+        55,
+        57
+      ]
+    },
+    {
+      "m": 10,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        17820,
+        17940
+      ],
+      "pitches": [
+        61,
+        69
+      ]
+    },
+    {
+      "m": 11,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        19440,
+        19560
+      ],
+      "pitches": [
+        50,
+        53
+      ]
+    },
+    {
+      "m": 11,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        19680,
+        19800
+      ],
+      "pitches": [
+        57,
+        62
+      ]
+    },
+    {
+      "m": 12,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        21360,
+        21480
+      ],
+      "pitches": [
+        84,
+        85
+      ]
+    },
+    {
+      "m": 12,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        21600,
+        21720
+      ],
+      "pitches": [
+        82,
+        83
+      ]
+    },
+    {
+      "m": 12,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        21840,
+        21960
+      ],
+      "pitches": [
+        80,
+        81
+      ]
+    },
+    {
+      "m": 13,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        23280,
+        23400
+      ],
+      "pitches": [
+        45,
+        45,
+        53
+      ]
+    },
+    {
+      "m": 13,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        23640,
+        23720
+      ],
+      "pitches": [
+        62,
+        69
+      ]
+    },
+    {
+      "m": 14,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 4,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        25200,
+        25320
+      ],
+      "pitches": [
+        45,
+        45,
+        52,
+        52
+      ]
+    },
+    {
+      "m": 14,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        25500,
+        25620
+      ],
+      "pitches": [
+        55,
+        57
+      ]
+    },
+    {
+      "m": 14,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        25620,
+        25740
+      ],
+      "pitches": [
+        61,
+        69
+      ]
+    },
+    {
+      "m": 15,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 60,
+      "onsets": [
+        27300,
+        27360
+      ],
+      "pitches": [
+        62,
+        65,
+        74
+      ]
+    },
+    {
+      "m": 16,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        29880,
+        30000
+      ],
+      "pitches": [
+        54,
+        55
+      ]
+    },
+    {
+      "m": 16,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        29880,
+        30000
+      ],
+      "pitches": [
+        87,
+        88
+      ]
+    },
+    {
+      "m": 16,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        30120,
+        30240
+      ],
+      "pitches": [
+        53,
+        53
+      ]
+    },
+    {
+      "m": 16,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        30120,
+        30240
+      ],
+      "pitches": [
+        85,
+        86
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        31680,
+        31760
+      ],
+      "pitches": [
+        49,
+        50
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        31680,
+        31760
+      ],
+      "pitches": [
+        82,
+        83
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        31840,
+        31920
+      ],
+      "pitches": [
+        48,
+        48
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        31840,
+        31920
+      ],
+      "pitches": [
+        80,
+        81
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 80,
+      "onsets": [
+        32040,
+        32120
+      ],
+      "pitches": [
+        46,
+        48
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        32040,
+        32160
+      ],
+      "pitches": [
+        78,
+        79
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        32200,
+        32320
+      ],
+      "pitches": [
+        41,
+        45
+      ]
+    },
+    {
+      "m": 17,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 3,
+      "uniqueOnsets": 3,
+      "spanTicks": 120,
+      "onsets": [
+        32200,
+        32260,
+        32320
+      ],
+      "pitches": [
+        74,
+        75,
+        77
+      ]
+    },
+    {
+      "m": 19,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        36600,
+        36720
+      ],
+      "pitches": [
+        69,
+        77
+      ]
+    },
+    {
+      "m": 20,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        38400,
+        38520
+      ],
+      "pitches": [
+        45,
+        57,
+        57
+      ]
+    },
+    {
+      "m": 20,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        38940,
+        39060
+      ],
+      "pitches": [
+        69,
+        76
+      ]
+    },
+    {
+      "m": 21,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 3,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        40320,
+        40440
+      ],
+      "pitches": [
+        50,
+        50,
+        57
+      ]
+    },
+    {
+      "m": 21,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        40920,
+        41040
+      ],
+      "pitches": [
+        81,
+        89
+      ]
+    },
+    {
+      "m": 23,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 4,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        44160,
+        44280
+      ],
+      "pitches": [
+        50,
+        50,
+        57,
+        57
+      ]
+    },
+    {
+      "m": 23,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        44460,
+        44580
+      ],
+      "pitches": [
+        62,
+        65
+      ]
+    },
+    {
+      "m": 23,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        44580,
+        44700
+      ],
+      "pitches": [
+        69,
+        77
+      ]
+    },
+    {
+      "m": 24,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        46080,
+        46200
+      ],
+      "pitches": [
+        69,
+        73
+      ]
+    },
+    {
+      "m": 24,
+      "page": 0,
+      "hand": 1,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        46200,
+        46320
+      ],
+      "pitches": [
+        57,
+        62
+      ]
+    },
+    {
+      "m": 24,
+      "page": 0,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        46320,
+        46440
+      ],
+      "pitches": [
+        73,
+        76
+      ]
+    },
+    {
+      "m": 27,
+      "page": -1,
+      "hand": 0,
+      "nNotes": 2,
+      "uniqueOnsets": 2,
+      "spanTicks": 120,
+      "onsets": [
+        52320,
+        52440
+      ],
+      "pitches": [
+        79,
+        89
+      ]
+    }
+  ]
+}

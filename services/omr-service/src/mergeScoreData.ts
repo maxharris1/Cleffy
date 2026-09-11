@@ -1,4 +1,3 @@
-import { inferAutoPedal } from './autoPedal.js';
 import { capHolds, capPedals, capTempoEvents } from './caps.js';
 import { DEFAULT_ERA, type Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
@@ -23,36 +22,12 @@ export interface MergeScoreDataOptions {
 }
 
 /**
- * Pedal the unmarked stretches of a joined score once, over the whole of it.
- * Parts are built without auto-pedal (see `BuildScoreDataOptions.autoPedal`):
- * a shard with no printed edge would otherwise pedal every bar, where the
- * whole score only infers when the engraving is silent throughout. Any
- * inferred edge or disclosure a part does carry is discarded and re-derived
- * here, and the disclosure follows what survives the cap. Notes at this
- * point carry no parser gate, so staccato is read back from the note's length.
+ * Keep engraved pedalling; drop inferred edges so hosted and old clients stay
+ * dry. Inference is opt-in on a single `buildScoreData` call (`autoPedal: true`).
  */
-const pedalMerged = (
-    score: Pick<ScoreData, 'notes' | 'measures' | 'timeSignatures' | 'totalTicks'>,
-    printed: readonly ScorePedal[],
-    warnings: Set<string>,
-    era: Era,
-): ScorePedal[] => {
+const pedalMerged = (printed: readonly ScorePedal[], warnings: Set<string>): ScorePedal[] => {
     warnings.delete('pedal_inferred');
-    const pedalling = inferAutoPedal(
-        {
-            notes: score.notes,
-            measures: score.measures,
-            timeSignatures: score.timeSignatures,
-            pedals: printed.filter((edge) => edge.src !== 'inferred'),
-            totalTicks: score.totalTicks,
-        },
-        era,
-    );
-    const capped = capPedals(pedalling.pedals);
-    if (capped.some((edge) => edge.src === 'inferred')) {
-        warnings.add('pedal_inferred');
-    }
-    return capped;
+    return capPedals(printed.filter((edge) => edge.src !== 'inferred'));
 };
 
 /**
@@ -68,7 +43,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
     if (parts.length === 1) {
         const only = parts[0]!.score;
         const soloWarnings = new Set(only.warnings);
-        const pedals = pedalMerged(only, only.pedals ?? [], soloWarnings, era);
+        const pedals = pedalMerged(only.pedals ?? [], soloWarnings);
         const solo: ScoreData = { ...only, warnings: [...soloWarnings].slice(0, 32), era };
         if (pedals.length > 0) {
             solo.pedals = pedals;
@@ -260,7 +235,7 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
     const cappedTempos = capTempoEvents(tempos);
     const cappedHolds = capHolds(holds);
     const totalTicks = Math.max(1, tickOffset);
-    const cappedPedals = pedalMerged({ notes, measures, timeSignatures, totalTicks }, pedals, warnings, era);
+    const cappedPedals = pedalMerged(pedals, warnings);
 
     const candidate: ScoreData = {
         version: SCORE_DATA_WRITE_VERSION,

@@ -1,0 +1,52 @@
+{
+    "slug": "pathetique",
+    "title": "Beethoven — Piano Sonata No. 8, Op. 13 (Pathétique)",
+    "pdf": {
+        "url": "https://imslp.org/wiki/Piano_Sonata_No.8,_Op.13_(Beethoven,_Ludwig_van)",
+        "pages": 19
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/O13/pathetique-1/pathetique-1.mid",
+        "sha256": "6e913d01e1c008ac588765c77d3586c28b7e722e373f67ed902eb565f333ccc1",
+        "license": "Public Domain (Mutopia 2009/09/13-299, 2011/10/25-295, 2013/01/08-296, Chris Sawer after Berners 1908 / Winterberger and G. Schirmer 1894). Local zip is the three movement MIDIs, not a Mutopia-hosted archive."
+    },
+    "movements": [
+        {
+            "name": "I. Grave — Allegro di molto e con brio",
+            "midi": "pathetique-1.mid",
+            "meter": { "num": 4, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 312,
+            "expectedFifths": -3,
+            "expectedTempo": { "min": 25, "max": 50 },
+            "repeatsUnfoldedInMidi": false
+        },
+        {
+            "name": "II. Adagio cantabile",
+            "midi": "pathetique-2.mid",
+            "meter": { "num": 2, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 73,
+            "expectedFifths": -4,
+            "expectedTempo": { "min": 30, "max": 50 },
+            "repeatsUnfoldedInMidi": false
+        },
+        {
+            "name": "III. Rondo. Allegro",
+            "midi": "pathetique-3.mid",
+            "meter": { "num": 2, "den": 2 },
+            "pickupQuarters": 1.5,
+            "printedBars": 210,
+            "expectedFifths": -3,
+            "expectedTempo": { "min": 180, "max": 250 },
+            "repeatsUnfoldedInMidi": false
+        }
+    ],
+    "editionNotes": [
+        "Movement I opens Grave in 4/4 (MIDI quarter=33) then Allegro in 2/2 (half=144). Both have four quarter-notes per bar, so a single 4/4 grid matches the MIDI. Movement III is 2/2 with a dotted-quarter pickup (LilyPond \\partial 4.).",
+        "The local reference zip is eval/cache/downloads/pathetique-mids.zip (pathetique-1.mid + pathetique-2.mid + pathetique-3.mid). Do not run fetch against the MIDI url in reference.url — that field only satisfies the mutopia schema.",
+        "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle.",
+        "The 19-page hosted scan used for the shootout is not vendored; pdf.sha256 is intentionally unset. Shootout must reuse the hosted PDF bytes."
+    ]
+}

@@ -1,0 +1,360 @@
+{
+  "piece": "Beethoven \u2014 Piano Sonata No. 8, Op. 13 (Path\u00e9tique)",
+  "slug": "pathetique",
+  "constraint": "Cannot audition speakers. MIDI sounding-envelope gaps are the energy-gap proxy. No fluidsynth/timidity/sf2; WAV skipped.",
+  "mutopia": {
+    "label": "Mutopia (I+II+III)",
+    "notes": 8299,
+    "duration_q": 2229.5,
+    "duration_s": 851.53,
+    "tempo0_bpm": 33.0,
+    "tempos": [
+      {
+        "tick": 0,
+        "bpm": 33.0
+      },
+      {
+        "tick": 19200,
+        "bpm": 288.0
+      },
+      {
+        "tick": 259200,
+        "bpm": 33.0
+      },
+      {
+        "tick": 266880,
+        "bpm": 288.0
+      },
+      {
+        "tick": 570240,
+        "bpm": 33.0
+      },
+      {
+        "tick": 577920,
+        "bpm": 288.0
+      },
+      {
+        "tick": 597600,
+        "bpm": 36.0
+      },
+      {
+        "tick": 667680,
+        "bpm": 216.0
+      }
+    ],
+    "notes_per_sec": 9.746,
+    "notes_per_quarter": 3.722,
+    "sounding_coverage": 0.978,
+    "silence_ge_0.5q": 23,
+    "silence_ge_1q": 21,
+    "silence_ge_1.5q": 17,
+    "silence_ge_4q": 1,
+    "longest_silences_q": [
+      {
+        "dur_q": 4.0,
+        "start_q": 40.0,
+        "end_q": 44.0
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1229.0,
+        "end_q": 1232.0
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1233.0,
+        "end_q": 1236.0
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1237.0,
+        "end_q": 1240.0
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1241.0,
+        "end_q": 1244.0
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1457.5,
+        "end_q": 1460.5
+      },
+      {
+        "dur_q": 2.0,
+        "start_q": 1561.5,
+        "end_q": 1563.5
+      },
+      {
+        "dur_q": 2.0,
+        "start_q": 2001.5,
+        "end_q": 2003.5
+      }
+    ],
+    "gap_hist": [
+      [
+        "0.5\u20131 q",
+        2
+      ],
+      [
+        "1\u20131.5 q",
+        4
+      ],
+      [
+        "1.5\u20132 q",
+        4
+      ],
+      [
+        "2\u20134 q",
+        12
+      ],
+      [
+        "4\u20138 q",
+        1
+      ],
+      [
+        ">8 q",
+        0
+      ]
+    ],
+    "median_ioi_q": 0.5,
+    "p95_ioi_q": 1.0,
+    "max_ioi_q": 7.0
+  },
+  "prod": {
+    "label": "Prod",
+    "notes": 7219,
+    "duration_q": 2297.92,
+    "duration_s": 1148.96,
+    "tempo0_bpm": 120.0,
+    "tempos": [
+      {
+        "tick": 0,
+        "bpm": 120.0
+      }
+    ],
+    "notes_per_sec": 6.283,
+    "notes_per_quarter": 3.142,
+    "sounding_coverage": 0.933,
+    "silence_ge_0.5q": 49,
+    "silence_ge_1q": 40,
+    "silence_ge_1.5q": 23,
+    "silence_ge_4q": 5,
+    "longest_silences_q": [
+      {
+        "dur_q": 33.25,
+        "start_q": 1163.92,
+        "end_q": 1197.17
+      },
+      {
+        "dur_q": 16.0,
+        "start_q": 1107.92,
+        "end_q": 1123.92
+      },
+      {
+        "dur_q": 15.0,
+        "start_q": 1652.17,
+        "end_q": 1667.17
+      },
+      {
+        "dur_q": 12.0,
+        "start_q": 2164.92,
+        "end_q": 2176.92
+      },
+      {
+        "dur_q": 11.0,
+        "start_q": 1249.29,
+        "end_q": 1260.29
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1237.29,
+        "end_q": 1240.29
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1241.29,
+        "end_q": 1244.29
+      },
+      {
+        "dur_q": 3.0,
+        "start_q": 1245.29,
+        "end_q": 1248.29
+      }
+    ],
+    "gap_hist": [
+      [
+        "0.5\u20131 q",
+        9
+      ],
+      [
+        "1\u20131.5 q",
+        17
+      ],
+      [
+        "1.5\u20132 q",
+        2
+      ],
+      [
+        "2\u20134 q",
+        16
+      ],
+      [
+        "4\u20138 q",
+        0
+      ],
+      [
+        ">8 q",
+        5
+      ]
+    ],
+    "median_ioi_q": 0.5,
+    "p95_ioi_q": 1.0,
+    "max_ioi_q": 34.25
+  },
+  "local": {
+    "label": "Local",
+    "notes": 7631,
+    "duration_q": 2401.67,
+    "duration_s": 1193.74,
+    "tempo0_bpm": 145.0,
+    "tempos": [
+      {
+        "tick": 0,
+        "bpm": 145.0
+      },
+      {
+        "tick": 281540,
+        "bpm": 145.0
+      },
+      {
+        "tick": 629600,
+        "bpm": 66.0
+      },
+      {
+        "tick": 715800,
+        "bpm": 112.0
+      }
+    ],
+    "notes_per_sec": 6.393,
+    "notes_per_quarter": 3.177,
+    "sounding_coverage": 0.882,
+    "silence_ge_0.5q": 89,
+    "silence_ge_1q": 67,
+    "silence_ge_1.5q": 51,
+    "silence_ge_4q": 6,
+    "longest_silences_q": [
+      {
+        "dur_q": 33.38,
+        "start_q": 1213.29,
+        "end_q": 1246.67
+      },
+      {
+        "dur_q": 16.0,
+        "start_q": 1156.29,
+        "end_q": 1172.29
+      },
+      {
+        "dur_q": 15.0,
+        "start_q": 1733.42,
+        "end_q": 1748.42
+      },
+      {
+        "dur_q": 14.05,
+        "start_q": 2265.7,
+        "end_q": 2279.75
+      },
+      {
+        "dur_q": 11.0,
+        "start_q": 1300.67,
+        "end_q": 1311.67
+      },
+      {
+        "dur_q": 4.02,
+        "start_q": 2363.14,
+        "end_q": 2367.17
+      },
+      {
+        "dur_q": 3.22,
+        "start_q": 2113.87,
+        "end_q": 2117.08
+      },
+      {
+        "dur_q": 3.1,
+        "start_q": 1567.65,
+        "end_q": 1570.75
+      }
+    ],
+    "gap_hist": [
+      [
+        "0.5\u20131 q",
+        22
+      ],
+      [
+        "1\u20131.5 q",
+        16
+      ],
+      [
+        "1.5\u20132 q",
+        10
+      ],
+      [
+        "2\u20134 q",
+        35
+      ],
+      [
+        "4\u20138 q",
+        1
+      ],
+      [
+        ">8 q",
+        5
+      ]
+    ],
+    "median_ioi_q": 0.5,
+    "p95_ioi_q": 1.0,
+    "max_ioi_q": 34.375
+  },
+  "empty_windows_prod_vs_mutopia": {
+    "win_q": 4.0,
+    "windows": 575,
+    "empty_while_ref": 18,
+    "empty_q": 72.0,
+    "sparse_while_ref": 48,
+    "empty_starts_q": [
+      1108.0,
+      1112.0,
+      1116.0,
+      1164.0,
+      1168.0,
+      1172.0,
+      1176.0,
+      1180.0,
+      1184.0,
+      1188.0,
+      1192.0,
+      1252.0
+    ]
+  },
+  "empty_windows_local_vs_mutopia": {
+    "win_q": 4.0,
+    "windows": 601,
+    "empty_while_ref": 17,
+    "empty_q": 68.0,
+    "sparse_while_ref": 67,
+    "empty_starts_q": [
+      1156.0,
+      1160.0,
+      1164.0,
+      1168.0,
+      1216.0,
+      1220.0,
+      1224.0,
+      1228.0,
+      1232.0,
+      1236.0,
+      1240.0,
+      1300.0
+    ]
+  }
+}

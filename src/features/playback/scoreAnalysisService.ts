@@ -39,8 +39,15 @@ export interface ScoreAnalysisStatusRow {
  * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
  * parts, and zips geometry per system so the playhead stays on the bar.
  * svc-14 skips staff-less cover/blank pages instead of failing the book.
+ * svc-15 skips engine-failed stubs and plays the remaining pages.
+ * svc-16 refuses READY unless every recovered geometry page has notes.
+ * svc-17 re-exports the saved .omr after stub failures instead of redoing the PDF first.
+ * svc-18 concatenates leftover piano parts and re-runs contiguous valid sheet ranges
+ * when Audiveris shards a book into unnamed scores.
+ * svc-19: duration snap, overfull bars keep meter length, meter-default BPM is not
+ * a clock event, inferred pedals are not written.
  */
-export const CURRENT_ENGINE_GENERATION = 14;
+export const CURRENT_ENGINE_GENERATION = 19;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires

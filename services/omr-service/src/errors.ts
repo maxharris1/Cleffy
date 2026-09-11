@@ -10,6 +10,8 @@ export const ERROR_CODES = {
     noStavesFound: 'no_staves_found',
     omrTimeout: 'omr_timeout',
     omrCrash: 'omr_crash',
+    /** OMR finished, but a recovered geometry page has no notes. */
+    scoreUnusable: 'score_unusable',
     musicXmlParseFailed: 'musicxml_parse_failed',
     /** @deprecated Retained for old rows; pull-mode uses backlog_full instead. */
     queueFull: 'queue_full',
@@ -30,6 +32,7 @@ export const isPermanentError = (code: ErrorCode, attempt = 1): boolean => {
         case ERROR_CODES.tooLarge:
         case ERROR_CODES.pageCountUnknown:
         case ERROR_CODES.noStavesFound:
+        case ERROR_CODES.scoreUnusable:
         case ERROR_CODES.musicXmlParseFailed:
         case ERROR_CODES.backlogFull:
             return true;

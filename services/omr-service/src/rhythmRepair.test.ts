@@ -69,7 +69,7 @@ describe('rhythm repair', () => {
         expect(score.warnings).toContain('rhythm_repaired');
         expect(score.warnings).not.toContain('measure_overfull');
         expect(onsetsIn(score, 0)).toEqual([0, 120, 240, 360, 480, 960, 1440]);
-        expect(score.notes.find((n) => n.p === 74)).toMatchObject({ t: 120, d: plain(120) });
+        expect(score.notes.find((n) => n.p === 74)).toMatchObject({ t: 120, d: 120 });
         expect(score.totalTicks).toBe(3840);
     });
 

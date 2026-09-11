@@ -1,0 +1,55 @@
+{
+  "documentId": "9820061e-de3f-493a-96ad-7f965f0200dd",
+  "title": "Für Elise, WoO 59 (Beethoven, Ludwig van)",
+  "page_count": 3,
+  "storage_path": "9820061e-de3f-493a-96ad-7f965f0200dd/original.pdf",
+  "content_rev": 0,
+  "status": "ready",
+  "engine_version": "audiveris-5.6.1+svc-4",
+  "error": null,
+  "progress": null,
+  "bpm_default": null,
+  "timings": {
+    "cacheHit": true,
+    "pdfBytes": 222242,
+    "pageCount": 3,
+    "downloadMs": 1029
+  },
+  "created_at": "2026-08-29T14:02:11.306591+00:00",
+  "updated_at": "2026-08-30T14:15:34.380083+00:00",
+  "score": {
+    "version": 2,
+    "ticksPerQuarter": 480,
+    "defaultBpm": null,
+    "noteCount": 901,
+    "measureCount": 106,
+    "systemCount": 19,
+    "pageCountFromMeasures": [
+      0,
+      1,
+      2
+    ],
+    "pageCountFromSystems": [
+      0,
+      1,
+      2
+    ],
+    "totalTicks": 77520,
+    "tempos": null,
+    "timeSignatures": [
+      {
+        "den": 8,
+        "num": 3,
+        "tick": 0
+      }
+    ],
+    "keySignatures": null,
+    "warnings": [
+      "repeats_ignored",
+      "measure_underfull",
+      "measure_overfull"
+    ],
+    "era": null,
+    "invalidSheets": null
+  }
+}

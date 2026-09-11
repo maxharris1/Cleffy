@@ -6,7 +6,13 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
-import { runAudiverisTolerant, sheetRangesExcluding, timeoutForPages, type AudiverisResult } from './audiveris.js';
+import {
+    runAudiverisTolerant,
+    sheetRangesExcluding,
+    timeoutForPages,
+    type AudiverisResult,
+    type SheetRange,
+} from './audiveris.js';
 import { buildScoreData, type BuildScoreDataOptions } from './buildScoreData.js';
 import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
@@ -23,7 +29,7 @@ import {
 } from './jobStore.js';
 import { mergeScoreDataParts, seamIsUnsafe, splitSheetRangesOverlapping } from './mergeScoreData.js';
 import { expressionSeedAt, parseMxlFiles, type MusicalScore, type ParseSeed } from './musicxml.js';
-import { parseOmrGeometry, type OmrGeometry } from './omrGeometry.js';
+import { countOmrStacks, parseOmrGeometry, type OmrGeometry } from './omrGeometry.js';
 import { summarizeStructure, type StructureSummary } from './repeats.js';
 import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
@@ -52,8 +58,15 @@ import type { ScoreData } from './scoreData.js';
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
  * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
+ * svc-15: skip sheets that logged Error processing stub, then -sheets the rest.
+ * svc-16: refuse READY unless every recovered geometry page has notes.
+ * svc-17: after stub failures, re-export the saved .omr before a PDF redo.
+ * svc-18: concatenate leftover grand-staff MusicXML parts; re-run contiguous
+ * valid sheet ranges when a split book still leaves recovered pages silent.
+ * svc-19: snap near-miss durations; overfull bars keep meter length; meter-default
+ * BPM is a warning not a clock event; inferred pedals are not written.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-14';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-19';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
@@ -284,6 +297,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         const cached = await cacheLookup(hash, cacheKey);
         if (cached) {
             timings.cacheHit = true;
+            assertScoreUsable(cached.score);
             const ok = await adapters.onReady(cached.score, timings);
             logJob(adapters.documentId, timings, cached.score, ok);
             return ok;
@@ -312,6 +326,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             return false;
         }
 
+        assertScoreUsable(score);
         await cacheStore(hash, cacheKey, score);
         const ok = await adapters.onReady(score, timings);
         logJob(adapters.documentId, timings, score, ok);
@@ -431,6 +446,7 @@ const transcribeParallel = async (
         mxlBuffers: Buffer[];
         geometry: OmrGeometry | null;
         invalidSheets: number[];
+        scoreSheetGroups: SheetRange[];
         sheets: { from: number; to: number };
     }>;
     try {
@@ -465,9 +481,7 @@ const transcribeParallel = async (
     if (!first || !second) {
         throw new JobError(ERROR_CODES.internal, 'parallel transcribe: expected two shards');
     }
-    // Shards are not auto-pedalled: a shard cannot tell a score that never
-    // pedals from one whose marks sit on the other shard's pages. The merge
-    // infers once, over the whole score, with the same era.
+    // Shards are not auto-pedalled: inferred sustain is not written on ScoreData.
     const parsedA = parseRangeArtifacts(first.mxlBuffers, first.geometry, era, undefined, { autoPedal: false });
     const seed = expressionSeedAt(parsedA.musical, overlapPageStartTick(parsedA.score, parsedA.musical));
     const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, era, seed, { autoPedal: false });
@@ -499,10 +513,33 @@ const transcribeParallel = async (
 
     timings.parallelPath = 'merged';
     timings.audiverisTotalMs = Date.now() - started;
-    return recordInvalidSheets(
+    const merged = recordInvalidSheets(
         timings,
         mergeScoreDataParts(parts, { era }),
         unionSheetNumbers(first.invalidSheets, second.invalidSheets),
+    );
+    if (scoreIsPlayable(merged)) {
+        return merged;
+    }
+    const movementRanges = planMovementRanges(
+        timings.pageCount ?? 0,
+        timings.invalidSheets ?? [],
+        false,
+        unionScoreSheetGroups(first.scoreSheetGroups, second.scoreSheetGroups),
+    );
+    if (movementRanges.length === 0) {
+        return merged;
+    }
+    timings.parallelPath = 'serial_fallback';
+    timings.parallelFallbackReasons = ['score_unusable'];
+    return transcribeAndMergeSheetRanges(
+        pdfPath,
+        join(workDir, 'out-movements'),
+        timings,
+        era,
+        onSheet,
+        registerKill,
+        movementRanges,
     );
 };
 
@@ -516,7 +553,7 @@ const transcribeRange = async (
     sheets: { from: number; to: number } | undefined,
     aggregateTimings = true,
 ): Promise<ScoreData> => {
-    const { score } = await transcribeRangeDetailed(
+    const detailed = await transcribeRangeDetailed(
         pdfPath,
         outDir,
         timings,
@@ -526,7 +563,27 @@ const transcribeRange = async (
         sheets,
         aggregateTimings,
     );
-    return score;
+    if (sheets) {
+        return detailed.score;
+    }
+    const movementRanges = planMovementRanges(
+        timings.pageCount ?? 0,
+        detailed.invalidSheets,
+        scoreIsPlayable(detailed.score),
+        detailed.scoreSheetGroups,
+    );
+    if (movementRanges.length === 0) {
+        return detailed.score;
+    }
+    return transcribeAndMergeSheetRanges(
+        pdfPath,
+        join(outDir, 'movements'),
+        timings,
+        era,
+        onSheet,
+        registerKill,
+        movementRanges,
+    );
 };
 
 const transcribeRangeDetailed = async (
@@ -538,7 +595,13 @@ const transcribeRangeDetailed = async (
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
     aggregateTimings = true,
-): Promise<{ score: ScoreData; openTiesAtEnd: number; structure: StructureSummary }> => {
+): Promise<{
+    score: ScoreData;
+    openTiesAtEnd: number;
+    structure: StructureSummary;
+    invalidSheets: number[];
+    scoreSheetGroups: SheetRange[];
+}> => {
     const artifacts = await collectRangeArtifacts(
         pdfPath,
         outDir,
@@ -560,7 +623,111 @@ const transcribeRangeDetailed = async (
     // Summarized from the marks rather than the built score: buildScoreData has
     // already decided what this range alone can perform, and the merge needs to
     // know what reaches past it.
-    return { score, openTiesAtEnd: parsed.openTiesAtEnd, structure: parsed.structure };
+    return {
+        score,
+        openTiesAtEnd: parsed.openTiesAtEnd,
+        structure: parsed.structure,
+        invalidSheets: artifacts.invalidSheets,
+        scoreSheetGroups: artifacts.scoreSheetGroups,
+    };
+};
+
+/**
+ * When the first export leaves recovered pages silent, split remaining valid
+ * sheets into contiguous ranges (and log PAGE groups when they add splits)
+ * and OMR each range as its own book.
+ */
+export const planMovementRanges = (
+    pageCount: number,
+    invalidSheets: readonly number[],
+    playable: boolean,
+    scoreSheetGroups: readonly SheetRange[] = [],
+): SheetRange[] => {
+    if (playable || pageCount < 1) {
+        return [];
+    }
+    const valid = sheetRangesExcluding({ from: 1, to: pageCount }, invalidSheets);
+    const fromLog = scoreSheetGroups.flatMap((group) => sheetRangesExcluding(group, invalidSheets));
+    const covered: number[] = [];
+    for (const range of fromLog) {
+        for (let sheet = range.from; sheet <= range.to; sheet++) {
+            covered.push(sheet);
+        }
+    }
+    const leftover = fromLog.length > 0 ? sheetRangesExcluding(valid, covered) : [];
+    const combined = fromLog.length > 0 ? [...fromLog, ...leftover] : valid;
+    return combined.length > 1 ? combined : [];
+};
+
+const unionScoreSheetGroups = (
+    left: readonly SheetRange[] | undefined,
+    right: readonly SheetRange[] | undefined,
+): SheetRange[] => {
+    const seen = new Set<string>();
+    const out: SheetRange[] = [];
+    for (const range of [...(left ?? []), ...(right ?? [])]) {
+        const key = `${range.from}-${range.to}`;
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        out.push(range);
+    }
+    return out.sort((a, b) => a.from - b.from || a.to - b.to);
+};
+
+export const transcribeAndMergeSheetRanges = async (
+    pdfPath: string,
+    workDir: string,
+    timings: JobTimings,
+    era: Era,
+    onSheet: (sheet: number) => void,
+    registerKill: ((kill: KillJvm) => void) | undefined,
+    ranges: SheetRange[],
+): Promise<ScoreData> => {
+    const parts: Array<{
+        score: ScoreData;
+        sheets: { from: number; to: number };
+        openTiesAtEnd: number;
+        structure: StructureSummary;
+    }> = [];
+    for (const range of ranges) {
+        const outDir = join(workDir, `out-${range.from}-${range.to}`);
+        try {
+            const collected = await collectRangeArtifacts(
+                pdfPath,
+                outDir,
+                timings,
+                onSheet,
+                registerKill,
+                range,
+                false,
+                range.to - range.from + 1,
+            );
+            const parsed = parseRangeArtifacts(collected.mxlBuffers, collected.geometry, era, undefined, {
+                autoPedal: false,
+            });
+            parts.push({
+                score: recordInvalidSheets(timings, parsed.score, collected.invalidSheets),
+                sheets: collected.sheets ?? range,
+                openTiesAtEnd: parsed.openTiesAtEnd,
+                structure: parsed.structure,
+            });
+            recordRhythmRepairs(timings, parsed.musical);
+        } catch (err) {
+            if (
+                err instanceof JobError &&
+                (err.code === ERROR_CODES.noStavesFound || err.code === ERROR_CODES.omrCrash)
+            ) {
+                continue;
+            }
+            throw err;
+        }
+    }
+    if (parts.length === 0) {
+        throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML from sheet ranges');
+    }
+    return mergeScoreDataParts(parts, { era });
 };
 
 export const collectRangeArtifacts = async (
@@ -571,17 +738,19 @@ export const collectRangeArtifacts = async (
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
     aggregateTimings: boolean,
+    timeoutPageCount?: number,
 ): Promise<{
     mxlBuffers: Buffer[];
     geometry: OmrGeometry | null;
     invalidSheets: number[];
+    scoreSheetGroups: SheetRange[];
     sheets: { from: number; to: number } | undefined;
 }> => {
     await mkdir(outDir, { recursive: true });
     let result: AudiverisResult;
     try {
         result = await runAudiverisTolerant(pdfPath, outDir, {
-            timeoutMs: timeoutForPages(timings.pageCount ?? null),
+            timeoutMs: timeoutForPages(timeoutPageCount ?? timings.pageCount ?? null),
             pageCount: timings.pageCount ?? 0,
             sheets,
             onSheetProgress: onSheet,
@@ -622,7 +791,13 @@ export const collectRangeArtifacts = async (
 
     const mxlBuffers = await Promise.all(result.mxlPaths.map((path) => readFile(path)));
     const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
-    return { mxlBuffers, geometry, invalidSheets: result.invalidSheets, sheets: effectiveSheets };
+    return {
+        mxlBuffers,
+        geometry,
+        invalidSheets: result.invalidSheets,
+        scoreSheetGroups: result.scoreSheetGroups ?? [],
+        sheets: effectiveSheets,
+    };
 };
 
 export const unionSheetNumbers = (
@@ -649,6 +824,66 @@ export const recordInvalidSheets = (
     return { ...score, warnings: [...score.warnings, 'pages_skipped'] };
 };
 
+const geometryPagesOf = (score: ScoreData): Set<number> => {
+    const pages = new Set<number>();
+    for (const system of score.systems) {
+        pages.add(system.page);
+    }
+    return pages;
+};
+
+/**
+ * Recovered pages (systems) that also have at least one note whose start tick
+ * falls in a measure on that page. Skipped sheets never appear in `systems`,
+ * so a staff-less cover is not a recovered page.
+ */
+const soundingGeometryPages = (score: ScoreData, geometryPages: Set<number>): Set<number> => {
+    const sounding = new Set<number>();
+    if (geometryPages.size === 0 || score.notes.length === 0) {
+        return sounding;
+    }
+    const notes = [...score.notes].sort((a, b) => a.t - b.t);
+    const measures = [...score.measures].sort((a, b) => a.tick - b.tick);
+    let i = 0;
+    for (const measure of measures) {
+        if (measure.page < 0 || !geometryPages.has(measure.page)) {
+            continue;
+        }
+        const end = measure.tick + measure.dTicks;
+        while (i < notes.length && notes[i]!.t < measure.tick) {
+            i += 1;
+        }
+        const note = notes[i];
+        if (note && note.t < end) {
+            sounding.add(measure.page);
+            if (sounding.size === geometryPages.size) {
+                break;
+            }
+        }
+    }
+    return sounding;
+};
+
+/**
+ * True when every recovered geometry page (`systems[].page`) appears as a
+ * sounding `measure.page`. No-geometry scores still pass: audio can play,
+ * and there is no recovered-page set to compare against.
+ */
+export const scoreIsPlayable = (score: ScoreData): boolean => {
+    const geometryPages = geometryPagesOf(score);
+    if (geometryPages.size === 0) {
+        return true;
+    }
+    const sounding = soundingGeometryPages(score, geometryPages);
+    return sounding.size === geometryPages.size;
+};
+
+export const assertScoreUsable = (score: ScoreData): void => {
+    if (!scoreIsPlayable(score)) {
+        throw new JobError(ERROR_CODES.scoreUnusable, 'A recovered page has no notes');
+    }
+};
+
 /** Telemetry only: how often the rhythm repair fires is how we learn whether to trust it. */
 const recordRhythmRepairs = (timings: JobTimings, ...parsed: MusicalScore[]): void => {
     const count = parsed.reduce((acc, musical) => acc + (musical.rhythmRepairs ?? 0), 0);
@@ -668,7 +903,10 @@ const parseRangeArtifacts = (
     seed?: ParseSeed,
     build: Omit<BuildScoreDataOptions, 'era'> = {},
 ): { score: ScoreData; musical: MusicalScore; openTiesAtEnd: number; structure: StructureSummary } => {
-    const musical = parseMxlFiles(mxlBuffers, seed, { era });
+    const musical = parseMxlFiles(mxlBuffers, seed, {
+        era,
+        geometryStackCount: geometry ? countOmrStacks(geometry) : undefined,
+    });
     const score = buildScoreData(musical, geometry, { ...build, era });
     return {
         score,
