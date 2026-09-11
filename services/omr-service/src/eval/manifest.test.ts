@@ -28,4 +28,19 @@ describe('loadCorpusEntry', () => {
         expect(entry.reference.source).toBe('fixture');
         expect(entry.movements[0]?.midi).toBe('toy.mid');
     });
+
+    it('loads the short Mutopia pins used for MIDI verification', () => {
+        const anna = loadCorpusEntry('anna-magdalena-04');
+        expect(anna.pdf.pages).toBe(1);
+        expect(anna.pdf.sha256).toHaveLength(64);
+        expect(anna.movements[0]?.printedBars).toBe(32);
+        expect(anna.movements[0]?.performedBars).toBe(64);
+        expect(anna.movements[0]?.repeatsUnfoldedInMidi).toBe(false);
+
+        const prelude = loadCorpusEntry('wtk1-prelude1');
+        expect(prelude.pdf.pages).toBe(2);
+        expect(prelude.pdf.sha256).toHaveLength(64);
+        expect(prelude.movements[0]?.printedBars).toBe(35);
+        expect(prelude.movements[0]?.repeatsUnfoldedInMidi).toBe(false);
+    });
 });
