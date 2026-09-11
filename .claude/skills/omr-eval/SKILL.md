@@ -1,6 +1,6 @@
 ---
 name: omr-eval
-description: Score Cleffy OMR output against a notation-quantized MIDI source of truth (Mutopia). Use when measuring parser or Audiveris accuracy, adding a corpus piece, or checking a musicality fix did not regress.
+description: Score Cleffy OMR output against a notation-quantized MIDI source of truth (Mutopia). Use when measuring parser or Audiveris accuracy, adding a corpus piece, checking a musicality fix did not regress, or running a hosted-vs-local OMR shootout on identical PDF bytes.
 ---
 
 # OMR accuracy eval
@@ -28,12 +28,54 @@ npm run build                    # dist/eval/cli.js
 
 `--from document` needs `supabase_db_cleffy` and is local-only (docker exec as
 `postgres` after a `documents` join; status must be `ready`). `--from pdf` /
-`audiveris` need `cleffy-local-omr` **and** a `pdf.sha256` pin. Override
-containers with `CLEFFY_DB_CONTAINER` / `CLEFFY_OMR_CONTAINER`.
+`audiveris` need `cleffy-local-omr` **and** a `pdf.sha256` pin. `--from score`
+loads a dumped `score.json`. Override containers with `CLEFFY_DB_CONTAINER` /
+`CLEFFY_OMR_CONTAINER`.
 
-Do not embed a live `score_analyses` document UUID in this skill or in corpus
-JSON. Document ids are checkout-specific and `--from document` cannot write a
-`baseline-*` oracle.
+Do not embed live `score_analyses` document UUIDs in corpus JSON. `--from
+document` cannot write a `baseline-*` oracle. Hosted fixture ids belong only
+in the Shootout section below.
+
+## Shootout (hosted prod vs current engine, same PDF)
+
+Apples-to-apples: one **PDF sha256** is the source of truth. Prod ScoreData
+comes from hosted project `jibgwgosihadbjgxdsfe` (read-only). Local ScoreData
+is the current engine run on **those exact bytes**. Both are scored against
+the same Mutopia MIDI with the official eval flags.
+
+`.cursor/start.sh` does **not** start OMR. A cloud agent may `shootout fetch`
+and `shootout compare` once both `score.json` files exist. It must **not** run
+`shootout local` unless `cleffy-omr` is up. Never mutate prod. Do not point
+fetch at `.env.local` (local stack).
+
+```bash
+cd services/omr-service
+npm run build
+npm run eval -- fetch --piece fur-elise
+
+# 1. Any machine with repo-root .env (VITE_SUPABASE_URL = hosted project;
+#    SUPABASE_SERVICE_ROLE_KEY for RLS SELECT + storage download only):
+npm run eval -- shootout fetch --piece fur-elise \
+  --document 9820061e-de3f-493a-96ad-7f965f0200dd
+
+# 2. Machine with cleffy-omr — uses eval/cache/downloads/shootout-fur-elise.pdf
+#    (the fetched Mutopia LilyPond bytes). NOT local doc 0f6d9e53-… (different PDF).
+npm run eval -- shootout local --piece fur-elise
+
+# 3. Cloud or local, after both score.json exist:
+npm run eval -- shootout compare --piece fur-elise
+```
+
+Writes `eval/results/fur-elise-prod/`, `eval/results/fur-elise-local/`, and
+`eval/results/fur-elise-shootout/` (composite / pitch / exact / missing / extra /
+overfull ticks / engines / pdf sha / whether inputs were identical). Exit 2 if
+the PDF hashes differ or a hash is missing.
+
+Optional: `npm run eval -- run --piece fur-elise --from score eval/results/fur-elise-prod/score.json`
+
+Für Elise fixture: prod document `9820061e-de3f-493a-96ad-7f965f0200dd` is the
+Mutopia LilyPond PDF. A local library scan `0f6d9e53-…` is a **different**
+file — never the local half of this shootout.
 
 ## Loop
 

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 
-import { fromArtifacts, fromDocument, fromPdf, type Candidate } from './candidate.js';
+import { fromArtifacts, fromDocument, fromPdf, fromScoreFile, type Candidate } from './candidate.js';
 import { compareScore } from './compare.js';
 import { fetchCorpus, midiPath } from './fetch.js';
 import { loadCorpusEntry, type CorpusEntry } from './manifest.js';
@@ -16,12 +16,22 @@ import {
     writeResult,
 } from './report.js';
 import { segmentMovements } from './segment.js';
+import {
+    compareShootout,
+    fetchProdShootout,
+    formatShootout,
+    runLocalShootout,
+    shootoutScorePath,
+} from './shootout.js';
 
 const usage = `Usage:
   node dist/eval/cli.js fetch --piece <slug>
   node dist/eval/cli.js audiveris --piece <slug> [--force-audiveris]
-  node dist/eval/cli.js run --piece <slug> --from pdf|artifacts <dir>|document <id>
+  node dist/eval/cli.js run --piece <slug> --from pdf|artifacts <dir>|document <id>|score <file>
        [--baseline <json>] [--out <filename>] [--tolerance 0.5] [--force-audiveris] [--json]
+  node dist/eval/cli.js shootout fetch --piece <slug> --document <uuid>
+  node dist/eval/cli.js shootout local --piece <slug> [--force-audiveris]
+  node dist/eval/cli.js shootout compare --piece <slug> [--prod <score.json>] [--local <score.json>]
 
   node dist/eval/cli.js --help
 
@@ -31,9 +41,14 @@ gate for corpus pieces that need the engine.
 
 --from document cannot --out a baseline-* file. Commit a baseline only from
 --from artifacts with a non-null artifactHash.
+
+Shootout: same PDF bytes, hosted ScoreData vs current engine, one MIDI eval.
+fetch is hosted read-only (project jibgwgosihadbjgxdsfe). local needs cleffy-omr.
+Cloud agents without Audiveris may fetch + compare once both score.json files exist.
 `;
 
-type Command = 'fetch' | 'audiveris' | 'run' | 'help';
+type Command = 'fetch' | 'audiveris' | 'run' | 'shootout' | 'help';
+type ShootoutSub = 'fetch' | 'local' | 'compare';
 
 const fail = (message: string, code = 1): never => {
     process.stderr.write(`${message}\n`);
@@ -48,6 +63,7 @@ const asCommand = (raw: string | undefined): Command | undefined => {
         case 'fetch':
         case 'audiveris':
         case 'run':
+        case 'shootout':
         case 'help':
             return raw;
         default:
@@ -111,6 +127,9 @@ const main = async (): Promise<number> => {
             json: { type: 'boolean', default: false },
             help: { type: 'boolean', short: 'h', default: false },
             'force-audiveris': { type: 'boolean', default: false },
+            document: { type: 'string' },
+            prod: { type: 'string' },
+            local: { type: 'string' },
         },
     });
     if (values.help === true) {
@@ -159,7 +178,7 @@ const main = async (): Promise<number> => {
         case 'run': {
             const from = values.from;
             if (from === undefined) {
-                return fail('--from pdf | artifacts <dir> | document <id>');
+                return fail('--from pdf | artifacts <dir> | document <id> | score <file>');
             }
             let candidate: Candidate;
             let midiDir: string;
@@ -194,6 +213,14 @@ const main = async (): Promise<number> => {
                 const fetched = await fetchCorpus(entry, { allowNetwork: false, mode: 'midi' });
                 candidate = await fromDocument(id);
                 midiDir = fetched.midiDir;
+            } else if (from === 'score') {
+                const scorePath = positionals[1];
+                if (scorePath === undefined) {
+                    return fail('--from score requires a path to score.json');
+                }
+                const fetched = await fetchCorpus(entry, { allowNetwork: false, mode: 'midi' });
+                candidate = await fromScoreFile(scorePath);
+                midiDir = fetched.midiDir;
             } else {
                 return fail(`unknown --from ${from}`);
             }
@@ -206,6 +233,48 @@ const main = async (): Promise<number> => {
                 values.out,
                 tolerance,
             );
+        }
+        case 'shootout': {
+            const subRaw = positionals[1];
+            const sub: ShootoutSub | undefined =
+                subRaw === 'fetch' || subRaw === 'local' || subRaw === 'compare' ? subRaw : undefined;
+            if (sub === undefined) {
+                return fail('shootout fetch | local | compare');
+            }
+            switch (sub) {
+                case 'fetch': {
+                    const documentId = values.document;
+                    if (documentId === undefined) {
+                        return fail('shootout fetch requires --document <uuid>');
+                    }
+                    const dest = await fetchProdShootout(entry, documentId);
+                    process.stdout.write(`prod ${dest}\n`);
+                    return 0;
+                }
+                case 'local': {
+                    const dest = await runLocalShootout(entry, values['force-audiveris'] === true);
+                    process.stdout.write(`local ${dest}\n`);
+                    return 0;
+                }
+                case 'compare': {
+                    const prodPath = values.prod ?? shootoutScorePath(entry.slug, 'prod');
+                    const localPath = values.local ?? shootoutScorePath(entry.slug, 'local');
+                    const { report, outDir } = await compareShootout(entry, prodPath, localPath);
+                    if (values.json === true) {
+                        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+                    } else {
+                        process.stdout.write(`${formatShootout(report)}wrote ${outDir}\n`);
+                    }
+                    if (report.pdfIdentical === true) {
+                        return 0;
+                    }
+                    return 2;
+                }
+                default: {
+                    const exhaustive: never = sub;
+                    return fail(`unknown shootout ${exhaustive}`);
+                }
+            }
         }
         default: {
             const exhaustive: never = command;

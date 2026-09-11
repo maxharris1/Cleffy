@@ -30,6 +30,7 @@ describe('eval CLI', () => {
         const out = execFileSync('node', [cliPath(), '--help'], { encoding: 'utf8' });
         expect(out).toContain('Usage:');
         expect(out).toContain('not an accuracy');
+        expect(out).toContain('shootout');
     });
 
     it('scores the committed toy artifacts without network', async () => {
