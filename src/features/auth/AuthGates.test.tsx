@@ -9,12 +9,17 @@ import type * as sessionModule from '@/features/auth/session';
 import type { SessionState } from '@/features/auth/session';
 
 const useSession = vi.fn();
+const standalone = vi.hoisted(() => ({ value: false }));
 
 // Partial mock: isRegisteredSession and userTypeOf ARE the rules under test, so
 // only the hook that reaches Supabase is replaced.
 vi.mock('@/features/auth/session', async (importOriginal) => ({
     ...(await importOriginal<typeof sessionModule>()),
     useSession: () => useSession(),
+}));
+
+vi.mock('@/features/install/installSurface', () => ({
+    isStandaloneDisplay: () => standalone.value,
 }));
 
 /** Only the fields the gates read — the rest of Session is never touched. */
@@ -42,6 +47,7 @@ const renderGate = (gate: ReactNode) =>
             <Routes>
                 <Route path="/gated" element={gate} />
                 <Route path="/" element={<Landmark label="landing" />} />
+                <Route path="/login" element={<Landmark label="login" />} />
                 <Route path="/library" element={<Landmark label="library" />} />
                 <Route path="/assignments" element={<Landmark label="assignments" />} />
                 <Route path="/student" element={<Landmark label="student login" />} />
@@ -61,6 +67,7 @@ const studentGate = () => (
 
 beforeEach(() => {
     vi.clearAllMocks();
+    standalone.value = false;
     useSession.mockReturnValue(settled(null));
 });
 
@@ -87,6 +94,13 @@ describe('RequireRegistered', () => {
         renderGate(registeredGate('/'));
         expect(screen.getByText('landing')).toBeInTheDocument();
         expect(screen.queryByText('teacher user-1')).not.toBeInTheDocument();
+    });
+
+    it('sends a standalone guest to login, not the marketing landing', () => {
+        standalone.value = true;
+        renderGate(registeredGate());
+        expect(screen.getByText('login')).toBeInTheDocument();
+        expect(screen.queryByText('landing')).not.toBeInTheDocument();
     });
 
     it('sends a provisioned student to their assignments, not the teacher chrome', () => {
