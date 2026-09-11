@@ -34,6 +34,8 @@ describe('LandingPage (cloud)', () => {
             expect(link).toHaveAttribute('href', '/register');
         }
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
+        expect(screen.getByRole('navigation', { name: 'Main' })).toHaveClass('safe-landing-nav');
+        expect(screen.getByRole('navigation', { name: 'Main' }).parentElement).toHaveClass('safe-landing-gutter');
     });
 
     it('shows the pricing reassurance and the practice-tools showcase', () => {

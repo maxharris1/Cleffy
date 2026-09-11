@@ -38,6 +38,34 @@
     --safe-right: env(safe-area-inset-right, 0px);
 }
 
+/*
+ * Full-bleed headers under apple-mobile-web-app-status-bar-style
+ * black-translucent. max() keeps Safari-in-tab padding when the inset is 0
+ * and lifts controls out from under the iPhone status bar / notch in PWA.
+ */
+.safe-landing-nav {
+    padding-top: max(1.5rem, var(--safe-top));
+}
+
+.safe-landing-gutter {
+    padding-left: max(1.5rem, var(--safe-left));
+    padding-right: max(1.5rem, var(--safe-right));
+}
+
+@media (min-width: 64rem) {
+    .safe-landing-gutter {
+        padding-left: max(2.5rem, var(--safe-left));
+        padding-right: max(2.5rem, var(--safe-right));
+    }
+}
+
+.safe-brand-shell {
+    padding-top: max(3rem, var(--safe-top));
+    padding-bottom: max(3rem, var(--safe-bottom));
+    padding-left: max(1.5rem, var(--safe-left));
+    padding-right: max(1.5rem, var(--safe-right));
+}
+
 html,
 body,
 #root {

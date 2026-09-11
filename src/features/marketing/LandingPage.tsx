@@ -52,8 +52,8 @@ const Footer = () => (
 /** Cloud landing: top bar, self-annotating hero, how-it-works, features, CTA. */
 const CloudLanding = () => (
     <main className="landing-page min-h-full">
-        <div className="mx-auto w-full max-w-6xl px-6 lg:px-10">
-            <nav aria-label="Main" className="flex items-center justify-between pt-6">
+        <div className="safe-landing-gutter mx-auto w-full max-w-6xl">
+            <nav aria-label="Main" className="safe-landing-nav flex items-center justify-between">
                 <Wordmark />
                 <div className="flex items-center gap-3">
                     {/* Students arrive here too, sent by a teacher, and their door
@@ -159,8 +159,8 @@ const CloudLanding = () => (
 /** Local-only fallback when Supabase isn't configured. */
 const LocalLanding = () => (
     <main className="landing-page min-h-full">
-        <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 lg:px-10">
-            <nav aria-label="Main" className="flex items-center justify-between pt-6">
+        <div className="safe-landing-gutter mx-auto flex min-h-full w-full max-w-6xl flex-col">
+            <nav aria-label="Main" className="safe-landing-nav flex items-center justify-between">
                 <Wordmark />
             </nav>
             <section className="landing-hero flex flex-1 flex-col justify-center gap-12 py-14 lg:grid lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] lg:items-center lg:gap-16">
