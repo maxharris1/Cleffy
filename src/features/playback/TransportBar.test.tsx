@@ -42,6 +42,25 @@ const renderBar = (overrides: Partial<TransportBarProps> = {}) => {
 };
 
 beforeEach(() => {
+    const memory: Record<string, string> = {};
+    vi.stubGlobal('localStorage', {
+        getItem: (key: string) => memory[key] ?? null,
+        setItem: (key: string, value: string) => {
+            memory[key] = value;
+        },
+        removeItem: (key: string) => {
+            delete memory[key];
+        },
+        clear: () => {
+            for (const key of Object.keys(memory)) {
+                delete memory[key];
+            }
+        },
+        key: () => null,
+        get length() {
+            return Object.keys(memory).length;
+        },
+    });
     act(() => useViewerStore.getState().resetPlayback());
 });
 
@@ -231,11 +250,11 @@ describe('TransportBar ready controls', () => {
             },
         });
         const pedal = screen.getByRole('button', { name: /auto-pedal/i });
-        expect(pedal).toHaveAttribute('aria-pressed', 'true');
+        expect(pedal).toHaveAttribute('aria-pressed', 'false');
         await userEvent.click(pedal);
-        expect(useViewerStore.getState().autoPedal).toBe(false);
-        expect(screen.getByRole('button', { name: /auto-pedal/i })).toHaveAttribute('aria-pressed', 'false');
-        setStore(() => useViewerStore.getState().setAutoPedal(true));
+        expect(useViewerStore.getState().autoPedal).toBe(true);
+        expect(screen.getByRole('button', { name: /auto-pedal/i })).toHaveAttribute('aria-pressed', 'true');
+        setStore(() => useViewerStore.getState().setAutoPedal(false));
     });
 
     it('disables the left hand for single-staff scores', () => {
