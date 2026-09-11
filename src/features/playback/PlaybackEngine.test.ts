@@ -4,6 +4,7 @@ import {
     ACCOMP_DIP,
     buildNoteShapes,
     clampVelocity,
+    JITTER_TIME_S,
     LEGATO_OVERLAP_FRACTION,
     LEGATO_OVERLAP_MAX_S,
     MELODY_LIFT,
@@ -27,7 +28,7 @@ import {
 } from '@/features/playback/pianoSampler';
 import type { PianoBuffers } from '@/features/playback/pianoSampler';
 import type { TempoStyle } from '@/features/playback/playbackPrefs';
-import { buildTempoMap, FINAL_RIT_FACTOR, secondsAtTick } from '@/features/playback/scoreTime';
+import { buildTempoMap, secondsAtTick } from '@/features/playback/scoreTime';
 import { EXPRESSIVE_FINAL_RIT_FACTOR, expressiveTempoCurve } from '@/features/playback/tempoStyle';
 import type { PlaybackStatus } from '@/state/store';
 import { DEFAULT_VELOCITY } from '@/types/scoreData';
@@ -319,15 +320,11 @@ describe('PlaybackEngine', () => {
         // The pickup carries no dynamic of its own: the score default, nudged
         // by this note's jitter, lifted as the tune and placed in its phrase's
         // contour, through the dB velocity curve.
-        const pickupPhrase = buildNoteShapes(tinyScore)[0]?.phrase ?? 0;
-        expect(pickupPhrase).toBeLessThan(0);
-        expect(ctx.gains[FIRST_VOICE_GAIN]?.gain.value).toBeCloseTo(
-            velocityToGain(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT + pickupPhrase),
-            10,
-        );
-        // Note k starts at anchor(0.08) + map(t), shaped by its chord and jitter.
-        const map = buildTempoMap(tinyScore, 120 / (tinyScore.defaultBpm ?? 120), 120);
-        const expected = tinyScore.notes.map((n, i) => onsetOf(tinyScore, i, 0.08 + secondsAtTick(map, n.t)));
+        expect(ctx.gains[FIRST_VOICE_GAIN]?.gain.value).toBeCloseTo(velocityToGain(DEFAULT_VELOCITY), 10);
+        // Strict is on the printed grid: no roll, no jitter, practice BPM when
+        // there is no tick-0 tempo (tinyScore's defaultBpm is not an opening).
+        const map = buildTempoMap(tinyScore, 1, 120, []);
+        const expected = tinyScore.notes.map((n) => 0.08 + secondsAtTick(map, n.t));
         const actual = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
         expected.sort((a, b) => a - b);
         for (const [i, time] of expected.entries()) {
@@ -349,7 +346,7 @@ describe('PlaybackEngine', () => {
         expect(ctx.oscillators.filter((o) => o.frequency.value === 1800)).toHaveLength(2);
         // The pickup note enters exactly where beat 4 of the second bar falls.
         const firstNote = Math.min(...ctx.sources.map((s) => s.startedAt ?? Infinity));
-        expect(firstNote).toBeCloseTo(onsetOf(tinyScore, 0, 0.08 + 7 * 0.5), 9);
+        expect(firstNote).toBeCloseTo(0.08 + 7 * 0.5, 9);
         expect(statuses).toContain('playing');
         expect(engine.getPositionTicks()).toBeGreaterThan(0);
     });
@@ -464,7 +461,7 @@ describe('PlaybackEngine', () => {
         // …and the left hand's C3 there leads it by its rise time. That note is
         // alone in its hand at that tick, so it takes no chord roll.
         const note = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 48));
-        expect(note?.startedAt).toBeCloseTo(beatAt - lag + noteJitter(480, 48, 1).dt, 9);
+        expect(note?.startedAt).toBeCloseTo(beatAt - lag, 9);
         expect(ctx.sources.some((s) => Math.abs((s.startedAt ?? -1) - beatAt) < 0.001)).toBe(false);
     });
 
@@ -511,8 +508,9 @@ describe('expression through the engine', () => {
         expectConnections(convolver, master);
         expectConnections(ctx.gains[BUS_RH], master, send);
         expectConnections(ctx.gains[BUS_LH], master, send);
-        // The metronome stays dry: a click smeared by a room is no reference.
-        expectConnections(ctx.gains[CLICK_BUS], master);
+        // The metronome stays off the musical compressor so it cannot duck the piano.
+        expectConnections(ctx.gains[CLICK_BUS], ctx.destination);
+        expect(ctx.gains[CLICK_BUS]?.connections).not.toContain(master);
         expect(convolver?.buffer?.numberOfChannels).toBe(2);
         expect(limiter?.threshold.value).toBe(-12);
     });
@@ -572,7 +570,7 @@ describe('expression through the engine', () => {
     });
 
     it('voices the top of a right-hand chord above the note under it', async () => {
-        const { ctx, engine, buffers } = makeEngine();
+        const { ctx, engine, buffers } = makeEngine({ tempoStyle: 'expressive' });
         await engine.play();
         await advance(ctx, 0.7);
         // m.1's chord: E5 (index 1) under G5 (index 2), the melody note.
@@ -581,6 +579,16 @@ describe('expression through the engine', () => {
         expect(voiceGainOf(top)).toBeGreaterThan(voiceGainOf(under));
         // …and it arrives after it: the chord rolls from the bottom up.
         expect((top?.startedAt ?? 0) - (under?.startedAt ?? 0)).toBeGreaterThan(0);
+    });
+
+    it('strict lands a chord attacks on the same tick, with no roll', async () => {
+        const { ctx, engine, buffers } = makeEngine();
+        await engine.play();
+        await advance(ctx, 0.7);
+        const under = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 76));
+        const top = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 79));
+        expect(top?.startedAt).toBeCloseTo(under?.startedAt ?? -1, 9);
+        expect(voiceGainOf(top)).toBe(voiceGainOf(under));
     });
 
     it('keeps a rolled chord on the last beat of a loop from attacking after B', async () => {
@@ -599,7 +607,7 @@ describe('expression through the engine', () => {
         engine.setLoop({ startTick: 0, endTick: B });
         await engine.play();
         await advance(ctx, 2.6);
-        const map = buildTempoMap(score, 120 / (score.defaultBpm ?? 120), 120);
+        const map = buildTempoMap(score, 1, 120, []);
         const bTime = 0.08 + secondsAtTick(map, B);
         const firstPass = ctx.sources.filter((s) => (s.startedAt ?? Infinity) < bTime + 0.05);
         expect(firstPass).toHaveLength(4);
@@ -616,7 +624,7 @@ describe('expression through the engine', () => {
             { t: 0, d: 480, p: 67, h: 1 },
         ];
         const score: ScoreData = { ...tinyScore, notes };
-        const { ctx, engine, buffers } = makeEngine({ score });
+        const { ctx, engine, buffers } = makeEngine({ score, tempoStyle: 'expressive' });
         await engine.play();
         await advance(ctx, 0.5);
         const gSources = ctx.sources.filter((s) => s.buffer === sampleOf(buffers, 67));
@@ -638,7 +646,7 @@ describe('expression through the engine', () => {
             measures: [{ n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.08, x1: 0.92 }],
             totalTicks: 1920,
         };
-        const { ctx, engine, buffers } = makeEngine({ score });
+        const { ctx, engine, buffers } = makeEngine({ score, tempoStyle: 'expressive' });
         await engine.play();
         await advance(ctx, 0.8);
         const lh = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 48));
@@ -681,7 +689,7 @@ describe('tempo map', () => {
         await engine.play();
         await advance(ctx, 30);
         const started = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
-        const expected = paced.notes.map((n, i) => onsetOf(paced, i, 0.08 + gridSeconds(n.t))).sort((a, b) => a - b);
+        const expected = paced.notes.map((n) => 0.08 + gridSeconds(n.t)).sort((a, b) => a - b);
         expect(started).toHaveLength(expected.length);
         started.forEach((at, i) => expect(at).toBeCloseTo(expected[i] ?? -1, 9));
     });
@@ -717,7 +725,7 @@ describe('tempo map', () => {
 
         // Every onset lands on the loop's grid: k full laps plus a real note offset.
         const inLoop = paced.notes
-            .map((n, i) => (n.t >= 3840 && n.t < 7680 ? onsetOf(paced, i, gridSeconds(n.t) - gridSeconds(3840)) : null))
+            .map((n) => (n.t >= 3840 && n.t < 7680 ? gridSeconds(n.t) - gridSeconds(3840) : null))
             .filter((offset): offset is number => offset !== null);
         for (const onset of onsets) {
             const sinceStart = onset - 0.08;
@@ -747,7 +755,7 @@ describe('tempo map', () => {
         expect(engine.getBpmAt(6000)).toBe(30);
     });
 
-    it('reports the unmarked final ritardando near the end', () => {
+    it('strict has no unmarked final ritardando', () => {
         const closing: ScoreData = {
             ...tinyScore,
             defaultBpm: 120,
@@ -768,10 +776,21 @@ describe('tempo map', () => {
         };
         const { engine } = makeEngine({ score: closing, bpm: 120 });
         expect(engine.getBpmAt(0)).toBe(120);
-        expect(engine.getBpmAt(7200)).toBe(Math.round(120 * FINAL_RIT_FACTOR));
+        expect(engine.getBpmAt(7200)).toBe(120);
         engine.setBpm(60);
         expect(engine.getBpmAt(0)).toBe(60);
-        expect(engine.getBpmAt(7200)).toBe(Math.round(60 * FINAL_RIT_FACTOR));
+        expect(engine.getBpmAt(7200)).toBe(60);
+    });
+
+    it('opens at the practice BPM when there is no tempo at tick 0', () => {
+        const grave: ScoreData = {
+            ...tinyScore,
+            defaultBpm: 145,
+            tempos: [{ tick: 480, bpm: 40, src: 'word' }],
+        };
+        const { engine } = makeEngine({ score: grave, bpm: 100 });
+        expect(engine.getBpmAt(0)).toBe(100);
+        expect(engine.getBpmAt(480)).toBe(40);
     });
 });
 
@@ -830,23 +849,17 @@ describe('tempo style', () => {
         expect(new Set(clicks).size).toBe(clicks.length);
     });
 
-    it('strict (and no style at all) schedules every note and click at the svc-10 time', async () => {
-        // fixtures/svc10-timeline.json was recorded once from the svc-10
-        // engine (commit 8862482) with this file's harness: makeEngine({ bpm:
-        // 120 }) on tinyScore, metronome on, advance(ctx, 16), sources sorted
-        // by start then stop, click times deduplicated (svc-10 re-fired past
-        // clicks after the last beat). Onsets and clicks are the tempo map and
-        // must not move; the recorded stops are reference only — v5's legato
-        // overlap and phrase shaping lengthen notes in both styles, and gains
-        // differ likewise (the expression tests cover both).
+    it('strict (and no style at all) schedules every note and click on the printed grid', async () => {
+        const map = buildTempoMap(tinyScore, 1, 120, []);
         for (const tempoStyle of [undefined, 'strict' as const]) {
             const { ctx, engine } = makeEngine({ bpm: 120, ...(tempoStyle ? { tempoStyle } : {}) });
             engine.setMetronome(true);
             await engine.play();
             await advance(ctx, 16);
             const onsets = ctx.sources.map((s) => s.startedAt ?? -1).sort((a, b) => a - b);
-            expect(onsets).toHaveLength(svc10Timeline.notes.length);
-            onsets.forEach((onset, i) => expect(onset).toBeCloseTo(svc10Timeline.notes[i]?.start ?? -1, 9));
+            const expected = tinyScore.notes.map((n) => 0.08 + secondsAtTick(map, n.t)).sort((a, b) => a - b);
+            expect(onsets).toHaveLength(expected.length);
+            onsets.forEach((onset, i) => expect(onset).toBeCloseTo(expected[i] ?? -1, 9));
             const clicks = ctx.oscillators.map((o) => o.startedAt ?? -1).sort((a, b) => a - b);
             expect(clicks).toHaveLength(svc10Timeline.clicks.length);
             clicks.forEach((click, i) => expect(click).toBeCloseTo(svc10Timeline.clicks[i] ?? -1, 9));
@@ -907,13 +920,18 @@ describe('tempo style', () => {
                 expect(changed.engine.getStatus()).toBe('counting');
                 await advance(changed.ctx, 3.2);
                 const firstOnset = Math.min(...changed.ctx.sources.map((s) => s.startedAt ?? Infinity));
-                expect(firstOnset).toBeGreaterThanOrEqual(0.08 + 3.5);
-                // The pickup lands exactly where the count-in promised it.
+                expect(firstOnset).toBeGreaterThanOrEqual(0.08 + 3.5 - JITTER_TIME_S);
+                // The pickup lands where the count-in promised it. Switching to
+                // expressive may add a few ms of attack jitter; BPM change does not.
                 const control = makeEngine();
                 await control.engine.play({ countIn: true });
                 await advance(control.ctx, 3.7);
                 const controlOnset = Math.min(...control.ctx.sources.map((s) => s.startedAt ?? Infinity));
-                expect(firstOnset).toBeCloseTo(controlOnset, 6);
+                if (name === 'style') {
+                    expect(Math.abs(firstOnset - controlOnset)).toBeLessThanOrEqual(JITTER_TIME_S);
+                } else {
+                    expect(firstOnset).toBeCloseTo(controlOnset, 6);
+                }
                 // Seven count-in clicks and not one more.
                 expect(changed.ctx.oscillators).toHaveLength(7);
             });
@@ -993,8 +1011,7 @@ describe('sustain pedal', () => {
         await dry.engine.play();
         await advance(dry.ctx, 3);
         const damped = dry.ctx.sources.find((s) => s.buffer === sampleOf(dry.buffers, 72));
-        // The pickup runs legato into the chord on the next beat, so it overlaps it by 6% of itself.
-        expect(lifespanOf(damped)).toBeCloseTo((480 + Math.round(480 * LEGATO_OVERLAP_FRACTION)) * SPT_120 + 0.3, 9);
+        expect(lifespanOf(damped)).toBeCloseTo(480 * SPT_120 + 0.3, 9);
     });
 
     it('releases a pedalled note as a free string, not as a damped one', async () => {
@@ -1011,7 +1028,7 @@ describe('sustain pedal', () => {
         expect(release?.target).toBe(0);
         expect(release?.tau).toBe(PEDAL_RELEASE_TAU_S);
         // The lift at 2400 is where the damper finally lands.
-        expect(release?.time).toBeCloseTo(0.08 + 2400 * SPT_120 + noteJitter(0, 72, 0).dt, 9);
+        expect(release?.time).toBeCloseTo(0.08 + 2400 * SPT_120, 9);
     });
 
     it('clears at a re-catch and holds only what is struck on it', async () => {
@@ -1037,7 +1054,7 @@ describe('sustain pedal', () => {
         expect(ctx.sources).toHaveLength(2);
         expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + PEDAL_TAIL_S, 9);
         expect(lifespanOf(ctx.sources[1])).toBeCloseTo(3360 * SPT_120 + PEDAL_TAIL_S, 9);
-        expect(ctx.sources[1]?.startedAt).toBeCloseTo(0.08 + 2400 * SPT_120 + noteJitter(2400, 60, 0).dt, 9);
+        expect(ctx.sources[1]?.startedAt).toBeCloseTo(0.08 + 2400 * SPT_120, 9);
     });
 
     it('cuts a pedalled note at the loop end, the way a written one is cut', async () => {
@@ -1057,7 +1074,7 @@ describe('sustain pedal', () => {
         await engine.play();
         await advance(ctx, 1);
         expect(ctx.sources).toHaveLength(1);
-        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT);
+        const vel = clampVelocity(DEFAULT_VELOCITY);
         const dampedTail = Math.max(0.3, 5 * releaseTauFor(72, vel));
         expect(lifespanOf(ctx.sources[0])).toBeCloseTo(2400 * SPT_120 + dampedTail, 9);
     });
@@ -1077,7 +1094,7 @@ describe('sustain pedal', () => {
         await advance(ctx, 1);
         const held = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
         const bTime = 0.08 + 2400 * SPT_120;
-        const vel = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 72, 0).dv + MELODY_LIFT);
+        const vel = clampVelocity(DEFAULT_VELOCITY);
         const damped = Math.max(0.3, 5 * releaseTauFor(72, vel));
         expect(held?.stoppedAt ?? Infinity).toBeLessThanOrEqual(bTime + damped + 0.006);
         expect(held?.stoppedAt ?? Infinity).toBeLessThan(bTime + 1.25);
@@ -1185,8 +1202,9 @@ describe('auto-pedal', () => {
         return lifespanOf(ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72)));
     };
 
-    it('plays inferred pedalling by default, exactly like engraved pedalling', async () => {
-        expect(await pickupLifespan(inferred)).toBe(await pickupLifespan(engraved));
+    it('does not play inferred pedalling by default, and matches engraved when auto-pedal is on', async () => {
+        const dry = await pickupLifespan({ ...tinyScore, warnings: ['pedal_inferred'] });
+        expect(await pickupLifespan(inferred)).toBe(dry);
         expect(await pickupLifespan(inferred, true)).toBe(await pickupLifespan(engraved));
     });
 
@@ -1243,7 +1261,7 @@ describe('auto-pedal', () => {
         // 960 ticks) now rings to the lift; without it, it would not.
         const e5 = (sources: MockSource[], b: PianoBuffers) =>
             lifespanOf(sources.find((s) => s.buffer === sampleOf(b, 76)));
-        const withPedal = makeEngine({ score: inferred });
+        const withPedal = makeEngine({ score: inferred, autoPedal: true });
         await withPedal.engine.play();
         await advance(withPedal.ctx, 3.5);
         const dry = makeEngine({ score: inferred, autoPedal: false });
@@ -1267,7 +1285,7 @@ describe('pedal resonance', () => {
     };
 
     const gridAt = (score: ScoreData, tick: number): number =>
-        0.08 + secondsAtTick(buildTempoMap(score, 120 / (score.defaultBpm ?? 120), 120), tick);
+        0.08 + secondsAtTick(buildTempoMap(score, 1, 120, []), tick);
 
     it('builds a second convolver only when the score has pedal edges', async () => {
         const dry = makeEngine();
@@ -1408,9 +1426,8 @@ describe('pedal resonance', () => {
         engine.setMetronome(true);
         await engine.play();
         await advance(ctx, 0.3);
-        const master = ctx.gains[0];
         const send = resonanceSendOf(ctx);
-        const clickBus = ctx.gains.find((g) => g.connections.length === 1 && g.connections[0] === master);
+        const clickBus = ctx.gains.find((g) => g.connections.length === 1 && g.connections[0] === ctx.destination);
         expect(clickBus).toBeDefined();
         expect(clickBus?.connections).not.toContain(send);
         expect(send?.connections).not.toContain(clickBus);
@@ -1475,6 +1492,46 @@ describe('velocity layers', () => {
         expect(panner).toBeInstanceOf(MockPanner);
     });
 
+    it('starts each mixed layer by its own attack lag so both land on the beat', () => {
+        const ctx = new MockContext();
+        const dest = ctx.createGain();
+        const lowLag = 0.01;
+        const highLag = 0.04;
+        const startAt = 1;
+        const buffers: PianoBuffers = new Map(
+            PIANO_ANCHORS.map((midi) => [
+                midi,
+                [
+                    {
+                        buffer: {} as AudioBuffer,
+                        onsetSec: 0,
+                        attackLagSec: lowLag,
+                        velocity: LAYER_SOFT_VELOCITY,
+                    },
+                    {
+                        buffer: {} as AudioBuffer,
+                        onsetSec: 0,
+                        attackLagSec: highLag,
+                        velocity: LAYER_LOUD_VELOCITY,
+                    },
+                ],
+            ]),
+        );
+        schedulePianoVoice({
+            ctx,
+            buffers,
+            midi: 60,
+            velocity: DEFAULT_VELOCITY,
+            startAt,
+            holdSec: 0.5,
+            destination: dest,
+        });
+        expect(ctx.sources).toHaveLength(2);
+        const started = [...ctx.sources.map((s) => s.startedAt ?? -1)].sort((a, b) => a - b);
+        expect(started[0]).toBeCloseTo(startAt - highLag, 9);
+        expect(started[1]).toBeCloseTo(startAt - lowLag, 9);
+    });
+
     it('creates one source when the velocity sits on the mid layer', () => {
         const ctx = new MockContext();
         const dest = ctx.createGain();
@@ -1533,24 +1590,29 @@ describe('velocity layers', () => {
 
 describe('legato', () => {
     /**
-     * A stepwise RH line in plain-gated quarters filling bar 1 of a two-bar
-     * 4/4 score. The empty second bar keeps the unmarked-close ritardando off
-     * the notes, so a tick is the same length under every one of them.
+     * A stepwise RH line in plain-gated quarters filling bar 1 of an eight-bar
+     * 4/4 score. Later empty bars keep the unmarked-close ritardando off the
+     * notes, so a tick is the same length under every one of them in Expressive.
      */
     const line = (d = 432): ScoreData => ({
         ...tinyScore,
         timeSignatures: [{ tick: 0, num: 4, den: 4 }],
-        measures: [
-            { n: 1, tick: 0, dTicks: 1920, page: 0, sys: 0, x0: 0.08, x1: 0.5 },
-            { n: 2, tick: 1920, dTicks: 1920, page: 0, sys: 0, x0: 0.5, x1: 0.92 },
-        ],
-        totalTicks: 3840,
+        measures: Array.from({ length: 8 }, (_, i) => ({
+            n: i + 1,
+            tick: i * 1920,
+            dTicks: 1920,
+            page: 0,
+            sys: 0,
+            x0: 0.08,
+            x1: 0.92,
+        })),
+        totalTicks: 15360,
         notes: [72, 74, 76, 77].map((p, i) => ({ t: i * 480, d, p, h: 0 as const })),
     });
     const DAMPED_TAIL_S = 0.3;
 
     it('lets a plain note overlap the next of its voice by 6 % of itself', async () => {
-        const { ctx, engine, buffers } = makeEngine({ score: line() });
+        const { ctx, engine, buffers } = makeEngine({ score: line(), tempoStyle: 'expressive' });
         await engine.play();
         await advance(ctx, 2.5);
         const first = ctx.sources.find((s) => s.buffer === sampleOf(buffers, 72));
@@ -1566,7 +1628,7 @@ describe('legato', () => {
 
     it('caps the overlap at 60 ms of wall clock', async () => {
         // At 30 bpm a tick is 4.17 ms, so 6 % of a quarter (26 ticks) would be 108 ms.
-        const { ctx, engine, buffers } = makeEngine({ score: line(), bpm: 30 });
+        const { ctx, engine, buffers } = makeEngine({ score: line(), bpm: 30, tempoStyle: 'expressive' });
         await engine.play();
         await advance(ctx, 3);
         const spt = 60 / (30 * 480);

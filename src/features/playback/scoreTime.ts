@@ -485,9 +485,13 @@ export interface TempoCurvePoint {
 /**
  * Practice-tempo scaling is a single multiplier over the whole map.
  *
- * Without a `curve` the map is exactly what it always was, unmarked-close
- * ritardando included. With one, the curve REPLACES that ritardando — it has
- * its own — and multiplies the tempo in force wherever it is not 1.
+ * The unmarked-close ritardando is not part of this map — that belongs to the
+ * expressive curve, which the caller passes when it wants it. Without a curve
+ * the clock is the printed tempos on a flat practice-BPM floor.
+ *
+ * `defaultBpm` is not an opening tempo: it may be a meter guess, and a late
+ * `tempos[0]` is not in force yet. Until a point at this tick, stay at
+ * `fallbackBpm` (the user/practice BPM).
  */
 export const buildTempoMap = (
     score: ScoreData,
@@ -498,11 +502,7 @@ export const buildTempoMap = (
     const safeScale = scale > 0 && Number.isFinite(scale) ? scale : 1;
     const tempos = score.tempos ?? [];
     const holds = score.holds ?? [];
-    // Fold the unmarked close in before scaling, the same way a printed rit. is.
-    const rit = curve ? [] : finalRitardandoPoints(score, score.defaultBpm ?? fallbackBpm);
-    const points = [...tempos.map((tempo) => ({ tick: tempo.tick, bpm: tempo.bpm })), ...rit].sort(
-        (a, b) => a.tick - b.tick,
-    );
+    const points = tempos.map((tempo) => ({ tick: tempo.tick, bpm: tempo.bpm })).sort((a, b) => a.tick - b.tick);
 
     const boundaries = new Set<number>([0]);
     for (const point of points) {
@@ -517,7 +517,7 @@ export const buildTempoMap = (
     const ticks = [...boundaries].sort((a, b) => a - b);
 
     const bpmAt = (tick: number): number => {
-        let bpm = score.defaultBpm ?? fallbackBpm;
+        let bpm = fallbackBpm;
         for (const point of points) {
             if (point.tick > tick) {
                 break;

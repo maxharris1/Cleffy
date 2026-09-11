@@ -296,7 +296,12 @@ describe('measureStartTick / measureEndTick', () => {
 });
 
 describe('tempo map', () => {
-    const scoreWith = (over: Partial<ScoreData>): ScoreData => ({ ...tinyScore, defaultBpm: 120, ...over });
+    const scoreWith = (over: Partial<ScoreData>): ScoreData => ({
+        ...tinyScore,
+        defaultBpm: 120,
+        tempos: [{ tick: 0, bpm: 120 }],
+        ...over,
+    });
 
     // At 120 quarter-BPM a tick is 60/(120*480) s, so a 4/4 bar (1920) is 2 s.
     it('is exact across a tempo change', () => {
@@ -311,9 +316,6 @@ describe('tempo map', () => {
             100,
         );
         expect(secondsAtTick(map, 7680)).toBeCloseTo(8, 6); // 4 bars at 120
-        // Past the printed change the unmarked close still stretches the last
-        // bar, so 15360 is no longer a flat 16 s at 60. Arriving at m.8 (the
-        // last barline before the rit.) is still five seconds of 60.
         expect(secondsAtTick(map, 12480)).toBeCloseTo(18, 6);
     });
 
@@ -393,11 +395,23 @@ describe('tempo map', () => {
 
     it('reduces to a flat map for a score with no tempo data', () => {
         const map = buildTempoMap({ ...tinyScore, defaultBpm: null }, 1, 100);
-        // Falls back to the supplied bpm, exactly as before v3. The unmarked
-        // close still bends the last bar; the body of the piece is flat.
+        // Falls back to the supplied bpm, exactly as before v3. The whole
+        // piece is flat: unmarked close is not part of this map.
         expect(secondsAtTick(map, 480)).toBeCloseTo(60 / 100, 6);
         expect(bpmAtTick(map, 480)).toBeCloseTo(100, 6);
         expect(bpmAtTick(map, 0)).toBeCloseTo(100, 6);
+        expect(bpmAtTick(map, 12480)).toBeCloseTo(100, 6);
+    });
+
+    it('does not treat defaultBpm or a late tempos[0] as the opening pulse', () => {
+        const map = buildTempoMap(
+            { ...tinyScore, defaultBpm: 145, tempos: [{ tick: 480, bpm: 40, src: 'word' }] },
+            1,
+            100,
+        );
+        expect(bpmAtTick(map, 0)).toBeCloseTo(100, 6);
+        expect(bpmAtTick(map, 479)).toBeCloseTo(100, 6);
+        expect(bpmAtTick(map, 480)).toBeCloseTo(40, 6);
     });
 });
 
@@ -472,14 +486,11 @@ describe('finalRitardandoPoints', () => {
         expect(ticks).toEqual([5760, 6240, 6720, 7200]);
     });
 
-    it('makes the last bar longer than the metronomic duration by the expected amount', () => {
+    it('keeps the last bar metronomic on the default map — unmarked rit is expressive-only', () => {
         const score = fourBar44();
         const map = buildTempoMap(score, 1, 120);
-        const spt = (bpm: number): number => 60 / (bpm * 480);
-        const lastBar = 480 * spt(120) + 480 * spt(114) + 480 * spt(108) + 480 * spt(120 * FINAL_RIT_FACTOR);
         expect(secondsAtTick(map, 5760)).toBeCloseTo(6, 6);
-        expect(secondsAtTick(map, 7680)).toBeCloseTo(6 + lastBar, 6);
-        expect(secondsAtTick(map, 7680)).toBeGreaterThan(8);
+        expect(secondsAtTick(map, 7680)).toBeCloseTo(8, 6);
     });
 });
 
