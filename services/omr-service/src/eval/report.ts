@@ -43,10 +43,12 @@ const movementMetricsSchema = z
         refBars: z.number(),
         omrPrintedBars: z.number().nonnegative(),
         omrPerformedBars: z.number(),
+        scoredBars: z.number().nonnegative(),
         refNotes: z.number(),
         omrNotes: z.number(),
         pitchMatch: z.number(),
         exact: z.number(),
+        onGrid: z.number(),
         missing: z.number(),
         extra: z.number(),
         octave: z.number(),
@@ -56,13 +58,22 @@ const movementMetricsSchema = z
         refOnly: z.number(),
         omrOnly: z.number(),
         merge2: z.number(),
+        maxRefOnlyRun: z.number().nonnegative(),
         barsAtCorrectLength: z.number().nonnegative(),
+        barsWrongLength: z.number().nonnegative(),
+        printedBarsMatch: z.boolean(),
+        refBarsMatch: z.boolean(),
+        extraUnexplained: z.number().nonnegative(),
+        holds: z.number().nonnegative(),
+        holdsOk: z.boolean(),
         melodySurvival: z.number(),
         melodyTotal: z.number(),
         melodyFound: z.number(),
         barsUnderWrongKey: z.number(),
         tempoInRange: z.boolean(),
         tempoBpm: z.number().nullable(),
+        printedTempoBpm: z.number().nullable(),
+        printedTempoInRange: z.boolean(),
         performedBarsMatch: z.boolean().nullable(),
         velocityDistinct: z.number(),
     })
@@ -71,6 +82,15 @@ const movementMetricsSchema = z
             ctx.addIssue({
                 code: 'custom',
                 message: `barsAtCorrectLength (${m.barsAtCorrectLength}) cannot exceed omrPrintedBars (${m.omrPrintedBars})`,
+            });
+        }
+        // onGrid adds a length test on top of exact, which adds an onset test on
+        // top of pitch. A record that breaks the ordering means the pairing bags
+        // disagree, and the headline score would be meaningless.
+        if (m.onGrid > m.exact + 1e-9 || m.exact > m.pitchMatch + 1e-9) {
+            ctx.addIssue({
+                code: 'custom',
+                message: `rates must narrow: onGrid (${m.onGrid}) <= exact (${m.exact}) <= pitchMatch (${m.pitchMatch})`,
             });
         }
     });
@@ -84,6 +104,7 @@ const evalRecordSchema = z.object({
         omrNotes: z.number(),
         pitchMatch: z.number(),
         exact: z.number(),
+        onGrid: z.number(),
         missing: z.number(),
         extra: z.number(),
         octave: z.number(),
@@ -94,6 +115,13 @@ const evalRecordSchema = z.object({
         movementCountOk: z.boolean(),
         metersOk: z.boolean(),
         warnings: z.array(z.string()),
+        flags: z.object({
+            measureUnderfull: z.boolean(),
+            measureOverfull: z.boolean(),
+            tempoDefaulted: z.boolean(),
+            repeatsIgnored: z.boolean(),
+            jumpsIgnored: z.boolean(),
+        }),
     }),
     composite: z.number(),
     bars: z.record(z.string(), z.array(z.unknown())),
@@ -112,20 +140,31 @@ const HEADLINES: HeadlineSpec[] = [
     { path: 'composite', higherIsBetter: true },
     { path: 'overall.pitchMatch', higherIsBetter: true },
     { path: 'overall.exact', higherIsBetter: true },
+    { path: 'overall.onGrid', higherIsBetter: true },
     { path: 'overall.missing', higherIsBetter: false },
+    { path: 'overall.extra', higherIsBetter: false },
     { path: 'structure.movementCountOk', higherIsBetter: true },
     { path: 'structure.metersOk', higherIsBetter: true },
+    { path: 'structure.flags.measureUnderfull', higherIsBetter: false },
+    { path: 'structure.flags.measureOverfull', higherIsBetter: false },
+    { path: 'structure.flags.repeatsIgnored', higherIsBetter: false },
+    { path: 'structure.flags.jumpsIgnored', higherIsBetter: false },
 ];
 
 const headlinePaths = (record: EvalRecord): HeadlineSpec[] => [
     ...HEADLINES,
     ...record.movements.flatMap((_, i) => [
         { path: `movements.${i}.pitchMatch`, higherIsBetter: true },
+        { path: `movements.${i}.onGrid`, higherIsBetter: true },
         { path: `movements.${i}.tempoInRange`, higherIsBetter: true },
         { path: `movements.${i}.barsUnderWrongKey`, higherIsBetter: false },
         { path: `movements.${i}.merge2`, higherIsBetter: false },
         { path: `movements.${i}.refOnly`, higherIsBetter: false },
+        { path: `movements.${i}.maxRefOnlyRun`, higherIsBetter: false },
+        { path: `movements.${i}.barsWrongLength`, higherIsBetter: false },
+        { path: `movements.${i}.holds`, higherIsBetter: false, absolute: true },
         { path: `movements.${i}.omrPrintedBars`, higherIsBetter: true, absolute: true },
+        { path: `movements.${i}.omrPerformedBars`, higherIsBetter: true, absolute: true },
     ]),
 ];
 
@@ -157,9 +196,9 @@ export const attachRecord = (result: EvalResult, candidate: Candidate): EvalReco
 const pct = (n: number): string => `${n.toFixed(1)}%`;
 
 const movementLine = (m: MovementMetrics): string =>
-    `| ${m.name} | ${pct(m.pitchMatch)} | ${pct(m.exact)} | ${m.missing} | ${m.semitone} | ${m.octave} | ${m.omrPrintedBars}/${m.refBars} | ${m.barsAtCorrectLength} | ${pct(m.melodySurvival)} | ${m.tempoBpm ?? '—'} ${m.tempoInRange ? 'ok' : 'out'} |`;
+    `| ${m.name} | ${pct(m.pitchMatch)} | ${pct(m.exact)} | ${pct(m.onGrid)} | ${m.missing} | ${m.extra} | ${m.semitone} | ${m.octave} | ${m.omrPrintedBars}/${m.refBars} | ${m.barsWrongLength} | ${m.omrPerformedBars}${m.performedBarsMatch === null ? '?' : m.performedBarsMatch ? '' : '!'} | ${m.holds} | ${pct(m.melodySurvival)} | ${m.printedTempoBpm ?? '—'} ${m.printedTempoInRange ? 'ok' : 'out'} |`;
 
-export const formatSummary = (record: EvalRecord): string => {
+export const formatSummary = (record: EvalRecord, gate?: string): string => {
     const lines = [
         `# ${record.title}`,
         '',
@@ -167,15 +206,18 @@ export const formatSummary = (record: EvalRecord): string => {
         `engine: ${record.engineVersion ?? '—'}  audiveris: ${record.audiverisVersion ?? '—'}  cacheHit: ${record.audiverisCacheHit}`,
         `artifactHash: ${record.artifactHash ?? '—'}`,
         '',
-        '| Movement | Pitch | Exact | Missing | Semi | Oct | Printed | At length | Melody | Tempo |',
-        '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+        '| Movement | Pitch | +Onset | +Length | Miss | Extra | Semi | Oct | Printed | Bad len | Performed | Holds | Melody | Printed tempo |',
+        '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
         ...record.movements.map(movementLine),
         '',
-        `Overall pitch ${pct(record.overall.pitchMatch)} · exact ${pct(record.overall.exact)} · missing ${record.overall.missing} · extra ${record.overall.extra} · velocities ${record.overall.velocityDistinct}`,
+        `Overall pitch ${pct(record.overall.pitchMatch)} · +onset ${pct(record.overall.exact)} · +length ${pct(record.overall.onGrid)} · missing ${record.overall.missing} · extra ${record.overall.extra} · velocities ${record.overall.velocityDistinct}`,
         `Structure: movements ${record.structure.movementCountOk ? 'ok' : 'mismatch'}, meters ${record.structure.metersOk ? 'ok' : 'mismatch'}`,
         `Warnings: ${record.structure.warnings.join(', ') || 'none'}`,
         '',
     ];
+    if (gate !== undefined) {
+        lines.push(gate);
+    }
     return lines.join('\n');
 };
 
@@ -207,7 +249,7 @@ export const assertBaselineWritable = (record: EvalRecord, filename: string): vo
     }
 };
 
-export const writeResult = async (record: EvalRecord, filename?: string): Promise<string> => {
+export const writeResult = async (record: EvalRecord, filename?: string, gate?: string): Promise<string> => {
     const dir = join(resultsDir(), record.slug);
     await mkdir(dir, { recursive: true });
     const stamp = record.generatedAt.replace(/[:.]/g, '-');
@@ -222,7 +264,7 @@ export const writeResult = async (record: EvalRecord, filename?: string): Promis
     }
     const jsonPath = join(dir, name);
     await writeFile(jsonPath, `${JSON.stringify(record, null, 2)}\n`);
-    await writeFile(join(dir, 'summary.md'), formatSummary(record));
+    await writeFile(join(dir, 'summary.md'), formatSummary(record, gate));
     return jsonPath;
 };
 

@@ -1,0 +1,148 @@
+{
+  "generatedAt": "2026-09-12T17:43:54.262Z",
+  "engineVersion": "audiveris-5.11.0+svc-14",
+  "audiverisVersion": "- Version:      5.11.0",
+  "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
+  "limits": {
+    "exactFloor": 95,
+    "onGridFloor": 90,
+    "barsPerAllowedMiss": 16
+  },
+  "totals": {
+    "pieces": 6,
+    "piecesPassed": 2,
+    "refNotes": 2760,
+    "pitchMatch": 89.85507246376811,
+    "exact": 73.55072463768116,
+    "onGrid": 72.02898550724638,
+    "missing": 212,
+    "extra": 233
+  },
+  "pieces": [
+    {
+      "slug": "wtk1-prelude1",
+      "title": "Bach — WTC I Prelude 1 in C, BWV 846",
+      "pages": 2,
+      "pdfSha256": "0bc884049d69e9d3ec24b133467d8b8bfc0335e169a16cfd1075b329e7278449",
+      "referenceSha256": "874e07d0479542971bfceaf420d6117da8d602d89d26eea4610e7dd1ef58bf26",
+      "artifactHash": "8e33b6dcc1ffd7fbe78e50f4c756e498d76d7c26b82e5add61cd44b5283daebe",
+      "refNotes": 549,
+      "pitchMatch": 96.17486338797814,
+      "exact": 81.60291438979965,
+      "onGrid": 79.59927140255009,
+      "missing": 17,
+      "extra": 14,
+      "composite": 84.32604735883424,
+      "pass": false,
+      "failures": [
+        "wtk1-prelude1: bar-length-warning (measure_underfull + measure_overfull)",
+        "Praeludium I: bar-length (11 of 35 bars are not the printed length)",
+        "Praeludium I: notes-present (17 missing, 3 allowed)",
+        "Praeludium I: no-invented-notes (14 extra, 3 allowed)",
+        "Praeludium I: attack-grid (exact 81.6% vs floor 95.0%)",
+        "Praeludium I: note-length (onGrid 79.6% vs floor 90.0%)"
+      ]
+    },
+    {
+      "slug": "anna-magdalena-04",
+      "title": "Petzold / Bach — Menuet in G, BWV Anh. 114",
+      "pages": 1,
+      "pdfSha256": "ffa49fba93590b9558d9da9958691b2f37d45e66bcd75a3105a90e9c6a5588ac",
+      "referenceSha256": "fd87a6673e18104047842a1c858d2c9d8eb9ad845d7a8fa46e3664b17642cb75",
+      "artifactHash": "6e348238e2510e8f2aa679df44a32774dfeb57766e1aec506c178bf60aa4bde2",
+      "refNotes": 204,
+      "pitchMatch": 99.50980392156863,
+      "exact": 99.50980392156863,
+      "onGrid": 96.56862745098037,
+      "missing": 1,
+      "extra": 10,
+      "composite": 89.63235294117648,
+      "pass": true,
+      "failures": []
+    },
+    {
+      "slug": "anna-magdalena-05",
+      "title": "Bach — Menuet in G minor, BWV Anh. 115",
+      "pages": 1,
+      "pdfSha256": "b7517d33d10778a1425ecdee7c61af554091354329c1d2b38ea5a24ee4fba0d4",
+      "referenceSha256": "6584a133df31cc3635af7c616b14e8c67f8d99df96a91371c54daf3745d4f444",
+      "artifactHash": "7ddb313c62fc339f25d78a7d2ecd3061f0d4e58c723ad381353179c22cdd6cf3",
+      "refNotes": 199,
+      "pitchMatch": 100,
+      "exact": 100,
+      "onGrid": 97.48743718592965,
+      "missing": 0,
+      "extra": 12,
+      "composite": 90,
+      "pass": true,
+      "failures": []
+    },
+    {
+      "slug": "schumann-op68-01",
+      "title": "Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie)",
+      "pages": 1,
+      "pdfSha256": "a1740565e6e59a53f65fe32525810abe921bb15cbbd702f5a5f31deb63bc5aca",
+      "referenceSha256": "f05a2e1f1fa397f4617d13d6b7bf679550ad9ae8032ed8c6b0f8446d519f5419",
+      "artifactHash": "4b2b4fa4e2544bad2a4d6b248f7114cd4b053b1b12bb53a032bbb0b6754cd9a9",
+      "refNotes": 303,
+      "pitchMatch": 100,
+      "exact": 100,
+      "onGrid": 99.66996699669967,
+      "missing": 0,
+      "extra": 4,
+      "composite": 100,
+      "pass": false,
+      "failures": [
+        "Melodie: no-invented-notes (4 extra, 2 allowed)"
+      ]
+    },
+    {
+      "slug": "fur-elise-mutopia",
+      "title": "Beethoven — Für Elise, WoO 59 (Mutopia typeset)",
+      "pages": 3,
+      "pdfSha256": "c5b64f7ad614e8737ed4710e8b7ebeb8359e85c64935767b9e49bfd164b3eba4",
+      "referenceSha256": "1c12c21c7bbf4cf163896732672648a69d497636059837abd153c71abe50215a",
+      "artifactHash": "f285cff4991be86a62f8765975b60c18da82fe44665e9a55586137ce15c4a36f",
+      "refNotes": 905,
+      "pitchMatch": 72.15469613259668,
+      "exact": 31.933701657458563,
+      "onGrid": 30.497237569060765,
+      "missing": 192,
+      "extra": 192,
+      "composite": 61.783279474616904,
+      "pass": false,
+      "failures": [
+        "fur-elise-mutopia: bar-length-warning (measure_underfull + measure_overfull)",
+        "Poco moto: printed-bar-count (106 printed bars read)",
+        "Poco moto: bar-alignment (106 scored bars vs 105 reference bars)",
+        "Poco moto: bar-length (3 of 106 bars are not the printed length)",
+        "Poco moto: no-invented-hold (2 hold(s) in the slice)",
+        "Poco moto: notes-present (192 missing, 7 allowed)",
+        "Poco moto: no-invented-notes (192 extra, 7 allowed)",
+        "Poco moto: attack-grid (exact 31.9% vs floor 95.0%)",
+        "Poco moto: note-length (onGrid 30.5% vs floor 90.0%)"
+      ]
+    },
+    {
+      "slug": "chopin-prelude-4",
+      "title": "Chopin — Prelude in E minor, Op. 28 No. 4",
+      "pages": 1,
+      "pdfSha256": "82c1e275802774095293f83f5ed38720fd5527afcf8e2b1239c70de1ead4b239",
+      "referenceSha256": "c1d7e05aa4e6e2baeec2e9108402a969c16d5df302b82fd66d110634697f2e3b",
+      "artifactHash": "5e31303ed838bd60074a704a3e576644dd2b467b47d2960d8580b1f4b07fcae8",
+      "refNotes": 600,
+      "pitchMatch": 99,
+      "exact": 98,
+      "onGrid": 97,
+      "missing": 2,
+      "extra": 1,
+      "composite": 95.4,
+      "pass": false,
+      "failures": [
+        "chopin-prelude-4: bar-length-warning (measure_overfull)",
+        "Largo: bar-length (3 of 26 bars are not the printed length)",
+        "Largo: no-invented-hold (7 hold(s) in the slice)"
+      ]
+    }
+  ]
+}

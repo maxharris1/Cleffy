@@ -28,6 +28,8 @@ const entry: CorpusEntry = {
             expectedTempo: { min: 90, max: 110 },
             repeatsUnfoldedInMidi: false,
             performedBars: 3,
+            expectedHolds: 0,
+            expectedExtraNotes: 0,
         },
     ],
     editionNotes: [],
@@ -98,11 +100,11 @@ describe('compareScore', () => {
 
     it('pitchSim is 1 for identical multisets', () => {
         const notes = [
-            { onsetQ: 0, pitch: 60, hand: 0 as const },
-            { onsetQ: 1, pitch: 64, hand: 0 as const },
+            { onsetQ: 0, durQ: 1, pitch: 60, hand: 0 as const },
+            { onsetQ: 1, durQ: 1, pitch: 64, hand: 0 as const },
         ];
         expect(pitchSim(notes, notes)).toBe(1);
-        expect(pitchSim(notes, [{ onsetQ: 0, pitch: 61, hand: 0 }])).toBe(0);
+        expect(pitchSim(notes, [{ onsetQ: 0, durQ: 1, pitch: 61, hand: 0 }])).toBe(0);
     });
 
     it('skip is strictly dearer than a zero-similarity match', () => {

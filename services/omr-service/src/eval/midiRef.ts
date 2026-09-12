@@ -245,6 +245,21 @@ const place = (tick: number, tpq: number, beats: number, pickup: number): { bar:
 /** Snap an onset to 1/12 of a quarter so triplets stay exact. */
 export const quantizeOnset = (quarters: number): number => Math.round(quarters * 12) / 12;
 
+/**
+ * Snap a note LENGTH to 1/24 of a quarter. Coarser than the 1/12 onset grid is
+ * not an option: printed 32nd notes are 1/8 of a quarter, which is off the 1/12
+ * grid, and 3/8 pieces are full of them. 1/24 is the first grid that holds both
+ * the triplet family (1/6, 1/12) and the binary family (1/4, 1/8).
+ *
+ * This does not rescue every reference length. LilyPond realises a printed
+ * `\prall` or `\mordent` as a run of short notes in the MIDI, so a handful of
+ * reference notes carry a length no OMR reading of the engraved quarter-note
+ * can match. Those count as duration misses rather than being special-cased —
+ * under 1% of the corpus, and inventing an ornament classifier to forgive them
+ * would be fitting the scorer to the reference's quirks.
+ */
+export const quantizeDur = (quarters: number): number => Math.round(quarters * 24) / 24;
+
 export const notesFromMidi = (buf: Buffer, movement: CorpusMovement): RefNote[] => {
     const { tpq, tracks } = parseSmf(buf);
     const hands = handOf(tracks);

@@ -47,6 +47,28 @@ const movementSchema = z.object({
     repeatsUnfoldedInMidi: z.boolean(),
     /** How many bars a correct performance of the page should play. */
     performedBars: z.number().int().positive().optional(),
+    /**
+     * Fermatas printed in the movement. Read off the engraving, never inferred
+     * from MIDI wall-clock: Mutopia MIDI is notation-quantized and holds no
+     * fermata. The play-along gate is one-sided against it — a hold the page
+     * does not print is a wonky pause, a fermata OMR missed still plays the
+     * printed grid.
+     */
+    expectedHolds: z.number().int().nonnegative().default(0),
+    /**
+     * Notes a CORRECT performance adds that the reference MIDI does not contain,
+     * because LilyPond's MIDI ignores engraved ornament signs while Cleffy
+     * realizes them (`src/ornaments.ts`). Without this the gate would punish the
+     * parser for being right.
+     *
+     * Derived from the signs printed in the edition, never from the parser's
+     * output: a `\prall` (MusicXML inverted-mordent) or `\mordent` on a note long
+     * enough to host the figure becomes three notes via `realizeMordent`, so +2
+     * each; a `\turn` becomes four or five via `realizeTurn`, so +4 at the upper
+     * bound. A pin carrying `\trill` has to state its own bound — a trill fills
+     * the principal's whole span, so the count depends on the note value.
+     */
+    expectedExtraNotes: z.number().int().nonnegative().default(0),
 });
 
 const pdfSchema = z.object({
