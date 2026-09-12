@@ -44,6 +44,14 @@ runs only (the full bench is the orchestrator's).
   needs a voice that legitimately ends on the barline repaired, the follow-up is
   the deferred `voicesOf` cross-staff restructuring, not loosening the guard.
 
+## Full-bench outcome (orchestrator run at `fb3dcfe`, no --force-audiveris)
+
+**Suite onGrid 75.6% → 75.7%, pass 3/16 → 4/16.** Every prediction below landed
+and nothing else moved: schumann-op68-01 FAIL→pass (extras 4→2); bar-length
+chopin 3→1 of 26 (onGrid 97.0→97.3), invention-08 2→1, wtk1 11→7, bwv999 12→2;
+extras 409→407; missing unchanged at 365; all previously passing pieces green.
+Fully attributed — no unexplained deltas.
+
 ## Expected full-bench outcome (to be attributed against)
 
 - schumann-op68-01 flips to pass → **4/16**; no other gate flips expected.

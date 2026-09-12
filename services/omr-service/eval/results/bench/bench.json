@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-12T18:37:02.555Z",
+  "generatedAt": "2026-09-12T21:04:21.916Z",
   "engineVersion": "audiveris-5.11.0+svc-14",
   "audiverisVersion": "- Version:      5.11.0",
   "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
@@ -10,13 +10,13 @@
   },
   "totals": {
     "pieces": 16,
-    "piecesPassed": 3,
+    "piecesPassed": 4,
     "refNotes": 5996,
     "pitchMatch": 86.55770513675783,
     "exact": 76.70113408939292,
-    "onGrid": 75.61707805203469,
+    "onGrid": 75.65043362241494,
     "missing": 365,
-    "extra": 409
+    "extra": 407
   },
   "pieces": [
     {
@@ -119,7 +119,7 @@
       "pass": false,
       "failures": [
         "bach-invention-08: bar-length-warning (measure_underfull + measure_overfull)",
-        "Invention 8: bar-length (2 of 34 bars are not the printed length)"
+        "Invention 8: bar-length (1 of 34 bars are not the printed length)"
       ]
     },
     {
@@ -139,7 +139,7 @@
       "pass": false,
       "failures": [
         "bach-prelude-bwv999: bar-length-warning (measure_overfull)",
-        "Prelude: bar-length (12 of 43 bars are not the printed length)",
+        "Prelude: bar-length (2 of 43 bars are not the printed length)",
         "Prelude: notes-present (76 missing, 3 allowed)",
         "Prelude: no-invented-notes (76 extra, 3 allowed)",
         "Prelude: attack-grid (exact 0.4% vs floor 95.0%)",
@@ -163,7 +163,7 @@
       "pass": false,
       "failures": [
         "wtk1-prelude1: bar-length-warning (measure_underfull + measure_overfull)",
-        "Praeludium I: bar-length (11 of 35 bars are not the printed length)",
+        "Praeludium I: bar-length (7 of 35 bars are not the printed length)",
         "Praeludium I: notes-present (17 missing, 3 allowed)",
         "Praeludium I: no-invented-notes (14 extra, 3 allowed)",
         "Praeludium I: attack-grid (exact 81.6% vs floor 95.0%)",
@@ -253,12 +253,10 @@
       "exact": 100,
       "onGrid": 99.66996699669967,
       "missing": 0,
-      "extra": 4,
+      "extra": 2,
       "composite": 100,
-      "pass": false,
-      "failures": [
-        "Melodie: no-invented-notes (4 extra, 2 allowed)"
-      ]
+      "pass": true,
+      "failures": []
     },
     {
       "slug": "schumann-op68-05",
@@ -323,7 +321,7 @@
       "onGrid": 30.497237569060765,
       "missing": 192,
       "extra": 192,
-      "composite": 61.783279474616904,
+      "composite": 61.85403419159804,
       "pass": false,
       "failures": [
         "fur-elise-mutopia: bar-length-warning (measure_underfull + measure_overfull)",
@@ -347,14 +345,14 @@
       "refNotes": 600,
       "pitchMatch": 99,
       "exact": 98,
-      "onGrid": 97,
+      "onGrid": 97.33333333333333,
       "missing": 2,
       "extra": 1,
       "composite": 95.4,
       "pass": false,
       "failures": [
         "chopin-prelude-4: bar-length-warning (measure_overfull)",
-        "Largo: bar-length (3 of 26 bars are not the printed length)"
+        "Largo: bar-length (1 of 26 bars are not the printed length)"
       ]
     }
   ]
