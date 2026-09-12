@@ -84,6 +84,17 @@ const voicesOf = (raw: RawMeasure): Map<string, Item[]> => {
 
 const sumOf = (items: readonly Item[]): number => items.reduce((acc, item) => acc + item.principal.dur, 0);
 
+/** The last tick the voice is still sounding — chord members included. */
+const extentOf = (items: readonly Item[]): number =>
+    items.reduce(
+        (acc, item) =>
+            item.members.reduce(
+                (end, member) => Math.max(end, member.rel + member.dur),
+                Math.max(acc, item.principal.rel + item.principal.dur),
+            ),
+        0,
+    );
+
 /** Onset rels after applying `candidate`, i.e. the rhythm the voice would then have. */
 const patternAfter = (items: readonly Item[], candidate: Candidate): number[] => {
     const rels = items.map((item) => item.principal.rel);
@@ -449,6 +460,14 @@ export const repairRhythm = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Si
         for (const [key, items] of voicesOf(raw)) {
             const sum = sumOf(items);
             if (sum === expected || sum === 0) {
+                continue;
+            }
+            // A voice whose last sound releases on the barline is not short,
+            // whatever its durations add up to: the difference is a <forward>
+            // it entered late after, or a chord member read onto this staff
+            // from the other one — never a lost symbol. Editing it could only
+            // push sound past the bar.
+            if (extentOf(items) === expected) {
                 continue;
             }
             const witnesses = neighbourPatterns(raws, sigs, pos, key, expected);
