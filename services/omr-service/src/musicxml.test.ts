@@ -789,6 +789,27 @@ describe('meter reconciliation', () => {
         expect(score.warnings).toContain('meter_corrected');
     });
 
+    it('reads 3/4 misdeclared as 4/4 from a majority of short bars', () => {
+        const score = parseMusicXmlString(
+            spanOf(
+                4,
+                4,
+                Array.from({ length: 12 }, () => 12),
+            ),
+        );
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 3, den: 4 }]);
+        expect(score.warnings).toContain('meter_corrected');
+        expect(score.measures.every((m) => m.dTicks === 1440)).toBe(true);
+        expect(score.warnings).not.toContain('measure_underfull');
+    });
+
+    it('does not shrink a genuine 4/4 just because a few bars dropped a beat', () => {
+        const lengths = [...Array.from({ length: 30 }, () => 16), ...Array.from({ length: 4 }, () => 12)];
+        const score = parseMusicXmlString(spanOf(4, 4, lengths));
+        expect(score.timeSignatures).toEqual([{ tick: 0, num: 4, den: 4 }]);
+        expect(score.warnings).not.toContain('meter_corrected');
+    });
+
     it('judges each meter span separately', () => {
         // 10 genuine 3/4 bars, then a change to 6/8 whose bars are really 9/8.
         const first = Array.from({ length: 10 }, (_, i) => bar(12, i === 0 ? ATTRS(3, 4) : '')).join('');
@@ -978,6 +999,32 @@ describe('tempo', () => {
         );
         expect(score.holds).toHaveLength(1);
     });
+
+    it('drops an inverted fermata on a short note, the Audiveris false-positive', () => {
+        const score = parseMusicXmlString(
+            wrap(
+                `<measure>${ATTRS_44}${note('C', 4, 2, '<notations><fermata type="inverted"/></notations>')}${note('E', 4, 14)}</measure>`,
+            ),
+        );
+        expect(score.holds).toEqual([]);
+    });
+
+    it('keeps an inverted fermata on a long note, and an upright one on a short note', () => {
+        const invertedHalf = parseMusicXmlString(
+            wrap(
+                `<measure>${ATTRS_44}${note('C', 4, 8, '<notations><fermata type="inverted"/></notations>')}${note('E', 4, 8)}</measure>`,
+            ),
+        );
+        expect(invertedHalf.holds).toEqual([{ tick: 0, beats: 2 }]);
+
+        const uprightEighth = parseMusicXmlString(
+            wrap(
+                `<measure>${ATTRS_44}${note('C', 4, 2, '<notations><fermata type="upright"/></notations>')}${note('E', 4, 14)}</measure>`,
+            ),
+        );
+        expect(uprightEighth.holds).toEqual([{ tick: 0, beats: 0.5 }]);
+    });
+
 
     const bpmOf = (text: string): number | undefined =>
         parseMusicXmlString(wrap(bar(`${ATTRS_44}${words(text)}`) + bar())).tempos[0]?.bpm;
