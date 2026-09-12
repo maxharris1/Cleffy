@@ -1,14 +1,16 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { PlayheadController } from '@/features/playback/PlayheadController';
 import { measureIndexAtPagePoint, measureStartTick } from '@/features/playback/scoreTime';
 import {
+    PAGE_GAP,
     clampScroll,
     computeDocumentLayout,
     fitPageWidthScale,
     focusedPageIndex,
+    pageTurnView,
     viewportToPagePoint,
     visiblePageRange,
     zoomAt,
@@ -33,7 +35,7 @@ import { isTextPayload } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
+import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
 
 /** Fingering feature loads on first use — keeps it out of the viewer bundle. */
 const FingeringFlow = lazy(() =>
@@ -45,6 +47,44 @@ const RENDER_SETTLE_MS = 200;
 
 /** Default text-note size as a fraction of page width. */
 const DEFAULT_TEXT_SIZE = 0.018;
+
+/**
+ * A tap in the left/right margin strip of the viewport turns the page (the
+ * sheet-music-reader convention). Kept narrow so a tap on the first or last
+ * bar of a system still seeks during play-along.
+ */
+const edgeTapStripPx = (viewportWidth: number): number => Math.min(64, Math.max(36, viewportWidth * 0.08));
+
+/**
+ * Keys that turn pages — every mode a Bluetooth page-turner pedal ships in
+ * (arrows, PageUp/Down) plus Space, as on a keyboard.
+ */
+const pageTurnDirection = (e: KeyboardEvent): -1 | 1 | null => {
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+        return null;
+    }
+    switch (e.key) {
+        case 'ArrowRight':
+        case 'ArrowDown':
+        case 'PageDown':
+            return e.shiftKey ? null : 1;
+        case 'ArrowLeft':
+        case 'ArrowUp':
+        case 'PageUp':
+            return e.shiftKey ? null : -1;
+        case ' ':
+            return e.shiftKey ? -1 : 1;
+        default:
+            return null;
+    }
+};
+
+/** Keys aimed at a control or a dialog belong to it, not to page turning. */
+const keyTargetsControl = (target: EventTarget | null): boolean =>
+    target instanceof Element &&
+    target.closest(
+        'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"]',
+    ) !== null;
 
 interface ViewportSize {
     width: number;
@@ -87,6 +127,7 @@ export interface PdfViewportProps {
 export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
+    const pageColumns = useViewerStore((s) => s.pageColumns);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
@@ -95,7 +136,10 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
 
-    const layout: DocumentLayout = useMemo(() => computeDocumentLayout(pageSizes), [pageSizes]);
+    const layout: DocumentLayout = useMemo(
+        () => computeDocumentLayout(pageSizes, pageColumns),
+        [pageSizes, pageColumns],
+    );
 
     // Annotation store + canvas registry — stable per mounted document, safe to
     // create during render (neither touches refs).
@@ -176,6 +220,40 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         setRenderScale(scale);
     }, [status, viewportSize, layout]);
 
+    /**
+     * Turn one row of pages. Reads live refs so the once-bound gesture
+     * controller and the keyboard listener always run the current geometry.
+     * Counts as a user gesture for auto-follow, exactly like a manual pan.
+     */
+    const turnPage = useCallback((direction: -1 | 1) => {
+        const { view: v, setView } = useViewerStore.getState();
+        const { width, height } = viewportSizeRef.current;
+        const current = focusedPageIndex(v, height, layoutRef.current.layouts);
+        const next = pageTurnView(v, layoutRef.current, current, direction, width, height);
+        if (!next) {
+            return;
+        }
+        playheadControllerRef.current?.notifyUserGesture();
+        setView(next.view);
+    }, []);
+
+    /**
+     * Switch between one and two pages per row, keeping the reader's place: the
+     * page nearest the viewport centre lands at the top of the re-fitted view.
+     */
+    const togglePageColumns = () => {
+        const { view: v, setView, setPageColumns } = useViewerStore.getState();
+        const { width, height } = viewportSize;
+        const next = pageColumns === 1 ? 2 : 1;
+        const nextLayout = computeDocumentLayout(pageSizes, next);
+        const focused = focusedPageIndex(v, height, layout.layouts);
+        const scale = fitPageWidthScale(nextLayout, width);
+        const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
+        setPageColumns(next);
+        setView(clampScroll({ scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale }, nextLayout, width, height));
+        setRenderScale(scale);
+    };
+
     // Crisp bitmap re-render shortly after zoom settles (canvases CSS-stretch meanwhile).
     useEffect(() => {
         if (view.scale === renderScale) {
@@ -233,6 +311,17 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 // Bitmap refresh is handled by the settle timer on scale change.
             },
             onTap: (x, y) => {
+                // A tap in the margin strip turns the page, whatever the tool:
+                // only pointers the ink layer declined get here.
+                const strip = edgeTapStripPx(viewportSizeRef.current.width);
+                if (x < strip) {
+                    turnPage(-1);
+                    return;
+                }
+                if (x > viewportSizeRef.current.width - strip) {
+                    turnPage(1);
+                    return;
+                }
                 // Tap a measure to seek there — with the pan tool (or as a
                 // read-only viewer, whose taps can't mean anything else).
                 const feature = playbackRef.current;
@@ -319,6 +408,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         annotationStore,
         registry,
         docId,
+        turnPage,
         syncUserId,
         syncName,
         syncIsAnonymous,
@@ -362,9 +452,18 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         return () => clearTimeout(timer);
     }, [view, viewportSize.height, layout]);
 
-    // Undo/redo keyboard shortcuts.
+    // Keyboard: page turns (any role — pedals send these keys) and undo/redo.
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
+            if (e.defaultPrevented || keyTargetsControl(e.target)) {
+                return;
+            }
+            const direction = pageTurnDirection(e);
+            if (direction !== null) {
+                e.preventDefault();
+                turnPage(direction);
+                return;
+            }
             if (readOnlyRef.current || !(e.metaKey || e.ctrlKey)) {
                 return;
             }
@@ -379,7 +478,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [annotationStore]);
+    }, [annotationStore, turnPage]);
 
     const commitText = (text: string) => {
         if (!textIntent || textIntentHandled.current) {
@@ -538,8 +637,12 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             const zoomed = zoomAt(v, v.scale * factor, viewportSize.width / 2, viewportSize.height / 2);
                             setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height));
                         }}
+                        pageColumns={layout.layouts.length > 1 ? pageColumns : null}
+                        onTogglePageColumns={togglePageColumns}
                     />
-                    {layout.layouts.length > 1 ? <PageChip pageCount={layout.layouts.length} /> : null}
+                    {layout.layouts.length > 1 ? (
+                        <Pager layout={layout} viewportSize={viewportSize} onTurn={turnPage} />
+                    ) : null}
                 </>
             )}
         </div>
@@ -569,7 +672,14 @@ const ReadOnlyFingeringToggle = () => {
                         : 'border-stone-200 bg-white/95 text-stone-600 hover:bg-white'
                 }`}
             >
-                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+                <svg
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    aria-hidden
+                >
                     <rect x="4" y="5" width="16" height="14" rx="1.5" />
                     <path strokeLinecap="round" strokeWidth="2.5" d="M9.33 5.5v6M14.67 5.5v6" />
                 </svg>
@@ -579,41 +689,91 @@ const ReadOnlyFingeringToggle = () => {
     );
 };
 
-/** Floating "p. 3 / 12" position chip — reads the debounced focused page. */
-const PageChip = ({ pageCount }: { pageCount: number }) => {
+/**
+ * Floating pager: previous / "p. 3 / 12" / next. Big round targets so a
+ * player can hit them without looking away from the music. Reads the
+ * debounced focused page, which is also what decides the ends.
+ */
+const Pager = ({
+    layout,
+    viewportSize,
+    onTurn,
+}: {
+    layout: DocumentLayout;
+    viewportSize: ViewportSize;
+    onTurn: (direction: -1 | 1) => void;
+}) => {
     const pageIndex = useViewerStore((s) => s.focusedPageIndex);
+    const view = useViewerStore((s) => s.view);
+    const pageCount = layout.layouts.length;
+    const canTurn = (direction: -1 | 1) =>
+        pageTurnView(view, layout, pageIndex, direction, viewportSize.width, viewportSize.height) !== null;
     return (
         <div
             data-ui-overlay
-            className="pointer-events-none absolute left-2 top-2 z-10 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-4 sm:top-auto"
+            className="absolute left-2 top-2 z-10 flex items-center gap-1 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:left-4 sm:top-auto"
         >
+            <button
+                type="button"
+                aria-label="Previous page"
+                disabled={!canTurn(-1)}
+                onClick={() => onTurn(-1)}
+                className={pagerButtonClassName}
+            >
+                <ChevronLeftIcon size={20} />
+            </button>
             <span className="rounded-full border border-stone-200 bg-white/95 px-2.5 py-1 text-xs font-medium tabular-nums text-stone-600 shadow-sm">
                 p. {Math.min(pageIndex + 1, pageCount)} / {pageCount}
             </span>
+            <button
+                type="button"
+                aria-label="Next page"
+                disabled={!canTurn(1)}
+                onClick={() => onTurn(1)}
+                className={pagerButtonClassName}
+            >
+                <ChevronRightIcon size={20} />
+            </button>
         </div>
     );
 };
 
-const ZoomControls = ({ onZoomBy }: { onZoomBy: (factor: number) => void }) => {
+const roundControlClassName =
+    'flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100';
+
+const pagerButtonClassName = `${roundControlClassName} disabled:opacity-40 disabled:active:bg-white`;
+
+const ZoomControls = ({
+    onZoomBy,
+    pageColumns,
+    onTogglePageColumns,
+}: {
+    onZoomBy: (factor: number) => void;
+    /** Null hides the one/two-page toggle (single-page documents). */
+    pageColumns: 1 | 2 | null;
+    onTogglePageColumns: () => void;
+}) => {
     return (
         <div
             data-ui-overlay
             className="absolute bottom-[calc(4.5rem+var(--safe-bottom))] right-4 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))]"
         >
-            <button
-                type="button"
-                aria-label="Zoom in"
-                onClick={() => onZoomBy(1.25)}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100"
-            >
+            {pageColumns !== null ? (
+                <button
+                    type="button"
+                    aria-label={pageColumns === 2 ? 'Show one page' : 'Show two pages side by side'}
+                    title={pageColumns === 2 ? 'Show one page' : 'Show two pages side by side'}
+                    aria-pressed={pageColumns === 2}
+                    onClick={onTogglePageColumns}
+                    className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
+                >
+                    <Columns2Icon size={20} />
+                </button>
+            ) : null}
+            <button type="button" aria-label="Zoom in" onClick={() => onZoomBy(1.25)} className={roundControlClassName}>
                 <ZoomInIcon size={20} />
             </button>
-            <button
-                type="button"
-                aria-label="Zoom out"
-                onClick={() => onZoomBy(0.8)}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-stone-700 shadow-md transition active:bg-stone-100"
-            >
+            <button type="button" aria-label="Zoom out" onClick={() => onZoomBy(0.8)} className={roundControlClassName}>
                 <ZoomOutIcon size={20} />
             </button>
         </div>

@@ -39,6 +39,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { MusicIcon } from '@/ui/icons';
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
@@ -82,6 +83,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
     const [shareOpen, setShareOpen] = useState(false);
     const [notesOpen, setNotesOpen] = useState(false);
+    // Play-along transport: hidden until the reader asks for it. Nothing about
+    // the analysis starts on its own — Generate inside the panel is the only
+    // thing that requests an OMR run.
+    const [playAlongOpen, setPlayAlongOpen] = useState(false);
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     const [staleBytes, setStaleBytes] = useState(false);
@@ -113,6 +118,16 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // Play-along: analysis lifecycle + the audio engine for this document.
     const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, true);
     const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
+    const analysisInFlight = analysisState.kind === 'pending' || analysisState.kind === 'processing';
+
+    const togglePlayAlong = () => {
+        if (playAlongOpen) {
+            // Closing the panel takes its controls away — never leave audio
+            // running with nothing on screen to stop it.
+            getEngine()?.pause();
+        }
+        setPlayAlongOpen(!playAlongOpen);
+    };
 
     useEffect(() => {
         let cancelled = false;
@@ -138,7 +153,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 perfMark('viewer-cache-paint');
             }
 
-            const [docResult, roleResult] = await Promise.allSettled([fetchDocument(docId), fetchMyRole(docId, userId)]);
+            const [docResult, roleResult] = await Promise.allSettled([
+                fetchDocument(docId),
+                fetchMyRole(docId, userId),
+            ]);
             if (cancelled) {
                 return;
             }
@@ -226,9 +244,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 // answered", and a missing stored role must not grant writes.
                 return;
             }
-            setLoadError(
-                docResult.reason instanceof Error ? docResult.reason.message : 'Could not open this score.',
-            );
+            setLoadError(docResult.reason instanceof Error ? docResult.reason.message : 'Could not open this score.');
         })();
 
         // Resist storage eviction — annotations and cached scores must survive
@@ -339,6 +355,35 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 >
                     Notes
                 </button>
+                {analysisState.kind !== 'unavailable' ? (
+                    <button
+                        type="button"
+                        title={
+                            playAlongOpen
+                                ? 'Hide the play-along panel'
+                                : 'Play-along — listen to the score, or generate it'
+                        }
+                        aria-label="Play-along"
+                        aria-expanded={playAlongOpen}
+                        aria-controls="play-along-bar"
+                        onClick={togglePlayAlong}
+                        className={buttonClassName(
+                            'ghost',
+                            'sm',
+                            'relative aria-expanded:bg-accent-soft aria-expanded:text-accent',
+                        )}
+                    >
+                        <MusicIcon size={16} />
+                        <span className="hidden sm:inline">Play-along</span>
+                        {analysisInFlight ? (
+                            <span
+                                aria-hidden="true"
+                                title="Analyzing score…"
+                                className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-accent"
+                            />
+                        ) : null}
+                    </button>
+                ) : null}
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 {!state.provisional ? <ShareExportMenu docId={docId} title={state.doc.title} /> : null}
                 {!state.provisional && state.role === 'owner' ? (
@@ -368,7 +413,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         docId={docId}
                         readOnly={readOnly}
                         onStoreReady={onStoreReady}
-                        playback={playbackFeature}
+                        // Playhead, loop tint and tap-to-seek live only while
+                        // the transport is on screen to drive them.
+                        playback={playAlongOpen ? playbackFeature : undefined}
                         sync={
                             // Not while provisional: the engine would start,
                             // then tear down and restart when the confirmed
@@ -389,15 +436,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     />
                 </PdfProvider>
             </div>
-            <TransportBar
-                state={analysisState}
-                role={state.role}
-                onGenerate={() => void generate()}
-                getEngine={getEngine}
-                pageCount={state.doc.page_count}
-                warning={warning}
-                onDismissWarning={dismissWarning}
-            />
+            {playAlongOpen ? (
+                <div id="play-along-bar" className="flex-none">
+                    <TransportBar
+                        state={analysisState}
+                        role={state.role}
+                        onGenerate={() => void generate()}
+                        getEngine={getEngine}
+                        pageCount={state.doc.page_count}
+                        warning={warning}
+                        onDismissWarning={dismissWarning}
+                    />
+                </div>
+            ) : null}
             {shareOpen && resolvedUserId ? (
                 <ShareDialog docId={docId} userId={resolvedUserId} onClose={() => setShareOpen(false)} />
             ) : null}

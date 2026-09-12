@@ -12,7 +12,6 @@ import {
     readCachedLibraryList,
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
-import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -152,9 +151,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 setUploadPct(pct);
             });
             rememberNewScore(before, document);
-            // Kick off play-along analysis in the background; the viewer's
-            // transport bar reports progress and offers a retry on failure.
-            void requestScoreAnalysis(document.id).catch(() => undefined);
+            // Play-along analysis is never started here: it costs an OMR run,
+            // so only the viewer's Generate button requests it.
             // Free, local prescan: does this score already carry colored-ink
             // markings? If so (and the user never declined), offer the import.
             try {
@@ -201,7 +199,6 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 };
             }
             rememberNewScore(before, result.document);
-            void requestScoreAnalysis(result.document.id).catch(() => undefined);
             navigate(`/doc/${result.document.id}`);
             return { ok: true as const };
         } catch (err) {
