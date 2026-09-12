@@ -39,6 +39,8 @@ const MOVEMENT: CorpusMovement = {
     expectedFifths: 0,
     expectedTempo: { min: 60, max: 120 },
     repeatsUnfoldedInMidi: false,
+    expectedHolds: 0,
+    expectedExtraNotes: 0,
 };
 
 describe('midiRef', () => {

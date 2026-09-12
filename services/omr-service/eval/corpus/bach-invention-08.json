@@ -1,0 +1,41 @@
+{
+    "slug": "bach-invention-08",
+    "title": "Bach — Invention 8 in F, BWV 779",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV779/bach-invention-08/bach-invention-08-let.pdf",
+        "sha256": "5323449d08aa5031e974e275f182bebf8f533ecf62e5f9b0c9c36364f4b66469",
+        "pages": 2
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV779/bach-invention-08/bach-invention-08.mid",
+        "sha256": "07238719180171f76283756405ee43a0319226e869283bf29affb9e4c360e6f8",
+        "license": "Public Domain (Mutopia 2008/06/15-61, Allen Garvin after Bach-Gesellschaft). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Invention 8",
+            "midi": "bach-invention-08.mid",
+            "meter": {
+                "num": 3,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 34,
+            "expectedFifths": -1,
+            "expectedTempo": {
+                "min": 70,
+                "max": 110
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 34,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "3/4, F major (expectedFifths -1). 34 bars, no repeats, no ornament signs, no fermatas — the cleanest entry in the suite and the control for 'does the harness agree with itself when nothing is hard'.",
+        "No printed metronome mark; the \\midi block asks for 90 to the quarter. expectedTempo is a band around it, and tempoInRange is a diagnostic.",
+        "pdf.sha256 pins the Mutopia letter PDF (2 pages). Do not embed document UUIDs."
+    ]
+}

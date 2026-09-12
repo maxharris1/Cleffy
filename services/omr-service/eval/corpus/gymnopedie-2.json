@@ -1,0 +1,42 @@
+{
+    "slug": "gymnopedie-2",
+    "title": "Satie — Gymnopédie No. 2",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/SatieE/gymnopedie_2/gymnopedie_2-let.pdf",
+        "sha256": "d23906c422539128fe0e5106a4ebf8ea7f8273a60c3f2dbcf4c7f5f46363acb6",
+        "pages": 2
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/SatieE/gymnopedie_2/gymnopedie_2.mid",
+        "sha256": "02e8ae8d7e1f6073f12f62a61a63cf07b260a1cf49f4a9008ee4e3f8e1934d30",
+        "license": "Public Domain (Mutopia 2012/12/23-38, Evin Robertson after the Dover edition). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Gymnopedie 2",
+            "midi": "gymnopedie_2.mid",
+            "meter": {
+                "num": 3,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 65,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 50,
+                "max": 100
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 65,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "3/4, A minor (expectedFifths 0), 65 bars, no repeats. The only non-Germanic idiom in the suite.",
+        "A very wide left hand alternating bass and mid-register chords under long right-hand notes, held across barlines. That texture is where staff is least likely to equal hand, so the Mutopia track order is doing real work here.",
+        "No printed metronome mark, so expectedTempo is a wide band and tempoInRange is a diagnostic only.",
+        "pdf.sha256 pins the Mutopia letter PDF (2 pages). Do not embed document UUIDs."
+    ]
+}

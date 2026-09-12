@@ -7,10 +7,12 @@
       "refBars": 2,
       "omrPrintedBars": 2,
       "omrPerformedBars": 2,
+      "scoredBars": 2,
       "refNotes": 4,
       "omrNotes": 4,
       "pitchMatch": 100,
       "exact": 100,
+      "onGrid": 100,
       "missing": 0,
       "extra": 0,
       "octave": 0,
@@ -20,13 +22,22 @@
       "refOnly": 0,
       "omrOnly": 0,
       "merge2": 0,
+      "maxRefOnlyRun": 0,
       "barsAtCorrectLength": 2,
+      "barsWrongLength": 0,
+      "printedBarsMatch": true,
+      "refBarsMatch": true,
+      "extraUnexplained": 0,
+      "holds": 0,
+      "holdsOk": true,
       "melodySurvival": 100,
       "melodyTotal": 2,
       "melodyFound": 2,
       "barsUnderWrongKey": 0,
       "tempoInRange": true,
       "tempoBpm": 100,
+      "printedTempoBpm": null,
+      "printedTempoInRange": false,
       "performedBarsMatch": true,
       "velocityDistinct": 1
     }
@@ -36,6 +47,7 @@
     "omrNotes": 4,
     "pitchMatch": 100,
     "exact": 100,
+    "onGrid": 100,
     "missing": 0,
     "extra": 0,
     "octave": 0,
@@ -48,7 +60,14 @@
     "warnings": [
       "no_geometry",
       "pedal_inferred"
-    ]
+    ],
+    "flags": {
+      "measureUnderfull": false,
+      "measureOverfull": false,
+      "tempoDefaulted": false,
+      "repeatsIgnored": false,
+      "jumpsIgnored": false
+    }
   },
   "bars": {
     "I": [
@@ -71,6 +90,7 @@
         "handErr": 0,
         "pitchMatched": 2,
         "exact": 2,
+        "onGrid": 2,
         "refCount": 2,
         "omrCount": 2
       },
@@ -93,17 +113,18 @@
         "handErr": 0,
         "pitchMatched": 2,
         "exact": 2,
+        "onGrid": 2,
         "refCount": 2,
         "omrCount": 2
       }
     ]
   },
   "composite": 100,
-  "generatedAt": "2026-09-09T00:00:00.000Z",
-  "engineVersion": "audiveris-5.11.0+svc-11",
+  "generatedAt": "2026-09-12T17:43:14.527Z",
+  "engineVersion": "audiveris-5.11.0+svc-14",
   "candidateSource": "artifacts",
   "audiverisCacheHit": null,
   "artifactHash": "3abda1691aa35bf449bd2b17f3703dece4ceee9281e25212d34403fd7f12e47e",
   "audiverisVersion": null,
-  "audiverisOptions": "-option Book.Lyrics=false"
+  "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true"
 }

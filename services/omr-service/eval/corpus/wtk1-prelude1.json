@@ -9,24 +9,34 @@
     "reference": {
         "source": "mutopia",
         "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV846/wtk1-prelude1/wtk1-prelude1.mid",
-        "sha256": "0340751d717f76eb1688ed9748ec31229889f7ce2806b7bb96a71858a5f4f69e",
-        "license": "Public Domain (Mutopia 2011/09/12-5, Tobias Erbsland after Shay Rojansky / Han-Wen Nienhuys). Local zip is wtk1-prelude1.mid, not a Mutopia-hosted archive."
+        "sha256": "874e07d0479542971bfceaf420d6117da8d602d89d26eea4610e7dd1ef58bf26",
+        "license": "Public Domain (Mutopia 2011/09/12-5, Tobias Erbsland after Shay Rojansky / Han-Wen Nienhuys). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
     },
     "movements": [
         {
             "name": "Praeludium I",
             "midi": "wtk1-prelude1.mid",
-            "meter": { "num": 4, "den": 4 },
+            "meter": {
+                "num": 4,
+                "den": 4
+            },
             "pickupQuarters": 0,
             "printedBars": 35,
             "expectedFifths": 0,
-            "expectedTempo": { "min": 50, "max": 80 },
+            "expectedTempo": {
+                "min": 50,
+                "max": 80
+            },
             "repeatsUnfoldedInMidi": false,
-            "performedBars": 35
+            "performedBars": 35,
+            "expectedHolds": 1,
+            "expectedExtraNotes": 0
         }
     ],
     "editionNotes": [
         "LilyPond \\tempo 4 = 60 in 4/4, C major. 35 printed bars, no repeats. MIDI last duration is 140 quarters (35 bars).",
-        "pdf.sha256 pins the Mutopia letter PDF (2 pages). Do not embed document UUIDs."
+        "One printed fermata: the .ly marks \\fermata on the final chord in BOTH staves, which is one clock stop at one tick, not two. expectedHolds counts clock stops.",
+        "pdf.sha256 pins the Mutopia letter PDF (2 pages). Do not embed document UUIDs.",
+        "No ornament signs, so expectedExtraNotes is 0. The final chord does carry \\arpeggio in both staves; Cleffy rolls it (arpeggiateChord) while the reference plays it as a block, which costs a handful of onset matches in the last bar. That is a reference limitation, not slack worth pinning."
     ]
 }

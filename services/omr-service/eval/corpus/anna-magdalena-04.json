@@ -9,25 +9,33 @@
     "reference": {
         "source": "mutopia",
         "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh114/anna-magdalena-04/anna-magdalena-04.mid",
-        "sha256": "ac8583129e9ff39343cf540927b5162a9902203ee697cb8f77fea3c10f5c9c2c",
-        "license": "Public Domain (Mutopia 2017/01/19-75, Allen Garvin after Bach-Gesellschaft). Local zip is anna-magdalena-04.mid, not a Mutopia-hosted archive."
+        "sha256": "fd87a6673e18104047842a1c858d2c9d8eb9ad845d7a8fa46e3664b17642cb75",
+        "license": "Public Domain (Mutopia 2017/01/19-75, Allen Garvin after Bach-Gesellschaft). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
     },
     "movements": [
         {
             "name": "Menuet in G",
             "midi": "anna-magdalena-04.mid",
-            "meter": { "num": 3, "den": 4 },
+            "meter": {
+                "num": 3,
+                "den": 4
+            },
             "pickupQuarters": 0,
             "printedBars": 32,
             "expectedFifths": 1,
-            "expectedTempo": { "min": 120, "max": 160 },
+            "expectedTempo": {
+                "min": 120,
+                "max": 160
+            },
             "repeatsUnfoldedInMidi": false,
-            "performedBars": 64
+            "performedBars": 64,
+            "expectedExtraNotes": 10
         }
     ],
     "editionNotes": [
         "LilyPond \\tempo 4 = 140 in 3/4, G major. Two \\repeat volta 2 blocks of 16 bars (printed 32; performed 64). Mutopia MIDI does not unfold them.",
         "Attributed to Christian Petzold; Mutopia still files it under BachJS BWV Anh. 114.",
-        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs.",
+        "Five printed ornament signs (1 \\prall + 4 \\mordent). Cleffy realizes each as three notes (src/ornaments.ts realizeMordent) while LilyPond's MIDI leaves them as the plain principal, so a correct reading adds 2 notes per sign: expectedExtraNotes 10."
     ]
 }
