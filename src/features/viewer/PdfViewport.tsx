@@ -15,6 +15,7 @@ import {
     visiblePageRange,
     zoomAt,
     type DocumentLayout,
+    type PageColumns,
 } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
@@ -35,7 +36,7 @@ import { isTextPayload } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
+import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, CoverPageIcon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
 
 /** Fingering feature loads on first use — keeps it out of the viewer bundle. */
 const FingeringFlow = lazy(() =>
@@ -128,6 +129,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
     const pageColumns = useViewerStore((s) => s.pageColumns);
+    const spreadCover = useViewerStore((s) => s.spreadCover);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
@@ -137,8 +139,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const didFitRef = useRef(false);
 
     const layout: DocumentLayout = useMemo(
-        () => computeDocumentLayout(pageSizes, pageColumns),
-        [pageSizes, pageColumns],
+        () => computeDocumentLayout(pageSizes, pageColumns, spreadCover),
+        [pageSizes, pageColumns, spreadCover],
     );
 
     // Annotation store + canvas registry — stable per mounted document, safe to
@@ -238,21 +240,29 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     }, []);
 
     /**
-     * Switch between one and two pages per row, keeping the reader's place: the
-     * page nearest the viewport centre lands at the top of the re-fitted view.
+     * Re-lay the document out, keeping the reader's place: the page nearest the
+     * viewport centre lands at the top of the re-fitted view. Shared by both
+     * layout switches — the page nearest the centre stays the page in view
+     * whether its row changed shape or moved down by one.
      */
-    const togglePageColumns = () => {
-        const { view: v, setView, setPageColumns } = useViewerStore.getState();
+    const relayout = (columns: PageColumns, coverPage: boolean) => {
+        const { view: v, setView, setPageColumns, setSpreadCover } = useViewerStore.getState();
         const { width, height } = viewportSize;
-        const next = pageColumns === 1 ? 2 : 1;
-        const nextLayout = computeDocumentLayout(pageSizes, next);
+        const nextLayout = computeDocumentLayout(pageSizes, columns, coverPage);
         const focused = focusedPageIndex(v, height, layout.layouts);
         const scale = fitPageWidthScale(nextLayout, width);
         const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
-        setPageColumns(next);
+        setPageColumns(columns);
+        setSpreadCover(coverPage);
         setView(clampScroll({ scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale }, nextLayout, width, height));
         setRenderScale(scale);
     };
+
+    /** Switch between one and two pages per row. */
+    const togglePageColumns = () => relayout(pageColumns === 1 ? 2 : 1, spreadCover);
+
+    /** Hold the first page back as a cover, so spreads pair 2|3 as printed music does. */
+    const toggleSpreadCover = () => relayout(pageColumns, !spreadCover);
 
     // Crisp bitmap re-render shortly after zoom settles (canvases CSS-stretch meanwhile).
     useEffect(() => {
@@ -639,6 +649,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         }}
                         pageColumns={layout.layouts.length > 1 ? pageColumns : null}
                         onTogglePageColumns={togglePageColumns}
+                        spreadCover={spreadCover}
+                        onToggleSpreadCover={toggleSpreadCover}
                     />
                     {layout.layouts.length > 1 ? (
                         <Pager layout={layout} viewportSize={viewportSize} onTurn={turnPage} />
@@ -747,11 +759,15 @@ const ZoomControls = ({
     onZoomBy,
     pageColumns,
     onTogglePageColumns,
+    spreadCover,
+    onToggleSpreadCover,
 }: {
     onZoomBy: (factor: number) => void;
     /** Null hides the one/two-page toggle (single-page documents). */
     pageColumns: 1 | 2 | null;
     onTogglePageColumns: () => void;
+    spreadCover: boolean;
+    onToggleSpreadCover: () => void;
 }) => {
     return (
         <div
@@ -768,6 +784,18 @@ const ZoomControls = ({
                     className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
                 >
                     <Columns2Icon size={20} />
+                </button>
+            ) : null}
+            {pageColumns === 2 ? (
+                <button
+                    type="button"
+                    aria-label="Cover page first"
+                    title="Show the first page alone, so spreads pair 2|3"
+                    aria-pressed={spreadCover}
+                    onClick={onToggleSpreadCover}
+                    className={`${roundControlClassName} aria-pressed:bg-accent-soft aria-pressed:text-accent`}
+                >
+                    <CoverPageIcon size={20} />
                 </button>
             ) : null}
             <button type="button" aria-label="Zoom in" onClick={() => onZoomBy(1.25)} className={roundControlClassName}>

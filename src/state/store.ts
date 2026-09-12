@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 import type { PageColumns } from '@/features/viewer/geometry';
-import { readPageColumns, writePageColumns } from '@/features/viewer/viewerPrefs';
+import { readPageColumns, readSpreadCover, writePageColumns, writeSpreadCover } from '@/features/viewer/viewerPrefs';
 import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
@@ -78,6 +78,8 @@ interface ViewerStore extends PlaybackSlice {
     fingerDraws: boolean;
     /** Pages per row: 1 (stack) or 2 (facing pages). Persisted per device. */
     pageColumns: PageColumns;
+    /** Two-page spreads open on a cover: page 1 alone, then 2|3. Persisted per device. */
+    spreadCover: boolean;
     setView: (view: ViewState) => void;
     setPinch: (pinch: PinchPreview | null) => void;
     resetView: (view?: Partial<ViewState>) => void;
@@ -87,6 +89,7 @@ interface ViewerStore extends PlaybackSlice {
     setFocusedPageIndex: (focusedPageIndex: number) => void;
     setFingerDraws: (fingerDraws: boolean) => void;
     setPageColumns: (pageColumns: PageColumns) => void;
+    setSpreadCover: (spreadCover: boolean) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -120,6 +123,7 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     focusedPageIndex: 0,
     fingerDraws: false,
     pageColumns: readPageColumns(),
+    spreadCover: readSpreadCover(),
     setView: (view) => set({ view }),
     setPinch: (pinch) => set({ pinch }),
     resetView: (view) => set({ view: { ...INITIAL_VIEW, ...view }, pinch: null, focusedPageIndex: 0 }),
@@ -131,6 +135,10 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setPageColumns: (pageColumns) => {
         writePageColumns(pageColumns);
         set({ pageColumns });
+    },
+    setSpreadCover: (spreadCover) => {
+        writeSpreadCover(spreadCover);
+        set({ spreadCover });
     },
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),

@@ -38,23 +38,38 @@ export type PageColumns = 1 | 2;
  * pages 1|2, 3|4, … the way an open book does, an odd last page sitting alone
  * on the left. Rows are as tall as their tallest page, so pages in the same
  * row always share a `top` — the row is what page turning steps through.
+ *
+ * `coverPage` (two columns only) says the PDF opens on a title page: page 1
+ * sits alone in the RIGHT column and the spreads after it pair 2|3, 4|5, …,
+ * which is how printed music is engraved — page turns fall between systems
+ * rather than mid-spread.
  */
-export const computeDocumentLayout = (pages: readonly PageSize[], columns: PageColumns = 1): DocumentLayout => {
+export const computeDocumentLayout = (
+    pages: readonly PageSize[],
+    columns: PageColumns = 1,
+    coverPage = false,
+): DocumentLayout => {
     const columnWidth = pages.reduce((max, p) => Math.max(max, p.width), 0);
     const contentWidth = columns === 1 ? columnWidth : columnWidth * 2 + PAGE_GAP;
     const layouts: PageLayout[] = [];
     let y = PAGE_GAP;
-    for (let i = 0; i < pages.length; i += columns) {
-        const row = pages.slice(i, i + columns);
+    // The cover row holds one page and starts in the right column; every row
+    // after it is a full-width spread starting on the left.
+    let firstColumn = columns === 2 && coverPage ? 1 : 0;
+    let i = 0;
+    while (i < pages.length) {
+        const row = pages.slice(i, i + columns - firstColumn);
         row.forEach((page, col) => {
             layouts.push({
                 top: y,
-                left: col * (columnWidth + PAGE_GAP) + (columnWidth - page.width) / 2,
+                left: (firstColumn + col) * (columnWidth + PAGE_GAP) + (columnWidth - page.width) / 2,
                 width: page.width,
                 height: page.height,
             });
         });
         y += row.reduce((max, p) => Math.max(max, p.height), 0) + PAGE_GAP;
+        i += row.length;
+        firstColumn = 0;
     }
     return { layouts, contentWidth, contentHeight: y };
 };
