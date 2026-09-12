@@ -28,13 +28,14 @@
                 "max": 175
             },
             "repeatsUnfoldedInMidi": false,
+            "performedBars": 55,
             "expectedHolds": 1,
             "expectedExtraNotes": 0
         }
     ],
     "editionNotes": [
         "2/4, A minor (expectedFifths 0), LilyPond \\tempo 4 = 152. 33 printed bars, matching the MIDI, which does not unfold the repeats.",
-        "performedBars is deliberately NOT pinned. The .ly has two \\repeat volta 2 blocks with \\alternative endings and is not bar-checked, so a performed count cannot be read off the source by hand; an unverified number would make the repeat check lie rather than measure. performedBarsMatch is null and repeat-walk skips the movement. Close it by rendering the .ly with LilyPond and reading the last bar number of an unfolded score.",
+        "performedBars 55 is derived from the Mutopia .ly at https://www.mutopiaproject.org/ftp/BurgmullerJFF/O100/25EF-02/25EF-02.ly (sha256 9ee203a6c2059700b10d45a7a1fd7a122803793af9a2e328d634bee538819a94), rendered with LilyPond 2.26.0 under \\unfoldRepeats; folded, that render reproduces the pinned reference MIDI's onset+pitch stream exactly and counts 33 bars = printedBars. A hand-walk of the two \\repeat volta 2 blocks with their \\alternative endings gives the same number: 2 + (7+1) + (7+1) + (15+1) + (15+1) + 5 = 55, and the engraved bar numbers agree.",
         "A \\fermata on the final chord in both staves is one clock stop: expectedHolds 1.",
         "Fast 16th-note right-hand runs at 152 — the fastest printed grid in the suite.",
         "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."

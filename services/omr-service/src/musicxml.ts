@@ -1111,6 +1111,24 @@ const beamOf = (noteEl: Elem): BeamState | undefined => {
 };
 
 /**
+ * Horizontal slack, in tenths, inside which two `<note>`s name the same printed
+ * notehead. A staff space is 10 tenths and a head is about 12 wide, so an
+ * engraver resolving a collision between two real heads moves one of them by
+ * far more than this; only a single glyph reported twice lands this close.
+ */
+const SAME_NOTEHEAD_TENTHS = 1;
+
+/** Engraved `default-x` in tenths, when the writer positioned the element. */
+const defaultXOf = (el: Elem): number | null => {
+    const raw = el.getAttribute('default-x');
+    if (raw === null || raw === '') {
+        return null;
+    }
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : null;
+};
+
+/**
  * A mark's staff, when the writer said which: `null` means unattributed.
  * Deliberately NOT collapsed to staff 1 — that default is what destroys the
  * only signal distinguishing "this writer separates the hands" from "this
@@ -1296,6 +1314,28 @@ const scanPart = (part: Elem): RawMeasure[] => {
         let maxCursor = 0;
         let lastNoteStart = 0;
         let newSystem = index === 0;
+        /** Noteheads already read in this bar: `staff:onset:midi` → `default-x`. */
+        const noteheadX = new Map<string, number>();
+        /**
+         * True when this `<note>` is a second reading of a head already taken.
+         * Two voices that meet on one pitch are engraved as ONE notehead with a
+         * stem going each way, and Audiveris reports that glyph once per voice —
+         * same staff, same onset, same pitch, and the identical `default-x`,
+         * because it is the identical glyph. Sounding it twice invents a note
+         * the page never printed.
+         */
+        const duplicateNotehead = (staff: number, onset: number, midi: number, x: number | null): boolean => {
+            if (x === null) {
+                return false;
+            }
+            const key = `${staff}:${onset}:${midi}`;
+            const seen = noteheadX.get(key);
+            if (seen !== undefined && Math.abs(x - seen) <= SAME_NOTEHEAD_TENTHS) {
+                return true;
+            }
+            noteheadX.set(key, x);
+            return false;
+        };
 
         for (const child of childElements(measure)) {
             switch (child.nodeName) {
@@ -1632,7 +1672,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const pitch = firstChild(child, 'pitch');
                         const accidental = firstChild(child, 'accidental') !== null;
                         const parsed = pitch ? pitchOf(pitch, accidental) : null;
-                        if (parsed) {
+                        if (parsed && !duplicateNotehead(noteStaff, start, parsed.midi, defaultXOf(child))) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
                             const ornament = ornamentOf(child);
                             const type = childText(child, 'type');

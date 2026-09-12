@@ -1626,8 +1626,9 @@ describe('voices', () => {
         voice: number | string,
         staff = 1,
         extra = '',
+        attrs = '',
     ): string =>
-        `<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff>${extra}</note>`;
+        `<note${attrs ? ` ${attrs}` : ''}><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff>${extra}</note>`;
     const rest = (duration: number, voice: number | string, staff = 1): string =>
         `<note><rest/><duration>${duration}</duration><voice>${voice}</voice><staff>${staff}</staff></note>`;
     const back = (duration: number): string => `<backup><duration>${duration}</duration></backup>`;
@@ -1806,6 +1807,47 @@ describe('voices', () => {
         ).join('');
         const score = parseMusicXmlString(wrap(bar(1, many, true)));
         expect(Math.max(...score.notes.map((n) => n.vc ?? 0))).toBe(7);
+    });
+
+    describe('a notehead two voices share', () => {
+        // Voices 1 and 2 meet on D5 on beat 2. An engraver prints ONE head there
+        // with a stem going each way, so a reader that reports it once per voice
+        // has read one glyph twice — which the identical default-x proves.
+        const meetOnD5 = (voice1X: string, voice2X: string): string =>
+            wrap(
+                bar(
+                    1,
+                    `${vn('G', 4, 4, 1, 1, '', 'default-x="10"')}${vn('D', 5, 4, 1, 1, '', voice1X)}${rest(8, 1)}` +
+                        `${back(16)}${rest(4, 2)}${vn('D', 5, 4, 2, 1, '', voice2X)}${rest(8, 2)}`,
+                    true,
+                ),
+            );
+
+        it('sounds once when both readings sit at the same default-x', () => {
+            expect(voicesOf(meetOnD5('default-x="50"', 'default-x="50"'))).toEqual([
+                { t: 0, p: 67, vc: 0 },
+                { t: 480, p: 74, vc: 0 },
+            ]);
+        });
+
+        it('keeps both when the heads are engraved apart', () => {
+            // A head width away is a real collision offset, so these are two heads.
+            expect(voicesOf(meetOnD5('default-x="50"', 'default-x="62"'))).toEqual([
+                { t: 0, p: 67, vc: 0 },
+                { t: 480, p: 74, vc: 0 },
+                { t: 480, p: 74, vc: 1 },
+            ]);
+        });
+
+        it('keeps both when the writer engraved no positions at all', () => {
+            // Without default-x there is no evidence of one glyph, and a parser
+            // that guessed would delete real unisons out of hand-written files.
+            expect(voicesOf(meetOnD5('', ''))).toEqual([
+                { t: 0, p: 67, vc: 0 },
+                { t: 480, p: 74, vc: 0 },
+                { t: 480, p: 74, vc: 1 },
+            ]);
+        });
     });
 
     describe('across a shard seam', () => {
