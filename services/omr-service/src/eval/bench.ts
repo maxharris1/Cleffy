@@ -22,10 +22,24 @@ import { segmentMovements } from './segment.js';
  * PDF is a hand-vendored IMSLP extract that cannot be fetched.
  */
 export const BENCH_SUITE = [
+    // Baroque keyboard: the printed grid with nothing else going on.
+    'czerny-op821-01',
+    'bach-prelude-bwv939',
+    'bach-air-anh131',
+    'bach-invention-01',
+    'bach-invention-08',
+    'bach-prelude-bwv999',
     'wtk1-prelude1',
+    // Repeats and voltas.
     'anna-magdalena-04',
     'anna-magdalena-05',
+    'anna-magdalena-07',
+    'burgmuller-op100-02',
+    // Pickups, and a reference that unfolds its own repeats.
     'schumann-op68-01',
+    'schumann-op68-05',
+    // Wider textures and the hard cases.
+    'gymnopedie-2',
     'fur-elise-mutopia',
     'chopin-prelude-4',
 ] as const;
@@ -183,6 +197,10 @@ export const formatBench = (report: BenchReport): string => {
             `1 missed/extra note allowed per ${report.limits.barsPerAllowedMiss} printed bars`,
         '',
         `**Play-along score ${pct(report.totals.onGrid)}** · ${report.totals.piecesPassed}/${report.totals.pieces} pieces pass the gate`,
+        '',
+        'Rates are weighted by reference notes, not by piece. A piece whose `meters`',
+        'check failed could not bind a tick slice, so its rates are void rather than',
+        'measured — read its failure list, not its percentages.',
         '',
         '| Piece | Pages | Ref notes | Pitch | +Onset | +Length | Miss | Extra | Composite | Gate |',
         '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',

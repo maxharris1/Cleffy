@@ -1,0 +1,41 @@
+{
+    "slug": "bach-air-anh131",
+    "title": "Bach (attrib.) — Air in F, BWV Anh. 131",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh131/air/air-let.pdf",
+        "sha256": "2421e97393ee1b476897314326409e0ea3e25e3ceb6d4bf215342e709be35af5",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh131/air/air.mid",
+        "sha256": "9b6b5c0d106734dc1784b81b30f9dd6b70c21c55c76bf5a88333a2bfe023b0fe",
+        "license": "CC BY-SA 2.5 (Mutopia 2006/05/17-767, anonymous maintainer, after the autograph). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Air",
+            "midi": "air.mid",
+            "meter": {
+                "num": 4,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 16,
+            "expectedFifths": -1,
+            "expectedTempo": {
+                "min": 105,
+                "max": 150
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 16,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "4/4, F major (expectedFifths -1), 16 bars, no repeats, no ornaments. LilyPond \\tempo 4=128.",
+        "Thin two-voice texture on one page — pairs with bach-air-style entries to check that a sparse page is not easier for the gate than a dense one.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+    ]
+}
