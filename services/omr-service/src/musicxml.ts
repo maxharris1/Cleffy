@@ -1111,6 +1111,24 @@ const beamOf = (noteEl: Elem): BeamState | undefined => {
 };
 
 /**
+ * Horizontal slack, in tenths, inside which two `<note>`s name the same printed
+ * notehead. A staff space is 10 tenths and a head is about 12 wide, so an
+ * engraver resolving a collision between two real heads moves one of them by
+ * far more than this; only a single glyph reported twice lands this close.
+ */
+const SAME_NOTEHEAD_TENTHS = 1;
+
+/** Engraved `default-x` in tenths, when the writer positioned the element. */
+const defaultXOf = (el: Elem): number | null => {
+    const raw = el.getAttribute('default-x');
+    if (raw === null || raw === '') {
+        return null;
+    }
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : null;
+};
+
+/**
  * A mark's staff, when the writer said which: `null` means unattributed.
  * Deliberately NOT collapsed to staff 1 — that default is what destroys the
  * only signal distinguishing "this writer separates the hands" from "this
@@ -1139,6 +1157,8 @@ export type RawEvent =
           tieStop: boolean;
           arts: ArtSet;
           fermata: boolean;
+          /** Audiveris inverted fermatas on short notes are usually false staccato/dot reads. */
+          fermataInverted?: boolean;
           ornament?: { kind: OrnamentKind; accidentalMark?: AccidentalMark };
           arpeggiate?: 'up' | 'down';
           /** Single-note tremolo strokes: the note is a measured repetition. */
@@ -1294,6 +1314,28 @@ const scanPart = (part: Elem): RawMeasure[] => {
         let maxCursor = 0;
         let lastNoteStart = 0;
         let newSystem = index === 0;
+        /** Noteheads already read in this bar: `staff:onset:midi` → `default-x`. */
+        const noteheadX = new Map<string, number>();
+        /**
+         * True when this `<note>` is a second reading of a head already taken.
+         * Two voices that meet on one pitch are engraved as ONE notehead with a
+         * stem going each way, and Audiveris reports that glyph once per voice —
+         * same staff, same onset, same pitch, and the identical `default-x`,
+         * because it is the identical glyph. Sounding it twice invents a note
+         * the page never printed.
+         */
+        const duplicateNotehead = (staff: number, onset: number, midi: number, x: number | null): boolean => {
+            if (x === null) {
+                return false;
+            }
+            const key = `${staff}:${onset}:${midi}`;
+            const seen = noteheadX.get(key);
+            if (seen !== undefined && Math.abs(x - seen) <= SAME_NOTEHEAD_TENTHS) {
+                return true;
+            }
+            noteheadX.set(key, x);
+            return false;
+        };
 
         for (const child of childElements(measure)) {
             switch (child.nodeName) {
@@ -1630,7 +1672,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const pitch = firstChild(child, 'pitch');
                         const accidental = firstChild(child, 'accidental') !== null;
                         const parsed = pitch ? pitchOf(pitch, accidental) : null;
-                        if (parsed) {
+                        if (parsed && !duplicateNotehead(noteStaff, start, parsed.midi, defaultXOf(child))) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
                             const ornament = ornamentOf(child);
                             const type = childText(child, 'type');
@@ -1638,6 +1680,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             const tremolo = tremoloOf(child);
                             const glissando = glissandoOf(child);
                             const artNames = markNames(child, 'articulations');
+                            const fermataEl = child.getElementsByTagName('fermata').item(0);
                             events.push({
                                 k: 'note',
                                 rel: start,
@@ -1649,7 +1692,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 tieStart: tieTypes.includes('start'),
                                 tieStop: tieTypes.includes('stop'),
                                 arts,
-                                fermata: child.getElementsByTagName('fermata').length > 0,
+                                fermata: fermataEl !== null,
+                                ...(fermataEl?.getAttribute('type') === 'inverted' ? { fermataInverted: true } : {}),
                                 breath: artNames.has('caesura') || artNames.has('breath-mark'),
                                 dots: childElements(child, 'dot').length,
                                 spell: parsed.spell,
@@ -1753,6 +1797,29 @@ const MIN_METER_VOTES = 8;
 const MIN_OVER_SHARE = 0.25;
 /** The over-length bars must cluster, not scatter. */
 const MIN_OVER_MODAL_COUNT = 6;
+/**
+ * Under-length is the common OMR failure (dropped notes), so a 4/4→3/4
+ * correction needs a majority cluster, not the 25% over-length bar.
+ */
+const MIN_UNDER_SHARE = 0.5;
+const MIN_UNDER_MODAL_COUNT = 6;
+
+/** Modal value in `vals`, breaking ties toward the shorter length. */
+const modalLength = (vals: readonly number[]): { modal: number; count: number } => {
+    const counts = new Map<number, number>();
+    for (const v of vals) {
+        counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    let modal = 0;
+    let modalCount = 0;
+    for (const [len, count] of counts) {
+        if (count > modalCount || (count === modalCount && (modal === 0 || len < modal))) {
+            modalCount = count;
+            modal = len;
+        }
+    }
+    return { modal, count: modalCount };
+};
 
 /**
  * Decide what signature a span of measures is really in.
@@ -1767,6 +1834,9 @@ const MIN_OVER_MODAL_COUNT = 6;
  * What is distinctive is the over-length population. Dropping notes shortens a
  * bar, so a genuinely correct signature is seldom exceeded; a wrong one is
  * exceeded constantly, and those excesses cluster at the true bar length.
+ * The complementary case — 3/4 read as 4/4, every bar short — cannot use that
+ * discriminator, so a second path requires a majority cluster at a known
+ * shorter ratio before it will resignature.
  */
 const judgeSpan = (raws: readonly RawMeasure[], from: number, to: number, warnings: Set<string>): MeterVerdict => {
     const declared = raws[from]?.sig ?? { num: 4, den: 4 };
@@ -1788,38 +1858,43 @@ const judgeSpan = (raws: readonly RawMeasure[], from: number, to: number, warnin
     }
 
     const over = votes.filter((v) => v > expected);
+    const under = votes.filter((v) => v < expected);
     const exact = votes.filter((v) => v === expected).length;
-    if (over.length / n < MIN_OVER_SHARE || over.length <= exact) {
-        return fallback;
-    }
-
-    // Modal length among the over-length bars — the candidate true bar length.
-    const counts = new Map<number, number>();
-    for (const v of over) {
-        counts.set(v, (counts.get(v) ?? 0) + 1);
-    }
-    let modal = 0;
-    let modalCount = 0;
-    for (const [len, count] of counts) {
-        if (count > modalCount || (count === modalCount && len < modal)) {
-            modalCount = count;
-            modal = len;
+    const tryRatio = (lengths: readonly number[], minModal: number): { num: number; den: number } | null => {
+        const { modal, count } = modalLength(lengths);
+        if (count < minModal || modal <= 0) {
+            return null;
         }
-    }
+        const g = gcd(modal, expected);
+        const rn = modal / g;
+        const rd = expected / g;
+        const known = METER_RATIOS.some(([a, b]) => a === rn && b === rd);
+        return known ? resignature(declared, rn, rd) : null;
+    };
 
-    const g = gcd(modal, expected);
-    const rn = modal / g;
-    const rd = expected / g;
-    const known = METER_RATIOS.some(([a, b]) => a === rn && b === rd);
-    const corrected = modalCount >= MIN_OVER_MODAL_COUNT && known ? resignature(declared, rn, rd) : null;
-
-    if (!corrected) {
+    if (over.length / n >= MIN_OVER_SHARE && over.length > exact) {
+        // Modal length among the over-length bars — the candidate true bar length.
+        const corrected = tryRatio(over, MIN_OVER_MODAL_COUNT);
+        if (corrected) {
+            warnings.add('meter_corrected');
+            return { from, to, sig: corrected, corrected: true };
+        }
         // Noticed and did not act — worth far more to the reader than silence.
         warnings.add('meter_suspect');
         return fallback;
     }
-    warnings.add('meter_corrected');
-    return { from, to, sig: corrected, corrected: true };
+
+    // 3/4 read as 4/4 (Gymnopédie): bars are systematically short, not over.
+    // Dropped notes also shorten bars, so this path needs a majority cluster.
+    if (under.length / n >= MIN_UNDER_SHARE && under.length > exact) {
+        const corrected = tryRatio(under, MIN_UNDER_MODAL_COUNT);
+        if (corrected) {
+            warnings.add('meter_corrected');
+            return { from, to, sig: corrected, corrected: true };
+        }
+    }
+
+    return fallback;
 };
 
 /**
@@ -3165,9 +3240,18 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         }
                     }
                     if (ev.fermata) {
-                        // Hold on ARRIVING at the onset, so the note itself still
-                        // starts on time and everything sounding across it rings on.
-                        holds.push({ tick: start, beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)) });
+                        // Inverted fermata on a note shorter than a quarter is the
+                        // Audiveris false-positive (staccato / accent dots). A real
+                        // inverted fermata sits on a longer note; missing one is
+                        // one-sided (the gate only fails invented holds).
+                        if (!(ev.fermataInverted && ev.dur < TICKS_PER_QUARTER)) {
+                            // Hold on ARRIVING at the onset, so the note itself still
+                            // starts on time and everything sounding across it rings on.
+                            holds.push({
+                                tick: start,
+                                beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)),
+                            });
+                        }
                     }
                     if (ev.breath && !ev.chord) {
                         // A caesura or breath mark is a short stop AFTER the note —

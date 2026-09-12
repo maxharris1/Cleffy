@@ -28,6 +28,7 @@
                 "max": 84
             },
             "repeatsUnfoldedInMidi": false,
+            "performedBars": 126,
             "expectedHolds": 0,
             "expectedExtraNotes": 0
         }
@@ -35,7 +36,8 @@
     "editionNotes": [
         "Same musical text as the `fur-elise` pin, but the PDF is the Mutopia LilyPond typeset at reference.url's sibling — so PDF, MIDI and .ly all come from one source and the whole entry is fetchable. `fur-elise` keeps the IMSLP scan for the hosted-vs-local shootout; do not cross the two.",
         "LilyPond \\tempo 4 = 72 under a transparent MetronomeMark; the printed heading is 'Poco moto.' in 3/8 with a one-eighth pickup (pickupQuarters 0.5).",
-        "performedBars is deliberately NOT pinned. The .ly carries two \\repeat volta 2 blocks whose \\alternative endings use \\set Timing.measurePosition to borrow an eighth across the barline, so the printed bar numbering is irregular and a performed-bar count cannot be read off the source by hand. An unpinned performedBars makes performedBarsMatch null and the repeat gate skips this movement rather than asserting a number nobody verified. Close it by rendering the .ly with LilyPond and reading the last bar number of an unfolded score.",
+        "performedBars 126 is derived from the Mutopia .ly at https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.ly (sha256 828a7bd1b42e441fe1b0eb0389ba46f1502dab28bbe488389e635fb446ba7a67), rendered with LilyPond 2.26.0 under \\unfoldRepeats and bucketed by src/eval/midiRef.ts's own convention; the same render folded reproduces the pinned reference MIDI byte-for-byte (905 notes) and scores 105 bars = printedBars, and a hand-walk of the two \\repeat volta 2 blocks agrees (repeat surplus 21).",
+        "Both bar pins use the MIDI-grid convention, not LilyPond's engraved numbering: the \\alternative endings use \\set Timing.measurePosition to borrow an eighth across the barline, so the engraved instance count is 106/127 against the pinned 105/126. That one-bar convention gap is pre-existing — it is why the bench records `printed-bar-count (106 printed bars read)`. The parser currently reads 106 printed but 126 performed (surplus 20 — the +1 printed-side split offset by a one-bar shortfall on the unfold side), so performedBarsMatch can read true while printed-bar-count still fails; printed-bar-count and bar-alignment stay the honest signal. Keeping both pins in one convention preserves the surplus of 21; do not 'fix' one pin without the other.",
         "printedBars 105 is the uniform-3/8 bar count the MIDI produces (verify with `run` — refBars in the summary), not LilyPond's printed numbering, which the measurePosition borrowing shifts.",
         "A minor throughout (expectedFifths 0).",
         "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle.",

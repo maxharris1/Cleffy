@@ -189,6 +189,26 @@ describe('rhythm repair', () => {
         expect(score.notes.filter((n) => inBar2(n) && n.p >= 60).map((n) => n.t - 1920)).toEqual([0, 720, 960]);
     });
 
+    it('leaves a voice that enters late and ends on the barline alone', () => {
+        // The second voice waits out two beats (a <forward>, as engraved) and
+        // then plays four beamed eighths that close exactly on the barline. Its
+        // durations sum to 960 of 1920, but nothing was lost: no rest is added.
+        const eighths =
+            note('C', 3, 2, { type: 'eighth', beam: 'begin', voice: 2 }) +
+            note('D', 3, 2, { type: 'eighth', beam: 'continue', voice: 2 }) +
+            note('E', 3, 2, { type: 'eighth', beam: 'continue', voice: 2 }) +
+            note('F', 3, 2, { type: 'eighth', beam: 'end', voice: 2 });
+        const lower = `<backup><duration>16</duration></backup><forward><duration>8</duration></forward>${eighths}`;
+        const score = parseMusicXmlString(
+            wrap(bar(1, note('G', 4, 16, { type: 'whole' }) + lower) + closing(2)),
+        );
+
+        expect(score.warnings).not.toContain('rhythm_repaired');
+        expect(score.rhythmRepairs).toBe(0);
+        expect(score.measures[0]?.dTicks).toBe(1920);
+        expect(score.notes.filter((n) => n.p < 60).map((n) => n.t)).toEqual([960, 1200, 1440, 1680]);
+    });
+
     it('repairs each voice on its own evidence when both are broken', () => {
         // Both voices of bar 2 lost the dot their bar-1 figure shows: one edit
         // each, one repair counted per voice.
