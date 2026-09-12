@@ -1,0 +1,42 @@
+{
+    "slug": "anna-magdalena-05",
+    "title": "Bach — Menuet in G minor, BWV Anh. 115",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh115/anna-magdalena-05/anna-magdalena-05-let.pdf",
+        "sha256": "b7517d33d10778a1425ecdee7c61af554091354329c1d2b38ea5a24ee4fba0d4",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh115/anna-magdalena-05/anna-magdalena-05.mid",
+        "sha256": "6584a133df31cc3635af7c616b14e8c67f8d99df96a91371c54daf3745d4f444",
+        "license": "Public Domain (Mutopia 2017/01/19-76, Allen Garvin after Bach-Gesellschaft). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Menuet in G minor",
+            "midi": "anna-magdalena-05.mid",
+            "meter": {
+                "num": 3,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 32,
+            "expectedFifths": -2,
+            "expectedTempo": {
+                "min": 120,
+                "max": 160
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 64,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 12
+        }
+    ],
+    "editionNotes": [
+        "LilyPond \\tempo 4 = 140 in 3/4, G minor. Two bar-checked \\repeat volta 2 blocks of 16 bars each (printed 32; performed 64). Mutopia MIDI does not unfold them.",
+        "Sibling of anna-magdalena-04: same typesetter, same form, minor key. The pair isolates key reading from everything else in the gate.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs.",
+        "Six printed ornament signs (4 \\prall + 2 \\mordent) at 2 added notes each: expectedExtraNotes 12. Cleffy realizes them (src/ornaments.ts), LilyPond's MIDI does not."
+    ]
+}

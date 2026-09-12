@@ -1,11 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 
+import { BENCH_SUITE, formatBench, runBench, writeBench } from './bench.js';
 import { fromArtifacts, fromDocument, fromPdf, fromScoreFile, type Candidate } from './candidate.js';
 import { compareScore } from './compare.js';
 import { fetchCorpus, midiPath } from './fetch.js';
 import { loadCorpusEntry, type CorpusEntry } from './manifest.js';
 import { notesFromMidi } from './midiRef.js';
+import { defaultLimits, formatGate, playAlongGate, type PlayAlongLimits } from './playAlong.js';
 import {
     attachRecord,
     diffBaseline,
@@ -29,15 +31,29 @@ const usage = `Usage:
   node dist/eval/cli.js audiveris --piece <slug> [--force-audiveris]
   node dist/eval/cli.js run --piece <slug> --from pdf|artifacts <dir>|document <id>|score <file>
        [--baseline <json>] [--out <filename>] [--tolerance 0.5] [--force-audiveris] [--json]
+       [--exact-floor 95] [--ongrid-floor 90] [--no-gate]
+  node dist/eval/cli.js bench [--piece <slug>] [--force-audiveris] [--json]
+       [--exact-floor 95] [--ongrid-floor 90]
   node dist/eval/cli.js shootout fetch --piece <slug> --document <uuid>
   node dist/eval/cli.js shootout local --piece <slug> [--force-audiveris]
   node dist/eval/cli.js shootout compare --piece <slug> [--prod <score.json>] [--local <score.json>]
 
   node dist/eval/cli.js --help
 
+bench is the objective play-along benchmark: it fetches and hash-checks every
+pinned piece, runs the current engine on the pinned PDF bytes, and writes
+eval/results/bench/{bench.json,bench.md}. Suite: ${BENCH_SUITE.join(', ')}.
+Needs cleffy-omr. Exit 1 if any piece fails the gate.
+
+The play-along gate is on by default for run and bench. It reads the CURRENT
+result, so it fails a broken piece with no baseline to diff against. It checks
+notes on pitch and on the printed grid only — attack onsets, note lengths, bar
+length, bar count, repeats, invented holds. It deliberately does not score
+expressive timing, induced jitter, chord roll, dynamics, pedal or printed tempo.
+
 CI runs eval unit tests (including this CLI on a committed toy fixture). It does
-not run Audiveris or score Moonlight. A green omr-service job is not an accuracy
-gate for corpus pieces that need the engine.
+not run Audiveris, bench, or score Moonlight. A green omr-service job is
+not an accuracy gate for corpus pieces that need the engine.
 
 --from document cannot --out a baseline-* file. Commit a baseline only from
 --from artifacts with a non-null artifactHash.
@@ -47,7 +63,7 @@ fetch is hosted read-only (project jibgwgosihadbjgxdsfe). local needs cleffy-omr
 Cloud agents without Audiveris may fetch + compare once both score.json files exist.
 `;
 
-type Command = 'fetch' | 'audiveris' | 'run' | 'shootout' | 'help';
+type Command = 'fetch' | 'audiveris' | 'run' | 'bench' | 'shootout' | 'help';
 type ShootoutSub = 'fetch' | 'local' | 'compare';
 
 const fail = (message: string, code = 1): never => {
@@ -63,6 +79,7 @@ const asCommand = (raw: string | undefined): Command | undefined => {
         case 'fetch':
         case 'audiveris':
         case 'run':
+        case 'bench':
         case 'shootout':
         case 'help':
             return raw;
@@ -80,6 +97,12 @@ const loadRefs = async (entry: CorpusEntry, midiDir: string) => {
     return refs;
 };
 
+interface GateOptions {
+    limits: PlayAlongLimits;
+    /** Report the gate but do not let it decide the exit code. */
+    noGate: boolean;
+}
+
 const runCompare = async (
     entry: CorpusEntry,
     candidate: Candidate,
@@ -88,24 +111,31 @@ const runCompare = async (
     baselinePath: string | undefined,
     outName: string | undefined,
     tolerance: number,
+    gateOptions: GateOptions,
 ): Promise<number> => {
     const refs = await loadRefs(entry, midiDir);
     const segmented = segmentMovements(candidate.score, entry);
     const result = compareScore(candidate.score, entry, refs, segmented);
     const record = attachRecord(result, candidate);
-    const written = await writeResult(record, outName);
+    const verdict = playAlongGate(result, gateOptions.limits);
+    const gateText = formatGate(verdict);
+    const written = await writeResult(record, outName, gateText);
     if (jsonOnly) {
-        process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
+        process.stdout.write(`${JSON.stringify({ ...record, playAlong: verdict }, null, 2)}\n`);
     } else {
-        process.stdout.write(`${formatSummary(record)}\nwrote ${written}\n`);
+        process.stdout.write(`${formatSummary(record)}\n${gateText}\nwrote ${written}\n`);
     }
+    // The gate reads the CURRENT record, so it fails a piece that is broken today
+    // even with no baseline to compare against. Baseline diffing only ever sees a
+    // delta, which means an already-failing oracle keeps passing forever.
+    const gateFailed = !gateOptions.noGate && !verdict.pass;
     if (!baselinePath) {
-        return 0;
+        return gateFailed ? 1 : 0;
     }
     try {
         const deltas = diffBaseline(loadBaseline(baselinePath), record, tolerance);
         process.stdout.write(`${formatDeltas(deltas)}\n`);
-        return deltas.some((d) => d.regressed) ? 1 : 0;
+        return deltas.some((d) => d.regressed) || gateFailed ? 1 : 0;
     } catch (err) {
         if (err instanceof IncomparableBaselineError) {
             process.stderr.write(`${err.message}\n`);
@@ -130,6 +160,9 @@ const main = async (): Promise<number> => {
             document: { type: 'string' },
             prod: { type: 'string' },
             local: { type: 'string' },
+            'exact-floor': { type: 'string' },
+            'ongrid-floor': { type: 'string' },
+            'no-gate': { type: 'boolean', default: false },
         },
     });
     if (values.help === true) {
@@ -138,21 +171,54 @@ const main = async (): Promise<number> => {
     }
     const command = asCommand(positionals[0]);
     const slug = values.piece;
-    if (command === undefined || (command !== 'help' && slug === undefined)) {
+    // bench scores the whole pinned suite, so --piece is optional there.
+    if (command === undefined || (command !== 'help' && command !== 'bench' && slug === undefined)) {
         return fail(usage);
     }
     if (command === 'help') {
         process.stdout.write(usage);
         return 0;
     }
-    if (slug === undefined) {
-        return fail(usage);
-    }
-    const entry = loadCorpusEntry(slug);
     const tolerance = Number(values.tolerance);
     if (!Number.isFinite(tolerance) || tolerance < 0) {
         return fail('--tolerance must be a non-negative number');
     }
+    const limits: PlayAlongLimits = { ...defaultLimits() };
+    for (const [flag, key] of [
+        ['exact-floor', 'exactFloor'],
+        ['ongrid-floor', 'onGridFloor'],
+    ] as const) {
+        const raw = values[flag];
+        if (raw === undefined) {
+            continue;
+        }
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+            return fail(`--${flag} must be a percentage between 0 and 100`);
+        }
+        limits[key] = parsed;
+    }
+    const gateOptions: GateOptions = { limits, noGate: values['no-gate'] === true };
+
+    if (command === 'bench') {
+        const report = await runBench({
+            limits,
+            forceAudiveris: values['force-audiveris'] === true,
+            slugs: slug === undefined ? undefined : [slug],
+        });
+        const dir = await writeBench(report);
+        if (values.json === true) {
+            process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        } else {
+            process.stdout.write(`${formatBench(report)}\nwrote ${dir}\n`);
+        }
+        return report.totals.piecesPassed === report.totals.pieces ? 0 : 1;
+    }
+
+    if (slug === undefined) {
+        return fail(usage);
+    }
+    const entry = loadCorpusEntry(slug);
 
     switch (command) {
         case 'fetch': {
@@ -232,6 +298,7 @@ const main = async (): Promise<number> => {
                 values.baseline,
                 values.out,
                 tolerance,
+                gateOptions,
             );
         }
         case 'shootout': {
