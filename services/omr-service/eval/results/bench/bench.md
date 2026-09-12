@@ -2,10 +2,10 @@
 
 engine: audiveris-5.11.0+svc-14  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-12T18:14:46.457Z
+generated: 2026-09-12T18:37:02.555Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
-**Play-along score 70.3%** · 2/16 pieces pass the gate
+**Play-along score 75.6%** · 3/16 pieces pass the gate
 
 Rates are weighted by reference notes, not by piece. A piece whose `meters`
 check failed could not bind a tick slice, so its rates are void rather than
@@ -23,13 +23,13 @@ measured — read its failure list, not its percentages.
 | Petzold / Bach — Menuet in G, BWV Anh. 114 | 1 | 204 | 99.5% | 99.5% | 96.6% | 1 | 10 | 89.6 | pass |
 | Bach — Menuet in G minor, BWV Anh. 115 | 1 | 199 | 100.0% | 100.0% | 97.5% | 0 | 12 | 90.0 | pass |
 | Bach — Menuet in G, BWV Anh. 116 | 1 | 310 | 99.0% | 96.5% | 95.8% | 3 | 2 | 98.8 | FAIL |
-| Burgmüller — 25 Études faciles, Op. 100 No. 2 (Arabesque) | 1 | 283 | 100.0% | 100.0% | 100.0% | 0 | 0 | 90.0 | FAIL |
+| Burgmüller — 25 Études faciles, Op. 100 No. 2 (Arabesque) | 1 | 283 | 100.0% | 100.0% | 100.0% | 0 | 0 | 90.0 | pass |
 | Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie) | 1 | 303 | 100.0% | 100.0% | 99.7% | 0 | 4 | 100.0 | FAIL |
 | Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) | 1 | 279 | 85.3% | 82.8% | 82.8% | 39 | 39 | 74.8 | FAIL |
-| Satie — Gymnopédie No. 2 | 2 | 371 | 0.0% | 0.0% | 0.0% | 371 | 0 | 13.8 | FAIL |
+| Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
 | Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 72.2% | 31.9% | 30.5% | 192 | 192 | 61.8 | FAIL |
 | Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.0% | 97.0% | 2 | 1 | 95.4 | FAIL |
-| **suite** | | **5996** | **80.6%** | **71.4%** | **70.3%** | **728** | **405** | | **2/16** |
+| **suite** | | **5996** | **86.6%** | **76.7%** | **75.6%** | **365** | **409** | | **3/16** |
 
 ## Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 — 1 failed check(s)
 
@@ -82,38 +82,29 @@ measured — read its failure list, not its percentages.
 - anna-magdalena-07: bar-length-warning (measure_overfull)
 - Menuet: bar-length (1 of 40 bars are not the printed length)
 
-## Burgmüller — 25 Études faciles, Op. 100 No. 2 (Arabesque) — 1 failed check(s)
-
-- Arabesque: no-invented-hold (3 hold(s) in the slice)
-
 ## Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie) — 1 failed check(s)
 
 - Melodie: no-invented-notes (4 extra, 2 allowed)
 
-## Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) — 10 failed check(s)
+## Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) — 9 failed check(s)
 
 - schumann-op68-05: bar-length-warning (measure_underfull)
 - Stuckchen: printed-bar-count (26 printed bars read)
 - Stuckchen: bar-alignment (26 scored bars vs 25 reference bars)
 - Stuckchen: bar-length (1 of 26 bars are not the printed length)
-- Stuckchen: no-invented-hold (2 hold(s) in the slice)
 - Stuckchen: repeat-walk (26 performed bars)
 - Stuckchen: notes-present (39 missing, 2 allowed)
 - Stuckchen: no-invented-notes (39 extra, 2 allowed)
 - Stuckchen: attack-grid (exact 82.8% vs floor 95.0%)
 - Stuckchen: note-length (onGrid 82.8% vs floor 90.0%)
 
-## Satie — Gymnopédie No. 2 — 9 failed check(s)
+## Satie — Gymnopédie No. 2 — 5 failed check(s)
 
-- gymnopedie-2: meters (a movement never bound a matching meter — its rates are void, not measured)
-- gymnopedie-2: bar-length-warning (measure_underfull + measure_overfull)
-- Gymnopedie 2: printed-bar-count (0 printed bars read)
-- Gymnopedie 2: bar-alignment (0 scored bars vs 65 reference bars)
-- Gymnopedie 2: repeat-walk (0 performed bars)
-- Gymnopedie 2: notes-present (371 missing, 1 allowed)
-- Gymnopedie 2: no-skipped-passage (longest unplaced reference run is 65 bar(s))
-- Gymnopedie 2: attack-grid (exact 0.0% vs floor 95.0%)
-- Gymnopedie 2: note-length (onGrid 0.0% vs floor 90.0%)
+- gymnopedie-2: bar-length-warning (measure_overfull)
+- Gymnopedie 2: bar-length (10 of 65 bars are not the printed length)
+- Gymnopedie 2: notes-present (8 missing, 5 allowed)
+- Gymnopedie 2: attack-grid (exact 86.3% vs floor 95.0%)
+- Gymnopedie 2: note-length (onGrid 85.7% vs floor 90.0%)
 
 ## Beethoven — Für Elise, WoO 59 (Mutopia typeset) — 9 failed check(s)
 
@@ -127,8 +118,7 @@ measured — read its failure list, not its percentages.
 - Poco moto: attack-grid (exact 31.9% vs floor 95.0%)
 - Poco moto: note-length (onGrid 30.5% vs floor 90.0%)
 
-## Chopin — Prelude in E minor, Op. 28 No. 4 — 3 failed check(s)
+## Chopin — Prelude in E minor, Op. 28 No. 4 — 2 failed check(s)
 
 - chopin-prelude-4: bar-length-warning (measure_overfull)
 - Largo: bar-length (3 of 26 bars are not the printed length)
-- Largo: no-invented-hold (7 hold(s) in the slice)

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-12T18:14:46.457Z",
+  "generatedAt": "2026-09-12T18:37:02.555Z",
   "engineVersion": "audiveris-5.11.0+svc-14",
   "audiverisVersion": "- Version:      5.11.0",
   "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
@@ -10,13 +10,13 @@
   },
   "totals": {
     "pieces": 16,
-    "piecesPassed": 2,
+    "piecesPassed": 3,
     "refNotes": 5996,
-    "pitchMatch": 80.58705803869246,
-    "exact": 71.36424282855236,
-    "onGrid": 70.31354236157438,
-    "missing": 728,
-    "extra": 405
+    "pitchMatch": 86.55770513675783,
+    "exact": 76.70113408939292,
+    "onGrid": 75.61707805203469,
+    "missing": 365,
+    "extra": 409
   },
   "pieces": [
     {
@@ -238,10 +238,8 @@
       "missing": 0,
       "extra": 0,
       "composite": 90,
-      "pass": false,
-      "failures": [
-        "Arabesque: no-invented-hold (3 hold(s) in the slice)"
-      ]
+      "pass": true,
+      "failures": []
     },
     {
       "slug": "schumann-op68-01",
@@ -282,7 +280,6 @@
         "Stuckchen: printed-bar-count (26 printed bars read)",
         "Stuckchen: bar-alignment (26 scored bars vs 25 reference bars)",
         "Stuckchen: bar-length (1 of 26 bars are not the printed length)",
-        "Stuckchen: no-invented-hold (2 hold(s) in the slice)",
         "Stuckchen: repeat-walk (26 performed bars)",
         "Stuckchen: notes-present (39 missing, 2 allowed)",
         "Stuckchen: no-invented-notes (39 extra, 2 allowed)",
@@ -298,23 +295,19 @@
       "referenceSha256": "02e8ae8d7e1f6073f12f62a61a63cf07b260a1cf49f4a9008ee4e3f8e1934d30",
       "artifactHash": "86ea1957e58261997652c2fe96f94e7c9661064841cd5e5b82574696ffb3db67",
       "refNotes": 371,
-      "pitchMatch": 0,
-      "exact": 0,
-      "onGrid": 0,
-      "missing": 371,
-      "extra": 0,
-      "composite": 13.75,
+      "pitchMatch": 96.49595687331536,
+      "exact": 86.2533692722372,
+      "onGrid": 85.71428571428571,
+      "missing": 8,
+      "extra": 4,
+      "composite": 85.00637569977192,
       "pass": false,
       "failures": [
-        "gymnopedie-2: meters (a movement never bound a matching meter — its rates are void, not measured)",
-        "gymnopedie-2: bar-length-warning (measure_underfull + measure_overfull)",
-        "Gymnopedie 2: printed-bar-count (0 printed bars read)",
-        "Gymnopedie 2: bar-alignment (0 scored bars vs 65 reference bars)",
-        "Gymnopedie 2: repeat-walk (0 performed bars)",
-        "Gymnopedie 2: notes-present (371 missing, 1 allowed)",
-        "Gymnopedie 2: no-skipped-passage (longest unplaced reference run is 65 bar(s))",
-        "Gymnopedie 2: attack-grid (exact 0.0% vs floor 95.0%)",
-        "Gymnopedie 2: note-length (onGrid 0.0% vs floor 90.0%)"
+        "gymnopedie-2: bar-length-warning (measure_overfull)",
+        "Gymnopedie 2: bar-length (10 of 65 bars are not the printed length)",
+        "Gymnopedie 2: notes-present (8 missing, 5 allowed)",
+        "Gymnopedie 2: attack-grid (exact 86.3% vs floor 95.0%)",
+        "Gymnopedie 2: note-length (onGrid 85.7% vs floor 90.0%)"
       ]
     },
     {
@@ -361,8 +354,7 @@
       "pass": false,
       "failures": [
         "chopin-prelude-4: bar-length-warning (measure_overfull)",
-        "Largo: bar-length (3 of 26 bars are not the printed length)",
-        "Largo: no-invented-hold (7 hold(s) in the slice)"
+        "Largo: bar-length (3 of 26 bars are not the printed length)"
       ]
     }
   ]
