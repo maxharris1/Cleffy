@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 
+import { readPlaybackPrefs, writePlaybackPrefs } from '@/features/playback/playbackPrefs';
+import type { TempoStyle } from '@/features/playback/playbackPrefs';
 import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
@@ -40,6 +42,11 @@ export const DEFAULT_BPM = 100;
 interface PlaybackSlice {
     playbackStatus: PlaybackStatus;
     bpm: number;
+    /**
+     * Tempo actually sounding at the playhead, or null when stopped.
+     * The practice tempo (`bpm`) is what +/− edits; this is the readout.
+     */
+    soundingBpm: number | null;
     /** Index into ScoreData.measures (not the printed number), null before playback. */
     currentMeasureIndex: number | null;
     muteRH: boolean;
@@ -51,8 +58,13 @@ interface PlaybackSlice {
     countInOn: boolean;
     loopRange: LoopRange | null;
     followMode: FollowMode;
+    /** Per-device preference, persisted; survives a document switch. */
+    tempoStyle: TempoStyle;
+    /** Per-device preference, persisted; survives a document switch. */
+    autoPedal: boolean;
     setPlaybackStatus: (playbackStatus: PlaybackStatus) => void;
     setBpm: (bpm: number) => void;
+    setSoundingBpm: (soundingBpm: number | null) => void;
     setCurrentMeasureIndex: (currentMeasureIndex: number | null) => void;
     setHandMuted: (hand: 0 | 1, muted: boolean) => void;
     setHandVolume: (hand: 0 | 1, volume: number) => void;
@@ -60,7 +72,9 @@ interface PlaybackSlice {
     setCountInOn: (countInOn: boolean) => void;
     setLoopRange: (loopRange: LoopRange | null) => void;
     setFollowMode: (followMode: FollowMode) => void;
-    /** Back to defaults when the viewer switches documents. */
+    setTempoStyle: (tempoStyle: TempoStyle) => void;
+    setAutoPedal: (autoPedal: boolean) => void;
+    /** Back to defaults when the viewer switches documents — the persisted preferences stay. */
     resetPlayback: () => void;
 }
 
@@ -89,6 +103,7 @@ const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
 const INITIAL_PLAYBACK = {
     playbackStatus: 'idle',
     bpm: DEFAULT_BPM,
+    soundingBpm: null,
     currentMeasureIndex: null,
     muteRH: false,
     muteLH: false,
@@ -123,8 +138,10 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setFocusedPageIndex: (focusedPageIndex) => set({ focusedPageIndex }),
     setFingerDraws: (fingerDraws) => set({ fingerDraws }),
     ...INITIAL_PLAYBACK,
+    ...readPlaybackPrefs(),
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),
+    setSoundingBpm: (soundingBpm) => set({ soundingBpm }),
     setCurrentMeasureIndex: (currentMeasureIndex) => set({ currentMeasureIndex }),
     setHandMuted: (hand, muted) => set(hand === 0 ? { muteRH: muted } : { muteLH: muted }),
     setHandVolume: (hand, volume) => {
@@ -135,5 +152,15 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setCountInOn: (countInOn) => set({ countInOn }),
     setLoopRange: (loopRange) => set({ loopRange }),
     setFollowMode: (followMode) => set({ followMode }),
+    setTempoStyle: (tempoStyle) =>
+        set((state) => {
+            writePlaybackPrefs({ tempoStyle, autoPedal: state.autoPedal });
+            return { tempoStyle };
+        }),
+    setAutoPedal: (autoPedal) =>
+        set((state) => {
+            writePlaybackPrefs({ tempoStyle: state.tempoStyle, autoPedal });
+            return { autoPedal };
+        }),
     resetPlayback: () => set({ ...INITIAL_PLAYBACK }),
 }));

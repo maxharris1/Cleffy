@@ -397,6 +397,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 pageCount={state.doc.page_count}
                 warning={warning}
                 onDismissWarning={dismissWarning}
+                documentTitle={state.doc.title}
             />
             {shareOpen && resolvedUserId ? (
                 <ShareDialog docId={docId} userId={resolvedUserId} onClose={() => setShareOpen(false)} />

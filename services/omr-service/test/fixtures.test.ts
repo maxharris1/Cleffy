@@ -41,7 +41,11 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
     });
 
     it('zips every measure to geometry in reading order, skipping the cautionary stack', () => {
-        expect(score.warnings).toEqual([]); // 15 stacks ↔ 15 measures, no mismatch
+        // 15 stacks ↔ 15 measures, so nothing geometric to report. The warnings
+        // are about tempo — Audiveris never recognized the ♩=n text — and the
+        // pedalling this unmarked score was given.
+        expect(score.warnings).toEqual(['tempo_defaulted', 'pedal_inferred']);
+        expect(score.pedals?.length ?? 0).toBeGreaterThan(0);
         for (const [index, measure] of score.measures.entries()) {
             expect(measure.sys, `measure ${index} has geometry`).toBeGreaterThanOrEqual(0);
             expect(measure.x1).toBeGreaterThan(measure.x0);
@@ -71,14 +75,18 @@ describe('fixture pipeline (mxl + omr → ScoreData)', () => {
         expect(score.notes.filter((n) => n.h === 0)).toHaveLength(32);
         expect(score.notes.filter((n) => n.h === 1)).toHaveLength(22);
         // A5 whole tied to A5 whole = one 3840-tick note, gated once at its close.
-        expect(score.notes.filter((n) => n.d > 1920)).toEqual([{ t: 2880, d: plain(3840), p: 81, h: 0 }]);
+        expect(score.notes.filter((n) => n.d > 1920)).toEqual([{ t: 2880, d: plain(3840), p: 81, h: 0, vc: 0 }]);
         // The E5+G5 chord shares one onset.
         const chord = score.notes.filter((n) => n.t === 960 && n.h === 0);
         expect(chord.map((n) => n.p).sort((a, b) => a - b)).toEqual([76, 79]);
     });
 
-    it('found no tempo mark (metronome text needs OCR) → defaultBpm null', () => {
-        expect(score.defaultBpm).toBeNull();
+    it('found no tempo mark (metronome text needs OCR) → tempo taken from the meter', () => {
+        // No tempo evidence of any kind survived the OMR, so the meter decides:
+        // 4/4 reads as a moderate 96, erring slow, and says so rather than
+        // leaving the reader to wonder where the number came from.
+        expect(score.defaultBpm).toBe(96);
+        expect(score.warnings).toContain('tempo_defaulted');
     });
 
     it('carries the engraved chord columns for a note-accurate playhead', () => {
@@ -107,16 +115,17 @@ describe('key-signature fixture (G major, real Audiveris 5.6.1 artifact)', () =>
     const musical = parseMxlFiles([keysig]);
 
     it('applies the key signature (F→F♯), honors accidentals, keeps naturals', () => {
-        expect(musical.notes).toEqual([
-            { t: 0, d: plain(480), p: 78, h: 0 }, // F♯5 purely from the key signature
-            { t: 0, d: plain(960), p: 50, h: 1 }, // D3 stays natural
-            { t: 480, d: plain(480), p: 79, h: 0 }, // G5
-            { t: 960, d: plain(480), p: 81, h: 0 }, // A5
-            { t: 960, d: plain(960), p: 38, h: 1 }, // D2
-            { t: 1440, d: plain(480), p: 85, h: 0 }, // C♯6 from an explicit accidental
-            { t: 1920, d: plain(1920), p: 74, h: 0 }, // D5 (chord)
-            { t: 1920, d: plain(1920), p: 78, h: 0 }, // F♯5 inside the chord — key sig again
-            { t: 1920, d: plain(1920), p: 43, h: 1 }, // G2
+        expect(musical.notes.every((n) => n.gate === 0.9)).toBe(true);
+        expect(musical.notes.map(({ gate: _gate, ...note }) => note)).toEqual([
+            { t: 0, d: plain(480), p: 78, h: 0, vc: 0 }, // F♯5 purely from the key signature
+            { t: 0, d: plain(960), p: 50, h: 1, vc: 0 }, // D3 stays natural
+            { t: 480, d: plain(480), p: 79, h: 0, vc: 0 }, // G5
+            { t: 960, d: plain(480), p: 81, h: 0, vc: 0 }, // A5
+            { t: 960, d: plain(960), p: 38, h: 1, vc: 0 }, // D2
+            { t: 1440, d: plain(480), p: 85, h: 0, vc: 0 }, // C♯6 from an explicit accidental
+            { t: 1920, d: plain(1920), p: 74, h: 0, vc: 1 }, // D5 — Audiveris wrote it as a second voice, not a chord member
+            { t: 1920, d: plain(1920), p: 78, h: 0, vc: 0 }, // F♯5 inside the chord — key sig again
+            { t: 1920, d: plain(1920), p: 43, h: 1, vc: 0 }, // G2
         ]);
     });
 

@@ -1,0 +1,32 @@
+{
+    "slug": "wtk1-prelude1",
+    "title": "Bach — WTC I Prelude 1 in C, BWV 846",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV846/wtk1-prelude1/wtk1-prelude1-let.pdf",
+        "sha256": "0bc884049d69e9d3ec24b133467d8b8bfc0335e169a16cfd1075b329e7278449",
+        "pages": 2
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV846/wtk1-prelude1/wtk1-prelude1.mid",
+        "sha256": "0340751d717f76eb1688ed9748ec31229889f7ce2806b7bb96a71858a5f4f69e",
+        "license": "Public Domain (Mutopia 2011/09/12-5, Tobias Erbsland after Shay Rojansky / Han-Wen Nienhuys). Local zip is wtk1-prelude1.mid, not a Mutopia-hosted archive."
+    },
+    "movements": [
+        {
+            "name": "Praeludium I",
+            "midi": "wtk1-prelude1.mid",
+            "meter": { "num": 4, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 35,
+            "expectedFifths": 0,
+            "expectedTempo": { "min": 50, "max": 80 },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 35
+        }
+    ],
+    "editionNotes": [
+        "LilyPond \\tempo 4 = 60 in 4/4, C major. 35 printed bars, no repeats. MIDI last duration is 140 quarters (35 bars).",
+        "pdf.sha256 pins the Mutopia letter PDF (2 pages). Do not embed document UUIDs."
+    ]
+}

@@ -1,3 +1,4 @@
+import { eraOfTitle, type Era } from '@/features/playback/era';
 import { getSupabase } from '@/lib/supabase';
 import { getDb } from '@/sync/db';
 import type { CachedScoreAnalysis } from '@/sync/db';
@@ -22,10 +23,42 @@ export interface ScoreAnalysisStatusRow {
  * services/omr-service/src/job.ts: an analysis produced by an older engine
  * still plays, but is missing whatever that bump added, and nothing else in
  * the system ever re-runs it — so the reader has to be offered the choice.
+ *
+ * This number follows the service's only when the bump changed what a score
+ * SOUNDS like. svc-6 was page sharding — the same PDF in, byte-for-byte the
+ * same ScoreData out, only sooner — so it deliberately stayed behind at 5
+ * rather than asking every reader to regenerate an identical analysis. svc-7
+ * (D.C./D.S. roadmaps, the tempo map surviving a shard merge, pedal) changes
+ * the performance, so it is worth the interruption. svc-8 seeds expression
+ * across the page-cut seam, which changes what every 4+ page score sounds like.
+ * svc-9 realises ornaments, appoggiaturas, tempo-relative graces and swing.
+ * svc-10 is the Audiveris 5.11.0 recognizer — a new engine changes what a PDF sounds like.
+ * svc-11 carries voices, infers pedal for unmarked scores and repairs misread bars (ScoreData v5).
+ * svc-12: auto-pedal only for wholly unmarked scores; per-voice dynamics survive a
+ * mark-less shard B; era stamped on the analysis.
+ * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
+ * parts, and zips geometry per system so the playhead stays on the bar.
+ * svc-14 skips staff-less cover/blank pages instead of failing the book.
  */
-export const CURRENT_ENGINE_GENERATION = 5;
+export const CURRENT_ENGINE_GENERATION = 14;
 
-const engineGeneration = (engineVersion: string | null): number | null => {
+/**
+ * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires
+ * only on main, so this client routinely ships understanding generations the
+ * live Cloud Run cannot write yet. A regenerate offer gated on
+ * CURRENT_ENGINE_GENERATION alone is then a paid no-op: the click spends one
+ * of the reader's metered omr_runs, the old engine answers from its cache with
+ * the very row that prompted the offer, and the banner comes straight back.
+ * So the offer is capped at this number, and this number moves only in the
+ * release that ships the matching OMR image. `/healthz` reports ENGINE_VERSION
+ * so score-analyze can refuse a charge even if this constant lags.
+ */
+export const DEPLOYED_ENGINE_GENERATION = 6;
+
+/** First generation whose output depends on the document title's era. */
+export const ERA_AWARE_ENGINE_GENERATION = 11;
+
+export const engineGeneration = (engineVersion: string | null): number | null => {
     const match = /\+svc-(\d+)$/.exec(engineVersion ?? '');
     if (!match?.[1]) {
         return null;
@@ -34,16 +67,41 @@ const engineGeneration = (engineVersion: string | null): number | null => {
     return Number.isFinite(parsed) ? parsed : null;
 };
 
-/** True when this analysis predates the current engine and could be improved. */
-export const analysisIsStale = (engineVersion: string | null): boolean => {
+export interface AnalysisStaleOptions {
+    /** Era stamped on the stored ScoreData, if any. */
+    era?: Era | null;
+    /** Live document title, used to re-derive the era. */
+    title?: string | null;
+}
+
+/**
+ * True when this analysis predates the current engine AND the deployed worker
+ * could actually better it, or when the title's era no longer matches the
+ * stamp and the deployed worker is era-aware. A re-run is only ever offered
+ * when clicking the button produces something newer than what the reader already has.
+ */
+export const analysisIsStaleAgainst = (
+    engineVersion: string | null,
+    offerableGeneration: number,
+    options: AnalysisStaleOptions = {},
+): boolean => {
     const generation = engineGeneration(engineVersion);
-    // Absent or unreadable means it predates version stamping, so it is the
-    // oldest data there is. This is only ever asked of a READY analysis, where
-    // a missing stamp cannot mean "not finished yet". Five rows in the live
-    // database are in exactly this state and would otherwise never be offered
-    // a re-run — the documents most in need of one.
-    return generation === null || generation < CURRENT_ENGINE_GENERATION;
+    const engineStale = generation === null || generation < offerableGeneration;
+    const stamped = options.era;
+    const eraStale =
+        offerableGeneration >= ERA_AWARE_ENGINE_GENERATION &&
+        stamped !== undefined &&
+        stamped !== null &&
+        eraOfTitle(options.title) !== stamped;
+    return engineStale || eraStale;
 };
+
+export const analysisIsStale = (engineVersion: string | null, options: AnalysisStaleOptions = {}): boolean =>
+    analysisIsStaleAgainst(
+        engineVersion,
+        Math.min(CURRENT_ENGINE_GENERATION, DEPLOYED_ENGINE_GENERATION),
+        options,
+    );
 
 /** A processing row untouched for this long is a lost job (service died/recycled). */
 export const STALE_PROCESSING_MS = 20 * 60 * 1000;

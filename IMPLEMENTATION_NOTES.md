@@ -99,10 +99,10 @@ for reading Pencil ink digits.
 | Looping       | One on/off toggle — no arming. Switching it on lays a four-bar range at the playhead, drawn on the score as an amber band with end brackets and a "Loop" tag; a range row in the transport nudges either end by a bar or snaps the start to the playhead                                                                                                                                                                                |
 | Musicality    | Printed dynamics (pp…fff, sfz accents, `<sound dynamics>`) drive velocities through a perceptual v^1.6 gain curve; grace notes play as crushed acciaccaturas; metronome marks convert beat-unit → quarter-BPM; each sample's codec padding **and** its attack rise time are measured at decode time, and notes start early by that rise so the note is _heard_ on the click rather than beginning there (bass anchors need up to 25 ms) |
 
-**⚠️ Deploy the app before the OMR service.** ScoreData is now **v3**. The app rejects any
+**⚠️ Deploy the app before the OMR service.** ScoreData is now **v5**. The app rejects any
 payload newer than its own `SCORE_DATA_VERSION` — `parseScoreData` returns null, the row caches
 as ready with no score, and the viewer sticks on a generic "internal" failure that Retry cannot
-clear. A v3-aware client reads v1/v2/v3 fine, so client-first is safe and service-first is not.
+clear. A v5-aware client reads v1–v5 fine, so client-first is safe and service-first is not.
 
 **Musicality (v3).** Dynamics resolve per `(tick, staff)` rather than from one mutable value
 walked in document order, so a left-hand `p` no longer overwrites the right hand's `f` from the
@@ -115,6 +115,49 @@ scalar: every printed mark, Italian headings inferred as quarter-BPM and marked 
 and rit./accel./a tempo pre-discretized to a point per beat. Fermatas are clock stops
 (`holds`), so a note sounding across one rings through it.
 
+**Musicality (v5, svc-11).** _Voices:_ every note carries `vc`, a per-staff slot 0–7 the
+parser normalises from Audiveris's unstable `<voice>` ids (an id that vanishes as another
+appears is a renumbering and keeps its slot; a link that has to reach over an octave with no
+rhythmic hand-over is disclosed as `voices_unstable`; the slot table rides the shard seed so a
+line keeps its `vc` across `transcribeParallel` seams); `<direction><voice>` dynamics become a
+`staff:voice` curve consulted before the staff's, with the staff's hairpins interpolated from
+that voice's own level. _Client voice analysis_
+(`voiceAnalysis.ts`, pure, index-aligned): successor-in-voice, legato eligibility from
+`d / gap ≥ 0.85`, the bar's melody voice over a 9-bar window (stepwise motion, height,
+top-of-hand), accompaniment = last bar's figure repeated under another voice, phrase starts
+after a beat of rest. `expression.ts` overlaps legato successors by 6 % of the note (≤ 60 ms,
+not when the pedal already pools), lifts the melody _voice_ rather than the top note, dips
+repeated figures 6/127, leans a phrase toward its peak ±3/127 and tapers a legato run's last two
+notes. _Tempo style_ (`Strict` / `Expressive` pill, persisted per device in `localStorage`):
+strict keeps the svc-10 tempo map byte for byte (onsets and clicks; note shaping above applies
+in both styles); expressive composes a per-beat factor curve into `buildTempoMap` — final rit.
+to 0.75 over the last 2 bars (4 when the score has ≥ 64 bars), ~8 %
+broadening before movement ends / repeat seams / holds, ~4 % agogic on the first downbeat after
+a melodic rest — so click, count-in, playhead and loop wrap follow for free. _Auto-pedal_
+(service, `autoPedal.ts`): where a score has no pedal edges (or an ≥ 8-bar gap) the job infers
+them per beat from the pitch-class set, lifting for rests, staccato beats and harmonic churn;
+the era comes from the composer surname in `documents.title` (`era.ts`; unknown → Classical:
+re-catch on bass change only; Baroque → none; Romantic/modern → full rule), edges cap at 256 by
+coarsening to 1/2/4/8 bars (past that, printed edges only), each inferred edge carries
+`src: 'inferred'`, and the score says
+`pedal_inferred`. Engraved pedalling always plays: the `Auto-pedal` pill removes only the edges
+tagged `src: 'inferred'` client-side, even on a score that mixes the two. _Rhythm repair_
+(`rhythmRepair.ts`): after meter reconciliation and before padding, a voice that does not sum to
+its bar gets ONE edit (per voice, so a bar with two broken voices gets two) — dot toggle,
+halve/double, trailing rest, or duplicated rest removed —
+only when the sum becomes exact and either a neighbouring bar's same voice has the same onset
+pattern or the note's beam group lands on the beat grid afterwards (`rhythm_repaired`,
+`timings.rhythmRepairs`). Directions read at or after the edit move with the notes (a voice's
+own dynamics always; graces, wedges, pedal and tempo marks only where no other voice shares the
+staff or bar); pickups and the final bar of a part are never repaired, as in meter
+reconciliation. A breath mark on a tied note stops the clock after the merged chain. _Smaller:_ Baroque trills and Pralltriller start on the upper
+auxiliary; single-note tremolos, glissandi (chromatic run) and caesura / breath marks (½-beat
+hold) are realised. Two more velocity layers were measured and deferred: `public/audio/piano`
+is 3.0 MB for three layers (~1.0 MB each), so five would cost ~+2.0 MB. Constants are
+uncalibrated (ASAP-style performance data could set the overlap, dips and curve depths); same-PDF
+documents share the first job's era through `score_cache`; barline styles are not in ScoreData,
+so section broadening uses `srcIndex` seams, movement ends and holds as proxies.
+
 **Repeats and voltas are performed as written.** Barline marks resolve into a performance
 order and the score is unrolled in `buildScoreData`, after the geometry zip — a repeated bar is
 a clone that keeps its page position, so the playhead sweeps the same printed bar again for
@@ -125,8 +168,8 @@ length past the 2000-measure schema cap, degrades wholesale to linear.
 
 **Known limitations** (surfaced as ScoreData `warnings`, and now shown in the transport):
 D.C. / D.S. / Coda / Fine are ignored — they arrive as text Audiveris emits unreliably, and a
-wrong repeat misplaces eight bars where a wrong D.S. reorders pages; pedal, ornaments and swing
-feel are not modelled; grace-note nuance is blocked on
+wrong repeat misplaces eight bars where a wrong D.S. reorders pages; two-note tremolos and
+una-corda / sostenuto pedals are not modelled; grace-note nuance is blocked on
 Audiveris emitting `<grace>` at all, which it did not do once across an entire 8198-note score.
 OMR accuracy still depends on scan quality — clean typeset PDFs work best, and wrong notes are a
 per-measure OMR limitation, not a playback bug. Geometry failures degrade gracefully: audio

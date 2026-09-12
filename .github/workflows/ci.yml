@@ -38,7 +38,13 @@ jobs:
                   cache: npm
                   cache-dependency-path: services/omr-service/package-lock.json
             - run: npm ci
+            # On pull_request the guard diffs against GITHUB_BASE_REF; a plain
+            # push has no base ref and used to fall through to origin/main,
+            # quietly comparing against the wrong trunk. Development integrates
+            # on dev, so that is the push-time base.
             - run: npm run check:engine-version
+              env:
+                  ENGINE_VERSION_BASE: origin/dev
             - run: npm run typecheck
             - run: npm run test
             - run: npm run build

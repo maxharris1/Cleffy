@@ -1,5 +1,89 @@
 # Musicality review — OMR → ScoreData → playback
 
+> **Addendum — 2026-09-08 (svc-12, Moonlight accuracy).** A Moonlight-only
+> diagnostic (`npm run eval:moonlight`) reports per-bar pitch-multiset recall
+> against the Mutopia edition, DTW-aligned. That is a follow-along metric, not
+> an OMR accuracy gate for tuplets, and it is not in CI. The PDF used here is
+> Mutopia’s LilyPond `moonlight-a4.pdf` (one Audiveris movement file, 334
+> engraved bars), not the IMSLP scan the original audit quoted (6/69, 42/61,
+> ~95/201). Engraved indexes are pinned in `eval/fixtures/moonlight/boundaries.json`
+> (I `0–68` gated, II `69–128` report-only, III `129–329` report-only) because
+> Audiveris numbers the first Allegretto bar as a second `number="69"`.
+>
+> | movement            | svc-11 baseline (no tuplets) | svc-12 (`implicitTuplets` + parser) | role |
+> | ------------------- | ---------------------------- | ----------------------------------- | ---- |
+> | I. Adagio sostenuto | 16/69 bars, 81.3% notes      | **69/69 bars, 99.9% notes**         | gated (pitch recall) |
+> | II. Allegretto      | 10/60 bars, 68.9% notes      | 10/60 bars, 68.9% notes             | report |
+> | III. Presto agitato | 127/201 bars, 82.2% notes    | 140/201 bars, 85.4% notes           | report |
+>
+> **What actually moved the needle.** `ProcessingSwitches.implicitTuplets=true` is
+> the mvt I result — the opening triplets were dropped as 3×eighths. That switch
+> is a product-wide play-along default (unmarked tuplets are a known Audiveris
+> drop; see No. 1 below), not a Moonlight-only experiment. `Book.Lyrics=false`
+> is a silent no-op; the real switch is `ProcessingSwitches.lyrics`. Fingerings is on
+> so digits do not compete as tuplet signs. Parser work that this edition did not
+> fire (LilyPond keys and a single Piano part are already clean) — coverage is
+> synthetic MusicXML, not this PDF:
+> `key_signature_repaired`, `ghost_part_filled`, `clef_suspect`, `dynamic_suspect`.
+> D.C./Fine and `. Presto agitato.` → 172 are covered by tests; this export unrolls
+> `:||` (`repeats_unrolled`) and does not emit `jumps_performed`.
+>
+> The general corpus eval CLI (`src/eval/`, `npm run eval`) lives on
+> `mh/omr-accuracy-eval` (PR #33, merged). This musical change is svc-13;
+> PR #34 must bump to svc-14.
+>
+> **Residual, this edition.**
+>
+> - **II.** Audiveris numbers the first Allegretto bar as a second `number="69"`
+>   with `implicit="yes"` (one quarter at the page/key/time change), then 3/4 bars
+>   whose _middle beat is empty_ — typical failing bars are 5/8 = 62.5% because
+>   one of three beats is missing. Not a key misread (fifths −5 is in force and
+>   correct). Parser tuplet inference (2f) and `.omr` HeadChordInter recovery (4)
+>   were not taken: mvt I already sat at 69/69 without them, and they would not
+>   restore a beat Audiveris never exported.
+> - **III.** Tuplets lifted 127 → 140 passing bars. Remaining misses cluster on
+>   even bars at ~31% (9/29) against odd bars at ~83% (19/23) — a barline / missing
+>   inner-voice pattern in the Presto, still an Audiveris export, not a zip or
+>   key-repair bug (`measure_geometry_mismatch` did not fire).
+>
+> Tiny fixture (`test/fixtures/tiny.mxl`) still zips 1:1. Schubert’s _Moments
+> Musicaux_ PDF was not in this environment, so that regression was not re-run.
+
+> **Addendum — 2026-09-02.** This review was written against the pipeline as it stood before
+> svc-5. The probe transcript, the case study and the priorities below are a record of that
+> state, not of today's; read them as history. What has been fixed since:
+>
+> - **svc-5** — dynamics resolve per staff (the P0 bleed, and with it the P3 accent that
+>   landed on the wrong note); hairpins are interpolated (P1); articulation gates sounding
+>   length, so staccato is short and slurs are not (P0); there is a real tempo map, with
+>   rit./accel./a tempo and fermatas (P1); repeats and voltas are unrolled into performance
+>   order (P1); and every warning the analysis stores is disclosed in the transport instead of
+>   being kept to ourselves.
+> - **svc-7, this pass** — D.C., D.S., segno, coda and Fine are read and performed, or refused
+>   as a whole and disclosed; the tempo map and fermatas survive the shard merge, which is what
+>   left every ≥4-page score — the Schubert case study included — at a flat fallback tempo; the
+>   opening tempo comes from a wider vocabulary, or from the meter when nothing at all is
+>   printed, and says which; sustain pedal is read (P2). On the client, the engine this
+>   document's thesis calls a MIDI note list gains a dB-domain dynamic range, reverb, keyboard
+>   panning, a velocity-tracked filter, deterministic humanization and pitch-dependent release.
+> - **svc-8** — a 4+ page score is still two shards, but the second is now parsed with the
+>   first's tempo and dynamics at the overlap, so a rit. that crossed the cut, an a tempo that
+>   opened the next page, and a pp printed only on page 1 all survive. A later movement with
+>   no heading of its own starts at its meter default rather than the previous movement's
+>   ritardando floor. Gradual marks are shaded (poco / molto) and the stepped family —
+>   meno mosso, più mosso, ritenuto, l'istesso tempo, doppio movimento — is read.
+> - **svc-9** — ornaments (trill, mordent, turn) and arpeggio signs are spelled as ordinary
+>   notes at the tempo in force; appoggiaturas take the beat and acciaccaturas scale with
+>   the pulse; a "swing" heading long–shorts pairs of eighths.
+>
+> Still open, and still described accurately below: velocity-layered samples, the measure
+> counter across concatenated movements, `totalTicks` cutting off secondary parts, and both
+> rhythm findings in the case study (No. 1's triplets, No. 2's misread meter) — those two are
+> Audiveris's limits, not ours.
+>
+> None of this reaches a document that was already analyzed until it is regenerated. The engine
+> generation bump is what puts that offer on the reader's screen.
+
 Review of what Cleffy hears when it looks at a score, and where that diverges from what a
 musician reads on the page. Findings below were verified by running the real parser
 (`services/omr-service/src/musicxml.ts`) over a grand-staff excerpt carrying ordinary piano
@@ -41,7 +125,7 @@ Output (`t` = tick, `d` = duration, `v` = velocity):
 ```
 
 Every staccato quarter is `d=480` — full length. The accent is inaudible. The crescendo is
-flat. The fermata does not hold. The tempo stays 120. And the right hand is playing *piano*
+flat. The fermata does not hold. The tempo stays 120. And the right hand is playing _piano_
 from bar 2 to the end of the piece.
 
 ---
@@ -93,12 +177,12 @@ smeared" rather than as a missing feature.
 nothing else in the app reads it, fingering included. So `d` is already a _sounding_ duration
 in practice, and the OMR service can shorten it directly:
 
-| marking      | gate         |
-| ------------ | ------------ |
-| staccatissimo| ~0.25        |
-| staccato     | ~0.50        |
-| (unmarked)   | ~0.90        |
-| tenuto/slur  | 1.0          |
+| marking       | gate  |
+| ------------- | ----- |
+| staccatissimo | ~0.25 |
+| staccato      | ~0.50 |
+| (unmarked)    | ~0.90 |
+| tenuto/slur   | 1.0   |
 
 No schema change, no client change.
 
@@ -158,7 +242,7 @@ against data that already exists.
 - **Ornaments:** trill / mordent / turn / arpeggiate play as plain notes (probe: the trill
   became a plain quarter). Reasonable v1 scope, but a real gap for baroque and classical.
 - **Grace notes:** always crushed acciaccatura at a fixed `GRACE_TICKS = 110`. `<grace
-  slash="no">` — an appoggiatura, which should take half the principal's value **on** the
+slash="no">` — an appoggiatura, which should take half the principal's value **on** the
   beat — plays identically. `steal-time-following` / `steal-time-previous` ignored. (Minor: the
   comment at `musicxml.ts:43` says "≈55 ms at 120 bpm"; 110/480 quarter at 120 bpm is ~115 ms.)
 - **Swing:** no swing flag in ScoreData; eighths are always straight. If charts/lead sheets are
@@ -238,26 +322,26 @@ ScoreData.
 **Key signatures are essentially perfect.** All twenty key changes across the set are correct,
 including internal modulations:
 
-| | printed | read |
-| --- | --- | --- |
-| No. 1 | C major, → G major middle section | 0 (default), `fifths=1` @42000 ✓ |
-| No. 2 | A♭ major, → F♯ minor middle sections | `-4`, `+3` twice ✓ |
-| No. 3 | F minor | `-4` ✓ |
-| No. 4 | C♯ minor | `+4` ✓ |
-| No. 5 | F minor | `-4` ✓ |
-| No. 6 | A♭ major | `-4` ✓ |
+|       | printed                              | read                             |
+| ----- | ------------------------------------ | -------------------------------- |
+| No. 1 | C major, → G major middle section    | 0 (default), `fifths=1` @42000 ✓ |
+| No. 2 | A♭ major, → F♯ minor middle sections | `-4`, `+3` twice ✓               |
+| No. 3 | F minor                              | `-4` ✓                           |
+| No. 4 | C♯ minor                             | `+4` ✓                           |
+| No. 5 | F minor                              | `-4` ✓                           |
+| No. 6 | A♭ major                             | `-4` ✓                           |
 
 Catching the enharmonic F♯-minor episodes inside an A♭ movement — twice — is genuinely good.
 
 **Movement segmentation found all six.** **Time signatures: five of six correct.** And rhythm
 recognition in the back four movements is strong:
 
-| movement | bars | bars at correct length | rate |
-| --- | --- | --- | --- |
-| No. 3 (2/4) | 77 | 76 | **99%** |
-| No. 4 (2/4) | 182 | 172 | **95%** |
-| No. 5 (2/4) | 111 | 110 | **99%** |
-| No. 6 (3/4) | 120 | 116 | **97%** |
+| movement    | bars | bars at correct length | rate    |
+| ----------- | ---- | ---------------------- | ------- |
+| No. 3 (2/4) | 77   | 76                     | **99%** |
+| No. 4 (2/4) | 182  | 172                    | **95%** |
+| No. 5 (2/4) | 111  | 110                    | **99%** |
+| No. 6 (3/4) | 120  | 116                    | **97%** |
 
 ## No. 2 is read in 6/8. It is printed in 9/8.
 
@@ -267,9 +351,9 @@ This is an Audiveris misread, not a parser bug — but **the parser then amplifi
 bar length becomes 1440 ticks instead of 2160, so the underfull-padding path
 (`musicxml.ts:643-651`) pads bars to a target derived from the wrong meter:
 
-| movement | bars | at correct length | actual ticks | correct ticks |
-| --- | --- | --- | --- | --- |
-| No. 2 (9/8) | 94 | **18 (19%)** | 159,960 | 203,040 |
+| movement    | bars | at correct length | actual ticks | correct ticks |
+| ----------- | ---- | ----------------- | ------------ | ------------- |
+| No. 2 (9/8) | 94   | **18 (19%)**      | 159,960      | 203,040       |
 
 44 bars were padded to exactly 1440 — each one **720 ticks short, a full dotted-quarter beat
 of 9/8**. The Andantino runs **21% short overall**, and because the error accumulates bar by
@@ -283,9 +367,9 @@ Instead the padding logic propagated it, and the user was told nothing.
 
 ## No. 1 loses its triplets
 
-| movement | bars | at correct length | rate |
-| --- | --- | --- | --- |
-| No. 1 (3/4) | 95 | 64 | **67%** |
+| movement    | bars | at correct length | rate    |
+| ----------- | ---- | ----------------- | ------- |
+| No. 1 (3/4) | 95   | 64                | **67%** |
 
 67% is an **upper bound** — silently padded underfull bars also land on exactly 1440 and are
 indistinguishable from correct ones in the stored data.
@@ -320,15 +404,15 @@ on a singing line over a quieter accompaniment.
 
 The whole dynamic range of the set reduces to seven values:
 
-| velocity | notes | share | |
-| --- | --- | --- | --- |
-| 0.34 | 3460 | 42.2% | `pp` |
-| 0.46 | 3454 | 42.1% | `p` |
-| 0.82 | 885 | 10.8% | `f` |
-| 0.92 | 333 | 4.1% | `ff` |
-| 0.66 | 51 | 0.6% | accent over `p` |
-| 0.70 | 13 | 0.2% | `mf` |
-| 0.54 | 2 | 0.0% | accent over `pp` |
+| velocity | notes | share |                  |
+| -------- | ----- | ----- | ---------------- |
+| 0.34     | 3460  | 42.2% | `pp`             |
+| 0.46     | 3454  | 42.1% | `p`              |
+| 0.82     | 885   | 10.8% | `f`              |
+| 0.92     | 333   | 4.1%  | `ff`             |
+| 0.66     | 51    | 0.6%  | accent over `p`  |
+| 0.70     | 13    | 0.2%  | `mf`             |
+| 0.54     | 2     | 0.0%  | accent over `pp` |
 
 **84% of the work plays at _p_ or _pp_.** Every value is an exact `DYNAMIC_LEVELS` constant or
 an accent offset — **there is not one intermediate value in 8198 notes**. That is direct proof
@@ -361,8 +445,8 @@ of six movements are all good enough to practise against. The failures cluster i
 places:
 
 1. **Rhythm, where the notation is dense** (No. 1's triplets, No. 2's misread meter). Both are
-   Audiveris limits, but both were *detectable* from data the pipeline already computes and
-   *worsened* by padding against a wrong target.
+   Audiveris limits, but both were _detectable_ from data the pipeline already computes and
+   _worsened_ by padding against a wrong target.
 2. **Everything expressive** — dynamics, accents, articulation, tempo, graces, repeats — which
    is the pipeline's own gap, not Audiveris's.
 

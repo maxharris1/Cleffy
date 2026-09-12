@@ -106,15 +106,15 @@ export default defineConfig({
                 navigateFallback: '/index.html',
                 navigateFallbackDenylist: [/^\/auth\/callback/],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-                // Piano samples (~0.85 MB) are deliberately NOT precached — they
-                // load on first Play and then replay (and work offline) from here.
+                // Piano samples (~2.8 MB, 87 files) are deliberately NOT precached —
+                // they load on first Play and then replay (and work offline) from here.
                 runtimeCaching: [
                     {
                         urlPattern: /\/audio\/piano\//,
                         handler: 'CacheFirst',
                         options: {
                             cacheName: 'piano-samples',
-                            expiration: { maxEntries: 40 },
+                            expiration: { maxEntries: 100 },
                         },
                     },
                 ],
@@ -135,6 +135,6 @@ export default defineConfig({
     test: {
         environment: 'jsdom',
         setupFiles: ['./src/test/setup.ts'],
-        include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}'],
+        include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}', 'supabase/functions/_shared/**/*.test.ts'],
     },
 });
