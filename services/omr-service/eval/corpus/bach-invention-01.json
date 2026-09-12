@@ -1,0 +1,44 @@
+{
+    "slug": "bach-invention-01",
+    "title": "Bach — Invention 1 in C, BWV 772",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV772/bach-invention-01/bach-invention-01-let.pdf",
+        "sha256": "9f31743791c689e7e5f5732e8181c49ba9d546f6a3b2d6cd874e6846d31a77a3",
+        "pages": 2
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV772/bach-invention-01/bach-invention-01.mid",
+        "sha256": "9b9a6213941932d5171d9102d85912c3c1c61f8176ce02005cd2198881823c2d",
+        "license": "CC BY-SA 3.0 (Mutopia 2008/06/15-40, jeff covey after Bach-Gesellschaft). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Invention 1",
+            "midi": "bach-invention-01.mid",
+            "meter": {
+                "num": 4,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 22,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 60,
+                "max": 100
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 22,
+            "expectedHolds": 1,
+            "expectedExtraNotes": 12
+        }
+    ],
+    "editionNotes": [
+        "The .ly prints no \\time and no \\key, so LilyPond's defaults stand: 4/4 and C major (expectedFifths 0). Invention 1 is in C.",
+        "Every bar carries a `% n` comment in the source; the last is 22, which matches the 22 bars the MIDI produces. No repeats, so performedBars is also 22.",
+        "Two-voice counterpoint in continuous 16ths — the clearest test of the attack grid in the suite, with nothing else going on.",
+        "Six printed ornament signs (4 \\prall + 2 \\mordent) at 2 added notes each: expectedExtraNotes 12.",
+        "The final chord is marked \\fermata AND \\arpeggio in both staves. Two staves at one moment is one clock stop, so expectedHolds is 1. Cleffy rolls the arpeggio (arpeggiateChord) while the reference plays it as a block, which costs a few onset matches in bar 22 — a reference limitation, not slack worth pinning.",
+        "No printed metronome mark; the tempo is a \\midi-block tempoWholesPerMinute of 80. expectedTempo is a band around it and tempoInRange is a diagnostic here."
+    ]
+}

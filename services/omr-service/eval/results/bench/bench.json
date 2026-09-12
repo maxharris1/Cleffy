@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-12T17:43:54.262Z",
+  "generatedAt": "2026-09-12T18:14:46.457Z",
   "engineVersion": "audiveris-5.11.0+svc-14",
   "audiverisVersion": "- Version:      5.11.0",
   "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
@@ -9,16 +9,143 @@
     "barsPerAllowedMiss": 16
   },
   "totals": {
-    "pieces": 6,
+    "pieces": 16,
     "piecesPassed": 2,
-    "refNotes": 2760,
-    "pitchMatch": 89.85507246376811,
-    "exact": 73.55072463768116,
-    "onGrid": 72.02898550724638,
-    "missing": 212,
-    "extra": 233
+    "refNotes": 5996,
+    "pitchMatch": 80.58705803869246,
+    "exact": 71.36424282855236,
+    "onGrid": 70.31354236157438,
+    "missing": 728,
+    "extra": 405
   },
   "pieces": [
+    {
+      "slug": "czerny-op821-01",
+      "title": "Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1",
+      "pages": 1,
+      "pdfSha256": "657707b2e7e771eab728833f317d6de2b0f6fcba0787cf9a990aa757cbb73765",
+      "referenceSha256": "4592e80dbc7e4bb76c9f8009e488774ccd751f08bf9f09cb3da83665471d345d",
+      "artifactHash": "add9f77af1dd245d35c91e20f1384725f019f636a8975b54a4c271f0da96855c",
+      "refNotes": 152,
+      "pitchMatch": 92.10526315789474,
+      "exact": 92.10526315789474,
+      "onGrid": 92.10526315789474,
+      "missing": 0,
+      "extra": 0,
+      "composite": 85.26315789473685,
+      "pass": false,
+      "failures": [
+        "No. 1: attack-grid (exact 92.1% vs floor 95.0%)"
+      ]
+    },
+    {
+      "slug": "bach-prelude-bwv939",
+      "title": "Bach — Little Prelude in C, BWV 939",
+      "pages": 1,
+      "pdfSha256": "4439ba40ce7916009c0c46186c1e3c71ec3ff16940926ddc8222f6f23a9f86f3",
+      "referenceSha256": "a3dc077fb05ad47984a62ac5f2edd6d55a1b2723fa4d26c187c65245d1ce8c4f",
+      "artifactHash": "eec5a1bca93b8fe9869b4a12b4afbc9c0b2824cb4f31607757cc18ef8436c309",
+      "refNotes": 179,
+      "pitchMatch": 100,
+      "exact": 100,
+      "onGrid": 94.97206703910615,
+      "missing": 0,
+      "extra": 16,
+      "composite": 100,
+      "pass": false,
+      "failures": [
+        "Praeludium: no-invented-notes (16 extra (12 explained by printed ornaments), 1 allowed)"
+      ]
+    },
+    {
+      "slug": "bach-air-anh131",
+      "title": "Bach (attrib.) — Air in F, BWV Anh. 131",
+      "pages": 1,
+      "pdfSha256": "2421e97393ee1b476897314326409e0ea3e25e3ceb6d4bf215342e709be35af5",
+      "referenceSha256": "9b6b5c0d106734dc1784b81b30f9dd6b70c21c55c76bf5a88333a2bfe023b0fe",
+      "artifactHash": "b91d63c27b4b79c6b3193c9d3b533bc8f49f1c83d6cf8cb9a31e33456479019a",
+      "refNotes": 97,
+      "pitchMatch": 97.9381443298969,
+      "exact": 92.78350515463916,
+      "onGrid": 91.75257731958763,
+      "missing": 2,
+      "extra": 2,
+      "composite": 83.67268041237114,
+      "pass": false,
+      "failures": [
+        "bach-air-anh131: bar-length-warning (measure_underfull)",
+        "Air: printed-bar-count (17 printed bars read)",
+        "Air: bar-alignment (17 scored bars vs 16 reference bars)",
+        "Air: bar-length (1 of 17 bars are not the printed length)",
+        "Air: repeat-walk (25 performed bars)",
+        "Air: attack-grid (exact 92.8% vs floor 95.0%)"
+      ]
+    },
+    {
+      "slug": "bach-invention-01",
+      "title": "Bach — Invention 1 in C, BWV 772",
+      "pages": 2,
+      "pdfSha256": "9f31743791c689e7e5f5732e8181c49ba9d546f6a3b2d6cd874e6846d31a77a3",
+      "referenceSha256": "9b9a6213941932d5171d9102d85912c3c1c61f8176ce02005cd2198881823c2d",
+      "artifactHash": "c9121146ab42517eadfe8ade3547272ecc1000889084c73f3f7ef1f1c5019411",
+      "refNotes": 458,
+      "pitchMatch": 94.97816593886463,
+      "exact": 94.97816593886463,
+      "onGrid": 94.10480349344978,
+      "missing": 23,
+      "extra": 37,
+      "composite": 96.23362445414848,
+      "pass": false,
+      "failures": [
+        "Invention 1: notes-present (23 missing, 2 allowed)",
+        "Invention 1: no-invented-notes (37 extra (12 explained by printed ornaments), 2 allowed)",
+        "Invention 1: attack-grid (exact 95.0% vs floor 95.0%)"
+      ]
+    },
+    {
+      "slug": "bach-invention-08",
+      "title": "Bach — Invention 8 in F, BWV 779",
+      "pages": 2,
+      "pdfSha256": "5323449d08aa5031e974e275f182bebf8f533ecf62e5f9b0c9c36364f4b66469",
+      "referenceSha256": "07238719180171f76283756405ee43a0319226e869283bf29affb9e4c360e6f8",
+      "artifactHash": "fff7b6aa89e7f64b0f3e2ef593aa832768c395c3ae5446a91e841e0d4a715018",
+      "refNotes": 598,
+      "pitchMatch": 99.66555183946488,
+      "exact": 98.66220735785953,
+      "onGrid": 97.82608695652172,
+      "missing": 2,
+      "extra": 0,
+      "composite": 99.54849498327759,
+      "pass": false,
+      "failures": [
+        "bach-invention-08: bar-length-warning (measure_underfull + measure_overfull)",
+        "Invention 8: bar-length (2 of 34 bars are not the printed length)"
+      ]
+    },
+    {
+      "slug": "bach-prelude-bwv999",
+      "title": "Bach — Prelude in D minor, BWV 999",
+      "pages": 2,
+      "pdfSha256": "7097fae53aa72897c61c780414b4d06b1e4ffd064e1cffa288dfe92825ac26ff",
+      "referenceSha256": "a246bc598d6e9f94a5a42d2f39849883171cec1b4507f59b44d2a156eddba81c",
+      "artifactHash": "c78ce5cccb2c487aad6e6570f83d8cbadcbbebcdbe08366364ec5f763e07d80e",
+      "refNotes": 509,
+      "pitchMatch": 15.520628683693516,
+      "exact": 0.39292730844793705,
+      "onGrid": 0.39292730844793705,
+      "missing": 76,
+      "extra": 76,
+      "composite": 34.047151277013754,
+      "pass": false,
+      "failures": [
+        "bach-prelude-bwv999: bar-length-warning (measure_overfull)",
+        "Prelude: bar-length (12 of 43 bars are not the printed length)",
+        "Prelude: notes-present (76 missing, 3 allowed)",
+        "Prelude: no-invented-notes (76 extra, 3 allowed)",
+        "Prelude: attack-grid (exact 0.4% vs floor 95.0%)",
+        "Prelude: note-length (onGrid 0.4% vs floor 90.0%)"
+      ]
+    },
     {
       "slug": "wtk1-prelude1",
       "title": "Bach — WTC I Prelude 1 in C, BWV 846",
@@ -78,6 +205,45 @@
       "failures": []
     },
     {
+      "slug": "anna-magdalena-07",
+      "title": "Bach — Menuet in G, BWV Anh. 116",
+      "pages": 1,
+      "pdfSha256": "9d53fe19d452a7e601e45786ecf860f30d45398912b1a6d47b656bcb96b4b86e",
+      "referenceSha256": "d304586f42030116f2996a140022dc4b93eee63f12226a337c6f29117441dc7c",
+      "artifactHash": "4b2ec83054e8cf7ecdd27b294b303a121b938964a39ec71ee535828b289a51d8",
+      "refNotes": 310,
+      "pitchMatch": 99.03225806451613,
+      "exact": 96.45161290322581,
+      "onGrid": 95.80645161290323,
+      "missing": 3,
+      "extra": 2,
+      "composite": 98.75806451612904,
+      "pass": false,
+      "failures": [
+        "anna-magdalena-07: bar-length-warning (measure_overfull)",
+        "Menuet: bar-length (1 of 40 bars are not the printed length)"
+      ]
+    },
+    {
+      "slug": "burgmuller-op100-02",
+      "title": "Burgmüller — 25 Études faciles, Op. 100 No. 2 (Arabesque)",
+      "pages": 1,
+      "pdfSha256": "8945e0d9992347c6aef67b98bb43cc8a9876f2f904ad0c43babe5b6eedafb519",
+      "referenceSha256": "9b689a9b3f178e7bb2b5899d0559e223e9d8de7081d83fc087760ac2b4d378e1",
+      "artifactHash": "d7d3e02309628ebd36c3bdbd0114e58c61d462a5282ed591bc03890316c1f7d6",
+      "refNotes": 283,
+      "pitchMatch": 100,
+      "exact": 100,
+      "onGrid": 100,
+      "missing": 0,
+      "extra": 0,
+      "composite": 90,
+      "pass": false,
+      "failures": [
+        "Arabesque: no-invented-hold (3 hold(s) in the slice)"
+      ]
+    },
+    {
       "slug": "schumann-op68-01",
       "title": "Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie)",
       "pages": 1,
@@ -94,6 +260,61 @@
       "pass": false,
       "failures": [
         "Melodie: no-invented-notes (4 extra, 2 allowed)"
+      ]
+    },
+    {
+      "slug": "schumann-op68-05",
+      "title": "Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen)",
+      "pages": 1,
+      "pdfSha256": "8f56f70d597a838d23590ed5bbc9ecf10b21e77f07620019cdc2d06b931f7c17",
+      "referenceSha256": "85e286ab96e4929d6d2c1fd340f57ce9452f21cedfed84504e9ad01d05577193",
+      "artifactHash": "52c7f3e2afc927dcad2dd80306c7af0725360857407b499986290f10458db19b",
+      "refNotes": 279,
+      "pitchMatch": 85.30465949820787,
+      "exact": 82.79569892473118,
+      "onGrid": 82.79569892473118,
+      "missing": 39,
+      "extra": 39,
+      "composite": 74.834229390681,
+      "pass": false,
+      "failures": [
+        "schumann-op68-05: bar-length-warning (measure_underfull)",
+        "Stuckchen: printed-bar-count (26 printed bars read)",
+        "Stuckchen: bar-alignment (26 scored bars vs 25 reference bars)",
+        "Stuckchen: bar-length (1 of 26 bars are not the printed length)",
+        "Stuckchen: no-invented-hold (2 hold(s) in the slice)",
+        "Stuckchen: repeat-walk (26 performed bars)",
+        "Stuckchen: notes-present (39 missing, 2 allowed)",
+        "Stuckchen: no-invented-notes (39 extra, 2 allowed)",
+        "Stuckchen: attack-grid (exact 82.8% vs floor 95.0%)",
+        "Stuckchen: note-length (onGrid 82.8% vs floor 90.0%)"
+      ]
+    },
+    {
+      "slug": "gymnopedie-2",
+      "title": "Satie — Gymnopédie No. 2",
+      "pages": 2,
+      "pdfSha256": "d23906c422539128fe0e5106a4ebf8ea7f8273a60c3f2dbcf4c7f5f46363acb6",
+      "referenceSha256": "02e8ae8d7e1f6073f12f62a61a63cf07b260a1cf49f4a9008ee4e3f8e1934d30",
+      "artifactHash": "86ea1957e58261997652c2fe96f94e7c9661064841cd5e5b82574696ffb3db67",
+      "refNotes": 371,
+      "pitchMatch": 0,
+      "exact": 0,
+      "onGrid": 0,
+      "missing": 371,
+      "extra": 0,
+      "composite": 13.75,
+      "pass": false,
+      "failures": [
+        "gymnopedie-2: meters (a movement never bound a matching meter — its rates are void, not measured)",
+        "gymnopedie-2: bar-length-warning (measure_underfull + measure_overfull)",
+        "Gymnopedie 2: printed-bar-count (0 printed bars read)",
+        "Gymnopedie 2: bar-alignment (0 scored bars vs 65 reference bars)",
+        "Gymnopedie 2: repeat-walk (0 performed bars)",
+        "Gymnopedie 2: notes-present (371 missing, 1 allowed)",
+        "Gymnopedie 2: no-skipped-passage (longest unplaced reference run is 65 bar(s))",
+        "Gymnopedie 2: attack-grid (exact 0.0% vs floor 95.0%)",
+        "Gymnopedie 2: note-length (onGrid 0.0% vs floor 90.0%)"
       ]
     },
     {

@@ -144,11 +144,26 @@ gate. `bench` fetches every piece itself (all bytes sha256-pinned) and reuses th
 Audiveris artifact cache, so a re-run on a later branch version is byte-identical
 input with whatever the parser does now.
 
-Suite: `wtk1-prelude1`, `anna-magdalena-04`, `anna-magdalena-05`,
-`schumann-op68-01`, `fur-elise-mutopia`, `chopin-prelude-4`. Every one is a
-Mutopia LilyPond edition whose PDF, MIDI and `.ly` come from one source, so the
-reference agrees with the page it was typeset from. `toy` (CI fixture) and
-`moonlight` (hand-vendored IMSLP extract, not fetchable) are excluded.
+Suite (16 pieces, `BENCH_SUITE` in `bench.ts`, roughly easiest first):
+
+| Group | Slugs |
+| --- | --- |
+| Printed grid, nothing else | `czerny-op821-01`, `bach-prelude-bwv939`, `bach-air-anh131`, `bach-invention-01`, `bach-invention-08`, `bach-prelude-bwv999`, `wtk1-prelude1` |
+| Repeats and voltas | `anna-magdalena-04`, `anna-magdalena-05`, `anna-magdalena-07`, `burgmuller-op100-02` |
+| Pickups; one unfolded reference | `schumann-op68-01`, `schumann-op68-05` |
+| Wider textures, hard cases | `gymnopedie-2`, `fur-elise-mutopia`, `chopin-prelude-4` |
+
+Every one is a Mutopia LilyPond edition whose PDF, MIDI and `.ly` come from one
+source, so the reference agrees with the page it was typeset from, and both
+hashes are pinned. Spread is deliberate: 5 meters (4/4, 3/4, 2/4, 2/2, 3/8),
+keys from 2 flats to 1 sharp, pickups of 0.5/1/3 quarters, pieces from 8 bars to
+105, and repeat shapes from none through equal halves (32→64) to unequal halves
+(40→80) to a reference that unfolds its own (20 printed / 24 performed).
+
+`toy` (CI fixture, not a musicality claim) and `moonlight` (hand-vendored IMSLP
+extract, not fetchable) are excluded. `bench.test.ts` guards the suite's shape
+without network or Audiveris — duplicate slugs, missing hashes, an unfolded
+reference with no `performedBars`, and the meter/key/pickup/repeat spread.
 
 ### What the gate checks, and what it refuses to
 

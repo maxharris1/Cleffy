@@ -129,8 +129,14 @@ const structureChecks = (
     {
         id: 'meters',
         ok: result.structure.metersOk,
-        detail: result.structure.metersOk ? 'ok' : 'a movement never bound a matching meter',
-        hears: 'everything after the bad meter lands off the beat',
+        // When a movement cannot bind a meter its tick slice is empty, so every
+        // reference note reads as missing and the three rates collapse to 0%.
+        // Say so here: a 0% is the CONSEQUENCE of the unbound meter, not an
+        // independent claim that the engine found no notes.
+        detail: result.structure.metersOk
+            ? 'ok'
+            : 'a movement never bound a matching meter — its rates are void, not measured',
+        hears: 'the piece in the wrong meter, so nothing lands where the page says',
     },
     {
         id: 'bar-length-warning',

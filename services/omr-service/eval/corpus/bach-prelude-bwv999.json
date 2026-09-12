@@ -1,0 +1,42 @@
+{
+    "slug": "bach-prelude-bwv999",
+    "title": "Bach — Prelude in D minor, BWV 999",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV999/Bach_Prelude_BWV999/Bach_Prelude_BWV999-let.pdf",
+        "sha256": "7097fae53aa72897c61c780414b4d06b1e4ffd064e1cffa288dfe92825ac26ff",
+        "pages": 2
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV999/Bach_Prelude_BWV999/Bach_Prelude_BWV999.mid",
+        "sha256": "a246bc598d6e9f94a5a42d2f39849883171cec1b4507f59b44d2a156eddba81c",
+        "license": "Public Domain (Mutopia 2013/01/22-60, Jakob Bagterp). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Prelude",
+            "midi": "Bach_Prelude_BWV999.mid",
+            "meter": {
+                "num": 3,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 43,
+            "expectedFifths": -1,
+            "expectedTempo": {
+                "min": 65,
+                "max": 95
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 43,
+            "expectedHolds": 1,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "This typeset transposes the lute original: the .ly says \\key d \\minor and the mutopiatitle is 'Prelude in D Minor', so expectedFifths is -1. Do not 'correct' it to the C minor of the BWV catalogue — the pin has to describe the page that was scored.",
+        "3/4, 43 bars, no repeats. Unbroken arpeggiated 16ths across both hands.",
+        "LilyPond \\tempo 4 = 80 is printed. A \\fermata appears on the final chord in both staves, which is one clock stop: expectedHolds 1.",
+        "pdf.sha256 pins the Mutopia letter PDF (2 pages). Do not embed document UUIDs."
+    ]
+}

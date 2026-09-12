@@ -1,0 +1,42 @@
+{
+    "slug": "burgmuller-op100-02",
+    "title": "Burgmüller — 25 Études faciles, Op. 100 No. 2 (Arabesque)",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BurgmullerJFF/O100/25EF-02/25EF-02-let.pdf",
+        "sha256": "8945e0d9992347c6aef67b98bb43cc8a9876f2f904ad0c43babe5b6eedafb519",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BurgmullerJFF/O100/25EF-02/25EF-02.mid",
+        "sha256": "9b689a9b3f178e7bb2b5899d0559e223e9d8de7081d83fc087760ac2b4d378e1",
+        "license": "Public Domain (Mutopia 2013/01/12-203, Bas Wassink after Collection Litolff, 19th c.). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Arabesque",
+            "midi": "25EF-02.mid",
+            "meter": {
+                "num": 2,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 33,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 130,
+                "max": 175
+            },
+            "repeatsUnfoldedInMidi": false,
+            "expectedHolds": 1,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "2/4, A minor (expectedFifths 0), LilyPond \\tempo 4 = 152. 33 printed bars, matching the MIDI, which does not unfold the repeats.",
+        "performedBars is deliberately NOT pinned. The .ly has two \\repeat volta 2 blocks with \\alternative endings and is not bar-checked, so a performed count cannot be read off the source by hand; an unverified number would make the repeat check lie rather than measure. performedBarsMatch is null and repeat-walk skips the movement. Close it by rendering the .ly with LilyPond and reading the last bar number of an unfolded score.",
+        "A \\fermata on the final chord in both staves is one clock stop: expectedHolds 1.",
+        "Fast 16th-note right-hand runs at 152 — the fastest printed grid in the suite.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+    ]
+}

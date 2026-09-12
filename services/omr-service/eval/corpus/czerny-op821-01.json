@@ -1,0 +1,41 @@
+{
+    "slug": "czerny-op821-01",
+    "title": "Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/CzernyC/Op_821/Czerny_Op_821_No_001/Czerny_Op_821_No_001-let.pdf",
+        "sha256": "657707b2e7e771eab728833f317d6de2b0f6fcba0787cf9a990aa757cbb73765",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/CzernyC/Op_821/Czerny_Op_821_No_001/Czerny_Op_821_No_001.mid",
+        "sha256": "4592e80dbc7e4bb76c9f8009e488774ccd751f08bf9f09cb3da83665471d345d",
+        "license": "Public Domain (Mutopia 2015/11/06-2060, Manuel Castejon Limas after Peters c.1888). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "No. 1",
+            "midi": "Czerny_Op_821_No_001.mid",
+            "meter": {
+                "num": 4,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 8,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 90,
+                "max": 130
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 8,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "4/4, C major, exactly 8 bars, no repeats, no ornaments. LilyPond \\tempo 4 = 110.",
+        "The floor case: the smallest page a real edition produces. A suite whose pieces are all 200+ notes can hide a constant-cost error, and this entry is where one would show up as a large percentage.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+    ]
+}
