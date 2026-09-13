@@ -62,10 +62,6 @@ vi.mock('@/features/import/prescan', () => ({
     prescanDocument: vi.fn(),
 }));
 
-vi.mock('@/features/playback/scoreAnalysisService', () => ({
-    requestScoreAnalysis: vi.fn(),
-}));
-
 /** A routed page with the one thing the tests need from it: browser Back. */
 const Page = ({ name }: { name: string }) => {
     const navigate = useNavigate();
@@ -111,8 +107,6 @@ describe('LibraryShell', () => {
         prependCachedLibraryDocument.mockResolvedValue(undefined);
         const document = { id: 'd2', title: 'New score' };
         uploadDocument.mockResolvedValue({ document });
-        const { requestScoreAnalysis } = await import('@/features/playback/scoreAnalysisService');
-        vi.mocked(requestScoreAnalysis).mockResolvedValue(undefined as never);
         renderShell();
 
         const input = screen.getByLabelText('Upload score', { selector: 'input' });

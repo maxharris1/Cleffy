@@ -29,21 +29,101 @@ export interface DocumentLayout {
     contentHeight: number;
 }
 
-/** Lay pages out in a vertical, horizontally-centered column. */
-export const computeDocumentLayout = (pages: readonly PageSize[]): DocumentLayout => {
-    const contentWidth = pages.reduce((max, p) => Math.max(max, p.width), 0);
+/** One page per row, or two facing pages (a spread) per row. */
+export type PageColumns = 1 | 2;
+
+/**
+ * Lay pages out in rows of `columns` pages, each page horizontally centered in
+ * its column. One column is the classic vertical stack; two columns pair
+ * pages 1|2, 3|4, … the way an open book does, an odd last page sitting alone
+ * on the left. Rows are as tall as their tallest page, so pages in the same
+ * row always share a `top` — the row is what page turning steps through.
+ *
+ * `coverPage` (two columns only) says the PDF opens on a title page: page 1
+ * sits alone in the RIGHT column and the spreads after it pair 2|3, 4|5, …,
+ * which is how printed music is engraved — page turns fall between systems
+ * rather than mid-spread.
+ */
+export const computeDocumentLayout = (
+    pages: readonly PageSize[],
+    columns: PageColumns = 1,
+    coverPage = false,
+): DocumentLayout => {
+    const columnWidth = pages.reduce((max, p) => Math.max(max, p.width), 0);
+    const contentWidth = columns === 1 ? columnWidth : columnWidth * 2 + PAGE_GAP;
     const layouts: PageLayout[] = [];
     let y = PAGE_GAP;
-    for (const page of pages) {
-        layouts.push({
-            top: y,
-            left: (contentWidth - page.width) / 2,
-            width: page.width,
-            height: page.height,
+    // The cover row holds one page and starts in the right column; every row
+    // after it is a full-width spread starting on the left.
+    let firstColumn = columns === 2 && coverPage ? 1 : 0;
+    let i = 0;
+    while (i < pages.length) {
+        const row = pages.slice(i, i + columns - firstColumn);
+        row.forEach((page, col) => {
+            layouts.push({
+                top: y,
+                left: (firstColumn + col) * (columnWidth + PAGE_GAP) + (columnWidth - page.width) / 2,
+                width: page.width,
+                height: page.height,
+            });
         });
-        y += page.height + PAGE_GAP;
+        y += row.reduce((max, p) => Math.max(max, p.height), 0) + PAGE_GAP;
+        i += row.length;
+        firstColumn = 0;
     }
     return { layouts, contentWidth, contentHeight: y };
+};
+
+/**
+ * The view after turning one row of pages forward or back from `pageIndex`:
+ * the adjacent row's top edge sits at the top of the viewport (with the usual
+ * page gap as margin), scale and horizontal position untouched. Rows are the
+ * pages sharing a `top`, so in a two-column layout a turn moves a whole
+ * spread. Returns null at either end of the document.
+ */
+export const pageTurnView = (
+    view: ViewState,
+    layout: DocumentLayout,
+    pageIndex: number,
+    direction: -1 | 1,
+    viewportWidth: number,
+    viewportHeight: number,
+): { view: ViewState; pageIndex: number } | null => {
+    const { layouts } = layout;
+    const current = layouts[pageIndex];
+    if (!current) {
+        return null;
+    }
+    let target = -1;
+    if (direction === 1) {
+        target = layouts.findIndex((l) => l.top > current.top);
+    } else {
+        // First page of the nearest row above the current one.
+        for (let i = pageIndex - 1; i >= 0; i--) {
+            const l = layouts[i];
+            if (!l || l.top >= current.top) {
+                continue;
+            }
+            target = i;
+            while (target > 0 && layouts[target - 1]?.top === l.top) {
+                target--;
+            }
+            break;
+        }
+    }
+    const targetLayout = target >= 0 ? layouts[target] : undefined;
+    if (!targetLayout) {
+        return null;
+    }
+    return {
+        pageIndex: target,
+        view: clampScroll(
+            { scale: view.scale, scrollX: view.scrollX, scrollY: (targetLayout.top - PAGE_GAP) * view.scale },
+            layout,
+            viewportWidth,
+            viewportHeight,
+        ),
+    };
 };
 
 /**

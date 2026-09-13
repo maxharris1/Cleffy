@@ -29,27 +29,21 @@ export type ScoreAnalysisState =
 const POLL_MS = 30_000;
 
 /**
- * Lifecycle of a document's play-along analysis: fetch → poll while the OMR
- * service works (30s fallback; Realtime drives sub-second updates) → deliver
- * validated ScoreData, with the Dexie cache covering offline opens.
+ * Lifecycle of a document's play-along analysis: read the existing status on
+ * open (never starts one — only `generate()` does, from the user's click) →
+ * poll while the OMR service works (30s fallback; Realtime drives sub-second
+ * updates) → deliver validated ScoreData, with the Dexie cache covering
+ * offline opens.
  */
-/** How many polls to spend after open while status is still `none` — covers the
- * race where LibraryShell fires requestScoreAnalysis then navigates before the
- * score_analyses row exists (6 × 30 s is long; bootstrap uses a shorter cadence). */
-const BOOTSTRAP_POLLS = 6;
-const BOOTSTRAP_POLL_MS = 5_000;
-
 export const useScoreAnalysis = (docId: string, enabled: boolean) => {
     const [state, setState] = useState<ScoreAnalysisState>({ kind: enabled ? 'none' : 'unavailable' });
     const aliveRef = useRef(true);
-    const [bootstrapPollsLeft, setBootstrapPollsLeft] = useState(BOOTSTRAP_POLLS);
 
     const [resetKey, setResetKey] = useState(`${docId}:${enabled}`);
     const key = `${docId}:${enabled}`;
     if (resetKey !== key) {
         setResetKey(key);
         setState({ kind: enabled ? 'none' : 'unavailable' });
-        setBootstrapPollsLeft(BOOTSTRAP_POLLS);
     }
 
     const applyStatus = useCallback(
@@ -134,23 +128,18 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         };
     }, [docId, enabled, applyStatus]);
 
-    const awaitingBootstrap = state.kind === 'none' && bootstrapPollsLeft > 0;
-    const inFlight = state.kind === 'pending' || state.kind === 'processing' || awaitingBootstrap;
+    const inFlight = state.kind === 'pending' || state.kind === 'processing';
     useEffect(() => {
         if (!inFlight || !enabled) {
             return;
         }
-        const interval = awaitingBootstrap ? BOOTSTRAP_POLL_MS : POLL_MS;
         const timer = setInterval(() => {
-            if (awaitingBootstrap) {
-                setBootstrapPollsLeft((left) => (left > 0 ? left - 1 : 0));
-            }
             if (document.visibilityState === 'visible') {
                 void applyStatus(docId);
             }
-        }, interval);
+        }, POLL_MS);
         return () => clearInterval(timer);
-    }, [inFlight, awaitingBootstrap, enabled, docId, applyStatus]);
+    }, [inFlight, enabled, docId, applyStatus]);
 
     const generate = useCallback(async () => {
         setState({ kind: 'pending' });

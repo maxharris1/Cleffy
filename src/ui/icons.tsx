@@ -1,9 +1,11 @@
 import {
     ArrowLeft,
+    BookOpen,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     ChevronUp,
+    Columns2,
     EllipsisVertical,
     Hourglass,
     LayoutGrid,
@@ -49,6 +51,8 @@ export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
+export const Columns2Icon = withBrandStroke(Columns2);
+export const CoverPageIcon = withBrandStroke(BookOpen);
 export const PointerIcon = withBrandStroke(Pointer);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);

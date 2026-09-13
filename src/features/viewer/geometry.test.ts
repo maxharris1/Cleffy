@@ -9,6 +9,7 @@ import {
     MIN_SCALE,
     PAGE_GAP,
     pagePointToViewport,
+    pageTurnView,
     scrollForPagePoint,
     viewportToPagePoint,
     visiblePageRange,
@@ -35,6 +36,108 @@ describe('computeDocumentLayout', () => {
         const layout = computeDocumentLayout([]);
         expect(layout.layouts).toHaveLength(0);
         expect(layout.contentWidth).toBe(0);
+    });
+
+    it('pairs pages into spreads with two columns, the odd last page alone on the left', () => {
+        const { layouts, contentWidth, contentHeight } = computeDocumentLayout(pages, 2);
+        expect(contentWidth).toBe(600 * 2 + PAGE_GAP);
+        // Row 1: pages 0 and 1 side by side, sharing a top.
+        expect(layouts[0]).toEqual({ top: PAGE_GAP, left: 0, width: 600, height: 800 });
+        expect(layouts[1]).toEqual({ top: PAGE_GAP, left: 600 + PAGE_GAP, width: 600, height: 800 });
+        // Row 2: the narrow page 2 centered in the left column.
+        expect(layouts[2]).toEqual({ top: PAGE_GAP + 800 + PAGE_GAP, left: 100, width: 400, height: 700 });
+        expect(contentHeight).toBe(PAGE_GAP + 800 + PAGE_GAP + 700 + PAGE_GAP);
+    });
+
+    it('makes a two-column row as tall as its taller page', () => {
+        const uneven = [
+            { width: 600, height: 500 },
+            { width: 600, height: 900 },
+            { width: 600, height: 500 },
+        ];
+        const { layouts } = computeDocumentLayout(uneven, 2);
+        expect(layouts[2]?.top).toBe(PAGE_GAP + 900 + PAGE_GAP);
+    });
+
+    it('holds the cover alone in the right column and pairs 2|3 after it', () => {
+        // Four pages: cover alone, then (1,2), then the odd page 3 alone on the left.
+        const four = [...pages, { width: 600, height: 800 }];
+        const { layouts, contentWidth, contentHeight } = computeDocumentLayout(four, 2, true);
+        expect(contentWidth).toBe(600 * 2 + PAGE_GAP);
+        // Row 1: page 0 in the RIGHT column, nothing on the left.
+        expect(layouts[0]).toEqual({ top: PAGE_GAP, left: 600 + PAGE_GAP, width: 600, height: 800 });
+        // Row 2: pages 1 and 2 as a spread, sharing a top. Page 2 is narrow, so
+        // it is centered in the right column.
+        const row2Top = PAGE_GAP + 800 + PAGE_GAP;
+        expect(layouts[1]).toEqual({ top: row2Top, left: 0, width: 600, height: 800 });
+        expect(layouts[2]).toEqual({ top: row2Top, left: 600 + PAGE_GAP + 100, width: 400, height: 700 });
+        // Row 3: the odd trailing page alone on the LEFT.
+        expect(layouts[3]).toEqual({ top: row2Top + 800 + PAGE_GAP, left: 0, width: 600, height: 800 });
+        expect(contentHeight).toBe(PAGE_GAP + (800 + PAGE_GAP) * 3);
+    });
+
+    it('ignores the cover option in a single column', () => {
+        expect(computeDocumentLayout(pages, 1, true)).toEqual(computeDocumentLayout(pages, 1));
+    });
+
+    it('keeps visible range and focus row-aware in two columns', () => {
+        const { layouts } = computeDocumentLayout([...pages, { width: 600, height: 800 }], 2);
+        // A viewport on the first row sees both of its pages plus the overscan row.
+        expect(visiblePageRange({ scale: 1, scrollX: 0, scrollY: 0 }, 400, layouts, 0)).toEqual({ start: 0, end: 1 });
+        // Centered on the second row: the left page of the pair is the focus.
+        const row2Top = layouts[2]?.top ?? 0;
+        expect(focusedPageIndex({ scale: 1, scrollX: 0, scrollY: row2Top }, 400, layouts)).toBe(2);
+    });
+});
+
+describe('pageTurnView', () => {
+    const view = { scale: 2, scrollX: 40, scrollY: 0 };
+
+    it('steps one page at a time in a single column and lands its top at the viewport top', () => {
+        const layout = computeDocumentLayout(pages);
+        const next = pageTurnView(view, layout, 0, 1, 800, 600);
+        expect(next?.pageIndex).toBe(1);
+        expect(next?.view.scale).toBe(2);
+        expect(next?.view.scrollY).toBe(((layout.layouts[1]?.top ?? 0) - PAGE_GAP) * 2);
+        expect(pageTurnView(view, layout, 1, -1, 800, 600)?.pageIndex).toBe(0);
+    });
+
+    it('returns null at either end of the document', () => {
+        const layout = computeDocumentLayout(pages);
+        expect(pageTurnView(view, layout, 0, -1, 800, 600)).toBeNull();
+        expect(pageTurnView(view, layout, 2, 1, 800, 600)).toBeNull();
+        expect(pageTurnView(view, layout, 99, 1, 800, 600)).toBeNull();
+    });
+
+    it('steps a whole spread in two columns, from either page of the pair', () => {
+        const layout = computeDocumentLayout([...pages, { width: 600, height: 800 }], 2);
+        expect(pageTurnView(view, layout, 0, 1, 800, 600)?.pageIndex).toBe(2);
+        expect(pageTurnView(view, layout, 1, 1, 800, 600)?.pageIndex).toBe(2);
+        expect(pageTurnView(view, layout, 3, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(view, layout, 2, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(view, layout, 3, 1, 800, 600)).toBeNull();
+    });
+
+    it('steps from the cover row to the 2|3 spread and back', () => {
+        const layout = computeDocumentLayout([...pages, { width: 600, height: 800 }], 2, true);
+        // The cover is a row of its own: forward lands on page 1, the left of the pair.
+        const next = pageTurnView(view, layout, 0, 1, 800, 600);
+        expect(next?.pageIndex).toBe(1);
+        expect(next?.view.scrollY).toBe(((layout.layouts[1]?.top ?? 0) - PAGE_GAP) * 2);
+        // Back from either page of the spread returns to the cover.
+        expect(pageTurnView(view, layout, 1, -1, 800, 600)?.pageIndex).toBe(0);
+        expect(pageTurnView(view, layout, 2, -1, 800, 600)?.pageIndex).toBe(0);
+        // Forward from the spread reaches the trailing page; the cover has no page before it.
+        expect(pageTurnView(view, layout, 2, 1, 800, 600)?.pageIndex).toBe(3);
+        expect(pageTurnView(view, layout, 0, -1, 800, 600)).toBeNull();
+    });
+
+    it('clamps the target so a short last page does not over-scroll', () => {
+        const layout = computeDocumentLayout(pages);
+        const tall = { width: 800, height: 5000 };
+        const turned = pageTurnView({ scale: 1, scrollX: 0, scrollY: 0 }, layout, 1, 1, tall.width, tall.height);
+        expect(turned?.pageIndex).toBe(2);
+        expect(turned?.view.scrollY).toBe(0); // content shorter than the viewport
     });
 });
 
