@@ -325,6 +325,145 @@ export const bitmapDims = (
 };
 
 /**
+ * Ceiling on the backing store of every mounted page canvas put together.
+ * iOS Safari kills the tab ("A problem repeatedly occurred") somewhere in the
+ * low hundreds of MB of canvas memory; MAX_BITMAP_SIDE only bounds one canvas,
+ * and a two-page spread on a phone after a rotation was measured at 600 MB.
+ */
+export const MAX_TOTAL_BITMAP_BYTES = 160 * 1024 * 1024;
+
+/** Ink is fat anti-aliased strokes — it never needs engraving resolution. */
+export const INK_MAX_DPR = 2;
+
+/** Rows kept mounted beyond the visible ones, above and below. */
+export const OVERSCAN_ROWS = 1;
+
+/** Bytes for one page's three canvases (PDF raster + committed ink + live ink). */
+const pageBitmapBytes = (page: PageLayout, scale: number, dpr: number): number => {
+    const pdf = bitmapDims(page, scale, dpr);
+    const ink = bitmapDims(page, scale, Math.min(dpr, INK_MAX_DPR));
+    return (pdf.width * pdf.height + 2 * ink.width * ink.height) * 4;
+};
+
+/**
+ * Multiplier (≤ 1) to apply to the device pixel ratio so that every page that
+ * can be mounted at this zoom fits inside MAX_TOTAL_BITMAP_BYTES. Estimated
+ * from geometry alone — how many rows and columns of the largest page cover
+ * the viewport plus overscan — so it is stable while scrolling and only moves
+ * with zoom, orientation or layout. Quantized to sixteenths so a few pixels
+ * of viewport change cannot trigger a re-raster. Pages past the budget render
+ * softer (CSS-upscaled) instead of taking the tab down — at the zooms where
+ * this bites, a soft page still beats a relaunched app.
+ */
+export const bitmapBudgetFactor = (
+    layout: DocumentLayout,
+    columns: PageColumns,
+    scale: number,
+    dpr: number,
+    viewportWidth: number,
+    viewportHeight: number,
+    budgetBytes = MAX_TOTAL_BITMAP_BYTES,
+): number => {
+    const pageCount = layout.layouts.length;
+    if (pageCount === 0 || scale <= 0 || dpr <= 0) {
+        return 1;
+    }
+    const maxPage: PageLayout = {
+        top: 0,
+        left: 0,
+        width: layout.layouts.reduce((max, l) => Math.max(max, l.width), 0),
+        height: layout.layouts.reduce((max, l) => Math.max(max, l.height), 0),
+    };
+    const rowStride = (maxPage.height + PAGE_GAP) * scale;
+    const colStride = (maxPage.width + PAGE_GAP) * scale;
+    // A viewport straddles one more row/column than it covers outright.
+    const rows = Math.ceil(viewportHeight / rowStride) + 1 + 2 * OVERSCAN_ROWS;
+    const cols = Math.min(columns, Math.ceil(viewportWidth / colStride) + 1);
+    const pages = Math.min(pageCount, rows * cols);
+    // Largest sixteenth that fits. Searched rather than solved: the ink
+    // canvases stop shrinking once under INK_MAX_DPR and the per-side cap
+    // bends the curve, so bytes are not a clean function of the factor.
+    for (let sixteenths = 16; sixteenths > 1; sixteenths--) {
+        const factor = sixteenths / 16;
+        if (pages * pageBitmapBytes(maxPage, scale, dpr * factor) <= budgetBytes) {
+            return factor;
+        }
+    }
+    return 1 / 16;
+};
+
+/**
+ * Pages to mount: the rows intersecting the viewport, extended by
+ * `overscanRows` whole rows each side (a two-column row is never half
+ * mounted), minus pages that are entirely off-screen sideways once the
+ * content is wider than the viewport. The horizontal test keeps half a
+ * viewport of margin so a pan does not reveal a blank page. Over-scrolled
+ * past the end, the last rows stay mounted.
+ */
+export const mountedPageIndices = (
+    view: ViewState,
+    layout: DocumentLayout,
+    viewportWidth: number,
+    viewportHeight: number,
+    overscanRows = OVERSCAN_ROWS,
+): number[] => {
+    const { layouts } = layout;
+    if (layouts.length === 0) {
+        return [];
+    }
+    // Row boundaries: the first page index of each row, and each page's row.
+    const rowStarts: number[] = [];
+    const rowOf: number[] = [];
+    let lastTop = Number.NaN;
+    layouts.forEach((l, i) => {
+        if (l.top !== lastTop) {
+            rowStarts.push(i);
+            lastTop = l.top;
+        }
+        rowOf.push(rowStarts.length - 1);
+    });
+    const rowCount = rowStarts.length;
+
+    const y0 = view.scrollY / view.scale;
+    const y1 = (view.scrollY + viewportHeight) / view.scale;
+    let firstRow = rowCount;
+    let lastRow = -1;
+    layouts.forEach((l, i) => {
+        if (l.top + l.height >= y0 && l.top <= y1) {
+            const row = rowOf[i] ?? 0;
+            firstRow = Math.min(firstRow, row);
+            lastRow = Math.max(lastRow, row);
+        }
+    });
+    if (firstRow > lastRow) {
+        // Past the last page (over-scrolled): keep the tail mounted.
+        lastRow = rowCount - 1;
+        firstRow = rowCount - 1;
+    }
+    firstRow = Math.max(0, firstRow - overscanRows);
+    lastRow = Math.min(rowCount - 1, lastRow + overscanRows);
+
+    const cullSideways = layout.contentWidth * view.scale > viewportWidth;
+    const margin = viewportWidth / 2 / view.scale;
+    const x0 = view.scrollX / view.scale - margin;
+    const x1 = (view.scrollX + viewportWidth) / view.scale + margin;
+
+    const out: number[] = [];
+    const end = lastRow + 1 < rowCount ? (rowStarts[lastRow + 1] ?? layouts.length) : layouts.length;
+    for (let i = rowStarts[firstRow] ?? 0; i < end; i++) {
+        const l = layouts[i];
+        if (!l) {
+            continue;
+        }
+        if (cullSideways && (l.left + l.width < x0 || l.left > x1)) {
+            continue;
+        }
+        out.push(i);
+    }
+    return out;
+};
+
+/**
  * Min-distance decimation of a flat [x,y,p,…] stroke (normalized units).
  * Always keeps the first and last points.
  */
