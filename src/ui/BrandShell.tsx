@@ -12,7 +12,7 @@ interface BrandShellProps {
 /** Cleffy brand frame used by auth, join, and empty/error surfaces. */
 export const BrandShell = ({ title, subtitle, children }: BrandShellProps) => {
     return (
-        <main className="landing-page flex min-h-full flex-col items-center justify-center px-6 py-12">
+        <main className="landing-page safe-brand-shell flex min-h-full flex-col items-center justify-center">
             <div className="landing-hero w-full max-w-sm text-center">
                 <Link to="/" className="landing-brand font-display text-3xl font-semibold leading-none">
                     Cleffy
@@ -27,7 +27,7 @@ export const BrandShell = ({ title, subtitle, children }: BrandShellProps) => {
 };
 
 export const BrandLoading = () => (
-    <main className="landing-page flex min-h-full items-center justify-center">
+    <main className="landing-page flex min-h-full items-center justify-center pt-[var(--safe-top)]">
         <LoadingText>Loading…</LoadingText>
     </main>
 );

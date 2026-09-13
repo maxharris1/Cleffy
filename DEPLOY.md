@@ -506,10 +506,47 @@ supabase secrets set --project-ref qdbnlrgylelelvwbkvnm STRIPE_SECRET_KEY=... AP
 
 ### GitHub integration
 
-Connected to `maxharris1/sheet_music_scribbler`, working directory `.`, with
-**automatic branching off** (otherwise every feature branch spawns its own
-billed Supabase branch) and **deploy-to-production off** (see the divergence
-section — auto-deploying `main` could re-apply work that is already live).
+GitHub App `supabase` is installed on **`maxharris1/Cleffy`** (working
+directory `.`). The dashboard still used the pre-rename repo name in older
+notes; the App follows the repo id, and checks/`supabase[bot]` comments land
+on Cleffy.
+
+**Deploy to production is ON.** Verified 2026-09-10 via
+`GET /v1/projects/jibgwgosihadbjgxdsfe/branches`: the default branch
+(`is_default`, project `jibgwgosihadbjgxdsfe`) has `git_branch: "main"`. That
+field *is* the dashboard **Deploy to production** switch (empty string = off).
+There is no public Management API field named `deploy_to_production`; the
+Studio form PATCHes `/v1/branches/{id}` with `git_branch`. Do not also add a
+GitHub Action `db push` — two appliers would fight.
+
+On merge to `main` the integration applies: pending SQL migrations, Edge
+Functions declared in `config.toml` (including `imslp-sync` with
+`verify_jwt = false`), and storage buckets from `config.toml`. Auth/API/seed
+are ignored.
+
+**Gate:** open a PR `dev` → `main`, approve it, merge with a **merge commit**
+(not squash). That merge is the full deploy: Vercel already auto-deploys
+`main` → cleffy.io; Supabase applies backend on the same merge. Do not merge
+that PR until you intend to ship production.
+
+**Automatic branching must stay OFF** (`new_branch_per_pr`). Confirm at
+[Project Settings → Integrations](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/settings/integrations)
+— toggle **Automatic branching**. The public API can *list* GitHub connections
+(`GET /v2/organizations/{slug}/integrations/github/connections`) but cannot
+update them; Studio uses `/platform/integrations/github/connections/{id}`.
+PR #32 spawned preview `cwxkhoqeqbhgakfafthd` (deleted after merge). If that
+toggle is on, turn it off so feature branches do not bill.
+
+**Still human:**
+
+1. **Automatic branching** — confirm OFF on the Integrations page (above).
+2. **Require a PR into `main`** — this sandbox cannot write rulesets
+   (`403 Resource not accessible by integration`). From a PAT with
+   `administration:write`:
+   `GH_TOKEN=ghp_… bash scripts/protect-main.sh --require-pr --require-ci`
+3. Vault `imslp_sync_url` / `imslp_sync_secret` are **not** created by GitHub.
+   Chip browse works without them; cron refresh is a silent no-op until they
+   exist (see SETUP_SUPABASE.md).
 
 ## 6. Smoke test — passed 2026-08-27
 
@@ -651,8 +688,8 @@ identical fingerprints (`md5` over the ordered version list):
 | `dev` branch `qdbnlrgylelelvwbkvnm` | 22         | 22     | 0     | 0               | `4f0bca6b…` |
 
 The previous divergence (25 applied in production, 4 at versions in no branch, 8
-under different timestamps) is gone. `supabase db push` is safe again, and the
-GitHub integration's "deploy to production" can be turned on when wanted.
+under different timestamps) is gone. Deploy-to-production is on (§5); apply
+production by merging `dev` → `main`, not a second `db push`.
 
 All prior data was intentionally discarded in the reset: 40 users, 46 documents,
 1,063 annotations and 47 uploaded PDFs. The Stripe sandbox subscription that

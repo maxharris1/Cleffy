@@ -1,4 +1,5 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,8 +39,13 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
 }));
 
 vi.mock('@/features/viewer/PdfViewport', () => ({
-    PdfViewport: ({ readOnly, sync }: { readOnly?: boolean; sync?: unknown }) => (
-        <div data-testid="pdf-viewport" data-readonly={String(Boolean(readOnly))} data-sync={sync ? 'on' : 'off'} />
+    PdfViewport: ({ readOnly, sync, playback }: { readOnly?: boolean; sync?: unknown; playback?: unknown }) => (
+        <div
+            data-testid="pdf-viewport"
+            data-readonly={String(Boolean(readOnly))}
+            data-sync={sync ? 'on' : 'off'}
+            data-playback={playback ? 'on' : 'off'}
+        />
     ),
 }));
 
@@ -66,12 +72,21 @@ vi.mock('@/features/import/prepareUpload', () => ({ UPLOAD_ACCEPT: '', prepareUp
 vi.mock('@/features/notes/NotesPanel', () => ({ NotesPanel: () => null }));
 vi.mock('@/features/share/ShareDialog', () => ({ ShareDialog: () => null }));
 vi.mock('@/features/auth/UpgradeBanner', () => ({ UpgradeBanner: () => null }));
-vi.mock('@/features/playback/TransportBar', () => ({ TransportBar: () => null }));
-vi.mock('@/features/playback/usePlayback', () => ({
-    usePlayback: () => ({ playbackFeature: null, getEngine: () => null, warning: null, dismissWarning: vi.fn() }),
+vi.mock('@/features/playback/TransportBar', () => ({
+    TransportBar: () => <div data-testid="transport-bar" />,
 }));
+const engine = { pause: vi.fn() };
+vi.mock('@/features/playback/usePlayback', () => ({
+    usePlayback: () => ({
+        playbackFeature: { score: {}, getEngine: () => engine },
+        getEngine: () => engine,
+        warning: null,
+        dismissWarning: vi.fn(),
+    }),
+}));
+const analysis: { state: { kind: string } } = { state: { kind: 'none' } };
 vi.mock('@/features/playback/useScoreAnalysis', () => ({
-    useScoreAnalysis: () => ({ state: { status: 'idle' }, generate: vi.fn(), applyBroadcast: vi.fn() }),
+    useScoreAnalysis: () => ({ state: analysis.state, generate: vi.fn(), applyBroadcast: vi.fn() }),
 }));
 
 const DOC_ID = '11111111-2222-4333-8444-555555555555';
@@ -121,6 +136,7 @@ const viewport = () => screen.getByTestId('pdf-viewport');
 
 beforeEach(() => {
     vi.clearAllMocks();
+    analysis.state = { kind: 'none' };
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
     fetchMyRole.mockResolvedValue('owner');
@@ -267,6 +283,43 @@ describe('CloudViewer warm open', () => {
         expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
         expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
         expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
+    });
+
+    it('keeps the play-along panel and playhead hidden until asked for, and pauses on close', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+
+        const toggle = screen.getByRole('button', { name: 'Play-along' });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        await user.click(toggle);
+        expect(screen.getByTestId('transport-bar')).toBeInTheDocument();
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        expect(viewport()).toHaveAttribute('data-playback', 'on');
+        expect(engine.pause).not.toHaveBeenCalled();
+
+        await user.click(toggle);
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+        expect(engine.pause).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers no play-along control when analysis is unavailable', async () => {
+        analysis.state = { kind: 'unavailable' };
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByRole('button', { name: 'Play-along' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
     });
 
     it('stays read-only when confirm fails with a PostgREST error', async () => {

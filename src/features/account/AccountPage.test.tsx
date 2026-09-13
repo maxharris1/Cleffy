@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AccountPage } from '@/features/account/AccountPage';
 import type * as OfflineStorageModule from '@/features/account/offlineStorage';
+import type * as InstallSurfaceModule from '@/features/install/installSurface';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { EntitlementLimits, Entitlements } from '@/types/database';
 
@@ -23,6 +24,7 @@ const redirectTo = vi.fn();
 
 const readOfflineStorage = vi.fn();
 const clearOfflineStorage = vi.fn();
+const resolveInstallSurface = vi.fn((_canPromptInstall = false): InstallSurfaceModule.InstallSurface => 'other');
 
 // The real session module reaches for a Supabase client at import time of its
 // callers; only the pieces this page uses are stubbed, with displayNameOf and
@@ -72,6 +74,14 @@ vi.mock('@/features/billing/StudioSeats', () => ({
 vi.mock('@/features/billing/PricingDialog', () => ({
     PricingDialog: () => <div data-testid="pricing-dialog" />,
 }));
+
+vi.mock('@/features/install/installSurface', async () => {
+    const actual = await vi.importActual<typeof InstallSurfaceModule>('@/features/install/installSurface');
+    return {
+        ...actual,
+        resolveInstallSurface: (canPromptInstall?: boolean) => resolveInstallSurface(canPromptInstall),
+    };
+});
 
 const FREE_LIMITS: EntitlementLimits = {
     cloud_scores: 3,
@@ -146,6 +156,7 @@ beforeEach(() => {
     updatePassword.mockResolvedValue(undefined);
     clearCachedEntitlements.mockResolvedValue(undefined);
     signOut.mockResolvedValue(undefined);
+    resolveInstallSurface.mockReturnValue('other');
 });
 
 afterEach(cleanup);
@@ -282,5 +293,25 @@ describe('AccountPage', () => {
 
         expect(clearCachedEntitlements).toHaveBeenCalledWith('teacher-1');
         expect(signOut).toHaveBeenCalledOnce();
+    });
+
+    it('offers Add to Home Screen in Preferences', async () => {
+        const user = userEvent.setup();
+        await renderSettled();
+
+        expect(screen.getByRole('heading', { name: 'Home screen' })).toBeInTheDocument();
+        expect(screen.getByText(/Put your library on an iPhone or iPad like an app/)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Add to Home Screen' }));
+        expect(screen.getByRole('dialog', { name: 'Add to Home Screen' })).toBeInTheDocument();
+        expect(screen.getByText('On the iPhone or iPad, open cleffy.io in Safari.')).toBeInTheDocument();
+    });
+
+    it('says the library is already an app when this session is standalone', async () => {
+        resolveInstallSurface.mockReturnValue('standalone');
+        await renderSettled();
+
+        expect(screen.getByRole('heading', { name: 'Home screen' })).toBeInTheDocument();
+        expect(screen.getByText('The library is already running as an app on this Home Screen.')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Add to Home Screen' })).not.toBeInTheDocument();
     });
 });

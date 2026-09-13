@@ -230,13 +230,17 @@ describe('mergeAndRank', () => {
         expect(ranked.map((h) => h.title)).toEqual([chopin]);
     });
 
-    it('key chip drops E-flat when keys are c-sharp-minor', () => {
-        const sharp = 'Nocturne in C-sharp minor, B.49 (Chopin, Frédéric)';
-        const flat = 'Nocturne in E-flat major, Op.9 No.2 (Chopin, Frédéric)';
-        const ranked = mergeAndRank([batch('nocturne', 1, [sharp, flat])], {
-            query: 'nocturne',
-            tokens: ['nocturne'],
-        }).filter((h) => titleMatchesFilters(h.title, { keys: ['c-sharp-minor'] }));
-        expect(ranked.map((h) => h.title)).toEqual([sharp]);
+    it('typed-search key chips stay title-only and do not require key category membership', () => {
+        const titled = 'Fantasy in G major (Someone, Else)';
+        const ranked = mergeAndRank([batch('fantasy', 1, [titled])], {
+            query: 'fantasy',
+            tokens: ['fantasy'],
+            categoryHits: new Map([[foldAccents(titled), new Set(['For piano'])]]),
+            requiredGroups: categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] }),
+        }).filter((h) => titleMatchesFilters(h.title, { keys: ['g-major'] }));
+        expect(categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] })).toEqual([
+            ['For piano', 'For piano (arr)'],
+        ]);
+        expect(ranked.map((h) => h.title)).toEqual([titled]);
     });
 });

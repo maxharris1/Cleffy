@@ -147,10 +147,10 @@ gcloud run deploy cleffy-omr --source services/omr-service --memory 4Gi --cpu 2 
 ```
 
 Then point the Edge Function at it (see `SETUP_SUPABASE.md` §4) with the
-`OMR_SERVICE_URL` / `OMR_SERVICE_SECRET` secrets. Uploads and IMSLP imports trigger analysis
-automatically; older scores get a "Generate play-along" button in the viewer. Without the
-service configured, everything else works — the transport bar just reports analysis as
-unavailable with a retry.
+`OMR_SERVICE_URL` / `OMR_SERVICE_SECRET` secrets. Nothing analyzes on its own: the viewer's
+"Play-along" panel (hidden by default) offers a "Generate play-along" button, and only that
+click requests a run. Without the service configured, everything else works — the panel just
+reports analysis as unavailable with a retry.
 
 Full service details (env vars, error codes, fixture regeneration): `services/omr-service/README.md`.
 

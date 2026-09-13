@@ -69,8 +69,13 @@ Both change how you work, so neither is on by default:
   fast-forward from `dev`. Merge through the GitHub button or `gh pr merge`
   after turning it on.
 
-`--require-ci` is worth turning on now. `--require-pr` is worth it as soon as
-there is anyone to review.
+The production gate is a PR `dev` → `main` (approve, then merge commit — not
+squash). Both flags should be on. This environment cannot write rulesets
+(`403`); from a machine with `administration:write`:
+
+```bash
+GH_TOKEN=ghp_… bash scripts/protect-main.sh --require-pr --require-ci
+```
 
 ## 2. The drift check
 

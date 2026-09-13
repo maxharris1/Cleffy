@@ -5,6 +5,7 @@ import { useOutletContext, useSearchParams } from 'react-router';
 import { initialsOf } from '@/features/account/initials';
 import type { OfflineStorageUsage } from '@/features/account/offlineStorage';
 import { clearOfflineStorage, formatMegabytes, readOfflineStorage } from '@/features/account/offlineStorage';
+import { HomeScreenPreferences } from '@/features/install/HomeScreenPreferences';
 import {
     displayNameOf,
     signOut,
@@ -506,7 +507,9 @@ export const AccountPage = () => {
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Preferences</h2>
 
-                <h3 className={`${SUB_HEADING} mt-4`}>Offline storage</h3>
+                <HomeScreenPreferences />
+
+                <h3 className={`${SUB_HEADING} mt-6`}>Offline storage</h3>
                 <p className="mt-1.5 text-sm text-stone-600">
                     {storage === null
                         ? 'Checking what this device has downloaded…'

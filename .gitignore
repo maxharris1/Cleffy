@@ -33,3 +33,6 @@ e2e-shots
 
 # OMR bench CSV output
 services/omr-service/bench/results
+
+# IMSLP catalog export checkpoint (resume a long walk; do not commit)
+scripts/data/.imslp-export-progress.json

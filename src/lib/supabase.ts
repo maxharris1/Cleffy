@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
+import { createAuthStorage } from '@/features/auth/authStorage';
 import type { Database } from '@/types/database';
 
 export type TypedSupabaseClient = SupabaseClient<Database>;
@@ -84,6 +85,13 @@ export const getSupabase = (): TypedSupabaseClient => {
     const { url, anonKey } = requireSupabaseConfig();
 
     client = createClient<Database>(url, anonKey, {
+        auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+            // localStorage plus a SameSite cookie so iOS Home Screen apps can
+            // recover a Safari session. See authStorage.ts.
+            storage: createAuthStorage(),
+        },
         realtime: {
             // Live ink streams at up to ~20 events/s per writer; the realtime-js
             // default client-side throttle (10/s) would silently degrade it.

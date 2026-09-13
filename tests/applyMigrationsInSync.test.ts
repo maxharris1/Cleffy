@@ -22,12 +22,15 @@ import { describe, expect, it } from 'vitest';
 const MIGRATIONS_DIR = 'supabase/migrations';
 const MIRROR = 'scripts/apply-migrations.sql';
 
+/** Catalog inserts are too large for the SQL-editor paste; db push applies them. */
+const isCatalogSql = (name: string): boolean => /^\d+_imslp_works_catalog\.sql$/.test(name);
+
 const read = (...segments: string[]): string => readFileSync(resolve(process.cwd(), ...segments), 'utf8');
 
 /** Lexicographic order is timestamp order, which is the order Postgres ran them in. */
 const migrations = (): string =>
     readdirSync(resolve(process.cwd(), MIGRATIONS_DIR))
-        .filter((name) => name.endsWith('.sql'))
+        .filter((name) => name.endsWith('.sql') && !isCatalogSql(name))
         .sort()
         .map((name) => read(MIGRATIONS_DIR, name))
         .join('\n');

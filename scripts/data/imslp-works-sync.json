@@ -1,0 +1,241 @@
+{
+  "generatedAt": "2026-09-10T18:18:08.609Z",
+  "categories": [
+    {
+      "category": "A major",
+      "pages_done": 12018
+    },
+    {
+      "category": "A minor",
+      "pages_done": 10354
+    },
+    {
+      "category": "Bach, Johann Sebastian",
+      "pages_done": 2793
+    },
+    {
+      "category": "Ballets",
+      "pages_done": 1068
+    },
+    {
+      "category": "Baroque",
+      "pages_done": 26262
+    },
+    {
+      "category": "Beethoven, Ludwig van",
+      "pages_done": 361
+    },
+    {
+      "category": "Brahms, Johannes",
+      "pages_done": 161
+    },
+    {
+      "category": "C major",
+      "pages_done": 29771
+    },
+    {
+      "category": "C minor",
+      "pages_done": 3869
+    },
+    {
+      "category": "C-sharp minor",
+      "pages_done": 658
+    },
+    {
+      "category": "Chopin, Frédéric",
+      "pages_done": 127
+    },
+    {
+      "category": "Classical",
+      "pages_done": 23496
+    },
+    {
+      "category": "Concertos",
+      "pages_done": 7346
+    },
+    {
+      "category": "D major",
+      "pages_done": 22854
+    },
+    {
+      "category": "D minor",
+      "pages_done": 6270
+    },
+    {
+      "category": "Debussy, Claude",
+      "pages_done": 107
+    },
+    {
+      "category": "E minor",
+      "pages_done": 3860
+    },
+    {
+      "category": "E-flat major",
+      "pages_done": 21237
+    },
+    {
+      "category": "Early 20th century",
+      "pages_done": 34818
+    },
+    {
+      "category": "Etudes",
+      "pages_done": 0
+    },
+    {
+      "category": "For cello",
+      "pages_done": 744
+    },
+    {
+      "category": "For cello (arr)",
+      "pages_done": 123
+    },
+    {
+      "category": "For flute",
+      "pages_done": 894
+    },
+    {
+      "category": "For flute (arr)",
+      "pages_done": 135
+    },
+    {
+      "category": "For guitar",
+      "pages_done": 5328
+    },
+    {
+      "category": "For guitar (arr)",
+      "pages_done": 4320
+    },
+    {
+      "category": "For orchestra",
+      "pages_done": 15626
+    },
+    {
+      "category": "For orchestra (arr)",
+      "pages_done": 3992
+    },
+    {
+      "category": "For organ",
+      "pages_done": 15886
+    },
+    {
+      "category": "For organ (arr)",
+      "pages_done": 2580
+    },
+    {
+      "category": "For piano",
+      "pages_done": 56663
+    },
+    {
+      "category": "For piano (arr)",
+      "pages_done": 12962
+    },
+    {
+      "category": "For violin",
+      "pages_done": 2738
+    },
+    {
+      "category": "For violin (arr)",
+      "pages_done": 196
+    },
+    {
+      "category": "For voice, piano",
+      "pages_done": 40013
+    },
+    {
+      "category": "For voice, piano (arr)",
+      "pages_done": 2472
+    },
+    {
+      "category": "Fugues",
+      "pages_done": 6773
+    },
+    {
+      "category": "G major",
+      "pages_done": 28914
+    },
+    {
+      "category": "Handel, George Frideric",
+      "pages_done": 648
+    },
+    {
+      "category": "Haydn, Joseph",
+      "pages_done": 836
+    },
+    {
+      "category": "Joplin, Scott",
+      "pages_done": 59
+    },
+    {
+      "category": "Liszt, Franz",
+      "pages_done": 598
+    },
+    {
+      "category": "Mendelssohn, Felix",
+      "pages_done": 248
+    },
+    {
+      "category": "Modern",
+      "pages_done": 50927
+    },
+    {
+      "category": "Mozart, Wolfgang Amadeus",
+      "pages_done": 1008
+    },
+    {
+      "category": "Nocturnes",
+      "pages_done": 2564
+    },
+    {
+      "category": "Operas",
+      "pages_done": 13366
+    },
+    {
+      "category": "Preludes",
+      "pages_done": 6104
+    },
+    {
+      "category": "Rachmaninoff, Sergei",
+      "pages_done": 80
+    },
+    {
+      "category": "Ravel, Maurice",
+      "pages_done": 84
+    },
+    {
+      "category": "Romantic",
+      "pages_done": 105948
+    },
+    {
+      "category": "Satie, Erik",
+      "pages_done": 84
+    },
+    {
+      "category": "Schubert, Franz",
+      "pages_done": 1046
+    },
+    {
+      "category": "Schumann, Robert",
+      "pages_done": 169
+    },
+    {
+      "category": "Sonatas",
+      "pages_done": 15674
+    },
+    {
+      "category": "Symphonies",
+      "pages_done": 3616
+    },
+    {
+      "category": "Tchaikovsky, Pyotr",
+      "pages_done": 155
+    },
+    {
+      "category": "Vivaldi, Antonio",
+      "pages_done": 840
+    },
+    {
+      "category": "Waltzes",
+      "pages_done": 13205
+    }
+  ]
+}

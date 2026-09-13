@@ -528,12 +528,18 @@ describe('ImslpBrowser', () => {
         );
     });
 
-    it('keeps key-only with Piano off on Popular, not a live Walker search', async () => {
-        const { screen } = await import('@testing-library/react');
+    it('browses a key chip as an IMSLP category, even with Piano off', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
-        const searchSpy = vi.spyOn(api, 'searchImslp');
+        const searchSpy = vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [hit('Nocturne in C-sharp minor, B.49 (Chopin, Frédéric)', 49)],
+                mode: 'browse',
+                total: 647,
+            }),
+        );
 
         await renderBrowser();
         await userEvent.click(screen.getByRole('button', { name: 'Instrument' }));
@@ -541,11 +547,35 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Key' }));
         await userEvent.click(await screen.findByRole('button', { name: 'C-sharp minor' }));
 
-        await new Promise((r) => setTimeout(r, 350));
-        expect(searchSpy).not.toHaveBeenCalled();
-        expect(screen.getByRole('heading', { name: 'Popular' })).toBeInTheDocument();
-        expect(screen.getByText(/C-sharp minor · Popular ·/)).toBeInTheDocument();
+        await waitFor(() => {
+            expect(searchSpy).toHaveBeenCalled();
+        });
+        expect(searchSpy.mock.calls.at(-1)?.[0]).toBe('');
+        expect(searchSpy.mock.calls.at(-1)?.[1]).toEqual(
+            expect.objectContaining({ filters: expect.objectContaining({ keys: ['c-sharp-minor'] }) }),
+        );
+        expect(screen.queryByRole('heading', { name: 'Popular' })).not.toBeInTheDocument();
+        expect(await screen.findByText(/C-sharp minor · 647 scores/)).toBeInTheDocument();
         expect(screen.queryByText('No matches')).not.toBeInTheDocument();
+    });
+
+    it('names a missing key category by its chip label in the index-building copy', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({ results: [], mode: 'browse', total: 0, indexReady: false, notReady: ['E-flat major'] }),
+        );
+
+        await renderBrowser();
+        await userEvent.click(screen.getByRole('button', { name: 'Key' }));
+        await userEvent.click(await screen.findByRole('button', { name: 'E-flat major' }));
+
+        expect(await screen.findByText('Index still building')).toBeInTheDocument();
+        expect(
+            screen.getByText('IMSLP index is still being built for E-flat major. Try typing a title.'),
+        ).toBeInTheDocument();
     });
 
     it('sends both composer ids when two composers are selected', async () => {

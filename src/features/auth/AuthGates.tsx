@@ -2,6 +2,7 @@ import type { Session } from '@supabase/supabase-js';
 import type { ReactNode } from 'react';
 import { Navigate } from 'react-router';
 
+import { registeredGuestPath } from '@/features/auth/authRedirect';
 import { isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import { BrandLoading } from '@/ui/BrandShell';
@@ -24,7 +25,7 @@ export const RequireRegistered = ({
         return <BrandLoading />;
     }
     if (!isRegisteredSession(session)) {
-        return <Navigate to={fallback} replace />;
+        return <Navigate to={registeredGuestPath(fallback)} replace />;
     }
     // A provisioned student is registered, but teacher chrome is not theirs: send
     // them to their assignments rather than showing a library they cannot own.

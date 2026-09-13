@@ -3,12 +3,12 @@ import {
     COMPOSER_FACETS,
     FORM_FACETS,
     categoriesInGroups,
+    browseCategoryGroupsFor,
     categoryGroupsFor,
     facetBoost,
     facetTokens,
     hardFilterGroups,
     hasActiveFilters,
-    keyTitlePatterns,
     parseFilters,
     parseSort,
     titleMatchesFilters,
@@ -250,7 +250,7 @@ const browseFromIndex = async (
     hasMore: boolean;
     notReady: string[];
 }> => {
-    const groups = categoryGroupsFor(filters);
+    const groups = browseCategoryGroupsFor(filters);
     const needed = categoriesInGroups(groups);
     const browsed = await queryBrowseIndex(serviceClient() as BrowseRpcClient | null, {
         groups,
@@ -258,7 +258,6 @@ const browseFromIndex = async (
         sort,
         limit,
         offset,
-        titleFilters: keyTitlePatterns(filters),
         popularTitles: POPULAR_WORKS.map((w) => w.title),
     });
     return {

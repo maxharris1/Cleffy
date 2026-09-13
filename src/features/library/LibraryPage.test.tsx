@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as InstallSurfaceModule from '@/features/install/installSurface';
 import { libraryMutationEpoch, noteLibraryMutation } from '@/features/library/libraryCache';
 import { LibraryPage } from '@/features/library/LibraryPage';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
@@ -49,6 +50,16 @@ vi.mock('@/features/library/tagsService', () => ({
 vi.mock('@/features/share/ShareDialog', () => ({
     ShareDialog: ({ docId }: { docId: string }) => <div data-testid="share-dialog">{docId}</div>,
 }));
+
+const resolveInstallSurface = vi.fn((_canPromptInstall = false): InstallSurfaceModule.InstallSurface => 'other');
+
+vi.mock('@/features/install/installSurface', async () => {
+    const actual = await vi.importActual<typeof InstallSurfaceModule>('@/features/install/installSurface');
+    return {
+        ...actual,
+        resolveInstallSurface: (canPromptInstall?: boolean) => resolveInstallSurface(canPromptInstall),
+    };
+});
 
 const doc = (id: string, title: string): DocumentRow => ({
     id,
@@ -171,6 +182,8 @@ beforeEach(() => {
     // pin the view rather than being rewritten around cards. The grid has its
     // own describe block at the end of this file.
     window.localStorage.setItem('cleffy:library-view', 'list');
+    window.localStorage.removeItem('cleffy:home-screen-prompt-dismissed');
+    resolveInstallSurface.mockReturnValue('other');
     listDocuments.mockResolvedValue({
         documents: [
             doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'),
@@ -893,5 +906,45 @@ describe('plans without a roster', () => {
         expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
         expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
         expect(screen.queryByRole('menuitem', { name: 'Assign to student…' })).not.toBeInTheDocument();
+    });
+});
+
+describe('Home Screen banner', () => {
+    it('shows on iOS Safari and opens the instruction dialog', async () => {
+        const user = userEvent.setup();
+        resolveInstallSurface.mockReturnValue('ios-safari');
+        renderLibrary();
+
+        expect(await screen.findByText(/Put your library on this Home Screen like an app/)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Show me' }));
+        expect(screen.getByRole('dialog', { name: 'Add to Home Screen' })).toBeInTheDocument();
+    });
+
+    it('hides after Not now and stays hidden', async () => {
+        const user = userEvent.setup();
+        resolveInstallSurface.mockReturnValue('ios-safari');
+        const { unmount } = renderLibrary();
+
+        await user.click(await screen.findByRole('button', { name: 'Not now' }));
+        expect(screen.queryByText(/Put your library on this Home Screen like an app/)).not.toBeInTheDocument();
+        expect(window.localStorage.getItem('cleffy:home-screen-prompt-dismissed')).toBe('1');
+
+        unmount();
+        renderLibrary();
+        expect(screen.queryByText(/Put your library on this Home Screen like an app/)).not.toBeInTheDocument();
+    });
+
+    it('does not show when the session is already standalone', async () => {
+        resolveInstallSurface.mockReturnValue('standalone');
+        renderLibrary();
+        await screen.findByRole('heading', { level: 1, name: 'Library' });
+        expect(screen.queryByText(/Put your library on this Home Screen like an app/)).not.toBeInTheDocument();
+    });
+
+    it('does not show off iOS', async () => {
+        resolveInstallSurface.mockReturnValue('other');
+        renderLibrary();
+        await screen.findByRole('heading', { level: 1, name: 'Library' });
+        expect(screen.queryByText(/Put your library on this Home Screen like an app/)).not.toBeInTheDocument();
     });
 });

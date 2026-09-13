@@ -228,18 +228,56 @@ select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp
 select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
 ```
 
-**Without those two secrets the cron tick is a silent no-op** and every chip
-beyond the default Piano shows "Index still building" forever. Rollout order
-for a fresh project (each step is required):
+Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
+work with the array of taxonomy categories it belongs to. Refresh ticks write
+`imslp_works_building` and only promote after a category walk completes, so a
+mid-rebuild failure leaves the previous snapshot serving. Typed search stays on
+live MediaWiki search; key chips there still match the title. Chip browse keys
+are IMSLP key categories on the mirror.
 
-1. `npx supabase db push` — brings `imslp_category_members`, `imslp_category_sync`,
-   `imslp_browse` (with `title_filters` / `popular_titles`), `imslp_index_ready`,
-   `imslp_titles_in_categories`, `imslp_sync_tick` and the `imslp-sync` cron job.
-2. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
+The chip index is a **committed catalog** in the repo
+(`scripts/data/imslp-works-catalog.jsonl.gz` + `imslp-works-sync.json`).
+`db push` loads it (the `*_imslp_works_catalog.sql` migration(s); split if
+a single file would exceed ~40MB). Those files are **not** in
+`scripts/apply-migrations.sql` — a SQL-editor paste cannot carry ~48MB of
+inserts. Locally, `npm run imslp:seed` upserts the same files and does **not**
+call IMSLP.
+
+To rebuild the catalog after a taxonomy change (talks to IMSLP, ~3,500
+requests, ~1 h at `--delay 1000`; do not go below 1000):
+
+```bash
+npm run imslp:export-catalog
+```
+
+That overwrites the gzip jsonl/sync files and regenerates the catalog
+migration(s).
+Interrupt and rerun: a checkpoint at `scripts/data/.imslp-export-progress.json`
+resumes (gitignored). Then commit the new files.
+
+```bash
+# load the committed catalog into the local stack (no IMSLP)
+npm run imslp:seed
+# or a hosted project:
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY=<service role key> \
+npm run imslp:seed
+```
+
+`--dry-run` prints counts without writing. The cron tick is only a refresh
+after the catalog is loaded; without the two vault secrets it is a silent
+no-op. Rollout for a fresh project:
+
+1. `npx supabase db push` — schema plus the catalog insert. Do not paste
+   `scripts/apply-migrations.sql` expecting the catalog: that mirror is
+   schema-only. Use `db push` or `psql -f` for `*_imslp_works_catalog.sql`.
+2. (Optional) `npm run imslp:seed` if you need to reload the catalog without
+   re-running migrations.
+3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
    `npx supabase functions deploy imslp-search`.
-3. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
-4. The two `vault.create_secret` statements above.
-5. Verify the walk is happening:
+4. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
+5. The two `vault.create_secret` statements above.
+6. Verify the refresh is ticking:
 
     ```sql
     select category, state, pages_done, completed_at
@@ -247,17 +285,14 @@ for a fresh project (each step is required):
     order by updated_at desc;
     ```
 
-    Each tick pages one category (up to 50 pages of 500 titles at ~1 req/s, so
-    ~50 s). The index builds `For piano` and `For piano (arr)` first, then eras,
-    forms, the other instruments and finally composers, so Piano · Baroque /
-    Piano · Nocturne answer about 6 minutes after the first tick and the whole
-    49-category taxonomy is `ok` within ~30 minutes. Until a chip's categories
-    are `ok` the panel says "IMSLP index is still being built for …" rather
-    than guessing.
+    Each tick spends up to 60 MediaWiki requests on one category (batches of
+    500 pages, usually 4 requests each) and resumes where it left off. The
+    committed catalog already answers every chip; cron keeps membership from
+    going stale.
 
-Locally the cron does not fire (no vault secrets); run `npm run imslp:sync`
-after `functions:serve` to walk the taxonomy once (~15 min), or with `--once`
-for a single tick.
+Locally the cron does not fire (no vault secrets); with the stack up, run
+`npm run imslp:seed` (no env needed — it targets the local API port from
+`supabase/config.toml` with the public demo service key).
 
 The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `SELF_URL` (its public base URL for drain-chain self-pokes). Without any of

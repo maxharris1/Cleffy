@@ -1,6 +1,7 @@
-import { Link, useNavigate } from 'react-router';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
+import { parseAuthNext } from '@/features/auth/authRedirect';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { signInWithPassword } from '@/features/auth/session';
 import { BrandShell } from '@/ui/BrandShell';
@@ -14,6 +15,8 @@ export const LoginPage = () => (
 
 const LoginForm = () => {
     const navigate = useNavigate();
+    const [params] = useSearchParams();
+    const next = parseAuthNext(params.get('next'));
 
     return (
         <BrandShell title="Log in" subtitle="Upload and share scores with your account.">
@@ -42,7 +45,7 @@ const LoginForm = () => {
                 }
                 onSubmit={async ({ email, password }) => {
                     await signInWithPassword(email, password);
-                    navigate('/library', { replace: true });
+                    navigate(next, { replace: true });
                 }}
             />
         </BrandShell>

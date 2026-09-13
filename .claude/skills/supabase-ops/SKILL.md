@@ -9,7 +9,7 @@ description: Operate this project's Supabase backend (project jibgwgosihadbjgxds
 
 | Environment | Ref | Notes |
 | --- | --- | --- |
-| Production (`cleffy.io`, git `main`) | `jibgwgosihadbjgxdsfe` | do not `db push` — see divergence below |
+| Production (`cleffy.io`, git `main`) | `jibgwgosihadbjgxdsfe` | GitHub integration deploys on merge to `main`; do not also `db push` |
 | Persistent `dev` branch (`dev.cleffy.io`, git `dev`) | `qdbnlrgylelelvwbkvnm` | **paused most of the time**; unpause to test a release |
 | Local | — | `npm run local:up`, API on :54421 |
 
@@ -21,7 +21,7 @@ Production dashboard: https://supabase.com/dashboard/project/jibgwgosihadbjgxdsf
 npm run local:up          # Supabase + OMR worker; --no-omr to skip OMR
 npm run dev:local         # Vite :5173
 npm run functions:serve   # edge functions
-npm run imslp:sync        # warm the IMSLP chip index (~15 min; chips say "still building" until then)
+npm run imslp:seed        # load the committed IMSLP catalog (no IMSLP network)
 npm run local:status      # health check
 npm run local:down
 ```

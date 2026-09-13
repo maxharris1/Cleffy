@@ -18,8 +18,9 @@ export interface GestureCallbacks {
     /** A navigation gesture (pan/pinch) ended — commit crisp re-render, inertia, etc. */
     onGestureEnd: () => void;
     /**
-     * A single non-ink pointer went down and up without moving (tap/click) —
-     * local viewport coords. Used for tap-a-measure-to-seek during playback.
+     * A single non-ink primary-button pointer went down and up without moving
+     * (tap/click) — local viewport coords. Used for edge-tap page turns and
+     * tap-a-measure-to-seek during playback.
      */
     onTap?: (x: number, y: number, pointerType: string) => void;
 }
@@ -48,6 +49,8 @@ interface TrackedPointer {
     maxDist: number;
     /** True once this pointer ever shared the surface with another (pinch). */
     multi: boolean;
+    /** Mouse button that started it (0 = primary); only primary taps count. */
+    button: number;
 }
 
 /** Safari-proprietary gesture events (desktop trackpad pinch). */
@@ -149,6 +152,7 @@ export class GestureController {
             downAt: performance.now(),
             maxDist: 0,
             multi: this.pointers.size > 0,
+            button: e.button,
         });
         if (this.pointers.size > 1) {
             for (const pointer of this.pointers.values()) {
@@ -210,6 +214,7 @@ export class GestureController {
         if (
             tracked &&
             !tracked.multi &&
+            tracked.button === 0 &&
             this.pointers.size === 0 &&
             tracked.maxDist < TAP_MAX_DIST_PX &&
             performance.now() - tracked.downAt < TAP_MAX_MS
