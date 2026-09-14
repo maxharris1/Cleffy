@@ -65,8 +65,10 @@ import type { ScoreData } from './scoreData.js';
  * svc-20 was a rejected slur-head experiment (RSI cycle 14: false accidental slur).
  * svc-21 was a quarter-rest template candidate closed without acceptance (RSI cycle 15).
  * svc-22: reject augmentation dots whose source ink is a neighboring head's ledger.
+ * svc-23: recover named PDF change-clef glyphs (`clefs.G_change` / `clefs.F_change`)
+ * after header selection, before HEADS.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-22';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-23';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

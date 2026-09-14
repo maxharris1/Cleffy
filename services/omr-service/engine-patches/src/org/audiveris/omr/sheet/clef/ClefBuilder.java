@@ -76,6 +76,9 @@ import ij.process.ByteProcessor;
 
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.awt.geom.Path2D;
+import java.awt.geom.Rectangle2D;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -836,6 +839,199 @@ public class ClefBuilder
         }
     }
 
+    //-----------------------//
+    // installPdfChangeClefs //
+    //-----------------------//
+    /**
+     * After header selection, register missing inline G/F change clefs named in the
+     * source PDF. Does not update {@code staff.setClefStop} or reopen header competition.
+     */
+    private static void installPdfChangeClefs (SystemInfo system)
+    {
+        final Sheet sheet = system.getSheet();
+        final java.nio.file.Path input;
+        try {
+            input = sheet.getStub().getBook().getInputPath();
+        } catch (RuntimeException ex) {
+            return;
+        }
+        if ((input == null) || !Files.isRegularFile(input)
+                || !input.getFileName().toString().toLowerCase().endsWith(".pdf")) {
+            return;
+        }
+        if ((sheet.getSkew() != null) && (Math.abs(sheet.getSkew().getSlope()) > 0.02)) {
+            logger.info("PDF change-clef skipped: unsupported sheet skew {}",
+                    sheet.getSkew().getSlope());
+            return;
+        }
+        if ((sheet.getWidth() <= 0) || (sheet.getHeight() <= 0)) {
+            return;
+        }
+
+        final List<PdfClefHints.Hint> hints = PdfClefHints.scan(
+                input,
+                sheet.getStub().getNumber() - 1);
+        if (hints.isEmpty()) {
+            return;
+        }
+
+        final ByteProcessor source = sheet.getPicture().getSource(Picture.SourceKey.NO_STAFF);
+        if (source == null) {
+            return;
+        }
+        final PdfClefHints.PixelSource pixels = (x, y) -> (x >= 0) && (y >= 0)
+                && (x < source.getWidth()) && (y < source.getHeight())
+                && (source.get(x, y) < 128);
+
+        for (PdfClefHints.Hint hint : hints) {
+            final Path2D sheetPath = PdfClefHints.toSheetPath(
+                    hint,
+                    sheet.getWidth(),
+                    sheet.getHeight());
+            if (sheetPath == null) {
+                continue;
+            }
+            final Rectangle2D outline = sheetPath.getBounds2D();
+            final PdfClefHints.InkEvidence ink = PdfClefHints.measureInk(sheetPath, pixels);
+            if (!ink.agrees()) {
+                logger.info("PDF change-clef {} rejected: ink path={} inside={} bounds={} font={}",
+                        hint.glyphName,
+                        ink.pathPixels,
+                        ink.inkInside,
+                        ink.inkInBounds,
+                        hint.fontName);
+                continue;
+            }
+
+            final List<PdfClefHints.StaffAnchor> anchors = new ArrayList<>();
+            final List<Staff> staves = sheet.getStaffManager().getStaves();
+            for (int i = 0; i < staves.size(); i++) {
+                final Staff staff = staves.get(i);
+                if (staff.isTablature() || staff.isOneLineStaff() || (staff.getLineCount() != 5)) {
+                    continue;
+                }
+                final double x = outline.getCenterX();
+                anchors.add(new PdfClefHints.StaffAnchor(
+                        i,
+                        staff.getFirstLine().yAt(x),
+                        staff.getLastLine().yAt(x),
+                        staff.pitchToOrdinate(x, hint.identity.clefLinePitch()),
+                        staff.getSpecificInterline()));
+            }
+            final Integer staffIndex = PdfClefHints.uniqueStaff(outline, anchors);
+            if (staffIndex == null) {
+                logger.info("PDF change-clef {} rejected: no unique staff at {}",
+                        hint.glyphName,
+                        outline);
+                continue;
+            }
+            final Staff staff = staves.get(staffIndex);
+            if (staff.getSystem() != system) {
+                continue;
+            }
+
+            if (coveredByExistingClef(system, staff, outline)) {
+                logger.info("PDF change-clef {} rejected: existing clef covers {} staff#{}",
+                        hint.glyphName,
+                        outline,
+                        staff.getId());
+                continue;
+            }
+
+            final Glyph glyph = glyphFromOutline(system, sheetPath, source);
+            if (glyph == null) {
+                logger.info("PDF change-clef {} rejected: empty outline-clipped glyph {}",
+                        hint.glyphName,
+                        outline);
+                continue;
+            }
+
+            final double grade = Grades.intrinsicRatio * ink.confidence();
+            final Shape shape = shapeOf(hint.identity);
+            final ClefInter clef = ClefInter.createValid(glyph, shape, grade, staff);
+            if (clef == null) {
+                continue;
+            }
+            clef.setStaff(staff);
+            system.getSig().addVertex(clef);
+            logger.info(
+                    "PDF change-clef {} accepted staff#{} box=({},{},{},{}) ink={}/{} font={}",
+                    hint.glyphName,
+                    staff.getId(),
+                    Math.round(outline.getX()),
+                    Math.round(outline.getY()),
+                    Math.round(outline.getWidth()),
+                    Math.round(outline.getHeight()),
+                    ink.inkInside,
+                    ink.pathPixels,
+                    hint.fontName);
+        }
+    }
+
+    private static Shape shapeOf (PdfClefHints.Identity identity)
+    {
+        return switch (identity) {
+        case G_CHANGE -> G_CLEF;
+        case F_CHANGE -> F_CLEF;
+        };
+    }
+
+    private static boolean coveredByExistingClef (SystemInfo system,
+                                                    Staff staff,
+                                                    Rectangle2D outline)
+    {
+        for (Inter inter : system.getSig().inters(ClefInter.class)) {
+            if (inter.getStaff() != staff) {
+                continue;
+            }
+            final Rectangle bounds = inter.getBounds();
+            if ((bounds != null) && PdfClefHints.coveredByExistingClef(outline, bounds)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Glyph glyphFromOutline (SystemInfo system,
+                                              Path2D sheetPath,
+                                              ByteProcessor source)
+    {
+        final Rectangle box = sheetPath.getBounds();
+        if ((box.width < 4) || (box.height < 8)) {
+            return null;
+        }
+        box.x = Math.max(0, box.x);
+        box.y = Math.max(0, box.y);
+        if (box.x >= source.getWidth() || box.y >= source.getHeight()) {
+            return null;
+        }
+        box.width = Math.min(box.width, source.getWidth() - box.x);
+        box.height = Math.min(box.height, source.getHeight() - box.y);
+        if ((box.width < 4) || (box.height < 8)) {
+            return null;
+        }
+
+        final ByteProcessor buf = new ByteProcessor(box.width, box.height);
+        for (int y = 0; y < box.height; y++) {
+            for (int x = 0; x < box.width; x++) {
+                final int sx = box.x + x;
+                final int sy = box.y + y;
+                final boolean inside = sheetPath.contains(sx + 0.5, sy + 0.5);
+                final boolean ink = (sx >= 0) && (sy >= 0)
+                        && (sx < source.getWidth()) && (sy < source.getHeight())
+                        && (source.get(sx, sy) < 128);
+                buf.set(x, y, (inside && ink) ? 0 : 255);
+            }
+        }
+        final RunTable runTable = new RunTableFactory(VERTICAL).createTable(buf);
+        final List<Glyph> parts = GlyphFactory.buildGlyphs(runTable, box.getLocation());
+        if (parts.isEmpty()) {
+            return null;
+        }
+        final Glyph glyph = (parts.size() == 1) ? parts.get(0) : GlyphFactory.buildGlyph(parts);
+        return system.registerGlyph(glyph, null);
+    }
+
     //~ Inner Classes ------------------------------------------------------------------------------
 
     //--------//
@@ -911,6 +1107,8 @@ public class ClefBuilder
             for (ClefBuilder builder : builders.values()) {
                 builder.selectClef();
             }
+
+            installPdfChangeClefs(system);
         }
     }
 

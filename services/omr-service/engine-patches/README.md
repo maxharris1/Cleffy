@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-22` (`src/job.ts` `ENGINE_VERSION`; cycle 16 candidate pending host bench) |
+| Engine revision | `audiveris-5.11.0+svc-23` (`src/job.ts` `ENGINE_VERSION`; cycle 17 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -249,6 +249,37 @@ detached flat marks, wrong ordinate, absent or thick opposite protrusions,
 and rounded dots. The real-dot tests deliberately supply an adverse
 hypothetical neighboring head; no artificial ink is added to those crops.
 
+## 0008 — recover a named PDF change-clef before HEADS
+
+LilyPond PDFs name inline change clefs `clefs.G_change` / `clefs.F_change` in the
+embedded music font. The raster classifier can miss those fragments, so the
+opening staff keeps the header F/G. Cycle 17 reads the book's source page with
+the bundled PDFBox API after header selection in `ClefBuilder.Column.selectClefs()`
+and before HEADS. Only those two encoding names in an embedded vector font are
+admitted. Ordinary header G/F glyphs stay on the existing path. Missing outlines,
+invisible text, rotation, shear, reduced clipping and blank ink fall through.
+
+The helper is `sheet/clef/PdfClefHints.java`. The vendored `ClefBuilder` hook
+does not call `findClefs()` / `registerClefs()` and does not move `clefStop`.
+An existing same-staff `ClefInter`, including G/F octave variants, is never
+duplicated, moved, replaced or downgraded. Grade comes from outline-clipped
+staff-free ink, not from the weak raster compound. Source evidence, controls
+and pending host attribution are in `docs/omr-rsi-cycle-17.md`. Svc-23
+requires a matching engine build and fresh host artifacts.
+
+The standalone controls compile the helper against PDFBox 3.0.6 (the version
+Audiveris 5.11.0 bundles) from the service directory:
+
+```sh
+javac -cp "$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
+  -d /tmp/cleffy-pdf-clef-controls \
+  engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefHints.java \
+  engine-patches/probes/PdfClefHintControls.java
+java -cp "/tmp/cleffy-pdf-clef-controls:$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
+  org.audiveris.omr.sheet.clef.PdfClefHintControls \
+  [optional-schumann.pdf]
+```
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -264,7 +295,8 @@ Two `Dockerfile` stages:
    - `jar uf audiveris.jar org` — the recompiled classes and their inner classes
      replace the shipped ones **inside** the jar;
    - `javap` checks `promoteOctaveClef`, `createMeasured`, `findBracketSpan`,
-     `hasAttachedHeadStemInk`, `isUnrecognizedLedgerFragment`, and `isFragment`,
+     `hasAttachedHeadStemInk`, `isUnrecognizedLedgerFragment`, `isFragment`,
+     `installPdfChangeClefs`, and `PdfClefHints.scan`,
      failing the build if an update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its
