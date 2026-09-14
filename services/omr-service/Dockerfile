@@ -56,6 +56,8 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/sheet/clef/ClefBuilder.java \
         engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefHints.java \
         engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefBeamCrossings.java \
+        engine-patches/src/org/audiveris/omr/sheet/header/HeaderBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java \
         engine-patches/src/org/audiveris/omr/sig/SigReducer.java \
         engine-patches/src/org/audiveris/omr/sig/inter/OctaveShiftInter.java \
         engine-patches/src/org/audiveris/omr/text/TextBuilder.java \
@@ -82,6 +84,10 @@ RUN set -eux; \
         | grep -q scan; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.PdfClefBeamCrossings \
         | grep -q coexist; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.time.PdfHeaderTimeHints \
+        | grep -q keySearchWidth; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.header.HeaderBuilder \
+        | grep -q PdfHeaderTimeHints; \
     javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.SigReducer \
         | grep -q PdfClefBeamCrossings; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.inter.OctaveShiftInter \

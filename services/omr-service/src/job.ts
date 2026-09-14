@@ -80,8 +80,9 @@ import type { ScoreData } from './scoreData.js';
  * svc-29: use the PDF loader's float DPI scale for named quarter-rest
  * outlines instead of the rounded raster canvas.
  * svc-30: keep a named PDF change-clef that shares ink with a proven beam.
+ * svc-31: bound header key extraction at a proven numerical time column.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-30';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-31';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
