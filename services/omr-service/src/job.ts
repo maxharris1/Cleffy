@@ -59,8 +59,10 @@ import type { ScoreData } from './scoreData.js';
  * differs from stock 5.11.0.
  * svc-16: recover OCR octave marks only with a measured printed dash span,
  * using TextBuilder and OctaveShiftInter while preserving normal chord linking.
+ * svc-17 was a rejected implicit-tuplet option experiment (RSI cycle 11).
+ * svc-18: limit tuplet beam siblings to a measured printed bracket span.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-16';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-18';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

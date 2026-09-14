@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-16` (`src/job.ts` `ENGINE_VERSION`) |
+| Engine revision | `audiveris-5.11.0+svc-18` (`src/job.ts` `ENGINE_VERSION`) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -139,6 +139,23 @@ This first rule recovers Czerny Op. 821/1 measure 6. The misassigned continuatio
 in measure 7 remains a separate defect; this patch does not move symbols between
 systems. Parser behavior, gate floors, and corpus allowances are unchanged.
 
+## 0003 — respect a printed tuplet bracket inside a longer beam
+
+`TupletsBuilder` previously included every chord on the smallest shared beam.
+A printed triplet bracket enclosing only the final three notes of a four-note
+beam was consequently rejected. The patched builder measures two bracket halves
+around the recognized numeral: long horizontal strokes, outward hooks, aligned
+sheet ordinates, and exactly the expected number of staff-local chord anchors.
+Only that verified span limits beam siblings. Absent, mismatched, or ambiguous
+brackets preserve the existing linking path.
+
+The vendored file is `src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java`,
+from the same Audiveris 5.11.0 tag. The reproducible upstream diff is
+`0003-tuplet-bracket-span.patch`. Evidence and negative controls are recorded in
+`docs/omr-rsi-chopin-symbol-localization.md`. No duration or pitch is inferred
+from bar length, and no scoring rule changes. Revision 17 remains reserved for
+the rejected option experiment; this accepted engine uses revision 18.
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -153,8 +170,8 @@ Two `Dockerfile` stages:
    - `javac` the vendored classes against `lib/app/audiveris.jar` plus the rest of `lib/app/*`;
    - `jar uf audiveris.jar org` — the recompiled classes and their inner classes
      replace the shipped ones **inside** the jar;
-   - `javap` checks both `promoteOctaveClef` and `createMeasured`, failing the build
-     if either update did not land.
+   - `javap` checks `promoteOctaveClef`, `createMeasured`, and `findBracketSpan`,
+     failing the build if an update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its
 `Audiveris.cfg` classpath and the bundled JRE are untouched, so nothing here has to be redone

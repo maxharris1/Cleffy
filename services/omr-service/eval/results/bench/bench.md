@@ -1,11 +1,11 @@
 # OMR play-along benchmark
 
-engine: audiveris-5.11.0+svc-16  audiveris: - Version:      5.11.0
+engine: audiveris-5.11.0+svc-18  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T15:35:54.535Z
+generated: 2026-09-14T15:56:03.946Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
-**Play-along score 95.2%** · 6/16 pieces pass the gate
+**Play-along score 95.2%** · 7/16 pieces pass the gate
 
 Rates are weighted by reference notes, not by piece. A piece whose `meters`
 check failed could not bind a tick slice, so its rates are void rather than
@@ -27,9 +27,9 @@ measured — read its failure list, not its percentages.
 | Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie) | 1 | 303 | 100.0% | 100.0% | 99.7% | 0 | 2 | 100.0 | pass |
 | Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) | 1 | 279 | 85.3% | 82.8% | 82.8% | 39 | 39 | 74.8 | FAIL |
 | Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
-| Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.3% | 24 | 24 | 86.6 | FAIL |
-| Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.0% | 97.3% | 2 | 1 | 95.4 | FAIL |
-| **suite** | | **5996** | **97.5%** | **95.9%** | **95.2%** | **119** | **161** | | **6/16** |
+| Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.0% | 24 | 24 | 86.6 | FAIL |
+| Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.3% | 97.8% | 2 | 1 | 95.5 | pass |
+| **suite** | | **5996** | **97.5%** | **96.0%** | **95.2%** | **119** | **161** | | **7/16** |
 
 ## Bach — Little Prelude in C, BWV 939 — 1 failed check(s)
 
@@ -91,8 +91,3 @@ measured — read its failure list, not its percentages.
 - Poco moto: notes-present (24 missing, 7 allowed)
 - Poco moto: no-invented-notes (24 extra, 7 allowed)
 - Poco moto: attack-grid (exact 94.6% vs floor 95.0%)
-
-## Chopin — Prelude in E minor, Op. 28 No. 4 — 2 failed check(s)
-
-- chopin-prelude-4: bar-length-warning (measure_overfull)
-- Largo: bar-length (1 of 26 bars are not the printed length)
