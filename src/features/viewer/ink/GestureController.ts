@@ -63,6 +63,9 @@ interface SafariGestureEvent extends Event {
 /** How recently a pen must have been active for touches to be palm-rejected (ms). */
 const PALM_REJECTION_WINDOW_MS = 500;
 
+/** A Safari gesture starting this soon after a touch-down is an iOS pinch, not a trackpad. */
+const TOUCH_PINCH_WINDOW_MS = 1000;
+
 export class GestureController {
     private el: HTMLElement;
     private callbacks: GestureCallbacks;
@@ -71,7 +74,12 @@ export class GestureController {
     private pointers = new Map<number, TrackedPointer>();
     private inkPointerId: number | null = null;
     private lastPenActivity = 0;
+    private lastTouchDown = 0;
     private lastSafariGestureScale = 1;
+    /** A gesturestart has been seen and no gestureend yet. */
+    private safariGestureActive = false;
+    /** The active Safari gesture is an iOS touch pinch (pointer path owns it). */
+    private touchPinch = false;
     private navigating = false;
 
     constructor(el: HTMLElement, callbacks: GestureCallbacks) {
@@ -122,10 +130,18 @@ export class GestureController {
         if (e.target instanceof Element && e.target.closest('[data-ui-overlay]')) {
             return;
         }
-        this.el.setPointerCapture(e.pointerId);
+        try {
+            this.el.setPointerCapture(e.pointerId);
+        } catch {
+            // A pointer cancelled mid-flight (rotation, system gesture) is gone
+            // by the time this runs; tracking it without capture is still fine.
+        }
 
         if (e.pointerType === 'pen') {
             this.lastPenActivity = performance.now();
+        }
+        if (e.pointerType === 'touch') {
+            this.lastTouchDown = performance.now();
         }
         // Palm rejection: ignore touches that land while/just after the pen is active.
         if (
@@ -256,14 +272,20 @@ export class GestureController {
     // Desktop Safari trackpad pinch arrives ONLY as gesture events. On iOS the
     // same events fire alongside touch pointers — there we only preventDefault
     // (the pointer path already handles the pinch) to suppress page zoom.
+    // Which kind it is gets decided once, at gesturestart: a rotation or
+    // system gesture can cancel the touch pointers mid-pinch, and the gesture
+    // stream must not then fall through to the trackpad math with a stale
+    // scale (one such event can jump the zoom to its maximum).
     private onSafariGestureStart = (e: SafariGestureEvent): void => {
         e.preventDefault();
         this.lastSafariGestureScale = e.scale;
+        this.safariGestureActive = true;
+        this.touchPinch = this.pointers.size > 0 || performance.now() - this.lastTouchDown < TOUCH_PINCH_WINDOW_MS;
     };
 
     private onSafariGestureChange = (e: SafariGestureEvent): void => {
         e.preventDefault();
-        if (this.pointers.size > 0) {
+        if (!this.safariGestureActive || this.touchPinch || this.pointers.size > 0) {
             return;
         }
         const factor = e.scale / this.lastSafariGestureScale;
@@ -275,6 +297,8 @@ export class GestureController {
     private onSafariGestureEnd = (e: SafariGestureEvent): void => {
         e.preventDefault();
         this.lastSafariGestureScale = 1;
+        this.safariGestureActive = false;
+        this.touchPinch = false;
         if (this.pointers.size === 0) {
             this.callbacks.onGestureEnd();
         }

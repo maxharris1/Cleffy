@@ -5,11 +5,15 @@ import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { PlayheadController } from '@/features/playback/PlayheadController';
 import { measureIndexAtPagePoint, measureStartTick } from '@/features/playback/scoreTime';
 import {
+    MAX_SCALE,
+    MIN_SCALE,
     PAGE_GAP,
+    bitmapBudgetFactor,
     clampScroll,
     computeDocumentLayout,
     fitPageWidthScale,
     focusedPageIndex,
+    mountedPageIndices,
     pageTurnView,
     viewportToPagePoint,
     visiblePageRange,
@@ -137,6 +141,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const [fingeringSel, setFingeringSel] = useState<FingeringSelection | null>(null);
     const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
+    /** Viewport the current view was last fitted/re-fitted for. */
+    const fittedViewportRef = useRef<ViewportSize | null>(null);
 
     const layout: DocumentLayout = useMemo(
         () => computeDocumentLayout(pageSizes, pageColumns, spreadCover),
@@ -202,11 +208,14 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         if (!el) {
             return;
         }
-        const observer = new ResizeObserver(() => {
-            setViewportSize({ width: el.clientWidth, height: el.clientHeight });
-        });
+        const measure = () => {
+            const width = el.clientWidth;
+            const height = el.clientHeight;
+            setViewportSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
+        };
+        const observer = new ResizeObserver(measure);
         observer.observe(el);
-        setViewportSize({ width: el.clientWidth, height: el.clientHeight });
+        measure();
         return () => observer.disconnect();
     }, []);
 
@@ -216,11 +225,42 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             return;
         }
         didFitRef.current = true;
+        fittedViewportRef.current = viewportSize;
         const scale = fitPageWidthScale(layout, viewportSize.width);
         const fitted = clampScroll({ scale, scrollX: 0, scrollY: 0 }, layout, viewportSize.width, viewportSize.height);
         useViewerStore.getState().resetView(fitted);
         setRenderScale(scale);
     }, [status, viewportSize, layout]);
+
+    // Rotation (or any later resize): keep the zoom RELATIVE to fit-width, so a
+    // spread fitted in landscape does not arrive in portrait 2× too large (and
+    // mount twice the bitmaps), nor a portrait fit turn into a ribbon in
+    // landscape. The content point under the old centre stays at the new
+    // centre. Ratios compose, so iOS's transient sizes mid-rotation land right.
+    useEffect(() => {
+        const prev = fittedViewportRef.current;
+        if (!didFitRef.current || !prev || viewportSize.width === 0 || viewportSize.height === 0) {
+            return;
+        }
+        if (prev.width === viewportSize.width && prev.height === viewportSize.height) {
+            return;
+        }
+        fittedViewportRef.current = viewportSize;
+        const { view: v, setView } = useViewerStore.getState();
+        const ratio = fitPageWidthScale(layout, viewportSize.width) / fitPageWidthScale(layout, prev.width);
+        const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * ratio));
+        const cx = (v.scrollX + prev.width / 2) / v.scale;
+        const cy = (v.scrollY + prev.height / 2) / v.scale;
+        setView(
+            clampScroll(
+                { scale, scrollX: cx * scale - viewportSize.width / 2, scrollY: cy * scale - viewportSize.height / 2 },
+                layout,
+                viewportSize.width,
+                viewportSize.height,
+            ),
+        );
+        setRenderScale(scale);
+    }, [viewportSize, layout]);
 
     /**
      * Turn one row of pages. Reads live refs so the once-bound gesture
@@ -252,6 +292,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         const focused = focusedPageIndex(v, height, layout.layouts);
         const scale = fitPageWidthScale(nextLayout, width);
         const top = nextLayout.layouts[focused]?.top ?? PAGE_GAP;
+        fittedViewportRef.current = viewportSize;
         setPageColumns(columns);
         setSpreadCover(coverPage);
         setView(clampScroll({ scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale }, nextLayout, width, height));
@@ -528,10 +569,17 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         });
     };
 
+    // Device pixels per CSS pixel for page bitmaps, reduced when everything
+    // that can be mounted at this zoom would blow the canvas budget (iOS kills
+    // the tab well before the OS reports memory pressure).
+    const pixelRatio = useMemo(() => {
+        const dpr = Math.min(window.devicePixelRatio || 1, 3);
+        return dpr * bitmapBudgetFactor(layout, pageColumns, renderScale, dpr, viewportSize.width, viewportSize.height);
+    }, [layout, pageColumns, renderScale, viewportSize.width, viewportSize.height]);
+
     const pages = [];
     if (doc) {
-        const range = visiblePageRange(view, viewportSize.height, layout.layouts);
-        for (let i = range.start; i <= range.end; i++) {
+        for (const i of mountedPageIndices(view, layout, viewportSize.width, viewportSize.height)) {
             const pageLayout = layout.layouts[i];
             if (pageLayout) {
                 pages.push(
@@ -541,6 +589,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         pageIndex={i}
                         layout={pageLayout}
                         scale={renderScale}
+                        pixelRatio={pixelRatio}
                         registry={registry}
                     />,
                 );
@@ -772,7 +821,9 @@ const ZoomControls = ({
     return (
         <div
             data-ui-overlay
-            className="absolute bottom-[calc(4.5rem+var(--safe-bottom))] right-4 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))]"
+            // Phones: top-right, clear of the bottom toolbar whose wrapped rows
+            // would otherwise cover the zoom buttons. Larger screens: bottom-right.
+            className="absolute right-2 top-2 flex flex-col gap-2 sm:bottom-[calc(1rem+var(--safe-bottom))] sm:right-4 sm:top-auto"
         >
             {pageColumns !== null ? (
                 <button
