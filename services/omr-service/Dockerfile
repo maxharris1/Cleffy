@@ -61,6 +61,8 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java \
         engine-patches/src/org/audiveris/omr/sheet/symbol/DotFactory.java \
         engine-patches/src/org/audiveris/omr/sheet/symbol/LedgerFragmentEvidence.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/PdfQuarterRestHints.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/SymbolsBuilder.java \
         engine-patches/src/org/audiveris/omr/step/PageStep.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
@@ -86,6 +88,10 @@ RUN set -eux; \
         | grep -q isUnrecognizedLedgerFragment; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.LedgerFragmentEvidence \
         | grep -q isFragment; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
+        | grep -q mergeQuarterRest; \
+    javap -c -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
+        | grep -q PdfQuarterRestHints; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBars \
         | grep -q repair; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \
