@@ -477,7 +477,7 @@ public final class PdfClefHints
     /**
      * A full-page clip from PDFBox init is supported. A reduced clip is unsupported.
      */
-    static boolean clipContains (Shape clip,
+    public static boolean clipContains (Shape clip,
                                  Rectangle2D glyph,
                                  PDRectangle crop)
     {
