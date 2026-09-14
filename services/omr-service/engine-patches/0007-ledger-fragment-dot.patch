@@ -1,0 +1,255 @@
+--- a/app/src/main/java/org/audiveris/omr/sheet/symbol/DotFactory.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/symbol/DotFactory.java
+@@ -30,6 +30,7 @@
+ import org.audiveris.omr.math.Rational;
+ import org.audiveris.omr.sheet.Part;
+ import org.audiveris.omr.sheet.PartBarline;
++import org.audiveris.omr.sheet.Picture;
+ import org.audiveris.omr.sheet.ProcessingSwitch;
+ import org.audiveris.omr.sheet.ProcessingSwitches;
+ import org.audiveris.omr.sheet.Scale;
+@@ -59,6 +60,8 @@
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
++import ij.process.ByteProcessor;
++
+ import java.awt.Rectangle;
+ import java.awt.geom.Point2D;
+ import java.util.ArrayList;
+@@ -197,6 +200,14 @@
+                 final LedgerInter ledger = staff.getConcreteLedgerNearby(center);
+ 
+                 if (ledger == null) {
++                    if (isUnrecognizedLedgerFragment(glyph, staff)) {
++                        if (glyph.isVip()) {
++                            logger.info("VIP glyph#{} dot rejected as ledger fragment", glyph.getId());
++                        }
++
++                        return false;
++                    }
++
+                     if (glyph.isVip()) {
+                         logger.info("VIP glyph#{} dot isolated OK", glyph.getId());
+                     }
+@@ -228,6 +239,88 @@
+ 
+             return false;
+         }
++    }
++
++    //-----------------------------//
++    // isUnrecognizedLedgerFragment //
++    //-----------------------------//
++    /**
++     * Check for a dot candidate which is actually a short horizontal ledger fragment.
++     * <p>
++     * This is deliberately restricted to source ink that (1) lies on an extrapolated ledger
++     * ordinate, (2) connects continuously through another recognized head, and (3) protrudes as
++     * a thin stroke beyond that head's opposite edge. Detached dots cannot satisfy this test.
++     * The test runs only
++     * when no concrete ledger was recognized; concrete ledgers retain the historical distance
++     * check above.
++     *
++     * @param glyph the dot candidate glyph
++     * @param staff the closest staff
++     * @return true when source ink is better explained as a ledger fragment
++     */
++    private boolean isUnrecognizedLedgerFragment (Glyph glyph,
++                                                  Staff staff)
++    {
++        if ((glyph == null) || staff.isOneLineStaff() || (staff.getLineCount() != 5)) {
++            return false;
++        }
++
++        final Rectangle box = glyph.getBounds();
++        final int il = staff.getSpecificInterline();
++
++        final Point2D center = glyph.getCenter2D();
++        final double pitch = staff.pitchPositionOf(center);
++        final int ledgerPitch = 2 * (int) Math.rint(pitch / 2);
++
++        if (Math.abs(ledgerPitch) <= (staff.getLineCount() - 1)) {
++            return false;
++        }
++
++        final double ledgerY = staff.pitchToOrdinate(center.getX(), ledgerPitch);
++        if (Math.abs(center.getY() - ledgerY) > Math.max(2, il * 0.3)) {
++            return false;
++        }
++
++        final ByteProcessor source = getSourceMask();
++        if (source == null) {
++            return false;
++        }
++
++        for (Inter inter : sig.inters(HeadInter.class)) {
++            if (inter.getStaff() != staff) {
++                continue;
++            }
++
++            final Rectangle head = inter.getBounds();
++            if (LedgerFragmentEvidence.isFragment(
++                    box,
++                    head,
++                    ledgerY,
++                    il,
++                    (x, y) -> (x >= 0) && (y >= 0)
++                            && (x < source.getWidth()) && (y < source.getHeight())
++                            && (source.get(x, y) < 128))) {
++                logger.info("Rejecting dot glyph#{} as connected ledger ink beside head#{}",
++                        glyph.getId(), inter.getId());
++                return true;
++            }
++        }
++
++        return false;
++    }
++
++    //-----------------//
++    // getSourceMask //
++    //-----------------//
++    /** Use original source ink; unavailable source evidence leaves the ordinary checks intact. */
++    private ByteProcessor getSourceMask ()
++    {
++        final var picture = system.getSheet().getPicture();
++        if (picture == null) {
++            return null;
++        }
++
++        return picture.getSource(Picture.SourceKey.BINARY);
+     }
+ 
+     //------------------//
+--- /dev/null
++++ b/app/src/main/java/org/audiveris/omr/sheet/symbol/LedgerFragmentEvidence.java
+@@ -0,0 +1,129 @@
++//------------------------------------------------------------------------------------------------//
++//                                                                                                //
++//                              L e d g e r F r a g m e n t E v i d e n c e                     //
++//                                                                                                //
++//------------------------------------------------------------------------------------------------//
++package org.audiveris.omr.sheet.symbol;
++
++import java.awt.Rectangle;
++
++/** Dependency-free source-ink checks for a dot candidate which may be ledger ink. */
++public final class LedgerFragmentEvidence
++{
++    private LedgerFragmentEvidence ()
++    {
++    }
++
++    /** A source accessor, returning false outside the image, independent of engine classes. */
++    @FunctionalInterface
++    public interface PixelSource
++    {
++        boolean isInk (int x,
++                       int y);
++    }
++
++    /**
++     * Check whether a small candidate is a horizontal ledger fragment entering a neighboring
++     * head. The source mask must supply the original binary pixels.
++     *
++     * @param candidate candidate glyph bounds
++     * @param neighboringHead bounds of a distinct recognized head on the right
++     * @param ledgerY expected ledger ordinate at the candidate center abscissa
++     * @param interline staff interline in pixels
++     * @param source source-ink accessor
++     * @return true only when geometry and source ink agree
++     */
++    public static boolean isFragment (Rectangle candidate,
++                                      Rectangle neighboringHead,
++                                      double ledgerY,
++                                      double interline,
++                                      PixelSource source)
++    {
++        if ((candidate == null) || (neighboringHead == null) || (source == null)
++                || !Double.isFinite(interline) || !Double.isFinite(ledgerY)
++                || (interline <= 0) || (neighboringHead.width <= 0)
++                || (neighboringHead.height <= 0)) {
++            return false;
++        }
++
++        if ((candidate.width < 3) || (candidate.height < 2)
++                || (candidate.width > (interline / 2))
++                || (candidate.height > (interline / 3))
++                || (candidate.width < candidate.height)) {
++            return false;
++        }
++
++        final double centerY = candidate.getCenterY();
++        if (Math.abs(centerY - ledgerY) > Math.max(2, interline * 0.3)) {
++            return false;
++        }
++
++        final int gap = neighboringHead.x - (candidate.x + candidate.width);
++        final int maxGap = Math.max(1, (int) Math.floor(interline / 10));
++        if ((gap < 0) || (gap > maxGap)
++                || !verticalOverlap(candidate, neighboringHead)
++                || (Math.abs(neighboringHead.getCenterY() - centerY) > (interline * 0.5))) {
++            return false;
++        }
++
++        // Require a complete source run from the left edge of the candidate through the head and
++        // beyond its right edge.  The ink must protrude on both sides of the head; a detached dot
++        // or a stroke that merely touches the head is insufficient.
++        final int runStart = candidate.x;
++        final int headRight = neighboringHead.x + neighboringHead.width - 1;
++        final int protrusion = Math.max(2, (int) Math.floor(interline / 4));
++        final int runStop = headRight + protrusion;
++        final int maxThickness = Math.max(2, (int) Math.ceil(interline / 3));
++        for (int y = candidate.y; y < (candidate.y + candidate.height); y++) {
++            if (hasInkRun(source, runStart, runStop, y)
++                    && isThinStroke(source, runStart, y, maxThickness)
++                    && isThinStroke(source, runStart + 1, y, maxThickness)
++                    && isThinStroke(source, runStop - 1, y, maxThickness)
++                    && isThinStroke(source, runStop, y, maxThickness)) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
++    private static boolean hasInkRun (PixelSource source,
++                                      int xStart,
++                                      int xStop,
++                                      int y)
++    {
++        for (int x = xStart; x <= xStop; x++) {
++            if (!source.isInk(x, y)) {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    /** Require the opposite protrusion to be a thin stroke, rather than another solid symbol. */
++    private static boolean isThinStroke (PixelSource source,
++                                         int x,
++                                         int y,
++                                         int maxThickness)
++    {
++        int thickness = 1;
++        for (int dy = 1; dy <= maxThickness && source.isInk(x, y - dy); dy++) {
++            if (++thickness > maxThickness) {
++                return false;
++            }
++        }
++        for (int dy = 1; dy <= maxThickness && source.isInk(x, y + dy); dy++) {
++            if (++thickness > maxThickness) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private static boolean verticalOverlap (Rectangle one,
++                                            Rectangle two)
++    {
++        return (one.y < (two.y + two.height)) && (two.y < (one.y + one.height));
++    }
++}

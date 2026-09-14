@@ -1,6 +1,7 @@
 # OMR RSI cycle 15
 
-**Candidate pending a matching-engine host bench.** The supplied official cycle-14 host report is
+**Closed without acceptance.** Cycle 16 removes patch 0006. See
+[cycle 16](omr-rsi-cycle-16.md). The supplied official cycle-14 host report is
 7/16, 95.41360907271515% on-grid, 117 missing and 159 extra notes. This cycle
 reverts cycle 14 under its kill criteria (see the [cycle-14 ledger](omr-rsi-cycle-14.md))
 and uses the locked implementer/host split: Astra and Luna implement and validate
