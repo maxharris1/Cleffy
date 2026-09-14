@@ -239,9 +239,18 @@ export const buildScoreData = (
     // Only act on marks that line up with the measures one-for-one; anything
     // else means a caller built the score without them, and an empty plan must
     // never be mistaken for "perform nothing".
+    // The anacrusis is the FIRST measure or it is not one, and it is never
+    // padded, so its `dTicks` is the hole a short bar before a repeat sign has
+    // to match exactly for that repeat to retake from it.
+    const pickupTicks = musical.measures[0]?.n === 0 ? (musical.measures[0]?.dTicks ?? 0) : 0;
     const plan =
         marks.length === measures.length
-            ? planRepeats(marks, { maxMeasures: MAX_MEASURES }, (i) => musical.measures[i]?.n === 0)
+            ? planRepeats(
+                  marks,
+                  { maxMeasures: MAX_MEASURES },
+                  (i) => musical.measures[i]?.n === 0,
+                  (i) => pickupTicks > 0 && (musical.measures[i]?.pad ?? 0) === pickupTicks,
+              )
             : null;
     // A degraded plan is never performed, so its flags describe a performance
     // that does not happen — they cannot be read without this filter.

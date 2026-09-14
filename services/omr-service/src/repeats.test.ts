@@ -17,8 +17,12 @@ const bar = (over: Partial<MeasureRepeatMarks> = {}): MeasureRepeatMarks => ({
 const dc = (al: 'fine' | 'coda' | null = null) => ({ kind: 'dc' as const, al });
 const ds = (al: 'fine' | 'coda' | null = null) => ({ kind: 'ds' as const, al });
 
-const plan = (marks: MeasureRepeatMarks[], limits = LIMITS, isPickup?: (i: number) => boolean) =>
-    planRepeats(marks, limits, isPickup);
+const plan = (
+    marks: MeasureRepeatMarks[],
+    limits = LIMITS,
+    isPickup?: (i: number) => boolean,
+    completesPickup?: (i: number) => boolean,
+) => planRepeats(marks, limits, isPickup, completesPickup);
 
 describe('planRepeats', () => {
     it('leaves a score with no repeat marks alone', () => {
@@ -51,6 +55,31 @@ describe('planRepeats', () => {
     it('does not replay a pickup on the way round', () => {
         // Bar 0 is a pickup: played once on the way in, never again.
         const result = plan([bar(), bar(), bar({ repeatBackward: true })], LIMITS, (i) => i === 0);
+        expect(result.order).toEqual([0, 1, 2, 1, 2]);
+    });
+
+    it('retakes from the pickup when the bar before the repeat sign completes it', () => {
+        // Bar 0 is a pickup and bar 2 is short by exactly it — the engraver's
+        // arithmetic that the two halves make one bar, so the retake starts
+        // at the pickup rather than at bar 1.
+        const result = plan(
+            [bar(), bar(), bar({ repeatBackward: true })],
+            LIMITS,
+            (i) => i === 0,
+            (i) => i === 2,
+        );
+        expect(result.order).toEqual([0, 1, 2, 0, 1, 2]);
+    });
+
+    it('still skips the pickup when a forward repeat governs the retake', () => {
+        // |: is what the `:|` goes back to, so a short bar under it is just a
+        // short bar and the pickup stays played-once.
+        const result = plan(
+            [bar(), bar({ repeatForward: true }), bar({ repeatBackward: true })],
+            LIMITS,
+            (i) => i === 0,
+            (i) => i === 2,
+        );
         expect(result.order).toEqual([0, 1, 2, 1, 2]);
     });
 

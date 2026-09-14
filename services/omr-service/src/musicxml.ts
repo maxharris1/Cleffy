@@ -41,7 +41,7 @@ export type GatedNote = ScoreNote & { gate?: number };
 export interface MusicalScore {
     notes: GatedNote[];
     /** In score order; geometry is zipped on later. */
-    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }>;
+    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }>;
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
@@ -1071,7 +1071,7 @@ interface PartContext {
 
 interface PartResult {
     notes: ScoreNote[];
-    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }>;
+    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }>;
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
@@ -1126,6 +1126,55 @@ const defaultXOf = (el: Elem): number | null => {
     }
     const value = Number.parseFloat(raw);
     return Number.isFinite(value) ? value : null;
+};
+
+/** Engraved `default-y` in tenths above the TOP staff line, when positioned. */
+const defaultYOf = (el: Elem): number | null => {
+    const raw = el.getAttribute('default-y');
+    if (raw === null || raw === '') {
+        return null;
+    }
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : null;
+};
+
+/**
+ * How far above the top staff line a breath comma or caesura can still be the
+ * mark it claims to be. A staff is 40 tenths tall and a breath comma is engraved
+ * immediately above the top line — Gould puts it "above the staff", never out in
+ * the gap — so a full staff height of clearance is already generous for a
+ * ledger-heavy passage.
+ */
+const BREATH_MAX_ABOVE_STAFF_TENTHS = 40;
+
+/**
+ * A breath mark or caesura the page actually prints.
+ *
+ * Audiveris binds a stray glyph from the gap BETWEEN systems to the nearest
+ * note, and it surfaces as an articulation on that note with a `default-y` far
+ * outside where the mark is engraved. Same shape as the inverted-fermata rule
+ * below and one-sided for the same reason: the play-along gate fails invented
+ * holds, never missing ones, so a mark the writer never positioned
+ * (`default-y` absent) is trusted rather than filtered.
+ */
+const breathOf = (noteEl: Elem): boolean => {
+    const groups = noteEl.getElementsByTagName('articulations');
+    for (let i = 0; i < groups.length; i++) {
+        const group = groups.item(i) as Elem | null;
+        if (!group) {
+            continue;
+        }
+        for (const mark of childElements(group)) {
+            if (mark.nodeName !== 'breath-mark' && mark.nodeName !== 'caesura') {
+                continue;
+            }
+            const y = defaultYOf(mark);
+            if (y === null || y <= BREATH_MAX_ABOVE_STAFF_TENTHS) {
+                return true;
+            }
+        }
+    }
+    return false;
 };
 
 /**
@@ -1679,7 +1728,6 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             const beam = beamOf(child);
                             const tremolo = tremoloOf(child);
                             const glissando = glissandoOf(child);
-                            const artNames = markNames(child, 'articulations');
                             const fermataEl = child.getElementsByTagName('fermata').item(0);
                             events.push({
                                 k: 'note',
@@ -1694,7 +1742,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 arts,
                                 fermata: fermataEl !== null,
                                 ...(fermataEl?.getAttribute('type') === 'inverted' ? { fermataInverted: true } : {}),
-                                breath: artNames.has('caesura') || artNames.has('breath-mark'),
+                                breath: breathOf(child),
                                 dots: childElements(child, 'dot').length,
                                 spell: parsed.spell,
                                 ...(type ? { type } : {}),
@@ -2864,7 +2912,7 @@ const discloseClefs = (raws: readonly RawMeasure[], warnings: Set<string>): void
  */
 const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult => {
     const notes: ScoreNote[] = [];
-    const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }> = [];
+    const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }> = [];
     const timeSignatures: ScoreTimeSig[] = [];
     const keySignatures: ScoreKeySig[] = [];
     const clefs: ScoreClef[] = [];
@@ -3282,7 +3330,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
 
-        measures.push({ n: raw.n, tick: place.tick, dTicks: place.dTicks, ...(raw.newSystem ? { sysBreak: true } : {}) });
+        measures.push({
+            n: raw.n,
+            tick: place.tick,
+            dTicks: place.dTicks,
+            ...(raw.newSystem ? { sysBreak: true } : {}),
+            // Kept only so a caller can still see the hole padding closed:
+            // `repeats.ts` needs it to tell an anacrusis-completing short bar
+            // from a damaged one. Never reaches ScoreData.
+            ...(place.pad > 0 ? { pad: place.pad } : {}),
+        });
     }
 
     // A tie whose stop was never engraved never reached its gating point. Close

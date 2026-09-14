@@ -1515,6 +1515,22 @@ describe('ornaments, graces and swing', () => {
         ]);
     });
 
+    it('ignores a comma engraved out in the gap between systems', () => {
+        // Audiveris binds a stray glyph to the nearest note as an articulation.
+        // A breath comma is printed just above the staff (40 tenths tall), so
+        // one 110 tenths clear of the top line is not the mark it claims to be;
+        // the same comma inside that reach still stops the clock.
+        const far = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 8, '<notations><articulations><breath-mark default-y="110">comma</breath-mark></articulations></notations>')}${note('D', 4, 8)}</measure>`,
+        );
+        expect(parseMusicXmlString(far).holds).toEqual([]);
+
+        const near = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 8, '<notations><articulations><breath-mark default-y="14">comma</breath-mark></articulations></notations>')}${note('D', 4, 8)}</measure>`,
+        );
+        expect(parseMusicXmlString(near).holds).toEqual([{ tick: 960, beats: 0.5 }]);
+    });
+
     it('takes the breath after the whole tie chain, not after its first note', () => {
         // Whole tied to whole, the breath mark engraved on the first: the stop
         // comes at 3840, where the merged note ends.

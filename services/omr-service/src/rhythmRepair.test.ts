@@ -209,6 +209,33 @@ describe('rhythm repair', () => {
         expect(score.notes.filter((n) => n.p < 60).map((n) => n.t)).toEqual([960, 1200, 1440, 1680]);
     });
 
+    it('leaves the short bar that the anacrusis completes at a repeat sign alone', () => {
+        // 3/4 opening on a one-quarter upbeat. The bar carrying `:|` is two
+        // quarters — short by exactly that upbeat, which is how the engraver
+        // says the retake starts at the upbeat and the two halves make one bar.
+        // Bar 1 would witness the "missing" rest, so the repair is available
+        // and declined: padding closes the hole and says so.
+        const ATTRS_34 = `<attributes><divisions>4</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>`;
+        const three = note('C', 5, 4, { type: 'quarter' }) + note('D', 5, 4, { type: 'quarter' }) + note('E', 5, 4, { type: 'quarter' });
+        const two = note('C', 5, 4, { type: 'quarter' }) + note('D', 5, 4, { type: 'quarter' });
+        const backward = `<barline location="right"><bar-style>light-heavy</bar-style><repeat direction="backward"/></barline>`;
+        const body = (tail: string) =>
+            `<measure number="0" implicit="yes">${ATTRS_34}${note('G', 4, 4, { type: 'quarter' })}</measure>` +
+            `<measure number="1">${three}</measure>` +
+            `<measure number="2">${two}${tail}</measure>` +
+            `<measure number="3">${three}</measure>`;
+
+        const repeated = parseMusicXmlString(wrap(body(backward)));
+        expect(repeated.rhythmRepairs).toBe(0);
+        expect(repeated.warnings).toContain('measure_underfull');
+
+        // Same bars with no repeat sign: nothing says the bar is short on
+        // purpose, so the ordinary repair runs.
+        const plainRun = parseMusicXmlString(wrap(body('')));
+        expect(plainRun.rhythmRepairs).toBe(1);
+        expect(plainRun.warnings).not.toContain('measure_underfull');
+    });
+
     it('repairs each voice on its own evidence when both are broken', () => {
         // Both voices of bar 2 lost the dot their bar-1 figure shows: one edit
         // each, one repair counted per voice.

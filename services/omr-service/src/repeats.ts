@@ -312,6 +312,12 @@ export const planRepeats = (
     marks: readonly MeasureRepeatMarks[],
     limits: RepeatLimits,
     isPickup: (index: number) => boolean = () => false,
+    /**
+     * True when the bar at this index is short by EXACTLY the anacrusis — the
+     * engraver's own proof that the two halves make one bar, so a repeat sitting
+     * on it retakes from the anacrusis. See the retake below.
+     */
+    completesPickup: (index: number) => boolean = () => false,
 ): RepeatPlan => {
     const n = marks.length;
     if (n === 0) {
@@ -389,7 +395,16 @@ export const planRepeats = (
             if (mark.repeatBackward && pass < mark.repeatTimes) {
                 passOf.set(lastForward, pass + 1);
                 performsRepeats = true;
-                i = lastForward;
+                // When the opening section repeats and the music began with an
+                // anacrusis, the engraver shortens the bar before the repeat
+                // sign by exactly that anacrusis, and the retake starts at the
+                // anacrusis — the two halves are one bar (Gould, Behind Bars).
+                // That short bar is the printed proof, and without it the
+                // default stands: the pickup is played once on the way in. A
+                // printed `|:` is what a retake goes back to, so a short bar
+                // under one says nothing about the head of the piece.
+                const retakesHead = lastForward === top && marks[lastForward]?.repeatForward !== true;
+                i = retakesHead && completesPickup(i) ? 0 : lastForward;
                 continue;
             }
             if (jump && i === jump.at) {
