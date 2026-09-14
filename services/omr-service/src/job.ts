@@ -71,8 +71,10 @@ import type { ScoreData } from './scoreData.js';
  * boundary, using printed PDF system-number anchors.
  * svc-25: group PDF system-number digits within a verified text line so a
  * printed 10 is not split by other baselines.
+ * svc-26: rebuild merged internal-bar voice/slot tables without null
+ * Voice.putSlotInfo records.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-25';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-26';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

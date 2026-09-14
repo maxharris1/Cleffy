@@ -64,6 +64,7 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/step/PageStep.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java; \
     (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
@@ -90,6 +91,8 @@ RUN set -eux; \
         | grep -q groupDigits; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarEvidence \
         | grep -q sourceCountAllowsInternal; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarVoices \
+        | grep -q rebuild; \
     javap -c -cp "$app/audiveris.jar" org.audiveris.omr.step.PageStep \
         | grep -q InternalDoubleBars
 

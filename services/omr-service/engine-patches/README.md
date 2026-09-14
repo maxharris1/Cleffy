@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-25` (`src/job.ts` `ENGINE_VERSION`; cycle 19 candidate pending host bench) |
+| Engine revision | `audiveris-5.11.0+svc-26` (`src/job.ts` `ENGINE_VERSION`; cycle 20 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -310,6 +310,7 @@ javac -cp "$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
   engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefHints.java \
   engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
   engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
+  engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java \
   engine-patches/probes/InternalDoubleBarControls.java
 java -cp "/tmp/cleffy-internal-bar-controls:$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
   org.audiveris.omr.sheet.rhythm.InternalDoubleBarControls \
@@ -330,6 +331,24 @@ is `0010-pdf-system-number-lines.patch`. Source evidence, whole-PDF controls and
 pending host attribution are in `docs/omr-rsi-cycle-19.md`. Svc-25 requires a
 matching engine build and fresh host artifacts.
 
+## 0011 — rebuild merged voice/slot tables without null slot records
+
+Cycle 19 reached the complementary pair and then crashed: `rebuildVoiceSlots`
+called `Voice.putSlotInfo(slot, null)` to clear stale keys, but Audiveris
+5.11.0 `putSlotInfo` always reads `chordInfo.status`. Catching that NPE
+could leave null map entries, and renumbering `Slot` objects does not rekey
+existing `TreeMap` tables. Cycle 20 captures fragment chord/voice/slot
+timelines before `mergeWithRight`, rebuilds BEGIN records onto the
+renumbered slot IDs, and lets `completeSlotTable` fill CONTINUE from the
+unchanged durations. Grouping, eligibility guards, and accepted earlier
+patches are unchanged.
+
+The helper is `sheet/rhythm/InternalDoubleBarVoices.java`. The merge
+lifecycle stays in `InternalDoubleBars.java`. The reproducible patch is
+`0011-internal-double-bar-voices.patch`. Source evidence and overlapping-id
+controls are in `docs/omr-rsi-cycle-20.md`. Svc-26 requires a matching engine
+build and fresh host artifacts.
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -349,6 +368,7 @@ Two `Dockerfile` stages:
      `installPdfChangeClefs`, `PdfClefHints.scan`, `InternalDoubleBars.repair`,
      `PdfSystemNumbers.scan`, `PdfSystemNumbers.groupDigits`,
      `InternalDoubleBarEvidence.sourceCountAllowsInternal`,
+     `InternalDoubleBarVoices.rebuild`,
      and `PageStep` calling `InternalDoubleBars`,
      failing the build if an update did not land.
 

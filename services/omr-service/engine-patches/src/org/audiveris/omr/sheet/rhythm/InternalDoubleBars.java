@@ -23,7 +23,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Recover a noncounting internal double-thin barline that Audiveris treated as a
@@ -396,40 +400,57 @@ public final class InternalDoubleBars
         if (shift == null) {
             return;
         }
+        if (left.getMeasures().size() != right.getMeasures().size()) {
+            logger.info("Internal double-bar skipped: fragment part counts differ");
+            return;
+        }
+
+        final FragmentCapture captured = captureFragments(left, right);
+        if (captured == null) {
+            logger.info("Internal double-bar skipped: unsupported fragment timing");
+            return;
+        }
+        final InternalDoubleBarVoices.MergeTables tables = InternalDoubleBarVoices.rebuild(
+                captured.leftSlots,
+                captured.rightSlots,
+                captured.leftChords,
+                captured.rightChords,
+                captured.shift);
+        if (!tables.ok) {
+            logger.info("Internal double-bar skipped: {}", tables.reason);
+            return;
+        }
+
         for (Measure measure : right.getMeasures()) {
             for (AbstractChordInter chord : measure.getStandardChords()) {
-                if (chord.getTimeOffset() != null) {
-                    chord.setTimeOffset(chord.getTimeOffset().plus(shift));
-                }
+                chord.setTimeOffset(chord.getTimeOffset().plus(shift));
             }
         }
         for (Slot slot : right.getSlots()) {
-            if (slot.getTimeOffset() != null) {
-                slot.setTimeOffset(slot.getTimeOffset().plus(shift));
-            }
+            slot.setTimeOffset(slot.getTimeOffset().plus(shift));
         }
 
         left.mergeWithRight(right);
 
+        for (InternalDoubleBarVoices.SlotPlan plan : tables.slots) {
+            final Slot slot = captured.slotsByKey.get(plan.key);
+            slot.setId(plan.newId);
+        }
         final List<Slot> slots = left.getSlots();
-        slots.sort(Comparator
-                .comparing((Slot slot) -> slot.getTimeOffset(),
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparingInt(Slot::getXOffset));
-        int id = 1;
+        slots.sort(Comparator.comparingInt(Slot::getId));
+
+        final Map<Integer, Slot> slotsById = new HashMap<>();
         for (Slot slot : slots) {
-            slot.setId(id++);
+            slotsById.put(slot.getId(), slot);
         }
 
-        for (Measure measure : left.getMeasures()) {
+        for (int i = 0; i < left.getMeasures().size(); i++) {
+            final Measure measure = left.getMeasures().get(i);
+            final String measureKey = "M" + i;
             for (AbstractChordInter chord : measure.getStandardChords()) {
                 chord.setMeasure(measure);
             }
-            for (Voice voice : measure.getVoices()) {
-                voice.setMeasure(measure);
-                rebuildVoiceSlots(voice, left);
-                voice.checkDuration();
-            }
+            applyVoiceTables(measure, measureKey, tables, captured, slotsById);
             measure.renameVoices();
         }
 
@@ -438,18 +459,205 @@ public final class InternalDoubleBars
                 left.getActualDuration());
     }
 
-    private static void rebuildVoiceSlots (Voice voice,
-                                              MeasureStack stack)
+    private static FragmentCapture captureFragments (MeasureStack left,
+                                                        MeasureStack right)
     {
-        for (Slot slot : stack.getSlots()) {
-            voice.putSlotInfo(slot, null);
+        final InternalDoubleBarVoices.Time shift = toTime(left.getActualDuration());
+        if ((shift == null) || !shift.isPositive()) {
+            return null;
         }
-        for (AbstractChordInter chord : voice.getChords()) {
-            final Slot slot = chord.getSlot();
-            if (slot != null) {
-                voice.putSlotInfo(slot, new SlotVoice(chord, ChordStatus.BEGIN));
+        final FragmentCapture captured = new FragmentCapture(shift);
+        if (!captureStack(left, false, captured) || !captureStack(right, true, captured)) {
+            return null;
+        }
+        if (captured.leftSlots.isEmpty() || captured.rightSlots.isEmpty()
+                || captured.leftChords.isEmpty() || captured.rightChords.isEmpty()) {
+            return null;
+        }
+        return captured;
+    }
+
+    private static boolean captureStack (MeasureStack stack,
+                                           boolean fromRight,
+                                           FragmentCapture captured)
+    {
+        int index = 0;
+        for (Slot slot : stack.getSlots()) {
+            if (slot.getTimeOffset() == null) {
+                return false;
+            }
+            final InternalDoubleBarVoices.Time time = toTime(slot.getTimeOffset());
+            if (time == null) {
+                return false;
+            }
+            final String key = (fromRight ? "R" : "L") + "-S" + index + "-" + slot.getId();
+            captured.keyOfSlot.put(slot, key);
+            captured.slotsByKey.put(key, slot);
+            final InternalDoubleBarVoices.SlotCapture rec = new InternalDoubleBarVoices.SlotCapture(
+                    key, slot.getId(), time, slot.getXOffset(), fromRight);
+            (fromRight ? captured.rightSlots : captured.leftSlots).add(rec);
+            index++;
+        }
+
+        final List<Measure> measures = stack.getMeasures();
+        for (int i = 0; i < measures.size(); i++) {
+            final Measure measure = measures.get(i);
+            final String measureKey = "M" + i;
+            for (AbstractChordInter chord : measure.getStandardChords()) {
+                final Voice voice = chord.getVoice();
+                final Slot slot = chord.getSlot();
+                if ((voice == null) || (slot == null) || (chord.getTimeOffset() == null)
+                        || (chord.getDuration() == null)) {
+                    return false;
+                }
+                final String slotKey = captured.keyOfSlot.get(slot);
+                if (slotKey == null) {
+                    return false;
+                }
+                final InternalDoubleBarVoices.Time time = toTime(chord.getTimeOffset());
+                final InternalDoubleBarVoices.Time duration = toTime(chord.getDuration());
+                if ((time == null) || (duration == null) || !duration.isPositive()) {
+                    return false;
+                }
+                final String voiceKey = captured.voiceKeys.computeIfAbsent(
+                        voice,
+                        v -> (fromRight ? "R" : "L") + "-" + measureKey + "-V" + v.getId());
+                final String chordId = (fromRight ? "R" : "L") + "-" + measureKey
+                        + "-C" + System.identityHashCode(chord);
+                captured.chordsById.put(chord, chordId);
+                final InternalDoubleBarVoices.ChordCapture rec =
+                        new InternalDoubleBarVoices.ChordCapture(
+                                chordId, voiceKey, measureKey, slotKey, time, duration, fromRight);
+                (fromRight ? captured.rightChords : captured.leftChords).add(rec);
             }
         }
-        voice.completeSlotTable();
+        return true;
+    }
+
+    private static void applyVoiceTables (Measure measure,
+                                           String measureKey,
+                                           InternalDoubleBarVoices.MergeTables tables,
+                                           FragmentCapture captured,
+                                           Map<Integer, Slot> slotsById)
+    {
+        final LinkedHashSet<String> voiceKeys = new LinkedHashSet<>();
+        for (String voiceKey : tables.voiceKeys) {
+            if (voiceHasMeasure(tables, voiceKey, measureKey)) {
+                voiceKeys.add(voiceKey);
+            }
+        }
+
+        measure.clearVoices();
+        for (String voiceKey : voiceKeys) {
+            AbstractChordInter first = null;
+            InternalDoubleBarVoices.Time firstTime = null;
+            for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+                if (!voiceKey.equals(put.voiceKey) || !InternalDoubleBarVoices.BEGIN.equals(put.status)) {
+                    continue;
+                }
+                final AbstractChordInter chord = chordFor(put.chordId, captured);
+                final InternalDoubleBarVoices.Time time = timeFor(put.chordId, captured);
+                if ((chord == null) || (time == null)) {
+                    continue;
+                }
+                if ((first == null) || (time.compareTo(firstTime) < 0)) {
+                    first = chord;
+                    firstTime = time;
+                }
+            }
+            if (first == null) {
+                continue;
+            }
+            first.setMeasure(measure);
+            final Voice voice = new Voice(first, measure);
+            measure.addVoice(voice);
+            voice.setMeasure(measure);
+            for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+                if (!voiceKey.equals(put.voiceKey) || !InternalDoubleBarVoices.BEGIN.equals(put.status)) {
+                    continue;
+                }
+                final AbstractChordInter chord = chordFor(put.chordId, captured);
+                final Slot slot = slotsById.get(put.slotId);
+                chord.setMeasure(measure);
+                chord.setVoice(voice);
+                chord.setSlot(slot);
+                voice.putSlotInfo(slot, new SlotVoice(chord, ChordStatus.BEGIN));
+            }
+            voice.completeSlotTable();
+            voice.checkDuration();
+        }
+    }
+
+    private static boolean voiceHasMeasure (InternalDoubleBarVoices.MergeTables tables,
+                                                String voiceKey,
+                                                String measureKey)
+    {
+        for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+            if (voiceKey.equals(put.voiceKey) && measureKey.equals(put.measureKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static AbstractChordInter chordFor (String chordId,
+                                                    FragmentCapture captured)
+    {
+        for (Map.Entry<AbstractChordInter, String> entry : captured.chordsById.entrySet()) {
+            if (entry.getValue().equals(chordId)) {
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
+    private static InternalDoubleBarVoices.Time timeFor (String chordId,
+                                                             FragmentCapture captured)
+    {
+        for (InternalDoubleBarVoices.ChordCapture chord : captured.leftChords) {
+            if (chord.chordId.equals(chordId)) {
+                return chord.time;
+            }
+        }
+        for (InternalDoubleBarVoices.ChordCapture chord : captured.rightChords) {
+            if (chord.chordId.equals(chordId)) {
+                return chord.time.plus(captured.shift);
+            }
+        }
+        return null;
+    }
+
+    private static InternalDoubleBarVoices.Time toTime (Rational r)
+    {
+        if (r == null) {
+            return null;
+        }
+        return new InternalDoubleBarVoices.Time(r.num, r.den);
+    }
+
+    private static final class FragmentCapture
+    {
+        final InternalDoubleBarVoices.Time shift;
+
+        final List<InternalDoubleBarVoices.SlotCapture> leftSlots = new ArrayList<>();
+
+        final List<InternalDoubleBarVoices.SlotCapture> rightSlots = new ArrayList<>();
+
+        final List<InternalDoubleBarVoices.ChordCapture> leftChords = new ArrayList<>();
+
+        final List<InternalDoubleBarVoices.ChordCapture> rightChords = new ArrayList<>();
+
+        final IdentityHashMap<Slot, String> keyOfSlot = new IdentityHashMap<>();
+
+        final Map<String, Slot> slotsByKey = new HashMap<>();
+
+        final IdentityHashMap<AbstractChordInter, String> chordsById = new IdentityHashMap<>();
+
+        final IdentityHashMap<Voice, String> voiceKeys = new IdentityHashMap<>();
+
+        FragmentCapture (InternalDoubleBarVoices.Time shift)
+        {
+            this.shift = shift;
+        }
     }
 }

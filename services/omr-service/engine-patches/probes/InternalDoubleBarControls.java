@@ -25,6 +25,8 @@ public final class InternalDoubleBarControls
     public static void main (String[] args)
             throws Exception
     {
+        checkMergedVoiceTables();
+
         require(InternalDoubleBarEvidence.sourceCountAllowsInternal(5, 10, 6),
                 "Schumann printed 5..10 vs six stacks");
         require(!InternalDoubleBarEvidence.sourceCountAllowsInternal(5, 11, 6),
@@ -282,6 +284,216 @@ public final class InternalDoubleBarControls
         System.out.println("whole pinned PDF 5/10/15/20 grouping and binding");
 
         System.out.println("InternalDoubleBarControls ok");
+    }
+
+    /**
+     * Overlapping fragment slot IDs, three left voices and two right voices.
+     * Rebuilds the same tables InternalDoubleBars applies; never stores a null
+     * slot record. Fixture offsets are not production constants.
+     */
+    private static void checkMergedVoiceTables ()
+    {
+        final InternalDoubleBarVoices.Time quarter = new InternalDoubleBarVoices.Time(1, 4);
+        final InternalDoubleBarVoices.Time eighth = new InternalDoubleBarVoices.Time(1, 8);
+        final InternalDoubleBarVoices.Time half = new InternalDoubleBarVoices.Time(1, 2);
+        final InternalDoubleBarVoices.Time zero = new InternalDoubleBarVoices.Time(0, 1);
+
+        final List<InternalDoubleBarVoices.SlotCapture> leftSlots = List.of(
+                slot("L-S0-1", 1, zero, 10, false),
+                slot("L-S1-2", 2, quarter, 40, false));
+        final List<InternalDoubleBarVoices.SlotCapture> rightSlots = List.of(
+                slot("R-S0-1", 1, zero, 80, true),
+                slot("R-S1-2", 2, eighth, 100, true),
+                slot("R-S2-3", 3, quarter, 120, true),
+                slot("R-S3-4", 4, new InternalDoubleBarVoices.Time(3, 8), 140, true));
+        require(leftSlots.get(0).originalId == rightSlots.get(0).originalId,
+                "overlapping pre-merge slot id 1");
+        require(leftSlots.get(1).originalId == rightSlots.get(1).originalId,
+                "overlapping pre-merge slot id 2");
+
+        final List<InternalDoubleBarVoices.ChordCapture> leftChords = List.of(
+                chord("U-D5", "U-L", "M0", "L-S0-1", zero, quarter, false),
+                chord("U-C5a", "U-L", "M0", "L-S1-2", quarter, quarter, false),
+                chord("L-F4", "L-mov", "M1", "L-S0-1", zero, quarter, false),
+                chord("L-E4", "L-mov", "M1", "L-S1-2", quarter, quarter, false),
+                chord("L-C4", "L-sim", "M1", "L-S0-1", zero, half, false));
+        final List<InternalDoubleBarVoices.ChordCapture> rightChords = List.of(
+                chord("U-B4", "U-R", "M0", "R-S0-1", zero, quarter, true),
+                chord("U-C5b", "U-R", "M0", "R-S2-3", quarter, quarter, true),
+                chord("L-G3", "L-R", "M1", "R-S0-1", zero, eighth, true),
+                chord("L-G4a", "L-R", "M1", "R-S1-2", eighth, eighth, true),
+                chord("L-A3", "L-R", "M1", "R-S2-3", quarter, eighth, true),
+                chord("L-G4b", "L-R", "M1", "R-S3-4", new InternalDoubleBarVoices.Time(3, 8),
+                        eighth, true));
+        require(leftChords.size() == 5 && rightChords.size() == 4,
+                "three left voices / two right voices");
+
+        final InternalDoubleBarVoices.MergeTables tables = InternalDoubleBarVoices.rebuild(
+                leftSlots, rightSlots, leftChords, rightChords, half);
+        require(tables.ok, "rebuild overlapping fragment tables");
+        require(tables.slots.size() == 6, "renumbered slots 1..6");
+        require(InternalDoubleBarVoices.beginCount(tables.puts) == 9,
+                "every original chord is one onset");
+        for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+            require((put.chordId != null) && (put.status != null),
+                    "no null slot record");
+        }
+        require(tables.voiceKeys.size() == 5, "left and right voices stay distinct");
+
+        require(slotTime(tables, 1).equals(zero) && slotTime(tables, 2).equals(quarter),
+                "left onsets unchanged");
+        require(slotTime(tables, 3).equals(half), "right first onset + 1/2");
+        require(slotTime(tables, 4).equals(new InternalDoubleBarVoices.Time(5, 8)),
+                "right eighth at 2.5 quarters");
+        require(slotTime(tables, 5).equals(new InternalDoubleBarVoices.Time(3, 4)),
+                "right quarter at 3");
+        require(slotTime(tables, 6).equals(new InternalDoubleBarVoices.Time(7, 8)),
+                "right last eighth at 3.5");
+
+        require(hasPut(tables, "U-L", 1, "U-D5", InternalDoubleBarVoices.BEGIN), "upper D5 BEGIN");
+        require(hasPut(tables, "U-L", 2, "U-C5a", InternalDoubleBarVoices.BEGIN), "upper C5 BEGIN");
+        require(hasPut(tables, "L-mov", 1, "L-F4", InternalDoubleBarVoices.BEGIN), "lower F4 BEGIN");
+        require(hasPut(tables, "L-mov", 2, "L-E4", InternalDoubleBarVoices.BEGIN), "lower E4 BEGIN");
+        require(hasPut(tables, "L-sim", 1, "L-C4", InternalDoubleBarVoices.BEGIN), "C4 half BEGIN");
+        require(hasPut(tables, "L-sim", 2, "L-C4", InternalDoubleBarVoices.CONTINUE),
+                "C4 half CONTINUE through second left onset");
+        require(!hasStatusAt(tables, "L-sim", 3, InternalDoubleBarVoices.CONTINUE),
+                "no invented C4 continuation into the right fragment");
+        require(hasPut(tables, "U-R", 3, "U-B4", InternalDoubleBarVoices.BEGIN),
+                "voice entering only on the right");
+        require(hasPut(tables, "U-R", 5, "U-C5b", InternalDoubleBarVoices.BEGIN), "right upper C5");
+        require(!hasStatusAt(tables, "U-R", 1, InternalDoubleBarVoices.BEGIN),
+                "right voice is not keyed by leftover slot id 1");
+        require(!hasStatusAt(tables, "U-R", 2, InternalDoubleBarVoices.BEGIN),
+                "right voice is not keyed by leftover slot id 2");
+        require(hasPut(tables, "L-R", 3, "L-G3", InternalDoubleBarVoices.BEGIN), "lower G3");
+        require(hasPut(tables, "L-R", 4, "L-G4a", InternalDoubleBarVoices.BEGIN), "lower G4 eighth");
+        require(hasPut(tables, "L-R", 5, "L-A3", InternalDoubleBarVoices.BEGIN), "lower A3");
+        require(hasPut(tables, "L-R", 6, "L-G4b", InternalDoubleBarVoices.BEGIN), "lower last G4");
+        System.out.println("merged voice/slot tables from overlapping fragment ids");
+
+        final List<InternalDoubleBarVoices.SlotCapture> mergedSlots = new ArrayList<>();
+        for (InternalDoubleBarVoices.SlotPlan plan : tables.slots) {
+            mergedSlots.add(new InternalDoubleBarVoices.SlotCapture(
+                    plan.key, plan.newId, plan.time, plan.xOffset, false));
+        }
+        final List<InternalDoubleBarVoices.ChordCapture> mergedChords = new ArrayList<>();
+        for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+            if (!InternalDoubleBarVoices.BEGIN.equals(put.status)) {
+                continue;
+            }
+            mergedChords.add(new InternalDoubleBarVoices.ChordCapture(
+                    put.chordId, put.voiceKey, put.measureKey, slotKey(tables, put.slotId),
+                    slotTime(tables, put.slotId), durationOf(put.chordId, leftChords, rightChords),
+                    false));
+        }
+        final InternalDoubleBarVoices.MergeTables again =
+                InternalDoubleBarVoices.tablesFromOnsets(mergedSlots, mergedChords);
+        require(again.ok && (again.puts.size() == tables.puts.size()),
+                "second table rebuild is inert");
+        require(InternalDoubleBarVoices.beginCount(again.puts) == 9,
+                "second application keeps one onset per chord");
+        System.out.println("second application of voice-table rebuild");
+
+        final InternalDoubleBarVoices.MergeTables missing = InternalDoubleBarVoices.rebuild(
+                leftSlots, rightSlots,
+                List.of(new InternalDoubleBarVoices.ChordCapture(
+                        "bad", "U-L", "M0", "L-S0-1", null, quarter, false)),
+                rightChords, half);
+        require(!missing.ok, "unsupported missing timing does not merge");
+        require(InternalDoubleBarVoices.rebuild(
+                leftSlots, List.of(), leftChords, rightChords, half).ok == false,
+                "empty right fragment is not a partial merge");
+        System.out.println("unsupported missing timing");
+    }
+
+    private static InternalDoubleBarVoices.SlotCapture slot (String key,
+                                                               int originalId,
+                                                               InternalDoubleBarVoices.Time time,
+                                                               int xOffset,
+                                                               boolean fromRight)
+    {
+        return new InternalDoubleBarVoices.SlotCapture(key, originalId, time, xOffset, fromRight);
+    }
+
+    private static InternalDoubleBarVoices.ChordCapture chord (String chordId,
+                                                                  String voiceKey,
+                                                                  String measureKey,
+                                                                  String slotKey,
+                                                                  InternalDoubleBarVoices.Time time,
+                                                                  InternalDoubleBarVoices.Time duration,
+                                                                  boolean fromRight)
+    {
+        return new InternalDoubleBarVoices.ChordCapture(
+                chordId, voiceKey, measureKey, slotKey, time, duration, fromRight);
+    }
+
+    private static InternalDoubleBarVoices.Time slotTime (InternalDoubleBarVoices.MergeTables tables,
+                                                               int slotId)
+    {
+        for (InternalDoubleBarVoices.SlotPlan slot : tables.slots) {
+            if (slot.newId == slotId) {
+                return slot.time;
+            }
+        }
+        throw new AssertionError("slot " + slotId);
+    }
+
+    private static String slotKey (InternalDoubleBarVoices.MergeTables tables,
+                                      int slotId)
+    {
+        for (InternalDoubleBarVoices.SlotPlan slot : tables.slots) {
+            if (slot.newId == slotId) {
+                return slot.key;
+            }
+        }
+        throw new AssertionError("slot key " + slotId);
+    }
+
+    private static InternalDoubleBarVoices.Time durationOf (String chordId,
+                                                                List<InternalDoubleBarVoices.ChordCapture> left,
+                                                                List<InternalDoubleBarVoices.ChordCapture> right)
+    {
+        for (InternalDoubleBarVoices.ChordCapture chord : left) {
+            if (chord.chordId.equals(chordId)) {
+                return chord.duration;
+            }
+        }
+        for (InternalDoubleBarVoices.ChordCapture chord : right) {
+            if (chord.chordId.equals(chordId)) {
+                return chord.duration;
+            }
+        }
+        throw new AssertionError("duration " + chordId);
+    }
+
+    private static boolean hasPut (InternalDoubleBarVoices.MergeTables tables,
+                                     String voiceKey,
+                                     int slotId,
+                                     String chordId,
+                                     String status)
+    {
+        for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+            if (voiceKey.equals(put.voiceKey) && (put.slotId == slotId)
+                    && chordId.equals(put.chordId) && status.equals(put.status)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasStatusAt (InternalDoubleBarVoices.MergeTables tables,
+                                            String voiceKey,
+                                            int slotId,
+                                            String status)
+    {
+        for (InternalDoubleBarVoices.SlotPut put : tables.puts) {
+            if (voiceKey.equals(put.voiceKey) && (put.slotId == slotId)
+                    && status.equals(put.status)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Path wholePdf (String[] args)
