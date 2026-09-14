@@ -7,6 +7,7 @@ import java.awt.geom.Path2D;
 import java.awt.geom.Rectangle2D;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -159,43 +160,197 @@ public final class InternalDoubleBarControls
         System.out.println("digit ink agreement");
 
         final Rectangle2D pageBox = new Rectangle2D.Double(0, 0, 612, 792);
+        final PdfSystemNumbers.GlyphHit one = PdfSystemNumbers.hit(
+                1, new Rectangle2D.Double(22.8, 403.4, 4.2, 8.2), pageBox);
+        final PdfSystemNumbers.GlyphHit zero = PdfSystemNumbers.hit(
+                0, new Rectangle2D.Double(27.2, 403.4, 5.2, 8.2), pageBox);
+        final PdfSystemNumbers.GlyphHit otherLine = PdfSystemNumbers.hit(
+                3, new Rectangle2D.Double(25.0, 508.0, 4.8, 8.0), pageBox);
         final List<PdfSystemNumbers.NumberHint> grouped = PdfSystemNumbers.groupDigits(
-                List.of(
-                        PdfSystemNumbers.hit(1, new Rectangle2D.Double(22.8, 403.4, 4.2, 8.2), pageBox),
-                        PdfSystemNumbers.hit(0, new Rectangle2D.Double(27.2, 403.4, 5.2, 8.2), pageBox)),
-                List.of());
+                List.of(one, zero), List.of());
         require(grouped.size() == 1 && grouped.get(0).value == 10 && !grouped.get(0).followedByPeriod,
                 "grouped 10");
+        final List<PdfSystemNumbers.NumberHint> interleaved = PdfSystemNumbers.groupDigits(
+                List.of(otherLine, zero, one), List.of());
+        require(valuesOf(interleaved).equals(List.of(3, 10))
+                        || valuesOf(interleaved).equals(List.of(10, 3)),
+                "other baseline does not split 10");
+        require(!valuesOf(interleaved).contains(1) && !valuesOf(interleaved).contains(0),
+                "no independent 1/0 after cross-line interleave");
+        final List<PdfSystemNumbers.NumberHint> equalX = PdfSystemNumbers.groupDigits(
+                List.of(
+                        PdfSystemNumbers.hit(1, new Rectangle2D.Double(22.8, 403.4, 4.2, 8.2), pageBox),
+                        PdfSystemNumbers.hit(5, new Rectangle2D.Double(22.8, 508.0, 4.8, 8.0), pageBox)),
+                List.of());
+        require(valuesOf(equalX).contains(1) && valuesOf(equalX).contains(5)
+                        && !valuesOf(equalX).contains(15) && !valuesOf(equalX).contains(51),
+                "equal x on different baselines stay separate");
+        final List<PdfSystemNumbers.NumberHint> distant = PdfSystemNumbers.groupDigits(
+                List.of(
+                        PdfSystemNumbers.hit(1, new Rectangle2D.Double(22.8, 403.4, 4.2, 8.2), pageBox),
+                        PdfSystemNumbers.hit(0, new Rectangle2D.Double(80.0, 403.4, 5.2, 8.2), pageBox)),
+                List.of());
+        require(valuesOf(distant).contains(1) && valuesOf(distant).contains(0)
+                        && !valuesOf(distant).contains(10),
+                "distant digits on one line stay separate");
+        final List<PdfSystemNumbers.NumberHint> missingZero = PdfSystemNumbers.groupDigits(
+                List.of(one), List.of());
+        require(missingZero.size() == 1 && missingZero.get(0).value == 1,
+                "missing 0 is not a truncated 10");
         final List<PdfSystemNumbers.NumberHint> titled = PdfSystemNumbers.groupDigits(
                 List.of(PdfSystemNumbers.hit(5, new Rectangle2D.Double(40, 700, 5, 8), pageBox)),
                 List.of(PdfSystemNumbers.hit(-1, new Rectangle2D.Double(45.2, 700, 2, 2), pageBox)));
         require(titled.size() == 1 && titled.get(0).followedByPeriod, "title 5. trailing period");
-        System.out.println("grouped integers and title period");
+        require(PdfSystemNumbers.scan(Path.of("not-a-pdf.txt"), 0).isEmpty(),
+                "unsupported input keeps old path");
+        System.out.println("grouped integers, cross-line, missing member, title period");
 
-        if (args.length > 0) {
-            final Path pdfPath = Path.of(args[0]);
-            require(Files.isRegularFile(pdfPath), "PDF path");
-            final List<PdfSystemNumbers.NumberHint> first = PdfSystemNumbers.scanUncached(pdfPath, 0);
-            require(!first.isEmpty(), "visible PDF digits");
-            boolean sawFive = false;
-            boolean sawTen = false;
-            for (PdfSystemNumbers.NumberHint hint : first) {
-                if ((hint.value == 5) && !hint.followedByPeriod) {
-                    sawFive = true;
-                }
-                if ((hint.value == 10) && !hint.followedByPeriod) {
-                    sawTen = true;
-                }
+        final Path pdfPath = wholePdf(args);
+        require(Files.isRegularFile(pdfPath), "whole pinned Schumann PDF");
+        final PdfSystemNumbers.PageGlyphs glyphs = PdfSystemNumbers.collectUncached(pdfPath, 0);
+        require(!glyphs.digits.isEmpty(), "visible PDF digits");
+        final List<PdfSystemNumbers.GlyphHit> shuffled = new ArrayList<>(glyphs.digits);
+        java.util.Collections.shuffle(shuffled, new java.util.Random(1));
+        final List<PdfSystemNumbers.NumberHint> fromShuffle =
+                PdfSystemNumbers.groupDigits(shuffled, glyphs.periods);
+        final List<PdfSystemNumbers.NumberHint> first = PdfSystemNumbers.scanUncached(pdfPath, 0);
+        require(valuesOf(fromShuffle).equals(valuesOf(first)), "shuffled draw order");
+        require(countValue(first, 10, false) == 1, "one complete 10");
+        require(countValue(first, 5, false) >= 1, "printed 5 without period");
+        require(countValue(first, 15, false) == 1, "one complete 15");
+        require(countValue(first, 20, false) == 1, "one complete 20");
+        require(countValue(first, 0, false) == 0, "no independent 0");
+        final PdfSystemNumbers.NumberHint ten = findValue(first, 10);
+        require(ten != null, "printed 10 hint");
+        final Path2D tenPath = PdfSystemNumbers.toSheetPath(ten, 2550, 3300);
+        require(tenPath != null, "10 sheet outline");
+        final PdfSystemNumbers.NumberHint five = findValue(first, 5);
+        require(five != null, "printed 5 hint");
+        final Path2D fivePath = PdfSystemNumbers.toSheetPath(five, 2550, 3300);
+        final PdfSystemNumbers.NumberHint fifteen = findValue(first, 15);
+        final PdfSystemNumbers.NumberHint twenty = findValue(first, 20);
+        require(fifteen != null && twenty != null, "printed 15 and 20");
+        final Path2D fifteenPath = PdfSystemNumbers.toSheetPath(fifteen, 2550, 3300);
+        final Path2D twentyPath = PdfSystemNumbers.toSheetPath(twenty, 2550, 3300);
+        require(fivePath != null && fifteenPath != null && twentyPath != null, "5/15/20 outlines");
+        final double interlineLive = 21;
+        final List<InternalDoubleBarEvidence.SystemGeom> systems = List.of(
+                geom(1, fivePath.getBounds2D(), interlineLive),
+                geom(2, tenPath.getBounds2D(), interlineLive),
+                geom(3, fifteenPath.getBounds2D(), interlineLive),
+                geom(4, twentyPath.getBounds2D(), interlineLive));
+        require(Integer.valueOf(2).equals(InternalDoubleBarEvidence.uniqueSystemIndex(
+                tenPath.getBounds2D(), systems)),
+                "complete 10 binds system 3");
+        require(Integer.valueOf(1).equals(InternalDoubleBarEvidence.uniqueSystemIndex(
+                fivePath.getBounds2D(), systems)),
+                "complete 5 binds system 2");
+        require(Integer.valueOf(3).equals(InternalDoubleBarEvidence.uniqueSystemIndex(
+                fifteenPath.getBounds2D(), systems)),
+                "complete 15 binds system 4");
+        require(Integer.valueOf(4).equals(InternalDoubleBarEvidence.uniqueSystemIndex(
+                twentyPath.getBounds2D(), systems)),
+                "complete 20 binds system 5");
+        for (PdfSystemNumbers.NumberHint hint : first) {
+            if (hint.followedByPeriod || ((hint.value != 1) && (hint.value != 0))) {
+                continue;
             }
-            require(sawFive, "printed 5 without period");
-            require(sawTen, "printed 10");
-            final List<PdfSystemNumbers.NumberHint> again = PdfSystemNumbers.scan(pdfPath, 0);
-            require(again.size() == first.size(), "duplicate scan is inert");
-            require(PdfSystemNumbers.scan(pdfPath, 99).isEmpty(), "missing page keeps old path");
-            System.out.println("actual Schumann PDF numbers count=" + first.size());
+            final Path2D path = PdfSystemNumbers.toSheetPath(hint, 2550, 3300);
+            require(path != null, "stray digit outline");
+            require(!Integer.valueOf(2).equals(InternalDoubleBarEvidence.uniqueSystemIndex(
+                    path.getBounds2D(), systems)),
+                    "no independent 1/0 at system 3");
         }
+        require(InternalDoubleBarEvidence.sourceCountAllowsInternal(5, 10, 6),
+                "restored 5→10 still allows six stacks");
+        require(!InternalDoubleBarEvidence.sourceCountAllowsInternal(5, 11, 6),
+                "following anchor 11 still blocks merge");
+        final Mask tenInk = new Mask();
+        fill(tenInk, tenPath.getBounds2D());
+        final PdfClefHints.InkEvidence tenEvidence = PdfClefHints.measureInk(tenPath, tenInk::isInk);
+        require(InternalDoubleBarEvidence.digitInkAgrees(
+                tenEvidence.pathPixels, tenEvidence.inkInside, tenEvidence.inkInBounds),
+                "10 outline has ink");
+        final Mask blankTen = new Mask();
+        final PdfClefHints.InkEvidence blankTenInk = PdfClefHints.measureInk(tenPath, blankTen::isInk);
+        require(!InternalDoubleBarEvidence.digitInkAgrees(
+                blankTenInk.pathPixels, blankTenInk.inkInside, blankTenInk.inkInBounds),
+                "blank 10 ink");
+        final List<PdfSystemNumbers.NumberHint> again = PdfSystemNumbers.scan(pdfPath, 0);
+        require(again.size() == first.size(), "duplicate scan is inert");
+        require(PdfSystemNumbers.scan(pdfPath, 99).isEmpty(), "missing page keeps old path");
+        System.out.println("whole pinned PDF 5/10/15/20 grouping and binding");
 
         System.out.println("InternalDoubleBarControls ok");
+    }
+
+    private static Path wholePdf (String[] args)
+    {
+        if ((args != null) && (args.length > 0)) {
+            return Path.of(args[0]);
+        }
+        final Path[] candidates = {
+            Path.of("services/omr-service/eval/cache/downloads/schumann-op68-05.pdf"),
+            Path.of("eval/cache/downloads/schumann-op68-05.pdf"),
+            Path.of("/tmp/omr-rsi-pdf-clef/schumann-op68-05.pdf")
+        };
+        for (Path candidate : candidates) {
+            if (Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+        }
+        return Path.of("services/omr-service/eval/cache/downloads/schumann-op68-05.pdf");
+    }
+
+    private static List<Integer> valuesOf (List<PdfSystemNumbers.NumberHint> hints)
+    {
+        final List<Integer> values = new ArrayList<>();
+        for (PdfSystemNumbers.NumberHint hint : hints) {
+            if (!hint.followedByPeriod) {
+                values.add(hint.value);
+            }
+        }
+        return values;
+    }
+
+    private static int countValue (List<PdfSystemNumbers.NumberHint> hints,
+                                     int value,
+                                     boolean period)
+    {
+        int count = 0;
+        for (PdfSystemNumbers.NumberHint hint : hints) {
+            if ((hint.value == value) && (hint.followedByPeriod == period)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static PdfSystemNumbers.NumberHint findValue (List<PdfSystemNumbers.NumberHint> hints,
+                                                              int value)
+    {
+        PdfSystemNumbers.NumberHint found = null;
+        for (PdfSystemNumbers.NumberHint hint : hints) {
+            if (hint.followedByPeriod || (hint.value != value)) {
+                continue;
+            }
+            if ((found == null)
+                    || (hint.pdfPath.getBounds2D().getMinX() < found.pdfPath.getBounds2D().getMinX())) {
+                found = hint;
+            }
+        }
+        return found;
+    }
+
+    private static InternalDoubleBarEvidence.SystemGeom geom (int index,
+                                                                  Rectangle2D outline,
+                                                                  double interline)
+    {
+        return new InternalDoubleBarEvidence.SystemGeom(
+                index,
+                outline.getCenterX(),
+                outline.getMaxY() + (2 * interline),
+                interline);
     }
 
     private static Path2D rectPath (Rectangle2D box)

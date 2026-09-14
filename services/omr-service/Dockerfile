@@ -86,6 +86,8 @@ RUN set -eux; \
         | grep -q repair; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \
         | grep -q scan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \
+        | grep -q groupDigits; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarEvidence \
         | grep -q sourceCountAllowsInternal; \
     javap -c -cp "$app/audiveris.jar" org.audiveris.omr.step.PageStep \

@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-24` (`src/job.ts` `ENGINE_VERSION`; cycle 18 candidate pending host bench) |
+| Engine revision | `audiveris-5.11.0+svc-25` (`src/job.ts` `ENGINE_VERSION`; cycle 19 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -316,6 +316,20 @@ java -cp "/tmp/cleffy-internal-bar-controls:$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS
   [optional-schumann.pdf]
 ```
 
+## 0010 — group PDF system numbers on their own text line
+
+Cycle 18 sorted every digit on the page by x before grouping. Digits on other
+baselines could sit between “1” and “0” in that order and split printed 10
+into 1 and 0, so system 2 bound 5 → 1 and skipped the internal-bar recovery.
+Cycle 19 clusters digits with the existing baseline test first, then applies
+the unchanged left-to-right gap test on that line only. Tolerances, merge
+lifecycle, and accepted clef/dot/tuplet patches are unchanged.
+
+The helper remains `sheet/rhythm/PdfSystemNumbers.java`. The reproducible patch
+is `0010-pdf-system-number-lines.patch`. Source evidence, whole-PDF controls and
+pending host attribution are in `docs/omr-rsi-cycle-19.md`. Svc-25 requires a
+matching engine build and fresh host artifacts.
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -333,7 +347,8 @@ Two `Dockerfile` stages:
    - `javap` checks `promoteOctaveClef`, `createMeasured`, `findBracketSpan`,
      `hasAttachedHeadStemInk`, `isUnrecognizedLedgerFragment`, `isFragment`,
      `installPdfChangeClefs`, `PdfClefHints.scan`, `InternalDoubleBars.repair`,
-     `PdfSystemNumbers.scan`, `InternalDoubleBarEvidence.sourceCountAllowsInternal`,
+     `PdfSystemNumbers.scan`, `PdfSystemNumbers.groupDigits`,
+     `InternalDoubleBarEvidence.sourceCountAllowsInternal`,
      and `PageStep` calling `InternalDoubleBars`,
      failing the build if an update did not land.
 

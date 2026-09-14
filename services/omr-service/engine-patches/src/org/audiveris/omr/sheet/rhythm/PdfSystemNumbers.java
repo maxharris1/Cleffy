@@ -43,10 +43,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -152,8 +153,9 @@ public final class PdfSystemNumbers
     }
 
     /**
-     * Group left-to-right digits that share a baseline into decimal integers.
-     * A trailing period marks a title/piece number, which must not be used.
+     * Group digits that share a verified text baseline, then form left-to-right
+     * decimal integers on that line only. A digit on another line cannot split or
+     * join a run. A trailing period marks a title/piece number, which must not be used.
      */
     public static List<NumberHint> groupDigits (List<GlyphHit> digits,
                                                   List<GlyphHit> periods)
@@ -161,28 +163,45 @@ public final class PdfSystemNumbers
         if ((digits == null) || digits.isEmpty()) {
             return List.of();
         }
-        final List<GlyphHit> ordered = new ArrayList<>(digits);
-        ordered.sort(Comparator.comparingDouble(g -> g.bounds.getMinX()));
         final List<NumberHint> numbers = new ArrayList<>();
-        List<GlyphHit> run = new ArrayList<>();
-        for (GlyphHit digit : ordered) {
-            if (run.isEmpty()) {
-                run.add(digit);
-                continue;
+        for (List<GlyphHit> line : clusterBaselines(digits)) {
+            line.sort(Comparator.comparingDouble((GlyphHit g) -> g.bounds.getMinX())
+                    .thenComparingDouble(g -> g.bounds.getCenterY())
+                    .thenComparingInt(g -> g.value));
+            List<GlyphHit> run = new ArrayList<>();
+            for (GlyphHit digit : line) {
+                if (run.isEmpty()) {
+                    run.add(digit);
+                    continue;
+                }
+                final GlyphHit prev = run.get(run.size() - 1);
+                if (sameNumberRun(prev, digit)) {
+                    run.add(digit);
+                } else {
+                    numbers.add(toNumber(run, periods));
+                    run = new ArrayList<>();
+                    run.add(digit);
+                }
             }
-            final GlyphHit prev = run.get(run.size() - 1);
-            if (sameNumberRun(prev, digit)) {
-                run.add(digit);
-            } else {
+            if (!run.isEmpty()) {
                 numbers.add(toNumber(run, periods));
-                run = new ArrayList<>();
-                run.add(digit);
             }
         }
-        if (!run.isEmpty()) {
-            numbers.add(toNumber(run, periods));
-        }
+        numbers.sort(Comparator
+                .comparingDouble((NumberHint n) -> n.pdfPath.getBounds2D().getMinY())
+                .thenComparingDouble(n -> n.pdfPath.getBounds2D().getMinX())
+                .thenComparingInt(n -> n.value));
         return List.copyOf(numbers);
+    }
+
+    /**
+     * Collect digit and period glyphs without grouping. Used by controls to prove
+     * grouping is independent of draw order.
+     */
+    public static PageGlyphs collectUncached (Path pdf,
+                                                 int pageIndex)
+    {
+        return readGlyphs(pdf, pageIndex);
     }
 
     public static Path2D toSheetPath (NumberHint hint,
@@ -202,20 +221,79 @@ public final class PdfSystemNumbers
     private static boolean sameNumberRun (GlyphHit left,
                                              GlyphHit right)
     {
+        if (!sameBaseline(left, right)) {
+            return false;
+        }
+        final Rectangle2D a = left.bounds;
+        final Rectangle2D b = right.bounds;
+        final double height = Math.max(a.getHeight(), b.getHeight());
+        final double gap = b.getMinX() - a.getMaxX();
+        if (gap < -0.15 * height) {
+            return false;
+        }
+        return gap <= (0.55 * height);
+    }
+
+    /** Existing vertical test from sameNumberRun; not a wider line-join tolerance. */
+    private static boolean sameBaseline (GlyphHit left,
+                                            GlyphHit right)
+    {
         final Rectangle2D a = left.bounds;
         final Rectangle2D b = right.bounds;
         final double height = Math.max(a.getHeight(), b.getHeight());
         if (height <= 0) {
             return false;
         }
-        if (Math.abs(a.getCenterY() - b.getCenterY()) > (0.4 * height)) {
-            return false;
+        return Math.abs(a.getCenterY() - b.getCenterY()) <= (0.4 * height);
+    }
+
+    private static List<List<GlyphHit>> clusterBaselines (List<GlyphHit> digits)
+    {
+        final int n = digits.size();
+        final int[] parent = new int[n];
+        for (int i = 0; i < n; i++) {
+            parent[i] = i;
         }
-        final double gap = b.getMinX() - a.getMaxX();
-        if (gap < -0.15 * height) {
-            return false;
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                if (sameBaseline(digits.get(i), digits.get(j))) {
+                    parent[find(parent, j)] = find(parent, i);
+                }
+            }
         }
-        return gap <= (0.55 * height);
+        final Map<Integer, List<GlyphHit>> groups = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) {
+            groups.computeIfAbsent(find(parent, i), key -> new ArrayList<>()).add(digits.get(i));
+        }
+        final List<List<GlyphHit>> lines = new ArrayList<>(groups.values());
+        lines.sort(Comparator
+                .comparingDouble((List<GlyphHit> line) -> lineMin(line, true))
+                .thenComparingDouble(line -> lineMin(line, false)));
+        return lines;
+    }
+
+    private static double lineMin (List<GlyphHit> line,
+                                     boolean vertical)
+    {
+        double min = Double.POSITIVE_INFINITY;
+        for (GlyphHit glyph : line) {
+            final double value = vertical ? glyph.bounds.getCenterY() : glyph.bounds.getMinX();
+            if (value < min) {
+                min = value;
+            }
+        }
+        return min;
+    }
+
+    private static int find (int[] parent,
+                               int index)
+    {
+        int current = index;
+        while (parent[current] != current) {
+            parent[current] = parent[parent[current]];
+            current = parent[current];
+        }
+        return current;
     }
 
     private static NumberHint toNumber (List<GlyphHit> run,
@@ -278,19 +356,33 @@ public final class PdfSystemNumbers
     private static List<NumberHint> readPage (Path pdf,
                                                 int pageIndex)
     {
+        final PageGlyphs glyphs = readGlyphs(pdf, pageIndex);
+        return groupDigits(glyphs.digits, glyphs.periods);
+    }
+
+    private static PageGlyphs readGlyphs (Path pdf,
+                                               int pageIndex)
+    {
+        if ((pdf == null) || (pageIndex < 0) || !Files.isRegularFile(pdf)) {
+            return PageGlyphs.EMPTY;
+        }
+        final String name = pdf.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (!name.endsWith(".pdf")) {
+            return PageGlyphs.EMPTY;
+        }
         try (PDDocument doc = Loader.loadPDF(pdf.toFile())) {
             if (pageIndex >= doc.getNumberOfPages()) {
-                return List.of();
+                return PageGlyphs.EMPTY;
             }
             final PDPage page = doc.getPage(pageIndex);
             if (page.getRotation() != 0) {
-                return List.of();
+                return PageGlyphs.EMPTY;
             }
             final Collector engine = new Collector(page);
             engine.processPage(page);
-            return Collections.unmodifiableList(groupDigits(engine.digits, engine.periods));
+            return new PageGlyphs(engine.digits, engine.periods);
         } catch (Exception ex) {
-            return List.of();
+            return PageGlyphs.EMPTY;
         }
     }
 
@@ -301,6 +393,23 @@ public final class PdfSystemNumbers
         final Path2D path = new Path2D.Double();
         path.append(pdfBounds, false);
         return new GlyphHit(value, path, pdfBounds, pageBox);
+    }
+
+    /** Digits and periods collected from one PDF page, before grouping. */
+    public static final class PageGlyphs
+    {
+        static final PageGlyphs EMPTY = new PageGlyphs(List.of(), List.of());
+
+        public final List<GlyphHit> digits;
+
+        public final List<GlyphHit> periods;
+
+        PageGlyphs (List<GlyphHit> digits,
+                     List<GlyphHit> periods)
+        {
+            this.digits = List.copyOf(digits);
+            this.periods = List.copyOf(periods);
+        }
     }
 
     public static final class GlyphHit

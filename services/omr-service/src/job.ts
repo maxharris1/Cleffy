@@ -69,8 +69,10 @@ import type { ScoreData } from './scoreData.js';
  * after header selection, before HEADS.
  * svc-24: recover an internal double-thin barline that was treated as a measure
  * boundary, using printed PDF system-number anchors.
+ * svc-25: group PDF system-number digits within a verified text line so a
+ * printed 10 is not split by other baselines.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-24';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-25';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
