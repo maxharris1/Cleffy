@@ -183,11 +183,14 @@ public final class InternalDoubleBarVoices
 
         public final String status;
 
+        public final Time duration;
+
         public SlotPut (String voiceKey,
                           String measureKey,
                           int slotId,
                           String chordId,
-                          String status)
+                          String status,
+                          Time duration)
         {
             if ((chordId == null) || (status == null)) {
                 throw new IllegalArgumentException("null slot record");
@@ -200,6 +203,7 @@ public final class InternalDoubleBarVoices
             this.slotId = slotId;
             this.chordId = chordId;
             this.status = status;
+            this.duration = duration;
         }
     }
 
@@ -356,14 +360,14 @@ public final class InternalDoubleBarVoices
                 final ChordCapture begin = begins.get(slot.newId);
                 if (begin != null) {
                     puts.add(new SlotPut(entry.getKey(), begin.measureKey, slot.newId,
-                            begin.chordId, BEGIN));
+                            begin.chordId, BEGIN, begin.duration));
                     prev = begin;
                     prevEnd = begin.time.plus(begin.duration);
                     continue;
                 }
                 if ((prev != null) && (prevEnd.compareTo(slot.time) > 0)) {
                     puts.add(new SlotPut(entry.getKey(), prev.measureKey, slot.newId,
-                            prev.chordId, CONTINUE));
+                            prev.chordId, CONTINUE, prev.duration));
                 }
             }
         }

@@ -421,6 +421,17 @@ public final class InternalDoubleBars
             return;
         }
 
+        for (Measure measure : left.getMeasures()) {
+            if (measure.getRightPartBarline() == null) {
+                logger.info("Internal double-bar skipped: missing separator to stamp");
+                return;
+            }
+        }
+
+        for (Measure measure : left.getMeasures()) {
+            measure.getRightPartBarline().setTimeOffset(shift);
+        }
+
         for (Measure measure : right.getMeasures()) {
             for (AbstractChordInter chord : measure.getStandardChords()) {
                 chord.setTimeOffset(chord.getTimeOffset().plus(shift));

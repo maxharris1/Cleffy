@@ -65,7 +65,10 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java \
-        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java; \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarExport.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java \
+        engine-patches/src/org/audiveris/omr/sheet/PartBarline.java \
+        engine-patches/src/org/audiveris/omr/score/PartwiseBuilder.java; \
     (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
         | grep -q installPdfChangeClefs; \
@@ -93,6 +96,12 @@ RUN set -eux; \
         | grep -q sourceCountAllowsInternal; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarVoices \
         | grep -q rebuild; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarExport \
+        | grep -q isTimedInternalSeparator; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.PartBarline \
+        | grep -q getTimeOffset; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.score.PartwiseBuilder \
+        | grep -q processInternalMiddleBarline; \
     javap -c -cp "$app/audiveris.jar" org.audiveris.omr.step.PageStep \
         | grep -q InternalDoubleBars
 

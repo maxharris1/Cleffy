@@ -73,8 +73,10 @@ import type { ScoreData } from './scoreData.js';
  * printed 10 is not split by other baselines.
  * svc-26: rebuild merged internal-bar voice/slot tables without null
  * Voice.putSlotInfo records.
+ * svc-27: export a recovered internal double-thin as a MusicXML middle
+ * barline at the captured fragment time.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-26';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-27';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

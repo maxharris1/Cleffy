@@ -26,6 +26,7 @@ public final class InternalDoubleBarControls
             throws Exception
     {
         checkMergedVoiceTables();
+        checkExportedMiddleBarline();
 
         require(InternalDoubleBarEvidence.sourceCountAllowsInternal(5, 10, 6),
                 "Schumann printed 5..10 vs six stacks");
@@ -405,6 +406,119 @@ public final class InternalDoubleBarControls
                 leftSlots, List.of(), leftChords, rightChords, half).ok == false,
                 "empty right fragment is not a partial merge");
         System.out.println("unsupported missing timing");
+    }
+
+    /**
+     * Merge tables, persist separator time, reload, then walk the export
+     * stream: one middle light-light at the captured fragment time.
+     */
+    private static void checkExportedMiddleBarline ()
+    {
+        final InternalDoubleBarVoices.Time quarter = new InternalDoubleBarVoices.Time(1, 4);
+        final InternalDoubleBarVoices.Time eighth = new InternalDoubleBarVoices.Time(1, 8);
+        final InternalDoubleBarVoices.Time half = new InternalDoubleBarVoices.Time(1, 2);
+        final InternalDoubleBarVoices.Time zero = new InternalDoubleBarVoices.Time(0, 1);
+        final InternalDoubleBarVoices.Time whole = new InternalDoubleBarVoices.Time(1, 1);
+
+        final List<InternalDoubleBarVoices.SlotCapture> leftSlots = List.of(
+                slot("L-S0-1", 1, zero, 10, false),
+                slot("L-S1-2", 2, quarter, 40, false));
+        final List<InternalDoubleBarVoices.SlotCapture> rightSlots = List.of(
+                slot("R-S0-1", 1, zero, 80, true),
+                slot("R-S1-2", 2, eighth, 100, true),
+                slot("R-S2-3", 3, quarter, 120, true),
+                slot("R-S3-4", 4, new InternalDoubleBarVoices.Time(3, 8), 140, true));
+        final List<InternalDoubleBarVoices.ChordCapture> leftChords = List.of(
+                chord("U-D5", "U-L", "M0", "L-S0-1", zero, quarter, false),
+                chord("U-C5a", "U-L", "M0", "L-S1-2", quarter, quarter, false),
+                chord("L-F4", "L-mov", "M1", "L-S0-1", zero, quarter, false),
+                chord("L-E4", "L-mov", "M1", "L-S1-2", quarter, quarter, false),
+                chord("L-C4", "L-sim", "M1", "L-S0-1", zero, half, false));
+        final List<InternalDoubleBarVoices.ChordCapture> rightChords = List.of(
+                chord("U-B4", "U-R", "M0", "R-S0-1", zero, quarter, true),
+                chord("U-C5b", "U-R", "M0", "R-S2-3", quarter, quarter, true),
+                chord("L-G3", "L-R", "M1", "R-S0-1", zero, eighth, true),
+                chord("L-G4a", "L-R", "M1", "R-S1-2", eighth, eighth, true),
+                chord("L-A3", "L-R", "M1", "R-S2-3", quarter, eighth, true),
+                chord("L-G4b", "L-R", "M1", "R-S3-4", new InternalDoubleBarVoices.Time(3, 8),
+                        eighth, true));
+        final InternalDoubleBarVoices.MergeTables tables = InternalDoubleBarVoices.rebuild(
+                leftSlots, rightSlots, leftChords, rightChords, half);
+        require(tables.ok, "export uses merged overlapping-id tables");
+
+        final String persisted = InternalDoubleBarExport.persistTime(half);
+        require("1/2".equals(persisted), "OMR attribute time=1/2");
+        final InternalDoubleBarVoices.Time reloaded = InternalDoubleBarExport.parseTime(persisted);
+        require(half.equals(reloaded), "reload restores captured fragment time");
+        require(InternalDoubleBarExport.isTimedInternalSeparator(
+                "LIGHT_LIGHT", false, false, false, reloaded, whole),
+                "reloaded time is a valid internal separator");
+        require(!InternalDoubleBarExport.isTimedInternalSeparator(
+                "LIGHT_LIGHT", false, false, false, half, half),
+                "separator must sit strictly inside the measure");
+        require(!InternalDoubleBarExport.isTimedInternalSeparator(
+                "LIGHT_HEAVY", false, false, false, half, whole),
+                "final light-heavy is not this case");
+        require(!InternalDoubleBarExport.isTimedInternalSeparator(
+                "LIGHT_LIGHT", false, true, false, half, whole),
+                "repeat mid-bar keeps old export");
+
+        final List<InternalDoubleBarExport.StreamEvent> xml =
+                InternalDoubleBarExport.exportMeasure(tables, reloaded, whole, false);
+        require(InternalDoubleBarExport.countNotes(xml) == 9, "all nine onsets exported");
+        require(InternalDoubleBarExport.countLocation(xml, InternalDoubleBarExport.MIDDLE,
+                InternalDoubleBarExport.LIGHT_LIGHT) == 1,
+                "exactly one middle light-light");
+        require(InternalDoubleBarExport.countLocation(xml, InternalDoubleBarExport.LEFT,
+                InternalDoubleBarExport.LIGHT_LIGHT) == 0,
+                "no left duplicate of the recovered separator");
+        final InternalDoubleBarExport.StreamEvent middle = InternalDoubleBarExport.firstMiddle(xml);
+        require((middle != null) && half.equals(middle.cursor),
+                "middle barline at two quarters");
+        require(InternalDoubleBarExport.toDivisions(middle.cursor, 2) == 4,
+                "four XML divisions at divisions-per-quarter 2");
+        final InternalDoubleBarExport.StreamEvent c4 = InternalDoubleBarExport.note(xml, "L-C4");
+        require((c4 != null) && half.equals(c4.duration) && zero.equals(c4.cursor),
+                "C4 half is not split");
+        require(InternalDoubleBarExport.note(xml, "U-B4") != null, "right-entering voice kept");
+        final List<InternalDoubleBarExport.StreamEvent> again =
+                InternalDoubleBarExport.exportMeasure(tables, reloaded, whole, false);
+        require(again.size() == xml.size(), "repeated export is stable");
+        require(InternalDoubleBarExport.countLocation(again, InternalDoubleBarExport.MIDDLE,
+                InternalDoubleBarExport.LIGHT_LIGHT) == 1,
+                "repeated export still one middle");
+
+        final List<InternalDoubleBarExport.StreamEvent> withLeft =
+                InternalDoubleBarExport.exportMeasure(tables, reloaded, whole, true);
+        require(InternalDoubleBarExport.countLocation(withLeft, InternalDoubleBarExport.LEFT,
+                "regular") == 1,
+                "distinct real left boundary is preserved");
+        require(InternalDoubleBarExport.countLocation(withLeft, InternalDoubleBarExport.MIDDLE,
+                InternalDoubleBarExport.LIGHT_LIGHT) == 1,
+                "middle separator still once with a real left bar");
+        System.out.println("timed middle light-light at captured fragment time");
+
+        final InternalDoubleBarVoices.Time threeQuarters = new InternalDoubleBarVoices.Time(3, 4);
+        final InternalDoubleBarVoices.MergeTables odd = InternalDoubleBarVoices.rebuild(
+                List.of(slot("L0", 1, zero, 10, false)),
+                List.of(slot("R0", 1, zero, 80, true), slot("R1", 2, quarter, 120, true)),
+                List.of(chord("A", "V1", "M0", "L0", zero, quarter, false)),
+                List.of(chord("B", "V1b", "M0", "R0", zero, quarter, true),
+                        chord("C", "V1b", "M0", "R1", quarter, half, true)),
+                quarter);
+        require(odd.ok, "1/4+3/4 merge");
+        final InternalDoubleBarExport.StreamEvent oddMid = InternalDoubleBarExport.firstMiddle(
+                InternalDoubleBarExport.exportMeasure(odd, quarter, whole, false));
+        require((oddMid != null) && quarter.equals(oddMid.cursor) && !half.equals(oddMid.cursor),
+                "separator is captured fragment time, not half the meter");
+        System.out.println("separator time is not a fixed half-bar rule");
+
+        require(InternalDoubleBarExport.exportMeasure(tables, null, whole, false)
+                        .stream().noneMatch(e -> InternalDoubleBarExport.MIDDLE.equals(e.location)),
+                "missing separator time does not guess a position");
+        require(!InternalDoubleBarExport.isValidSeparatorTime(null, whole),
+                "null time is unsupported");
+        System.out.println("unsupported missing separator time");
     }
 
     private static InternalDoubleBarVoices.SlotCapture slot (String key,

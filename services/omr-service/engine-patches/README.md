@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-26` (`src/job.ts` `ENGINE_VERSION`; cycle 20 candidate pending host bench) |
+| Engine revision | `audiveris-5.11.0+svc-27` (`src/job.ts` `ENGINE_VERSION`; cycle 21 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -311,6 +311,7 @@ javac -cp "$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
   engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
   engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
   engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java \
+  engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarExport.java \
   engine-patches/probes/InternalDoubleBarControls.java
 java -cp "/tmp/cleffy-internal-bar-controls:$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
   org.audiveris.omr.sheet.rhythm.InternalDoubleBarControls \
@@ -349,6 +350,23 @@ lifecycle stays in `InternalDoubleBars.java`. The reproducible patch is
 controls are in `docs/omr-rsi-cycle-20.md`. Svc-26 requires a matching engine
 build and fresh host artifacts.
 
+## 0012 — emit the recovered internal double-thin at its captured time
+
+Cycle 20 merged printed m8 but exported the separator as a left `light-light`
+before any notes. `PartwiseBuilder.processBarline` maps every non-RIGHT
+location to LEFT, and `processMeasure` emits `mid-barline` before the voice
+loop. Cycle 21 stamps the pre-merge left duration on that PartBarline,
+persists it across OMR reload, and emits one MusicXML middle `light-light`
+at that cursor. Repeat/ending mid-barlines keep the old export. Pickup and
+final-bar pins are unchanged.
+
+The helpers are `sheet/rhythm/InternalDoubleBarExport.java` and a `time`
+attribute on vendored `sheet/PartBarline.java`. The export hook is vendored
+`score/PartwiseBuilder.java`. The merge stamp stays in `InternalDoubleBars`.
+The reproducible patch is `0012-internal-double-bar-export.patch`. Source
+evidence and export-stream controls are in `docs/omr-rsi-cycle-21.md`.
+Svc-27 requires a matching engine build and fresh host artifacts.
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -369,6 +387,9 @@ Two `Dockerfile` stages:
      `PdfSystemNumbers.scan`, `PdfSystemNumbers.groupDigits`,
      `InternalDoubleBarEvidence.sourceCountAllowsInternal`,
      `InternalDoubleBarVoices.rebuild`,
+     `InternalDoubleBarExport.isTimedInternalSeparator`,
+     `PartBarline.getTimeOffset`,
+     `PartwiseBuilder.processInternalMiddleBarline`,
      and `PageStep` calling `InternalDoubleBars`,
      failing the build if an update did not land.
 
