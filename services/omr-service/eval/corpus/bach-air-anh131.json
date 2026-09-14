@@ -21,20 +21,34 @@
                 "den": 4
             },
             "pickupQuarters": 0,
-            "printedBars": 16,
+            "partialBars": [
+                {
+                    "bar": 8,
+                    "quarters": 3
+                },
+                {
+                    "bar": 9,
+                    "quarters": 1
+                },
+                {
+                    "bar": 17,
+                    "quarters": 3
+                }
+            ],
+            "printedBars": 17,
             "expectedFifths": -1,
             "expectedTempo": {
                 "min": 105,
                 "max": 150
             },
             "repeatsUnfoldedInMidi": false,
-            "performedBars": 16,
+            "performedBars": 34,
             "expectedHolds": 0,
             "expectedExtraNotes": 0
         }
     ],
     "editionNotes": [
-        "4/4, F major (expectedFifths -1), 16 bars, no repeats, no ornaments. LilyPond \\tempo 4=128.",
+        "4/4, F major (expectedFifths -1), 17 printed segments with m8/X8 and terminal m16 partials; two successive bare backward repeats, no ornaments. LilyPond \\tempo 4=128.",
         "Thin two-voice texture on one page — pairs with bach-air-style entries to check that a sparse page is not easier for the gate than a dense one.",
         "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
     ]

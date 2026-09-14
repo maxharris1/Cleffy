@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-14T14:33:55.984Z",
+  "generatedAt": "2026-09-14T15:04:10.141Z",
   "engineVersion": "audiveris-5.11.0+svc-15",
   "audiverisVersion": "- Version:      5.11.0",
   "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
@@ -12,11 +12,11 @@
     "pieces": 16,
     "piecesPassed": 5,
     "refNotes": 5996,
-    "pitchMatch": 97.29819879919947,
-    "exact": 95.78052034689793,
-    "onGrid": 95.0133422281521,
-    "missing": 121,
-    "extra": 163
+    "pitchMatch": 97.33155436957972,
+    "exact": 95.81387591727818,
+    "onGrid": 95.04669779853235,
+    "missing": 119,
+    "extra": 161
   },
   "pieces": [
     {
@@ -65,20 +65,16 @@
       "referenceSha256": "9b6b5c0d106734dc1784b81b30f9dd6b70c21c55c76bf5a88333a2bfe023b0fe",
       "artifactHash": "964096ff5e5a9240392a714c7470f9aeca7d7f3970a6503c5307ee62d5f7a793",
       "refNotes": 97,
-      "pitchMatch": 97.9381443298969,
-      "exact": 92.78350515463916,
-      "onGrid": 91.75257731958763,
-      "missing": 2,
-      "extra": 2,
-      "composite": 83.67268041237114,
+      "pitchMatch": 100,
+      "exact": 94.84536082474227,
+      "onGrid": 93.8144329896907,
+      "missing": 0,
+      "extra": 0,
+      "composite": 88.96907216494846,
       "pass": false,
       "failures": [
         "bach-air-anh131: bar-length-warning (measure_underfull)",
-        "Air: printed-bar-count (17 printed bars read)",
-        "Air: bar-alignment (17 scored bars vs 16 reference bars)",
-        "Air: bar-length (1 of 17 bars are not the printed length)",
-        "Air: repeat-walk (34 performed bars)",
-        "Air: attack-grid (exact 92.8% vs floor 95.0%)"
+        "Air: attack-grid (exact 94.8% vs floor 95.0%)"
       ]
     },
     {
@@ -317,7 +313,7 @@
       "pass": false,
       "failures": [
         "fur-elise-mutopia: bar-length-warning (measure_underfull + measure_overfull)",
-        "Poco moto: bar-length (3 of 106 bars are not the printed length)",
+        "Poco moto: bar-length (4 of 106 bars are not the printed length)",
         "Poco moto: notes-present (24 missing, 7 allowed)",
         "Poco moto: no-invented-notes (24 extra, 7 allowed)",
         "Poco moto: attack-grid (exact 94.6% vs floor 95.0%)"

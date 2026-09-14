@@ -44,7 +44,10 @@ const ref = (bar: number, onsetQ: number, pitch: number, hand: 0 | 1 = 0, durQ =
     hand,
 });
 
-const scoreOf = (notes: Array<{ t: number; p: number; h?: 0 | 1 }>, dTicks: number[] = [1920, 1920, 1920]): ScoreData => {
+const scoreOf = (
+    notes: Array<{ t: number; p: number; h?: 0 | 1 }>,
+    dTicks: number[] = [1920, 1920, 1920],
+): ScoreData => {
     let tick = 0;
     const measures = dTicks.map((d, i) => {
         const m = { n: i + 1, tick, dTicks: d, page: 0, sys: 0, x0: 0, x1: 1, srcIndex: i };
@@ -67,6 +70,87 @@ const scoreOf = (notes: Array<{ t: number; p: number; h?: 0 | 1 }>, dTicks: numb
 };
 
 describe('compareScore', () => {
+    it('grades declared partial bar lengths by movement-relative source index', () => {
+        const movement = {
+            ...entry.movements[0]!,
+            partialBars: [{ bar: 2, quarters: 2 }],
+            printedBars: 3,
+        };
+        const partialEntry = { ...entry, movements: [movement] };
+        const score = scoreOf(
+            [
+                { t: 0, p: 60 },
+                { t: 1920, p: 62 },
+                { t: 2880, p: 64 },
+                { t: 3840, p: 65 },
+            ],
+            [1920, 960, 1920],
+        );
+        score.measures.forEach((measure, index) => {
+            measure.srcIndex = index + 20;
+        });
+        const result = compareScore(
+            score,
+            partialEntry,
+            [[ref(1, 0, 60), ref(2, 0, 62), ref(2, 1, 64), ref(3, 0, 65)]],
+            segmentMovements(score, partialEntry),
+        );
+        expect(result.movements[0]?.barsWrongLength).toBe(0);
+    });
+
+    it('keeps pickup bar zero when walking later partial bars', () => {
+        const movement = {
+            ...entry.movements[0]!,
+            pickupQuarters: 1,
+            partialBars: [{ bar: 2, quarters: 2 }],
+            printedBars: 4,
+        };
+        const partialEntry = { ...entry, movements: [movement] };
+        const score = scoreOf(
+            [
+                { t: 0, p: 60 },
+                { t: 480, p: 62 },
+                { t: 2400, p: 64 },
+                { t: 3360, p: 65 },
+            ],
+            [480, 1920, 960, 1920],
+        );
+        score.measures.forEach((measure, index) => {
+            measure.srcIndex = index + 20;
+        });
+        const result = compareScore(
+            score,
+            partialEntry,
+            [[ref(0, 3, 60), ref(1, 0, 62), ref(2, 0, 64), ref(3, 0, 65)]],
+            segmentMovements(score, partialEntry),
+        );
+        expect(result.movements[0]?.barsWrongLength).toBe(0);
+    });
+
+    it('keeps a wrong declared partial duration red', () => {
+        const movement = {
+            ...entry.movements[0]!,
+            partialBars: [{ bar: 2, quarters: 1 }],
+            printedBars: 3,
+        };
+        const partialEntry = { ...entry, movements: [movement] };
+        const score = scoreOf(
+            [
+                { t: 0, p: 60 },
+                { t: 1920, p: 62 },
+                { t: 2880, p: 64 },
+            ],
+            [1920, 960, 1920],
+        );
+        const result = compareScore(
+            score,
+            partialEntry,
+            [[ref(1, 0, 60), ref(2, 0, 62), ref(3, 0, 64)]],
+            segmentMovements(score, partialEntry),
+        );
+        expect(result.movements[0]?.barsWrongLength).toBe(1);
+    });
+
     it('counts one missing note, one semitone, and one merged bar', () => {
         const refs: RefNote[] = [
             ref(1, 0, 60),

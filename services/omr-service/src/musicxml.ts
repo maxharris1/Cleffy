@@ -1332,8 +1332,14 @@ export interface RawMeasure {
     /** Display number as printed (pickups are 0). */
     n: number;
     isPickup: boolean;
+    /** MusicXML's explicit implicit-measure marker (distinct from bar 0 pickup). */
+    isImplicit: boolean;
     /** Real content length, BEFORE any padding — the meter check's evidence. */
     contentTicks: number;
+    /** Content length before rhythm/regrid repairs. */
+    originalContentTicks: number;
+    /** A time-modification is present in the source MusicXML. */
+    hasTuplet: boolean;
     /** Signature in force after this measure's own <attributes>. */
     sig: { num: number; den: number };
     /** Document order, preserved: resolution may reorder, scanning must not. */
@@ -1376,6 +1382,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
         const measureWords: string[] = [];
         let cursor = 0;
         let maxCursor = 0;
+        let hasTuplet = false;
         let lastNoteStart = 0;
         let newSystem = index === 0;
         /** Noteheads already read in this bar: `staff:onset:midi` → `default-x`. */
@@ -1679,6 +1686,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     break;
                 }
                 case 'note': {
+                    hasTuplet = hasTuplet || firstChild(child, 'time-modification') !== null;
                     const graceEl = firstChild(child, 'grace');
                     if (graceEl) {
                         const gracePitch = firstChild(child, 'pitch');
@@ -1796,7 +1804,10 @@ const scanPart = (part: Elem): RawMeasure[] => {
             index,
             n: displayNumber,
             isPickup: measure.getAttribute('implicit') === 'yes' || displayNumber === 0,
+            isImplicit: measure.getAttribute('implicit') === 'yes',
             contentTicks: maxCursor,
+            originalContentTicks: maxCursor,
+            hasTuplet,
             sig: { ...currentSig },
             events,
             repeat,
@@ -2129,6 +2140,63 @@ const placeMeasures = (
     const out: MeasurePlacement[] = [];
     let measureStart = ctx.tickOffset;
 
+    /**
+     * A short bar is normally damaged input and is padded so later barlines
+     * remain on the declared meter. Two generic MusicXML structures prove an
+     * intentional short segment: a backward repeat immediately followed by
+     * an implicit continuation that completes the meter, or a terminal
+     * backward-repeat bar whose short length is the closing segment. This is
+     * deliberately structural; it does not depend on a piece name, geometry,
+     * or a target score.
+     */
+    const preservesPrintedFragment = (pos: number, raw: RawMeasure, expected: number): boolean => {
+        if (raw.contentTicks <= 0 || raw.contentTicks >= expected || !raw.repeat.repeatBackward) {
+            return false;
+        }
+        const next = raws[pos + 1];
+        if (
+            next?.isImplicit &&
+            next.sig.num === raw.sig.num &&
+            next.sig.den === raw.sig.den &&
+            raw.contentTicks + next.contentTicks === expected
+        ) {
+            return true;
+        }
+        if (pos !== raws.length - 1) {
+            return false;
+        }
+        // A terminal short ending may complete an internal implicit fragment
+        // (the fragment is the section's omitted opening half). Require that
+        // fragment to follow an earlier repeat and to complement this bar;
+        // an arbitrary truncated final bar remains an underfull warning.
+        for (let i = pos - 1; i >= 1; i--) {
+            const candidate = raws[i];
+            const repeat = raws[i - 1];
+            if (!candidate?.isImplicit || !repeat?.repeat.repeatBackward) {
+                continue;
+            }
+            for (let j = i + 1; j < pos; j++) {
+                const between = raws[j];
+                if (
+                    !between ||
+                    between.repeat.repeatForward ||
+                    between.repeat.repeatBackward ||
+                    between.sig.num !== raw.sig.num ||
+                    between.sig.den !== raw.sig.den
+                ) {
+                    return false;
+                }
+            }
+            return (
+                candidate.sig.num === raw.sig.num &&
+                candidate.sig.den === raw.sig.den &&
+                candidate.contentTicks > 0 &&
+                candidate.contentTicks + raw.contentTicks === expected
+            );
+        }
+        return false;
+    };
+
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         if (!raw) {
@@ -2152,6 +2220,13 @@ const placeMeasures = (
         // Pickups stay content-length (MusicXML implicit / measure 0); other bars
         // snap underfull content up to the active signature so later ticks don't skew.
         const contentLen = raw.contentTicks;
+        const printedFragment = preservesPrintedFragment(pos, raw, expected);
+        if (!raw.isPickup && raw.hasTuplet && raw.originalContentTicks < expected && !printedFragment) {
+            // Regridding can repair raw.contentTicks and event extent while the
+            // source still proves a malformed underfull tuplet. Preserve that
+            // evidence as a warning rather than hiding the recognition defect.
+            ctx.warnings.add('measure_underfull');
+        }
         let length = contentLen;
         let pad = 0;
         if (numbered) {
@@ -2168,7 +2243,7 @@ const placeMeasures = (
             }
         } else if (length <= 0) {
             length = expected;
-        } else if (!raw.isPickup && length < expected) {
+        } else if (!raw.isPickup && length < expected && !printedFragment) {
             pad = expected - length;
             ctx.warnings.add('measure_underfull');
             length = expected;
@@ -2622,11 +2697,7 @@ const seedCurveStarts = (curves: Map<number, DynamicCurve>, seed: ParseSeed, tic
 };
 
 /** Resume per-voice levels from a prior shard when this parse printed none. */
-const seedVoiceCurveStarts = (
-    voiceCurves: Map<string, DynamicCurve>,
-    seed: ParseSeed,
-    tickOffset: number,
-): void => {
+const seedVoiceCurveStarts = (voiceCurves: Map<string, DynamicCurve>, seed: ParseSeed, tickOffset: number): void => {
     for (const [key, v] of Object.entries(seed.velocityByVoice ?? {})) {
         const existing = voiceCurves.get(key);
         if (existing && pointValueAt(existing.points, tickOffset) !== undefined) {
@@ -3550,9 +3621,7 @@ export const parseMxlFiles = (
         const parsed = parseMusicXmlString(extractMxl(file), tickOffset, index === 0 ? seed : EMPTY_SEED, options);
         combined.notes.push(...parsed.notes);
         combined.measures.push(
-            ...parsed.measures.map((measure, i) =>
-                index > 0 && i === 0 ? { ...measure, sysBreak: true } : measure,
-            ),
+            ...parsed.measures.map((measure, i) => (index > 0 && i === 0 ? { ...measure, sysBreak: true } : measure)),
         );
         combined.timeSignatures.push(...parsed.timeSignatures);
         combined.keySignatures.push(...parsed.keySignatures);

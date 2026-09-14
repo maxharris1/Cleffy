@@ -2,7 +2,7 @@
 
 engine: audiveris-5.11.0+svc-15  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T14:33:55.984Z
+generated: 2026-09-14T15:04:10.141Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
 **Play-along score 95.0%** · 5/16 pieces pass the gate
@@ -15,7 +15,7 @@ measured — read its failure list, not its percentages.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 | 1 | 152 | 92.1% | 92.1% | 92.1% | 0 | 0 | 85.3 | FAIL |
 | Bach — Little Prelude in C, BWV 939 | 1 | 179 | 100.0% | 100.0% | 95.0% | 0 | 16 | 100.0 | FAIL |
-| Bach (attrib.) — Air in F, BWV Anh. 131 | 1 | 97 | 97.9% | 92.8% | 91.8% | 2 | 2 | 83.7 | FAIL |
+| Bach (attrib.) — Air in F, BWV Anh. 131 | 1 | 97 | 100.0% | 94.8% | 93.8% | 0 | 0 | 89.0 | FAIL |
 | Bach — Invention 1 in C, BWV 772 | 2 | 458 | 95.0% | 95.0% | 94.1% | 23 | 37 | 96.2 | FAIL |
 | Bach — Invention 8 in F, BWV 779 | 2 | 598 | 99.7% | 98.7% | 97.8% | 2 | 0 | 99.5 | FAIL |
 | Bach — Prelude in D minor, BWV 999 | 2 | 509 | 100.0% | 100.0% | 100.0% | 0 | 0 | 90.0 | pass |
@@ -29,7 +29,7 @@ measured — read its failure list, not its percentages.
 | Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
 | Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.0% | 24 | 24 | 86.6 | FAIL |
 | Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.0% | 97.3% | 2 | 1 | 95.4 | FAIL |
-| **suite** | | **5996** | **97.3%** | **95.8%** | **95.0%** | **121** | **163** | | **5/16** |
+| **suite** | | **5996** | **97.3%** | **95.8%** | **95.0%** | **119** | **161** | | **5/16** |
 
 ## Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 — 1 failed check(s)
 
@@ -39,14 +39,10 @@ measured — read its failure list, not its percentages.
 
 - Praeludium: no-invented-notes (16 extra (12 explained by printed ornaments), 1 allowed)
 
-## Bach (attrib.) — Air in F, BWV Anh. 131 — 6 failed check(s)
+## Bach (attrib.) — Air in F, BWV Anh. 131 — 2 failed check(s)
 
 - bach-air-anh131: bar-length-warning (measure_underfull)
-- Air: printed-bar-count (17 printed bars read)
-- Air: bar-alignment (17 scored bars vs 16 reference bars)
-- Air: bar-length (1 of 17 bars are not the printed length)
-- Air: repeat-walk (34 performed bars)
-- Air: attack-grid (exact 92.8% vs floor 95.0%)
+- Air: attack-grid (exact 94.8% vs floor 95.0%)
 
 ## Bach — Invention 1 in C, BWV 772 — 3 failed check(s)
 
@@ -95,7 +91,7 @@ measured — read its failure list, not its percentages.
 ## Beethoven — Für Elise, WoO 59 (Mutopia typeset) — 5 failed check(s)
 
 - fur-elise-mutopia: bar-length-warning (measure_underfull + measure_overfull)
-- Poco moto: bar-length (3 of 106 bars are not the printed length)
+- Poco moto: bar-length (4 of 106 bars are not the printed length)
 - Poco moto: notes-present (24 missing, 7 allowed)
 - Poco moto: no-invented-notes (24 extra, 7 allowed)
 - Poco moto: attack-grid (exact 94.6% vs floor 95.0%)

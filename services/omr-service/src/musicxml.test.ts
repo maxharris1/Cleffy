@@ -107,6 +107,61 @@ describe('parseMusicXmlString', () => {
         expect(score.warnings).not.toContain('measure_underfull');
     });
 
+    it('keeps a repeat ending and adjacent implicit continuation as paired fragments', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}</measure>` +
+                `<measure number="2">${note('D', 4, 12)}<barline location="right"><repeat direction="backward"/></barline></measure>` +
+                `<measure number="X2" implicit="yes">${note('E', 4, 4)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures.map((measure) => measure.dTicks)).toEqual([1920, 1440, 480]);
+        expect(score.warnings).not.toContain('measure_underfull');
+    });
+
+    it('keeps a terminal repeat ending only when it complements a later implicit fragment', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}<barline location="right"><repeat direction="backward"/></barline></measure>` +
+                `<measure number="X1" implicit="yes">${note('D', 4, 4)}</measure>` +
+                `<measure number="2">${note('E', 4, 12)}<barline location="right"><repeat direction="backward"/></barline></measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures.map((measure) => measure.dTicks)).toEqual([1920, 480, 1440]);
+        expect(score.warnings).not.toContain('measure_underfull');
+    });
+
+    it('pads a short final repeat ending without a complementary implicit fragment', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}</measure>` +
+                `<measure number="2">${note('D', 4, 12)}<barline location="right"><repeat direction="backward"/></barline></measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures.map((measure) => measure.dTicks)).toEqual([1920, 1920]);
+        expect(score.warnings).toContain('measure_underfull');
+    });
+
+    it('pads a repeat ending when its implicit continuation does not complement it', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}</measure>` +
+                `<measure number="2">${note('D', 4, 12)}<barline location="right"><repeat direction="backward"/></barline></measure>` +
+                `<measure number="X2" implicit="yes">${note('E', 4, 8)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures.map((measure) => measure.dTicks)).toEqual([1920, 1920, 960]);
+        expect(score.warnings).toContain('measure_underfull');
+    });
+
+    it('does not treat an implicit fragment after an intervening repeat as a terminal complement', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 16)}<barline location="right"><repeat direction="backward"/></barline></measure>` +
+                `<measure number="X1" implicit="yes">${note('D', 4, 4)}</measure>` +
+                `<measure number="2">${note('E', 4, 16)}<barline location="right"><repeat direction="backward"/></barline></measure>` +
+                `<measure number="3">${note('F', 4, 12)}<barline location="right"><repeat direction="backward"/></barline></measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures.at(-1)?.dTicks).toBe(1920);
+        expect(score.warnings).toContain('measure_underfull');
+    });
+
     it('converts dotted-quarter and eighth beat units too', () => {
         const mark = (unit: string, dots: number, perMinute: number) =>
             wrap(
@@ -1024,7 +1079,6 @@ describe('tempo', () => {
         );
         expect(uprightEighth.holds).toEqual([{ tick: 0, beats: 0.5 }]);
     });
-
 
     const bpmOf = (text: string): number | undefined =>
         parseMusicXmlString(wrap(bar(`${ATTRS_44}${words(text)}`) + bar())).tempos[0]?.bpm;

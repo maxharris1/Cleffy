@@ -415,12 +415,14 @@ const omrBarList = (
     hi: number,
     barTicks: number,
     pickupQuarters: number,
+    partialBars: ReadonlyMap<number, number>,
     dedupe: boolean,
 ): OmrBar[] => {
     const inRange = measures.filter((m) => m.tick >= lo && m.tick < hi);
     const seen = new Set<number>();
     const out: OmrBar[] = [];
     const pickupTicks = Math.round(pickupQuarters * TICKS_PER_QUARTER);
+    const firstSourceIndex = inRange[0]?.srcIndex;
     for (const measure of inRange) {
         const key = measure.srcIndex ?? measure.n;
         if (dedupe) {
@@ -435,9 +437,18 @@ const omrBarList = (
         // pickup note can ever pair on onset.
         const shift = isPickup ? barTicks - pickupTicks : 0;
         const members = notes.filter((n) => n.t >= measure.tick && n.t < measure.tick + measure.dTicks);
+        // Reference MIDI numbers anacrusis notes as bar 0 (`midiRef.place()`).
+        // Keep that same origin when the first printed measure is a pickup;
+        // otherwise the first engraved measure is bar 1.  This offset must be
+        // movement-relative because srcIndex is global in concatenated scores.
+        const firstPrintedBar = pickupTicks > 0 ? 0 : 1;
+        const printedBar =
+            measure.srcIndex === undefined || firstSourceIndex === undefined
+                ? out.length + firstPrintedBar
+                : measure.srcIndex - firstSourceIndex + firstPrintedBar;
         out.push({
             measure,
-            expectedTicks: isPickup ? pickupTicks : barTicks,
+            expectedTicks: isPickup ? pickupTicks : (partialBars.get(printedBar) ?? barTicks),
             notes: members.map((n) => ({
                 onsetQ: quantizeOnset((n.t - measure.tick + shift) / TICKS_PER_QUARTER),
                 durQ: quantizeDur(n.d / TICKS_PER_QUARTER),
@@ -558,7 +569,7 @@ const barTicksOf = (movement: CorpusMovement): number =>
 
 /** Bars the reference MIDI should contain, given whether it unfolds repeats. */
 const expectedRefBars = (movement: CorpusMovement): number =>
-    movement.repeatsUnfoldedInMidi ? movement.performedBars ?? movement.printedBars : movement.printedBars;
+    movement.repeatsUnfoldedInMidi ? (movement.performedBars ?? movement.printedBars) : movement.printedBars;
 
 const scoreMovement = (
     refNotes: readonly RefNote[],
@@ -570,6 +581,9 @@ const scoreMovement = (
     const refKeyed = [...refMap.entries()].sort((a, b) => a[0] - b[0]);
     const refLists = refKeyed.map(([, notes]) => asBarNotes(notes));
     const expected = barTicksOf(movement);
+    const partialBars = new Map(
+        movement.partialBars.map((bar) => [bar.bar, Math.round(bar.quarters * TICKS_PER_QUARTER)] as const),
+    );
     const printedBars = omrBarList(
         score.measures,
         score.notes,
@@ -577,13 +591,14 @@ const scoreMovement = (
         hi,
         expected,
         movement.pickupQuarters,
+        partialBars,
         true,
     );
     // A reference that unfolds its own repeats describes the performance, so the
     // performed measure list is the comparable sequence. A printed-once
     // reference wants the engraved page.
     const omrBars = movement.repeatsUnfoldedInMidi
-        ? omrBarList(score.measures, score.notes, lo, hi, expected, movement.pickupQuarters, false)
+        ? omrBarList(score.measures, score.notes, lo, hi, expected, movement.pickupQuarters, partialBars, false)
         : printedBars;
     const omrLists = omrBars.map((b) => b.notes);
     const path = alignBars(refLists, omrLists);
@@ -674,9 +689,7 @@ const scoreMovement = (
     const tempoInRange =
         tempoBpm !== null && tempoBpm >= movement.expectedTempo.min && tempoBpm <= movement.expectedTempo.max;
     const printedTempoBpm = printedTempoAt(score, lo);
-    const velocities = new Set(
-        score.notes.filter((n) => n.t >= lo && n.t < hi).map((n) => n.v ?? DEFAULT_VELOCITY),
-    );
+    const velocities = new Set(score.notes.filter((n) => n.t >= lo && n.t < hi).map((n) => n.v ?? DEFAULT_VELOCITY));
     const holds = (score.holds ?? []).filter((h) => h.tick >= lo && h.tick < hi).length;
 
     const metrics: MovementMetrics = {
@@ -733,12 +746,8 @@ const scoreMovement = (
 export const compositeScore = (result: Omit<EvalResult, 'composite'>): number => {
     const pitch = result.overall.pitchMatch;
     const exact = result.overall.exact;
-    const missing =
-        result.overall.refNotes === 0 ? 100 : 100 * (1 - result.overall.missing / result.overall.refNotes);
-    const structParts: number[] = [
-        result.structure.movementCountOk ? 100 : 0,
-        result.structure.metersOk ? 100 : 0,
-    ];
+    const missing = result.overall.refNotes === 0 ? 100 : 100 * (1 - result.overall.missing / result.overall.refNotes);
+    const structParts: number[] = [result.structure.movementCountOk ? 100 : 0, result.structure.metersOk ? 100 : 0];
     for (const mov of result.movements) {
         if (mov.performedBarsMatch !== null) {
             structParts.push(mov.performedBarsMatch ? 100 : 0);
