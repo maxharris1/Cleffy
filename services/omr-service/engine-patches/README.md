@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-20` (`src/job.ts` `ENGINE_VERSION`; cycle 14 candidate pending host bench) |
+| Engine revision | `audiveris-5.11.0+svc-21` (`src/job.ts` `ENGINE_VERSION`; cycle 15 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -180,37 +180,59 @@ the probe against the patched jar and run its
 It fails if any expected positive or negative result changes. This is a manual
 engine probe; CI does not run Audiveris.
 
-## 0005 — use the head center for horizontal slur concavity
+## 0005 — rejected horizontal slur-head concavity experiment
 
-`SlurLinker.selectBestHead` previously tested an above slur against the far
-edge of each candidate head. On `bach-prelude-bwv939`, that reference admits
-the upper C5 head of a two-head chord while the printed horizontal tie belongs
-to the lower A4 head. The cycle-14 localization records the target geometry,
-the competing dot products, and the unchanged distance ranking.
+Cycle 14 changed horizontal slur concavity to use the physical head center.
+The official host suite stayed at 7/16 and removed one real BWV 939 A4 extra,
+but its incidental Anh. 116 m24 gain depended on reading accidental parentheses
+as a musical slur. Visual attribution triggered the no-invented-curves kill
+criterion. The override and Docker compilation entry are reverted; commit
+`f7211aa` retains the rejected source and patch. Svc-20 remains reserved.
+See `docs/omr-rsi-cycle-14.md` for the host numbers, artifact identities, and
+rejection. Svc-21 applies only the next rest hypothesis to accepted svc-19
+engine behavior.
 
-The candidate changes one reference point in
-`src/org/audiveris/omr/sheet/curve/SlurLinker.java`: horizontal curves use the
-existing physical head center for the concavity test; nonhorizontal curves
-keep the existing bounds-edge rule. Lookup-area containment, the strict dot
-inequality, and closest-head selection are unchanged. No pitch continuity,
-chord-wide tie copying, curve invention, parser change, or scoring change is
-included.
+## 0006 — corroborate quarter rests with same-page glyph templates
 
-The reproducible diff is `0005-slur-head-concavity.patch`, derived from the
-Audiveris 5.11.0 `SlurLinker.java` source (upstream SHA-256
-`d9f92f97b42aad8c3763bdae7db35b272b394b2154014c03b665baaf12fbe797`) and
-the vendored candidate (SHA-256
-`463c486183d85a64e295acac2fe0d411711b73a080c39e8ee2434bb843494c10`). As
-with the earlier patches, normalize upstream CRLF to LF before applying the
-diff.
+The Air m14 quarter rest survives as a glyph and passes symbol classification,
+but its weighted intrinsic grade is too weak for the ordinary LINKS cleanup.
+`SymbolsBuilder` now measures it against strong original quarter-rest readings
+from the same page before passing the resulting evaluation to `InterFactory`.
+The existing factory, exclusions, and weak-inter cleanup still apply.
 
-This candidate is intended for engine revision `audiveris-5.11.0+svc-20`.
-The isolated BWV 939 probe keeps the neighboring C5 upper tie and lower E4
-tie controls intact and removes the localized A4 extra. The official fresh
-host full-suite validation is pending, so this patch carries no suite or
-piece acceptance claim. It must be killed if a protected pass turns red, an
-accepted tie is lost without page evidence, or any gain depends on an invented
-curve or changed scoring.
+Templates require an original `CHECKED` quarter-rest grade at or above
+`Grades.validationMinGrade`. The target must already have a quarter-rest
+result at or above `Grades.symbolMinGrade`. Staff association must be
+unambiguous; interlines may differ by at most 10%, normalized staff position
+by 0.75 interline, and mask dimensions/translation by 0.15 interline. Matching
+requires both foreground recalls at least 0.90 and IoU at least 0.85. The
+corroborating grade is template grade times IoU. Original template grades are
+captured before cluster processing; promoted confidences cannot feed back.
+
+The vendored source is `src/org/audiveris/omr/sheet/symbol/SymbolsBuilder.java`;
+`QuarterRestTemplateMatcher.java` in the same package holds the geometry and
+mask checks without engine dependencies. The reproducible upstream diff
+`0006-quarter-rest-template.patch` includes both files.
+`docs/omr-rsi-cycle-15.md` records validation and host kill criteria. The
+historical template localization packet supplies page/ink evidence, but its
+isolated results do not establish acceptance of this reconstructed candidate.
+Svc-21 requires a fresh host suite; the implementer does not run OMR.
+
+The standalone controls compile only the dependency-free matcher and use saved
+run-table masks. They do not load or execute Audiveris. From this service
+directory with a JDK installed:
+
+```sh
+javac -d /tmp/cleffy-rest-controls \
+  engine-patches/src/org/audiveris/omr/sheet/symbol/QuarterRestTemplateMatcher.java \
+  engine-patches/probes/QuarterRestTemplateControls.java
+java -cp /tmp/cleffy-rest-controls org.audiveris.omr.sheet.symbol.QuarterRestTemplateControls
+java -cp /tmp/cleffy-rest-controls org.audiveris.omr.sheet.symbol.QuarterRestTemplateControls \
+  engine-patches/probes/quarter-rest-fixtures.tsv
+```
+
+The fixture file records original PDF/OMR/XML hashes and glyph coordinates.
+Control grades are explicit test inputs, not a fresh classifier observation.
 
 ## How the patches are applied
 
@@ -226,8 +248,8 @@ Two `Dockerfile` stages:
    - `javac` the vendored classes against `lib/app/audiveris.jar` plus the rest of `lib/app/*`;
    - `jar uf audiveris.jar org` — the recompiled classes and their inner classes
      replace the shipped ones **inside** the jar;
-   - `javap` checks `promoteOctaveClef`, `createMeasured`, `findBracketSpan`, and
-     `hasAttachedHeadStemInk`,
+   - `javap` checks `promoteOctaveClef`, `createMeasured`, `findBracketSpan`,
+     `hasAttachedHeadStemInk`, `promotedQuarterRestGrade`, and `findMatch`,
      failing the build if an update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its

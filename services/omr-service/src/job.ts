@@ -62,9 +62,10 @@ import type { ScoreData } from './scoreData.js';
  * svc-17 was a rejected implicit-tuplet option experiment (RSI cycle 11).
  * svc-18: limit tuplet beam siblings to a measured printed bracket span.
  * svc-19: retain delta-outlier ledgers supported by connected head and stem ink.
- * svc-20: select heads on the concave side of horizontal slur endpoints.
+ * svc-20 was a rejected slur-head experiment (RSI cycle 14: false accidental slur).
+ * svc-21: corroborate quarter-rest candidates with strong same-page glyph templates.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-20';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-21';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

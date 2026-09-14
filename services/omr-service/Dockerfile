@@ -58,7 +58,8 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/text/TextBuilder.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java \
         engine-patches/src/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java \
-        engine-patches/src/org/audiveris/omr/sheet/curve/SlurLinker.java; \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/SymbolsBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/QuarterRestTemplateMatcher.java; \
     (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
         | grep -q promoteOctaveClef; \
@@ -67,7 +68,11 @@ RUN set -eux; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.TupletsBuilder \
         | grep -q findBracketSpan; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.ledger.LedgersPostAnalysis \
-        | grep -q hasAttachedHeadStemInk
+        | grep -q hasAttachedHeadStemInk; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
+        | grep -q promotedQuarterRestGrade; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.QuarterRestTemplateMatcher \
+        | grep -q findMatch
 
 FROM node:22-bookworm-slim
 RUN apt-get update \
