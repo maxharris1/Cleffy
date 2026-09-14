@@ -37,6 +37,15 @@ lists. Projected suite: exact 94.2→~95.7, onGrid 93.4→**~95.1**, pass 4/16�
 - `remapMarks` (directions inside a regridded bar) has unit coverage only — no
   corpus piece prints a dynamic/pedal inside a regridded bar.
 
+## Full-bench outcome (orchestrator run at `7688b54`, no --force-audiveris)
+
+**Suite onGrid 93.4% → 95.0%, pass 4/16 → 5/16 — the RSI goal (~95%) is met.**
+wtk1 exactly at the single-piece prediction (96.2 / 94.4 / 94.0, bar-length
+2 of 35); bwv999's flip confirmed at 100/100/100 with 0 miss / 0 extra. All
+other 14 pieces byte-identical to the previous bench. The +1.6 suite delta
+decomposes exactly into wtk1 (+1.3) and bwv999 (+0.4); no scorer code changed
+this cycle. Fully attributed.
+
 ## Expected full-bench outcome (to be attributed against)
 
 - wtk1 onGrid 79.6→~94.0 (+1.3 suite pts), bwv999 →100/100/100 pass.

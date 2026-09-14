@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-14T11:55:10.252Z",
+  "generatedAt": "2026-09-14T12:39:53.259Z",
   "engineVersion": "audiveris-5.11.0+svc-15",
   "audiverisVersion": "- Version:      5.11.0",
   "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
@@ -10,11 +10,11 @@
   },
   "totals": {
     "pieces": 16,
-    "piecesPassed": 4,
+    "piecesPassed": 5,
     "refNotes": 5996,
     "pitchMatch": 97.29819879919947,
-    "exact": 94.24616410940627,
-    "onGrid": 93.36224149432955,
+    "exact": 95.78052034689793,
+    "onGrid": 95.04669779853235,
     "missing": 121,
     "extra": 163
   },
@@ -131,16 +131,13 @@
       "artifactHash": "2742a424f5be1af5c1eaf688ccb64f9a5660315eb6955efcddb642b5917900ae",
       "refNotes": 509,
       "pitchMatch": 100,
-      "exact": 95.67779960707269,
-      "onGrid": 95.67779960707269,
+      "exact": 100,
+      "onGrid": 100,
       "missing": 0,
       "extra": 0,
-      "composite": 89.13555992141454,
-      "pass": false,
-      "failures": [
-        "bach-prelude-bwv999: bar-length-warning (measure_overfull)",
-        "Prelude: bar-length (2 of 43 bars are not the printed length)"
-      ]
+      "composite": 90,
+      "pass": true,
+      "failures": []
     },
     {
       "slug": "wtk1-prelude1",
@@ -151,19 +148,18 @@
       "artifactHash": "2481711be8c0c75e20ff2bc22c5b85994c5193599365bcb846a403717b254830",
       "refNotes": 549,
       "pitchMatch": 96.17486338797814,
-      "exact": 81.60291438979965,
-      "onGrid": 79.59927140255009,
+      "exact": 94.35336976320583,
+      "onGrid": 93.98907103825137,
       "missing": 17,
       "extra": 14,
-      "composite": 84.32604735883424,
+      "composite": 86.87613843351548,
       "pass": false,
       "failures": [
-        "wtk1-prelude1: bar-length-warning (measure_underfull + measure_overfull)",
-        "Praeludium I: bar-length (7 of 35 bars are not the printed length)",
+        "wtk1-prelude1: bar-length-warning (measure_overfull)",
+        "Praeludium I: bar-length (2 of 35 bars are not the printed length)",
         "Praeludium I: notes-present (17 missing, 3 allowed)",
         "Praeludium I: no-invented-notes (14 extra, 3 allowed)",
-        "Praeludium I: attack-grid (exact 81.6% vs floor 95.0%)",
-        "Praeludium I: note-length (onGrid 79.6% vs floor 90.0%)"
+        "Praeludium I: attack-grid (exact 94.4% vs floor 95.0%)"
       ]
     },
     {

@@ -2,10 +2,10 @@
 
 engine: audiveris-5.11.0+svc-15  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T11:55:10.252Z
+generated: 2026-09-14T12:39:53.259Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
-**Play-along score 93.4%** · 4/16 pieces pass the gate
+**Play-along score 95.0%** · 5/16 pieces pass the gate
 
 Rates are weighted by reference notes, not by piece. A piece whose `meters`
 check failed could not bind a tick slice, so its rates are void rather than
@@ -18,8 +18,8 @@ measured — read its failure list, not its percentages.
 | Bach (attrib.) — Air in F, BWV Anh. 131 | 1 | 97 | 97.9% | 92.8% | 91.8% | 2 | 2 | 83.7 | FAIL |
 | Bach — Invention 1 in C, BWV 772 | 2 | 458 | 95.0% | 95.0% | 94.1% | 23 | 37 | 96.2 | FAIL |
 | Bach — Invention 8 in F, BWV 779 | 2 | 598 | 99.7% | 98.7% | 97.8% | 2 | 0 | 99.5 | FAIL |
-| Bach — Prelude in D minor, BWV 999 | 2 | 509 | 100.0% | 95.7% | 95.7% | 0 | 0 | 89.1 | FAIL |
-| Bach — WTC I Prelude 1 in C, BWV 846 | 2 | 549 | 96.2% | 81.6% | 79.6% | 17 | 14 | 84.3 | FAIL |
+| Bach — Prelude in D minor, BWV 999 | 2 | 509 | 100.0% | 100.0% | 100.0% | 0 | 0 | 90.0 | pass |
+| Bach — WTC I Prelude 1 in C, BWV 846 | 2 | 549 | 96.2% | 94.4% | 94.0% | 17 | 14 | 86.9 | FAIL |
 | Petzold / Bach — Menuet in G, BWV Anh. 114 | 1 | 204 | 99.5% | 99.5% | 96.6% | 1 | 10 | 89.6 | pass |
 | Bach — Menuet in G minor, BWV Anh. 115 | 1 | 199 | 100.0% | 100.0% | 97.5% | 0 | 12 | 90.0 | pass |
 | Bach — Menuet in G, BWV Anh. 116 | 1 | 310 | 99.0% | 96.5% | 95.8% | 3 | 2 | 98.8 | FAIL |
@@ -29,7 +29,7 @@ measured — read its failure list, not its percentages.
 | Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
 | Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.3% | 24 | 24 | 86.6 | FAIL |
 | Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.0% | 97.3% | 2 | 1 | 95.4 | FAIL |
-| **suite** | | **5996** | **97.3%** | **94.2%** | **93.4%** | **121** | **163** | | **4/16** |
+| **suite** | | **5996** | **97.3%** | **95.8%** | **95.0%** | **121** | **163** | | **5/16** |
 
 ## Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 — 1 failed check(s)
 
@@ -59,19 +59,13 @@ measured — read its failure list, not its percentages.
 - bach-invention-08: bar-length-warning (measure_underfull + measure_overfull)
 - Invention 8: bar-length (1 of 34 bars are not the printed length)
 
-## Bach — Prelude in D minor, BWV 999 — 2 failed check(s)
+## Bach — WTC I Prelude 1 in C, BWV 846 — 5 failed check(s)
 
-- bach-prelude-bwv999: bar-length-warning (measure_overfull)
-- Prelude: bar-length (2 of 43 bars are not the printed length)
-
-## Bach — WTC I Prelude 1 in C, BWV 846 — 6 failed check(s)
-
-- wtk1-prelude1: bar-length-warning (measure_underfull + measure_overfull)
-- Praeludium I: bar-length (7 of 35 bars are not the printed length)
+- wtk1-prelude1: bar-length-warning (measure_overfull)
+- Praeludium I: bar-length (2 of 35 bars are not the printed length)
 - Praeludium I: notes-present (17 missing, 3 allowed)
 - Praeludium I: no-invented-notes (14 extra, 3 allowed)
-- Praeludium I: attack-grid (exact 81.6% vs floor 95.0%)
-- Praeludium I: note-length (onGrid 79.6% vs floor 90.0%)
+- Praeludium I: attack-grid (exact 94.4% vs floor 95.0%)
 
 ## Bach — Menuet in G, BWV Anh. 116 — 2 failed check(s)
 
