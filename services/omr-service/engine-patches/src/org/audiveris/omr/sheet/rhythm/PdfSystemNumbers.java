@@ -384,12 +384,7 @@ public final class PdfSystemNumbers
             if (isMusicGlyphName(glyphName)) {
                 return;
             }
-            String unicode = null;
-            try {
-                unicode = font.toUnicode(code);
-            } catch (IOException ex) {
-                unicode = null;
-            }
+            String unicode = font.toUnicode(code);
             final Integer digit = digitOf(glyphName, unicode);
             final boolean period = isPeriod(glyphName, unicode);
             if ((digit == null) && !period) {
