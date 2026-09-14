@@ -1,0 +1,190 @@
+{
+  "description": "Exact unscaled BINARY crops, independently verified pixel for pixel. Coordinates below are original sheet coordinates. Real-dot controls additionally use an adverse hypothetical neighboring-head box in the standalone test, distinct from the actual attached head recorded here. No source ink is invented.",
+  "fixtures": [
+    {
+      "fixture": "anh116-target.png",
+      "expected_fragment": true,
+      "engine": "audiveris-5.11.0+svc-19",
+      "pdf_sha256": "9d53fe19d452a7e601e45786ecf860f30d45398912b1a6d47b656bcb96b4b86e",
+      "artifact_directory": "9d53fe19d452a7e601e45786ecf860f30d45398912b1a6d47b656bcb96b4b86e-audiveris-5.11.0+svc-19-70115b6766485bc3d380ec66f10be4cde4283e4f6031a606a671c9575aa2883f",
+      "omr_sha256": "940f392eb03269b507a8bf954bddeded7d18acb90986a99251e44aaa0ccc52c5",
+      "sheet": "sheet#1",
+      "xml_sha256": "2a779872a3f703ddeff289019389b082bfc75c235ef4b627505457b6b120e378",
+      "binary_sha256": "a98917764e50ae8466cdf89672cd25441b1fce2c7594a5f070f0344fb53dcc6c",
+      "crop_origin": [
+        1308,
+        1584
+      ],
+      "crop_size": [
+        60,
+        30
+      ],
+      "crop_sha256": "452e98afda9287614237f043c020e8525627333ea9705ce1f09484ff17fc1a6c",
+      "dot_inter_id": "6528",
+      "dot_glyph_id": "6332",
+      "dot_bounds": [
+        1315,
+        1589,
+        6,
+        4
+      ],
+      "dot_ink_pixels": 20,
+      "actual_head_inter_id": "2477",
+      "actual_head_glyph_id": "2347",
+      "actual_head_bounds": [
+        1322,
+        1586,
+        25,
+        20
+      ]
+    },
+    {
+      "fixture": "anh114-dot.png",
+      "expected_fragment": false,
+      "engine": "audiveris-5.11.0+svc-19",
+      "pdf_sha256": "ffa49fba93590b9558d9da9958691b2f37d45e66bcd75a3105a90e9c6a5588ac",
+      "artifact_directory": "ffa49fba93590b9558d9da9958691b2f37d45e66bcd75a3105a90e9c6a5588ac-audiveris-5.11.0+svc-19-70115b6766485bc3d380ec66f10be4cde4283e4f6031a606a671c9575aa2883f",
+      "omr_sha256": "8dbf63259f1ce4b0dae8d029ad9626ba1523c6dd40a7049c93fcb4c2c24faa80",
+      "sheet": "sheet#1",
+      "xml_sha256": "3d936793bae9ebd05eb5b1e3abed178bc78714263359600672ab7e8d2967ceaa",
+      "binary_sha256": "d500129a0a29f231282eafec93cd4f84615f844607b34fef295b6164f0afb1dc",
+      "crop_origin": [
+        1270,
+        575
+      ],
+      "crop_size": [
+        80,
+        50
+      ],
+      "crop_sha256": "25d0a0a23e2af327014da54912b3bf3eb1eff0f19c5e6df0f373c304e102ff4b",
+      "dot_inter_id": "4452",
+      "dot_glyph_id": "4394",
+      "dot_bounds": [
+        1324,
+        590,
+        10,
+        9
+      ],
+      "dot_ink_pixels": 64,
+      "actual_head_inter_id": "1510",
+      "actual_head_glyph_id": "1509",
+      "actual_head_bounds": [
+        1288,
+        594,
+        26,
+        22
+      ]
+    },
+    {
+      "fixture": "anh115-dot.png",
+      "expected_fragment": false,
+      "engine": "audiveris-5.11.0+svc-19",
+      "pdf_sha256": "b7517d33d10778a1425ecdee7c61af554091354329c1d2b38ea5a24ee4fba0d4",
+      "artifact_directory": "b7517d33d10778a1425ecdee7c61af554091354329c1d2b38ea5a24ee4fba0d4-audiveris-5.11.0+svc-19-70115b6766485bc3d380ec66f10be4cde4283e4f6031a606a671c9575aa2883f",
+      "omr_sha256": "e881f7c577c03d512800efa4038de0c27c5017baaa23cfd683a094eb35ba6474",
+      "sheet": "sheet#1",
+      "xml_sha256": "aee4eaaddde2eabdbf7683c01ad99cfa66d25f5af75b96f8cdc5352940bb522e",
+      "binary_sha256": "1fa051f6f24545fb32bc5c2dda62751cdeec80cbc1cb38f8ef4db23bcf2d1d36",
+      "crop_origin": [
+        1810,
+        1770
+      ],
+      "crop_size": [
+        80,
+        50
+      ],
+      "crop_sha256": "c5025f7ef6ffd601c524788d704b21c1b8b30d2b34b3641d3e265f4f7a8a7dde",
+      "dot_inter_id": "4419",
+      "dot_glyph_id": "4347",
+      "dot_bounds": [
+        1867,
+        1789,
+        9,
+        10
+      ],
+      "dot_ink_pixels": 64,
+      "actual_head_inter_id": "1971",
+      "actual_head_glyph_id": "1970",
+      "actual_head_bounds": [
+        1830,
+        1784,
+        26,
+        22
+      ]
+    },
+    {
+      "fixture": "chopin-dot.png",
+      "expected_fragment": false,
+      "engine": "audiveris-5.11.0+svc-19",
+      "pdf_sha256": "82c1e275802774095293f83f5ed38720fd5527afcf8e2b1239c70de1ead4b239",
+      "artifact_directory": "82c1e275802774095293f83f5ed38720fd5527afcf8e2b1239c70de1ead4b239-audiveris-5.11.0+svc-19-70115b6766485bc3d380ec66f10be4cde4283e4f6031a606a671c9575aa2883f",
+      "omr_sha256": "20736f3a51ad5bec0d47c7d36a23b334aad416b5b62d467268e39c10e1714e02",
+      "sheet": "sheet#1",
+      "xml_sha256": "cf231d41f3074a621baf3393e613e8ee81752e30139bd6f663b1114e4628f520",
+      "binary_sha256": "58abf132accd4477fa3e4d5d3b31473065f291ec9a28e5686d6d073a771f82a5",
+      "crop_origin": [
+        540,
+        525
+      ],
+      "crop_size": [
+        80,
+        50
+      ],
+      "crop_sha256": "84f736409ec2b3536856693739aec6fbd04d137c4a202f7edd6de202366b0f46",
+      "dot_inter_id": "11769",
+      "dot_glyph_id": "10503",
+      "dot_bounds": [
+        596,
+        545,
+        9,
+        9
+      ],
+      "dot_ink_pixels": 58,
+      "actual_head_inter_id": "3099",
+      "actual_head_glyph_id": "3098",
+      "actual_head_bounds": [
+        564,
+        539,
+        23,
+        20
+      ]
+    },
+    {
+      "fixture": "arabesque-dot.png",
+      "expected_fragment": false,
+      "engine": "audiveris-5.11.0+svc-19",
+      "pdf_sha256": "8945e0d9992347c6aef67b98bb43cc8a9876f2f904ad0c43babe5b6eedafb519",
+      "artifact_directory": "8945e0d9992347c6aef67b98bb43cc8a9876f2f904ad0c43babe5b6eedafb519-audiveris-5.11.0+svc-19-70115b6766485bc3d380ec66f10be4cde4283e4f6031a606a671c9575aa2883f",
+      "omr_sha256": "d4b75b00e8344d88f0a7a1311e70dc4388e330a3eb52b5b090b84e0a7ca5edc1",
+      "sheet": "sheet#1",
+      "xml_sha256": "160bb80bbd9bc0e343e08cabd8b9a316aa78a7d5f72206c1f15e672a180b1a23",
+      "binary_sha256": "d91dcd41c9e199ee2d413907aee686c5347d41768b5e226b99cd0b1a0c6bb2df",
+      "crop_origin": [
+        670,
+        955
+      ],
+      "crop_size": [
+        80,
+        50
+      ],
+      "crop_sha256": "893208a064636aa031aaebd78e64e111265aa6cfbf146a0bc8d717113259e304",
+      "dot_inter_id": "8002",
+      "dot_glyph_id": "7449",
+      "dot_bounds": [
+        719,
+        971,
+        7,
+        8
+      ],
+      "dot_ink_pixels": 39,
+      "actual_head_inter_id": "2792",
+      "actual_head_glyph_id": "2791",
+      "actual_head_bounds": [
+        690,
+        974,
+        21,
+        17
+      ]
+    }
+  ]
+}

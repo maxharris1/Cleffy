@@ -1,6 +1,6 @@
 # OMR RSI cycle 15
 
-**Candidate pending a matching-engine host bench.** The supplied official cycle-14 host report is
+**Closed without acceptance; candidate reverted in cycle 16.** The supplied official cycle-14 host report is
 7/16, 95.41360907271515% on-grid, 117 missing and 159 extra notes. This cycle
 reverts cycle 14 under its kill criteria (see the [cycle-14 ledger](omr-rsi-cycle-14.md))
 and uses the locked implementer/host split: Astra and Luna implement and validate
@@ -54,6 +54,30 @@ svc-21 cache entries. An error about a mismatching engine is an environment
 failure, not a new suite result: do not repost an older `bench.md` as the
 result of that attempt. The implementer has not modified or run the host
 wrapper, Docker, Audiveris, or a benchmark.
+
+## Final supplied host result at `98450f5`
+
+The new prompt explicitly designates the host table for `98450f5` in
+`cleffy-rsi-omr-20` as official. Accept those observations: **7/16**, 95.4%
+on-grid, 117 missing, 159 extra, with all seven protected passes green.
+Air still has `measure_underfull` and 94.8% exact attacks; Invention 8 still
+has `measure_underfull`. There is no credited primary-rest recovery or
+pass flip. No benchmark is repeated by the implementer.
+
+Apply the recorded primary-rest recovery criterion conservatively: **do not
+accept or carry the quarter-rest candidate forward**. Remove patch 0006,
+its two production sources, standalone controls/fixture, and Docker compile
+entries before the next recognition hypothesis. Commit `72bd29b` preserves
+the rejected candidate and its checks. Svc-21 remains reserved.
+
+The earlier engine-provenance discrepancy is retained above as history; these
+numbers do not establish whether the intended classes executed. This verdict
+is a failure to meet the acceptance criterion in the supplied official result,
+not a claim that the rest-matching algorithm was disproven on a verified image.
+The provenance guard from `98450f5` remains in place for future host runs.
+Cycle 14 remains rejected for the false accidental slur, independently of this
+result. Cycle 16 starts from accepted svc-19 recognition behavior and contains
+one new hypothesis. No result is claimed for that new candidate.
 
 ## Hypothesis → layer → diff
 
@@ -155,4 +179,4 @@ below-gate glyph 5242 is a required negative control. Inspect any other changed
 piece at its first changed XML event before crediting the gain.
 
 No Docker build, Audiveris execution, or benchmark is run by this implementer.
-Suite delta and acceptance remain pending the next official host table.
+The candidate is now closed without acceptance under the final supplied host result above; the historical validation does not override that verdict.
