@@ -67,8 +67,10 @@ import type { ScoreData } from './scoreData.js';
  * svc-22: reject augmentation dots whose source ink is a neighboring head's ledger.
  * svc-23: recover named PDF change-clef glyphs (`clefs.G_change` / `clefs.F_change`)
  * after header selection, before HEADS.
+ * svc-24: recover an internal double-thin barline that was treated as a measure
+ * boundary, using printed PDF system-number anchors.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-23';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-24';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

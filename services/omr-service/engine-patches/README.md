@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-23` (`src/job.ts` `ENGINE_VERSION`; cycle 17 candidate pending host bench) |
+| Engine revision | `audiveris-5.11.0+svc-24` (`src/job.ts` `ENGINE_VERSION`; cycle 18 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -281,6 +281,41 @@ java -cp "/tmp/cleffy-pdf-clef-controls:$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOG
   [optional-schumann.pdf]
 ```
 
+## 0009 — recover an internal double-thin barline before numbering
+
+Audiveris can classify a mid-measure double-thin barline correctly and still
+treat it as a logical measure boundary. Cycle 18 restores its internal-barline
+role after initial rhythm and before `MeasureFixer` numbering/export. Recovery
+requires printed system-start numbers from visible PDF text (embedded font
+encoding or unicode digits, transformed outlines, ink), a source-number
+difference that is exactly one less than the raw stack count, exactly one
+complementary pair, and double-thin ink on every staff. Two short bars that
+merely sum to the meter are not enough. Repeats, endings, heavy/final bars,
+signature changes and ambiguous numbers leave the site unchanged.
+
+The helpers are `sheet/rhythm/PdfSystemNumbers.java`,
+`sheet/rhythm/InternalDoubleBarEvidence.java` and
+`sheet/rhythm/InternalDoubleBars.java`. The hook is the vendored
+`step/PageStep.java`. The reproducible patch is `0009-internal-double-bar.patch`.
+Source evidence, controls and pending host attribution are in
+`docs/omr-rsi-cycle-18.md`. Svc-24 requires a matching engine build and fresh
+host artifacts.
+
+The standalone controls compile the PDF-number helper against PDFBox 3.0.6
+from the service directory:
+
+```sh
+javac -cp "$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
+  -d /tmp/cleffy-internal-bar-controls \
+  engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefHints.java \
+  engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
+  engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
+  engine-patches/probes/InternalDoubleBarControls.java
+java -cp "/tmp/cleffy-internal-bar-controls:$PDFBOX:$FONTBOX:$PDFBOX_IO:$COMMONS_LOGGING" \
+  org.audiveris.omr.sheet.rhythm.InternalDoubleBarControls \
+  [optional-schumann.pdf]
+```
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -297,7 +332,9 @@ Two `Dockerfile` stages:
      replace the shipped ones **inside** the jar;
    - `javap` checks `promoteOctaveClef`, `createMeasured`, `findBracketSpan`,
      `hasAttachedHeadStemInk`, `isUnrecognizedLedgerFragment`, `isFragment`,
-     `installPdfChangeClefs`, and `PdfClefHints.scan`,
+     `installPdfChangeClefs`, `PdfClefHints.scan`, `InternalDoubleBars.repair`,
+     `PdfSystemNumbers.scan`, `InternalDoubleBarEvidence.sourceCountAllowsInternal`,
+     and `PageStep` calling `InternalDoubleBars`,
      failing the build if an update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its

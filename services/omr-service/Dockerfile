@@ -60,7 +60,11 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java \
         engine-patches/src/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java \
         engine-patches/src/org/audiveris/omr/sheet/symbol/DotFactory.java \
-        engine-patches/src/org/audiveris/omr/sheet/symbol/LedgerFragmentEvidence.java; \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/LedgerFragmentEvidence.java \
+        engine-patches/src/org/audiveris/omr/step/PageStep.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java; \
     (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
         | grep -q installPdfChangeClefs; \
@@ -77,7 +81,15 @@ RUN set -eux; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.DotFactory \
         | grep -q isUnrecognizedLedgerFragment; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.LedgerFragmentEvidence \
-        | grep -q isFragment
+        | grep -q isFragment; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBars \
+        | grep -q repair; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \
+        | grep -q scan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarEvidence \
+        | grep -q sourceCountAllowsInternal; \
+    javap -c -cp "$app/audiveris.jar" org.audiveris.omr.step.PageStep \
+        | grep -q InternalDoubleBars
 
 FROM node:22-bookworm-slim
 RUN apt-get update \
