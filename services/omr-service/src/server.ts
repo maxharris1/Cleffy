@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
-import { runClaimedJob, runJob, type JobRequest } from './job.js';
+import { ENGINE_VERSION, runClaimedJob, runJob, type JobRequest } from './job.js';
 import { claimJob, hasQueuedWork, newWorkerId, reapExpiredLeases } from './jobStore.js';
 import { JobQueue } from './queue.js';
 import { supabaseWriteback } from './writeback.js';
@@ -160,10 +160,16 @@ const handlePoke = async (res: ServerResponse): Promise<void> => {
     json(res, 200, { ok: true, claimed: true });
 };
 
+/** Public liveness plus the generation the client gates regenerate on. */
+export const healthzPayload = (): { ok: true; engineVersion: string } => ({
+    ok: true,
+    engineVersion: ENGINE_VERSION,
+});
+
 export const server = createServer((req, res) => {
     void (async () => {
         if (req.method === 'GET' && req.url === '/healthz') {
-            json(res, 200, { ok: true });
+            json(res, 200, healthzPayload());
             return;
         }
 

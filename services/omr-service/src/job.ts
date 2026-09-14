@@ -1,13 +1,14 @@
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
-import { runAudiveris, timeoutForPages } from './audiveris.js';
-import { buildScoreData } from './buildScoreData.js';
+import { runAudiverisTolerant, sheetRangesExcluding, timeoutForPages, type AudiverisResult } from './audiveris.js';
+import { buildScoreData, type BuildScoreDataOptions } from './buildScoreData.js';
+import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
 import {
     cacheLookup,
@@ -21,14 +22,17 @@ import {
     type OmJobRow,
 } from './jobStore.js';
 import { mergeScoreDataParts, seamIsUnsafe, splitSheetRangesOverlapping } from './mergeScoreData.js';
-import { parseMxlFiles } from './musicxml.js';
-import { parseOmrGeometry } from './omrGeometry.js';
+import { expressionSeedAt, parseMxlFiles, type MusicalScore, type ParseSeed } from './musicxml.js';
+import { parseOmrGeometry, type OmrGeometry } from './omrGeometry.js';
+import { summarizeStructure, type StructureSummary } from './repeats.js';
 import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
 import type { ScoreData } from './scoreData.js';
 
 /**
- * Bump svc-<n> when musicxml/omrGeometry/buildScoreData/scoreData/flags/tessdata change.
+ * Bump svc-<n> when anything that changes the ScoreData a given PDF produces
+ * changes: musicxml/omrGeometry/buildScoreData/repeats/mergeScoreData/caps/
+ * scoreData/flags/tessdata. `scripts/check-engine-version.mjs` enforces it.
  *
  * Jumped 2 → 5 deliberately. Analyses in production report `svc-4`, a value that
  * has never existed in this repository's history — the deployed service was built
@@ -36,19 +40,96 @@ import type { ScoreData } from './scoreData.js';
  * what is actually deployed, which matters because staleness is judged by
  * comparing that integer: naming this svc-3 would make every production-analyzed
  * document look NEWER than the current engine and never offer to regenerate.
+ *
+ * svc-8 seeds the second shard of a split score with the first's tempo and
+ * dynamics, so rit./a tempo/hairpins survive the page cut instead of resetting.
+ * svc-9: ornaments, appoggiatura, tempo-relative graces, swing.
+ * svc-10: engine upgrade 5.6.1 → 5.11.0.
+ * svc-11: voices (ScoreData v5), per-voice dynamics, auto-pedal, rhythm repair, Baroque ornaments.
+ * svc-12: auto-pedal only for wholly unmarked scores; per-voice dynamics survive a
+ * mark-less shard B; era stamped on the analysis; wire version 3 so v3 readers
+ * still parse the optional v5 fields.
+ * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
+ * key-signature repair; ghost-part fill; per-system geometry zip.
+ * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
  */
-export const ENGINE_VERSION = 'audiveris-5.6.1+svc-6';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-14';
+
+/**
+ * The `score_cache` key for one engine and one era. The era comes from the
+ * document's title, not from the PDF, and it changes the output (how an
+ * unmarked score is pedalled, how a Baroque trill is spelled), so two
+ * documents that share a PDF under different titles need two entries. Only
+ * the cache reads this: what is written to `engine_version` on the document
+ * stays the bare ENGINE_VERSION, which the client parses for its generation.
+ * The resolved era is also stamped on ScoreData so a same-document title
+ * edit can mark the row stale without a schema migration.
+ */
+export const cacheKeyFor = (engineVersion: string, era: Era): string => `${engineVersion}#era=${era}`;
 
 const MAX_PDF_BYTES = 60 * 1024 * 1024;
 export const MAX_PAGES = 60;
-/** Cost-neutral page parallel: 2 JVMs on the existing 2 vCPU shape. */
-const PARALLEL_SHEET_MIN_PAGES = 4;
+/** Cost-neutral page parallel: 2 JVMs — only when the container can hold them. */
+export const PARALLEL_SHEET_MIN_PAGES = 4;
 const PARALLEL_SHEET_SHARDS = 2;
 const PARALLEL_SHEET_OVERLAP = 1;
+/**
+ * Two concurrent -Xmx3g heaps + OpenCV/JavaCPP + Node + /tmp need more than 8Gi.
+ * Typical Docker Desktop is ≤8Gi and stays serial; Cloud Run is deployed at 16Gi.
+ */
+export const PARALLEL_MIN_MEMORY_BYTES = 8 * 1024 * 1024 * 1024;
+const CGROUP_V2_MEMORY_MAX = '/sys/fs/cgroup/memory.max';
+const CGROUP_V1_MEMORY_LIMIT = '/sys/fs/cgroup/memory/memory.limit_in_bytes';
+/** cgroup v1 "unlimited" is a near-2^63 sentinel, not a real limit. */
+const CGROUP_UNLIMITED_FLOOR = 1e15;
 
 const HEARTBEAT_MIN_INTERVAL_MS = 10_000;
 const LEASE_HEARTBEAT_MS = 60_000;
 const COMPLETE_RETRIES = 2;
+
+/** Parse a cgroup memory.max / memory.limit_in_bytes value. Null = unlimited/unknown. */
+export const parseCgroupMemoryLimit = (raw: string): number | null => {
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed === 'max' || trimmed === '-1') {
+        return null;
+    }
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n <= 0 || n >= CGROUP_UNLIMITED_FLOOR) {
+        return null;
+    }
+    return Math.floor(n);
+};
+
+export const readContainerMemoryBytes = (): number | null => {
+    for (const path of [CGROUP_V2_MEMORY_MAX, CGROUP_V1_MEMORY_LIMIT]) {
+        try {
+            const parsed = parseCgroupMemoryLimit(readFileSync(path, 'utf8'));
+            if (parsed !== null) {
+                return parsed;
+            }
+        } catch {
+            // missing or unreadable
+        }
+    }
+    const total = totalmem();
+    return total > 0 ? total : null;
+};
+
+export const isParallelForcedOff = (raw: string | undefined): boolean => {
+    const v = raw?.trim().toLowerCase();
+    return v === '0' || v === 'false' || v === 'off';
+};
+
+/** Parallel only with enough pages and more than 8Gi of container RAM. */
+export const shouldRunParallelShards = (
+    pageCount: number,
+    containerMemoryBytes: number | null,
+    parallelEnv: string | undefined = process.env.OMR_PARALLEL,
+): boolean =>
+    pageCount >= PARALLEL_SHEET_MIN_PAGES &&
+    !isParallelForcedOff(parallelEnv) &&
+    containerMemoryBytes !== null &&
+    containerMemoryBytes > PARALLEL_MIN_MEMORY_BYTES;
 
 export interface JobRequest {
     documentId: string;
@@ -68,6 +149,8 @@ interface PipelineAdapters {
     registerKill?: (kill: KillJvm) => void;
     /** When true, abort without failing (lease lost). */
     isAbandoned?: () => boolean;
+    /** The document's stylistic era, for auto-pedalling; the default when absent. */
+    resolveEra?: () => Promise<Era>;
 }
 
 /**
@@ -93,6 +176,7 @@ export const runJob = async (job: JobRequest, writeback: Writeback): Promise<voi
             return true;
         },
         onFailed: (code) => writeback.failed(job.documentId, code),
+        resolveEra: () => eraForDocument(job.documentId),
     });
 };
 
@@ -150,9 +234,18 @@ export const runClaimedJob = async (
                 await failJob(job.id, workerId, code);
             },
             registerKill: (kill) => {
-                killJvm = kill;
+                const prev = killJvm;
+                killJvm = () => {
+                    try {
+                        prev?.();
+                    } catch {
+                        // previous process already gone
+                    }
+                    kill();
+                };
             },
             isAbandoned: () => abandoned,
+            resolveEra: () => eraForDocument(job.document_id),
         });
         return { ok };
     } finally {
@@ -184,7 +277,11 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         timings.pageCount = Math.max(adapters.pageCount, observedPages ?? 0);
 
         const hash = sha256Hex(pdfBytes);
-        const cached = await cacheLookup(hash, ENGINE_VERSION);
+        // Resolved before the lookup: the era is part of the key, because the
+        // same PDF under a Bach title and a Chopin title must not share pedalling.
+        const era = adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
+        const cacheKey = cacheKeyFor(ENGINE_VERSION, era);
+        const cached = await cacheLookup(hash, cacheKey);
         if (cached) {
             timings.cacheHit = true;
             const ok = await adapters.onReady(cached.score, timings);
@@ -196,19 +293,26 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             return false;
         }
 
-        const score = await transcribe(pdfPath, workDir, timings, (sheet) => {
-            const now = Date.now();
-            if (now - lastBeat >= HEARTBEAT_MIN_INTERVAL_MS) {
-                lastBeat = now;
-                void adapters.onProcessing(sheet).catch(() => undefined);
-            }
-        }, adapters.registerKill);
+        const score = await transcribe(
+            pdfPath,
+            workDir,
+            timings,
+            era,
+            (sheet) => {
+                const now = Date.now();
+                if (now - lastBeat >= HEARTBEAT_MIN_INTERVAL_MS) {
+                    lastBeat = now;
+                    void adapters.onProcessing(sheet).catch(() => undefined);
+                }
+            },
+            adapters.registerKill,
+        );
 
         if (adapters.isAbandoned?.()) {
             return false;
         }
 
-        await cacheStore(hash, ENGINE_VERSION, score);
+        await cacheStore(hash, cacheKey, score);
         const ok = await adapters.onReady(score, timings);
         logJob(adapters.documentId, timings, score, ok);
         return ok;
@@ -258,34 +362,63 @@ const transcribe = async (
     pdfPath: string,
     workDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill?: (kill: KillJvm) => void,
 ): Promise<ScoreData> => {
     const pages = timings.pageCount ?? 0;
-    if (pages >= PARALLEL_SHEET_MIN_PAGES) {
-        return transcribeParallel(pdfPath, workDir, timings, onSheet, registerKill);
+    const memoryBytes = readContainerMemoryBytes();
+    if (shouldRunParallelShards(pages, memoryBytes)) {
+        try {
+            return await transcribeParallel(pdfPath, workDir, timings, era, onSheet, registerKill);
+        } catch (err) {
+            if (
+                err instanceof JobError &&
+                err.code === ERROR_CODES.omrCrash &&
+                timings.parallelPath !== 'serial_fallback'
+            ) {
+                timings.parallelPath = 'serial_fallback';
+                timings.parallelFallbackReasons = ['omr_crash'];
+                return transcribeRange(
+                    pdfPath,
+                    join(workDir, 'out-serial'),
+                    timings,
+                    era,
+                    onSheet,
+                    registerKill,
+                    undefined,
+                );
+            }
+            throw err;
+        }
     }
-    return transcribeRange(pdfPath, join(workDir, 'out'), timings, onSheet, registerKill, undefined);
+    if (pages >= PARALLEL_SHEET_MIN_PAGES) {
+        timings.parallelPath = 'serial';
+        timings.parallelFallbackReasons = ['insufficient_memory'];
+    }
+    return transcribeRange(pdfPath, join(workDir, 'out'), timings, era, onSheet, registerKill, undefined);
 };
 
 const transcribeParallel = async (
     pdfPath: string,
     workDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill?: (kill: KillJvm) => void,
 ): Promise<ScoreData> => {
-    const ranges = splitSheetRangesOverlapping(
-        timings.pageCount ?? 0,
-        PARALLEL_SHEET_SHARDS,
-        PARALLEL_SHEET_OVERLAP,
-    );
+    const ranges = splitSheetRangesOverlapping(timings.pageCount ?? 0, PARALLEL_SHEET_SHARDS, PARALLEL_SHEET_OVERLAP);
     const kills: KillJvm[] = [];
-    registerKill?.(() => {
+    const killShards = () => {
         for (const kill of kills) {
-            kill();
+            try {
+                kill();
+            } catch {
+                // already exited
+            }
         }
-    });
+    };
+    registerKill?.(killShards);
 
     const maxSheetByShard = ranges.map(() => 0);
     const report = () => {
@@ -293,44 +426,91 @@ const transcribeParallel = async (
     };
 
     const started = Date.now();
-    const parts = await Promise.all(
-        ranges.map(async (sheets, index) => {
-            const outDir = join(workDir, `out-${sheets.from}-${sheets.to}`);
-            const { score, openTiesAtEnd } = await transcribeRangeDetailed(
-                pdfPath,
-                outDir,
-                timings,
-                (sheet) => {
-                    maxSheetByShard[index] = Math.max(maxSheetByShard[index]!, sheet);
-                    report();
-                },
-                (kill) => {
-                    kills.push(kill);
-                },
-                sheets,
-                /* aggregateTimings */ index === 0,
-            );
-            return { score, sheets, openTiesAtEnd };
-        }),
-    );
+
+    let artifacts: Array<{
+        mxlBuffers: Buffer[];
+        geometry: OmrGeometry | null;
+        invalidSheets: number[];
+        sheets: { from: number; to: number };
+    }>;
+    try {
+        artifacts = await Promise.all(
+            ranges.map(async (sheets, index) => {
+                const outDir = join(workDir, `out-${sheets.from}-${sheets.to}`);
+                const collected = await collectRangeArtifacts(
+                    pdfPath,
+                    outDir,
+                    timings,
+                    (sheet) => {
+                        maxSheetByShard[index] = Math.max(maxSheetByShard[index]!, sheet);
+                        report();
+                    },
+                    (kill) => {
+                        kills.push(kill);
+                    },
+                    sheets,
+                    /* aggregateTimings */ index === 0,
+                );
+                return { ...collected, sheets: collected.sheets ?? sheets };
+            }),
+        );
+    } catch (err) {
+        killShards();
+        throw err;
+    }
+
+    const tParse = Date.now();
+    const first = artifacts[0];
+    const second = artifacts[1];
+    if (!first || !second) {
+        throw new JobError(ERROR_CODES.internal, 'parallel transcribe: expected two shards');
+    }
+    // Shards are not auto-pedalled: a shard cannot tell a score that never
+    // pedals from one whose marks sit on the other shard's pages. The merge
+    // infers once, over the whole score, with the same era.
+    const parsedA = parseRangeArtifacts(first.mxlBuffers, first.geometry, era, undefined, { autoPedal: false });
+    const seed = expressionSeedAt(parsedA.musical, overlapPageStartTick(parsedA.score, parsedA.musical));
+    const parsedB = parseRangeArtifacts(second.mxlBuffers, second.geometry, era, seed, { autoPedal: false });
+    timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
+    recordRhythmRepairs(timings, parsedA.musical, parsedB.musical);
+
+    const parts = [
+        {
+            score: parsedA.score,
+            sheets: first.sheets,
+            openTiesAtEnd: parsedA.openTiesAtEnd,
+            structure: parsedA.structure,
+        },
+        {
+            score: parsedB.score,
+            sheets: second.sheets,
+            openTiesAtEnd: parsedB.openTiesAtEnd,
+            structure: parsedB.structure,
+        },
+    ];
 
     const safety = seamIsUnsafe(parts);
     if (safety.unsafe) {
         timings.parallelPath = 'serial_fallback';
         timings.parallelFallbackReasons = safety.reasons;
         timings.audiverisTotalMs = Date.now() - started;
-        return transcribeRange(pdfPath, join(workDir, 'out-serial'), timings, onSheet, registerKill, undefined);
+        return transcribeRange(pdfPath, join(workDir, 'out-serial'), timings, era, onSheet, registerKill, undefined);
     }
 
     timings.parallelPath = 'merged';
     timings.audiverisTotalMs = Date.now() - started;
-    return mergeScoreDataParts(parts);
+    return recordInvalidSheets(
+        timings,
+        mergeScoreDataParts(parts, { era }),
+        unionSheetNumbers(first.invalidSheets, second.invalidSheets),
+    );
 };
 
 const transcribeRange = async (
     pdfPath: string,
     outDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
@@ -340,6 +520,7 @@ const transcribeRange = async (
         pdfPath,
         outDir,
         timings,
+        era,
         onSheet,
         registerKill,
         sheets,
@@ -352,18 +533,69 @@ const transcribeRangeDetailed = async (
     pdfPath: string,
     outDir: string,
     timings: JobTimings,
+    era: Era,
     onSheet: (sheet: number) => void,
     registerKill: ((kill: KillJvm) => void) | undefined,
     sheets: { from: number; to: number } | undefined,
     aggregateTimings = true,
-): Promise<{ score: ScoreData; openTiesAtEnd: number }> => {
-    await mkdir(outDir, { recursive: true });
-    const result = await runAudiveris(pdfPath, outDir, {
-        timeoutMs: timeoutForPages(timings.pageCount ?? null),
+): Promise<{ score: ScoreData; openTiesAtEnd: number; structure: StructureSummary }> => {
+    const artifacts = await collectRangeArtifacts(
+        pdfPath,
+        outDir,
+        timings,
+        onSheet,
+        registerKill,
         sheets,
-        onSheetProgress: onSheet,
-        onSpawned: registerKill,
-    });
+        aggregateTimings,
+    );
+    const tParse = Date.now();
+    const parsed = parseRangeArtifacts(artifacts.mxlBuffers, artifacts.geometry, era);
+    const score = recordInvalidSheets(timings, parsed.score, artifacts.invalidSheets);
+    if (aggregateTimings) {
+        timings.parseMs = Date.now() - tParse;
+    } else {
+        timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
+    }
+    recordRhythmRepairs(timings, parsed.musical);
+    // Summarized from the marks rather than the built score: buildScoreData has
+    // already decided what this range alone can perform, and the merge needs to
+    // know what reaches past it.
+    return { score, openTiesAtEnd: parsed.openTiesAtEnd, structure: parsed.structure };
+};
+
+export const collectRangeArtifacts = async (
+    pdfPath: string,
+    outDir: string,
+    timings: JobTimings,
+    onSheet: (sheet: number) => void,
+    registerKill: ((kill: KillJvm) => void) | undefined,
+    sheets: { from: number; to: number } | undefined,
+    aggregateTimings: boolean,
+): Promise<{
+    mxlBuffers: Buffer[];
+    geometry: OmrGeometry | null;
+    invalidSheets: number[];
+    sheets: { from: number; to: number } | undefined;
+}> => {
+    await mkdir(outDir, { recursive: true });
+    let result: AudiverisResult;
+    try {
+        result = await runAudiverisTolerant(pdfPath, outDir, {
+            timeoutMs: timeoutForPages(timings.pageCount ?? null),
+            pageCount: timings.pageCount ?? 0,
+            sheets,
+            onSheetProgress: onSheet,
+            onSpawned: registerKill,
+        });
+    } catch (err) {
+        // A shard whose requested range is all staff-less would otherwise throw
+        // permanent no_staves_found for the job. Map it to omr_crash so
+        // transcribe() can serial-fallback over the whole book.
+        if (sheets && err instanceof JobError && err.code === ERROR_CODES.noStavesFound) {
+            throw new JobError(ERROR_CODES.omrCrash, 'Shard range produced no staves; falling back to serial');
+        }
+        throw err;
+    }
     if (aggregateTimings) {
         timings.jvmStartToFirstSheetMs = result.jvmStartToFirstSheetMs ?? undefined;
         timings.perSheetMs = result.perSheetMs;
@@ -371,22 +603,94 @@ const transcribeRangeDetailed = async (
         timings.steps = result.stepDurationsMs;
         timings.stepCounts = result.stepCounts;
     }
+    if (result.invalidSheets.length > 0) {
+        timings.invalidSheets = unionSheetNumbers(timings.invalidSheets, result.invalidSheets);
+    }
 
     if (result.mxlPaths.length === 0) {
+        if (sheets) {
+            throw new JobError(ERROR_CODES.omrCrash, 'Shard range produced no MusicXML; falling back to serial');
+        }
         throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML');
     }
 
-    const tParse = Date.now();
+    const remaining = sheets ? sheetRangesExcluding(sheets, result.invalidSheets) : [];
+    const effectiveSheets =
+        remaining.length > 0
+            ? { from: remaining[0]!.from, to: remaining[remaining.length - 1]!.to }
+            : sheets;
+
     const mxlBuffers = await Promise.all(result.mxlPaths.map((path) => readFile(path)));
-    const musical = parseMxlFiles(mxlBuffers);
     const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
-    const score = buildScoreData(musical, geometry);
-    if (aggregateTimings) {
-        timings.parseMs = Date.now() - tParse;
-    } else {
-        timings.parseMs = (timings.parseMs ?? 0) + (Date.now() - tParse);
+    return { mxlBuffers, geometry, invalidSheets: result.invalidSheets, sheets: effectiveSheets };
+};
+
+export const unionSheetNumbers = (
+    existing: readonly number[] | undefined,
+    added: readonly number[],
+): number[] =>
+    [...new Set([...(existing ?? []), ...added])]
+        .filter((n) => Number.isInteger(n) && n >= 1)
+        .sort((a, b) => a - b);
+
+/** Record skipped staff-less pages on timings and the score warning list. */
+export const recordInvalidSheets = (
+    timings: JobTimings,
+    score: ScoreData,
+    invalidSheets: readonly number[],
+): ScoreData => {
+    if (invalidSheets.length === 0) {
+        return score;
     }
-    return { score, openTiesAtEnd: musical.openTiesAtEnd };
+    timings.invalidSheets = unionSheetNumbers(timings.invalidSheets, invalidSheets);
+    if (score.warnings.includes('pages_skipped')) {
+        return score;
+    }
+    return { ...score, warnings: [...score.warnings, 'pages_skipped'] };
+};
+
+/** Telemetry only: how often the rhythm repair fires is how we learn whether to trust it. */
+const recordRhythmRepairs = (timings: JobTimings, ...parsed: MusicalScore[]): void => {
+    const count = parsed.reduce((acc, musical) => acc + (musical.rhythmRepairs ?? 0), 0);
+    if (count > 0) {
+        timings.rhythmRepairs = (timings.rhythmRepairs ?? 0) + count;
+    }
+    const keys = parsed.reduce((acc, musical) => acc + (musical.keyRepairs ?? 0), 0);
+    if (keys > 0) {
+        timings.keyRepairs = (timings.keyRepairs ?? 0) + keys;
+    }
+};
+
+const parseRangeArtifacts = (
+    mxlBuffers: Buffer[],
+    geometry: OmrGeometry | null,
+    era: Era,
+    seed?: ParseSeed,
+    build: Omit<BuildScoreDataOptions, 'era'> = {},
+): { score: ScoreData; musical: MusicalScore; openTiesAtEnd: number; structure: StructureSummary } => {
+    const musical = parseMxlFiles(mxlBuffers, seed, { era });
+    const score = buildScoreData(musical, geometry, { ...build, era });
+    return {
+        score,
+        musical,
+        openTiesAtEnd: musical.openTiesAtEnd,
+        structure: summarizeStructure(musical.repeats),
+    };
+};
+
+/** Tick where shard A's last (overlap) page begins, on the linear musical timeline. */
+const overlapPageStartTick = (score: ScoreData, musical: MusicalScore): number => {
+    const pages = score.measures.map((m) => m.page).filter((p) => p >= 0);
+    if (pages.length === 0) {
+        return musical.totalTicks;
+    }
+    const maxPage = Math.max(...pages);
+    const first = score.measures.find((m) => m.page === maxPage);
+    if (!first) {
+        return musical.totalTicks;
+    }
+    const idx = first.srcIndex ?? score.measures.indexOf(first);
+    return musical.measures[idx]?.tick ?? first.tick;
 };
 
 const downloadPdf = async (url: string, destination: string): Promise<void> => {

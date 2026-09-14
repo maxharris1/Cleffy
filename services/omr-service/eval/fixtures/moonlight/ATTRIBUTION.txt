@@ -1,0 +1,10 @@
+moonlight1.mid, moonlight2.mid, and moonlight3.mid are the three movement
+MIDI files of the Mutopia Project edition of Beethoven, Piano Sonata
+Op. 27 No. 2 (“Moonlight”), arranged by Stewart Holmes.
+
+Source: https://www.mutopiaproject.org/ftp/BeethovenLv/O27/moonlight/
+License: Creative Commons Attribution-ShareAlike 2.5
+         https://creativecommons.org/licenses/by-sa/2.5/
+
+The matching LilyPond A4 PDF (`moonlight-a4.pdf`) is not vendored in this
+repository. The recorded baseline was produced from that PDF.
