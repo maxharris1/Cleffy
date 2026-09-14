@@ -55,6 +55,8 @@ RUN set -eux; \
         -d /work/patch-classes \
         engine-patches/src/org/audiveris/omr/sheet/clef/ClefBuilder.java \
         engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefHints.java \
+        engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefBeamCrossings.java \
+        engine-patches/src/org/audiveris/omr/sig/SigReducer.java \
         engine-patches/src/org/audiveris/omr/sig/inter/OctaveShiftInter.java \
         engine-patches/src/org/audiveris/omr/text/TextBuilder.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java \
@@ -78,6 +80,10 @@ RUN set -eux; \
         | grep -q promoteOctaveClef; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.PdfClefHints \
         | grep -q scan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.PdfClefBeamCrossings \
+        | grep -q coexist; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.SigReducer \
+        | grep -q PdfClefBeamCrossings; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.inter.OctaveShiftInter \
         | grep -q createMeasured; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.TupletsBuilder \

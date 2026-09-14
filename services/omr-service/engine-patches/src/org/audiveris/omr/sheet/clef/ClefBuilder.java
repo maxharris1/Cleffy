@@ -954,6 +954,7 @@ public class ClefBuilder
             }
             clef.setStaff(staff);
             system.getSig().addVertex(clef);
+            PdfClefBeamCrossings.rememberNamedClef(clef, hint);
             logger.info(
                     "PDF change-clef {} accepted staff#{} box=({},{},{},{}) ink={}/{} font={}",
                     hint.glyphName,
