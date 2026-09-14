@@ -6,20 +6,48 @@ starts from a commit that includes this tree.
 
 ## What boots
 
-1. **`install`** (`environment.json`): `npm ci`
+1. **`install`** (`environment.json`): `npm ci`, then `.cursor/ensure-omr-image.sh`
+   (builds `cleffy-omr` **only if the tag is missing**; never rebuilds a baked image)
 2. **`start`**: `.cursor/start.sh`
    - starts Docker (`fuse-overlayfs` / `iptables-legacy` from the Dockerfile)
    - `npx supabase start` (migrations + `supabase/seed.sql`)
    - ensures the private `scores` storage bucket
    - writes **`.env.local`** (Vite) and **`supabase/functions/.env`** with the
      well-known local demo keys — never points at hosted Supabase
+   - if image `cleffy-omr` exists: `docker compose … up -d --no-build` for
+     `cleffy-local-omr` on host **`:8091→8080`**, and sets `OMR_SERVICE_URL` /
+     `OMR_SERVICE_SECRET` the same way as `scripts/local-up.sh`. Missing image
+     is logged; Supabase still boots.
 3. **Terminals**: wait for health, then `npm run dev:local` (Vite `:5173`) and
    `npm run functions:serve`
 
+## OMR / Audiveris
+
+`start` never rebuilds Audiveris. The cloud snapshot should already contain
+image `cleffy-omr` (RSI **svc-15** / Audiveris 5.11.0 when that image was baked).
+`main`'s `services/omr-service/Dockerfile` is still 5.6.1 — `ensure-omr-image.sh`
+only uses that Dockerfile when the tag is absent.
+
+Health:
+
+```bash
+curl -sf http://127.0.0.1:8091/healthz
+```
+
+Play-along bench (RSI branch; default container name matches local-up):
+
+```bash
+CLEFFY_OMR_CONTAINER=cleffy-local-omr npm run eval -- bench
+```
+
+If an RSI agent is missing the baked image, rebuild from that checkout:
+
+```bash
+docker build -t cleffy-omr services/omr-service
+```
+
 ## What stays off
 
-- **OMR** (`services/omr-service`) is **not** started. Play-along analysis that
-  needs Audiveris will not run in this environment unless you start it by hand.
 - **Hosted / live Supabase** is never linked or mutated by these scripts.
 - **Billing / Stripe** tables and env are not part of current `dev` and are not
   seeded here.

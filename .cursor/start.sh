@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Cursor Cloud Agent boot script — local Supabase for Cleffy.
-# Runs after `install` (npm ci). Fail-loud: exits non-zero if any step fails
-# so Cursor does not mark a broken environment as ready.
+# Cursor Cloud Agent boot script — local Supabase + OMR when the image exists.
+# Runs after `install` (npm ci + build-image-if-missing). Fail-loud: exits
+# non-zero if required Supabase steps fail so Cursor does not mark a broken
+# environment as ready. OMR is best-effort: missing image is logged, not fatal.
 #
 # Writes .env.local (Vite) + supabase/functions/.env — does not overwrite .env.
-# Does not start the OMR service and does not touch hosted Supabase.
+# Does not touch hosted Supabase. Does not rebuild the OMR image.
 
 set -uo pipefail
 
