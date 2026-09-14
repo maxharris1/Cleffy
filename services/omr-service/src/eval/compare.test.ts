@@ -23,6 +23,7 @@ const entry: CorpusEntry = {
             midi: 'i.mid',
             meter: { num: 4, den: 4 },
             pickupQuarters: 0,
+            partialBars: [],
             printedBars: 3,
             expectedFifths: 0,
             expectedTempo: { min: 90, max: 110 },

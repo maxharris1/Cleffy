@@ -437,6 +437,53 @@ const apply = (raw: RawMeasure, items: Item[], candidate: Candidate): void => {
     }
 };
 
+/** Ticks of the anacrusis a part opens with; 0 when it opens on a full bar. */
+const anacrusisTicks = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Sig>): number => {
+    const first = raws[0];
+    if (!first || !first.isPickup || first.contentTicks <= 0) {
+        return 0;
+    }
+    const expected = barTicksOf(sigs[0] ?? first.sig);
+    return first.contentTicks < expected ? first.contentTicks : 0;
+};
+
+/**
+ * The bar that carries the `:|` sending the player back to the anacrusis, and
+ * is short by EXACTLY it.
+ *
+ * When the opening section of a piece with an upbeat is repeated, the engraver
+ * shortens the bar before the repeat sign by the upbeat so the retake lands on
+ * a whole bar (Gould, Behind Bars) — Für Elise's first ending, `a'4` in 3/8,
+ * is the textbook case. That bar is short BY DESIGN, exactly like the pickup
+ * and the final bar this repair already exempts, and "repairing" it invents a
+ * rest the page never printed and erases the only evidence that the retake
+ * starts at the upbeat.
+ *
+ * Tight on purpose. It needs all three: a real anacrusis, an exact complement,
+ * and a `:|` with no `|:` before it — a repeat governed by a forward sign goes
+ * back THERE, not to the head, so a short bar under one is just a short bar.
+ */
+export const completesAnacrusis = (
+    raws: readonly RawMeasure[],
+    sigs: ReadonlyArray<Sig>,
+    pos: number,
+): boolean => {
+    const raw = raws[pos];
+    if (!raw || raw.isPickup || !raw.repeat.repeatBackward || raw.contentTicks <= 0) {
+        return false;
+    }
+    const pickup = anacrusisTicks(raws, sigs);
+    if (pickup <= 0) {
+        return false;
+    }
+    for (let i = 0; i <= pos; i++) {
+        if (raws[i]?.repeat.repeatForward) {
+            return false;
+        }
+    }
+    return raw.contentTicks + pickup === barTicksOf(sigs[pos] ?? raw.sig);
+};
+
 /**
  * Repair the bars of one part in place. `sigs` are the per-bar EFFECTIVE
  * signatures (after meter reconciliation). Returns how many bar-voices were
@@ -447,8 +494,9 @@ export const repairRhythm = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Si
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         // Pickups are legitimately short, and so is the final bar of a part
-        // (the meter reconciliation skips it for the same reason).
-        if (!raw || raw.isPickup || pos === raws.length - 1) {
+        // (the meter reconciliation skips it for the same reason) and the bar
+        // whose shortfall IS the anacrusis the `:|` next to it sends us back to.
+        if (!raw || raw.isPickup || pos === raws.length - 1 || completesAnacrusis(raws, sigs, pos)) {
             continue;
         }
         const sig = sigs[pos] ?? raw.sig;

@@ -35,6 +35,7 @@ const MOVEMENT: CorpusMovement = {
     midi: 't.mid',
     meter: { num: 3, den: 4 },
     pickupQuarters: 1,
+    partialBars: [],
     printedBars: 3,
     expectedFifths: 0,
     expectedTempo: { min: 60, max: 120 },
@@ -83,5 +84,28 @@ describe('midiRef', () => {
         expect(notes).toHaveLength(2);
         expect(notes[0]).toMatchObject({ bar: 0, onsetQ: 2, pitch: 72, hand: 0 });
         expect(notes[1]).toMatchObject({ bar: 1, onsetQ: 0, pitch: 74, hand: 0 });
+    });
+
+    it('walks the printed grid past a declared partial bar', () => {
+        const tpq = 480;
+        // 3/4 with a one-quarter pickup. Bar 2 is printed as a half bar, so the
+        // note a quarter after it starts bar 3 — a uniform grid would bury it
+        // two beats into bar 2 and every bar after would be a beat out.
+        const buf = smf(tpq, [
+            track([
+                ...nameEvent('up'),
+                ...on(0, 60),
+                ...off(tpq, 60),
+                // bar 1 (3 quarters), bar 2 (2 quarters, partial), then bar 3.
+                ...on(tpq * 5, 62),
+                ...off(tpq, 62),
+            ]),
+        ]);
+        const uniform = notesFromMidi(buf, MOVEMENT);
+        expect(uniform[1]).toMatchObject({ bar: 2, onsetQ: 2 });
+
+        const printed = notesFromMidi(buf, { ...MOVEMENT, partialBars: [{ bar: 2, quarters: 2 }] });
+        expect(printed[0]).toMatchObject({ bar: 0, onsetQ: 2, pitch: 60 });
+        expect(printed[1]).toMatchObject({ bar: 3, onsetQ: 0, pitch: 62 });
     });
 });

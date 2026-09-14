@@ -21,14 +21,20 @@
                 "den": 8
             },
             "pickupQuarters": 0.5,
-            "printedBars": 105,
+            "partialBars": [
+                {
+                    "bar": 8,
+                    "quarters": 1.0
+                }
+            ],
+            "printedBars": 106,
             "expectedFifths": 0,
             "expectedTempo": {
                 "min": 60,
                 "max": 84
             },
             "repeatsUnfoldedInMidi": false,
-            "performedBars": 126,
+            "performedBars": 127,
             "expectedHolds": 0,
             "expectedExtraNotes": 0
         }
@@ -36,9 +42,9 @@
     "editionNotes": [
         "Same musical text as the `fur-elise` pin, but the PDF is the Mutopia LilyPond typeset at reference.url's sibling — so PDF, MIDI and .ly all come from one source and the whole entry is fetchable. `fur-elise` keeps the IMSLP scan for the hosted-vs-local shootout; do not cross the two.",
         "LilyPond \\tempo 4 = 72 under a transparent MetronomeMark; the printed heading is 'Poco moto.' in 3/8 with a one-eighth pickup (pickupQuarters 0.5).",
-        "performedBars 126 is derived from the Mutopia .ly at https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.ly (sha256 828a7bd1b42e441fe1b0eb0389ba46f1502dab28bbe488389e635fb446ba7a67), rendered with LilyPond 2.26.0 under \\unfoldRepeats and bucketed by src/eval/midiRef.ts's own convention; the same render folded reproduces the pinned reference MIDI byte-for-byte (905 notes) and scores 105 bars = printedBars, and a hand-walk of the two \\repeat volta 2 blocks agrees (repeat surplus 21).",
-        "Both bar pins use the MIDI-grid convention, not LilyPond's engraved numbering: the \\alternative endings use \\set Timing.measurePosition to borrow an eighth across the barline, so the engraved instance count is 106/127 against the pinned 105/126. That one-bar convention gap is pre-existing — it is why the bench records `printed-bar-count (106 printed bars read)`. The parser currently reads 106 printed but 126 performed (surplus 20 — the +1 printed-side split offset by a one-bar shortfall on the unfold side), so performedBarsMatch can read true while printed-bar-count still fails; printed-bar-count and bar-alignment stay the honest signal. Keeping both pins in one convention preserves the surplus of 21; do not 'fix' one pin without the other.",
-        "printedBars 105 is the uniform-3/8 bar count the MIDI produces (verify with `run` — refBars in the summary), not LilyPond's printed numbering, which the measurePosition borrowing shifts.",
+        "The first \\repeat volta 2 borrows an eighth across the barline: its first ending is `a'4` over `a,16 e a r`, a printed 2/8 bar (partialBars bar 8), completed by the one-eighth anacrusis when the repeat is retaken; the second ending spends the same eighth on the far side of a `\\bar \"\"`, which draws nothing, so the page shows one full 3/8 bar there. The second \\repeat volta 2's endings are both full 3/8 — the borrow happens exactly once.",
+        "Because of that borrow the reference MIDI, which is written straight through (repeats not taken), runs one eighth out of phase with the engraved barlines from bar 9 on. partialBars puts the reference notes back in the bars the page draws; without it every bar after the first ending pairs two thirds of the right notes at the wrong onsets. Both bar pins are therefore the ENGRAVED counts: printedBars 106 (pickup as bar 0) and performedBars 127, surplus 21 (repeat 1 surplus 8, repeat 2 surplus 13). Keep the two in one convention — do not move one without the other.",
+        "performedBars 127 is derived from the Mutopia .ly at https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.ly (sha256 828a7bd1b42e441fe1b0eb0389ba46f1502dab28bbe488389e635fb446ba7a67); the folded render reproduces the pinned reference MIDI byte-for-byte (905 notes). The retake of repeat 1 replays the anacrusis, which is what makes its 2/8 first ending a whole bar; the printed page is 106 bars and the performance is 127.",
         "A minor throughout (expectedFifths 0).",
         "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle.",
         "No ornament signs (the \\grace and \\appoggiatura figures are ordinary notes in the reference MIDI), so expectedExtraNotes is 0."

@@ -229,17 +229,40 @@ const handOf = (tracks: ReturnType<typeof parseTrack>[]): Array<RefHand | null> 
     });
 };
 
-const place = (tick: number, tpq: number, beats: number, pickup: number): { bar: number; onsetQ: number } => {
+/**
+ * Which printed bar a reference tick falls in, and how far into it.
+ *
+ * `partials` carries the corpus `partialBars` pin as bar → ticks. Empty (every
+ * bar the full meter) is the usual case and keeps the closed-form grid. When the
+ * page prints a short bar mid-piece the grid has to be WALKED instead: a bar
+ * that is not a whole meter long moves every barline after it, so the phase is
+ * not computable from the tick alone, and a uniform grid would quietly hand the
+ * scorer bars the page never drew.
+ */
+const place = (
+    tick: number,
+    tpq: number,
+    beats: number,
+    pickup: number,
+    partials: ReadonlyMap<number, number>,
+): { bar: number; onsetQ: number } => {
     const barTicks = tpq * beats;
     const pickupTicks = Math.round(pickup * tpq);
-    if (pickupTicks > 0) {
-        if (tick < pickupTicks) {
-            return { bar: 0, onsetQ: (tick + (barTicks - pickupTicks)) / tpq };
-        }
+    if (pickupTicks > 0 && tick < pickupTicks) {
+        return { bar: 0, onsetQ: (tick + (barTicks - pickupTicks)) / tpq };
+    }
+    if (partials.size === 0) {
         const body = tick - pickupTicks;
         return { bar: 1 + Math.floor(body / barTicks), onsetQ: (body % barTicks) / tpq };
     }
-    return { bar: 1 + Math.floor(tick / barTicks), onsetQ: (tick % barTicks) / tpq };
+    let start = pickupTicks;
+    for (let bar = 1; ; bar++) {
+        const length = partials.get(bar) ?? barTicks;
+        if (length <= 0 || tick < start + length) {
+            return { bar, onsetQ: (tick - start) / tpq };
+        }
+        start += length;
+    }
 };
 
 /** Snap an onset to 1/12 of a quarter so triplets stay exact. */
@@ -264,6 +287,9 @@ export const notesFromMidi = (buf: Buffer, movement: CorpusMovement): RefNote[] 
     const { tpq, tracks } = parseSmf(buf);
     const hands = handOf(tracks);
     const beats = (movement.meter.num * 4) / movement.meter.den;
+    const partials = new Map(
+        movement.partialBars.map((bar) => [bar.bar, Math.round(bar.quarters * tpq)] as const),
+    );
     const out: RefNote[] = [];
     tracks.forEach((track, i) => {
         const hand = hands[i];
@@ -271,7 +297,7 @@ export const notesFromMidi = (buf: Buffer, movement: CorpusMovement): RefNote[] 
             return;
         }
         for (const note of track.notes) {
-            const placed = place(note.tick, tpq, beats, movement.pickupQuarters);
+            const placed = place(note.tick, tpq, beats, movement.pickupQuarters, partials);
             out.push({
                 bar: placed.bar,
                 onsetQ: quantizeOnset(placed.onsetQ),

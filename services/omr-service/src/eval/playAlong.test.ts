@@ -13,6 +13,7 @@ const movement = (over: Partial<CorpusMovement> = {}): CorpusMovement => ({
     midi: 'i.mid',
     meter: { num: 4, den: 4 },
     pickupQuarters: 0,
+    partialBars: [],
     printedBars: 2,
     expectedFifths: 0,
     expectedTempo: { min: 90, max: 110 },

@@ -35,6 +35,29 @@ const movementSchema = z.object({
     meter: meterSchema,
     /** Pickup length in quarter-notes. 0 when the first bar is complete. */
     pickupQuarters: z.number().nonnegative(),
+    /**
+     * Printed bars SHORTER than the meter other than the anacrusis, as
+     * `{ bar, quarters }` in this pin's own numbering (the pickup is bar 0).
+     * Read off the ENGRAVING — the edition's own source, never the parser's
+     * output or the MIDI's wall clock.
+     *
+     * Without it `midiRef.place` strikes a uniform grid from the pickup, which
+     * only tracks the printed barlines while every bar is full. A first ending
+     * that borrows from the anacrusis prints a short bar mid-piece, and a
+     * reference read straight through (repeats not taken) carries that borrow:
+     * from there the uniform grid runs a fraction of a bar out of phase with
+     * the page, and every bar after it pairs two thirds of the right notes at
+     * the wrong onsets. Declaring the short bar puts the reference notes back in
+     * the bars the page draws.
+     */
+    partialBars: z
+        .array(
+            z.object({
+                bar: z.number().int().positive(),
+                quarters: z.number().positive(),
+            }),
+        )
+        .default([]),
     /** Engraved bars in the reference, including a numbered pickup as bar 0. */
     printedBars: z.number().int().positive(),
     /** Circle-of-fifths of the movement's home key. */
