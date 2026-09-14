@@ -1,6 +1,7 @@
 import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
+import { regridBars } from './barRegrid.js';
 import { DEFAULT_VELOCITY, MAX_VOICE_SLOT, TICKS_PER_QUARTER } from './scoreData.js';
 import type {
     ScoreClef,
@@ -1228,6 +1229,18 @@ export type RawEvent =
            * key is dropped.
            */
           spell?: { step: number; octave: number; alter: number; explicit: boolean };
+          /**
+           * Engraved `default-x` in tenths from the barline — where the head was
+           * actually printed, which is the only record of simultaneity that does
+           * not go through the writer's voice threading (see barRegrid.ts).
+           */
+          x?: number;
+          /**
+           * Printed stem direction. Within one engraved voice it is constant
+           * wherever the engraver forced it, so a change of direction inside a
+           * single <voice> marks two printed voices the writer ran together.
+           */
+          stem?: 'up' | 'down';
       }
     | {
           /**
@@ -1241,6 +1254,8 @@ export type RawEvent =
           voice: string;
           /** <rest measure="yes"/> — a whole-bar rest is a bar's length by definition and never edited. */
           measureRest: boolean;
+          /** Engraved `default-x` in tenths from the barline, as on a note. */
+          x?: number;
       }
     | {
           k: 'grace';
@@ -1689,6 +1704,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     const isRest = restEl !== null;
 
                     const noteStaff = childInt(child, 'staff') ?? 1;
+                    const headX = defaultXOf(child);
                     if (isRest && durTicks > 0) {
                         events.push({
                             k: 'rest',
@@ -1697,6 +1713,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             staff: noteStaff,
                             voice: childText(child, 'voice') ?? '1',
                             measureRest: restEl.getAttribute('measure') === 'yes',
+                            ...(headX !== null ? { x: headX } : {}),
                         });
                     }
                     let arts = lastArts.get(noteStaff) ?? PLAIN_ART;
@@ -1721,8 +1738,10 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const pitch = firstChild(child, 'pitch');
                         const accidental = firstChild(child, 'accidental') !== null;
                         const parsed = pitch ? pitchOf(pitch, accidental) : null;
-                        if (parsed && !duplicateNotehead(noteStaff, start, parsed.midi, defaultXOf(child))) {
+                        if (parsed && !duplicateNotehead(noteStaff, start, parsed.midi, headX)) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
+                            const stemText = childText(child, 'stem');
+                            const stem = stemText === 'up' || stemText === 'down' ? stemText : undefined;
                             const ornament = ornamentOf(child);
                             const type = childText(child, 'type');
                             const beam = beamOf(child);
@@ -1751,6 +1770,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 ...(glissando ? { glissando } : {}),
                                 ...(ornament ? { ornament } : {}),
                                 ...(arp ? { arpeggiate: arp } : {}),
+                                ...(headX !== null ? { x: headX } : {}),
+                                ...(stem ? { stem } : {}),
                             });
                         }
                     }
@@ -2943,7 +2964,11 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
     // After the meter verdict — a span of consistently long bars is a misread
     // signature, not a hundred lost dots — and before padding, which is the
-    // blunt fix for whatever the repair left alone.
+    // blunt fix for whatever the repair left alone. The regrid runs first: it
+    // puts the heads of a mis-threaded bar back where the page prints them, so
+    // the repair sees the bar's real shape instead of a voice pushed past the
+    // barline by a join it never made.
+    regridBars(raws, sigs, ctx.warnings);
     const rhythmRepairs = repairRhythm(raws, sigs, ctx.warnings);
     const placements = placeMeasures(raws, sigs, ctx);
 
