@@ -1,8 +1,8 @@
 # Engine patches (Audiveris 5.11.0)
 
-Cleffy ships stock Audiveris 5.11.0 from the official release `.deb` with exactly one
-recompiled class. This directory holds the vendored source, the diff against upstream, and
-the reasoning. `services/omr-service/Dockerfile` applies it in the `engine` build stage.
+Cleffy ships stock Audiveris 5.11.0 from the official release `.deb` with a small set of
+recompiled classes. This directory holds the vendored sources, the diffs against upstream, and
+the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` build stage.
 
 ## Provenance
 
@@ -12,7 +12,21 @@ the reasoning. `services/omr-service/Dockerfile` applies it in the `engine` buil
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-15` (`src/job.ts` `ENGINE_VERSION`) |
+| Engine revision | `audiveris-5.11.0+svc-16` (`src/job.ts` `ENGINE_VERSION`) |
+
+The Czerny ottava recovery adds these engine classes:
+
+| File | Vendored copy |
+| --- | --- |
+| `app/src/main/java/org/audiveris/omr/text/TextBuilder.java` | `src/org/audiveris/omr/text/TextBuilder.java` |
+| `app/src/main/java/org/audiveris/omr/sig/inter/OctaveShiftInter.java` | `src/org/audiveris/omr/sig/inter/OctaveShiftInter.java` |
+
+The combined diff for these two files is `0002-czerny-ottava.patch`. Its rule and artifact
+evidence are recorded in the repository's `docs/omr-rsi-czerny-localization.md`.
+
+These files remain pinned to Audiveris 5.11.0 and are compiled together with the existing
+`ClefBuilder` patch. Each engine algorithm change receives a new engine revision and a
+fresh full-corpus evaluation against the matching image.
 
 Re-fetch the pristine file to re-derive the diff. Upstream ships CRLF and the vendored copy is
 LF, so normalize before diffing or every line reads as changed:
@@ -23,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/Audiveris/audiveris/5.11.0/app/src/
 diff -u /tmp/ClefBuilder.upstream.java src/org/audiveris/omr/sheet/clef/ClefBuilder.java
 ```
 
-The checked-in diff is 271 added / 5 removed lines; nothing outside `ClefBuilder` is touched.
+Patch `0001` is 271 added / 5 removed lines and changes only `ClefBuilder`.
 
 ## 0001 — octave G clefs can never win the header (`promoteOctaveClef`)
 
@@ -111,7 +125,21 @@ Staff#1 octave clef G_CLEF_8VB grade:0.035 supersedes G_CLEF grade:0.798
     (digit 21 px beyond staff, plain grade decays 0.798 -> 0.166)
 ```
 
-## How the patch is applied
+## 0002 — recover an OCR octave mark with its printed dashed span
+
+`TextBuilder` can retain a printed `8va` as direction text while symbol recognition
+emits no octave-shift interpretation. Recovery requires the value glyph, an
+interline-scaled chain of short dashes anchored beside it above the staff, and a
+span reaching the system edge. Detached chains, interior spans, and existing
+overlapping octave interpretations are rejected. The measured line is passed to
+`OctaveShiftInter.createMeasured()`; the existing chord-linking and export paths
+apply the octave. A hook is retained only when source pixels support one.
+
+This first rule recovers Czerny Op. 821/1 measure 6. The misassigned continuation
+in measure 7 remains a separate defect; this patch does not move symbols between
+systems. Parser behavior, gate floors, and corpus allowances are unchanged.
+
+## How the patches are applied
 
 Two `Dockerfile` stages:
 
@@ -122,10 +150,11 @@ Two `Dockerfile` stages:
 2. Stage `engine` (`eclipse-temurin:25-jdk`) — the jar's classes are major version 69 (Java 25)
    and the `.deb`'s bundled jpackage runtime is Zulu 25, so the patch is compiled with
    `--release 25`:
-   - `javac` the vendored file against `lib/app/audiveris.jar` plus the rest of `lib/app/*`;
-   - `jar uf audiveris.jar org` — the recompiled `ClefBuilder.class` and its four inner classes
+   - `javac` the vendored classes against `lib/app/audiveris.jar` plus the rest of `lib/app/*`;
+   - `jar uf audiveris.jar org` — the recompiled classes and their inner classes
      replace the shipped ones **inside** the jar;
-   - `javap | grep promoteOctaveClef` — the build fails loudly if the update did not land.
+   - `javap` checks both `promoteOctaveClef` and `createMeasured`, failing the build
+     if either update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its
 `Audiveris.cfg` classpath and the bundled JRE are untouched, so nothing here has to be redone

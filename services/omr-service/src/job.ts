@@ -57,8 +57,10 @@ import type { ScoreData } from './scoreData.js';
  * losing the kind-keyed dedupe to the plain G_CLEF and transposing the whole page
  * up an octave. See engine-patches/README.md. First revision whose engine binary
  * differs from stock 5.11.0.
+ * svc-16: recover OCR octave marks only with a measured printed dash span,
+ * using TextBuilder and OctaveShiftInter while preserving normal chord linking.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-15';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-16';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

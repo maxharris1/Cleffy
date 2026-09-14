@@ -1,0 +1,327 @@
+--- a/app/src/main/java/org/audiveris/omr/sig/inter/OctaveShiftInter.java	Audiveris 5.11.0, CRLF normalized to LF
++++ b/app/src/main/java/org/audiveris/omr/sig/inter/OctaveShiftInter.java	Cleffy svc-16
+@@ -905,6 +905,53 @@
+         os.line = new Line2D.Double(center, new Point(center.x + lineLg, center.y));
+         os.setStaff(staff);
+ 
++        return os;
++    }
++
++    //-------------------//
++    // createMeasured    //
++    //-------------------//
++    /**
++     * Create an octave shift using a measured printed line.
++     * <p>
++     * This is used when the value glyph is recognized separately from its dashed extension.
++     * The ordinary {@link #create(Glyph, Shape, double, Staff)} path remains unchanged and
++     * continues to provide the default-size line for classifier-created symbols.
++     *
++     * @param glyph       value glyph retained by OCR
++     * @param shape       OTTAVA, QUINDICESIMA or VENTIDUESIMA
++     * @param grade       interpretation quality
++     * @param staff       related staff
++     * @param measured    actual left-to-right line span in sheet coordinates
++     * @param withHook    whether the measured span has a printed ending hook
++     * @return the created instance, or null when geometry/staff is invalid
++     */
++    public static Inter createMeasured (Glyph glyph,
++                                        Shape shape,
++                                        double grade,
++                                        Staff staff,
++                                        Line2D measured,
++                                        boolean withHook)
++    {
++        if ((staff == null) || (measured == null) || (measured.getX2() <= measured.getX1())
++                || (measured.getY1() != measured.getY2())) {
++            return null;
++        }
++
++        final OctaveShiftInter os = new OctaveShiftInter(glyph, shape, null, grade);
++        os.line = new Line2D.Double(measured.getP1(), measured.getP2());
++
++        // setStaff derives the kind and the default hook only after bounds exist. Materialize
++        // the bounds first, then retain a hook only when the source pixels proved one exists.
++        os.computeValueDimensions(staff.getSystem().getSheet());
++        os.getBounds();
++        os.setStaff(staff);
++
++        if (!withHook) {
++            os.hookEnd = null;
++        }
++
++        os.setBounds(null);
+         return os;
+     }
+ 
+--- a/app/src/main/java/org/audiveris/omr/text/TextBuilder.java	Audiveris 5.11.0, CRLF normalized to LF
++++ b/app/src/main/java/org/audiveris/omr/text/TextBuilder.java	Cleffy svc-16
+@@ -49,6 +49,7 @@
+ import org.audiveris.omr.sig.inter.LyricItemInter;
+ import org.audiveris.omr.sig.inter.LyricLineInter;
+ import org.audiveris.omr.sig.inter.MetronomeInter;
++import org.audiveris.omr.sig.inter.OctaveShiftInter;
+ import org.audiveris.omr.sig.inter.SentenceInter;
+ import org.audiveris.omr.sig.inter.WordInter;
+ import static org.audiveris.omr.text.TextRole.ChordName;
+@@ -70,6 +71,7 @@
+ import java.awt.Point;
+ import java.awt.Rectangle;
+ import java.awt.geom.Area;
++import java.awt.geom.Line2D;
+ import java.awt.geom.Point2D;
+ import java.util.ArrayList;
+ import java.util.Collection;
+@@ -205,6 +207,242 @@
+     //--------------------//
+     // createSystemInters //
+     //--------------------//
++
++    //-----------------------//
++    // recoverTextOttavas   //
++    //-----------------------//
++    /**
++     * Recover an ottava whose value has been retained by OCR while the fixed-symbol classifier
++     * did not create an interpretation. The measured dashed span is taken from the same pixels
++     * used to build the text glyph; no pitch or score-specific information is involved.
++     */
++    private void recoverTextOttavas (ByteProcessor buffer,
++                                     List<TextLine> lines)
++    {
++        final SIGraph sig = system.getSig();
++
++        for (TextLine line : lines) {
++            if (line.getRole() != TextRole.Direction) {
++                continue;
++            }
++
++            for (TextWord word : line.getWords()) {
++                if (!isOttavaText(word.getValue()) || (word.getGlyph() == null)) {
++                    continue;
++                }
++
++                final Point2D center = word.getCenter2D();
++                final Staff staff = system.getStaffAtOrBelow(center);
++
++                if ((staff == null) || (staff.getFirstLine().yAt(center.getX()) - center.getY()
++                        < sheet.getInterline())) {
++                    continue;
++                }
++
++                final Rectangle bounds = word.getBounds();
++                final Line2D dash = findDashedSpan(
++                        buffer,
++                        staff,
++                        bounds.x + bounds.width,
++                        staff.getAbscissa(org.audiveris.omr.util.HorizontalSide.RIGHT),
++                        (int) Math.rint(bounds.getCenterY()));
++
++                if (dash == null) {
++                    continue;
++                }
++
++                final int staffRight = staff.getAbscissa(org.audiveris.omr.util.HorizontalSide.RIGHT);
++                // This cycle proves only the open, system-edge form. Do not turn an interior
++                // dashed fragment into an octave shift, even if nearby ink resembles a hook.
++                if (dash.getX2() < (staffRight - sheet.getInterline())) {
++                    continue;
++                }
++                final boolean withHook = hasEndingHook(buffer, dash);
++
++                boolean alreadyPresent = false;
++                for (var inter : sig.inters(OctaveShiftInter.class)) {
++                    final OctaveShiftInter existing = (OctaveShiftInter) inter;
++                    final Line2D existingLine = existing.getLine();
++                    final int overlapTolerance = Math.max(1, (int) Math.rint(0.10 * sheet.getInterline()));
++                    final boolean sameSpan = (existingLine != null)
++                            && (Math.abs(existingLine.getY1() - dash.getY1()) <= overlapTolerance)
++                            && (Math.max(existingLine.getX1(), dash.getX1())
++                            <= (Math.min(existingLine.getX2(), dash.getX2()) + overlapTolerance));
++                    if ((existing.getGlyph() == word.getGlyph())
++                            || sameSpan) {
++                        alreadyPresent = true;
++                        break;
++                    }
++                }
++                if (alreadyPresent) {
++                    continue;
++                }
++
++                final Double grade = word.getConfidence();
++                final var os = OctaveShiftInter.createMeasured(
++                        word.getGlyph(),
++                        Shape.OTTAVA,
++                        (grade != null) ? grade : 1.0,
++                        staff,
++                        new Line2D.Double(bounds.x, dash.getY1(), dash.getX2(), dash.getY2()),
++                        withHook);
++
++                if (os != null) {
++                    sig.addVertex(os);
++                }
++            }
++        }
++    }
++
++    //------------------//
++    // findDashedSpan  //
++    //------------------//
++    /**
++     * Find a long sequence of short horizontal runs above a staff. This deliberately requires
++     * several separated runs and a substantial total span, which excludes ordinary text stems,
++     * staff lines and isolated punctuation.
++     */
++    private Line2D findDashedSpan (ByteProcessor buffer,
++                                   Staff staff,
++                                   int fromX,
++                                   int toX,
++                                   int anchorY)
++    {
++        final int interline = sheet.getInterline();
++        final int minDashWidth = Math.max(1, (int) Math.rint(0.30 * interline));
++        final int maxDashWidth = Math.max(minDashWidth + 1, (int) Math.rint(0.80 * interline));
++        final int maxGap = Math.max(1, (int) Math.rint(2.0 * interline));
++        final int top = (int) Math.rint(staff.getFirstLine().yAt(fromX));
++        final int yMin = Math.max(0, Math.max(top - (6 * interline), anchorY - interline));
++        final int yMax = Math.max(0, Math.min(top - (2 * interline), anchorY + interline));
++        final int left = Math.max(0, fromX);
++        final int right = Math.min(buffer.getWidth() - 1, toX);
++        Line2D best = null;
++
++        for (int y = yMin; y <= yMax; y++) {
++            final List<int[]> runs = new ArrayList<>();
++            int start = -1;
++
++            for (int x = left; x <= right + 1; x++) {
++                final boolean dark = (x <= right) && (buffer.getPixel(x, y) < 128);
++
++                if (dark && (start < 0)) {
++                    start = x;
++                } else if (!dark && (start >= 0)) {
++                    final int width = x - start;
++                    if ((width >= minDashWidth) && (width <= maxDashWidth)) {
++                        runs.add(new int[] { start, x - 1 });
++                    }
++                    start = -1;
++                }
++            }
++
++            if (runs.size() < 4) {
++                continue;
++            }
++
++            int first = runs.get(0)[0];
++            int last = runs.get(0)[1];
++            int count = 1;
++
++            if ((first - fromX) > interline) {
++                continue;
++            }
++
++            for (int i = 1; i < runs.size(); i++) {
++                final int[] run = runs.get(i);
++                if ((run[0] - last) > maxGap) {
++                    if ((count >= 4) && ((last - first) >= (6 * interline))
++                            && ((best == null) || ((last - first) > best.getX2() - best.getX1()))) {
++                        best = new Line2D.Double(first, y, last, y);
++                    }
++                    break;
++                } else {
++                    count++;
++                }
++                last = run[1];
++            }
++
++            if ((count >= 4) && ((last - first) >= (6 * interline))
++                    && ((best == null) || ((last - first) > best.getX2() - best.getX1()))) {
++                best = new Line2D.Double(first, y, last, y);
++            }
++        }
++
++        return best;
++    }
++
++    //------------------//
++    // hasEndingHook   //
++    //------------------//
++    /**
++     * Check for the short vertical ending hook in the source pixels immediately after a dash
++     * span. An interior span without this ink is rejected rather than given a fabricated hook.
++     */
++    private boolean hasEndingHook (ByteProcessor buffer,
++                                   Line2D dash)
++    {
++        final int interline = sheet.getInterline();
++        final int maxX = Math.min(
++                buffer.getWidth() - 1,
++                (int) Math.rint(dash.getX2()) + Math.max(1, (int) Math.rint(0.75 * interline)));
++        final int minHeight = Math.max(1, (int) Math.rint(0.40 * interline));
++        final int maxHookWidth = Math.max(1, (int) Math.rint(0.35 * interline));
++        final int yMin = Math.max(
++                0,
++                (int) Math.rint(dash.getY1()) - Math.max(1, (int) Math.rint(0.10 * interline)));
++        final int yMax = Math.min(
++                buffer.getHeight() - 1,
++                (int) Math.rint(dash.getY1()) + interline);
++        int hookStart = -1;
++
++        for (int x = (int) Math.rint(dash.getX2()) + 1; x <= maxX; x++) {
++            int first = -1;
++            int last = -1;
++
++            for (int y = yMin; y <= yMax + 1; y++) {
++                final boolean dark = (y <= yMax) && (buffer.getPixel(x, y) < 128);
++                if (dark && (first < 0)) {
++                    first = y;
++                } else if (!dark && (first >= 0)) {
++                    last = y - 1;
++                    break;
++                }
++            }
++
++            final boolean vertical = (first >= 0) && ((last - first + 1) >= minHeight);
++            if (vertical) {
++                if (hookStart < 0) {
++                    hookStart = x;
++                }
++            } else if (hookStart >= 0) {
++                if ((x - hookStart) <= maxHookWidth) {
++                    return true;
++                }
++                hookStart = -1;
++            }
++        }
++
++        if ((hookStart >= 0) && ((maxX + 1 - hookStart) <= maxHookWidth)) {
++            return true;
++        }
++
++        return false;
++    }
++
++    //-----------------//
++    // isOttavaText   //
++    //-----------------//
++    private static boolean isOttavaText (String value)
++    {
++        if (value == null) {
++            return false;
++        }
++
++        final String normalized = value.replaceAll("[^A-Za-z0-9]", "").toLowerCase();
++        return normalized.equals("8va") || normalized.equals("811a");
++    }
++
+     /**
+      * Allocate corresponding inters based on the role for each text line.
+      */
+@@ -1009,6 +1247,9 @@
+         watch.start("mapGlyphs");
+         mapGlyphs(lines, relSections, null);
+ 
++        // Recover printed ottava lines whose value was read as OCR text.
++        recoverTextOttavas(buffer, lines);
++
+         // Allocate corresponding inters based on role
+         // - Sentences of Words (or of one ChordName)
+         // - LyricLines of LyricItems

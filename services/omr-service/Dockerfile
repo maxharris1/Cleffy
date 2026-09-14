@@ -1,4 +1,4 @@
-# Cleffy OMR service: Audiveris 5.11.0 (headless, one patched class) + Node wrapper.
+# Cleffy OMR service: Audiveris 5.11.0 (headless, patched engine classes) + Node wrapper.
 #
 # The Audiveris release .deb bundles its own Java runtime (jpackage), so the
 # runtime image needs no system JDK. Audiveris OCR needs Tesseract *3.04 legacy*
@@ -31,8 +31,7 @@ RUN curl -fsSL -o /tmp/audiveris.deb \
     && rm /tmp/audiveris.deb
 
 # ---------------------------------------------------------------------------
-# Engine stage: recompile the single patched class into the shipped
-# audiveris.jar.
+# Engine stage: recompile the patched classes into the shipped audiveris.jar.
 #
 # The jar's classes are major version 69 (Java 25) and the bundled jpackage
 # runtime is Zulu 25, so the patch must be compiled by a JDK 25 with
@@ -54,10 +53,14 @@ RUN set -eux; \
     javac --release 25 -nowarn -encoding UTF-8 \
         -cp "$app/audiveris.jar:$app/*" \
         -d /work/patch-classes \
-        engine-patches/src/org/audiveris/omr/sheet/clef/ClefBuilder.java; \
+        engine-patches/src/org/audiveris/omr/sheet/clef/ClefBuilder.java \
+        engine-patches/src/org/audiveris/omr/sig/inter/OctaveShiftInter.java \
+        engine-patches/src/org/audiveris/omr/text/TextBuilder.java; \
     (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
-        | grep -q promoteOctaveClef
+        | grep -q promoteOctaveClef; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.inter.OctaveShiftInter \
+        | grep -q createMeasured
 
 FROM node:22-bookworm-slim
 RUN apt-get update \

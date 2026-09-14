@@ -1,11 +1,11 @@
 # OMR play-along benchmark
 
-engine: audiveris-5.11.0+svc-15  audiveris: - Version:      5.11.0
+engine: audiveris-5.11.0+svc-16  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T15:04:10.141Z
+generated: 2026-09-14T15:16:54.874Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
-**Play-along score 95.0%** · 5/16 pieces pass the gate
+**Play-along score 95.2%** · 6/16 pieces pass the gate
 
 Rates are weighted by reference notes, not by piece. A piece whose `meters`
 check failed could not bind a tick slice, so its rates are void rather than
@@ -13,7 +13,7 @@ measured — read its failure list, not its percentages.
 
 | Piece | Pages | Ref notes | Pitch | +Onset | +Length | Miss | Extra | Composite | Gate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 | 1 | 152 | 92.1% | 92.1% | 92.1% | 0 | 0 | 85.3 | FAIL |
+| Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 | 1 | 152 | 97.4% | 97.4% | 97.4% | 0 | 0 | 88.4 | pass |
 | Bach — Little Prelude in C, BWV 939 | 1 | 179 | 100.0% | 100.0% | 95.0% | 0 | 16 | 100.0 | FAIL |
 | Bach (attrib.) — Air in F, BWV Anh. 131 | 1 | 97 | 100.0% | 94.8% | 93.8% | 0 | 0 | 89.0 | FAIL |
 | Bach — Invention 1 in C, BWV 772 | 2 | 458 | 95.0% | 95.0% | 94.1% | 23 | 37 | 96.2 | FAIL |
@@ -27,13 +27,9 @@ measured — read its failure list, not its percentages.
 | Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie) | 1 | 303 | 100.0% | 100.0% | 99.7% | 0 | 2 | 100.0 | pass |
 | Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) | 1 | 279 | 85.3% | 82.8% | 82.8% | 39 | 39 | 74.8 | FAIL |
 | Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
-| Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.0% | 24 | 24 | 86.6 | FAIL |
+| Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.3% | 24 | 24 | 86.6 | FAIL |
 | Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.0% | 97.3% | 2 | 1 | 95.4 | FAIL |
-| **suite** | | **5996** | **97.3%** | **95.8%** | **95.0%** | **119** | **161** | | **5/16** |
-
-## Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 — 1 failed check(s)
-
-- No. 1: attack-grid (exact 92.1% vs floor 95.0%)
+| **suite** | | **5996** | **97.5%** | **95.9%** | **95.2%** | **119** | **161** | | **6/16** |
 
 ## Bach — Little Prelude in C, BWV 939 — 1 failed check(s)
 
