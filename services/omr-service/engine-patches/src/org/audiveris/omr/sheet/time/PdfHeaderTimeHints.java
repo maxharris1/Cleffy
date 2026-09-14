@@ -241,12 +241,12 @@ public final class PdfHeaderTimeHints
         int excluded = 0;
         final List<Placed> placed = new ArrayList<>();
         for (Hint hint : hints) {
-            final Path2D sheetPath = PdfQuarterRestHints.toLoaderSheetPath(
-                    hint,
+            final AffineTransform loaderAt = PdfQuarterRestHints.loaderPdfToSheet(
+                    hint.pageBox,
                     dpi,
                     sheet.getWidth(),
                     sheet.getHeight());
-            if (sheetPath == null) {
+            if (loaderAt == null) {
                 logger.info(
                         "PDF header time skipped: loader canvas mismatch dpi={} sheet={}x{} page={}",
                         dpi,
@@ -255,6 +255,7 @@ public final class PdfHeaderTimeHints
                         hint.pageBox);
                 return maxHeaderWidth;
             }
+            final Path2D sheetPath = new Path2D.Double(hint.pdfPath, loaderAt);
             final Rectangle2D outline = sheetPath.getBounds2D();
             final Integer staffIndex = PdfQuarterRestHints.uniqueStaff(outline, anchors);
             if (staffIndex == null) {

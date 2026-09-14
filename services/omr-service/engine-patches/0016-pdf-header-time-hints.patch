@@ -69,8 +69,8 @@ diff --git a/app/src/main/java/org/audiveris/omr/sheet/header/HeaderBuilder.java
 diff --git a/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java b/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java
 new file mode 100644
 --- /dev/null	2026-09-14 17:24:27.717934764 +0000
-+++ b/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java	2026-09-14 23:21:52.415705530 +0000
-@@ -0,0 +1,809 @@
++++ b/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java	2026-09-14 23:25:52.617924964 +0000
+@@ -0,0 +1,810 @@
 +package org.audiveris.omr.sheet.time;
 +
 +import org.apache.pdfbox.Loader;
@@ -314,12 +314,12 @@ new file mode 100644
 +        int excluded = 0;
 +        final List<Placed> placed = new ArrayList<>();
 +        for (Hint hint : hints) {
-+            final Path2D sheetPath = PdfQuarterRestHints.toLoaderSheetPath(
-+                    hint,
++            final AffineTransform loaderAt = PdfQuarterRestHints.loaderPdfToSheet(
++                    hint.pageBox,
 +                    dpi,
 +                    sheet.getWidth(),
 +                    sheet.getHeight());
-+            if (sheetPath == null) {
++            if (loaderAt == null) {
 +                logger.info(
 +                        "PDF header time skipped: loader canvas mismatch dpi={} sheet={}x{} page={}",
 +                        dpi,
@@ -328,6 +328,7 @@ new file mode 100644
 +                        hint.pageBox);
 +                return maxHeaderWidth;
 +            }
++            final Path2D sheetPath = new Path2D.Double(hint.pdfPath, loaderAt);
 +            final Rectangle2D outline = sheetPath.getBounds2D();
 +            final Integer staffIndex = PdfQuarterRestHints.uniqueStaff(outline, anchors);
 +            if (staffIndex == null) {
