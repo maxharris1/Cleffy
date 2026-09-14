@@ -1,8 +1,8 @@
 # OMR play-along benchmark
 
-engine: audiveris-5.11.0+svc-20  audiveris: - Version:      5.11.0
+engine: audiveris-5.11.0+svc-21  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T17:06:12.817Z
+generated: 2026-09-14T18:25:10.595Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
 **Play-along score 95.4%** · 7/16 pieces pass the gate

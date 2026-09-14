@@ -1,10 +1,59 @@
 # OMR RSI cycle 15
 
-**Candidate pending host bench.** The supplied official cycle-14 host report is
+**Candidate pending a matching-engine host bench.** The supplied official cycle-14 host report is
 7/16, 95.41360907271515% on-grid, 117 missing and 159 extra notes. This cycle
 reverts cycle 14 under its kill criteria (see the [cycle-14 ledger](omr-rsi-cycle-14.md))
 and uses the locked implementer/host split: Astra and Luna implement and validate
 source; the host alone runs OMR and `services/omr-service/src/eval/`.
+
+## Supplied host result at `72bd29b`
+
+The next official host table remains **7/16**, 95.41360907271515% on-grid,
+117 missing and 159 extra notes. Every piece metric and failed check is
+unchanged from the supplied svc-20 table. All seven protected passes remain
+green in that official result; Air remains at 92/97 exact notes with
+`measure_underfull`. No target recovery or pass flip is credited.
+
+However, the host identifies its container as `cleffy-rsi-omr-20`, while the
+new `bench.json` labels itself `audiveris-5.11.0+svc-21`. The report generated
+at `2026-09-14T18:25:10.595Z` is preserved unchanged in
+`services/omr-service/eval/results/bench/`; its SHA256 is
+`b2783a943762f642b094c813f79d2d5fa7a820d75d7aa4d5b9e30e4878f17cc3`.
+The earlier cycle-14 report is preserved in commit `72bd29b`.
+
+Read-only extraction of the saved MusicXML confirms the mismatch. Each
+svc-21 cache entry below has byte-identical score XML to svc-20, including
+the cycle-14 changes that this candidate explicitly rolled back:
+
+| Piece | svc-20 and mislabeled svc-21 score XML SHA256 |
+| --- | --- |
+| Air | `7f573f6852d8c5d957182ff02eb9907ea7659a81a2bcb4c9493fef665af516a4` |
+| Anh. 116 | `fc8caa4a8c03e1317ef2173a603d65f9be853b44085dfefa10c2e90dae857cab` |
+| BWV 939 | `4379b1d9a6bb9e8eaee310968a6b09fdbd6ef38fb6fff6a43aabbc93df9c107b` |
+
+The official numbers are accepted as the observed result, but they do not
+establish execution of the quarter-rest patch. Cycle 14 stays rejected for
+its invented slur. Cycle 15 stays unaccepted and pending; the primary-rest
+kill criterion cannot be attributed to code the host has not shown it ran.
+No second recognition hypothesis is stacked on it.
+
+The owning bookkeeping seam is `src/eval/candidate.ts`: `fromPdf` previously
+used the checkout's `ENGINE_VERSION` for both the cache key and metadata,
+while `readAudiverisVersion` checked only the upstream 5.11.0 version. The
+host wrapper can fall back to an older running container. The follow-up
+therefore checks the selected container's built service revision before
+loading or creating artifacts, and requires observed engine provenance for
+cache reuse in the new `observedEngineVersion` metadata field. The PDF hash,
+options, declared engine, and observed engine must all match. Legacy or
+mismatching entries are cleared before regeneration, and failed exports
+receive no verification metadata. This changes artifact attribution, not the comparator, gates,
+floors, pins, parser, or recognition hypothesis.
+
+The host must select a built svc-21 container and regenerate the unverified
+svc-21 cache entries. An error about a mismatching engine is an environment
+failure, not a new suite result: do not repost an older `bench.md` as the
+result of that attempt. The implementer has not modified or run the host
+wrapper, Docker, Audiveris, or a benchmark.
 
 ## Hypothesis → layer → diff
 
@@ -34,13 +83,24 @@ previously promoted confidence as supporting evidence.
 
 The ordinary `InterFactory` and weak-inter cleanup retain authority over the
 candidate. No rest is derived from bar length or desired timing. Parser,
-scorer, options, pins, allowances, gate floors, and deployed generation stay
+comparison, options, pins, allowances, gate floors, and deployed generation stay
 as before. `ENGINE_VERSION` advances to svc-21 to separate host artifacts.
 
 ## Local validation
 
-Service build and typecheck pass; all 509 fixture/fake-process unit tests pass
-in 29 files. These are source checks, not a piece or suite pass claim.
+At candidate preparation (`72bd29b`), service build and typecheck passed with
+509 fixture/fake-process unit tests in 29 files. After the provenance fix,
+service build and typecheck pass with **520 tests in 29 files**. The added
+checks run the version-reading script against fake source (including comments,
+missing exports, and read failures), reject an older container before an
+engine command, reuse verified cache entries, regenerate each mismatching
+metadata field without stale files, and leave failed exports unverified.
+All Docker/export operations in these checks are fakes. These are source
+checks, not a piece or suite pass claim.
+
+The two rest-template production sources retain their exact `72bd29b`
+hashes below. The provenance follow-up does not change the engine revision
+or introduce another recognition hypothesis.
 
 All seven active vendored Java sources compile together with `javac --release
 25` against the official Audiveris 5.11.0 release libraries, without executing
