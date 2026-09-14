@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-19` (`src/job.ts` `ENGINE_VERSION`) |
+| Engine revision | `audiveris-5.11.0+svc-20` (`src/job.ts` `ENGINE_VERSION`; cycle 14 candidate pending host bench) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -179,6 +179,38 @@ the probe against the patched jar and run its
 `org.audiveris.omr.sheet.ledger.EvidenceControls` class with the PNG path.
 It fails if any expected positive or negative result changes. This is a manual
 engine probe; CI does not run Audiveris.
+
+## 0005 — use the head center for horizontal slur concavity
+
+`SlurLinker.selectBestHead` previously tested an above slur against the far
+edge of each candidate head. On `bach-prelude-bwv939`, that reference admits
+the upper C5 head of a two-head chord while the printed horizontal tie belongs
+to the lower A4 head. The cycle-14 localization records the target geometry,
+the competing dot products, and the unchanged distance ranking.
+
+The candidate changes one reference point in
+`src/org/audiveris/omr/sheet/curve/SlurLinker.java`: horizontal curves use the
+existing physical head center for the concavity test; nonhorizontal curves
+keep the existing bounds-edge rule. Lookup-area containment, the strict dot
+inequality, and closest-head selection are unchanged. No pitch continuity,
+chord-wide tie copying, curve invention, parser change, or scoring change is
+included.
+
+The reproducible diff is `0005-slur-head-concavity.patch`, derived from the
+Audiveris 5.11.0 `SlurLinker.java` source (upstream SHA-256
+`d9f92f97b42aad8c3763bdae7db35b272b394b2154014c03b665baaf12fbe797`) and
+the vendored candidate (SHA-256
+`463c486183d85a64e295acac2fe0d411711b73a080c39e8ee2434bb843494c10`). As
+with the earlier patches, normalize upstream CRLF to LF before applying the
+diff.
+
+This candidate is intended for engine revision `audiveris-5.11.0+svc-20`.
+The isolated BWV 939 probe keeps the neighboring C5 upper tie and lower E4
+tie controls intact and removes the localized A4 extra. The official fresh
+host full-suite validation is pending, so this patch carries no suite or
+piece acceptance claim. It must be killed if a protected pass turns red, an
+accepted tie is lost without page evidence, or any gain depends on an invented
+curve or changed scoring.
 
 ## How the patches are applied
 

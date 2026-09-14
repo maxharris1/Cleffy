@@ -1,0 +1,11 @@
+--- a/app/src/main/java/org/audiveris/omr/sheet/curve/SlurLinker.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/curve/SlurLinker.java
+@@ -606 +606,3 @@
+-            // Check head reference point WRT slur concavity
++            // A horizontal curve must embrace the head center. Using its far edge
++            // can select a neighboring chord head on the opposite side of the curve.
++            // Keep the existing bounds-edge rule for nonhorizontal slurs.
+@@ -608 +610,2 @@
+-            Point refPt = new Point(center.x, bounds.y + (above ? (bounds.height - 1) : 0));
++            Point refPt = horizontal ? center
++                    : new Point(center.x, bounds.y + (above ? (bounds.height - 1) : 0));
