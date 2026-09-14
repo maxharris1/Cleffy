@@ -346,6 +346,11 @@ export const planRepeats = (
     let i = 0;
     let afterJump = false;
     let performsRepeats = false;
+    // A bare :| starts a new section after its final pass. Keep this separate
+    // from the repeat pass while a volta is being skipped: the next ending in
+    // the same repeat still needs the old pass number, but a later bare :| must
+    // not reuse the exhausted section's anchor.
+    let resetBareSectionAfterEnding = false;
     let performsJumps = false;
     // A jump buys the performance up to one whole extra traversal of the score.
     const guard = 6 * n + 64;
@@ -382,6 +387,12 @@ export const planRepeats = (
             const skipTo = pastEndingBlock(marks, i);
             if (skipTo <= i) {
                 return linear(n, true);
+            }
+            if (!afterJump && marks.slice(i, skipTo).some((candidate) => candidate?.repeatBackward)) {
+                // The first ending often carries the only :|. On the next
+                // pass it is skipped, so the reset cannot happen at that
+                // backward mark; defer it until the matching ending closes.
+                resetBareSectionAfterEnding = true;
             }
             i = skipTo;
             continue;
@@ -422,6 +433,20 @@ export const planRepeats = (
                 i = jump.codaTarget;
                 continue;
             }
+        }
+
+        if (!afterJump && resetBareSectionAfterEnding && mark.endingStop) {
+            // Keep the current volta's pass for the bar just emitted, then
+            // make the following printed section a fresh bare-repeat section.
+            lastForward = i + 1;
+            passOf.set(lastForward, 1);
+            resetBareSectionAfterEnding = false;
+        } else if (!afterJump && mark.repeatBackward && pass >= mark.repeatTimes) {
+            // An exhausted bare backward repeat must not lend its old anchor
+            // or pass counter to a later bare backward repeat. An explicit
+            // |: encountered later will replace this anchor as usual.
+            lastForward = i + 1;
+            passOf.set(lastForward, 1);
         }
         i += 1;
     }
@@ -558,7 +583,9 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
         }
     }
 
-    const point = <T extends { tick: number; k?: 'down' | 'up' }>(events: readonly T[] | undefined): T[] | undefined => {
+    const point = <T extends { tick: number; k?: 'down' | 'up' }>(
+        events: readonly T[] | undefined,
+    ): T[] | undefined => {
         if (!events) {
             return undefined;
         }

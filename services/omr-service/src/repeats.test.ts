@@ -52,6 +52,47 @@ describe('planRepeats', () => {
         expect(result.order).toEqual([0, 1, 2, 0, 1, 2]);
     });
 
+    it('starts each successive bare repeat at the new section anchor', () => {
+        const result = plan([
+            ...Array.from({ length: 7 }, () => bar()),
+            bar({ repeatBackward: true }),
+            ...Array.from({ length: 8 }, () => bar()),
+            bar({ repeatBackward: true }),
+        ]);
+        expect(result.order).toEqual([
+            0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 8, 9, 10, 11, 12, 13, 14,
+            15, 16,
+        ]);
+        expect(result.degraded).toBe(false);
+        expect(result.performsRepeats).toBe(true);
+    });
+
+    it('starts after a completed volta before a later bare repeat', () => {
+        const result = plan([
+            bar({ repeatForward: true }),
+            bar({ endingStart: [1], endingStop: true, repeatBackward: true }),
+            bar({ endingStart: [2], endingStop: true }),
+            bar(),
+            bar({ repeatBackward: true }),
+        ]);
+        expect(result.order).toEqual([0, 1, 0, 2, 3, 4, 3, 4]);
+        expect(result.degraded).toBe(false);
+    });
+
+    it('does not retake successive bare repeats after a jump', () => {
+        const result = plan([
+            bar(),
+            bar({ repeatBackward: true }),
+            bar(),
+            bar({ repeatBackward: true }),
+            bar({ jump: dc() }),
+        ]);
+        expect(result.order).toEqual([0, 1, 0, 1, 2, 3, 2, 3, 4, 0, 1, 2, 3, 4]);
+        expect(result.degraded).toBe(false);
+        expect(result.performsRepeats).toBe(true);
+        expect(result.performsJumps).toBe(true);
+    });
+
     it('does not replay a pickup on the way round', () => {
         // Bar 0 is a pickup: played once on the way in, never again.
         const result = plan([bar(), bar(), bar({ repeatBackward: true })], LIMITS, (i) => i === 0);
@@ -602,7 +643,13 @@ describe('unrollRepeats', () => {
         // tick 0, the one tick with no bar before it to claim it. Bar 0 takes
         // it, on each pass, so the down that follows still alternates.
         const out = unrollRepeats(
-            { ...linear, pedals: [{ tick: 0, k: 'up' as const }, { tick: 479, k: 'down' as const }] },
+            {
+                ...linear,
+                pedals: [
+                    { tick: 0, k: 'up' as const },
+                    { tick: 479, k: 'down' as const },
+                ],
+            },
             [0, 1, 0, 1, 2],
         );
         expect(out.pedals).toEqual([
@@ -615,7 +662,13 @@ describe('unrollRepeats', () => {
 
     it('gives every pass its release when the pedal lifts on the repeat bar line', () => {
         const out = unrollRepeats(
-            { ...linear, pedals: [{ tick: 0, k: 'down' as const }, { tick: 960, k: 'up' as const }] },
+            {
+                ...linear,
+                pedals: [
+                    { tick: 0, k: 'down' as const },
+                    { tick: 960, k: 'up' as const },
+                ],
+            },
             [0, 1, 0, 1, 2],
         );
         // The 'up' sits on the bar line the repeat jumps from. Each pass must
