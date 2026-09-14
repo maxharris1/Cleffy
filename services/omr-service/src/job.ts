@@ -77,8 +77,10 @@ import type { ScoreData } from './scoreData.js';
  * barline at the captured fragment time.
  * svc-28: recover named PDF quarter-rest glyphs (`rests.2`) as ordinary
  * SYMBOLS evaluations before LINKS cleanup.
+ * svc-29: use the PDF loader's float DPI scale for named quarter-rest
+ * outlines instead of the rounded raster canvas.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-28';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-29';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

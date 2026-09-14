@@ -39,6 +39,7 @@ import org.audiveris.omr.sheet.Scale;
 import org.audiveris.omr.sheet.Sheet;
 import org.audiveris.omr.sheet.Staff;
 import org.audiveris.omr.sheet.SystemInfo;
+import org.audiveris.omr.sheet.clef.PdfClefHints;
 import org.audiveris.omr.sig.SIGraph;
 import org.audiveris.omr.sig.inter.Inter;
 import org.audiveris.omr.sig.inter.SmallChordInter;
@@ -57,6 +58,7 @@ import org.slf4j.LoggerFactory;
 
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.awt.geom.AffineTransform;
 import java.awt.geom.Path2D;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
@@ -67,6 +69,7 @@ import java.util.Collections;
 import java.util.EnumSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -284,6 +287,13 @@ public class SymbolsBuilder
             return raster;
         }
 
+        final Integer dpiValue = PdfQuarterRestHints.effectivePdfDpi();
+        if (dpiValue == null) {
+            logger.info("PDF quarter rest skipped: missing ImageLoading.pdfResolution");
+            return raster;
+        }
+        final float dpi = dpiValue.floatValue();
+
         final List<PdfQuarterRestHints.Hint> hints = PdfQuarterRestHints.scan(
                 input,
                 sheet.getStub().getNumber() - 1);
@@ -294,6 +304,16 @@ public class SymbolsBuilder
         final ByteProcessor noStaff = sheet.getPicture().getSource(Picture.SourceKey.NO_STAFF);
         final ByteProcessor binary = sheet.getPicture().getSource(Picture.SourceKey.BINARY);
         if ((noStaff == null) || (binary == null)) {
+            return raster;
+        }
+        if ((binary.getWidth() != sheet.getWidth()) || (binary.getHeight() != sheet.getHeight())
+                || (noStaff.getWidth() != sheet.getWidth())
+                || (noStaff.getHeight() != sheet.getHeight())) {
+            logger.info("PDF quarter rest skipped: picture {}x{} != sheet {}x{}",
+                    binary.getWidth(),
+                    binary.getHeight(),
+                    sheet.getWidth(),
+                    sheet.getHeight());
             return raster;
         }
 
@@ -325,11 +345,22 @@ public class SymbolsBuilder
         PdfQuarterRestHints.Agreement agreement = null;
         Path2D matchedPath = null;
         for (PdfQuarterRestHints.Hint hint : hints) {
-            final Path2D sheetPath = PdfQuarterRestHints.toSheetPath(
+            final Path2D canvasPath = PdfQuarterRestHints.toSheetPath(
                     hint,
                     sheet.getWidth(),
                     sheet.getHeight());
+            final Path2D sheetPath = PdfQuarterRestHints.toLoaderSheetPath(
+                    hint,
+                    dpi,
+                    sheet.getWidth(),
+                    sheet.getHeight());
             if (sheetPath == null) {
+                logger.info(
+                        "PDF quarter rest skipped: loader canvas mismatch dpi={} sheet={}x{} page={}",
+                        dpi,
+                        sheet.getWidth(),
+                        sheet.getHeight(),
+                        hint.pageBox);
                 continue;
             }
             final Rectangle2D outline = sheetPath.getBounds2D();
@@ -341,6 +372,7 @@ public class SymbolsBuilder
             if ((staffIndex == null) || (staves.get(staffIndex) != closestStaff)) {
                 continue;
             }
+            final Rectangle glyphBox = glyph.getBounds();
             final PdfQuarterRestHints.PixelSource restInk = (px, py) -> glyph.contains(
                     new Point(px, py));
             final PdfQuarterRestHints.PixelSource staffLine = (px, py) -> {
@@ -355,7 +387,36 @@ public class SymbolsBuilder
             final PdfQuarterRestHints.Agreement ag = PdfQuarterRestHints.measure(
                     sheetPath,
                     restInk,
-                    staffLine);
+                    staffLine,
+                    glyphBox);
+            final AffineTransform canvasAt = (canvasPath == null) ? null
+                    : PdfClefHints.pdfToSheet(hint.pageBox, sheet.getWidth(), sheet.getHeight());
+            final AffineTransform loaderAt = PdfQuarterRestHints.loaderPdfToSheet(
+                    hint.pageBox,
+                    dpi,
+                    sheet.getWidth(),
+                    sheet.getHeight());
+            final Rectangle2D canvasBox = (canvasPath == null) ? null : canvasPath.getBounds2D();
+            logger.info(
+                    "PDF quarter rest {} glyph#{} staff#{} glyphBox=({},{},{},{}) canvasAt={} loaderAt={} canvasBox={} loaderBox={} outline={} glyphInk={} both={} skip={} recallO={} recallG={} iou={}",
+                    hint.glyphName,
+                    glyph.getId(),
+                    closestStaff.getId(),
+                    glyphBox.x,
+                    glyphBox.y,
+                    glyphBox.width,
+                    glyphBox.height,
+                    matrixOf(canvasAt),
+                    matrixOf(loaderAt),
+                    boxOf(canvasBox),
+                    boxOf(outline),
+                    ag.outlineCount,
+                    ag.glyphCount,
+                    ag.both,
+                    ag.staffLineSkipped,
+                    ag.recallOutline(),
+                    ag.recallGlyph(),
+                    ag.iou());
             if (!ag.agrees()) {
                 logger.info(
                         "PDF quarter rest {} rejected: recallO={} recallG={} iou={} skip={} glyph#{}",
@@ -421,6 +482,34 @@ public class SymbolsBuilder
                 agreement.staffLineSkipped,
                 agreement.confidence());
         return out.toArray(Evaluation[]::new);
+    }
+
+    private static String matrixOf (AffineTransform at)
+    {
+        if (at == null) {
+            return "null";
+        }
+        return String.format(
+                Locale.ROOT,
+                "[sx=%s sy=%s tx=%s ty=%s]",
+                at.getScaleX(),
+                at.getScaleY(),
+                at.getTranslateX(),
+                at.getTranslateY());
+    }
+
+    private static String boxOf (Rectangle2D box)
+    {
+        if (box == null) {
+            return "null";
+        }
+        return String.format(
+                Locale.ROOT,
+                "(%.4f,%.4f,%.4f,%.4f)",
+                box.getX(),
+                box.getY(),
+                box.getWidth(),
+                box.getHeight());
     }
 
     //------------------//

@@ -259,12 +259,126 @@ public final class PdfQuarterRestHints
     }
 
     /**
+     * PDFBox {@code renderImageWithDPI} scale: {@code dpi / 72f}. Image size is
+     * not a drawing scale.
+     */
+    public static float loaderScale (float dpi)
+    {
+        return dpi / 72f;
+    }
+
+    /**
+     * Canvas allocated by PDFBox for this crop and DPI, using floor of the
+     * float products. Returns {@code null} when the page or DPI is unusable.
+     */
+    public static int[] expectedCanvas (Rectangle2D pageBox,
+                                          float dpi)
+    {
+        if ((pageBox == null) || (dpi <= 0) || (pageBox.getWidth() <= 0)
+                || (pageBox.getHeight() <= 0)) {
+            return null;
+        }
+        final float scale = loaderScale(dpi);
+        final float widthPt = (float) pageBox.getWidth();
+        final float heightPt = (float) pageBox.getHeight();
+        return new int[] {
+                (int) Math.max(Math.floor(widthPt * scale), 1),
+                (int) Math.max(Math.floor(heightPt * scale), 1)};
+    }
+
+    /**
+     * Loader PDF-to-sheet transform: float DPI scale, crop origin, y flip.
+     * Image dimensions verify the expected canvas; they do not set the scale.
+     * Returns {@code null} when DPI, crop, or canvas is inconsistent.
+     */
+    public static AffineTransform loaderPdfToSheet (Rectangle2D pageBox,
+                                                       float dpi,
+                                                       int sheetWidth,
+                                                       int sheetHeight)
+    {
+        if ((pageBox == null) || (dpi <= 0) || (sheetWidth <= 0) || (sheetHeight <= 0)
+                || (pageBox.getWidth() <= 0) || (pageBox.getHeight() <= 0)) {
+            return null;
+        }
+        final int[] canvas = expectedCanvas(pageBox, dpi);
+        if ((canvas == null) || (canvas[0] != sheetWidth) || (canvas[1] != sheetHeight)) {
+            return null;
+        }
+        final float scale = loaderScale(dpi);
+        final float cropX = (float) pageBox.getX();
+        final float cropY = (float) pageBox.getY();
+        final float cropH = (float) pageBox.getHeight();
+        return new AffineTransform(
+                scale,
+                0,
+                0,
+                -scale,
+                -cropX * scale,
+                (cropY + cropH) * scale);
+    }
+
+    public static Path2D toLoaderSheetPath (Hint hint,
+                                              float dpi,
+                                              int sheetWidth,
+                                              int sheetHeight)
+    {
+        if (hint == null) {
+            return null;
+        }
+        final AffineTransform at = loaderPdfToSheet(hint.pageBox, dpi, sheetWidth, sheetHeight);
+        if (at == null) {
+            return null;
+        }
+        return new Path2D.Double(hint.pdfPath, at);
+    }
+
+    /**
+     * {@code ImageLoading.pdfResolution} as passed to PDFBox. Missing
+     * configuration returns {@code null} so callers keep the old raster path.
+     */
+    public static Integer effectivePdfDpi ()
+    {
+        try {
+            final Class<?> loading = Class.forName("org.audiveris.omr.image.ImageLoading");
+            final java.lang.reflect.Field constantsField = loading.getDeclaredField("constants");
+            constantsField.setAccessible(true);
+            final Object constants = constantsField.get(null);
+            if (constants == null) {
+                return null;
+            }
+            final java.lang.reflect.Field dpiField = constants.getClass().getDeclaredField(
+                    "pdfResolution");
+            dpiField.setAccessible(true);
+            final Object dpiConstant = dpiField.get(constants);
+            if (!(dpiConstant instanceof org.audiveris.omr.constant.Constant.Integer integer)) {
+                return null;
+            }
+            return integer.getValue();
+        } catch (ReflectiveOperationException ex) {
+            return null;
+        }
+    }
+
+    /**
      * Compare the transformed outline to rest-shaped ink. Staff-line pixels are
      * skipped in both directions so staff removal cannot score as a miss.
      */
     public static Agreement measure (Path2D outline,
                                        PixelSource restInk,
                                        PixelSource staffLine)
+    {
+        return measure(outline, restInk, staffLine, null);
+    }
+
+    /**
+     * Same agreement as {@link #measure(Path2D, PixelSource, PixelSource)},
+     * scanning the union of outline and glyph bounds so glyph ink outside the
+     * outline box is counted.
+     */
+    public static Agreement measure (Path2D outline,
+                                       PixelSource restInk,
+                                       PixelSource staffLine,
+                                       Rectangle2D glyphBounds)
     {
         if ((outline == null) || (restInk == null)) {
             return new Agreement(0, 0, 0, 0);
@@ -273,10 +387,15 @@ public final class PdfQuarterRestHints
         if ((box.getWidth() < 3) || (box.getHeight() < 6)) {
             return new Agreement(0, 0, 0, 0);
         }
-        final int x0 = (int) Math.floor(box.getX());
-        final int y0 = (int) Math.floor(box.getY());
-        final int x1 = (int) Math.ceil(box.getMaxX());
-        final int y1 = (int) Math.ceil(box.getMaxY());
+        Rectangle2D scan = box;
+        if ((glyphBounds != null) && (glyphBounds.getWidth() > 0)
+                && (glyphBounds.getHeight() > 0)) {
+            scan = box.createUnion(glyphBounds);
+        }
+        final int x0 = (int) Math.floor(scan.getX());
+        final int y0 = (int) Math.floor(scan.getY());
+        final int x1 = (int) Math.ceil(scan.getMaxX());
+        final int y1 = (int) Math.ceil(scan.getMaxY());
         int outlineCount = 0;
         int glyphCount = 0;
         int both = 0;
