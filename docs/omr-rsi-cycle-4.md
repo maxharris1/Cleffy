@@ -39,6 +39,15 @@ MusicXML lines**, while two runs of the *same* image differ identically
 - `CURRENT_ENGINE_GENERATION` 14→15 app-side; `DEPLOYED_ENGINE_GENERATION`
   stays 6 until the image actually deploys.
 
+## Full-bench outcome (orchestrator run at `b0fce9b`, engine svc-15, full re-run)
+
+**Suite onGrid 85.2% → 93.4%, pass 4/16 (unchanged).** bwv999 exactly at the
+single-piece prediction (100.0 / 95.7 / 95.7, 0 miss / 0 extra, FAIL only on
+`bar-length` 2 of 43 + warning). Every other piece reproduced its previous
+rates exactly under the fresh engine run except fur-elise onGrid 94.0→94.3,
+the already-diagnosed dot/staccato jitter. Suite missing 197→121, extra
+239→163. Fully attributed — no unexplained deltas.
+
 ## Expected full-bench outcome (to be attributed against)
 
 - bwv999 onGrid 0.4 → ~95.7 on 509 notes → suite onGrid ≈ 85.2 + ~8.1 ≈
