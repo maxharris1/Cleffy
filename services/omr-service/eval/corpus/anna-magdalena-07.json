@@ -1,0 +1,42 @@
+{
+    "slug": "anna-magdalena-07",
+    "title": "Bach — Menuet in G, BWV Anh. 116",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh116/anna-magdalena-07/anna-magdalena-07-let.pdf",
+        "sha256": "9d53fe19d452a7e601e45786ecf860f30d45398912b1a6d47b656bcb96b4b86e",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWVAnh116/anna-magdalena-07/anna-magdalena-07.mid",
+        "sha256": "d304586f42030116f2996a140022dc4b93eee63f12226a337c6f29117441dc7c",
+        "license": "Public Domain (Mutopia 2013/01/06-77, Allen Garvin after Bach-Gesellschaft). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Menuet",
+            "midi": "anna-magdalena-07.mid",
+            "meter": {
+                "num": 3,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 40,
+            "expectedFifths": 1,
+            "expectedTempo": {
+                "min": 105,
+                "max": 145
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 80,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "LilyPond \\tempo 4 = 125 in 3/4, G major. Two bar-checked \\repeat volta 2 blocks of 16 and 24 bars (printed 40, which matches the MIDI; performed 16x2 + 24x2 = 80). Mutopia does not unfold them.",
+        "Third member of the anna-magdalena set with 04 and 05, and the one with UNEQUAL repeat halves — so performedBars is not just twice printedBars, which is exactly the arithmetic a count-only repeat check can get wrong.",
+        "Two \\times 2/3 triplets in the second half, which is what the 1/12-quarter onset quantum exists for.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+    ]
+}

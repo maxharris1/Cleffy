@@ -1,0 +1,44 @@
+{
+    "slug": "fur-elise-mutopia",
+    "title": "Beethoven — Für Elise, WoO 59 (Mutopia typeset)",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59-let.pdf",
+        "sha256": "c5b64f7ad614e8737ed4710e8b7ebeb8359e85c64935767b9e49bfd164b3eba4",
+        "pages": 3
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.mid",
+        "sha256": "1c12c21c7bbf4cf163896732672648a69d497636059837abd153c71abe50215a",
+        "license": "Public Domain (Mutopia 2015/08/18-931, Stelios Samelis after Breitkopf & Härtel 1888). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Poco moto",
+            "midi": "fur_Elise_WoO59.mid",
+            "meter": {
+                "num": 3,
+                "den": 8
+            },
+            "pickupQuarters": 0.5,
+            "printedBars": 105,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 60,
+                "max": 84
+            },
+            "repeatsUnfoldedInMidi": false,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "Same musical text as the `fur-elise` pin, but the PDF is the Mutopia LilyPond typeset at reference.url's sibling — so PDF, MIDI and .ly all come from one source and the whole entry is fetchable. `fur-elise` keeps the IMSLP scan for the hosted-vs-local shootout; do not cross the two.",
+        "LilyPond \\tempo 4 = 72 under a transparent MetronomeMark; the printed heading is 'Poco moto.' in 3/8 with a one-eighth pickup (pickupQuarters 0.5).",
+        "performedBars is deliberately NOT pinned. The .ly carries two \\repeat volta 2 blocks whose \\alternative endings use \\set Timing.measurePosition to borrow an eighth across the barline, so the printed bar numbering is irregular and a performed-bar count cannot be read off the source by hand. An unpinned performedBars makes performedBarsMatch null and the repeat gate skips this movement rather than asserting a number nobody verified. Close it by rendering the .ly with LilyPond and reading the last bar number of an unfolded score.",
+        "printedBars 105 is the uniform-3/8 bar count the MIDI produces (verify with `run` — refBars in the summary), not LilyPond's printed numbering, which the measurePosition borrowing shifts.",
+        "A minor throughout (expectedFifths 0).",
+        "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle.",
+        "No ornament signs (the \\grace and \\appoggiatura figures are ordinary notes in the reference MIDI), so expectedExtraNotes is 0."
+    ]
+}
