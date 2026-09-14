@@ -612,10 +612,14 @@ public final class PdfClefBeamCrossings
     private static Path2D unionPath (Path2D a,
                                        Path2D b)
     {
-        return (Path2D) union(a, b);
+        return new Path2D.Double(union(a, b));
     }
 
+    private static Shape union (Shape a,
+                                  Shape b)
+    {
         final Area area = new Area(a);
         area.add(new Area(b));
         return area;
+    }
 }
