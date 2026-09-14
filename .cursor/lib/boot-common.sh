@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Slim shared cloud boot helpers for Cleffy.
-# Boots local Supabase only — no OMR container, no billing stack.
+# Boots local Supabase, and the OMR worker when image `cleffy-omr` is already
+# present (start never rebuilds). Billing stack is not part of this boot.
 
 boot_common_init_repo() {
     if [ -z "${BOOT_COMMON_REPO_ROOT:-}" ]; then
@@ -104,6 +105,7 @@ cleanup_stale_stack() {
     boot_common_init_repo
     boot_common_log "Cleaning stale Supabase containers..."
     remove_stale_compose_containers "supabase_.*_$(boot_common_project_id)$"
+    remove_stale_compose_containers "cleffy-local-omr"
 
     if supabase_running_ok; then
         boot_common_log "Supabase healthy — leaving running stack; swept non-running supabase_* only."
@@ -196,7 +198,8 @@ EOF
 # any SUPABASE_-prefixed name in this file ("Env name cannot start with SUPABASE_").
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 ANALYZE_NOTES_MODEL=${ANALYZE_NOTES_MODEL:-}
-# OMR: set by scripts/local-up.sh; left blank in the cloud agent stack.
+# OMR: same contract as scripts/local-up.sh. Cloud start exports these when
+# image cleffy-omr is present; otherwise they stay empty and functions skip OMR.
 OMR_SERVICE_URL=${OMR_SERVICE_URL:-}
 OMR_SERVICE_SECRET=${OMR_SERVICE_SECRET:-}
 OMR_QUEUE_MODE=${OMR_QUEUE_MODE:-push}
@@ -282,17 +285,97 @@ _boot_stack_require() {
     return 1
 }
 
-# Shared stack bring-up for start.sh. Local Supabase only — does not start OMR.
+boot_common_omr_image() {
+    echo "${CLEFFY_OMR_IMAGE:-cleffy-omr}"
+}
+
+boot_common_omr_host_port() {
+    echo "${CLEFFY_LOCAL_OMR_PORT:-8091}"
+}
+
+omr_image_present() {
+    docker image inspect "$(boot_common_omr_image)" >/dev/null 2>&1
+}
+
+# Same local-only contract as scripts/local-up.sh. The secret is the well-known
+# local default, not a hosted credential. Call only when we will start OMR.
+export_omr_local_env() {
+    export OMR_SERVICE_SECRET="${OMR_SERVICE_SECRET:-${OMR_SERVICE_SECRET_LOCAL:-cleffy-local-omr-secret}}"
+    export OMR_QUEUE_MODE="${OMR_QUEUE_MODE:-push}"
+    export OMR_SERVICE_URL="${OMR_SERVICE_URL:-http://cleffy-local-omr:8080}"
+}
+
+wait_omr_healthz() {
+    local port="$1"
+    local attempt
+    for attempt in $(seq 1 15); do
+        if curl -sf "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# Start the baked OMR image. Never rebuilds. Missing image or a start failure
+# is logged; callers must not treat this as a boot-stack hard failure.
+start_omr_container() {
+    boot_common_init_repo
+    local image network port secret
+    image="$(boot_common_omr_image)"
+
+    if ! omr_image_present; then
+        boot_common_log "OMR image ${image} missing — skipping (Supabase continues)"
+        return 0
+    fi
+
+    network="supabase_network_$(boot_common_project_id)"
+    if ! docker network inspect "$network" >/dev/null 2>&1; then
+        boot_common_log "OMR skip: docker network ${network} not found"
+        return 0
+    fi
+
+    boot_common_env_defaults
+    secret="${OMR_SERVICE_SECRET:-${OMR_SERVICE_SECRET_LOCAL:-cleffy-local-omr-secret}}"
+    port="$(boot_common_omr_host_port)"
+    boot_common_log "Starting OMR ${image} as cleffy-local-omr (host :${port}→8080, no rebuild)"
+
+    if ! CLEFFY_LOCAL_OMR_SECRET="$secret" \
+        CLEFFY_LOCAL_SERVICE_ROLE_KEY="$LOCAL_SERVICE_ROLE_KEY" \
+        CLEFFY_LOCAL_OMR_PORT="$port" \
+        CLEFFY_LOCAL_SUPABASE_NETWORK="$network" \
+        docker compose -f docker-compose.local.yml -p cleffy-local up -d --no-build; then
+        boot_common_log "WARN: OMR compose up failed — continuing without OMR"
+        return 0
+    fi
+
+    if wait_omr_healthz "$port"; then
+        boot_common_log "OK: OMR healthz on :${port}"
+    else
+        boot_common_log "WARN: OMR container started but healthz not ready on :${port}"
+    fi
+    return 0
+}
+
+# Shared stack bring-up for start.sh. Local Supabase always; OMR only if the
+# image is already present (install / snapshot owns the build).
 boot_stack() {
     local mode="${1:-cold}"
     local db_container
 
     boot_common_init_repo
     BOOT_STACK_FAILURES=()
-    boot_common_log "boot_stack mode=${mode} (supabase only; OMR skipped)"
+    boot_common_log "boot_stack mode=${mode}"
 
     cleanup_stale_stack
     boot_common_log "OK: stale container cleanup"
+
+    if omr_image_present; then
+        export_omr_local_env
+        boot_common_log "OMR image present — writing OMR_SERVICE_URL for the local stack"
+    else
+        boot_common_log "OMR image missing — OMR_SERVICE_URL left empty"
+    fi
 
     write_env_files
     _boot_stack_require "env files" test -f .env.local -a -f supabase/functions/.env
@@ -305,6 +388,8 @@ boot_stack() {
     else
         _boot_stack_record_failure "supabase_db container missing"
     fi
+
+    start_omr_container
 
     [ "${#BOOT_STACK_FAILURES[@]}" -eq 0 ]
 }

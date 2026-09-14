@@ -3,7 +3,7 @@
         "dockerfile": "Dockerfile",
         "context": ".."
     },
-    "install": "npm ci",
+    "install": "npm ci\nbash .cursor/ensure-omr-image.sh",
     "start": "bash .cursor/start.sh",
     "terminals": [
         {
