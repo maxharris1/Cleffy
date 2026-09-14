@@ -90,7 +90,7 @@ RUN set -eux; \
         | grep -q isFragment; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
         | grep -q mergeQuarterRest; \
-    javap -c -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
         | grep -q PdfQuarterRestHints; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBars \
         | grep -q repair; \
