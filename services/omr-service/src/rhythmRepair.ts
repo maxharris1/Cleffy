@@ -95,6 +95,47 @@ const extentOf = (items: readonly Item[]): number =>
         0,
     );
 
+/**
+ * The last tick the voice would still be sounding after `candidate`.
+ *
+ * A voice that ends on the barline is the whole of the evidence the guard above
+ * rests on; an edit that would carry one PAST it is refuted the same way, and by
+ * the same fact about bars. A voice whose sum is short because the rest of the
+ * bar belongs to another voice is the common case — filling it up would push its
+ * tail out of the bar and stretch the bar to fit.
+ */
+const extentAfter = (items: readonly Item[], candidate: Candidate): number => {
+    let end = 0;
+    let shift = 0;
+    for (let index = 0; index < items.length; index++) {
+        const item = items[index];
+        if (!item) {
+            continue;
+        }
+        if (candidate.kind === 'delete_rest' && index === candidate.index) {
+            shift -= item.principal.dur;
+            continue;
+        }
+        const edited = candidate.newDur !== undefined && index === candidate.index;
+        const dur = edited ? (candidate.newDur ?? item.principal.dur) : item.principal.dur;
+        const rel = item.principal.rel + shift;
+        end = Math.max(end, rel + dur);
+        for (const member of item.members) {
+            end = Math.max(end, rel + (edited ? dur : member.dur));
+        }
+        if (edited) {
+            shift += dur - item.principal.dur;
+        }
+    }
+    if (candidate.kind === 'insert_rest') {
+        const last = items[items.length - 1];
+        if (last) {
+            end = Math.max(end, last.principal.rel + last.principal.dur + (candidate.restDur ?? 0));
+        }
+    }
+    return end;
+};
+
 /** Onset rels after applying `candidate`, i.e. the rhythm the voice would then have. */
 const patternAfter = (items: readonly Item[], candidate: Candidate): number[] => {
     const rels = items.map((item) => item.principal.rel);
@@ -520,6 +561,9 @@ export const repairRhythm = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Si
             }
             const witnesses = neighbourPatterns(raws, sigs, pos, key, expected);
             const chosen = candidatesFor(items, sum, expected).find((candidate) => {
+                if (extentAfter(items, candidate) > expected) {
+                    return false;
+                }
                 const pattern = patternAfter(items, candidate);
                 return witnesses.some((w) => sameOnsets(w, pattern)) || beamGroupAligns(items, candidate, beat);
             });
