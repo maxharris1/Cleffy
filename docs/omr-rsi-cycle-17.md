@@ -1,14 +1,7 @@
 # OMR RSI cycle 17 — PDF change-clef identity
 
-**Candidate pending official host bench.** Hypothesis from Astra; this commit
-implements the one PDF change-clef recovery. No Audiveris run and no new
-official score. The host builds matching svc-23 and benches with
-`services/omr-service/src/eval/`.
-
-The original writeup follows. The bounded contract is implemented as
-`PdfClefHints` plus a `Column.selectClefs()` hook after header choices. Patch
-0007 is kept. Cycle 14/15 patches are not reopened. This does not promise a
-`schumann-op68-05` piece pass.
+**Candidate pending official host bench.** Implemented on `mh/omr-rsi-notes-fixes-c12b`.
+Engine `audiveris-5.11.0+svc-23`. No Audiveris run by this implementer.
 
 ## Official starting point and cycle-16 attribution
 
@@ -190,25 +183,6 @@ Missing source or ambiguous evidence must skip recovery, not trigger a guess.
 
 An attributable partial improvement may be kept under these criteria even
 while Schumann's independent bar split stays red; record the remaining
-failures honestly. **16/16 remains the goal.**
-
-## Implementation landed for host bench
-
-`PdfClefHints` scans the book's PDF page with bundled PDFBox 3.0.6. It admits
-only embedded-font encoding names `clefs.G_change` and `clefs.F_change`,
-transforms the glyph outline with the text rendering matrix concatenated to the
-font matrix, and maps PDF user space through the page box onto the sheet.
-`ClefBuilder.Column.selectClefs()` runs this after every header `selectClef()`
-and does not call `findClefs()` / `registerClefs()`. A unique staff plus
-clef-line anchor is required. Outline-clipped `NO_STAFF` ink must agree;
-bounding-box overlap, the nearby dynamic `p`, blank pixels, rotation, shear
-and reduced clips fall through. An existing same-staff `ClefInter` that
-intersects the outline, including G/F octave variants, is left untouched.
-
-Standalone controls recovered the pinned Schumann glyph
-(`SMPQBM+Emmentaler-20`, sheet outline `(501.4,898.3,42.6,126.6)` at 2550×3300)
-and rejected ordinary G/F names, dynamic `p`, blank ink, wrong-staff placement,
-header coverage and duplicate scans. Engine revision is `audiveris-5.11.0+svc-23`.
-Deployed generation 15, floors, allowances, pins, parser and scorer are unchanged.
-No Audiveris/Docker/official bench was run by this implementer.
-
+failures honestly. **16/16 remains the goal.** This cycle changes only this
+hypothesis document. Astra has not edited engine/parser code, committed an
+implementation, executed Audiveris/Docker, or run a benchmark.

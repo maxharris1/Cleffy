@@ -259,7 +259,8 @@ and before HEADS. Only those two encoding names in an embedded vector font are
 admitted. Ordinary header G/F glyphs stay on the existing path. Missing outlines,
 invisible text, rotation, shear, reduced clipping and blank ink fall through.
 
-The helper is `sheet/clef/PdfClefHints.java`. The vendored `ClefBuilder` hook
+The helper is `sheet/clef/PdfClefHints.java`. The reproducible patch is
+`0008-pdf-clef-hints.patch`. The vendored `ClefBuilder` hook
 does not call `findClefs()` / `registerClefs()` and does not move `clefStop`.
 An existing same-staff `ClefInter`, including G/F octave variants, is never
 duplicated, moved, replaced or downgraded. Grade comes from outline-clipped
