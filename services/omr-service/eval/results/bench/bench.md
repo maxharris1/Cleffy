@@ -1,11 +1,11 @@
 # OMR play-along benchmark
 
-engine: audiveris-5.11.0+svc-18  audiveris: - Version:      5.11.0
+engine: audiveris-5.11.0+svc-19  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T15:56:03.946Z
+generated: 2026-09-14T16:35:36.004Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
-**Play-along score 95.2%** · 7/16 pieces pass the gate
+**Play-along score 95.3%** · 7/16 pieces pass the gate
 
 Rates are weighted by reference notes, not by piece. A piece whose `meters`
 check failed could not bind a tick slice, so its rates are void rather than
@@ -17,19 +17,19 @@ measured — read its failure list, not its percentages.
 | Bach — Little Prelude in C, BWV 939 | 1 | 179 | 100.0% | 100.0% | 95.0% | 0 | 16 | 100.0 | FAIL |
 | Bach (attrib.) — Air in F, BWV Anh. 131 | 1 | 97 | 100.0% | 94.8% | 93.8% | 0 | 0 | 89.0 | FAIL |
 | Bach — Invention 1 in C, BWV 772 | 2 | 458 | 95.0% | 95.0% | 94.1% | 23 | 37 | 96.2 | FAIL |
-| Bach — Invention 8 in F, BWV 779 | 2 | 598 | 99.7% | 98.7% | 97.8% | 2 | 0 | 99.5 | FAIL |
+| Bach — Invention 8 in F, BWV 779 | 2 | 598 | 99.8% | 99.0% | 98.7% | 1 | 0 | 99.7 | FAIL |
 | Bach — Prelude in D minor, BWV 999 | 2 | 509 | 100.0% | 100.0% | 100.0% | 0 | 0 | 90.0 | pass |
 | Bach — WTC I Prelude 1 in C, BWV 846 | 2 | 549 | 96.2% | 94.4% | 94.0% | 17 | 14 | 86.9 | FAIL |
 | Petzold / Bach — Menuet in G, BWV Anh. 114 | 1 | 204 | 99.5% | 99.5% | 96.6% | 1 | 10 | 89.6 | pass |
 | Bach — Menuet in G minor, BWV Anh. 115 | 1 | 199 | 100.0% | 100.0% | 97.5% | 0 | 12 | 90.0 | pass |
-| Bach — Menuet in G, BWV Anh. 116 | 1 | 310 | 99.0% | 96.5% | 95.8% | 3 | 2 | 98.8 | FAIL |
+| Bach — Menuet in G, BWV Anh. 116 | 1 | 310 | 99.4% | 96.8% | 96.1% | 2 | 1 | 99.0 | FAIL |
 | Burgmüller — 25 Études faciles, Op. 100 No. 2 (Arabesque) | 1 | 283 | 100.0% | 100.0% | 100.0% | 0 | 0 | 90.0 | pass |
 | Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie) | 1 | 303 | 100.0% | 100.0% | 99.7% | 0 | 2 | 100.0 | pass |
 | Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) | 1 | 279 | 85.3% | 82.8% | 82.8% | 39 | 39 | 74.8 | FAIL |
 | Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
 | Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.0% | 24 | 24 | 86.6 | FAIL |
 | Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.3% | 97.8% | 2 | 1 | 95.5 | pass |
-| **suite** | | **5996** | **97.5%** | **96.0%** | **95.2%** | **119** | **161** | | **7/16** |
+| **suite** | | **5996** | **97.5%** | **96.0%** | **95.3%** | **117** | **160** | | **7/16** |
 
 ## Bach — Little Prelude in C, BWV 939 — 1 failed check(s)
 
@@ -46,10 +46,9 @@ measured — read its failure list, not its percentages.
 - Invention 1: no-invented-notes (37 extra (12 explained by printed ornaments), 2 allowed)
 - Invention 1: attack-grid (exact 95.0% vs floor 95.0%)
 
-## Bach — Invention 8 in F, BWV 779 — 2 failed check(s)
+## Bach — Invention 8 in F, BWV 779 — 1 failed check(s)
 
-- bach-invention-08: bar-length-warning (measure_underfull + measure_overfull)
-- Invention 8: bar-length (1 of 34 bars are not the printed length)
+- bach-invention-08: bar-length-warning (measure_underfull)
 
 ## Bach — WTC I Prelude 1 in C, BWV 846 — 5 failed check(s)
 

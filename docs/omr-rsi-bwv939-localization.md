@@ -28,10 +28,14 @@ Its `sheet#1/sheet#1.xml` contains:
   repeats C3 as attacks.  A linker or parser change cannot safely recreate
   the C3 ties from this artifact: the curve evidence is absent at the OMR
   boundary.
-* For m7--8, curve 4383 survives on the A4 heads 1538/1546, while curves
+* For m7--8, curve 4383 survives on the E4 heads 1538/1546, while curves
   4386 and 4389 both link to the C5 heads 1443/1447.  The emitted MusicXML
-  has the two C5 stop ties and no A4 stop tie.  This is an engine-side
-  tie-state/serialization discrepancy, not a `musicxml.ts` parser defect.
+  has the E4 tie, two C5 stop ties, and no A4 stop tie. The earlier packet
+  mislabeled head pitch position 4 as A4; on this treble staff it is E4.
+  Astra checked the exact svc-15 OMR (`last-persistent-id=4588`) against
+  its MusicXML. Serialization faithfully follows those relations. The
+  second upper curve is linked to the wrong chord member; the responsible
+  seam is head selection, not export or `musicxml.ts`.
 * The 300 dpi OMR has no slur object for the printed m14--15 F3 tie, so this
   site is also lost before MusicXML parsing.
 
@@ -53,8 +57,12 @@ Audiveris tie-link path (`SlurLinker.selectBestHead` / `lookupLinkPair`, with
 multi-head chords, retain the head whose staff pitch is continuous across the
 two endpoints, and preserve separate curves as separate head relations.  Do
 not copy a tie to every chord member.  This would be testable on the m8 case,
-where a surviving below curve is associated with A4 while duplicate above
-curves are associated with C5.
+where the below curve correctly belongs to E4 while both upper curves are
+associated with C5. Upper curve 4386 ends near y=1300 and curve 4389 near
+y=1320; the latter must be investigated against the printed A4 head. The
+current `selectBestHead` concavity check uses a head's lower edge for an
+above curve, allowing a C5 whose center lies above that second curve endpoint.
+This is a concrete next probe, not evidence that the rule is already fixed.
 
 The 300-to-400 dpi comparison does not establish that this source rule is the
 cause, and it cannot recover m2/m3 C3 without inventing missing curve evidence.

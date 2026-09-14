@@ -56,14 +56,17 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/sheet/clef/ClefBuilder.java \
         engine-patches/src/org/audiveris/omr/sig/inter/OctaveShiftInter.java \
         engine-patches/src/org/audiveris/omr/text/TextBuilder.java \
-        engine-patches/src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java; \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java; \
     (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
         | grep -q promoteOctaveClef; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.inter.OctaveShiftInter \
         | grep -q createMeasured; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.TupletsBuilder \
-        | grep -q findBracketSpan
+        | grep -q findBracketSpan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.ledger.LedgersPostAnalysis \
+        | grep -q hasAttachedHeadStemInk
 
 FROM node:22-bookworm-slim
 RUN apt-get update \

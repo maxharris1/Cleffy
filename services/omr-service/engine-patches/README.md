@@ -12,7 +12,7 @@ the reasoning. `services/omr-service/Dockerfile` applies them in the `engine` bu
 | File | `app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Vendored copy | `src/org/audiveris/omr/sheet/clef/ClefBuilder.java` |
 | Diff vs upstream | `0001-clefbuilder-octave-g-clef.patch` |
-| Engine revision | `audiveris-5.11.0+svc-18` (`src/job.ts` `ENGINE_VERSION`) |
+| Engine revision | `audiveris-5.11.0+svc-19` (`src/job.ts` `ENGINE_VERSION`) |
 
 The Czerny ottava recovery adds these engine classes:
 
@@ -154,7 +154,31 @@ from the same Audiveris 5.11.0 tag. The reproducible upstream diff is
 `0003-tuplet-bracket-span.patch`. Evidence and negative controls are recorded in
 `docs/omr-rsi-chopin-symbol-localization.md`. No duration or pitch is inferred
 from bar length, and no scoring rule changes. Revision 17 remains reserved for
-the rejected option experiment; this accepted engine uses revision 18.
+the rejected option experiment; this change first shipped in revision 18.
+
+## 0004 — retain a ledger supported by attached head and stem ink
+
+`LedgersPostAnalysis` can discard a geometrically accepted first ledger below
+a staff because its ordinate lies just beyond the learned delta distribution.
+The added check retains only an upper-delta outlier whose height already passes,
+whose staff distance is within 0.15 interline of one interline, and whose source
+pixels contain a connected filled body with an attached stem at its edge.
+Existing extraction, ledger grade, height, and other post-analysis checks remain.
+Clef, text, and short-mark controls reject. No head or rhythm is synthesized;
+the normal head-recognition pass consumes the retained ledger.
+
+The vendored source is `src/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java`
+and its upstream diff is `0004-ledger-attached-head.patch`. The Invention 8
+localization packet records the target and controls. This change does not fix
+the separate final-bar rest omission.
+
+`probes/EvidenceControls.java` checks the final helper on the exact Invention 8
+baseline `sheet#1/BINARY.png`: the printed ledger/head, real clef/text strokes,
+a short horizontal fragment, and a target copy with its stem erased. Compile
+the probe against the patched jar and run its
+`org.audiveris.omr.sheet.ledger.EvidenceControls` class with the PNG path.
+It fails if any expected positive or negative result changes. This is a manual
+engine probe; CI does not run Audiveris.
 
 ## How the patches are applied
 
@@ -170,7 +194,8 @@ Two `Dockerfile` stages:
    - `javac` the vendored classes against `lib/app/audiveris.jar` plus the rest of `lib/app/*`;
    - `jar uf audiveris.jar org` — the recompiled classes and their inner classes
      replace the shipped ones **inside** the jar;
-   - `javap` checks `promoteOctaveClef`, `createMeasured`, and `findBracketSpan`,
+   - `javap` checks `promoteOctaveClef`, `createMeasured`, `findBracketSpan`, and
+     `hasAttachedHeadStemInk`,
      failing the build if an update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its

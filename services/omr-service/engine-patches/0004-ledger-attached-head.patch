@@ -1,0 +1,169 @@
+--- a/app/src/main/java/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java
+@@ -28,0 +29 @@
++import org.audiveris.omr.sheet.Picture;
+@@ -38,0 +40,4 @@
++import ij.process.ByteProcessor;
++
++import java.awt.Point;
++import java.awt.Rectangle;
+@@ -40,0 +46 @@
++import java.util.ArrayDeque;
+@@ -299 +305,3 @@
+-                discard(info.ledger);
++                if (!"DELTA".equals(dD) || !hH.isBlank() || !hasAttachedHeadStemInk(info)) {
++                    discard(info.ledger);
++                }
+@@ -301,0 +310,152 @@
++    }
++
++    /**
++     * Verify page evidence for a head attached to a stem at the first virtual
++     * ledger below a staff. The ledger step runs before HeadInter construction,
++     * so this deliberately uses connected source pixels and staff-relative
++     * geometry, without piece-specific coordinates or object ids.
++     */
++    private boolean hasAttachedHeadStemInk (Info info)
++    {
++        if (info.key != 1) {
++            return false;
++        }
++
++        final double il = info.staff.getSpecificInterline();
++        final ByteProcessor binary = sheet.getPicture().getSource(Picture.SourceKey.BINARY);
++        return hasAttachedHeadStemInk(binary, info.ledger.getBounds(), il, info.delta);
++    }
++
++    static boolean hasAttachedHeadStemInk (ByteProcessor binary,
++                                           Rectangle ledgerBox,
++                                           double il,
++                                           double delta)
++    {
++        if (Math.abs(delta - il) > (0.15 * il)) {
++            return false;
++        }
++
++        final double cy = ledgerBox.y + (ledgerBox.height / 2.0);
++        final int x0 = Math.max(0, (int) Math.floor(ledgerBox.x - (0.5 * il)));
++        final int x1 = Math.min(binary.getWidth() - 1,
++                                (int) Math.ceil(ledgerBox.x + ledgerBox.width + (0.5 * il)));
++        final int y0 = Math.max(0, (int) Math.floor(cy - (0.75 * il)));
++        final int y1 = Math.min(binary.getHeight() - 1, (int) Math.ceil(cy + (0.75 * il)));
++        final boolean[][] visited = new boolean[y1 - y0 + 1][x1 - x0 + 1];
++
++        for (int y = y0; y <= y1; y++) {
++            for (int x = x0; x <= x1; x++) {
++                if (visited[y - y0][x - x0]
++                        || ledgerBox.contains(x, y)
++                        || binary.getPixel(x, y) >= 128) {
++                    continue;
++                }
++
++                int area = 0;
++                int minX = x;
++                int maxX = x;
++                int minY = y;
++                int maxY = y;
++                final ArrayDeque<Point> queue = new ArrayDeque<>();
++                final boolean[][] component = new boolean[y1 - y0 + 1][x1 - x0 + 1];
++                queue.add(new Point(x, y));
++                visited[y - y0][x - x0] = true;
++                component[y - y0][x - x0] = true;
++
++                while (!queue.isEmpty()) {
++                    final Point p = queue.removeFirst();
++                    area++;
++                    minX = Math.min(minX, p.x);
++                    maxX = Math.max(maxX, p.x);
++                    minY = Math.min(minY, p.y);
++                    maxY = Math.max(maxY, p.y);
++
++                    for (int dy = -1; dy <= 1; dy++) {
++                        for (int dx = -1; dx <= 1; dx++) {
++                            if ((dx == 0) && (dy == 0)) {
++                                continue;
++                            }
++
++                            final int nx = p.x + dx;
++                            final int ny = p.y + dy;
++                            if ((nx < x0) || (nx > x1) || (ny < y0) || (ny > y1)
++                                    || visited[ny - y0][nx - x0]
++                                    || ledgerBox.contains(nx, ny)
++                                    || binary.getPixel(nx, ny) >= 128) {
++                                continue;
++                            }
++
++                            visited[ny - y0][nx - x0] = true;
++                            component[ny - y0][nx - x0] = true;
++                            queue.addLast(new Point(nx, ny));
++                        }
++                    }
++                }
++
++                final int width = maxX - minX + 1;
++                final int height = maxY - minY + 1;
++                final double occupancy = (double) area / (width * (double) height);
++                if ((area < (int) Math.round(0.10 * il * il))
++                        || (width < (int) Math.round(0.9 * il))
++                        || (height < (int) Math.round(0.5 * il))
++                        || (occupancy < 0.20)) {
++                    continue;
++                }
++
++                if (hasEdgeAttachedStem(binary, ledgerBox, component, x0, y0, minX, maxX, minY, maxY, il)) {
++                    return true;
++                }
++            }
++        }
++
++        return false;
++    }
++
++    private static boolean hasEdgeAttachedStem (ByteProcessor binary,
++                                                Rectangle ledgerBox,
++                                                boolean[][] component,
++                                                int componentX0,
++                                                int componentY0,
++                                                int minX,
++                                                int maxX,
++                                                int minY,
++                                                int maxY,
++                                                double il)
++    {
++        final int stemX0 = Math.max(0, (int) Math.floor(minX - (0.15 * il)));
++        final int stemX1 = Math.min(binary.getWidth() - 1, (int) Math.ceil(maxX + (0.15 * il)));
++        final int scanY0 = Math.max(0, (int) Math.floor(ledgerBox.y - il));
++        final int scanY1 = Math.min(binary.getHeight() - 1, ledgerBox.y - 1);
++
++        for (int x = stemX0; x <= stemX1; x++) {
++            final boolean atEdge = (x <= minX + (int) Math.ceil(0.2 * il))
++                    || (x >= maxX - (int) Math.ceil(0.2 * il));
++            if (!atEdge) {
++                continue;
++            }
++
++            int run = 0;
++            int runEnd = -1;
++            for (int y = scanY0; y <= scanY1; y++) {
++                if (binary.getPixel(x, y) < 128) {
++                    run++;
++                    runEnd = y;
++                    if ((run >= (int) Math.round(0.5 * il))
++                            && (runEnd >= (minY - 2))
++                            && (runEnd <= (maxY + 2))) {
++                        for (int linkY = Math.max(minY, runEnd - 2); linkY <= Math.min(maxY, runEnd + 2); linkY++) {
++                            for (int linkX = Math.max(minX, x - 1); linkX <= Math.min(maxX, x + 1); linkX++) {
++                                if (component[linkY - componentY0][linkX - componentX0]) {
++                                    return true;
++                                }
++                            }
++                        }
++                    }
++                } else {
++                    run = 0;
++                    runEnd = -1;
++                }
++            }
++        }
++
++        return false;

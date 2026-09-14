@@ -61,8 +61,9 @@ import type { ScoreData } from './scoreData.js';
  * using TextBuilder and OctaveShiftInter while preserving normal chord linking.
  * svc-17 was a rejected implicit-tuplet option experiment (RSI cycle 11).
  * svc-18: limit tuplet beam siblings to a measured printed bracket span.
+ * svc-19: retain delta-outlier ledgers supported by connected head and stem ink.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-18';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-19';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
