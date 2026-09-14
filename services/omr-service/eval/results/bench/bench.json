@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-12T21:04:21.916Z",
+  "generatedAt": "2026-09-14T11:20:01.717Z",
   "engineVersion": "audiveris-5.11.0+svc-14",
   "audiverisVersion": "- Version:      5.11.0",
   "audiverisOptions": "-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true",
@@ -12,11 +12,11 @@
     "pieces": 16,
     "piecesPassed": 4,
     "refNotes": 5996,
-    "pitchMatch": 86.55770513675783,
-    "exact": 76.70113408939292,
-    "onGrid": 75.65043362241494,
-    "missing": 365,
-    "extra": 407
+    "pitchMatch": 90.12675116744497,
+    "exact": 86.1574382921948,
+    "onGrid": 85.24016010673783,
+    "missing": 197,
+    "extra": 239
   },
   "pieces": [
     {
@@ -316,23 +316,19 @@
       "referenceSha256": "1c12c21c7bbf4cf163896732672648a69d497636059837abd153c71abe50215a",
       "artifactHash": "f285cff4991be86a62f8765975b60c18da82fe44665e9a55586137ce15c4a36f",
       "refNotes": 905,
-      "pitchMatch": 72.15469613259668,
-      "exact": 31.933701657458563,
-      "onGrid": 30.497237569060765,
-      "missing": 192,
-      "extra": 192,
-      "composite": 61.85403419159804,
+      "pitchMatch": 95.8011049723757,
+      "exact": 94.58563535911603,
+      "onGrid": 94.03314917127074,
+      "missing": 24,
+      "extra": 24,
+      "composite": 86.62751485458146,
       "pass": false,
       "failures": [
         "fur-elise-mutopia: bar-length-warning (measure_underfull + measure_overfull)",
-        "Poco moto: printed-bar-count (106 printed bars read)",
-        "Poco moto: bar-alignment (106 scored bars vs 105 reference bars)",
         "Poco moto: bar-length (3 of 106 bars are not the printed length)",
-        "Poco moto: no-invented-hold (2 hold(s) in the slice)",
-        "Poco moto: notes-present (192 missing, 7 allowed)",
-        "Poco moto: no-invented-notes (192 extra, 7 allowed)",
-        "Poco moto: attack-grid (exact 31.9% vs floor 95.0%)",
-        "Poco moto: note-length (onGrid 30.5% vs floor 90.0%)"
+        "Poco moto: notes-present (24 missing, 7 allowed)",
+        "Poco moto: no-invented-notes (24 extra, 7 allowed)",
+        "Poco moto: attack-grid (exact 94.6% vs floor 95.0%)"
       ]
     },
     {

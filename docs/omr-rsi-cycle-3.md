@@ -43,6 +43,13 @@ chopin-prelude-4 (onGrid 97.3 held). Unit suite 493/493.
   underfull+overfull warnings). Next headroom on this piece: the residual 24/24
   and 3 wrong-length bars.
 
+## Full-bench outcome (orchestrator run at `3f63cc9`, no --force-audiveris)
+
+**Suite onGrid 75.7% → 85.2%, pass 4/16 (unchanged).** Für Elise landed exactly
+at the single-piece prediction (95.8 / 94.6 / 94.0, 24 miss / 24 extra) and no
+other piece moved a digit. Suite missing 365→197, extra 407→239. Fully
+attributed — no unexplained deltas.
+
 ## Expected full-bench outcome (to be attributed against)
 
 - fur-elise-mutopia: 9 → 5 failing checks, onGrid 30.5 → 94.0 on 905 notes

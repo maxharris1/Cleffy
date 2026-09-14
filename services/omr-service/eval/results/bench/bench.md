@@ -2,10 +2,10 @@
 
 engine: audiveris-5.11.0+svc-14  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-12T21:04:21.916Z
+generated: 2026-09-14T11:20:01.717Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
-**Play-along score 75.7%** · 4/16 pieces pass the gate
+**Play-along score 85.2%** · 4/16 pieces pass the gate
 
 Rates are weighted by reference notes, not by piece. A piece whose `meters`
 check failed could not bind a tick slice, so its rates are void rather than
@@ -27,9 +27,9 @@ measured — read its failure list, not its percentages.
 | Schumann — Album für die Jugend, Op. 68 No. 1 (Mélodie) | 1 | 303 | 100.0% | 100.0% | 99.7% | 0 | 2 | 100.0 | pass |
 | Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen) | 1 | 279 | 85.3% | 82.8% | 82.8% | 39 | 39 | 74.8 | FAIL |
 | Satie — Gymnopédie No. 2 | 2 | 371 | 96.5% | 86.3% | 85.7% | 8 | 4 | 85.0 | FAIL |
-| Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 72.2% | 31.9% | 30.5% | 192 | 192 | 61.9 | FAIL |
+| Beethoven — Für Elise, WoO 59 (Mutopia typeset) | 3 | 905 | 95.8% | 94.6% | 94.0% | 24 | 24 | 86.6 | FAIL |
 | Chopin — Prelude in E minor, Op. 28 No. 4 | 1 | 600 | 99.0% | 98.0% | 97.3% | 2 | 1 | 95.4 | FAIL |
-| **suite** | | **5996** | **86.6%** | **76.7%** | **75.7%** | **365** | **407** | | **4/16** |
+| **suite** | | **5996** | **90.1%** | **86.2%** | **85.2%** | **197** | **239** | | **4/16** |
 
 ## Czerny — 160 Eight-Measure Exercises, Op. 821 No. 1 — 1 failed check(s)
 
@@ -102,17 +102,13 @@ measured — read its failure list, not its percentages.
 - Gymnopedie 2: attack-grid (exact 86.3% vs floor 95.0%)
 - Gymnopedie 2: note-length (onGrid 85.7% vs floor 90.0%)
 
-## Beethoven — Für Elise, WoO 59 (Mutopia typeset) — 9 failed check(s)
+## Beethoven — Für Elise, WoO 59 (Mutopia typeset) — 5 failed check(s)
 
 - fur-elise-mutopia: bar-length-warning (measure_underfull + measure_overfull)
-- Poco moto: printed-bar-count (106 printed bars read)
-- Poco moto: bar-alignment (106 scored bars vs 105 reference bars)
 - Poco moto: bar-length (3 of 106 bars are not the printed length)
-- Poco moto: no-invented-hold (2 hold(s) in the slice)
-- Poco moto: notes-present (192 missing, 7 allowed)
-- Poco moto: no-invented-notes (192 extra, 7 allowed)
-- Poco moto: attack-grid (exact 31.9% vs floor 95.0%)
-- Poco moto: note-length (onGrid 30.5% vs floor 90.0%)
+- Poco moto: notes-present (24 missing, 7 allowed)
+- Poco moto: no-invented-notes (24 extra, 7 allowed)
+- Poco moto: attack-grid (exact 94.6% vs floor 95.0%)
 
 ## Chopin — Prelude in E minor, Op. 28 No. 4 — 2 failed check(s)
 
