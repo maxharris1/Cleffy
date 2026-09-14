@@ -40,6 +40,17 @@ const WATCHED = [
     'src/types/scoreData.ts',
 ];
 
+/**
+ * Watched by prefix rather than by exact path. Since svc-15 the image no longer
+ * ships stock Audiveris: `engine-patches/` holds recompiled engine classes and the
+ * Dockerfile applies them, so a change under either rewrites what a PDF turns into
+ * just as surely as the parser does — and neither is a file this list could name
+ * exhaustively (a second patch would slip past an exact-path entry).
+ */
+const WATCHED_PREFIXES = ['services/omr-service/engine-patches/'];
+
+const WATCHED_EXTRA = ['services/omr-service/Dockerfile'];
+
 const ENGINE_FILE = 'src/job.ts';
 const VERSION_RE = /export const ENGINE_VERSION = '(audiveris-\d+\.\d+\.\d+\+svc-\d+)'/;
 
@@ -96,7 +107,10 @@ const changed = new Set(
         .filter(Boolean),
 );
 
-const hit = WATCHED.filter((f) => changed.has(f));
+const hit = [
+    ...[...WATCHED, ...WATCHED_EXTRA].filter((f) => changed.has(f)),
+    ...[...changed].filter((f) => WATCHED_PREFIXES.some((p) => f.startsWith(p))),
+];
 if (hit.length === 0) {
     console.log('[engine-version] ok: no watched parser files changed');
     process.exit(0);

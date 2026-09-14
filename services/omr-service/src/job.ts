@@ -52,8 +52,13 @@ import type { ScoreData } from './scoreData.js';
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
  * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
+ * svc-15: patched Audiveris ClefBuilder — an octave G clef (the italic 8 under a
+ * treble clef, standard for guitar) can finally win the staff header, instead of
+ * losing the kind-keyed dedupe to the plain G_CLEF and transposing the whole page
+ * up an octave. See engine-patches/README.md. First revision whose engine binary
+ * differs from stock 5.11.0.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-14';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-15';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
