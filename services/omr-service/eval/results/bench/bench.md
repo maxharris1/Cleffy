@@ -2,7 +2,7 @@
 
 engine: audiveris-5.11.0+svc-15  audiveris: - Version:      5.11.0
 audiveris options: `-option org.audiveris.omr.sheet.ProcessingSwitches.lyrics=false -option org.audiveris.omr.sheet.ProcessingSwitches.implicitTuplets=true -option org.audiveris.omr.sheet.ProcessingSwitches.fingerings=true`
-generated: 2026-09-14T14:17:25.639Z
+generated: 2026-09-14T14:33:55.984Z
 gate floors: exact ≥ 95.0%, onGrid ≥ 90.0%, 1 missed/extra note allowed per 16 printed bars
 
 **Play-along score 95.0%** · 5/16 pieces pass the gate
@@ -45,7 +45,7 @@ measured — read its failure list, not its percentages.
 - Air: printed-bar-count (17 printed bars read)
 - Air: bar-alignment (17 scored bars vs 16 reference bars)
 - Air: bar-length (1 of 17 bars are not the printed length)
-- Air: repeat-walk (25 performed bars)
+- Air: repeat-walk (34 performed bars)
 - Air: attack-grid (exact 92.8% vs floor 95.0%)
 
 ## Bach — Invention 1 in C, BWV 772 — 3 failed check(s)
