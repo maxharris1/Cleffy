@@ -39,8 +39,11 @@ export interface ScoreAnalysisStatusRow {
  * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
  * parts, and zips geometry per system so the playhead stays on the bar.
  * svc-14 skips staff-less cover/blank pages instead of failing the book.
+ * svc-34 is the raster-honest OMR image (patches 0001-0004 and 0007): octave G
+ * clefs, ottava ink, tuplet brackets, ledger heads, and ledger-fragment dots.
+ * DEPLOYED_ENGINE_GENERATION stays 6 until Cloud Run ships this image.
  */
-export const CURRENT_ENGINE_GENERATION = 14;
+export const CURRENT_ENGINE_GENERATION = 34;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires

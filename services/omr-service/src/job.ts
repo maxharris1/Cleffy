@@ -52,8 +52,12 @@ import type { ScoreData } from './scoreData.js';
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
  * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
+ * svc-34: raster-honest Audiveris patches 0001-0004 and 0007 (octave G clef,
+ * ottava ink, tuplet bracket, ledger head, ledger-fragment dots). Parser
+ * repairs from the RSI cycles land in the same stamp. Not svc-15..33: those
+ * numbers were vector-hint images or mixed patch sets this product image omits.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-14';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-34';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

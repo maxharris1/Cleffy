@@ -1,0 +1,228 @@
+--- a/app/src/main/java/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java	Audiveris 5.11.0, CRLF normalized to LF
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java	Cleffy svc-18
+@@ -23,0 +24,2 @@
++import org.audiveris.omr.glyph.Glyph;
++import org.audiveris.omr.glyph.GlyphGroup;
+@@ -27,0 +30 @@
++import org.audiveris.omr.sheet.SystemInfo;
+@@ -282,0 +286,16 @@
++        /*
++         * A beam can contain more items than a printed tuplet sign embraces.  If
++         * the actual symbol graph still contains both bracket halves, use their
++         * measured ink to limit the chord anchors.  An absent or ambiguous pair
++         * leaves the historical path untouched.
++         */
++        final Rectangle bracketSpan = findBracketSpan(tuplet, candidates);
++        if (bracketSpan != null) {
++            final int expected = expectedCount(tuplet.getShape());
++            candidates.removeIf(chord -> !containsX(bracketSpan, chord.getTailLocation().x));
++
++            if (candidates.size() != expected) {
++                return null;
++            }
++        }
++
+@@ -286 +305 @@
+-                tuplet,
++                tuplet, bracketSpan,
+@@ -319,0 +339,184 @@
++    }
++
++    //--------------------//
++    // findBracketSpan   //
++    //--------------------//
++    /**
++     * Find one unambiguous pair of horizontal bracket halves around the sign.
++     * Geometry is expressed in interline units and ink occupancy is checked so
++     * that arbitrary nearby symbol glyphs cannot act as a bracket.
++     */
++    private static Rectangle findBracketSpan (TupletInter tuplet,
++                                              List<AbstractChordInter> candidates)
++    {
++        if (tuplet.getSig() == null || candidates.isEmpty()) {
++            return null;
++        }
++
++        final SystemInfo system = tuplet.getSig().getSystem();
++        final Glyph sign = tuplet.getGlyph();
++
++        if (system == null || sign == null) {
++            return null;
++        }
++
++        final int il = system.getSheet().getInterline();
++        final Rectangle signBox = sign.getBounds();
++        final List<Glyph> left = new ArrayList<>();
++        final List<Glyph> right = new ArrayList<>();
++
++        for (Glyph glyph : system.getGroupedGlyphs(GlyphGroup.SYMBOL)) {
++            if (glyph == sign) {
++                continue;
++            }
++
++            final Rectangle box = glyph.getBounds();
++            final int gapLeft = signBox.x - (box.x + box.width);
++            final int gapRight = box.x - (signBox.x + signBox.width);
++            final int yDelta = Math.abs(box.y + (box.height / 2)
++                    - signBox.y - (signBox.height / 2));
++
++            if (yDelta > il) {
++                continue;
++            }
++
++            if ((gapLeft >= 0) && (gapLeft <= (2 * il))
++                    && isBracketHalf(glyph, il, true)) {
++                left.add(glyph);
++            } else if ((gapRight >= 0) && (gapRight <= (2 * il))
++                    && isBracketHalf(glyph, il, false)) {
++                right.add(glyph);
++            }
++        }
++
++        if ((left.size() != 1) || (right.size() != 1)) {
++            return null;
++        }
++
++        final Rectangle leftBox = left.get(0).getBounds();
++        final Rectangle rightBox = right.get(0).getBounds();
++
++        // Both halves must describe one bracket, rather than two unrelated
++        // horizontal marks at similar heights.  Their top strokes and hooks
++        // are measured in the same interline-scaled coordinate frame.
++        final int leftTop = leftBox.y + topStrokeRow(left.get(0), il);
++        final int rightTop = rightBox.y + topStrokeRow(right.get(0), il);
++        if (Math.abs(leftTop - rightTop)
++                > Math.max(1, il / 4)) {
++            return null;
++        }
++
++        final Rectangle span = new Rectangle(leftBox.x, leftBox.y,
++                rightBox.x + rightBox.width - leftBox.x,
++                Math.max(leftBox.y + leftBox.height, rightBox.y + rightBox.height)
++                        - Math.min(leftBox.y, rightBox.y));
++
++        // The bracket must cover at least the sign and one staff-local chord.
++        if (!span.intersects(signBox)) {
++            return null;
++        }
++
++        final Staff targetStaff = getTargetStaff(candidates);
++        int chordCount = 0;
++        for (AbstractChordInter chord : candidates) {
++            if (containsX(span, chord.getTailLocation().x)
++                    && (targetStaff != chord.getTopStaff())) {
++                // A second staff in the same measured span makes the pair
++                // ambiguous. Leave the historical candidate path intact.
++                return null;
++            }
++            if ((targetStaff == chord.getTopStaff())
++                    && containsX(span, chord.getTailLocation().x)) {
++                chordCount++;
++            }
++        }
++
++        return (chordCount == expectedCount(tuplet.getShape())) ? span : null;
++    }
++
++    private static boolean containsX (Rectangle span,
++                                     int x)
++    {
++        return (x >= span.x) && (x <= (span.x + span.width));
++    }
++
++    //-----------------//
++    // isBracketHalf  //
++    //-----------------//
++    /**
++     * Check measured dimensions and ink for one horizontal bracket half.
++     *
++     * @param leftHalf true for the left half, whose hook must be on its outer
++     *                  (left) edge; false for the right half
++     */
++    private static boolean isBracketHalf (Glyph glyph,
++                                          int il,
++                                          boolean leftHalf)
++    {
++        final Rectangle box = glyph.getBounds();
++
++        if ((box.width < il) || (box.width > (3 * il))
++                || (box.height < (il / 2)) || (box.height > (2 * il))) {
++            return false;
++        }
++
++        final int top = topStrokeRow(glyph, il);
++        if (top < 0) {
++            return false;
++        }
++
++        // A bracket half has a continuous, long horizontal stroke near its
++        // top.  Requiring a run (rather than total row ink) excludes dotted
++        // text and fragmented nearby symbols.
++        final int outerColumns = Math.max(1, Math.min(box.width, il / 3));
++        final int innerStart = leftHalf ? outerColumns : 0;
++        final int innerEnd = leftHalf ? box.width : box.width - outerColumns;
++        int outerHookInk = 0;
++        int innerHookInk = 0;
++
++        for (int dx = 0; dx < box.width; dx++) {
++            int columnInk = 0;
++            for (int dy = 0; dy < box.height; dy++) {
++                if (glyph.contains(new Point(box.x + dx, box.y + dy))) {
++                    columnInk++;
++                }
++            }
++
++            if ((leftHalf && dx < outerColumns) || (!leftHalf && dx >= box.width - outerColumns)) {
++                outerHookInk = Math.max(outerHookInk, columnInk);
++            }
++            if (dx >= innerStart && dx < innerEnd) {
++                innerHookInk = Math.max(innerHookInk, columnInk);
++            }
++        }
++
++        // The long vertical run must be on the outer edge.  The inner edge
++        // may contain a short hook, but cannot be the primary upright.
++        return (outerHookInk * 2 >= box.height)
++                && (innerHookInk * 2 < box.height)
++                && (outerHookInk > innerHookInk);
++    }
++
++    /** Return the first top-near row containing a long contiguous ink run. */
++    private static int topStrokeRow (Glyph glyph,
++                                     int il)
++    {
++        final Rectangle box = glyph.getBounds();
++        final int maxTop = Math.min(box.height - 1, Math.max(il, box.height / 2));
++        final int minimumRun = Math.max(2, Math.min(box.width, Math.max(il, box.width / 2)));
++
++        for (int dy = 0; dy <= maxTop; dy++) {
++            int run = 0;
++            for (int dx = 0; dx < box.width; dx++) {
++                if (glyph.contains(new Point(box.x + dx, box.y + dy))) {
++                    run++;
++                    if (run >= minimumRun) {
++                        return dy;
++                    }
++                } else {
++                    run = 0;
++                }
++            }
++        }
++
++        return -1;
+@@ -377,0 +581,3 @@
++        /** Optional measured bracket span, used to trim beam siblings. */
++        private final Rectangle bracketSpan;
++
+@@ -396,0 +603 @@
++                         Rectangle bracketSpan,
+@@ -399,0 +607 @@
++            this.bracketSpan = bracketSpan;
+@@ -479 +687,6 @@
+-                            set.addAll(s.getChords());
++                            for (AbstractChordInter sibling : s.getChords()) {
++                                if ((bracketSpan == null)
++                                        || containsX(bracketSpan, sibling.getTailLocation().x)) {
++                                    set.add(sibling);
++                                }
++                            }
