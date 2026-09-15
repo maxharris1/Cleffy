@@ -1,3 +1,6 @@
+import type { AlignmentMap } from './symbolic/align.js';
+import type { AnalysisSource } from './symbolic/jobResult.js';
+
 /** Per-job timing / size telemetry written to score_analyses.timings. */
 export interface JobTimings {
     downloadMs?: number;
@@ -22,6 +25,14 @@ export interface JobTimings {
     keyRepairs?: number;
     /** 1-based PDF pages Audiveris flagged invalid (no staves) and we skipped. */
     invalidSheets?: number[];
+    /**
+     * Sibling of ScoreData (not part of scoreDataSchema). Present when
+     * CLEFFY_SYMBOLIC_FIRST ran; absent when the flag is off so timings stay
+     * byte-identical to the pre-symbolic job.
+     */
+    source?: AnalysisSource;
+    /** Printed-bar cursor. Only stamped on a symbolic accept. */
+    alignmentMap?: AlignmentMap;
 }
 
 export const emptyTimings = (): JobTimings => ({});

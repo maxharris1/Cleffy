@@ -25,6 +25,8 @@ import { mergeScoreDataParts, seamIsUnsafe, splitSheetRangesOverlapping } from '
 import { expressionSeedAt, parseMxlFiles, type MusicalScore, type ParseSeed } from './musicxml.js';
 import { parseOmrGeometry, type OmrGeometry } from './omrGeometry.js';
 import { summarizeStructure, type StructureSummary } from './repeats.js';
+import { isSymbolicFirstEnabled } from './symbolic/flag.js';
+import { defaultSymbolicDeps, trySymbolicJob, type TrySymbolicDeps } from './symbolic/tryJob.js';
 import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
 import type { ScoreData } from './scoreData.js';
@@ -143,7 +145,7 @@ export interface JobRequest {
 
 export type KillJvm = () => void;
 
-interface PipelineAdapters {
+export interface PipelineAdapters {
     documentId: string;
     pageCount: number;
     resolvePdfUrl: () => Promise<string>;
@@ -155,6 +157,13 @@ interface PipelineAdapters {
     isAbandoned?: () => boolean;
     /** The document's stylistic era, for auto-pedalling; the default when absent. */
     resolveEra?: () => Promise<Era>;
+    /**
+     * Override CLEFFY_SYMBOLIC_FIRST. Unset reads the env (off in prod).
+     * Tests pass this so env leakage cannot flip the cache-then-transcribe path.
+     */
+    symbolicEnabled?: boolean;
+    imslpPageTitle?: string;
+    symbolicDeps?: TrySymbolicDeps;
 }
 
 /**
@@ -281,6 +290,27 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         timings.pageCount = Math.max(adapters.pageCount, observedPages ?? 0);
 
         const hash = sha256Hex(pdfBytes);
+        const symbolicOn = adapters.symbolicEnabled ?? isSymbolicFirstEnabled();
+        if (symbolicOn) {
+            const symbolic = await trySymbolicJob(
+                pdfBytes,
+                {
+                    uploadId: adapters.documentId,
+                    pageCount: timings.pageCount,
+                    ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
+                },
+                adapters.symbolicDeps ?? defaultSymbolicDeps(),
+            );
+            timings.source = symbolic.source;
+            if (symbolic.kind === 'accept') {
+                timings.alignmentMap = symbolic.alignmentMap;
+                const ok = await adapters.onReady(symbolic.score, timings);
+                logJob(adapters.documentId, timings, symbolic.score, ok);
+                return ok;
+            }
+            // Fallthrough keeps band/reason. Do not re-score after OMR.
+        }
+
         // Resolved before the lookup: the era is part of the key, because the
         // same PDF under a Bach title and a Chopin title must not share pedalling.
         const era = adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
@@ -332,6 +362,9 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
 };
+
+/** Exported for job-level symbolic-first tests. */
+export const runOmrPipeline = runPipeline;
 
 const logJob = (documentId: string, timings: JobTimings, score: ScoreData, ok: boolean): void => {
     if (ok) {
