@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { catalogAgrees } from './types.js';
 import { workKeyFromText, workKeyFromTokens, workKeyFromMutopiaPath } from './workKey.js';
 
 describe('WorkKey normalization', () => {
@@ -78,6 +79,26 @@ describe('WorkKey normalization', () => {
             catalogType: 'No',
             catalogN: 2,
         });
+        expect(workKeyFromText('2. ème Gymnopédie Erik Satie')).toEqual({
+            composerId: 'satie',
+            catalogType: 'No',
+            catalogN: 2,
+        });
+    });
+
+    it('catalogAgrees treats a missing PDF movementIndex as a hit', () => {
+        expect(
+            catalogAgrees(
+                { composerId: 'czerny', catalogType: 'Op', catalogN: 821 },
+                { composerId: 'czerny', catalogType: 'Op', catalogN: 821, movementIndex: 1 },
+            ),
+        ).toBe(true);
+        expect(
+            catalogAgrees(
+                { composerId: 'schumann', catalogType: 'Op', catalogN: 68, movementIndex: 1 },
+                { composerId: 'schumann', catalogType: 'Op', catalogN: 68, movementIndex: 2 },
+            ),
+        ).toBe(false);
     });
 
     it('reads a Mutopia FTP path', () => {

@@ -2,6 +2,7 @@ import { fifthsAt, pitchSim, type BarNote } from '../eval/compare.js';
 import type { CorpusEntry, CorpusMovement } from '../eval/manifest.js';
 import { notesFromMidi, parseSmfForTest, place, quantizeOnset, refBarsOf } from '../eval/midiRef.js';
 import { SCORE_DATA_VERSION, TICKS_PER_QUARTER, type ScoreData } from '../scoreData.js';
+import type { BarBox } from './pdfLayout.js';
 import type { WorkKey } from './types.js';
 
 export const OPENING_BARS = 8;
@@ -15,13 +16,19 @@ export interface Meter {
 }
 
 export interface PdfSignals {
-    meter: Meter;
-    fifths: number;
+    /** Null when the PDF text layer has no meter token. */
+    meter: Meter | null;
+    /** Null when the PDF text layer has no key and no OMR artifact is merged. */
+    fifths: number | null;
     printedBars: number;
     pickupQuarters: number;
-    opening: BarNote[][];
+    /** Null when no OMR artifact is available — opening weight is omitted. */
+    opening: BarNote[][] | null;
     workKey: WorkKey;
     pageCount: number;
+    pickupFlagged: boolean;
+    layoutBars: number;
+    barBoxes: BarBox[];
 }
 
 export interface MatchCandidateInput {
@@ -190,9 +197,9 @@ export const candidateFromMidi = (
 };
 
 /**
- * PDF fingerprint stand-in: meters / pickup / printedBars from the corpus pin,
- * opening pitch bag from `midi` (the same bytes used as the candidate).
- * There is no PDF text/layout reader on this path yet.
+ * PDF fingerprint stand-in used by unit tests that do not open a PDF:
+ * meters / pickup / printedBars from the corpus pin, opening pitch bag from
+ * `midi`. Production eval uses `pdfSignalsFromPdf` instead.
  */
 export const pdfSignalsFromPin = (entry: CorpusEntry, midi: Buffer, workKey: WorkKey): PdfSignals => {
     const mov = entry.movements[0];
@@ -217,6 +224,9 @@ export const pdfSignalsFromPin = (entry: CorpusEntry, midi: Buffer, workKey: Wor
         opening: cand.opening,
         workKey,
         pageCount: entry.pdf.pages,
+        pickupFlagged: mov.pickupQuarters > 0,
+        layoutBars: mov.printedBars,
+        barBoxes: [],
     };
 };
 

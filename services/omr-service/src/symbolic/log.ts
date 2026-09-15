@@ -41,7 +41,7 @@ export const emptySignalVector = (): SignalVector => ({
     fifths: false,
     barCountPdf: 0,
     barCountCand: 0,
-    openingSim: 0,
+    openingSim: null,
     catalogHit: false,
 });
 

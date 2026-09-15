@@ -32,6 +32,24 @@ export const workKeysEqual = (a: WorkKey, b: WorkKey): boolean =>
     a.catalogN === b.catalogN &&
     (a.movementIndex ?? null) === (b.movementIndex ?? null);
 
+/**
+ * Catalog token for PDF vs candidate. Mutopia headers often omit "No. N"
+ * while the pin title has it; a missing movementIndex on either side still
+ * agrees. Both present and different → miss (Op. 68 No. 1 vs No. 2).
+ */
+export const catalogAgrees = (pdf: WorkKey, candidate: WorkKey): boolean => {
+    if (pdf.composerId === 'unknown' || candidate.composerId === 'unknown') {
+        return false;
+    }
+    if (pdf.composerId !== candidate.composerId || pdf.catalogType !== candidate.catalogType || pdf.catalogN !== candidate.catalogN) {
+        return false;
+    }
+    if (pdf.movementIndex === undefined || candidate.movementIndex === undefined) {
+        return true;
+    }
+    return pdf.movementIndex === candidate.movementIndex;
+};
+
 export const formatFromFilename = (name: string): SymbolicFormat | null => {
     const lower = name.toLowerCase();
     if (lower.endsWith('.mxl')) {

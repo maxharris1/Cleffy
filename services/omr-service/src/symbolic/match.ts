@@ -1,5 +1,5 @@
 import { metersEqual } from '../eval/segment.js';
-import { workKeysEqual } from './types.js';
+import { catalogAgrees } from './types.js';
 import { isPerformanceMidi, openingSim, type MatchCandidateInput, type PdfSignals } from './signals.js';
 
 export type MatchBand = 'accept' | 'ambiguous' | 'reject';
@@ -13,7 +13,8 @@ export type MatchReason =
     | 'arrangement'
     | 'performance_midi'
     | 'no_candidate'
-    | 'parser_unusable';
+    | 'parser_unusable'
+    | 'alignment_failed';
 
 export interface ScoreParts {
     meter: number;
@@ -28,7 +29,7 @@ export interface SignalVector {
     fifths: boolean;
     barCountPdf: number;
     barCountCand: number;
-    openingSim: number;
+    openingSim: number | null;
     catalogHit: boolean;
 }
 
@@ -66,6 +67,9 @@ const bandFor = (
     barError: number,
     arrangement: boolean,
     performanceMidi: boolean,
+    openingOmitted: boolean,
+    catalogHit: boolean,
+    fifthsOk: boolean,
 ): { band: MatchBand; reason: MatchReason } => {
     if (performanceMidi) {
         return { band: 'reject', reason: 'performance_midi' };
@@ -79,7 +83,7 @@ const bandFor = (
     if (barError > 2) {
         return { band: 'reject', reason: 'bars' };
     }
-    if (score >= 85 && barError <= 1 && meterOk) {
+    if (score >= 85 && barError <= 1 && meterOk && (!openingOmitted || (catalogHit && fifthsOk))) {
         return { band: 'accept', reason: 'accept' };
     }
     if (score >= 70) {
@@ -91,23 +95,46 @@ const bandFor = (
 /**
  * Cheap PDF-vs-candidate fingerprint. Returns parts, not just the sum.
  * Does not call playAlongGate / compareScore.
+ *
+ * When `pdf.opening` is null the 30-point opening weight is redistributed
+ * over the remaining present signals. Accept then still requires ≥85, so
+ * meter+bars+key+catalog must all agree when those signals are known.
  */
 export const symbolicMatchScore = (pdf: PdfSignals, candidate: MatchCandidateInput): MatchResult => {
     const performanceMidi = candidate.midi !== undefined && isPerformanceMidi(candidate.midi);
-    const meterOk = metersEqual(pdf.meter, candidate.meter);
-    const fifthsOk = pdf.fifths === candidate.fifths;
+    const meterKnown = pdf.meter !== null;
+    const fifthsKnown = pdf.fifths !== null;
+    const openingKnown = pdf.opening !== null;
+    const meterOk = pdf.meter === null || metersEqual(pdf.meter, candidate.meter);
+    const fifthsOk = pdf.fifths === null || pdf.fifths === candidate.fifths;
     const barError = Math.abs(pdf.printedBars - candidate.barCount);
-    const sim = openingSim(pdf.opening, candidate.opening);
-    const catalogHit = workKeysEqual(pdf.workKey, candidate.workKey);
+    const sim = pdf.opening !== null ? openingSim(pdf.opening, candidate.opening) : null;
+    const catalogHit = catalogAgrees(pdf.workKey, candidate.workKey);
+    const rawPool =
+        (meterKnown ? WEIGHTS.meter : 0) +
+        (fifthsKnown ? WEIGHTS.fifths : 0) +
+        WEIGHTS.barCount +
+        (openingKnown ? WEIGHTS.opening : 0) +
+        WEIGHTS.catalog;
+    const scale = rawPool > 0 ? 100 / rawPool : 1;
     const parts: ScoreParts = {
-        meter: meterOk ? WEIGHTS.meter : 0,
-        fifths: fifthsOk ? WEIGHTS.fifths : 0,
-        barCount: barCountPart(barError),
-        opening: Math.round(WEIGHTS.opening * sim * 1000) / 1000,
-        catalog: catalogHit ? WEIGHTS.catalog : 0,
+        meter: meterKnown && meterOk ? WEIGHTS.meter * scale : 0,
+        fifths: fifthsKnown && fifthsOk ? WEIGHTS.fifths * scale : 0,
+        barCount: barCountPart(barError) * scale,
+        opening: openingKnown && sim !== null ? Math.round(WEIGHTS.opening * sim * scale * 1000) / 1000 : 0,
+        catalog: catalogHit ? WEIGHTS.catalog * scale : 0,
     };
     const score = parts.meter + parts.fifths + parts.barCount + parts.opening + parts.catalog;
-    const { band, reason } = bandFor(score, meterOk, barError, candidate.arrangement, performanceMidi);
+    const { band, reason } = bandFor(
+        score,
+        meterOk,
+        barError,
+        candidate.arrangement,
+        performanceMidi,
+        !openingKnown,
+        catalogHit,
+        fifthsOk,
+    );
     return {
         parts,
         score,

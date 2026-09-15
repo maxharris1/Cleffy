@@ -18,6 +18,7 @@
         "@supabase/supabase-js": "^2.111.0",
         "@xmldom/xmldom": "^0.9.8",
         "adm-zip": "^0.5.16",
+        "pdfjs-dist": "^5.7.284",
         "zod": "^4.4.3"
     },
     "devDependencies": {

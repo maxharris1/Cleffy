@@ -69,12 +69,22 @@ const catalogFromText = (text: string): CatalogHit | undefined => {
         return { catalogType: 'Anh', catalogN: Number(anh[1]) };
     }
 
+    const roman = (raw: string | undefined): number | undefined => {
+        if (!raw) {
+            return undefined;
+        }
+        const map: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8 };
+        return map[raw.toLowerCase()];
+    };
+
     const bwv = folded.match(/\bBWV\s*(\d+)\b/i);
     if (bwv?.[1]) {
-        const movement = folded.match(/\b(?:invention|prelude|praeludium|menuet|minuet|air)\s*(\d+)\b/i);
+        const movement =
+            folded.match(/\b(?:invention|prelude|praeludium|menuet|minuet|air)\s*(\d+)\b/i) ??
+            folded.match(/\b(?:invention|prelude|praeludium)\s+(I{1,3}|IV|V|VI{0,3}|IX|X)\b/i);
         const hit: CatalogHit = { catalogType: 'BWV', catalogN: Number(bwv[1]) };
         if (movement?.[1]) {
-            hit.movementIndex = Number(movement[1]);
+            hit.movementIndex = /^\d+$/.test(movement[1]) ? Number(movement[1]) : roman(movement[1]);
         }
         return hit;
     }
@@ -108,6 +118,10 @@ const catalogFromText = (text: string): CatalogHit | undefined => {
     const numbered = folded.match(/\b(?:gymnop[eé]die|gnossienne)[_-\s]*(?:No\.?\s*)?(\d+)\b/i);
     if (numbered?.[1]) {
         return { catalogType: 'No', catalogN: Number(numbered[1]) };
+    }
+    const numberedPrefix = folded.match(/\b(\d+)\s*\.?\s*(?:ème|eme)?\s*(?:gymnop[eé]die|gnossienne)\b/i);
+    if (numberedPrefix?.[1]) {
+        return { catalogType: 'No', catalogN: Number(numberedPrefix[1]) };
     }
 
     return undefined;
