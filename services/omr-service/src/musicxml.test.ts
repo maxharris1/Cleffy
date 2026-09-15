@@ -66,6 +66,34 @@ describe('parseMusicXmlString', () => {
         expect(score.warnings).toContain('measure_underfull');
     });
 
+    it('takes a 3/4 measure="yes" rest as the bar, not the written whole-note duration', () => {
+        // Satie Gymnopédie 2 bar 1: Audiveris WHOLE_REST duration 4 in 3/4.
+        const attrs =
+            '<attributes><divisions>1</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>';
+        const xml = wrap(
+            `<measure number="1">${attrs}<note><rest measure="yes"/><duration>4</duration></note></measure>` +
+                `<measure number="2"><note><pitch><step>G</step><octave>4</octave></pitch><duration>3</duration></note></measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures[0]?.dTicks).toBe(TICKS_PER_QUARTER * 3);
+        expect(score.measures[1]?.tick).toBe(TICKS_PER_QUARTER * 3);
+        expect(score.warnings).not.toContain('measure_overfull');
+    });
+
+    it('leaves a 4/4 measure="yes" rest whose duration already fills the bar unchanged', () => {
+        const attrs =
+            '<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>';
+        const xml = wrap(
+            `<measure number="1">${attrs}<note><rest measure="yes"/><duration>4</duration></note></measure>` +
+                `<measure number="2"><note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration></note></measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.measures.map((m) => m.dTicks)).toEqual([TICKS_PER_QUARTER * 4, TICKS_PER_QUARTER * 4]);
+        expect(score.measures[1]?.tick).toBe(TICKS_PER_QUARTER * 4);
+        expect(score.warnings).not.toContain('measure_overfull');
+        expect(score.warnings).not.toContain('measure_underfull');
+    });
+
     it('extends open ties across underfull padding', () => {
         const xml = wrap(
             `<measure number="1">${ATTRS_44}

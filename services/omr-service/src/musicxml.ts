@@ -1706,10 +1706,16 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         break;
                     }
                     const isChord = firstChild(child, 'chord') !== null;
-                    const durTicks = ticksOf(childInt(child, 'duration') ?? 0, divisions);
-                    const start = isChord ? lastNoteStart : cursor;
                     const restEl = firstChild(child, 'rest');
                     const isRest = restEl !== null;
+                    const measureRest = isRest && restEl.getAttribute('measure') === 'yes';
+                    // Audiveris exports a whole-bar rest as type WHOLE / duration 4
+                    // even in 3/4 (Satie Gymnopédie 2 bar 1). <rest measure="yes"/>
+                    // is a bar of the active signature, not the written <duration>.
+                    const durTicks = measureRest
+                        ? barTicksOf(currentSig)
+                        : ticksOf(childInt(child, 'duration') ?? 0, divisions);
+                    const start = isChord ? lastNoteStart : cursor;
 
                     const noteStaff = childInt(child, 'staff') ?? 1;
                     const headX = defaultXOf(child);
@@ -1720,7 +1726,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             dur: durTicks,
                             staff: noteStaff,
                             voice: childText(child, 'voice') ?? '1',
-                            measureRest: restEl.getAttribute('measure') === 'yes',
+                            measureRest,
                             ...(headX !== null ? { x: headX } : {}),
                         });
                     }
