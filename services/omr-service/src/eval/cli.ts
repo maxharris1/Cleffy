@@ -48,11 +48,12 @@ eval/results/bench/{bench.json,bench.md}. Suite: ${BENCH_SUITE.join(', ')}.
 Needs cleffy-omr. Exit 1 if any piece fails the gate.
 
 symbolic scores the 16 pinned pieces plus the false-match attack set through
-symbolicMatchScore (not playAlongGate). Offline; synthesizes quantized MIDI
-from pin meters/pickup/printedBars when Mutopia bytes are not cached. Accepted
-bench rows also ingest MIDI→ScoreData and record compareScore onGrid/exact/miss/extra
-as a provenance column — not a gate. Exit 1 if any bench piece is not accept
-or any attack is accept.
+symbolicMatchScore (not playAlongGate). Fetches pinned Mutopia PDFs into
+eval/cache/downloads when missing. Bench pdfSignals come from the PDF (and
+eval/cache/artifacts/<slug>/ when present), never from the candidate MIDI.
+Accepted bench rows also ingest MIDI→ScoreData and record compareScore
+onGrid/exact/miss/extra as a provenance column — not a gate. Exit 1 if any
+bench piece is not accept or any attack is accept.
 
 The play-along gate is on by default for run and bench. It reads the CURRENT
 result, so it fails a broken piece with no baseline to diff against. It checks
@@ -226,7 +227,7 @@ const main = async (): Promise<number> => {
     }
 
     if (command === 'symbolic') {
-        const report = runSymbolicEval();
+        const report = await runSymbolicEval();
         if (values.json === true) {
             process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
         } else {

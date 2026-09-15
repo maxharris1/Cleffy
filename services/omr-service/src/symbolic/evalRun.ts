@@ -2,15 +2,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { compareScore } from '../eval/compare.js';
+import { fetchCorpus } from '../eval/fetch.js';
 import { loadCorpusEntry, type CorpusEntry } from '../eval/manifest.js';
 import { notesFromMidi } from '../eval/midiRef.js';
-import { downloadsDir } from '../eval/paths.js';
+import { artifactsCacheDir, downloadsDir } from '../eval/paths.js';
 import { segmentMovements } from '../eval/segment.js';
 import { ingestSymbolic } from './ingest.js';
 import { decisionLogLine, formatDecisionLine, sha256Hex } from './log.js';
 import { decideSymbolic, type MatchBand, type MatchReason } from './match.js';
 import { synthQuantizedMidi } from './midiSynth.js';
-import { candidateFromMidi, pdfSignalsFromPin, type MatchCandidateInput } from './signals.js';
+import { mergePdfSignals, pdfSignalsFromArtifact, pdfSignalsFromPdf } from './pdfRead.js';
+import { candidateFromMidi, type MatchCandidateInput, type PdfSignals } from './signals.js';
 import { workKeyFromText } from './workKey.js';
 import type { WorkKey } from './types.js';
 
@@ -44,6 +46,10 @@ export interface SymbolicEvalRow {
     reason: MatchReason;
     score: number;
     logLine: string;
+    layoutBars?: number;
+    pinPrintedBars?: number;
+    layoutDelta?: number;
+    openingSim?: number | null;
     /** compareScore vs the same MIDI as a library. Provenance, not a gate. */
     onGrid?: number;
     exact?: number;
@@ -81,8 +87,7 @@ const requireWorkKey = (entry: CorpusEntry): WorkKey => {
  * unfolds repeats. Match scoring compares pin `printedBars` (engraved), never
  * the performed length, so Op. 68 No. 1's 24-bar MIDI still fingerprints as
  * 20 printed bars. Otherwise synthesize a quantized stand-in that matches the
- * pin's meter / pickup / printedBars. Opening bars are always taken from these
- * same bytes (no PDF read yet).
+ * pin's meter / pickup / printedBars.
  */
 export const cachedMidiPath = (entry: CorpusEntry): string | null => {
     const mov = entry.movements[0];
@@ -118,21 +123,43 @@ export const midiForPin = (entry: CorpusEntry): Buffer => {
     });
 };
 
+const slugArtifactDir = (slug: string): string | null => {
+    const dir = join(artifactsCacheDir(), slug);
+    return existsSync(dir) ? dir : null;
+};
+
+/**
+ * Bench `pdfSignals` come from the pinned PDF (and an OMR artifact when
+ * `eval/cache/artifacts/<slug>/` exists). Layout bar count is never copied
+ * from the pin or the candidate MIDI.
+ */
+export const pdfSignalsForEntry = async (entry: CorpusEntry): Promise<PdfSignals> => {
+    const fetched = await fetchCorpus(entry, { allowNetwork: true, mode: 'all' });
+    if (fetched.pdfPath === null) {
+        throw new Error(`${entry.slug}: pinned PDF missing at eval/cache/downloads/${entry.slug}.pdf`);
+    }
+    const fromPdf = await pdfSignalsFromPdf(readFileSync(fetched.pdfPath));
+    const artifactDir = slugArtifactDir(entry.slug);
+    const artifact = artifactDir ? pdfSignalsFromArtifact(artifactDir) : null;
+    return mergePdfSignals(fromPdf, artifact);
+};
+
 const pad = (s: string, n: number): string => (s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length));
 
 export const formatSymbolicTable = (report: SymbolicEvalReport): string => {
-    const header = `${pad('id', 28)} ${pad('set', 12)} ${pad('band', 10)} ${pad('score', 7)} ${pad('reason', 18)} ${pad('onGrid', 7)} ${pad('exact', 7)} ${pad('miss', 5)} extra`;
+    const header = `${pad('id', 28)} ${pad('set', 12)} ${pad('band', 10)} ${pad('score', 7)} ${pad('reason', 18)} ${pad('layoutBars', 10)} ${pad('openingSim', 10)} ${pad('onGrid', 7)} ${pad('exact', 7)} ${pad('miss', 5)} extra`;
     const lines = [header, '-'.repeat(header.length)];
-    const dash = (n: number | undefined, digits: number): string =>
-        n === undefined ? '-' : n.toFixed(digits);
+    const dash = (n: number | undefined | null, digits: number): string =>
+        n === undefined || n === null ? '-' : n.toFixed(digits);
     for (const row of report.rows) {
         lines.push(
-            `${pad(row.id, 28)} ${pad(row.set, 12)} ${pad(row.band, 10)} ${pad(row.score.toFixed(1), 7)} ${pad(row.reason, 18)} ${pad(dash(row.onGrid, 1), 7)} ${pad(dash(row.exact, 1), 7)} ${pad(dash(row.missing, 0), 5)} ${dash(row.extra, 0)}`,
+            `${pad(row.id, 28)} ${pad(row.set, 12)} ${pad(row.band, 10)} ${pad(row.score.toFixed(1), 7)} ${pad(row.reason, 18)} ${pad(dash(row.layoutBars, 0), 10)} ${pad(dash(row.openingSim, 2), 10)} ${pad(dash(row.onGrid, 1), 7)} ${pad(dash(row.exact, 1), 7)} ${pad(dash(row.missing, 0), 5)} ${dash(row.extra, 0)}`,
         );
     }
     lines.push(
         `${report.benchAccept}/${report.benchTotal} bench accept; ${report.falseAccepts}/${report.falseTotal} false accepts`,
     );
+    lines.push('layoutBars is PDF vector barlines (not the pin). openingSim is null without an OMR artifact.');
     lines.push('onGrid/exact/miss/extra is compareScore provenance (not an accept predicate)');
     return `${lines.join('\n')}\n`;
 };
@@ -162,18 +189,25 @@ export const matchCandidateForPin = (
     });
 };
 
-const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow => {
+const benchRow = async (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): Promise<SymbolicEvalRow> => {
     const entry = loadCorpusEntry(slug);
     const workKey = requireWorkKey(entry);
     const midi = midiForPin(entry);
-    const pdf = pdfSignalsFromPin(entry, midi, workKey);
+    const pdf = await pdfSignalsForEntry(entry);
     const cand = matchCandidateForPin(entry, midi, workKey);
+    const pinBars = entry.movements[0]?.printedBars ?? 0;
+    const layoutDelta = Math.abs(pdf.layoutBars - pinBars);
+    if (layoutDelta > 1) {
+        process.stderr.write(
+            `LAYOUT DISAGREE ${slug} layoutBars=${pdf.layoutBars} pin=${pinBars} delta=${pdf.layoutBars - pinBars}\n`,
+        );
+    }
     const decision = decideSymbolic(pdf, [cand]);
     const log = decisionLogLine({
         uploadId: `eval:${slug}`,
         pdfSha256: entry.pdf.sha256 ?? sha256Hex(midi),
         pageCount: pdf.pageCount,
-        workKey,
+        workKey: pdf.workKey.composerId === 'unknown' ? workKey : pdf.workKey,
         match: decision.best,
         band: decision.band,
         reason: decision.reason,
@@ -185,6 +219,10 @@ const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow 
         reason: decision.reason,
         score: decision.best?.score ?? 0,
         logLine: formatDecisionLine(log),
+        layoutBars: pdf.layoutBars,
+        pinPrintedBars: pinBars,
+        layoutDelta: pdf.layoutBars - pinBars,
+        openingSim: decision.best?.signals.openingSim ?? null,
     };
     if (decision.band !== 'accept') {
         return row;
@@ -208,11 +246,22 @@ const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow 
     return row;
 };
 
-export const falseMatchFixtures = (): SymbolicEvalRow[] => {
+export const falseMatchFixtures = async (): Promise<SymbolicEvalRow[]> => {
+    if (falseMatchCache) {
+        return falseMatchCache;
+    }
+    const rows = await buildFalseMatchFixtures();
+    falseMatchCache = rows;
+    return rows;
+};
+
+let falseMatchCache: SymbolicEvalRow[] | null = null;
+
+const buildFalseMatchFixtures = async (): Promise<SymbolicEvalRow[]> => {
     const schumann = loadCorpusEntry('schumann-op68-01');
     const schKey = requireWorkKey(schumann);
     const schPdfMidi = midiForPin(schumann);
-    const schPdf = pdfSignalsFromPin(schumann, schPdfMidi, schKey);
+    const schPdf = await pdfSignalsForEntry(schumann);
     const soldaten = synthQuantizedMidi({
         meter: { num: 2, den: 4 },
         pickupQuarters: 0,
@@ -236,7 +285,7 @@ export const falseMatchFixtures = (): SymbolicEvalRow[] => {
     const wtc = loadCorpusEntry('wtk1-prelude1');
     const wtcKey = requireWorkKey(wtc);
     const wtcMidi = midiForPin(wtc);
-    const wtcPdf = pdfSignalsFromPin(wtc, wtcMidi, wtcKey);
+    const wtcPdf = await pdfSignalsForEntry(wtc);
     const prelude2 = synthQuantizedMidi({
         meter: { num: 4, den: 4 },
         pickupQuarters: 0,
@@ -260,7 +309,7 @@ export const falseMatchFixtures = (): SymbolicEvalRow[] => {
     const lute = loadCorpusEntry('bach-prelude-bwv999');
     const luteKey = requireWorkKey(lute);
     const luteMidi = midiForPin(lute);
-    const lutePdf = pdfSignalsFromPin(lute, luteMidi, luteKey);
+    const lutePdf = await pdfSignalsForEntry(lute);
     const duo = synthQuantizedMidi({
         meter: { num: 3, den: 4 },
         pickupQuarters: 0,
@@ -305,7 +354,7 @@ export const falseMatchFixtures = (): SymbolicEvalRow[] => {
     const gym = loadCorpusEntry('gymnopedie-2');
     const gymKey = requireWorkKey(gym);
     const gymMidi = midiForPin(gym);
-    const gymPdf = pdfSignalsFromPin(gym, gymMidi, gymKey);
+    const gymPdf = await pdfSignalsForEntry(gym);
     const quintet = synthQuantizedMidi({
         meter: { num: 4, den: 4 },
         pickupQuarters: 0,
@@ -339,6 +388,7 @@ export const falseMatchFixtures = (): SymbolicEvalRow[] => {
         band: decision.band,
         reason: decision.reason,
         score: decision.best?.score ?? 0,
+        openingSim: decision.best?.signals.openingSim ?? null,
         logLine: formatDecisionLine(
             decisionLogLine({
                 uploadId,
@@ -396,9 +446,12 @@ export const falseMatchFixtures = (): SymbolicEvalRow[] => {
     ];
 };
 
-export const runSymbolicEval = (): SymbolicEvalReport => {
-    const bench = SYMBOLIC_BENCH_SLUGS.map(benchRow);
-    const attacks = falseMatchFixtures();
+export const runSymbolicEval = async (): Promise<SymbolicEvalReport> => {
+    const bench = [];
+    for (const slug of SYMBOLIC_BENCH_SLUGS) {
+        bench.push(await benchRow(slug));
+    }
+    const attacks = await falseMatchFixtures();
     const rows = [...bench, ...attacks];
     return {
         rows,

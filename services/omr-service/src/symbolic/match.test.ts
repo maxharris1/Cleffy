@@ -1,39 +1,37 @@
 import { describe, expect, it } from 'vitest';
 
 import { loadCorpusEntry } from '../eval/manifest.js';
-import { falseMatchFixtures, matchCandidateForPin, midiForPin, runSymbolicEval, SYMBOLIC_BENCH_SLUGS } from './evalRun.js';
+import { falseMatchFixtures, matchCandidateForPin, midiForPin, pdfSignalsForEntry, runSymbolicEval, SYMBOLIC_BENCH_SLUGS } from './evalRun.js';
 import { decideSymbolic, symbolicMatchScore } from './match.js';
 import { synthQuantizedMidi } from './midiSynth.js';
 import { candidateFromMidi, isPerformanceMidi, pdfSignalsFromPin, printedBarCountFromMeasures } from './signals.js';
 import { workKeyFromText } from './workKey.js';
 
 /**
- * No PDF read exists yet. pdfSignals take meters / pickup / printedBars from
- * the corpus pin and the opening pitch bag from the same MIDI used as the
- * candidate (cached Mutopia bytes when present, otherwise a quantized stand-in).
- * Bar count is always the engraved/printed count, never performed/unfolded.
+ * Bench pdfSignals come from the pinned PDF (layout + text), not from the
+ * candidate MIDI. Opening is omitted unless an OMR artifact is cached.
  */
 describe('symbolicMatchScore — 16 bench', () => {
-    it('accepts every pinned piece against its own MIDI', () => {
+    it('accepts every pinned piece against its own MIDI', async () => {
         for (const slug of SYMBOLIC_BENCH_SLUGS) {
             const entry = loadCorpusEntry(slug);
             const workKey = workKeyFromText(entry.title);
             expect(workKey, slug).toBeTruthy();
             const midi = midiForPin(entry);
             expect(isPerformanceMidi(midi), `${slug} quantized`).toBe(false);
-            const pdf = pdfSignalsFromPin(entry, midi, workKey!);
+            const pdf = await pdfSignalsForEntry(entry);
             const cand = matchCandidateForPin(entry, midi, workKey!);
             const result = symbolicMatchScore(pdf, cand);
             expect(result.parts.meter + result.parts.fifths + result.parts.barCount + result.parts.opening + result.parts.catalog, `${slug} parts sum`).toBeCloseTo(result.score, 5);
-            expect(result.band, `${slug} band score=${result.score} reason=${result.reason}`).toBe('accept');
+            expect(result.band, `${slug} band score=${result.score} reason=${result.reason} layout=${pdf.layoutBars} pin=${entry.movements[0]?.printedBars} catalog=${JSON.stringify(pdf.workKey)}`).toBe('accept');
             expect(result.score, slug).toBeGreaterThanOrEqual(85);
         }
-    });
+    }, 180_000);
 });
 
 describe('symbolicMatchScore — false-match set', () => {
-    it('never accepts an attack fixture', () => {
-        const rows = falseMatchFixtures();
+    it('never accepts an attack fixture', async () => {
+        const rows = await falseMatchFixtures();
         expect(rows.length).toBe(5);
         for (const row of rows) {
             expect(row.band, `${row.id} ${row.reason} ${row.score}`).not.toBe('accept');
@@ -41,27 +39,28 @@ describe('symbolicMatchScore — false-match set', () => {
         }
     });
 
-    it('hard-rejects performance MIDI of BWV 846', () => {
-        const row = falseMatchFixtures().find((r) => r.id === 'bwv846-performance-midi');
+    it('hard-rejects performance MIDI of BWV 846', async () => {
+        const row = (await falseMatchFixtures()).find((r) => r.id === 'bwv846-performance-midi');
         expect(row?.reason).toBe('performance_midi');
         expect(row?.band).toBe('reject');
     });
 
-    it('hard-rejects the BWV 999 duo and the quintet as arrangements', () => {
-        const duo = falseMatchFixtures().find((r) => r.id === 'bwv999-duo');
-        const quintet = falseMatchFixtures().find((r) => r.id === 'gnossienne-quintet');
+    it('hard-rejects the BWV 999 duo and the quintet as arrangements', async () => {
+        const rows = await falseMatchFixtures();
+        const duo = rows.find((r) => r.id === 'bwv999-duo');
+        const quintet = rows.find((r) => r.id === 'gnossienne-quintet');
         expect(duo?.reason).toBe('arrangement');
         expect(quintet?.reason).toBe('arrangement');
     });
 
-    it('rejects Schumann 68/2 against a 68/1 PDF', () => {
-        const row = falseMatchFixtures().find((r) => r.id === 'schumann-68-2-vs-1');
+    it('rejects Schumann 68/2 against a 68/1 PDF', async () => {
+        const row = (await falseMatchFixtures()).find((r) => r.id === 'schumann-68-2-vs-1');
         expect(row?.band).toBe('reject');
-        expect(row?.reason).toBe('meter');
+        expect(row?.reason).toBe('bars');
     });
 
-    it('rejects WTC Prelude 2 against Prelude 1', () => {
-        const row = falseMatchFixtures().find((r) => r.id === 'wtc-prelude-2-vs-1');
+    it('rejects WTC Prelude 2 against Prelude 1', async () => {
+        const row = (await falseMatchFixtures()).find((r) => r.id === 'wtc-prelude-2-vs-1');
         expect(row?.band).toBe('reject');
         expect(row?.reason).toBe('bars');
     });
@@ -77,10 +76,10 @@ describe('decideSymbolic', () => {
         a.format = 'ly';
         a.url = 'https://example.test/a.ly';
         const bMidi = synthQuantizedMidi({
-            meter: pdf.meter,
+            meter: pdf.meter ?? { num: 4, den: 4 },
             pickupQuarters: pdf.pickupQuarters,
             printedBars: pdf.printedBars,
-            fifths: pdf.fifths,
+            fifths: pdf.fifths ?? 0,
             pitches: [72, 76, 79, 84],
         });
         const b = candidateFromMidi(bMidi, {
@@ -88,8 +87,8 @@ describe('decideSymbolic', () => {
             format: 'mid',
             url: 'https://example.test/b.mid',
             workKey,
-            meter: pdf.meter,
-            fifths: pdf.fifths,
+            meter: pdf.meter ?? { num: 4, den: 4 },
+            fifths: pdf.fifths ?? 0,
             pickupQuarters: pdf.pickupQuarters,
             arrangement: false,
         });
@@ -111,13 +110,26 @@ describe('decideSymbolic', () => {
         expect(decision.band).toBe('reject');
     });
 
+    it('accepts without opening when meter, bars, key, and catalog agree', () => {
+        const entry = loadCorpusEntry('czerny-op821-01');
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        pdf.opening = null;
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.signals.openingSim).toBeNull();
+        expect(result.band).toBe('accept');
+        expect(result.score).toBeGreaterThanOrEqual(85);
+    });
+
     it('uses low_score for fingerprint-only rejects below 70', () => {
         const entry = loadCorpusEntry('czerny-op821-01');
         const workKey = workKeyFromText(entry.title)!;
         const midi = midiForPin(entry);
         const pdf = pdfSignalsFromPin(entry, midi, workKey);
         const cand = matchCandidateForPin(entry, midi, workKey);
-        cand.opening = pdf.opening.map(() => []);
+        cand.opening = (pdf.opening ?? []).map(() => []);
         cand.workKey = { composerId: 'other', catalogType: 'Op', catalogN: 1 };
         const result = symbolicMatchScore(pdf, cand);
         expect(result.score).toBeLessThan(70);
@@ -131,7 +143,7 @@ describe('decideSymbolic', () => {
         const midi = midiForPin(entry);
         const pdf = pdfSignalsFromPin(entry, midi, workKey);
         const cand = matchCandidateForPin(entry, midi, workKey);
-        cand.opening = pdf.opening.map(() => []);
+        cand.opening = (pdf.opening ?? []).map(() => []);
         const result = symbolicMatchScore(pdf, cand);
         expect(result.score).toBeGreaterThanOrEqual(70);
         expect(result.score).toBeLessThan(85);
@@ -173,8 +185,8 @@ describe('printed bar count', () => {
 });
 
 describe('runSymbolicEval', () => {
-    it('prints a clean 16/16 + 0 false accepts report', () => {
-        const report = runSymbolicEval();
+    it('prints a clean 16/16 + 0 false accepts report', async () => {
+        const report = await runSymbolicEval();
         expect(report.benchTotal).toBe(16);
         expect(report.benchAccept).toBe(16);
         expect(report.falseAccepts).toBe(0);
@@ -182,9 +194,10 @@ describe('runSymbolicEval', () => {
         for (const row of report.rows.filter((r) => r.set === 'bench')) {
             expect(row.onGrid, row.id).toBeGreaterThanOrEqual(99);
             expect(row.reason).not.toBe('parser_unusable');
+            expect(row.openingSim === null || typeof row.openingSim === 'number', row.id).toBe(true);
         }
         for (const row of report.rows.filter((r) => r.set === 'false-match')) {
             expect(row.onGrid).toBeUndefined();
         }
-    });
+    }, 180_000);
 });

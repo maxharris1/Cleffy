@@ -68,17 +68,19 @@ describe('eval CLI', () => {
         rmSync(outPath, { force: true });
     });
 
-    it('symbolic prints the 16 + false-match table without network', () => {
+    it('symbolic prints the 16 + false-match table', () => {
         ensureBuilt();
         const out = execFileSync('node', [cliPath(), 'symbolic'], {
             encoding: 'utf8',
             cwd: root(),
+            timeout: 180_000,
         });
         expect(out).toContain('czerny-op821-01');
         expect(out).toContain('schumann-68-2-vs-1');
         expect(out).toContain('16/16 bench accept');
         expect(out).toContain('0/5 false accepts');
-        expect(out).toContain('onGrid');
+        expect(out).toContain('layoutBars');
+        expect(out).toContain('openingSim');
         expect(out).not.toContain('playAlong');
     });
 });
