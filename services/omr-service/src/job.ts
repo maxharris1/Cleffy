@@ -82,8 +82,9 @@ import type { ScoreData } from './scoreData.js';
  * svc-30: keep a named PDF change-clef that shares ink with a proven beam.
  * svc-31: bound header key extraction at a proven numerical time column.
  * svc-32: named quarter rest may own a staff whose last line it straddles.
+ * svc-33: recover a painted PDF tie when raster CURVES left the curve unowned.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-32';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-33';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

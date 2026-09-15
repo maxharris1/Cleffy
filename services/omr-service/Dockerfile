@@ -67,6 +67,8 @@ RUN set -eux; \
         engine-patches/src/org/audiveris/omr/sheet/symbol/LedgerFragmentEvidence.java \
         engine-patches/src/org/audiveris/omr/sheet/symbol/PdfQuarterRestHints.java \
         engine-patches/src/org/audiveris/omr/sheet/symbol/SymbolsBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/curve/PdfTieHints.java \
+        engine-patches/src/org/audiveris/omr/sheet/curve/SlursBuilder.java \
         engine-patches/src/org/audiveris/omr/step/PageStep.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
         engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
@@ -108,6 +110,10 @@ RUN set -eux; \
         | grep -q uniqueStaff; \
     javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
         | grep -q PdfQuarterRestHints; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.curve.PdfTieHints \
+        | grep -q install; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.curve.SlursBuilder \
+        | grep -q PdfTieHints; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBars \
         | grep -q repair; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \

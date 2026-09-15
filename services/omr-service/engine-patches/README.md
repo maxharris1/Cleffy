@@ -367,6 +367,16 @@ The reproducible patch is `0012-internal-double-bar-export.patch`. Source
 evidence and export-stream controls are in `docs/omr-rsi-cycle-21.md`.
 Svc-27 requires a matching engine build and fresh host artifacts.
 
+## 0018 — painted PDF ties that raster CURVES did not own
+
+Cycle 27. A filled single-arc banana on the source page whose endpoints bind
+two already recognized same-pitch heads, with no intervening head of that
+pitch and no raster slur already owning that ink, becomes an ordinary
+`SlurInter` plus `checkStaffTie`. Ink minima stay recall 0.90 / IoU 0.85.
+The helper is `sheet/curve/PdfTieHints.java`. The hook is vendored
+`sheet/curve/SlursBuilder.java` after `handleTieCollisions()`. Patch
+`0018-pdf-tie-hints.patch`. Engine `audiveris-5.11.0+svc-33`.
+
 ## How the patches are applied
 
 Two `Dockerfile` stages:
@@ -390,7 +400,8 @@ Two `Dockerfile` stages:
      `InternalDoubleBarExport.isTimedInternalSeparator`,
      `PartBarline.getTimeOffset`,
      `PartwiseBuilder.processInternalMiddleBarline`,
-     and `PageStep` calling `InternalDoubleBars`,
+     `PageStep` calling `InternalDoubleBars`,
+     `PdfTieHints.install`, and `SlursBuilder` calling `PdfTieHints`,
      failing the build if an update did not land.
 
 The runtime stage then `COPY --from=engine /opt/audiveris-root`. The launcher, its
