@@ -476,7 +476,31 @@ public final class PdfQuarterRestHints
             }
             found = staff.index;
         }
-        return found;
+        if (found != null) {
+            return found;
+        }
+
+        // Center is below the half-interline window. Own the rest if its outline
+        // straddles exactly one staff last line and extends below that line.
+        Integer below = null;
+        for (StaffAnchor staff : staves) {
+            if (staff.interline <= 0) {
+                continue;
+            }
+            final double margin = 0.5 * staff.interline;
+            if (cy <= (staff.lastLineY + margin)) {
+                continue;
+            }
+            if ((outline.getMinY() >= staff.lastLineY)
+                    || (outline.getMaxY() <= staff.lastLineY)) {
+                continue;
+            }
+            if (below != null) {
+                return null;
+            }
+            below = staff.index;
+        }
+        return below;
     }
 
     /**
