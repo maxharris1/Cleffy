@@ -179,6 +179,40 @@ describe('identifyPdfWorkKey', () => {
 });
 
 describe('identifyAndLookup', () => {
+    it('looks up Mutopia MIDI from an FTP directory listing', async () => {
+        const pages: Record<string, string> = {
+            'https://www.mutopiaproject.org/ftp/BachJS/BWV772/':
+                '<a href="bach-invention-01/">bach-invention-01/</a>',
+            'https://www.mutopiaproject.org/ftp/BachJS/BWV772/bach-invention-01/':
+                '<a href="bach-invention-01.mid">mid</a><a href="bach-invention-01.ly">ly</a>',
+        };
+        const result = await identifyAndLookup({
+            pdfBytes: Buffer.from('%PDF-1.4'),
+            caller: fakeCaller(
+                JSON.stringify({
+                    title: 'Invention No. 1',
+                    composer: 'Bach',
+                    catalog: 'BWV 772',
+                    confidence: 0.95,
+                }),
+                [],
+            ),
+            fetcher: {
+                fetchText: async (url) => {
+                    const html = pages[url];
+                    if (html === undefined) {
+                        throw new Error(`unexpected ${url}`);
+                    }
+                    return html;
+                },
+            },
+        });
+        expect(result?.candidates.some((c) => c.format === 'mid' && c.url.endsWith('bach-invention-01.mid'))).toBe(
+            true,
+        );
+        expect(result?.candidates.some((c) => c.format === 'ly')).toBe(true);
+    });
+
     it('looks up Mutopia MIDI after a vision WorkKey', async () => {
         const entry = loadCorpusEntry('bach-invention-01');
         const midi = entry.reference.source === 'mutopia' ? entry.reference.url : '';
@@ -202,44 +236,64 @@ describe('identifyAndLookup', () => {
 });
 
 describe('createGeminiCaller', () => {
+    const okBody = JSON.stringify({
+        candidates: [
+            {
+                content: {
+                    parts: [
+                        {
+                            text: JSON.stringify({
+                                title: 'x',
+                                composer: 'y',
+                                catalog: 'BWV 772',
+                                confidence: 1,
+                            }),
+                        },
+                    ],
+                },
+            },
+        ],
+    });
+
     it('POSTs PDF bytes to the Flash-Lite generateContent URL', async () => {
         const hits: Array<{ url: string; body: string }> = [];
         const caller = createGeminiCaller({
             apiKey: 'test-key',
+            model: 'gemini-3.5-flash-lite',
             fetchImpl: (async (url, init) => {
                 hits.push({ url: String(url), body: String(init?.body ?? '') });
-                return new Response(
-                    JSON.stringify({
-                        candidates: [
-                            {
-                                content: {
-                                    parts: [
-                                        {
-                                            text: JSON.stringify({
-                                                title: 'x',
-                                                composer: 'y',
-                                                catalog: 'BWV 772',
-                                                confidence: 1,
-                                            }),
-                                        },
-                                    ],
-                                },
-                            },
-                        ],
-                    }),
-                    { status: 200, headers: { 'Content-Type': 'application/json' } },
-                );
+                return new Response(okBody, { status: 200, headers: { 'Content-Type': 'application/json' } });
             }) as typeof fetch,
         });
         const text = await caller.generateJson(Buffer.from('pdf-bytes'), 'identify');
         expect(JSON.parse(text).catalog).toBe('BWV 772');
         expect(hits).toHaveLength(1);
-        expect(hits[0]?.url).toContain('gemini-2.5-flash-lite:generateContent');
+        expect(hits[0]?.url).toContain('gemini-3.5-flash-lite:generateContent');
         expect(hits[0]?.url).toContain('key=test-key');
         const posted = JSON.parse(hits[0]?.body ?? '{}') as {
             contents: Array<{ parts: Array<{ inlineData?: { mimeType: string; data: string } }> }>;
         };
         expect(posted.contents[0]?.parts[0]?.inlineData?.mimeType).toBe('application/pdf');
         expect(posted.contents[0]?.parts[0]?.inlineData?.data).toBe(Buffer.from('pdf-bytes').toString('base64'));
+        expect(caller.lastModel?.()).toBe('gemini-3.5-flash-lite');
+    });
+
+    it('falls back from 3.1 to 3.5 when the cheaper model is 404/503', async () => {
+        const models: string[] = [];
+        const caller = createGeminiCaller({
+            apiKey: 'test-key',
+            fetchImpl: (async (url) => {
+                const href = String(url);
+                if (href.includes('gemini-3.1-flash-lite')) {
+                    models.push('3.1');
+                    return new Response(JSON.stringify({ error: { message: 'new users' } }), { status: 404 });
+                }
+                models.push('3.5');
+                return new Response(okBody, { status: 200, headers: { 'Content-Type': 'application/json' } });
+            }) as typeof fetch,
+        });
+        await caller.generateJson(Buffer.from('pdf-bytes'), 'identify');
+        expect(models).toEqual(['3.1', '3.5']);
+        expect(caller.lastModel?.()).toBe('gemini-3.5-flash-lite');
     });
 });

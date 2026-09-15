@@ -60,7 +60,8 @@ symbolicMatchScore (not playAlongGate). Offline; synthesizes quantized MIDI
 from pin meters/pickup/printedBars when Mutopia bytes are not cached. Exit 1
 if any bench piece is not accept or any attack is accept.
 
-symbolic identify sends the PDF to gemini-2.5-flash-lite (rank 4, after IMSLP
+symbolic identify sends the PDF to gemini-3.1-flash-lite, falling back to
+gemini-3.5-flash-lite (rank 4, after IMSLP
 title / PDF text / filename), then looks up Mutopia MIDI/.ly. Needs
 GEMINI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY. Vision never auto-ingests.
 
