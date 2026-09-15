@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 import { loadCorpusEntry } from '../eval/manifest.js';
-import { falseMatchFixtures, midiForPin, runSymbolicEval, SYMBOLIC_BENCH_SLUGS } from './evalRun.js';
+import { falseMatchFixtures, matchCandidateForPin, midiForPin, runSymbolicEval, SYMBOLIC_BENCH_SLUGS } from './evalRun.js';
 import { decideSymbolic, symbolicMatchScore } from './match.js';
 import { synthQuantizedMidi } from './midiSynth.js';
-import { candidateFromMidi, isPerformanceMidi, pdfSignalsFromPin } from './signals.js';
+import { candidateFromMidi, isPerformanceMidi, pdfSignalsFromPin, printedBarCountFromMeasures } from './signals.js';
 import { workKeyFromText } from './workKey.js';
 
 /**
  * No PDF read exists yet. pdfSignals take meters / pickup / printedBars from
  * the corpus pin and the opening pitch bag from the same MIDI used as the
- * candidate (cached Mutopia bytes when present and not unfolded, otherwise a
- * quantized stand-in generated in-process).
+ * candidate (cached Mutopia bytes when present, otherwise a quantized stand-in).
+ * Bar count is always the engraved/printed count, never performed/unfolded.
  */
 describe('symbolicMatchScore — 16 bench', () => {
     it('accepts every pinned piece against its own MIDI', () => {
@@ -22,16 +22,7 @@ describe('symbolicMatchScore — 16 bench', () => {
             const midi = midiForPin(entry);
             expect(isPerformanceMidi(midi), `${slug} quantized`).toBe(false);
             const pdf = pdfSignalsFromPin(entry, midi, workKey!);
-            const cand = candidateFromMidi(midi, {
-                source: 'mutopia',
-                format: 'mid',
-                url: entry.reference.source === 'mutopia' ? entry.reference.url : '',
-                workKey: workKey!,
-                meter: pdf.meter,
-                fifths: pdf.fifths,
-                pickupQuarters: pdf.pickupQuarters,
-                arrangement: false,
-            });
+            const cand = matchCandidateForPin(entry, midi, workKey!);
             const result = symbolicMatchScore(pdf, cand);
             expect(result.parts.meter + result.parts.fifths + result.parts.barCount + result.parts.opening + result.parts.catalog, `${slug} parts sum`).toBeCloseTo(result.score, 5);
             expect(result.band, `${slug} band score=${result.score} reason=${result.reason}`).toBe('accept');
@@ -82,16 +73,9 @@ describe('decideSymbolic', () => {
         const workKey = workKeyFromText(entry.title)!;
         const midi = midiForPin(entry);
         const pdf = pdfSignalsFromPin(entry, midi, workKey);
-        const a = candidateFromMidi(midi, {
-            source: 'mutopia',
-            format: 'ly',
-            url: 'https://example.test/a.ly',
-            workKey,
-            meter: pdf.meter,
-            fifths: pdf.fifths,
-            pickupQuarters: pdf.pickupQuarters,
-            arrangement: false,
-        });
+        const a = matchCandidateForPin(entry, midi, workKey);
+        a.format = 'ly';
+        a.url = 'https://example.test/a.ly';
         const bMidi = synthQuantizedMidi({
             meter: pdf.meter,
             pickupQuarters: pdf.pickupQuarters,
@@ -125,6 +109,66 @@ describe('decideSymbolic', () => {
         const decision = decideSymbolic(pdf, []);
         expect(decision.reason).toBe('no_candidate');
         expect(decision.band).toBe('reject');
+    });
+
+    it('uses low_score for fingerprint-only rejects below 70', () => {
+        const entry = loadCorpusEntry('czerny-op821-01');
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        cand.opening = pdf.opening.map(() => []);
+        cand.workKey = { composerId: 'other', catalogType: 'Op', catalogN: 1 };
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.score).toBeLessThan(70);
+        expect(result.band).toBe('reject');
+        expect(result.reason).toBe('low_score');
+    });
+
+    it('uses ambiguous only for the 70–84 band (not a fingerprint reject)', () => {
+        const entry = loadCorpusEntry('czerny-op821-01');
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        cand.opening = pdf.opening.map(() => []);
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.score).toBeGreaterThanOrEqual(70);
+        expect(result.score).toBeLessThan(85);
+        expect(result.band).toBe('ambiguous');
+        expect(result.reason).toBe('ambiguous');
+    });
+});
+
+describe('printed bar count', () => {
+    it('dedupes srcIndex (performed repeats do not inflate printed bars)', () => {
+        expect(
+            printedBarCountFromMeasures([
+                { n: 1, srcIndex: 0 },
+                { n: 2, srcIndex: 1 },
+                { n: 3, srcIndex: 0 },
+                { n: 4, srcIndex: 1 },
+                { n: 5, srcIndex: 2 },
+            ]),
+        ).toBe(3);
+    });
+
+    it('compares Op. 68 No. 1 against printedBars, not performedBars', () => {
+        const entry = loadCorpusEntry('schumann-op68-01');
+        const mov = entry.movements[0]!;
+        expect(mov.repeatsUnfoldedInMidi).toBe(true);
+        expect(mov.printedBars).toBe(20);
+        expect(mov.performedBars).toBe(24);
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        expect(cand.barCount).toBe(mov.printedBars);
+        expect(pdf.printedBars).toBe(mov.printedBars);
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.signals.barCountCand).toBe(20);
+        expect(result.barError).toBe(0);
+        expect(result.band).toBe('accept');
     });
 });
 

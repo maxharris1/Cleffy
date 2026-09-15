@@ -70,6 +70,23 @@ export const printedBarCountFromTicks = (
     return Math.max(...bars) - Math.min(...bars) + 1;
 };
 
+/**
+ * Printed bar count: distinct `srcIndex` values (engraved bars), never the
+ * performed/unfolded length. `n` stands in when srcIndex is absent.
+ */
+export const printedBarCountFromMeasures = (
+    measures: readonly { srcIndex?: number; n: number }[],
+): number => {
+    if (measures.length === 0) {
+        return 0;
+    }
+    const seen = new Set<number>();
+    for (const measure of measures) {
+        seen.add(measure.srcIndex ?? measure.n);
+    }
+    return seen.size;
+};
+
 export const isPerformanceMidi = (buf: Buffer): boolean => {
     const parsed = parseSmfForTest(buf);
     if (parsed.notes.length === 0) {
@@ -128,15 +145,21 @@ export const candidateFromMidi = (
         fifths: number;
         pickupQuarters: number;
         arrangement: boolean;
+        /**
+         * Engraved (printed) bar count when known — pin `printedBars`, or
+         * srcIndex-deduped measures. Never the performed/unfolded length.
+         */
+        printedBars?: number;
     },
 ): MatchCandidateInput => {
     const parsed = parseSmfForTest(buf);
-    const barCount = printedBarCountFromTicks(
+    const fromTicks = printedBarCountFromTicks(
         parsed.notes.map((n) => n.tick),
         parsed.tpq,
         meta.meter,
         meta.pickupQuarters,
     );
+    const barCount = meta.printedBars ?? fromTicks;
     const notes = notesFromMidi(
         buf,
         movementStub(meta.meter, meta.pickupQuarters, Math.max(1, barCount), meta.fifths),

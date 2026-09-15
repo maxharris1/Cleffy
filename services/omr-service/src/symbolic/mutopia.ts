@@ -249,6 +249,7 @@ export const lookupMutopia = (index: readonly MutopiaPiece[], workKey: WorkKey):
         }
         for (const file of piece.files) {
             const format = formatFromFilename(file.filename);
+            // .pdf (and other non-candidate suffixes) stay index-only.
             if (format === null) {
                 continue;
             }

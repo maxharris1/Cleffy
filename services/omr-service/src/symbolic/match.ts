@@ -7,6 +7,7 @@ export type MatchBand = 'accept' | 'ambiguous' | 'reject';
 export type MatchReason =
     | 'accept'
     | 'ambiguous'
+    | 'low_score'
     | 'meter'
     | 'bars'
     | 'arrangement'
@@ -83,7 +84,7 @@ const bandFor = (
     if (score >= 70) {
         return { band: 'ambiguous', reason: 'ambiguous' };
     }
-    return { band: 'reject', reason: 'ambiguous' };
+    return { band: 'reject', reason: 'low_score' };
 };
 
 /**

@@ -6,7 +6,7 @@ import { downloadsDir } from '../eval/paths.js';
 import { decisionLogLine, formatDecisionLine, sha256Hex } from './log.js';
 import { decideSymbolic, type MatchBand, type MatchReason } from './match.js';
 import { synthQuantizedMidi } from './midiSynth.js';
-import { candidateFromMidi, pdfSignalsFromPin } from './signals.js';
+import { candidateFromMidi, pdfSignalsFromPin, type MatchCandidateInput } from './signals.js';
 import { workKeyFromText } from './workKey.js';
 import type { WorkKey } from './types.js';
 
@@ -68,22 +68,37 @@ const requireWorkKey = (entry: CorpusEntry): WorkKey => {
 };
 
 /**
- * Prefer a cached Mutopia MIDI when present. Otherwise synthesize a quantized
- * stand-in that matches the pin's meter / pickup / printedBars. Opening bars
- * are always taken from these same bytes (no PDF read yet). Unfolded Mutopia
- * MIDI (Schumann Op. 68 No. 1) would disagree with printedBars, so the
- * stand-in is the offline-eval default.
+ * Prefer a cached Mutopia MIDI when present, including files whose MIDI
+ * unfolds repeats. Match scoring compares pin `printedBars` (engraved), never
+ * the performed length, so Op. 68 No. 1's 24-bar MIDI still fingerprints as
+ * 20 printed bars. Otherwise synthesize a quantized stand-in that matches the
+ * pin's meter / pickup / printedBars. Opening bars are always taken from these
+ * same bytes (no PDF read yet).
  */
+export const cachedMidiPath = (entry: CorpusEntry): string | null => {
+    const mov = entry.movements[0];
+    if (!mov) {
+        return null;
+    }
+    const cached = join(downloadsDir(), `${entry.slug}.mid`);
+    if (existsSync(cached)) {
+        return cached;
+    }
+    const named = join(downloadsDir(), `${entry.slug}-midi`, mov.midi);
+    if (existsSync(named)) {
+        return named;
+    }
+    return null;
+};
+
 export const midiForPin = (entry: CorpusEntry): Buffer => {
     const mov = entry.movements[0];
     if (!mov) {
         throw new Error(`${entry.slug}: no movement`);
     }
-    const cached = join(downloadsDir(), `${entry.slug}.mid`);
-    const named = join(downloadsDir(), `${entry.slug}-midi`, mov.midi);
-    const useCache = !mov.repeatsUnfoldedInMidi && (existsSync(cached) || existsSync(named));
-    if (useCache) {
-        return readFileSync(existsSync(cached) ? cached : named);
+    const cached = cachedMidiPath(entry);
+    if (cached !== null) {
+        return readFileSync(cached);
     }
     return synthQuantizedMidi({
         meter: mov.meter,
@@ -110,22 +125,36 @@ export const formatSymbolicTable = (report: SymbolicEvalReport): string => {
     return `${lines.join('\n')}\n`;
 };
 
-const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow => {
-    const entry = loadCorpusEntry(slug);
-    const workKey = requireWorkKey(entry);
-    const midi = midiForPin(entry);
-    const pdf = pdfSignalsFromPin(entry, midi, workKey);
-    const cand = candidateFromMidi(midi, {
+export const matchCandidateForPin = (
+    entry: CorpusEntry,
+    midi: Buffer,
+    workKey: WorkKey,
+): MatchCandidateInput => {
+    const mov = entry.movements[0];
+    if (!mov) {
+        throw new Error(`${entry.slug}: no movement`);
+    }
+    return candidateFromMidi(midi, {
         source: 'mutopia',
         format: 'mid',
         url: entry.reference.source === 'mutopia' ? entry.reference.url : '',
         sha256: entry.reference.source === 'mutopia' ? entry.reference.sha256 : sha256Hex(midi),
         workKey,
-        meter: pdf.meter,
-        fifths: pdf.fifths,
-        pickupQuarters: pdf.pickupQuarters,
+        meter: mov.meter,
+        fifths: mov.expectedFifths,
+        pickupQuarters: mov.pickupQuarters,
         arrangement: false,
+        // Always the engraved count. Unfolded Mutopia MIDI is longer.
+        printedBars: mov.printedBars,
     });
+};
+
+const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow => {
+    const entry = loadCorpusEntry(slug);
+    const workKey = requireWorkKey(entry);
+    const midi = midiForPin(entry);
+    const pdf = pdfSignalsFromPin(entry, midi, workKey);
+    const cand = matchCandidateForPin(entry, midi, workKey);
     const decision = decideSymbolic(pdf, [cand]);
     const log = decisionLogLine({
         uploadId: `eval:${slug}`,

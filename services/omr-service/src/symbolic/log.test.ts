@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { loadCorpusEntry } from '../eval/manifest.js';
-import { midiForPin } from './evalRun.js';
+import { matchCandidateForPin, midiForPin } from './evalRun.js';
 import { decisionLogLine, formatDecisionLine, SYMBOLIC_TIER } from './log.js';
 import { symbolicMatchScore } from './match.js';
-import { candidateFromMidi, pdfSignalsFromPin } from './signals.js';
+import { pdfSignalsFromPin } from './signals.js';
 import { workKeyFromText } from './workKey.js';
 
 describe('symbolic decision log', () => {
@@ -13,17 +13,7 @@ describe('symbolic decision log', () => {
         const workKey = workKeyFromText(entry.title)!;
         const midi = midiForPin(entry);
         const pdf = pdfSignalsFromPin(entry, midi, workKey);
-        const cand = candidateFromMidi(midi, {
-            source: 'mutopia',
-            format: 'mid',
-            url: entry.reference.source === 'mutopia' ? entry.reference.url : '',
-            sha256: entry.reference.source === 'mutopia' ? entry.reference.sha256 : undefined,
-            workKey,
-            meter: pdf.meter,
-            fifths: pdf.fifths,
-            pickupQuarters: pdf.pickupQuarters,
-            arrangement: false,
-        });
+        const cand = matchCandidateForPin(entry, midi, workKey);
         const match = symbolicMatchScore(pdf, cand);
         const line = decisionLogLine({
             uploadId: 'u1',

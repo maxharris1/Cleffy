@@ -116,8 +116,22 @@ describe('Mutopia index + lookup', () => {
             const midi = entry.reference.source === 'mutopia' ? entry.reference.url : '';
             expect(found.some((c) => c.url === midi), `${slug} midi lookup`).toBe(true);
             expect(found.some((c) => c.format === 'ly'), `${slug} has .ly`).toBe(true);
+            expect(found.some((c) => c.url.endsWith('.pdf')), `${slug} pdf not a candidate`).toBe(false);
         }
         expect(missing, missing.join('\n')).toEqual([]);
+    });
+
+    it('keeps Mutopia .pdf URLs on the index and off the ranked candidate list', () => {
+        const index = parseMutopiaHtml(mutopiaFixtureHtml());
+        expect(index.some((p) => p.files.some((f) => f.filename.toLowerCase().endsWith('.pdf')))).toBe(true);
+        for (const piece of index) {
+            const key = piece.workKey;
+            if (!key) {
+                continue;
+            }
+            const ranked = lookupMutopia(index, key);
+            expect(ranked.some((c) => c.url.toLowerCase().endsWith('.pdf'))).toBe(false);
+        }
     });
 
     it('drops non-piano Mutopia rows (guitar decoy)', () => {
