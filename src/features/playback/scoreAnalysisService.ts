@@ -1,3 +1,4 @@
+import { parseTimingsExtras } from '@/features/playback/analysisSource';
 import { eraOfTitle, type Era } from '@/features/playback/era';
 import { getSupabase } from '@/lib/supabase';
 import { getDb } from '@/sync/db';
@@ -142,6 +143,7 @@ export const fetchScoreAnalysisFull = async (docId: string): Promise<CachedScore
         return null;
     }
     const previous = await getDb().scoreCache.get(docId);
+    const extras = parseTimingsExtras((data as { timings?: unknown }).timings);
     const cached: CachedScoreAnalysis = {
         docId,
         status: data.status,
@@ -151,6 +153,8 @@ export const fetchScoreAnalysisFull = async (docId: string): Promise<CachedScore
         bpmDefault: data.bpm_default,
         fetchedAt: new Date().toISOString(),
         ...(previous?.bpmOverride !== undefined ? { bpmOverride: previous.bpmOverride } : {}),
+        ...(extras.source ? { source: extras.source } : {}),
+        ...(extras.alignmentMap ? { alignmentMap: extras.alignmentMap } : {}),
     };
     await getDb().scoreCache.put(cached);
     return cached;

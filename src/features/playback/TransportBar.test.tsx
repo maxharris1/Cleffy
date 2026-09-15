@@ -595,3 +595,56 @@ describe('repeated bars in the measure counter', () => {
         expect(screen.getByText('m. 21 / 24')).toBeInTheDocument();
     });
 });
+
+describe('source badge', () => {
+    it('shows Symbolic · Mutopia 100 on accept', () => {
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: tinyScore,
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+                source: {
+                    tier: 'symbolic',
+                    band: 'accept',
+                    reason: 'accept',
+                    sourceName: 'Mutopia',
+                    matchScore: 100,
+                },
+            },
+        });
+        expect(screen.getByTestId('source-badge')).toHaveTextContent('Symbolic · Mutopia 100');
+    });
+
+    it('shows Pick edition on ambiguous', () => {
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: tinyScore,
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+                source: { tier: 'omr', band: 'ambiguous', reason: 'ambiguous', matchScore: 81 },
+            },
+        });
+        expect(screen.getByTestId('source-badge')).toHaveTextContent('Pick edition');
+    });
+
+    it('shows OMR on reject and hides when source is absent', () => {
+        const { unmount } = renderBar({
+            state: {
+                kind: 'ready',
+                score: tinyScore,
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+                source: { tier: 'omr', band: 'reject', reason: 'no_candidate' },
+            },
+        });
+        expect(screen.getByTestId('source-badge')).toHaveTextContent('OMR');
+        unmount();
+        renderBar();
+        expect(screen.queryByTestId('source-badge')).toBeNull();
+    });
+});

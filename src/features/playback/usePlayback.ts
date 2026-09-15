@@ -21,6 +21,7 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
     const score = analysis.kind === 'ready' ? analysis.score : null;
     const bpmDefault = analysis.kind === 'ready' ? analysis.bpmDefault : null;
     const bpmOverride = analysis.kind === 'ready' ? analysis.bpmOverride : null;
+    const alignmentMap = analysis.kind === 'ready' ? analysis.alignmentMap : null;
 
     // Clear a stale sample warning when the document/score changes (during
     // render, per the React "adjusting state" pattern).
@@ -117,8 +118,8 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
     const getEngine = useCallback(() => engineRef.current, []);
 
     const playbackFeature = useMemo<PlaybackFeature | undefined>(
-        () => (score ? { score, getEngine } : undefined),
-        [score, getEngine],
+        () => (score ? { score, getEngine, alignmentMap } : undefined),
+        [score, getEngine, alignmentMap],
     );
 
     return { playbackFeature, getEngine, warning, dismissWarning: () => setWarning(null) };

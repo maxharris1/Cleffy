@@ -1,3 +1,4 @@
+import type { AlignmentMap } from '@/features/playback/analysisSource';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { measureIndexAtTick, xAtTickInMeasure } from '@/features/playback/scoreTime';
 import { clampScroll, scrollForPagePoint } from '@/features/viewer/geometry';
@@ -33,10 +34,27 @@ export interface PlayheadRect {
     y1: number;
 }
 
-export const playheadRect = (score: ScoreData, tick: number): PlayheadRect | null => {
+export const playheadRect = (score: ScoreData, tick: number, map?: AlignmentMap | null): PlayheadRect | null => {
     const measureIndex = measureIndexAtTick(score.measures, tick);
     const measure = score.measures[measureIndex];
-    if (!measure || measure.sys < 0 || measure.page < 0) {
+    if (!measure) {
+        return null;
+    }
+    const src = measure.srcIndex ?? measureIndex;
+    const box = map?.bySrcIndex[src];
+    if (box) {
+        const boxed = { ...measure, page: box.page, sys: box.system, x0: box.x0, x1: box.x1 };
+        return {
+            measureIndex,
+            pageIndex: box.page,
+            x: xAtTickInMeasure(boxed, tick),
+            x0: box.x0,
+            x1: box.x1,
+            y0: box.y0,
+            y1: box.y1,
+        };
+    }
+    if (measure.sys < 0 || measure.page < 0) {
         return null;
     }
     const system = score.systems[measure.sys];
@@ -46,7 +64,6 @@ export const playheadRect = (score: ScoreData, tick: number): PlayheadRect | nul
     return {
         measureIndex,
         pageIndex: measure.page,
-        // Rides the engraved chord columns when the analysis provides them.
         x: xAtTickInMeasure(measure, tick),
         x0: measure.x0,
         x1: measure.x1,
@@ -58,6 +75,7 @@ export const playheadRect = (score: ScoreData, tick: number): PlayheadRect | nul
 export interface PlayheadDeps {
     getEngine: () => PlaybackEngine | null;
     getScore: () => ScoreData | null;
+    getAlignmentMap?: () => AlignmentMap | null | undefined;
     lineEl: HTMLElement;
     highlightEl: HTMLElement;
     getLayout: () => DocumentLayout;
@@ -81,6 +99,7 @@ export class PlayheadController {
     private lastMeasureIndex = -2;
     private lastRenderScale = -1;
     private lastScore: ScoreData | null = null;
+    private lastMap: AlignmentMap | null | undefined = undefined;
     private lastLayout: DocumentLayout | null = null;
     private forceFollow = false;
 
@@ -156,6 +175,7 @@ export class PlayheadController {
         }
         const renderScale = this.deps.getRenderScale();
         const layoutNow = this.deps.getLayout();
+        const map = this.deps.getAlignmentMap?.() ?? null;
         // Page geometry is part of the frame's identity: a paused transport
         // holds one tick forever, so without this the overlays would stay
         // wherever (or hidden) they were when the pages first measured.
@@ -164,6 +184,7 @@ export class PlayheadController {
             renderScale === this.lastRenderScale &&
             score === this.lastScore &&
             layoutNow === this.lastLayout &&
+            map === this.lastMap &&
             !this.forceFollow
         ) {
             return;
@@ -172,8 +193,9 @@ export class PlayheadController {
         this.lastRenderScale = renderScale;
         this.lastScore = score;
         this.lastLayout = layoutNow;
+        this.lastMap = map;
 
-        const rect = playheadRect(score, tick);
+        const rect = playheadRect(score, tick, map);
         const measureIndex = rect ? rect.measureIndex : measureIndexAtTick(score.measures, tick);
         if (measureIndex !== this.lastMeasureIndex || this.forceFollow) {
             const store = useViewerStore.getState();

@@ -114,6 +114,40 @@ describe('fetchScoreAnalysisFull', () => {
         expect((await getDb().scoreCache.get(DOC))?.status).toBe('ready');
     });
 
+    it('caches timings.source and alignmentMap beside ScoreData', async () => {
+        fake.row = {
+            ...readyRow,
+            timings: {
+                source: {
+                    tier: 'symbolic',
+                    band: 'accept',
+                    reason: 'accept',
+                    sourceName: 'Mutopia',
+                    matchScore: 100,
+                    format: 'mid',
+                },
+                alignmentMap: {
+                    pdfSha256: 'pdf',
+                    candidateSha256: 'cand',
+                    pickup: false,
+                    printedBars: 1,
+                    bySrcIndex: { 0: { page: 0, system: 0, x0: 0.1, x1: 0.4, y0: 0.2, y1: 0.3 } },
+                },
+            },
+        };
+        const cached = await fetchScoreAnalysisFull(DOC);
+        expect(cached?.source).toEqual({
+            tier: 'symbolic',
+            band: 'accept',
+            reason: 'accept',
+            sourceName: 'Mutopia',
+            matchScore: 100,
+            format: 'mid',
+        });
+        expect(cached?.alignmentMap?.bySrcIndex[0]?.page).toBe(0);
+        expect((await getDb().scoreCache.get(DOC))?.source?.sourceName).toBe('Mutopia');
+    });
+
     it('nulls out a malformed score payload instead of crashing', async () => {
         fake.row = { ...readyRow, score: { garbage: true } };
         const cached = await fetchScoreAnalysisFull(DOC);

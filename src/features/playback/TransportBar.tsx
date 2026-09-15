@@ -4,6 +4,7 @@ import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { Era } from '@/features/playback/era';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
+import { SourceBadge } from '@/features/playback/SourceBadge';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import { BPM_MAX, BPM_MIN, useViewerStore } from '@/state/store';
 import type { MemberRole } from '@/types/database';
@@ -553,6 +554,8 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     <span>{sig.num}</span>
                     <span>{sig.den}</span>
                 </span>
+
+                {props.state.kind === 'ready' && props.state.source ? <SourceBadge source={props.state.source} /> : null}
 
                 <button
                     type="button"
