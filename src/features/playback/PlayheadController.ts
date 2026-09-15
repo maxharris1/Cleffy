@@ -98,6 +98,11 @@ export class PlayheadController {
             if (state.followMode === 'on' && prev.followMode !== 'on') {
                 this.forceFollow = true;
             }
+            if (state.playbackStatus !== prev.playbackStatus) {
+                // Sounding BPM is only live while playing; a status change with
+                // a frozen tick must still refresh the transport readout.
+                this.lastTick = -1;
+            }
         });
     }
 
@@ -141,6 +146,14 @@ export class PlayheadController {
         }
         const engine = this.deps.getEngine();
         const tick = engine ? engine.getPositionTicks() : 0;
+        const store = useViewerStore.getState();
+        const live =
+            engine && (store.playbackStatus === 'playing' || store.playbackStatus === 'counting')
+                ? engine.getBpmAt(tick)
+                : null;
+        if (store.soundingBpm !== live) {
+            store.setSoundingBpm(live);
+        }
         const renderScale = this.deps.getRenderScale();
         const layoutNow = this.deps.getLayout();
         // Page geometry is part of the frame's identity: a paused transport

@@ -1,0 +1,33 @@
+{
+    "slug": "fur-elise",
+    "title": "Beethoven — Für Elise, WoO 59",
+    "pdf": {
+        "url": "https://imslp.org/wiki/F%C3%BCr_Elise,_WoO_59_(Beethoven,_Ludwig_van)",
+        "sha256": "0641395b4e97811bb89751352719bb9994cacd4f13da7b9429fe65716dfdc328",
+        "pages": 3
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.mid",
+        "sha256": "15966bfcb90fd9ba4d578a4339bb8d028c7c235e41325567f30f40e8ea411c06",
+        "license": "Public Domain (Mutopia 2015/08/18-931, Stelios Samelis after Breitkopf & Härtel 1888). Local zip is fur-elise.mid, not a Mutopia-hosted archive."
+    },
+    "movements": [
+        {
+            "name": "Poco moto",
+            "midi": "fur-elise.mid",
+            "meter": { "num": 3, "den": 8 },
+            "pickupQuarters": 0.5,
+            "printedBars": 105,
+            "expectedFifths": 0,
+            "expectedTempo": { "min": 60, "max": 84 },
+            "repeatsUnfoldedInMidi": false
+        }
+    ],
+    "editionNotes": [
+        "LilyPond \\tempo 4 = 72 under a hidden metronome mark; the printed heading is Poco moto. in 3/8 with a one-eighth pickup.",
+        "Mutopia MIDI does not unfold the two volta repeats. Compare printed bars, not performed length.",
+        "A minor throughout (expectedFifths 0). pdf.sha256 pins one 3-page scan. A different IMSLP-style library scan must not be used as the local half of a hosted shootout — reuse the hosted PDF bytes (omr-eval skill Shootout).",
+        "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle."
+    ]
+}

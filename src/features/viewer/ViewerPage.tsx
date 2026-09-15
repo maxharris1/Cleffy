@@ -446,6 +446,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         pageCount={state.doc.page_count}
                         warning={warning}
                         onDismissWarning={dismissWarning}
+                        documentTitle={state.doc.title}
                     />
                 </div>
             ) : null}

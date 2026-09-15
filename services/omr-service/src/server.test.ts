@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { validateJobRequest } from './server.js';
+import { ENGINE_VERSION } from './job.js';
+import { healthzPayload, validateJobRequest } from './server.js';
 
 const DOC = '0c7fdd18-7d2d-4d24-b4dc-a17971a2b3a4';
 const SUPA = 'https://project.supabase.co';
@@ -55,5 +56,12 @@ describe('validateJobRequest', () => {
                 SUPA,
             ),
         ).toBeNull();
+    });
+});
+
+describe('healthzPayload', () => {
+    it('reports the live ENGINE_VERSION so regenerate can handshake', () => {
+        expect(healthzPayload()).toEqual({ ok: true, engineVersion: ENGINE_VERSION });
+        expect(ENGINE_VERSION).toMatch(/\+svc-\d+$/);
     });
 });

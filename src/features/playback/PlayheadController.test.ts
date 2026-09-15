@@ -84,6 +84,33 @@ describe('PlayheadController drawing', () => {
         controller.destroy();
     });
 
+    it('writes the sounding tempo while playing and clears it when stopped', () => {
+        const engine = {
+            getPositionTicks: () => 6000,
+            getBpmAt: (tick: number) => (tick >= 6000 ? 60 : 120),
+        };
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        const lineEl = document.createElement('div');
+        const highlightEl = document.createElement('div');
+        useViewerStore.getState().setPlaybackStatus('playing');
+        const controller = new PlayheadController({
+            getEngine: () => engine as never,
+            getScore: () => tinyScore,
+            lineEl,
+            highlightEl,
+            getLayout: () => PAGED_LAYOUT,
+            getRenderScale: () => 1,
+            getViewportSize: () => ({ width: 800, height: 600 }),
+        });
+        flushFrame();
+        expect(useViewerStore.getState().soundingBpm).toBe(60);
+        useViewerStore.getState().setPlaybackStatus('paused');
+        flushFrame();
+        expect(useViewerStore.getState().soundingBpm).toBeNull();
+        controller.destroy();
+    });
+
     it('keeps retrying until the pages are measured (reopening a cached score)', () => {
         let layout = EMPTY_LAYOUT;
         const { controller, lineEl, highlightEl } = mount(() => layout);
