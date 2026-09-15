@@ -1,7 +1,14 @@
 import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { formatSymbolicTable, runSymbolicEval } from '../symbolic/evalRun.js';
+import { createNetworkFetcher, rateLimitedFetcher } from '../symbolic/http.js';
+import {
+    createGeminiCallerFromEnv,
+    hydrateGeminiKeyFromFiles,
+    identifyAndLookup,
+} from '../symbolic/visionId.js';
 import { BENCH_SUITE, formatBench, runBench, writeBench } from './bench.js';
 import { fromArtifacts, fromDocument, fromPdf, fromScoreFile, type Candidate } from './candidate.js';
 import { compareScore } from './compare.js';
@@ -36,6 +43,7 @@ const usage = `Usage:
   node dist/eval/cli.js bench [--piece <slug>] [--force-audiveris] [--json]
        [--exact-floor 95] [--ongrid-floor 90]
   node dist/eval/cli.js symbolic [--json]
+  node dist/eval/cli.js symbolic identify --pdf <file> [--json]
   node dist/eval/cli.js shootout fetch --piece <slug> --document <uuid>
   node dist/eval/cli.js shootout local --piece <slug> [--force-audiveris]
   node dist/eval/cli.js shootout compare --piece <slug> [--prod <score.json>] [--local <score.json>]
@@ -54,6 +62,10 @@ eval/cache/artifacts/<slug>/ when present), never from the candidate MIDI.
 Accepted bench rows also ingest MIDI→ScoreData and record compareScore
 onGrid/exact/miss/extra as a provenance column — not a gate. Exit 1 if any
 bench piece is not accept or any attack is accept.
+
+symbolic identify sends the PDF to gemini-2.5-flash-lite (rank 4, after IMSLP
+title / PDF text / filename), then looks up Mutopia MIDI/.ly. Needs
+GEMINI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY. Vision never auto-ingests.
 
 The play-along gate is on by default for run and bench. It reads the CURRENT
 result, so it fails a broken piece with no baseline to diff against. It checks
@@ -174,6 +186,7 @@ const main = async (): Promise<number> => {
             'exact-floor': { type: 'string' },
             'ongrid-floor': { type: 'string' },
             'no-gate': { type: 'boolean', default: false },
+            pdf: { type: 'string' },
         },
     });
     if (values.help === true) {
@@ -227,6 +240,55 @@ const main = async (): Promise<number> => {
     }
 
     if (command === 'symbolic') {
+        if (positionals[1] === 'identify') {
+            const pdfPath = values.pdf ?? positionals[2];
+            if (pdfPath === undefined || pdfPath === '') {
+                return fail('symbolic identify requires --pdf <file>');
+            }
+            hydrateGeminiKeyFromFiles();
+            const pdfBytes = await readFile(pdfPath);
+            const result = await identifyAndLookup({
+                pdfBytes,
+                filename: basename(pdfPath),
+                caller: createGeminiCallerFromEnv(),
+                fetcher: rateLimitedFetcher(createNetworkFetcher()),
+            });
+            if (result === null) {
+                process.stderr.write('no WorkKey from metadata or vision\n');
+                return 2;
+            }
+            const midi = result.candidates.filter((c) => c.format === 'mid');
+            const payload = {
+                source: result.hit.source,
+                workKey: result.hit.workKey,
+                title: result.hit.title,
+                composer: result.hit.composer,
+                catalog: result.hit.catalog,
+                confidence: result.hit.confidence,
+                model: result.hit.model,
+                candidates: result.candidates.map((c) => ({
+                    source: c.source,
+                    format: c.format,
+                    url: c.url,
+                    priority: c.priority,
+                })),
+                midiUrls: midi.map((c) => c.url),
+            };
+            if (values.json === true) {
+                process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+            } else {
+                process.stdout.write(
+                    `${result.hit.source} ${JSON.stringify(result.hit.workKey)} conf=${result.hit.confidence}\n`,
+                );
+                for (const c of result.candidates) {
+                    process.stdout.write(`  ${c.priority} ${c.format} ${c.url}\n`);
+                }
+                if (midi.length === 0) {
+                    process.stdout.write('  (no MIDI candidate)\n');
+                }
+            }
+            return 0;
+        }
         const report = await runSymbolicEval();
         if (values.json === true) {
             process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
