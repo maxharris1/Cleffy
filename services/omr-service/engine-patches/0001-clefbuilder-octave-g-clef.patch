@@ -1,0 +1,368 @@
+--- a/app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java	(Audiveris 5.11.0, CRLF normalized to LF)
++++ b/app/src/main/java/org/audiveris/omr/sheet/clef/ClefBuilder.java	(Cleffy svc-15)
+@@ -122,6 +122,14 @@
+      */
+     private static final EnumSet<Shape> ONE_LINE_CLEF_SHAPES = EnumSet.of(PERCUSSION_CLEF);
+ 
++    /**
++     * The octave-transposing G clefs.
++     * <p>
++     * They share {@link ClefKind#TREBLE} with the plain G_CLEF, hence the dedicated handling
++     * in {@link #promoteOctaveClef}.
++     */
++    private static final EnumSet<Shape> OCTAVE_CLEF_SHAPES = EnumSet.of(G_CLEF_8VA, G_CLEF_8VB);
++
+     //~ Instance fields ----------------------------------------------------------------------------
+ 
+     /** Dedicated staff to analyze. */
+@@ -244,15 +252,22 @@
+         // Best inter per clef kind
+         Map<ClefKind, ClefInter> bestMap = new EnumMap<>(ClefKind.class);
+ 
++        // Best octave G clef per octave shape, kept aside from bestMap (see promoteOctaveClef)
++        Map<Shape, ClefInter> octaveMap = new EnumMap<>(Shape.class);
++        Map<Shape, Double> octavePlainMap = new EnumMap<>(Shape.class);
++
+         for (Set<Glyph> set : sets) {
+             // Use only the subgraph for this set
+             SimpleGraph<Glyph, GlyphLink> subGraph = GlyphCluster.getSubGraph(set, graph, false);
+-            ClefAdapter adapter = new ClefAdapter(subGraph, bestMap);
++            ClefAdapter adapter = new ClefAdapter(subGraph, bestMap, octaveMap, octavePlainMap);
+             new GlyphCluster(adapter, null).decompose();
+ 
+             int trials = adapter.trials;
+             logger.debug("Staff#{} clef parts:{} trials:{}", staff.getId(), set.size(), trials);
+         }
++
++        // Let the engraving promote an octave G clef over the plain one, if warranted
++        promoteOctaveClef(bestMap, octaveMap, octavePlainMap);
+ 
+         // Discard poor candidates as much as possible
+         if (bestMap.size() > 1) {
+@@ -360,6 +375,179 @@
+         logger.debug("{} parts: {}", this, parts.size());
+ 
+         return parts;
++    }
++
++    //-------------------//
++    // promoteOctaveClef //
++    //-------------------//
++    /**
++     * Let an octave G clef supersede the plain G clef when the engraving warrants it.
++     * <p>
++     * <code>ClefInter.kindOf()</code> maps G_CLEF, G_CLEF_8VA and G_CLEF_8VB onto the single
++     * <code>ClefKind.TREBLE</code>, so the kind-keyed <code>bestMap</code> can hold only one of
++     * them, and it keeps the highest-graded one. On a staff engraved with an octave clef,
++     * <code>GlyphCluster</code> produces both the clef body alone (read G_CLEF, cleanly, around
++     * 0.8) and the body plus the octave digit (read G_CLEF_8VB, weakly, around 0.05 - the octave
++     * shapes are rare in the training set). The plain reading therefore wins on every page of
++     * every score, and the whole staff is transcribed an octave too high.
++     * <p>
++     * The classifier's own confidence cannot arbitrate that, so what arbitrates here is the
++     * engraving: ink that the plain clef reading cannot account for, sitting exactly where an
++     * octave digit is engraved. An octave candidate supersedes the plain clef only if all of:
++     * <ol>
++     * <li><b>Same clef body plus extra ink.</b> Its glyph strictly contains the plain candidate's
++     * glyph and carries strictly more weight - one reading is the other plus something.
++     * <li><b>The plain reading cannot explain that extra ink.</b> The classifier's G_CLEF grade
++     * for the larger glyph must have collapsed to at most <code>maxPlainClefDecay</code> of the
++     * grade it gave the contained clef body. A plain G clef with a stray speck attached still
++     * reads as a fine G clef; a clef with a digit under it does not.
++     * <li><b>The extra ink is placed and sized like an octave digit.</b> It lies beyond the staff
++     * (below the bottom line for 8VB, above the top line for 8VA) and spans between
++     * <code>minOctaveDigitHeight</code> and <code>maxOctaveDigitHeight</code> interlines.
++     * <li><b>The classifier does offer the octave reading</b> for that larger glyph, above the
++     * usual <code>Grades.clefMinGrade</code> acceptance floor.
++     * </ol>
++     * A header engraved as a bare G clef yields no containing glyph at all, condition 1 fails
++     * immediately, and the stock selection stands untouched.
++     *
++     * @param bestMap       the best clef per kind, updated in place
++     * @param octaveMap     the best octave clef candidate per octave shape
++     * @param octavePlainMap the plain G clef grade on the very glyph behind each octaveMap entry
++     */
++    private void promoteOctaveClef (Map<ClefKind, ClefInter> bestMap,
++                                    Map<Shape, ClefInter> octaveMap,
++                                    Map<Shape, Double> octavePlainMap)
++    {
++        if (octaveMap.isEmpty()) {
++            return;
++        }
++
++        final ClefInter plain = bestMap.get(ClefKind.TREBLE);
++
++        if ((plain == null) || (plain.getShape() != G_CLEF) || (plain.getGlyph() == null)) {
++            return;
++        }
++
++        final Glyph plainGlyph = plain.getGlyph();
++        final Rectangle plainBox = plainGlyph.getBounds();
++        final int xMid = plainBox.x + (plainBox.width / 2);
++        ClefInter best = null;
++        String bestReason = null;
++
++        for (ClefInter octave : octaveMap.values()) {
++            final Glyph glyph = octave.getGlyph();
++
++            if (glyph == null) {
++                continue;
++            }
++
++            final Shape shape = octave.getShape();
++            final Rectangle box = glyph.getBounds();
++            final String reason = octaveRejection(shape, box, glyph, plain, plainGlyph, xMid,
++                                                  octavePlainMap.getOrDefault(shape, 0.0));
++
++            if (reason != null) {
++                logger.info(
++                        "Staff#{} octave clef {} grade:{} not retained over {} grade:{} - {}",
++                        staff.getId(),
++                        shape,
++                        String.format("%.3f", octave.getGrade()),
++                        plain.getShape(),
++                        String.format("%.3f", plain.getGrade()),
++                        reason);
++                continue;
++            }
++
++            if ((best == null) || (best.getGrade() < octave.getGrade())) {
++                best = octave;
++                bestReason = String.format(
++                        "digit %d px beyond staff, plain grade decays %.3f -> %.3f",
++                        (shape == G_CLEF_8VB)
++                                ? ((box.y + box.height) - (plainBox.y + plainBox.height))
++                                : (plainBox.y - box.y),
++                        plain.getGrade(),
++                        octavePlainMap.getOrDefault(shape, 0.0));
++            }
++        }
++
++        if (best != null) {
++            logger.info(
++                    "Staff#{} octave clef {} grade:{} supersedes {} grade:{} ({})",
++                    staff.getId(),
++                    best.getShape(),
++                    String.format("%.3f", best.getGrade()),
++                    plain.getShape(),
++                    String.format("%.3f", plain.getGrade()),
++                    bestReason);
++            bestMap.put(ClefKind.TREBLE, best);
++        }
++    }
++
++    //-----------------//
++    // octaveRejection //
++    //-----------------//
++    /**
++     * Check one octave clef candidate against the plain clef it would supersede.
++     *
++     * @param shape      the octave shape at stake
++     * @param box        bounds of the octave candidate glyph
++     * @param glyph      the octave candidate glyph
++     * @param plain      the plain clef candidate
++     * @param plainGlyph the plain clef glyph
++     * @param xMid       mid abscissa of the plain clef, to read the staff lines at
++     * @param plainHere  plain G clef grade on the octave candidate glyph
++     * @return null if the candidate is acceptable, else why it is not
++     */
++    private String octaveRejection (Shape shape,
++                                    Rectangle box,
++                                    Glyph glyph,
++                                    ClefInter plain,
++                                    Glyph plainGlyph,
++                                    int xMid,
++                                    double plainHere)
++    {
++        final Rectangle plainBox = plainGlyph.getBounds();
++
++        // 1. The very same clef body, plus extra ink
++        if (!box.contains(plainBox) || (glyph.getWeight() <= plainGlyph.getWeight())) {
++            return "glyph does not strictly contain the plain clef glyph";
++        }
++
++        // 2. The plain reading must have collapsed on that larger glyph
++        if (plainHere > (params.maxPlainClefDecay * plain.getGrade())) {
++            return String.format(
++                    "plain clef still reads %.3f on the larger glyph (max %.3f)",
++                    plainHere,
++                    params.maxPlainClefDecay * plain.getGrade());
++        }
++
++        // 3. Extra ink beyond the staff, on the side where the octave digit is engraved
++        final int digit;
++
++        if (shape == G_CLEF_8VB) {
++            digit = (box.y + box.height) - (plainBox.y + plainBox.height);
++
++            if ((digit <= 0) || ((plainBox.y + plainBox.height) < staff.getLastLine().yAt(xMid))) {
++                return "no extra ink below the plain clef and beyond the staff";
++            }
++        } else {
++            digit = plainBox.y - box.y;
++
++            if ((digit <= 0) || (plainBox.y > staff.getFirstLine().yAt(xMid))) {
++                return "no extra ink above the plain clef and beyond the staff";
++            }
++        }
++
++        // 4. Sized like an octave digit
++        if ((digit < params.minOctaveDigitHeight) || (digit > params.maxOctaveDigitHeight)) {
++            return String.format(
++                    "extra ink %d px is not digit-sized (%d..%d px)",
++                    digit,
++                    params.minOctaveDigitHeight,
++                    params.maxOctaveDigitHeight);
++        }
++
++        return null;
+     }
+ 
+     //------------//
+@@ -543,11 +731,21 @@
+         /** Best inter per clef kind. */
+         private final Map<ClefKind, ClefInter> bestMap;
+ 
++        /** Best inter per octave G clef shape. */
++        private final Map<Shape, ClefInter> octaveMap;
++
++        /** Plain G clef grade on the very glyph that yielded the octaveMap entry. */
++        private final Map<Shape, Double> octavePlainMap;
++
+         ClefAdapter (SimpleGraph<Glyph, GlyphLink> graph,
+-                     Map<ClefKind, ClefInter> bestMap)
++                     Map<ClefKind, ClefInter> bestMap,
++                     Map<Shape, ClefInter> octaveMap,
++                     Map<Shape, Double> octavePlainMap)
+         {
+             super(graph);
+             this.bestMap = bestMap;
++            this.octaveMap = octaveMap;
++            this.octavePlainMap = octavePlainMap;
+         }
+ 
+         @Override
+@@ -562,20 +760,59 @@
+ 
+             logger.debug("ClefAdapter evaluateGlyph on {}", glyph);
+ 
++            // Octave G clefs are rare shapes: for one and the same glyph the classifier ranks
++            // them below the plain G_CLEF, so a deeper sequence is requested here. The extra
++            // evaluations feed octaveMap ONLY - the plain selection below still sees exactly the
++            // first params.maxEvalRank evaluations, which the classifier returns in the very same
++            // order whatever the requested count.
++            final int evalRank = Math.max(params.maxEvalRank, params.maxOctaveEvalRank);
+             Evaluation[] evals = classifier.evaluate(
+                     glyph,
+                     staff.getSpecificInterline(),
+-                    params.maxEvalRank,
++                    evalRank,
+                     Grades.clefMinGrade / Grades.intrinsicRatio,
+                     null);
+ 
++            // Grade the classifier gives the PLAIN G clef on this very same glyph
++            double plainHere = 0;
++
++            for (Evaluation eval : evals) {
++                if (eval.shape == G_CLEF) {
++                    plainHere = Grades.intrinsicRatio * eval.grade;
++                    break;
++                }
++            }
++
+             // Allowed clefs shapes
+             final EnumSet clefShapes = staff.isDrum() ? ONE_LINE_CLEF_SHAPES : HEADER_CLEF_SHAPES;
+-            for (Evaluation eval : evals) {
++            for (int i = 0; i < evals.length; i++) {
++                final Evaluation eval = evals[i];
+                 final Shape shape = eval.shape;
+ 
+                 if (clefShapes.contains(shape)) {
+                     final double grade = Grades.intrinsicRatio * eval.grade;
++
++                    if (OCTAVE_CLEF_SHAPES.contains(shape)) {
++                        final ClefInter bestOctave = octaveMap.get(shape);
++
++                        if ((bestOctave == null) || (bestOctave.getGrade() < grade)) {
++                            final ClefInter octave = ClefInter.createValid(
++                                    glyph,
++                                    shape,
++                                    grade,
++                                    staff);
++
++                            if (octave != null) {
++                                octaveMap.put(shape, octave);
++                                octavePlainMap.put(shape, plainHere);
++                            }
++                        }
++                    }
++
++                    if (i >= params.maxEvalRank) {
++                        continue; // Beyond standard rank: octave probe only
++                    }
++
+                     ClefKind kind = ClefInter.kindOf(glyph.getCenter2D(), shape, staff);
+                     ClefInter bestInter = bestMap.get(kind);
+ 
+@@ -732,6 +969,23 @@
+                 "none",
+                 3,
+                 "Maximum acceptable rank in clef evaluation");
++
++        private final Constant.Integer maxOctaveEvalRank = new Constant.Integer(
++                "none",
++                12,
++                "Maximum acceptable rank in clef evaluation for an octave G clef");
++
++        private final Constant.Ratio maxPlainClefDecay = new Constant.Ratio(
++                0.5,
++                "Maximum plain clef grade on the octave glyph, as a ratio of the plain clef grade");
++
++        private final Scale.Fraction minOctaveDigitHeight = new Scale.Fraction(
++                0.5,
++                "Minimum height of the octave digit beyond the plain clef");
++
++        private final Scale.Fraction maxOctaveDigitHeight = new Scale.Fraction(
++                2.5,
++                "Maximum height of the octave digit beyond the plain clef");
+     }
+ 
+     //------------//
+@@ -743,6 +997,10 @@
+ 
+         final int maxEvalRank;
+ 
++        final int maxOctaveEvalRank;
++
++        final double maxPlainClefDecay;
++
+         // Sheet scale dependent
+         //----------------------
+ 
+@@ -769,11 +1027,17 @@
+ 
+         final int minGlyphWeight;
+ 
++        final int minOctaveDigitHeight;
++
++        final int maxOctaveDigitHeight;
++
+         Parameters (Scale scale,
+                     int staffSpecific)
+         {
+             maxPartCount = constants.maxPartCount.getValue();
+             maxEvalRank = constants.maxEvalRank.getValue();
++            maxOctaveEvalRank = constants.maxOctaveEvalRank.getValue();
++            maxPlainClefDecay = constants.maxPlainClefDecay.getValue();
+ 
+             {
+                 // Use sheet large interline scale
+@@ -793,6 +1057,8 @@
+                 maxPartGap = specific.toPixelsDouble(constants.maxPartGap);
+                 maxGlyphHeight = specific.toPixelsDouble(constants.maxGlyphHeight);
+                 minGlyphWeight = specific.toPixels(constants.minGlyphWeight);
++                minOctaveDigitHeight = specific.toPixels(constants.minOctaveDigitHeight);
++                maxOctaveDigitHeight = specific.toPixels(constants.maxOctaveDigitHeight);
+             }
+         }
+     }

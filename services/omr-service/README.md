@@ -105,7 +105,8 @@ See [`bench/README.md`](bench/README.md) for the x86 harness and Workstream C ga
 
 ## Test fixtures
 
-The Docker image ships Audiveris 5.11.0. `test/fixtures/` contains REAL Audiveris 5.6.1 artifacts: `tiny.musicxml`
+The Docker image ships Audiveris 5.11.0 with one recompiled class — see
+[`engine-patches/README.md`](engine-patches/README.md). `test/fixtures/` contains REAL Audiveris 5.6.1 artifacts: `tiny.musicxml`
 (source) was rendered to `tiny.pdf` (verovio + headless Chromium print) and
 transcribed with `Audiveris -batch -export`, producing `tiny.mxl` +
 `tiny.omr`. Regenerate after an Audiveris upgrade and re-verify

@@ -84,6 +84,58 @@ const voicesOf = (raw: RawMeasure): Map<string, Item[]> => {
 
 const sumOf = (items: readonly Item[]): number => items.reduce((acc, item) => acc + item.principal.dur, 0);
 
+/** The last tick the voice is still sounding — chord members included. */
+const extentOf = (items: readonly Item[]): number =>
+    items.reduce(
+        (acc, item) =>
+            item.members.reduce(
+                (end, member) => Math.max(end, member.rel + member.dur),
+                Math.max(acc, item.principal.rel + item.principal.dur),
+            ),
+        0,
+    );
+
+/**
+ * The last tick the voice would still be sounding after `candidate`.
+ *
+ * A voice that ends on the barline is the whole of the evidence the guard above
+ * rests on; an edit that would carry one PAST it is refuted the same way, and by
+ * the same fact about bars. A voice whose sum is short because the rest of the
+ * bar belongs to another voice is the common case — filling it up would push its
+ * tail out of the bar and stretch the bar to fit.
+ */
+const extentAfter = (items: readonly Item[], candidate: Candidate): number => {
+    let end = 0;
+    let shift = 0;
+    for (let index = 0; index < items.length; index++) {
+        const item = items[index];
+        if (!item) {
+            continue;
+        }
+        if (candidate.kind === 'delete_rest' && index === candidate.index) {
+            shift -= item.principal.dur;
+            continue;
+        }
+        const edited = candidate.newDur !== undefined && index === candidate.index;
+        const dur = edited ? (candidate.newDur ?? item.principal.dur) : item.principal.dur;
+        const rel = item.principal.rel + shift;
+        end = Math.max(end, rel + dur);
+        for (const member of item.members) {
+            end = Math.max(end, rel + (edited ? dur : member.dur));
+        }
+        if (edited) {
+            shift += dur - item.principal.dur;
+        }
+    }
+    if (candidate.kind === 'insert_rest') {
+        const last = items[items.length - 1];
+        if (last) {
+            end = Math.max(end, last.principal.rel + last.principal.dur + (candidate.restDur ?? 0));
+        }
+    }
+    return end;
+};
+
 /** Onset rels after applying `candidate`, i.e. the rhythm the voice would then have. */
 const patternAfter = (items: readonly Item[], candidate: Candidate): number[] => {
     const rels = items.map((item) => item.principal.rel);
@@ -426,6 +478,53 @@ const apply = (raw: RawMeasure, items: Item[], candidate: Candidate): void => {
     }
 };
 
+/** Ticks of the anacrusis a part opens with; 0 when it opens on a full bar. */
+const anacrusisTicks = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Sig>): number => {
+    const first = raws[0];
+    if (!first || !first.isPickup || first.contentTicks <= 0) {
+        return 0;
+    }
+    const expected = barTicksOf(sigs[0] ?? first.sig);
+    return first.contentTicks < expected ? first.contentTicks : 0;
+};
+
+/**
+ * The bar that carries the `:|` sending the player back to the anacrusis, and
+ * is short by EXACTLY it.
+ *
+ * When the opening section of a piece with an upbeat is repeated, the engraver
+ * shortens the bar before the repeat sign by the upbeat so the retake lands on
+ * a whole bar (Gould, Behind Bars) — Für Elise's first ending, `a'4` in 3/8,
+ * is the textbook case. That bar is short BY DESIGN, exactly like the pickup
+ * and the final bar this repair already exempts, and "repairing" it invents a
+ * rest the page never printed and erases the only evidence that the retake
+ * starts at the upbeat.
+ *
+ * Tight on purpose. It needs all three: a real anacrusis, an exact complement,
+ * and a `:|` with no `|:` before it — a repeat governed by a forward sign goes
+ * back THERE, not to the head, so a short bar under one is just a short bar.
+ */
+export const completesAnacrusis = (
+    raws: readonly RawMeasure[],
+    sigs: ReadonlyArray<Sig>,
+    pos: number,
+): boolean => {
+    const raw = raws[pos];
+    if (!raw || raw.isPickup || !raw.repeat.repeatBackward || raw.contentTicks <= 0) {
+        return false;
+    }
+    const pickup = anacrusisTicks(raws, sigs);
+    if (pickup <= 0) {
+        return false;
+    }
+    for (let i = 0; i <= pos; i++) {
+        if (raws[i]?.repeat.repeatForward) {
+            return false;
+        }
+    }
+    return raw.contentTicks + pickup === barTicksOf(sigs[pos] ?? raw.sig);
+};
+
 /**
  * Repair the bars of one part in place. `sigs` are the per-bar EFFECTIVE
  * signatures (after meter reconciliation). Returns how many bar-voices were
@@ -436,8 +535,9 @@ export const repairRhythm = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Si
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         // Pickups are legitimately short, and so is the final bar of a part
-        // (the meter reconciliation skips it for the same reason).
-        if (!raw || raw.isPickup || pos === raws.length - 1) {
+        // (the meter reconciliation skips it for the same reason) and the bar
+        // whose shortfall IS the anacrusis the `:|` next to it sends us back to.
+        if (!raw || raw.isPickup || pos === raws.length - 1 || completesAnacrusis(raws, sigs, pos)) {
             continue;
         }
         const sig = sigs[pos] ?? raw.sig;
@@ -451,8 +551,19 @@ export const repairRhythm = (raws: readonly RawMeasure[], sigs: ReadonlyArray<Si
             if (sum === expected || sum === 0) {
                 continue;
             }
+            // A voice whose last sound releases on the barline is not short,
+            // whatever its durations add up to: the difference is a <forward>
+            // it entered late after, or a chord member read onto this staff
+            // from the other one — never a lost symbol. Editing it could only
+            // push sound past the bar.
+            if (extentOf(items) === expected) {
+                continue;
+            }
             const witnesses = neighbourPatterns(raws, sigs, pos, key, expected);
             const chosen = candidatesFor(items, sum, expected).find((candidate) => {
+                if (extentAfter(items, candidate) > expected) {
+                    return false;
+                }
                 const pattern = patternAfter(items, candidate);
                 return witnesses.some((w) => sameOnsets(w, pattern)) || beamGroupAligns(items, candidate, beat);
             });

@@ -1,0 +1,883 @@
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/header/HeaderBuilder.java b/app/src/main/java/org/audiveris/omr/sheet/header/HeaderBuilder.java
+--- a/app/src/main/java/org/audiveris/omr/sheet/header/HeaderBuilder.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/header/HeaderBuilder.java
+@@ -30,6 +30,7 @@
+ import org.audiveris.omr.sheet.clef.ClefBuilder;
+ import org.audiveris.omr.sheet.key.KeyColumn;
+ import org.audiveris.omr.sheet.time.HeaderTimeColumn;
++import org.audiveris.omr.sheet.time.PdfHeaderTimeHints;
+ import org.audiveris.omr.sig.SIGraph;
+ import org.audiveris.omr.sig.inter.BarlineInter;
+ import org.audiveris.omr.sig.inter.ClefInter;
+@@ -275,12 +276,22 @@
+         int clefOffset = clefColumn.retrieveClefs();
+         setSystemClefStop(clefOffset);
+ 
+-        // Retrieve header key-sigs
+-        int keyOffset = keyColumn.retrieveKeys(maxHeaderWidth);
++        // Retrieve header key-sigs, stopping before a proven numerical time column
++        final int keyWidth = PdfHeaderTimeHints.keySearchWidth(system, maxHeaderWidth);
++        int keyOffset = keyColumn.retrieveKeys(keyWidth);
+         setSystemKeyStop(keyOffset);
+ 
+         // Retrieve header time-sigs
+         int timeOffset = timeColumn.retrieveTime();
++        if ((keyWidth < maxHeaderWidth) && (timeOffset < 0)) {
++            logger.info(
++                    "PDF header time hints not committed for S#{}; restoring original key search",
++                    system.getId());
++            restoreKeysToClefStop();
++            keyOffset = keyColumn.retrieveKeys(maxHeaderWidth);
++            setSystemKeyStop(keyOffset);
++            timeOffset = timeColumn.retrieveTime();
++        }
+         setSystemTimeStop(timeOffset);
+ 
+         // We should be able now to select the best clef for each staff
+@@ -293,6 +304,31 @@
+         freezeHeaders();
+     }
+ 
++    //------------------------//
++    // restoreKeysToClefStop //
++    //------------------------//
++    /**
++     * Discard provisional keys and header stops so the original key search
++     * can run after a time-column reservation was not committed.
++     */
++    private void restoreKeysToClefStop ()
++    {
++        for (Staff staff : system.getStaves()) {
++            if (staff.isTablature()) {
++                continue;
++            }
++
++            StaffHeader header = staff.getHeader();
++            if (header.key != null) {
++                header.key.remove();
++                header.key = null;
++            }
++
++            Integer clefStop = staff.getClefStop();
++            header.stop = (clefStop != null) ? clefStop : header.start;
++        }
++    }
++
+     //---------------//
+     // purgeBarlines //
+     //---------------//
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java b/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java
+new file mode 100644
+--- /dev/null	2026-09-14 17:24:27.717934764 +0000
++++ b/app/src/main/java/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java	2026-09-14 23:25:52.617924964 +0000
+@@ -0,0 +1,810 @@
++package org.audiveris.omr.sheet.time;
++
++import org.apache.pdfbox.Loader;
++import org.apache.pdfbox.contentstream.PDFStreamEngine;
++import org.apache.pdfbox.contentstream.operator.state.Concatenate;
++import org.apache.pdfbox.contentstream.operator.state.Restore;
++import org.apache.pdfbox.contentstream.operator.state.Save;
++import org.apache.pdfbox.contentstream.operator.state.SetGraphicsStateParameters;
++import org.apache.pdfbox.contentstream.operator.state.SetMatrix;
++import org.apache.pdfbox.contentstream.operator.text.BeginText;
++import org.apache.pdfbox.contentstream.operator.text.EndText;
++import org.apache.pdfbox.contentstream.operator.text.MoveText;
++import org.apache.pdfbox.contentstream.operator.text.MoveTextSetLeading;
++import org.apache.pdfbox.contentstream.operator.text.NextLine;
++import org.apache.pdfbox.contentstream.operator.text.SetCharSpacing;
++import org.apache.pdfbox.contentstream.operator.text.SetFontAndSize;
++import org.apache.pdfbox.contentstream.operator.text.SetTextHorizontalScaling;
++import org.apache.pdfbox.contentstream.operator.text.SetTextLeading;
++import org.apache.pdfbox.contentstream.operator.text.SetTextRenderingMode;
++import org.apache.pdfbox.contentstream.operator.text.SetTextRise;
++import org.apache.pdfbox.contentstream.operator.text.SetWordSpacing;
++import org.apache.pdfbox.contentstream.operator.text.ShowText;
++import org.apache.pdfbox.contentstream.operator.text.ShowTextAdjusted;
++import org.apache.pdfbox.contentstream.operator.text.ShowTextLine;
++import org.apache.pdfbox.contentstream.operator.text.ShowTextLineAndSpace;
++import org.apache.pdfbox.pdmodel.PDDocument;
++import org.apache.pdfbox.pdmodel.PDPage;
++import org.apache.pdfbox.pdmodel.common.PDRectangle;
++import org.apache.pdfbox.pdmodel.font.PDFont;
++import org.apache.pdfbox.pdmodel.font.PDSimpleFont;
++import org.apache.pdfbox.pdmodel.font.PDVectorFont;
++import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode;
++import org.apache.pdfbox.util.Matrix;
++import org.apache.pdfbox.util.Vector;
++
++import org.audiveris.omr.sheet.Picture;
++import org.audiveris.omr.sheet.Sheet;
++import org.audiveris.omr.sheet.Staff;
++import org.audiveris.omr.sheet.SystemInfo;
++import org.audiveris.omr.sheet.clef.PdfClefHints;
++import org.audiveris.omr.sheet.symbol.PdfQuarterRestHints;
++
++import ij.process.ByteProcessor;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.awt.Shape;
++import java.awt.geom.AffineTransform;
++import java.awt.geom.Area;
++import java.awt.geom.Path2D;
++import java.awt.geom.Rectangle2D;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.concurrent.ConcurrentHashMap;
++
++/**
++ * Recover an opening numerical time column from the book's PDF page and keep
++ * that proven column out of header key extraction.
++ * <p>
++ * Identity is the embedded music-font encoding name plus a nonempty outline.
++ * First scope is one numerator digit over one denominator digit in an ordinary
++ * staff header. Ink uses the loader DPI scale and the same 0.90/0.85 staff-free
++ * minima as named quarter rests. No piece name, filename, hash, subset prefix,
++ * character code, coordinate, glyph-ID or pitch selector.
++ */
++public final class PdfHeaderTimeHints
++{
++    private static final Logger logger = LoggerFactory.getLogger(PdfHeaderTimeHints.class);
++
++    private static final ConcurrentHashMap<String, List<Hint>> CACHE = new ConcurrentHashMap<>();
++
++    private PdfHeaderTimeHints ()
++    {
++    }
++
++    /** One named, visibly painted numeral on a page. */
++    public static final class Hint
++    {
++        public final int digit;
++
++        public final String glyphName;
++
++        public final String fontName;
++
++        public final Path2D pdfPath;
++
++        public final Rectangle2D pageBox;
++
++        Hint (int digit,
++              String glyphName,
++              String fontName,
++              Path2D pdfPath,
++              Rectangle2D pageBox)
++        {
++            this.digit = digit;
++            this.glyphName = glyphName;
++            this.fontName = fontName;
++            this.pdfPath = pdfPath;
++            this.pageBox = pageBox;
++        }
++    }
++
++    /**
++     * Encoding digit names, including an optional {@code time.} prefix.
++     * Character codes are not consulted.
++     */
++    public static Integer digitOf (String glyphName)
++    {
++        if (glyphName == null) {
++            return null;
++        }
++        String name = glyphName;
++        if (name.startsWith("time.")) {
++            name = name.substring(5);
++        }
++        return switch (name) {
++        case "zero" -> 0;
++        case "one" -> 1;
++        case "two" -> 2;
++        case "three" -> 3;
++        case "four" -> 4;
++        case "five" -> 5;
++        case "six" -> 6;
++        case "seven" -> 7;
++        case "eight" -> 8;
++        case "nine" -> 9;
++        default -> null;
++        };
++    }
++
++    /** Single-digit numerator over 2, 4 or 8. Not a literal 3/4 rule. */
++    public static boolean ordinaryTime (int numerator,
++                                         int denominator)
++    {
++        if ((numerator < 1) || (numerator > 9)) {
++            return false;
++        }
++        return (denominator == 2) || (denominator == 4) || (denominator == 8);
++    }
++
++    public static List<Hint> scan (Path pdf,
++                                    int pageIndex)
++    {
++        if ((pdf == null) || (pageIndex < 0) || !Files.isRegularFile(pdf)) {
++            return List.of();
++        }
++        final String name = pdf.getFileName().toString().toLowerCase();
++        if (!name.endsWith(".pdf")) {
++            return List.of();
++        }
++        final String key;
++        try {
++            key = pdf.toAbsolutePath().normalize() + "|hdrtime|" + Files.size(pdf) + "|" + pageIndex;
++        } catch (IOException ex) {
++            return List.of();
++        }
++        return CACHE.computeIfAbsent(key, ignored -> readPage(pdf, pageIndex));
++    }
++
++    public static List<Hint> scanUncached (Path pdf,
++                                         int pageIndex)
++    {
++        return readPage(pdf, pageIndex);
++    }
++
++    /**
++     * Width to pass to {@code KeyColumn.retrieveKeys} so the projection ends at
++     * the left of the proven time-pair union. Returns {@code maxHeaderWidth}
++     * when evidence is missing, inconsistent, or fails ink proof.
++     */
++    public static int keySearchWidth (SystemInfo system,
++                                        int maxHeaderWidth)
++    {
++        if ((system == null) || (maxHeaderWidth <= 0)) {
++            return maxHeaderWidth;
++        }
++        final Sheet sheet = system.getSheet();
++        final Integer dpi = PdfQuarterRestHints.effectivePdfDpi();
++        final Path input;
++        try {
++            input = sheet.getStub().getBook().getInputPath();
++        } catch (RuntimeException ex) {
++            return maxHeaderWidth;
++        }
++        if ((dpi == null) || (input == null) || !Files.isRegularFile(input)
++                || !input.getFileName().toString().toLowerCase().endsWith(".pdf")) {
++            return maxHeaderWidth;
++        }
++        if ((sheet.getSkew() != null) && (Math.abs(sheet.getSkew().getSlope()) > 0.02)) {
++            logger.info("PDF header time skipped: unsupported sheet skew {}",
++                    sheet.getSkew().getSlope());
++            return maxHeaderWidth;
++        }
++        if ((sheet.getWidth() <= 0) || (sheet.getHeight() <= 0)) {
++            return maxHeaderWidth;
++        }
++        final int pageIndex = sheet.getStub().getNumber() - 1;
++        final List<Hint> hints = scan(input, pageIndex);
++        if (hints.isEmpty()) {
++            logger.info(
++                    "PDF header time: page {} dpi {} canvas {}x{} digits=0 excluded=0",
++                    pageIndex,
++                    dpi,
++                    sheet.getWidth(),
++                    sheet.getHeight());
++            return maxHeaderWidth;
++        }
++
++        final ByteProcessor noStaff = sheet.getPicture().getSource(Picture.SourceKey.NO_STAFF);
++        final ByteProcessor binary = sheet.getPicture().getSource(Picture.SourceKey.BINARY);
++        if ((noStaff == null) || (binary == null)) {
++            return maxHeaderWidth;
++        }
++
++        final List<Staff> staves = system.getStaves();
++        final List<PdfQuarterRestHints.StaffAnchor> anchors = new ArrayList<>();
++        int staffed = 0;
++        for (int i = 0; i < staves.size(); i++) {
++            final Staff staff = staves.get(i);
++            if (staff.isTablature() || staff.isOneLineStaff() || (staff.getLineCount() != 5)) {
++                continue;
++            }
++            staffed++;
++            final int x = staff.getHeaderStart();
++            anchors.add(new PdfQuarterRestHints.StaffAnchor(
++                    i,
++                    staff.getFirstLine().yAt(x),
++                    staff.getLastLine().yAt(x),
++                    staff.getSpecificInterline()));
++        }
++        if (staffed == 0) {
++            return maxHeaderWidth;
++        }
++
++        int excluded = 0;
++        final List<Placed> placed = new ArrayList<>();
++        for (Hint hint : hints) {
++            final AffineTransform loaderAt = PdfQuarterRestHints.loaderPdfToSheet(
++                    hint.pageBox,
++                    dpi,
++                    sheet.getWidth(),
++                    sheet.getHeight());
++            if (loaderAt == null) {
++                logger.info(
++                        "PDF header time skipped: loader canvas mismatch dpi={} sheet={}x{} page={}",
++                        dpi,
++                        sheet.getWidth(),
++                        sheet.getHeight(),
++                        hint.pageBox);
++                return maxHeaderWidth;
++            }
++            final Path2D sheetPath = new Path2D.Double(hint.pdfPath, loaderAt);
++            final Rectangle2D outline = sheetPath.getBounds2D();
++            final Integer staffIndex = PdfQuarterRestHints.uniqueStaff(outline, anchors);
++            if (staffIndex == null) {
++                excluded++;
++                continue;
++            }
++            final Staff staff = staves.get(staffIndex);
++            final Integer clefStop = staff.getClefStop();
++            if (clefStop == null) {
++                excluded++;
++                continue;
++            }
++            if (outline.getMaxX() <= clefStop) {
++                excluded++;
++                continue;
++            }
++            if (outline.getMinX() >= (staff.getHeaderStart() + maxHeaderWidth)) {
++                excluded++;
++                continue;
++            }
++            placed.add(new Placed(hint, sheetPath, outline, staff, staffIndex));
++        }
++
++        logger.info(
++                "PDF header time: page {} dpi {} canvas {}x{} digits={} excluded={} outlines={}",
++                pageIndex,
++                dpi,
++                sheet.getWidth(),
++                sheet.getHeight(),
++                hints.size(),
++                excluded,
++                placed.size());
++
++        final List<Pair> pairs = new ArrayList<>();
++        for (int i = 0; i < staves.size(); i++) {
++            final Staff staff = staves.get(i);
++            if (staff.isTablature() || staff.isOneLineStaff() || (staff.getLineCount() != 5)) {
++                continue;
++            }
++            final Pair pair = pairOnStaff(placed, staff, i, noStaff, binary);
++            if (pair == null) {
++                logger.info("PDF header time: staff#{} has no proven numeral pair", staff.getId());
++                return maxHeaderWidth;
++            }
++            pairs.add(pair);
++        }
++        if (pairs.size() != staffed) {
++            return maxHeaderWidth;
++        }
++        if (!columnsAligned(pairs)) {
++            logger.info("PDF header time: staff columns are not aligned; retaining key bounds");
++            return maxHeaderWidth;
++        }
++
++        int bound = maxHeaderWidth;
++        for (Pair pair : pairs) {
++            final int width = (int) Math.floor(pair.left) - pair.staff.getHeaderStart();
++            if (width <= 0) {
++                logger.info("PDF header time: staff#{} bound {} is inconsistent",
++                        pair.staff.getId(),
++                        width);
++                return maxHeaderWidth;
++            }
++            bound = Math.min(bound, width);
++        }
++        if (bound >= maxHeaderWidth) {
++            return maxHeaderWidth;
++        }
++        for (Pair pair : pairs) {
++            logger.info(
++                    "PDF header time pair staff#{} {}/{} left={} ink num={}/{} den={}/{} pair={}/{} font={}",
++                    pair.staff.getId(),
++                    pair.num.hint.digit,
++                    pair.den.hint.digit,
++                    Math.round(pair.left),
++                    pair.numAgreement.both,
++                    pair.numAgreement.outlineCount,
++                    pair.denAgreement.both,
++                    pair.denAgreement.outlineCount,
++                    pair.pairAgreement.both,
++                    pair.pairAgreement.outlineCount,
++                    pair.num.hint.fontName);
++        }
++        logger.info("PDF header time bounding keys at width {} (was {}) for sys#{}",
++                bound,
++                maxHeaderWidth,
++                system.getId());
++        return bound;
++    }
++
++    private static boolean columnsAligned (List<Pair> pairs)
++    {
++        if (pairs.size() < 2) {
++            return true;
++        }
++        double minLeft = Double.POSITIVE_INFINITY;
++        double maxLeft = Double.NEGATIVE_INFINITY;
++        double interline = pairs.get(0).staff.getSpecificInterline();
++        for (Pair pair : pairs) {
++            minLeft = Math.min(minLeft, pair.left);
++            maxLeft = Math.max(maxLeft, pair.left);
++            interline = Math.max(interline, pair.staff.getSpecificInterline());
++        }
++        return (maxLeft - minLeft) <= (1.2 * interline);
++    }
++
++    private static Pair pairOnStaff (List<Placed> placed,
++                                        Staff staff,
++                                        int staffIndex,
++                                        ByteProcessor noStaff,
++                                        ByteProcessor binary)
++    {
++        final List<Placed> onStaff = new ArrayList<>();
++        for (Placed placedDigit : placed) {
++            if (placedDigit.staffIndex == staffIndex) {
++                onStaff.add(placedDigit);
++            }
++        }
++        final double interline = staff.getSpecificInterline();
++        Pair found = null;
++        for (int i = 0; i < onStaff.size(); i++) {
++            for (int j = 0; j < onStaff.size(); j++) {
++                if (i == j) {
++                    continue;
++                }
++                final Placed upper = onStaff.get(i);
++                final Placed lower = onStaff.get(j);
++                if (upper.outline.getCenterY() >= lower.outline.getCenterY()) {
++                    continue;
++                }
++                if (!ordinaryTime(upper.hint.digit, lower.hint.digit)) {
++                    continue;
++                }
++                final double dx = Math.abs(upper.outline.getCenterX() - lower.outline.getCenterX());
++                final double dy = lower.outline.getCenterY() - upper.outline.getCenterY();
++                if (dx > (1.2 * interline)) {
++                    continue;
++                }
++                if ((dy < (0.4 * interline)) || (dy > (2.5 * interline))) {
++                    continue;
++                }
++                final PdfQuarterRestHints.Agreement numAg = measureDigit(
++                        upper, noStaff, binary);
++                final PdfQuarterRestHints.Agreement denAg = measureDigit(
++                        lower, noStaff, binary);
++                if ((numAg == null) || (denAg == null) || !numAg.agrees() || !denAg.agrees()) {
++                    logger.info(
++                            "PDF header time staff#{} pair {}/{} failed numeral ink num={}/{}/{} den={}/{}/{}",
++                            staff.getId(),
++                            upper.hint.digit,
++                            lower.hint.digit,
++                            (numAg == null) ? 0 : numAg.both,
++                            (numAg == null) ? 0 : numAg.outlineCount,
++                            (numAg == null) ? 0 : numAg.glyphCount,
++                            (denAg == null) ? 0 : denAg.both,
++                            (denAg == null) ? 0 : denAg.outlineCount,
++                            (denAg == null) ? 0 : denAg.glyphCount);
++                    continue;
++                }
++                final Component numComp = extractComponent(upper.sheetPath, noStaff);
++                final Component denComp = extractComponent(lower.sheetPath, noStaff);
++                if ((numComp == null) || (denComp == null) || numComp.touches(denComp)) {
++                    logger.info("PDF header time staff#{} pair {}/{} has ambiguous components",
++                            staff.getId(),
++                            upper.hint.digit,
++                            lower.hint.digit);
++                    continue;
++                }
++                final Area union = new Area(upper.sheetPath);
++                union.add(new Area(lower.sheetPath));
++                final Path2D pairPath = new Path2D.Double(union);
++                final Component pairComp = Component.union(numComp, denComp);
++                final PdfQuarterRestHints.Agreement pairAg = PdfQuarterRestHints.measure(
++                        pairPath,
++                        pairComp::isInk,
++                        staffLine(binary, noStaff),
++                        pairComp.bounds);
++                if (!pairAg.agrees()) {
++                    logger.info(
++                            "PDF header time staff#{} pair {}/{} failed pair ink both={} outline={} glyph={} skip={}",
++                            staff.getId(),
++                            upper.hint.digit,
++                            lower.hint.digit,
++                            pairAg.both,
++                            pairAg.outlineCount,
++                            pairAg.glyphCount,
++                            pairAg.staffLineSkipped);
++                    return null;
++                }
++                if (found != null) {
++                    logger.info("PDF header time staff#{} has multiple numeral pairs",
++                            staff.getId());
++                    return null;
++                }
++                found = new Pair(
++                        staff,
++                        upper,
++                        lower,
++                        numAg,
++                        denAg,
++                        pairAg,
++                        Math.min(upper.outline.getMinX(), lower.outline.getMinX()));
++            }
++        }
++        return found;
++    }
++
++    private static PdfQuarterRestHints.Agreement measureDigit (Placed placed,
++                                                                  ByteProcessor noStaff,
++                                                                  ByteProcessor binary)
++    {
++        final Component component = extractComponent(placed.sheetPath, noStaff);
++        if (component == null) {
++            return null;
++        }
++        return PdfQuarterRestHints.measure(
++                placed.sheetPath,
++                component::isInk,
++                staffLine(binary, noStaff),
++                component.bounds);
++    }
++
++    private static PdfQuarterRestHints.PixelSource staffLine (ByteProcessor binary,
++                                                                  ByteProcessor noStaff)
++    {
++        return (x, y) -> {
++            if ((x < 0) || (y < 0) || (x >= binary.getWidth()) || (y >= binary.getHeight())) {
++                return false;
++            }
++            final boolean bin = binary.get(x, y) < 128;
++            final boolean ns = (x < noStaff.getWidth()) && (y < noStaff.getHeight())
++                    && (noStaff.get(x, y) < 128);
++            return bin && !ns;
++        };
++    }
++
++    /**
++     * Untrimmed staff-free component overlapping the outline. Multiple
++     * overlapping components or an empty seed set fail rather than clip.
++     */
++    private static Component extractComponent (Path2D outline,
++                                                ByteProcessor noStaff)
++    {
++        final Rectangle2D box = outline.getBounds2D();
++        if ((box.getWidth() < 3) || (box.getHeight() < 3)) {
++            return null;
++        }
++        final int width = noStaff.getWidth();
++        final int height = noStaff.getHeight();
++        final int x0 = Math.max(0, (int) Math.floor(box.getX()));
++        final int y0 = Math.max(0, (int) Math.floor(box.getY()));
++        final int x1 = Math.min(width, (int) Math.ceil(box.getMaxX()));
++        final int y1 = Math.min(height, (int) Math.ceil(box.getMaxY()));
++        final List<int[]> seeds = new ArrayList<>();
++        for (int y = y0; y < y1; y++) {
++            for (int x = x0; x < x1; x++) {
++                if (outline.contains(x + 0.5, y + 0.5) && (noStaff.get(x, y) < 128)) {
++                    seeds.add(new int[] {x, y});
++                }
++            }
++        }
++        if (seeds.isEmpty()) {
++            return null;
++        }
++        final boolean[][] seen = new boolean[height][width];
++        final ArrayDeque<int[]> queue = new ArrayDeque<>();
++        final int[] first = seeds.get(0);
++        queue.add(first);
++        seen[first[1]][first[0]] = true;
++        int minX = first[0];
++        int minY = first[1];
++        int maxX = first[0];
++        int maxY = first[1];
++        int count = 0;
++        while (!queue.isEmpty()) {
++            final int[] p = queue.removeFirst();
++            count++;
++            if (count > 20_000) {
++                return null;
++            }
++            minX = Math.min(minX, p[0]);
++            minY = Math.min(minY, p[1]);
++            maxX = Math.max(maxX, p[0]);
++            maxY = Math.max(maxY, p[1]);
++            trySeed(p[0] - 1, p[1], noStaff, seen, queue);
++            trySeed(p[0] + 1, p[1], noStaff, seen, queue);
++            trySeed(p[0], p[1] - 1, noStaff, seen, queue);
++            trySeed(p[0], p[1] + 1, noStaff, seen, queue);
++        }
++        for (int[] seed : seeds) {
++            if (!seen[seed[1]][seed[0]]) {
++                return null;
++            }
++        }
++        return new Component(seen, minX, minY, maxX, maxY);
++    }
++
++    private static void trySeed (int x,
++                                  int y,
++                                  ByteProcessor noStaff,
++                                  boolean[][] seen,
++                                  ArrayDeque<int[]> queue)
++    {
++        if ((x < 0) || (y < 0) || (x >= noStaff.getWidth()) || (y >= noStaff.getHeight())) {
++            return;
++        }
++        if (seen[y][x] || (noStaff.get(x, y) >= 128)) {
++            return;
++        }
++        seen[y][x] = true;
++        queue.add(new int[] {x, y});
++    }
++
++    private static List<Hint> readPage (Path pdf,
++                                        int pageIndex)
++    {
++        try (PDDocument doc = Loader.loadPDF(pdf.toFile())) {
++            if (pageIndex >= doc.getNumberOfPages()) {
++                return List.of();
++            }
++            final PDPage page = doc.getPage(pageIndex);
++            if (page.getRotation() != 0) {
++                return List.of();
++            }
++            final Collector engine = new Collector(page);
++            engine.processPage(page);
++            return Collections.unmodifiableList(engine.hints);
++        } catch (Exception ex) {
++            return List.of();
++        }
++    }
++
++    private static final class Placed
++    {
++        private final Hint hint;
++
++        private final Path2D sheetPath;
++
++        private final Rectangle2D outline;
++
++        private final Staff staff;
++
++        private final int staffIndex;
++
++        private Placed (Hint hint,
++                        Path2D sheetPath,
++                        Rectangle2D outline,
++                        Staff staff,
++                        int staffIndex)
++        {
++            this.hint = hint;
++            this.sheetPath = sheetPath;
++            this.outline = outline;
++            this.staff = staff;
++            this.staffIndex = staffIndex;
++        }
++    }
++
++    private static final class Pair
++    {
++        private final Staff staff;
++
++        private final Placed num;
++
++        private final Placed den;
++
++        private final PdfQuarterRestHints.Agreement numAgreement;
++
++        private final PdfQuarterRestHints.Agreement denAgreement;
++
++        private final PdfQuarterRestHints.Agreement pairAgreement;
++
++        private final double left;
++
++        private Pair (Staff staff,
++                      Placed num,
++                      Placed den,
++                      PdfQuarterRestHints.Agreement numAgreement,
++                      PdfQuarterRestHints.Agreement denAgreement,
++                      PdfQuarterRestHints.Agreement pairAgreement,
++                      double left)
++        {
++            this.staff = staff;
++            this.num = num;
++            this.den = den;
++            this.numAgreement = numAgreement;
++            this.denAgreement = denAgreement;
++            this.pairAgreement = pairAgreement;
++            this.left = left;
++        }
++    }
++
++    private static final class Component
++    {
++        private final boolean[][] mask;
++
++        private final Rectangle2D bounds;
++
++        private Component (boolean[][] mask,
++                           int minX,
++                           int minY,
++                           int maxX,
++                           int maxY)
++        {
++            this.mask = mask;
++            this.bounds = new Rectangle2D.Double(minX, minY, (maxX - minX) + 1, (maxY - minY) + 1);
++        }
++
++        private boolean isInk (int x,
++                                int y)
++        {
++            if ((y < 0) || (x < 0) || (y >= mask.length) || (x >= mask[0].length)) {
++                return false;
++            }
++            return mask[y][x];
++        }
++
++        private boolean touches (Component other)
++        {
++            final int x0 = (int) Math.max(bounds.getX(), other.bounds.getX());
++            final int y0 = (int) Math.max(bounds.getY(), other.bounds.getY());
++            final int x1 = (int) Math.min(bounds.getMaxX(), other.bounds.getMaxX());
++            final int y1 = (int) Math.min(bounds.getMaxY(), other.bounds.getMaxY());
++            for (int y = y0; y < y1; y++) {
++                for (int x = x0; x < x1; x++) {
++                    if (isInk(x, y) && other.isInk(x, y)) {
++                        return true;
++                    }
++                }
++            }
++            return false;
++        }
++
++        private static Component union (Component a,
++                                          Component b)
++        {
++            final int height = Math.max(a.mask.length, b.mask.length);
++            final int width = Math.max(a.mask[0].length, b.mask[0].length);
++            final boolean[][] mask = new boolean[height][width];
++            int minX = Integer.MAX_VALUE;
++            int minY = Integer.MAX_VALUE;
++            int maxX = 0;
++            int maxY = 0;
++            for (int y = 0; y < height; y++) {
++                for (int x = 0; x < width; x++) {
++                    if (a.isInk(x, y) || b.isInk(x, y)) {
++                        mask[y][x] = true;
++                        minX = Math.min(minX, x);
++                        minY = Math.min(minY, y);
++                        maxX = Math.max(maxX, x);
++                        maxY = Math.max(maxY, y);
++                    }
++                }
++            }
++            return new Component(mask, minX, minY, maxX, maxY);
++        }
++    }
++
++    private static final class Collector
++            extends PDFStreamEngine
++    {
++        private final PDPage page;
++
++        private final List<Hint> hints = new ArrayList<>();
++
++        Collector (PDPage page)
++        {
++            this.page = page;
++            addOperator(new BeginText(this));
++            addOperator(new EndText(this));
++            addOperator(new SetFontAndSize(this));
++            addOperator(new ShowText(this));
++            addOperator(new ShowTextAdjusted(this));
++            addOperator(new ShowTextLine(this));
++            addOperator(new ShowTextLineAndSpace(this));
++            addOperator(new MoveText(this));
++            addOperator(new MoveTextSetLeading(this));
++            addOperator(new NextLine(this));
++            addOperator(new SetCharSpacing(this));
++            addOperator(new SetTextLeading(this));
++            addOperator(new SetMatrix(this));
++            addOperator(new SetTextRenderingMode(this));
++            addOperator(new SetTextRise(this));
++            addOperator(new SetWordSpacing(this));
++            addOperator(new SetTextHorizontalScaling(this));
++            addOperator(new Concatenate(this));
++            addOperator(new Save(this));
++            addOperator(new Restore(this));
++            addOperator(new SetGraphicsStateParameters(this));
++        }
++
++        @Override
++        protected void showFontGlyph (Matrix trm,
++                                       PDFont font,
++                                       int code,
++                                       Vector displacement)
++            throws IOException
++        {
++            if (!PdfClefHints.uprightMatrix(trm) || (font == null) || !font.isEmbedded()
++                    || font.isVertical()) {
++                return;
++            }
++            if (getGraphicsState().getTextState().getRenderingMode() != RenderingMode.FILL) {
++                return;
++            }
++            if (!(font instanceof PDSimpleFont simple) || (simple.getEncoding() == null)) {
++                return;
++            }
++            if (!(font instanceof PDVectorFont vector)) {
++                return;
++            }
++            if (!PdfQuarterRestHints.isSupportedFamily(font.getName())) {
++                return;
++            }
++            final Integer digit = digitOf(simple.getEncoding().getName(code));
++            if (digit == null) {
++                return;
++            }
++            final Shape glyph;
++            try {
++                glyph = vector.getPath(code);
++            } catch (IOException ex) {
++                return;
++            }
++            if ((glyph == null) || glyph.getBounds2D().isEmpty()) {
++                return;
++            }
++            final AffineTransform at = trm.createAffineTransform();
++            at.concatenate(font.getFontMatrix().createAffineTransform());
++            final Shape pageShape = at.createTransformedShape(glyph);
++            if ((pageShape == null) || pageShape.getBounds2D().isEmpty()) {
++                return;
++            }
++            final Shape clip = getGraphicsState().getCurrentClippingPath();
++            if (!PdfClefHints.clipContains(clip, pageShape.getBounds2D(), page.getCropBox())) {
++                return;
++            }
++            final PDRectangle crop = page.getCropBox();
++            final Rectangle2D pageBox = new Rectangle2D.Double(
++                    crop.getLowerLeftX(),
++                    crop.getLowerLeftY(),
++                    crop.getWidth(),
++                    crop.getHeight());
++            hints.add(new Hint(
++                    digit,
++                    simple.getEncoding().getName(code),
++                    font.getName(),
++                    new Path2D.Double(pageShape),
++                    pageBox));
++        }
++    }
++}

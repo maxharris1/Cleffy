@@ -1,6 +1,7 @@
 import AdmZip from 'adm-zip';
 import { DOMParser } from '@xmldom/xmldom';
 
+import { regridBars } from './barRegrid.js';
 import { DEFAULT_VELOCITY, MAX_VOICE_SLOT, TICKS_PER_QUARTER } from './scoreData.js';
 import type {
     ScoreClef,
@@ -41,7 +42,7 @@ export type GatedNote = ScoreNote & { gate?: number };
 export interface MusicalScore {
     notes: GatedNote[];
     /** In score order; geometry is zipped on later. */
-    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }>;
+    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }>;
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
@@ -1071,7 +1072,7 @@ interface PartContext {
 
 interface PartResult {
     notes: ScoreNote[];
-    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }>;
+    measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }>;
     timeSignatures: ScoreTimeSig[];
     keySignatures: ScoreKeySig[];
     clefs: ScoreClef[];
@@ -1111,6 +1112,73 @@ const beamOf = (noteEl: Elem): BeamState | undefined => {
 };
 
 /**
+ * Horizontal slack, in tenths, inside which two `<note>`s name the same printed
+ * notehead. A staff space is 10 tenths and a head is about 12 wide, so an
+ * engraver resolving a collision between two real heads moves one of them by
+ * far more than this; only a single glyph reported twice lands this close.
+ */
+const SAME_NOTEHEAD_TENTHS = 1;
+
+/** Engraved `default-x` in tenths, when the writer positioned the element. */
+const defaultXOf = (el: Elem): number | null => {
+    const raw = el.getAttribute('default-x');
+    if (raw === null || raw === '') {
+        return null;
+    }
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : null;
+};
+
+/** Engraved `default-y` in tenths above the TOP staff line, when positioned. */
+const defaultYOf = (el: Elem): number | null => {
+    const raw = el.getAttribute('default-y');
+    if (raw === null || raw === '') {
+        return null;
+    }
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : null;
+};
+
+/**
+ * How far above the top staff line a breath comma or caesura can still be the
+ * mark it claims to be. A staff is 40 tenths tall and a breath comma is engraved
+ * immediately above the top line — Gould puts it "above the staff", never out in
+ * the gap — so a full staff height of clearance is already generous for a
+ * ledger-heavy passage.
+ */
+const BREATH_MAX_ABOVE_STAFF_TENTHS = 40;
+
+/**
+ * A breath mark or caesura the page actually prints.
+ *
+ * Audiveris binds a stray glyph from the gap BETWEEN systems to the nearest
+ * note, and it surfaces as an articulation on that note with a `default-y` far
+ * outside where the mark is engraved. Same shape as the inverted-fermata rule
+ * below and one-sided for the same reason: the play-along gate fails invented
+ * holds, never missing ones, so a mark the writer never positioned
+ * (`default-y` absent) is trusted rather than filtered.
+ */
+const breathOf = (noteEl: Elem): boolean => {
+    const groups = noteEl.getElementsByTagName('articulations');
+    for (let i = 0; i < groups.length; i++) {
+        const group = groups.item(i) as Elem | null;
+        if (!group) {
+            continue;
+        }
+        for (const mark of childElements(group)) {
+            if (mark.nodeName !== 'breath-mark' && mark.nodeName !== 'caesura') {
+                continue;
+            }
+            const y = defaultYOf(mark);
+            if (y === null || y <= BREATH_MAX_ABOVE_STAFF_TENTHS) {
+                return true;
+            }
+        }
+    }
+    return false;
+};
+
+/**
  * A mark's staff, when the writer said which: `null` means unattributed.
  * Deliberately NOT collapsed to staff 1 — that default is what destroys the
  * only signal distinguishing "this writer separates the hands" from "this
@@ -1139,6 +1207,8 @@ export type RawEvent =
           tieStop: boolean;
           arts: ArtSet;
           fermata: boolean;
+          /** Audiveris inverted fermatas on short notes are usually false staccato/dot reads. */
+          fermataInverted?: boolean;
           ornament?: { kind: OrnamentKind; accidentalMark?: AccidentalMark };
           arpeggiate?: 'up' | 'down';
           /** Single-note tremolo strokes: the note is a measured repetition. */
@@ -1159,6 +1229,18 @@ export type RawEvent =
            * key is dropped.
            */
           spell?: { step: number; octave: number; alter: number; explicit: boolean };
+          /**
+           * Engraved `default-x` in tenths from the barline — where the head was
+           * actually printed, which is the only record of simultaneity that does
+           * not go through the writer's voice threading (see barRegrid.ts).
+           */
+          x?: number;
+          /**
+           * Printed stem direction. Within one engraved voice it is constant
+           * wherever the engraver forced it, so a change of direction inside a
+           * single <voice> marks two printed voices the writer ran together.
+           */
+          stem?: 'up' | 'down';
       }
     | {
           /**
@@ -1172,6 +1254,8 @@ export type RawEvent =
           voice: string;
           /** <rest measure="yes"/> — a whole-bar rest is a bar's length by definition and never edited. */
           measureRest: boolean;
+          /** Engraved `default-x` in tenths from the barline, as on a note. */
+          x?: number;
       }
     | {
           k: 'grace';
@@ -1248,8 +1332,14 @@ export interface RawMeasure {
     /** Display number as printed (pickups are 0). */
     n: number;
     isPickup: boolean;
+    /** MusicXML's explicit implicit-measure marker (distinct from bar 0 pickup). */
+    isImplicit: boolean;
     /** Real content length, BEFORE any padding — the meter check's evidence. */
     contentTicks: number;
+    /** Content length before rhythm/regrid repairs. */
+    originalContentTicks: number;
+    /** A time-modification is present in the source MusicXML. */
+    hasTuplet: boolean;
     /** Signature in force after this measure's own <attributes>. */
     sig: { num: number; den: number };
     /** Document order, preserved: resolution may reorder, scanning must not. */
@@ -1292,8 +1382,31 @@ const scanPart = (part: Elem): RawMeasure[] => {
         const measureWords: string[] = [];
         let cursor = 0;
         let maxCursor = 0;
+        let hasTuplet = false;
         let lastNoteStart = 0;
         let newSystem = index === 0;
+        /** Noteheads already read in this bar: `staff:onset:midi` → `default-x`. */
+        const noteheadX = new Map<string, number>();
+        /**
+         * True when this `<note>` is a second reading of a head already taken.
+         * Two voices that meet on one pitch are engraved as ONE notehead with a
+         * stem going each way, and Audiveris reports that glyph once per voice —
+         * same staff, same onset, same pitch, and the identical `default-x`,
+         * because it is the identical glyph. Sounding it twice invents a note
+         * the page never printed.
+         */
+        const duplicateNotehead = (staff: number, onset: number, midi: number, x: number | null): boolean => {
+            if (x === null) {
+                return false;
+            }
+            const key = `${staff}:${onset}:${midi}`;
+            const seen = noteheadX.get(key);
+            if (seen !== undefined && Math.abs(x - seen) <= SAME_NOTEHEAD_TENTHS) {
+                return true;
+            }
+            noteheadX.set(key, x);
+            return false;
+        };
 
         for (const child of childElements(measure)) {
             switch (child.nodeName) {
@@ -1573,6 +1686,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     break;
                 }
                 case 'note': {
+                    hasTuplet = hasTuplet || firstChild(child, 'time-modification') !== null;
                     const graceEl = firstChild(child, 'grace');
                     if (graceEl) {
                         const gracePitch = firstChild(child, 'pitch');
@@ -1598,6 +1712,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                     const isRest = restEl !== null;
 
                     const noteStaff = childInt(child, 'staff') ?? 1;
+                    const headX = defaultXOf(child);
                     if (isRest && durTicks > 0) {
                         events.push({
                             k: 'rest',
@@ -1606,6 +1721,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                             staff: noteStaff,
                             voice: childText(child, 'voice') ?? '1',
                             measureRest: restEl.getAttribute('measure') === 'yes',
+                            ...(headX !== null ? { x: headX } : {}),
                         });
                     }
                     let arts = lastArts.get(noteStaff) ?? PLAIN_ART;
@@ -1630,14 +1746,16 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const pitch = firstChild(child, 'pitch');
                         const accidental = firstChild(child, 'accidental') !== null;
                         const parsed = pitch ? pitchOf(pitch, accidental) : null;
-                        if (parsed) {
+                        if (parsed && !duplicateNotehead(noteStaff, start, parsed.midi, headX)) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
+                            const stemText = childText(child, 'stem');
+                            const stem = stemText === 'up' || stemText === 'down' ? stemText : undefined;
                             const ornament = ornamentOf(child);
                             const type = childText(child, 'type');
                             const beam = beamOf(child);
                             const tremolo = tremoloOf(child);
                             const glissando = glissandoOf(child);
-                            const artNames = markNames(child, 'articulations');
+                            const fermataEl = child.getElementsByTagName('fermata').item(0);
                             events.push({
                                 k: 'note',
                                 rel: start,
@@ -1649,8 +1767,9 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 tieStart: tieTypes.includes('start'),
                                 tieStop: tieTypes.includes('stop'),
                                 arts,
-                                fermata: child.getElementsByTagName('fermata').length > 0,
-                                breath: artNames.has('caesura') || artNames.has('breath-mark'),
+                                fermata: fermataEl !== null,
+                                ...(fermataEl?.getAttribute('type') === 'inverted' ? { fermataInverted: true } : {}),
+                                breath: breathOf(child),
                                 dots: childElements(child, 'dot').length,
                                 spell: parsed.spell,
                                 ...(type ? { type } : {}),
@@ -1659,6 +1778,8 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 ...(glissando ? { glissando } : {}),
                                 ...(ornament ? { ornament } : {}),
                                 ...(arp ? { arpeggiate: arp } : {}),
+                                ...(headX !== null ? { x: headX } : {}),
+                                ...(stem ? { stem } : {}),
                             });
                         }
                     }
@@ -1683,7 +1804,10 @@ const scanPart = (part: Elem): RawMeasure[] => {
             index,
             n: displayNumber,
             isPickup: measure.getAttribute('implicit') === 'yes' || displayNumber === 0,
+            isImplicit: measure.getAttribute('implicit') === 'yes',
             contentTicks: maxCursor,
+            originalContentTicks: maxCursor,
+            hasTuplet,
             sig: { ...currentSig },
             events,
             repeat,
@@ -1753,6 +1877,29 @@ const MIN_METER_VOTES = 8;
 const MIN_OVER_SHARE = 0.25;
 /** The over-length bars must cluster, not scatter. */
 const MIN_OVER_MODAL_COUNT = 6;
+/**
+ * Under-length is the common OMR failure (dropped notes), so a 4/4→3/4
+ * correction needs a majority cluster, not the 25% over-length bar.
+ */
+const MIN_UNDER_SHARE = 0.5;
+const MIN_UNDER_MODAL_COUNT = 6;
+
+/** Modal value in `vals`, breaking ties toward the shorter length. */
+const modalLength = (vals: readonly number[]): { modal: number; count: number } => {
+    const counts = new Map<number, number>();
+    for (const v of vals) {
+        counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    let modal = 0;
+    let modalCount = 0;
+    for (const [len, count] of counts) {
+        if (count > modalCount || (count === modalCount && (modal === 0 || len < modal))) {
+            modalCount = count;
+            modal = len;
+        }
+    }
+    return { modal, count: modalCount };
+};
 
 /**
  * Decide what signature a span of measures is really in.
@@ -1767,6 +1914,9 @@ const MIN_OVER_MODAL_COUNT = 6;
  * What is distinctive is the over-length population. Dropping notes shortens a
  * bar, so a genuinely correct signature is seldom exceeded; a wrong one is
  * exceeded constantly, and those excesses cluster at the true bar length.
+ * The complementary case — 3/4 read as 4/4, every bar short — cannot use that
+ * discriminator, so a second path requires a majority cluster at a known
+ * shorter ratio before it will resignature.
  */
 const judgeSpan = (raws: readonly RawMeasure[], from: number, to: number, warnings: Set<string>): MeterVerdict => {
     const declared = raws[from]?.sig ?? { num: 4, den: 4 };
@@ -1788,38 +1938,43 @@ const judgeSpan = (raws: readonly RawMeasure[], from: number, to: number, warnin
     }
 
     const over = votes.filter((v) => v > expected);
+    const under = votes.filter((v) => v < expected);
     const exact = votes.filter((v) => v === expected).length;
-    if (over.length / n < MIN_OVER_SHARE || over.length <= exact) {
-        return fallback;
-    }
-
-    // Modal length among the over-length bars — the candidate true bar length.
-    const counts = new Map<number, number>();
-    for (const v of over) {
-        counts.set(v, (counts.get(v) ?? 0) + 1);
-    }
-    let modal = 0;
-    let modalCount = 0;
-    for (const [len, count] of counts) {
-        if (count > modalCount || (count === modalCount && len < modal)) {
-            modalCount = count;
-            modal = len;
+    const tryRatio = (lengths: readonly number[], minModal: number): { num: number; den: number } | null => {
+        const { modal, count } = modalLength(lengths);
+        if (count < minModal || modal <= 0) {
+            return null;
         }
-    }
+        const g = gcd(modal, expected);
+        const rn = modal / g;
+        const rd = expected / g;
+        const known = METER_RATIOS.some(([a, b]) => a === rn && b === rd);
+        return known ? resignature(declared, rn, rd) : null;
+    };
 
-    const g = gcd(modal, expected);
-    const rn = modal / g;
-    const rd = expected / g;
-    const known = METER_RATIOS.some(([a, b]) => a === rn && b === rd);
-    const corrected = modalCount >= MIN_OVER_MODAL_COUNT && known ? resignature(declared, rn, rd) : null;
-
-    if (!corrected) {
+    if (over.length / n >= MIN_OVER_SHARE && over.length > exact) {
+        // Modal length among the over-length bars — the candidate true bar length.
+        const corrected = tryRatio(over, MIN_OVER_MODAL_COUNT);
+        if (corrected) {
+            warnings.add('meter_corrected');
+            return { from, to, sig: corrected, corrected: true };
+        }
         // Noticed and did not act — worth far more to the reader than silence.
         warnings.add('meter_suspect');
         return fallback;
     }
-    warnings.add('meter_corrected');
-    return { from, to, sig: corrected, corrected: true };
+
+    // 3/4 read as 4/4 (Gymnopédie): bars are systematically short, not over.
+    // Dropped notes also shorten bars, so this path needs a majority cluster.
+    if (under.length / n >= MIN_UNDER_SHARE && under.length > exact) {
+        const corrected = tryRatio(under, MIN_UNDER_MODAL_COUNT);
+        if (corrected) {
+            warnings.add('meter_corrected');
+            return { from, to, sig: corrected, corrected: true };
+        }
+    }
+
+    return fallback;
 };
 
 /**
@@ -1985,6 +2140,63 @@ const placeMeasures = (
     const out: MeasurePlacement[] = [];
     let measureStart = ctx.tickOffset;
 
+    /**
+     * A short bar is normally damaged input and is padded so later barlines
+     * remain on the declared meter. Two generic MusicXML structures prove an
+     * intentional short segment: a backward repeat immediately followed by
+     * an implicit continuation that completes the meter, or a terminal
+     * backward-repeat bar whose short length is the closing segment. This is
+     * deliberately structural; it does not depend on a piece name, geometry,
+     * or a target score.
+     */
+    const preservesPrintedFragment = (pos: number, raw: RawMeasure, expected: number): boolean => {
+        if (raw.contentTicks <= 0 || raw.contentTicks >= expected || !raw.repeat.repeatBackward) {
+            return false;
+        }
+        const next = raws[pos + 1];
+        if (
+            next?.isImplicit &&
+            next.sig.num === raw.sig.num &&
+            next.sig.den === raw.sig.den &&
+            raw.contentTicks + next.contentTicks === expected
+        ) {
+            return true;
+        }
+        if (pos !== raws.length - 1) {
+            return false;
+        }
+        // A terminal short ending may complete an internal implicit fragment
+        // (the fragment is the section's omitted opening half). Require that
+        // fragment to follow an earlier repeat and to complement this bar;
+        // an arbitrary truncated final bar remains an underfull warning.
+        for (let i = pos - 1; i >= 1; i--) {
+            const candidate = raws[i];
+            const repeat = raws[i - 1];
+            if (!candidate?.isImplicit || !repeat?.repeat.repeatBackward) {
+                continue;
+            }
+            for (let j = i + 1; j < pos; j++) {
+                const between = raws[j];
+                if (
+                    !between ||
+                    between.repeat.repeatForward ||
+                    between.repeat.repeatBackward ||
+                    between.sig.num !== raw.sig.num ||
+                    between.sig.den !== raw.sig.den
+                ) {
+                    return false;
+                }
+            }
+            return (
+                candidate.sig.num === raw.sig.num &&
+                candidate.sig.den === raw.sig.den &&
+                candidate.contentTicks > 0 &&
+                candidate.contentTicks + raw.contentTicks === expected
+            );
+        }
+        return false;
+    };
+
     for (let pos = 0; pos < raws.length; pos++) {
         const raw = raws[pos];
         if (!raw) {
@@ -2008,6 +2220,13 @@ const placeMeasures = (
         // Pickups stay content-length (MusicXML implicit / measure 0); other bars
         // snap underfull content up to the active signature so later ticks don't skew.
         const contentLen = raw.contentTicks;
+        const printedFragment = preservesPrintedFragment(pos, raw, expected);
+        if (!raw.isPickup && raw.hasTuplet && raw.originalContentTicks < expected && !printedFragment) {
+            // Regridding can repair raw.contentTicks and event extent while the
+            // source still proves a malformed underfull tuplet. Preserve that
+            // evidence as a warning rather than hiding the recognition defect.
+            ctx.warnings.add('measure_underfull');
+        }
         let length = contentLen;
         let pad = 0;
         if (numbered) {
@@ -2024,7 +2243,7 @@ const placeMeasures = (
             }
         } else if (length <= 0) {
             length = expected;
-        } else if (!raw.isPickup && length < expected) {
+        } else if (!raw.isPickup && length < expected && !printedFragment) {
             pad = expected - length;
             ctx.warnings.add('measure_underfull');
             length = expected;
@@ -2478,11 +2697,7 @@ const seedCurveStarts = (curves: Map<number, DynamicCurve>, seed: ParseSeed, tic
 };
 
 /** Resume per-voice levels from a prior shard when this parse printed none. */
-const seedVoiceCurveStarts = (
-    voiceCurves: Map<string, DynamicCurve>,
-    seed: ParseSeed,
-    tickOffset: number,
-): void => {
+const seedVoiceCurveStarts = (voiceCurves: Map<string, DynamicCurve>, seed: ParseSeed, tickOffset: number): void => {
     for (const [key, v] of Object.entries(seed.velocityByVoice ?? {})) {
         const existing = voiceCurves.get(key);
         if (existing && pointValueAt(existing.points, tickOffset) !== undefined) {
@@ -2789,7 +3004,7 @@ const discloseClefs = (raws: readonly RawMeasure[], warnings: Set<string>): void
  */
 const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult => {
     const notes: ScoreNote[] = [];
-    const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean }> = [];
+    const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }> = [];
     const timeSignatures: ScoreTimeSig[] = [];
     const keySignatures: ScoreKeySig[] = [];
     const clefs: ScoreClef[] = [];
@@ -2820,7 +3035,11 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const sigs = ctx.timeline ? raws.map((raw) => raw.sig) : effectiveSigs(raws, reconcileMeter(raws, ctx.warnings));
     // After the meter verdict — a span of consistently long bars is a misread
     // signature, not a hundred lost dots — and before padding, which is the
-    // blunt fix for whatever the repair left alone.
+    // blunt fix for whatever the repair left alone. The regrid runs first: it
+    // puts the heads of a mis-threaded bar back where the page prints them, so
+    // the repair sees the bar's real shape instead of a voice pushed past the
+    // barline by a join it never made.
+    regridBars(raws, sigs, ctx.warnings);
     const rhythmRepairs = repairRhythm(raws, sigs, ctx.warnings);
     const placements = placeMeasures(raws, sigs, ctx);
 
@@ -3165,9 +3384,18 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         }
                     }
                     if (ev.fermata) {
-                        // Hold on ARRIVING at the onset, so the note itself still
-                        // starts on time and everything sounding across it rings on.
-                        holds.push({ tick: start, beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)) });
+                        // Inverted fermata on a note shorter than a quarter is the
+                        // Audiveris false-positive (staccato / accent dots). A real
+                        // inverted fermata sits on a longer note; missing one is
+                        // one-sided (the gate only fails invented holds).
+                        if (!(ev.fermataInverted && ev.dur < TICKS_PER_QUARTER)) {
+                            // Hold on ARRIVING at the onset, so the note itself still
+                            // starts on time and everything sounding across it rings on.
+                            holds.push({
+                                tick: start,
+                                beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)),
+                            });
+                        }
                     }
                     if (ev.breath && !ev.chord) {
                         // A caesura or breath mark is a short stop AFTER the note —
@@ -3198,7 +3426,16 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
             }
         }
 
-        measures.push({ n: raw.n, tick: place.tick, dTicks: place.dTicks, ...(raw.newSystem ? { sysBreak: true } : {}) });
+        measures.push({
+            n: raw.n,
+            tick: place.tick,
+            dTicks: place.dTicks,
+            ...(raw.newSystem ? { sysBreak: true } : {}),
+            // Kept only so a caller can still see the hole padding closed:
+            // `repeats.ts` needs it to tell an anacrusis-completing short bar
+            // from a damaged one. Never reaches ScoreData.
+            ...(place.pad > 0 ? { pad: place.pad } : {}),
+        });
     }
 
     // A tie whose stop was never engraved never reached its gating point. Close
@@ -3384,9 +3621,7 @@ export const parseMxlFiles = (
         const parsed = parseMusicXmlString(extractMxl(file), tickOffset, index === 0 ? seed : EMPTY_SEED, options);
         combined.notes.push(...parsed.notes);
         combined.measures.push(
-            ...parsed.measures.map((measure, i) =>
-                index > 0 && i === 0 ? { ...measure, sysBreak: true } : measure,
-            ),
+            ...parsed.measures.map((measure, i) => (index > 0 && i === 0 ? { ...measure, sysBreak: true } : measure)),
         );
         combined.timeSignatures.push(...parsed.timeSignatures);
         combined.keySignatures.push(...parsed.keySignatures);

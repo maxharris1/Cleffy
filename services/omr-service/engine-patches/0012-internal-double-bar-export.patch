@@ -1,0 +1,565 @@
+diff --git a/app/src/main/java/org/audiveris/omr/score/PartwiseBuilder.java b/app/src/main/java/org/audiveris/omr/score/PartwiseBuilder.java
+--- a/app/src/main/java/org/audiveris/omr/score/PartwiseBuilder.java
++++ b/app/src/main/java/org/audiveris/omr/score/PartwiseBuilder.java
+@@ -41,6 +41,8 @@
+ import org.audiveris.omr.sheet.SheetStub;
+ import org.audiveris.omr.sheet.Staff;
+ import org.audiveris.omr.sheet.SystemInfo;
++import org.audiveris.omr.sheet.rhythm.InternalDoubleBarExport;
++import org.audiveris.omr.sheet.rhythm.InternalDoubleBarVoices;
+ import org.audiveris.omr.sheet.rhythm.Measure;
+ import org.audiveris.omr.sheet.rhythm.MeasureStack;
+ import org.audiveris.omr.sheet.rhythm.Slot;
+@@ -1368,6 +1370,63 @@
+         }
+     }
+ 
++    //-----------------------------//
++    // processInternalMiddleBarline //
++    //-----------------------------//
++    /**
++     * Emit one MusicXML middle barline at the current musical cursor.
++     * Does not map MIDDLE onto LEFT and does not attach repeats or endings.
++     */
++    private void processInternalMiddleBarline (PartBarline partBarline)
++    {
++        if (partBarline == null) {
++            return;
++        }
++        try {
++            final Barline pmBarline = factory.createBarline();
++            pmBarline.setLocation(RightLeftMiddle.MIDDLE);
++            final PartBarline.Style style = partBarline.getStyle();
++            if (style != null) {
++                BarStyleColor barStyleColor = factory.createBarStyleColor();
++                barStyleColor.setValue(barStyleOf(style, RightLeftMiddle.MIDDLE));
++                pmBarline.setBarStyle(barStyleColor);
++            }
++            current.pmMeasure.getNoteOrBackupOrForward().add(pmBarline);
++        } catch (Exception ex) {
++            logger.warn("Cannot process internal middle barline {} in {}",
++                    partBarline,
++                    current.page,
++                    ex);
++        }
++    }
++
++    private boolean isTimedInternalMiddle (Measure measure,
++                                               PartBarline mid)
++    {
++        if ((measure == null) || (mid == null) || (mid.getTimeOffset() == null)) {
++            return false;
++        }
++        final boolean ending = (mid.getEnding(LEFT) != null) || (mid.getEnding(RIGHT) != null);
++        final String style = (mid.getStyle() == null) ? null : mid.getStyle().name();
++        final MeasureStack stack = measure.getStack();
++        final Rational duration = (stack == null) ? null : stack.getActualDuration();
++        return InternalDoubleBarExport.isTimedInternalSeparator(
++                style,
++                mid.isLeftRepeat(),
++                mid.isRightRepeat(),
++                ending,
++                toExportTime(mid.getTimeOffset()),
++                toExportTime(duration));
++    }
++
++    private static InternalDoubleBarVoices.Time toExportTime (Rational r)
++    {
++        if (r == null) {
++            return null;
++        }
++        return new InternalDoubleBarVoices.Time(r.num, r.den);
++    }
++
+     //------------//
+     // processBow //
+     //------------//
+@@ -2006,10 +2065,13 @@
+                 // Print?
+                 new MeasurePrint(measure).process();
+ 
+-                // Left/mid barline?
+-                PartBarline mid = measure.getMidPartBarline();
+-
+-                if (mid != null) {
++                // Left barline, or an untimed mid barline (repeats/endings keep old export).
++                // A recovered internal double-thin is emitted later at its captured time.
++                final PartBarline mid = measure.getMidPartBarline();
++                final boolean timedInternal = isTimedInternalMiddle(measure, mid);
++                if (timedInternal) {
++                    processBarline(getBarlineOnLeft(measure), RightLeftMiddle.LEFT);
++                } else if (mid != null) {
+                     processBarline(mid, RightLeftMiddle.MIDDLE);
+                 } else {
+                     processBarline(getBarlineOnLeft(measure), RightLeftMiddle.LEFT);
+@@ -2075,6 +2137,10 @@
+ 
+             // Now voice per voice
+             Rational timeCounter = Rational.ZERO;
++            final PartBarline exportMid = measure.getMidPartBarline();
++            final boolean timedInternal = isTimedInternalMiddle(measure, exportMid);
++            final Rational separator = timedInternal ? exportMid.getTimeOffset() : null;
++            boolean insertedInternal = false;
+ 
+             for (Voice voice : measure.getVoices()) {
+                 current.voice = voice;
+@@ -2107,6 +2173,18 @@
+                             // Need a forward before this chord?
+                             Rational timeOffset = chord.getTimeOffset();
+ 
++                            if ((separator != null) && InternalDoubleBarExport.insertBeforeOnset(
++                                    toExportTime(timeOffset),
++                                    toExportTime(separator),
++                                    insertedInternal)) {
++                                if (timeCounter.compareTo(separator) < 0) {
++                                    insertForward(separator.minus(timeCounter), chord);
++                                    timeCounter = separator;
++                                }
++                                processInternalMiddleBarline(exportMid);
++                                insertedInternal = true;
++                            }
++
+                             if (timeCounter.compareTo(timeOffset) < 0) {
+                                 insertForward(timeOffset.minus(timeCounter), chord);
+                                 timeCounter = timeOffset;
+@@ -2135,6 +2213,13 @@
+                             // Delegate to the chord children directly
+                             processChord(chord);
+                             timeCounter = timeCounter.plus(chord.getDuration());
++                            if ((separator != null) && InternalDoubleBarExport.insertAfterOnset(
++                                    toExportTime(timeCounter),
++                                    toExportTime(separator),
++                                    insertedInternal)) {
++                                processInternalMiddleBarline(exportMid);
++                                insertedInternal = true;
++                            }
+                         }
+                     }
+ 
+@@ -2153,6 +2238,12 @@
+                 current.endVoice();
+             }
+ 
++            if (timedInternal && !insertedInternal) {
++                logger.info("Internal double-bar export skipped: separator time {} not reached in {}",
++                        separator,
++                        measure);
++            }
++
+             // Clefs that occur after time slots, if any
+             clefIters.push(null, null);
+ 
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/PartBarline.java b/app/src/main/java/org/audiveris/omr/sheet/PartBarline.java
+--- a/app/src/main/java/org/audiveris/omr/sheet/PartBarline.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/PartBarline.java
+@@ -23,6 +23,7 @@
+ 
+ import org.audiveris.omr.math.GeoUtil;
+ import org.audiveris.omr.math.PointUtil;
++import org.audiveris.omr.math.Rational;
+ import org.audiveris.omr.sig.inter.EndingInter;
+ import org.audiveris.omr.sig.inter.FermataInter;
+ import org.audiveris.omr.sig.inter.Inters;
+@@ -42,10 +43,12 @@
+ 
+ import javax.xml.bind.annotation.XmlAccessType;
+ import javax.xml.bind.annotation.XmlAccessorType;
++import javax.xml.bind.annotation.XmlAttribute;
+ import javax.xml.bind.annotation.XmlElement;
+ import javax.xml.bind.annotation.XmlIDREF;
+ import javax.xml.bind.annotation.XmlList;
+ import javax.xml.bind.annotation.XmlRootElement;
++import javax.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
+ 
+ /**
+  * Class <code>PartBarline</code> represents a logical barline for a part, that is made of
+@@ -84,6 +87,14 @@
+     @XmlElement(name = "staff-barlines")
+     private final List<StaffBarlineInter> staffBarlines = new ArrayList<>();
+ 
++    /**
++     * Time offset of a recovered internal double-thin separator within the
++     * containing measure. Null when this barline is not that case.
++     */
++    @XmlAttribute(name = "time")
++    @XmlJavaTypeAdapter(Rational.JaxbAdapter.class)
++    private Rational timeOffset;
++
+     //~ Constructors -------------------------------------------------------------------------------
+ 
+     /**
+@@ -266,6 +277,32 @@
+         return staffBarlines.get(0).getStyle();
+     }
+ 
++    //---------------//
++    // getTimeOffset //
++    //---------------//
++    /**
++     * Report the captured internal-separator time offset, if any.
++     *
++     * @return time since measure start, or null
++     */
++    public Rational getTimeOffset ()
++    {
++        return timeOffset;
++    }
++
++    //---------------//
++    // setTimeOffset //
++    //---------------//
++    /**
++     * Assign the captured internal-separator time offset.
++     *
++     * @param timeOffset time since measure start, or null
++     */
++    public void setTimeOffset (Rational timeOffset)
++    {
++        this.timeOffset = timeOffset;
++    }
++
+     //--------------//
+     // isLeftRepeat //
+     //--------------//
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarExport.java b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarExport.java
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarExport.java
+@@ -0,0 +1,269 @@
++package org.audiveris.omr.sheet.rhythm;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Timed MusicXML export of a recovered internal double-thin separator.
++ * Does not infer the offset from half the meter. Never emits a guessed
++ * position when timing is missing or outside the surviving measure.
++ */
++public final class InternalDoubleBarExport
++{
++    public static final String NOTE = "NOTE";
++
++    public static final String BACKUP = "BACKUP";
++
++    public static final String FORWARD = "FORWARD";
++
++    public static final String BARLINE = "BARLINE";
++
++    public static final String LEFT = "LEFT";
++
++    public static final String MIDDLE = "MIDDLE";
++
++    public static final String RIGHT = "RIGHT";
++
++    public static final String LIGHT_LIGHT = "light-light";
++
++    private InternalDoubleBarExport ()
++    {
++    }
++
++    public static final class StreamEvent
++    {
++        public final String kind;
++
++        public final String location;
++
++        public final String style;
++
++        public final String chordId;
++
++        public final InternalDoubleBarVoices.Time cursor;
++
++        public final InternalDoubleBarVoices.Time duration;
++
++        public StreamEvent (String kind,
++                             String location,
++                             String style,
++                             String chordId,
++                             InternalDoubleBarVoices.Time cursor,
++                             InternalDoubleBarVoices.Time duration)
++        {
++            this.kind = kind;
++            this.location = location;
++            this.style = style;
++            this.chordId = chordId;
++            this.cursor = cursor;
++            this.duration = duration;
++        }
++    }
++
++    /**
++     * True only for a source-verified internal double-thin with a captured
++     * fragment time strictly inside the surviving measure.
++     */
++    public static boolean isTimedInternalSeparator (String style,
++                                                          boolean leftRepeat,
++                                                          boolean rightRepeat,
++                                                          boolean ending,
++                                                          InternalDoubleBarVoices.Time time,
++                                                          InternalDoubleBarVoices.Time measureDuration)
++    {
++        if (!InternalDoubleBarEvidence.isInternalDoubleThin(style, leftRepeat, rightRepeat, ending)) {
++            return false;
++        }
++        return isValidSeparatorTime(time, measureDuration);
++    }
++
++    public static boolean isValidSeparatorTime (InternalDoubleBarVoices.Time time,
++                                                    InternalDoubleBarVoices.Time measureDuration)
++    {
++        if ((time == null) || !time.isPositive()) {
++            return false;
++        }
++        if (measureDuration == null) {
++            return false;
++        }
++        return time.compareTo(measureDuration) < 0;
++    }
++
++    public static String persistTime (InternalDoubleBarVoices.Time time)
++    {
++        return (time == null) ? null : time.toString();
++    }
++
++    public static InternalDoubleBarVoices.Time parseTime (String text)
++    {
++        if ((text == null) || text.isBlank()) {
++            return null;
++        }
++        final int slash = text.indexOf('/');
++        try {
++            if (slash <= 0) {
++                return new InternalDoubleBarVoices.Time(Integer.parseInt(text.trim()), 1);
++            }
++            return new InternalDoubleBarVoices.Time(
++                    Integer.parseInt(text.substring(0, slash).trim()),
++                    Integer.parseInt(text.substring(slash + 1).trim()));
++        } catch (RuntimeException ex) {
++            return null;
++        }
++    }
++
++    public static boolean insertBeforeOnset (InternalDoubleBarVoices.Time nextOnset,
++                                                   InternalDoubleBarVoices.Time separator,
++                                                   boolean alreadyInserted)
++    {
++        if (alreadyInserted || (separator == null) || (nextOnset == null)) {
++            return false;
++        }
++        return nextOnset.compareTo(separator) >= 0;
++    }
++
++    public static boolean insertAfterOnset (InternalDoubleBarVoices.Time cursorAfter,
++                                                InternalDoubleBarVoices.Time separator,
++                                                boolean alreadyInserted)
++    {
++        if (alreadyInserted || (separator == null) || (cursorAfter == null)) {
++            return false;
++        }
++        return cursorAfter.compareTo(separator) >= 0;
++    }
++
++    public static InternalDoubleBarVoices.Time minus (InternalDoubleBarVoices.Time left,
++                                                             InternalDoubleBarVoices.Time right)
++    {
++        return new InternalDoubleBarVoices.Time(
++                (left.num * right.den) - (right.num * left.den),
++                left.den * right.den);
++    }
++
++    public static int toDivisions (InternalDoubleBarVoices.Time time,
++                                      int divisionsPerQuarter)
++    {
++        if ((time == null) || (divisionsPerQuarter <= 0) || (time.den == 0)) {
++            return -1;
++        }
++        return (time.num * 4 * divisionsPerQuarter) / time.den;
++    }
++
++    /**
++     * Walk merged voices the way PartwiseBuilder does: backups, forwards,
++     * one middle light-light, no per-voice copy, no left duplicate.
++     */
++    public static List<StreamEvent> exportMeasure (InternalDoubleBarVoices.MergeTables tables,
++                                                       InternalDoubleBarVoices.Time separator,
++                                                       InternalDoubleBarVoices.Time measureDuration,
++                                                       boolean realLeftBoundary)
++    {
++        final List<StreamEvent> events = new ArrayList<>();
++        if ((tables == null) || !tables.ok) {
++            return events;
++        }
++        if (realLeftBoundary) {
++            events.add(new StreamEvent(BARLINE, LEFT, "regular", null,
++                    new InternalDoubleBarVoices.Time(0, 1), null));
++        }
++        final InternalDoubleBarVoices.Time stored = parseTime(persistTime(separator));
++        final boolean timed = isTimedInternalSeparator(
++                "LIGHT_LIGHT", false, false, false, stored, measureDuration);
++        InternalDoubleBarVoices.Time cursor = new InternalDoubleBarVoices.Time(0, 1);
++        boolean inserted = false;
++        boolean firstVoice = true;
++        for (String voiceKey : tables.voiceKeys) {
++            if (!firstVoice && (cursor.num != 0)) {
++                events.add(new StreamEvent(BACKUP, null, null, null, cursor, cursor));
++                cursor = new InternalDoubleBarVoices.Time(0, 1);
++            }
++            firstVoice = false;
++            for (InternalDoubleBarVoices.SlotPut put : InternalDoubleBarVoices.putsForVoice(
++                    tables, voiceKey)) {
++                if (!InternalDoubleBarVoices.BEGIN.equals(put.status)) {
++                    continue;
++                }
++                final InternalDoubleBarVoices.Time onset = slotTime(tables, put.slotId);
++                if (timed && insertBeforeOnset(onset, stored, inserted)) {
++                    if (cursor.compareTo(stored) < 0) {
++                        events.add(new StreamEvent(FORWARD, null, null, null, cursor,
++                                minus(stored, cursor)));
++                        cursor = stored;
++                    }
++                    events.add(new StreamEvent(BARLINE, MIDDLE, LIGHT_LIGHT, null, stored, null));
++                    inserted = true;
++                }
++                if (cursor.compareTo(onset) < 0) {
++                    events.add(new StreamEvent(FORWARD, null, null, null, cursor,
++                            minus(onset, cursor)));
++                    cursor = onset;
++                }
++                events.add(new StreamEvent(NOTE, null, null, put.chordId, onset, put.duration));
++                cursor = onset.plus(put.duration);
++                if (timed && insertAfterOnset(cursor, stored, inserted)) {
++                    events.add(new StreamEvent(BARLINE, MIDDLE, LIGHT_LIGHT, null, stored, null));
++                    inserted = true;
++                }
++            }
++        }
++        events.add(new StreamEvent(BARLINE, RIGHT, "light-heavy", null, measureDuration, null));
++        return events;
++    }
++
++    public static int countLocation (List<StreamEvent> events,
++                                         String location,
++                                         String style)
++    {
++        int count = 0;
++        for (StreamEvent event : events) {
++            if (BARLINE.equals(event.kind) && location.equals(event.location)
++                    && ((style == null) || style.equals(event.style))) {
++                count++;
++            }
++        }
++        return count;
++    }
++
++    public static int countNotes (List<StreamEvent> events)
++    {
++        int count = 0;
++        for (StreamEvent event : events) {
++            if (NOTE.equals(event.kind)) {
++                count++;
++            }
++        }
++        return count;
++    }
++
++    public static StreamEvent firstMiddle (List<StreamEvent> events)
++    {
++        for (StreamEvent event : events) {
++            if (MIDDLE.equals(event.location)) {
++                return event;
++            }
++        }
++        return null;
++    }
++
++    public static StreamEvent note (List<StreamEvent> events,
++                                       String chordId)
++    {
++        for (StreamEvent event : events) {
++            if (NOTE.equals(event.kind) && chordId.equals(event.chordId)) {
++                return event;
++            }
++        }
++        return null;
++    }
++
++    private static InternalDoubleBarVoices.Time slotTime (InternalDoubleBarVoices.MergeTables tables,
++                                                               int slotId)
++    {
++        for (InternalDoubleBarVoices.SlotPlan slot : tables.slots) {
++            if (slot.newId == slotId) {
++                return slot.time;
++            }
++        }
++        return null;
++    }
++}
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java
+index dcee594..a99178b 100644
+--- a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java
+@@ -183,11 +183,14 @@ public final class InternalDoubleBarVoices
+ 
+         public final String status;
+ 
++        public final Time duration;
++
+         public SlotPut (String voiceKey,
+                           String measureKey,
+                           int slotId,
+                           String chordId,
+-                          String status)
++                          String status,
++                          Time duration)
+         {
+             if ((chordId == null) || (status == null)) {
+                 throw new IllegalArgumentException("null slot record");
+@@ -200,6 +203,7 @@ public final class InternalDoubleBarVoices
+             this.slotId = slotId;
+             this.chordId = chordId;
+             this.status = status;
++            this.duration = duration;
+         }
+     }
+ 
+@@ -356,14 +360,14 @@ public final class InternalDoubleBarVoices
+                 final ChordCapture begin = begins.get(slot.newId);
+                 if (begin != null) {
+                     puts.add(new SlotPut(entry.getKey(), begin.measureKey, slot.newId,
+-                            begin.chordId, BEGIN));
++                            begin.chordId, BEGIN, begin.duration));
+                     prev = begin;
+                     prevEnd = begin.time.plus(begin.duration);
+                     continue;
+                 }
+                 if ((prev != null) && (prevEnd.compareTo(slot.time) > 0)) {
+                     puts.add(new SlotPut(entry.getKey(), prev.measureKey, slot.newId,
+-                            prev.chordId, CONTINUE));
++                            prev.chordId, CONTINUE, prev.duration));
+                 }
+             }
+         }
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java
+index 4c5ea97..641d07b 100644
+--- a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java
+@@ -421,6 +421,17 @@ public final class InternalDoubleBars
+             return;
+         }
+ 
++        for (Measure measure : left.getMeasures()) {
++            if (measure.getRightPartBarline() == null) {
++                logger.info("Internal double-bar skipped: missing separator to stamp");
++                return;
++            }
++        }
++
++        for (Measure measure : left.getMeasures()) {
++            measure.getRightPartBarline().setTimeOffset(shift);
++        }
++
+         for (Measure measure : right.getMeasures()) {
+             for (AbstractChordInter chord : measure.getStandardChords()) {
+                 chord.setTimeOffset(chord.getTimeOffset().plus(shift));

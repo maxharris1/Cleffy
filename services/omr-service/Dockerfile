@@ -1,7 +1,7 @@
-# Cleffy OMR service: Audiveris 5.11.0 (headless) + Node wrapper.
+# Cleffy OMR service: Audiveris 5.11.0 (headless, patched engine classes) + Node wrapper.
 #
 # The Audiveris release .deb bundles its own Java runtime (jpackage), so the
-# image needs no system JDK. Audiveris OCR needs Tesseract *3.04 legacy*
+# runtime image needs no system JDK. Audiveris OCR needs Tesseract *3.04 legacy*
 # language files (not Debian's LSTM-only eng.traineddata).
 #
 # Build:  docker build -t cleffy-omr services/omr-service
@@ -16,19 +16,133 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
+# Unpack the official Audiveris .deb. Kept on the Debian base rather than folded
+# into the JDK stage below: the .deb's bundled JRE carries hard-linked `legal/`
+# files, and `dpkg -x` on the Ubuntu-noble JDK image fails them with ENOSYS when
+# the amd64 build is emulated on an arm64 host (Apple Silicon dev machines).
+FROM node:22-bookworm-slim AS audiveris-dist
+ARG AUDIVERIS_VERSION=5.11.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/audiveris.deb \
+        "https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VERSION}/Audiveris-${AUDIVERIS_VERSION}-ubuntu22.04-x86_64.deb" \
+    && dpkg -x /tmp/audiveris.deb /opt/audiveris-root \
+    && rm /tmp/audiveris.deb
+
+# ---------------------------------------------------------------------------
+# Engine stage: recompile the patched classes into the shipped audiveris.jar.
+#
+# The jar's classes are major version 69 (Java 25) and the bundled jpackage
+# runtime is Zulu 25, so the patch must be compiled by a JDK 25 with
+# `--release 25`; anything older emits a class the runtime would still load but
+# that would silently diverge from the rest of the jar's compilation target.
+#
+# The .class files are written straight INTO audiveris.jar (`jar uf`) rather
+# than prepended to the launcher classpath: the jpackage `Audiveris.cfg` builds
+# its classpath from repeated `app.classpath=` lines and an extra entry there is
+# easy to lose on a future engine bump, whereas an updated jar cannot be
+# half-applied. See engine-patches/README.md for the provenance and the diff.
+# ---------------------------------------------------------------------------
+FROM eclipse-temurin:25-jdk AS engine
+COPY --from=audiveris-dist /opt/audiveris-root /opt/audiveris-root
+WORKDIR /work
+COPY engine-patches ./engine-patches
+RUN set -eux; \
+    app=/opt/audiveris-root/opt/audiveris/lib/app; \
+    javac --release 25 -nowarn -encoding UTF-8 \
+        -cp "$app/audiveris.jar:$app/*" \
+        -d /work/patch-classes \
+        engine-patches/src/org/audiveris/omr/sheet/clef/ClefBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefHints.java \
+        engine-patches/src/org/audiveris/omr/sheet/clef/PdfClefBeamCrossings.java \
+        engine-patches/src/org/audiveris/omr/sheet/header/HeaderBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/time/PdfHeaderTimeHints.java \
+        engine-patches/src/org/audiveris/omr/sig/SigReducer.java \
+        engine-patches/src/org/audiveris/omr/sig/inter/OctaveShiftInter.java \
+        engine-patches/src/org/audiveris/omr/text/TextBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/TupletsBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/ledger/LedgersPostAnalysis.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/DotFactory.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/LedgerFragmentEvidence.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/PdfQuarterRestHints.java \
+        engine-patches/src/org/audiveris/omr/sheet/symbol/SymbolsBuilder.java \
+        engine-patches/src/org/audiveris/omr/sheet/curve/PdfTieHints.java \
+        engine-patches/src/org/audiveris/omr/sheet/curve/SlursBuilder.java \
+        engine-patches/src/org/audiveris/omr/step/PageStep.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarVoices.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBarExport.java \
+        engine-patches/src/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java \
+        engine-patches/src/org/audiveris/omr/sheet/PartBarline.java \
+        engine-patches/src/org/audiveris/omr/score/PartwiseBuilder.java; \
+    (cd /work/patch-classes && jar uf "$app/audiveris.jar" org); \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
+        | grep -q installPdfChangeClefs; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.ClefBuilder \
+        | grep -q promoteOctaveClef; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.PdfClefHints \
+        | grep -q scan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.clef.PdfClefBeamCrossings \
+        | grep -q coexist; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.time.PdfHeaderTimeHints \
+        | grep -q keySearchWidth; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.header.HeaderBuilder \
+        | grep -q PdfHeaderTimeHints; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.SigReducer \
+        | grep -q PdfClefBeamCrossings; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sig.inter.OctaveShiftInter \
+        | grep -q createMeasured; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.TupletsBuilder \
+        | grep -q findBracketSpan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.ledger.LedgersPostAnalysis \
+        | grep -q hasAttachedHeadStemInk; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.DotFactory \
+        | grep -q isUnrecognizedLedgerFragment; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.LedgerFragmentEvidence \
+        | grep -q isFragment; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
+        | grep -q mergeQuarterRest; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
+        | grep -q loaderPdfToSheet; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
+        | grep -q uniqueStaff; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
+        | grep -q PdfQuarterRestHints; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.curve.PdfTieHints \
+        | grep -q install; \
+    javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.curve.SlursBuilder \
+        | grep -q PdfTieHints; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBars \
+        | grep -q repair; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \
+        | grep -q scan; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.PdfSystemNumbers \
+        | grep -q groupDigits; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarEvidence \
+        | grep -q sourceCountAllowsInternal; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarVoices \
+        | grep -q rebuild; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.rhythm.InternalDoubleBarExport \
+        | grep -q isTimedInternalSeparator; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.PartBarline \
+        | grep -q getTimeOffset; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.score.PartwiseBuilder \
+        | grep -q processInternalMiddleBarline; \
+    javap -c -cp "$app/audiveris.jar" org.audiveris.omr.step.PageStep \
+        | grep -q InternalDoubleBars
+
 FROM node:22-bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates fontconfig fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-ARG AUDIVERIS_VERSION=5.11.0
+COPY --from=engine /opt/audiveris-root /opt/audiveris-root
+
 # Tesseract 3.04 eng — Audiveris runs OCR in legacy mode only.
 ARG TESSDATA_ENG_URL=https://github.com/tesseract-ocr/tessdata/raw/3.04.00/eng.traineddata
-RUN curl -fsSL -o /tmp/audiveris.deb \
-        "https://github.com/Audiveris/audiveris/releases/download/${AUDIVERIS_VERSION}/Audiveris-${AUDIVERIS_VERSION}-ubuntu22.04-x86_64.deb" \
-    && dpkg -x /tmp/audiveris.deb /opt/audiveris-root \
-    && rm /tmp/audiveris.deb \
-    && mkdir -p /opt/tesseract-ocr/tessdata \
+RUN mkdir -p /opt/tesseract-ocr/tessdata \
     && curl -fsSL -o /opt/tesseract-ocr/tessdata/eng.traineddata "${TESSDATA_ENG_URL}"
 
 # TESSDATA_PREFIX must name the tessdata FOLDER ITSELF, not its parent. Pointing

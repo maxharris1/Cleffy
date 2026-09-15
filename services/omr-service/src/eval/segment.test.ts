@@ -20,6 +20,7 @@ const entry = (meters: Array<{ num: number; den: number }>): CorpusEntry => ({
         midi: `m${i + 1}.mid`,
         meter,
         pickupQuarters: 0,
+        partialBars: [],
         printedBars: 8,
         expectedFifths: 0,
         expectedTempo: { min: 60, max: 120 },

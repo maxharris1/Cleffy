@@ -1,0 +1,461 @@
+package org.audiveris.omr.sheet.rhythm;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+
+/**
+ * Rebuild merged voice/slot tables from captured fragment timelines.
+ * Never emits a null slot record. Does not call {@code Voice.putSlotInfo}.
+ */
+public final class InternalDoubleBarVoices
+{
+    public static final String BEGIN = "BEGIN";
+
+    public static final String CONTINUE = "CONTINUE";
+
+    private InternalDoubleBarVoices ()
+    {
+    }
+
+    /** Whole-note rational used by captured onsets and durations. */
+    public static final class Time
+            implements Comparable<Time>
+    {
+        public final int num;
+
+        public final int den;
+
+        public Time (int num,
+                     int den)
+        {
+            if (den <= 0) {
+                throw new IllegalArgumentException("non-positive denominator");
+            }
+            final int g = gcd(Math.abs(num), den);
+            this.num = num / g;
+            this.den = den / g;
+        }
+
+        public Time plus (Time other)
+        {
+            return new Time((this.num * other.den) + (other.num * this.den),
+                    this.den * other.den);
+        }
+
+        public boolean isPositive ()
+        {
+            return num > 0;
+        }
+
+        @Override
+        public int compareTo (Time other)
+        {
+            final long a = (long) this.num * (long) other.den;
+            final long b = (long) other.num * this.den;
+            return Long.compare(a, b);
+        }
+
+        @Override
+        public boolean equals (Object obj)
+        {
+            if (this == obj) {
+                return true;
+            }
+            if (!(obj instanceof Time)) {
+                return false;
+            }
+            final Time other = (Time) obj;
+            return (num == other.num) && (den == other.den);
+        }
+
+        @Override
+        public int hashCode ()
+        {
+            return Objects.hash(num, den);
+        }
+
+        @Override
+        public String toString ()
+        {
+            return num + "/" + den;
+        }
+    }
+
+    public static final class SlotCapture
+    {
+        public final String key;
+
+        public final int originalId;
+
+        public final Time time;
+
+        public final int xOffset;
+
+        public final boolean fromRight;
+
+        public SlotCapture (String key,
+                             int originalId,
+                             Time time,
+                             int xOffset,
+                             boolean fromRight)
+        {
+            this.key = key;
+            this.originalId = originalId;
+            this.time = time;
+            this.xOffset = xOffset;
+            this.fromRight = fromRight;
+        }
+    }
+
+    public static final class ChordCapture
+    {
+        public final String chordId;
+
+        public final String voiceKey;
+
+        public final String measureKey;
+
+        public final String slotKey;
+
+        public final Time time;
+
+        public final Time duration;
+
+        public final boolean fromRight;
+
+        public ChordCapture (String chordId,
+                              String voiceKey,
+                              String measureKey,
+                              String slotKey,
+                              Time time,
+                              Time duration,
+                              boolean fromRight)
+        {
+            this.chordId = chordId;
+            this.voiceKey = voiceKey;
+            this.measureKey = measureKey;
+            this.slotKey = slotKey;
+            this.time = time;
+            this.duration = duration;
+            this.fromRight = fromRight;
+        }
+    }
+
+    public static final class SlotPlan
+    {
+        public final String key;
+
+        public final int newId;
+
+        public final Time time;
+
+        public final int xOffset;
+
+        public SlotPlan (String key,
+                           int newId,
+                           Time time,
+                           int xOffset)
+        {
+            this.key = key;
+            this.newId = newId;
+            this.time = time;
+            this.xOffset = xOffset;
+        }
+    }
+
+    /** One non-null BEGIN or CONTINUE record keyed by the renumbered slot id. */
+    public static final class SlotPut
+    {
+        public final String voiceKey;
+
+        public final String measureKey;
+
+        public final int slotId;
+
+        public final String chordId;
+
+        public final String status;
+
+        public final Time duration;
+
+        public SlotPut (String voiceKey,
+                          String measureKey,
+                          int slotId,
+                          String chordId,
+                          String status,
+                          Time duration)
+        {
+            if ((chordId == null) || (status == null)) {
+                throw new IllegalArgumentException("null slot record");
+            }
+            if (!BEGIN.equals(status) && !CONTINUE.equals(status)) {
+                throw new IllegalArgumentException("status " + status);
+            }
+            this.voiceKey = voiceKey;
+            this.measureKey = measureKey;
+            this.slotId = slotId;
+            this.chordId = chordId;
+            this.status = status;
+            this.duration = duration;
+        }
+    }
+
+    public static final class MergeTables
+    {
+        public final boolean ok;
+
+        public final String reason;
+
+        public final List<SlotPlan> slots;
+
+        public final List<SlotPut> puts;
+
+        public final List<String> voiceKeys;
+
+        private MergeTables (boolean ok,
+                             String reason,
+                             List<SlotPlan> slots,
+                             List<SlotPut> puts,
+                             List<String> voiceKeys)
+        {
+            this.ok = ok;
+            this.reason = reason;
+            this.slots = List.copyOf(slots);
+            this.puts = List.copyOf(puts);
+            this.voiceKeys = List.copyOf(voiceKeys);
+        }
+
+        public static MergeTables fail (String reason)
+        {
+            return new MergeTables(false, reason, List.of(), List.of(), List.of());
+        }
+    }
+
+    /**
+     * Combine left/right captures. Right onsets receive {@code shift} exactly once.
+     * Left onsets and all durations are unchanged. Fails rather than omit a chord.
+     */
+    public static MergeTables rebuild (List<SlotCapture> leftSlots,
+                                          List<SlotCapture> rightSlots,
+                                          List<ChordCapture> leftChords,
+                                          List<ChordCapture> rightChords,
+                                          Time shift)
+    {
+        if ((shift == null) || !shift.isPositive()) {
+            return MergeTables.fail("missing left duration shift");
+        }
+        if ((leftSlots == null) || (rightSlots == null)
+                || (leftChords == null) || (rightChords == null)) {
+            return MergeTables.fail("missing fragment capture");
+        }
+        if (leftSlots.isEmpty() || rightSlots.isEmpty()
+                || leftChords.isEmpty() || rightChords.isEmpty()) {
+            return MergeTables.fail("empty fragment");
+        }
+
+        final List<SlotCapture> mergedSlots = new ArrayList<>();
+        final String leftSlotErr = appendSlots(mergedSlots, leftSlots, false, null);
+        if (leftSlotErr != null) {
+            return MergeTables.fail(leftSlotErr);
+        }
+        final String rightSlotErr = appendSlots(mergedSlots, rightSlots, true, shift);
+        if (rightSlotErr != null) {
+            return MergeTables.fail(rightSlotErr);
+        }
+
+        final List<ChordCapture> mergedChords = new ArrayList<>();
+        final String leftChordErr = appendChords(mergedChords, leftChords, false, null);
+        if (leftChordErr != null) {
+            return MergeTables.fail(leftChordErr);
+        }
+        final String rightChordErr = appendChords(mergedChords, rightChords, true, shift);
+        if (rightChordErr != null) {
+            return MergeTables.fail(rightChordErr);
+        }
+
+        return tablesFromOnsets(mergedSlots, mergedChords);
+    }
+
+    /**
+     * Rebuild BEGIN/CONTINUE tables from already-shifted onsets (second application).
+     */
+    public static MergeTables tablesFromOnsets (List<SlotCapture> slots,
+                                                    List<ChordCapture> chords)
+    {
+        if ((slots == null) || slots.isEmpty() || (chords == null) || chords.isEmpty()) {
+            return MergeTables.fail("missing merged onsets");
+        }
+
+        final Set<String> slotKeys = new HashSet<>();
+        for (SlotCapture slot : slots) {
+            if ((slot.key == null) || (slot.time == null)) {
+                return MergeTables.fail("slot missing key or time");
+            }
+            if (!slotKeys.add(slot.key)) {
+                return MergeTables.fail("duplicate slot key");
+            }
+        }
+
+        final List<SlotCapture> ordered = new ArrayList<>(slots);
+        ordered.sort(Comparator
+                .comparing((SlotCapture slot) -> slot.time)
+                .thenComparingInt(slot -> slot.xOffset)
+                .thenComparing(slot -> slot.key));
+
+        final List<SlotPlan> planned = new ArrayList<>();
+        final Map<String, SlotPlan> byKey = new LinkedHashMap<>();
+        final Set<Integer> ids = new HashSet<>();
+        int id = 1;
+        for (SlotCapture slot : ordered) {
+            if (!ids.add(id)) {
+                return MergeTables.fail("duplicate slot id");
+            }
+            final SlotPlan plan = new SlotPlan(slot.key, id++, slot.time, slot.xOffset);
+            planned.add(plan);
+            byKey.put(slot.key, plan);
+        }
+
+        final Set<String> chordIds = new HashSet<>();
+        final LinkedHashMap<String, List<ChordCapture>> byVoice = new LinkedHashMap<>();
+        for (ChordCapture chord : chords) {
+            if ((chord.chordId == null) || (chord.voiceKey == null) || (chord.measureKey == null)
+                    || (chord.slotKey == null) || (chord.time == null) || (chord.duration == null)
+                    || !chord.duration.isPositive()) {
+                return MergeTables.fail("chord missing identity, slot, time or duration");
+            }
+            if (!chordIds.add(chord.chordId)) {
+                return MergeTables.fail("duplicate chord identity");
+            }
+            final SlotPlan slot = byKey.get(chord.slotKey);
+            if (slot == null) {
+                return MergeTables.fail("missing post-merge slot for chord");
+            }
+            if (!slot.time.equals(chord.time)) {
+                return MergeTables.fail("chord time does not match slot");
+            }
+            byVoice.computeIfAbsent(chord.voiceKey, key -> new ArrayList<>()).add(chord);
+        }
+
+        final List<SlotPut> puts = new ArrayList<>();
+        for (Map.Entry<String, List<ChordCapture>> entry : byVoice.entrySet()) {
+            final List<ChordCapture> voiceChords = new ArrayList<>(entry.getValue());
+            voiceChords.sort(Comparator.comparing(chord -> chord.time));
+            final Map<Integer, ChordCapture> begins = new TreeMap<>();
+            for (ChordCapture chord : voiceChords) {
+                final SlotPlan slot = byKey.get(chord.slotKey);
+                if (begins.put(slot.newId, chord) != null) {
+                    return MergeTables.fail("two onsets in one voice at one slot");
+                }
+            }
+            ChordCapture prev = null;
+            Time prevEnd = null;
+            for (SlotPlan slot : planned) {
+                final ChordCapture begin = begins.get(slot.newId);
+                if (begin != null) {
+                    puts.add(new SlotPut(entry.getKey(), begin.measureKey, slot.newId,
+                            begin.chordId, BEGIN, begin.duration));
+                    prev = begin;
+                    prevEnd = begin.time.plus(begin.duration);
+                    continue;
+                }
+                if ((prev != null) && (prevEnd.compareTo(slot.time) > 0)) {
+                    puts.add(new SlotPut(entry.getKey(), prev.measureKey, slot.newId,
+                            prev.chordId, CONTINUE, prev.duration));
+                }
+            }
+        }
+
+        for (SlotPut put : puts) {
+            if ((put.chordId == null) || (put.status == null)) {
+                return MergeTables.fail("null slot record");
+            }
+        }
+
+        if (chordIds.size() != beginCount(puts)) {
+            return MergeTables.fail("chord not represented exactly once as an onset");
+        }
+
+        return new MergeTables(true, "ok", planned, puts, List.copyOf(byVoice.keySet()));
+    }
+
+    public static int beginCount (List<SlotPut> puts)
+    {
+        int count = 0;
+        for (SlotPut put : puts) {
+            if (BEGIN.equals(put.status)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public static List<SlotPut> putsForVoice (MergeTables tables,
+                                                 String voiceKey)
+    {
+        final List<SlotPut> found = new ArrayList<>();
+        if ((tables == null) || (voiceKey == null)) {
+            return found;
+        }
+        for (SlotPut put : tables.puts) {
+            if (voiceKey.equals(put.voiceKey)) {
+                found.add(put);
+            }
+        }
+        return found;
+    }
+
+    private static String appendSlots (List<SlotCapture> merged,
+                                         List<SlotCapture> source,
+                                         boolean fromRight,
+                                         Time shift)
+    {
+        for (SlotCapture slot : source) {
+            if ((slot == null) || (slot.key == null) || (slot.time == null)) {
+                return "slot missing key or time";
+            }
+            final Time time = fromRight ? slot.time.plus(shift) : slot.time;
+            merged.add(new SlotCapture(slot.key, slot.originalId, time, slot.xOffset, fromRight));
+        }
+        return null;
+    }
+
+    private static String appendChords (List<ChordCapture> merged,
+                                           List<ChordCapture> source,
+                                           boolean fromRight,
+                                           Time shift)
+    {
+        for (ChordCapture chord : source) {
+            if ((chord == null) || (chord.chordId == null) || (chord.voiceKey == null)
+                    || (chord.measureKey == null) || (chord.slotKey == null)
+                    || (chord.time == null) || (chord.duration == null)
+                    || !chord.duration.isPositive()) {
+                return "chord missing identity, slot, time or duration";
+            }
+            final Time time = fromRight ? chord.time.plus(shift) : chord.time;
+            merged.add(new ChordCapture(chord.chordId, chord.voiceKey, chord.measureKey,
+                    chord.slotKey, time, chord.duration, fromRight));
+        }
+        return null;
+    }
+
+    private static int gcd (int a,
+                              int b)
+    {
+        if (a == 0) {
+            return (b == 0) ? 1 : b;
+        }
+        while (b != 0) {
+            final int t = a % b;
+            a = b;
+            b = t;
+        }
+        return a;
+    }
+}

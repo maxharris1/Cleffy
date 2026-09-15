@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, readdirSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -83,13 +83,43 @@ export const fromArtifacts = async (dir: string, source: CandidateSource = 'arti
     };
 };
 
-const dockerExec = async (container: string, args: string[]): Promise<{ stdout: string; stderr: string }> => {
+type DockerExec = (container: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type RunAudiveris = (pdfPath: string, destDir: string, logPath: string) => Promise<void>;
+
+const defaultDockerExec: DockerExec = async (container, args) => {
     try {
         return await execFileAsync('docker', ['exec', container, ...args], { maxBuffer: 32 * 1024 * 1024 });
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(`docker exec ${container} failed: ${message}`, { cause: err });
     }
+};
+
+let dockerExecImpl: DockerExec = defaultDockerExec;
+
+const dockerExec: DockerExec = (container, args) => dockerExecImpl(container, args);
+
+/** Read the version exported by the selected container without importing its service. */
+const readContainerEngineVersion = async (): Promise<string> => {
+    const script = String.raw`const fs=require('node:fs');const source=fs.readFileSync('/svc/dist/job.js','utf8');const match=source.match(/^\s*export\s+const\s+ENGINE_VERSION\s*=\s*(['"])([^'"]+)\1\s*;\s*$/m);if(!match)process.exit(2);process.stdout.write(match[2]);`;
+    const { stdout } = await dockerExecImpl(omrContainer(), ['node', '-e', script]);
+    const version = stdout.trim();
+    if (!version) {
+        throw new Error(`OMR container ${omrContainer()} did not expose ENGINE_VERSION from /svc/dist/job.js`);
+    }
+    return version;
+};
+
+/** Fail closed before reading the Audiveris binary or touching an artifact cache. */
+const assertContainerEngineVersion = async (): Promise<string> => {
+    const observed = await readContainerEngineVersion();
+    if (observed !== ENGINE_VERSION) {
+        throw new Error(
+            `OMR container ${omrContainer()} has ENGINE_VERSION ${observed}, expected ${ENGINE_VERSION}; ` +
+                `select the matching Cleffy OMR image before running the benchmark`,
+        );
+    }
+    return observed;
 };
 
 export const readAudiverisVersion = async (): Promise<string> => {
@@ -103,13 +133,6 @@ export const readAudiverisVersion = async (): Promise<string> => {
     } catch {
         return ENGINE_VERSION;
     }
-};
-
-const cacheReady = (dir: string): boolean => {
-    if (!existsSync(dir)) {
-        return false;
-    }
-    return walkFiles(dir).some((f) => f.toLowerCase().endsWith('.mxl'));
 };
 
 const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath: string): Promise<void> => {
@@ -164,18 +187,78 @@ const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath
     }
 };
 
+let runAudiverisImpl: RunAudiveris = runAudiverisInContainer;
+
+/** Test-only process seam; production always uses Docker and the local exporter. */
+export const setCandidateRuntimeForTests = (runtime: {
+    dockerExec?: DockerExec;
+    runAudiveris?: RunAudiveris;
+} | null): void => {
+    dockerExecImpl = runtime?.dockerExec ?? defaultDockerExec;
+    runAudiverisImpl = runtime?.runAudiveris ?? runAudiverisInContainer;
+};
+
+interface ArtifactMeta {
+    pdfSha?: unknown;
+    engineVersion?: unknown;
+    observedEngineVersion?: unknown;
+    audiverisVersion?: unknown;
+    options?: unknown;
+}
+
+/** A cache is reusable only when its input and observed container provenance are exact. */
+const cacheMetaMatches = async (dir: string, pdfSha: string, options: string): Promise<boolean> => {
+    const metaPath = join(dir, 'meta.json');
+    if (!existsSync(metaPath)) {
+        return false;
+    }
+
+    try {
+        const raw: unknown = JSON.parse(await readFile(metaPath, 'utf8'));
+        if (raw === null || typeof raw !== 'object') {
+            return false;
+        }
+        const meta = raw as ArtifactMeta;
+        return (
+            meta.pdfSha === pdfSha &&
+            meta.options === options &&
+            meta.engineVersion === ENGINE_VERSION &&
+            meta.observedEngineVersion === ENGINE_VERSION
+        );
+    } catch {
+        return false;
+    }
+};
+
+const cacheReady = async (dir: string, pdfSha: string, options: string): Promise<boolean> =>
+    existsSync(dir) &&
+    walkFiles(dir).some((f) => f.toLowerCase().endsWith('.mxl')) &&
+    (await cacheMetaMatches(dir, pdfSha, options));
+
 export const fromPdf = async (pdfPath: string, force = false): Promise<Candidate> => {
     const pdfSha = sha256File(pdfPath);
     const options = optionsFingerprint();
     const dest = join(artifactsCacheDir(), artifactCacheKey(pdfSha, options));
-    const hit = !force && cacheReady(dest);
+    // Verify the selected container before cache lookup or any Audiveris command. This prevents
+    // an older running container from being recorded under the local engine revision.
+    const observedEngineVersion = await assertContainerEngineVersion();
+    const hit = !force && (await cacheReady(dest, pdfSha, options));
     const dockerVersion = await readAudiverisVersion();
     if (!hit) {
+        // A legacy or mismatched cache uses the same revision-keyed directory. Remove its files
+        // before export so stale MXL/OMR files cannot be mixed with the fresh run.
+        await rm(dest, { recursive: true, force: true });
         await mkdir(dest, { recursive: true });
-        await runAudiverisInContainer(pdfPath, dest, join(dest, 'audiveris.log'));
+        await runAudiverisImpl(pdfPath, dest, join(dest, 'audiveris.log'));
         await writeFile(
             join(dest, 'meta.json'),
-            JSON.stringify({ pdfSha, engineVersion: ENGINE_VERSION, audiverisVersion: dockerVersion, options }),
+            JSON.stringify({
+                pdfSha,
+                engineVersion: ENGINE_VERSION,
+                observedEngineVersion,
+                audiverisVersion: dockerVersion,
+                options,
+            }),
         );
     }
     const candidate = await fromArtifacts(dest, 'pdf');

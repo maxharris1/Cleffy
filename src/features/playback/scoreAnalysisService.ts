@@ -39,8 +39,10 @@ export interface ScoreAnalysisStatusRow {
  * svc-13 restores dropped tuplets, repairs single-staff key misreads, fills ghost
  * parts, and zips geometry per system so the playhead stays on the bar.
  * svc-14 skips staff-less cover/blank pages instead of failing the book.
+ * svc-15 patches Audiveris so an octave G clef wins the staff header: guitar and
+ * tenor-voice scores stop sounding an octave high.
  */
-export const CURRENT_ENGINE_GENERATION = 14;
+export const CURRENT_ENGINE_GENERATION = 15;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires

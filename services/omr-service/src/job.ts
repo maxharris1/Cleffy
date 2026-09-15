@@ -52,8 +52,39 @@ import type { ScoreData } from './scoreData.js';
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
  * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
+ * svc-15: patched Audiveris ClefBuilder — an octave G clef (the italic 8 under a
+ * treble clef, standard for guitar) can finally win the staff header, instead of
+ * losing the kind-keyed dedupe to the plain G_CLEF and transposing the whole page
+ * up an octave. See engine-patches/README.md. First revision whose engine binary
+ * differs from stock 5.11.0.
+ * svc-16: recover OCR octave marks only with a measured printed dash span,
+ * using TextBuilder and OctaveShiftInter while preserving normal chord linking.
+ * svc-17 was a rejected implicit-tuplet option experiment (RSI cycle 11).
+ * svc-18: limit tuplet beam siblings to a measured printed bracket span.
+ * svc-19: retain delta-outlier ledgers supported by connected head and stem ink.
+ * svc-20 was a rejected slur-head experiment (RSI cycle 14: false accidental slur).
+ * svc-21 was a quarter-rest template candidate closed without acceptance (RSI cycle 15).
+ * svc-22: reject augmentation dots whose source ink is a neighboring head's ledger.
+ * svc-23: recover named PDF change-clef glyphs (`clefs.G_change` / `clefs.F_change`)
+ * after header selection, before HEADS.
+ * svc-24: recover an internal double-thin barline that was treated as a measure
+ * boundary, using printed PDF system-number anchors.
+ * svc-25: group PDF system-number digits within a verified text line so a
+ * printed 10 is not split by other baselines.
+ * svc-26: rebuild merged internal-bar voice/slot tables without null
+ * Voice.putSlotInfo records.
+ * svc-27: export a recovered internal double-thin as a MusicXML middle
+ * barline at the captured fragment time.
+ * svc-28: recover named PDF quarter-rest glyphs (`rests.2`) as ordinary
+ * SYMBOLS evaluations before LINKS cleanup.
+ * svc-29: use the PDF loader's float DPI scale for named quarter-rest
+ * outlines instead of the rounded raster canvas.
+ * svc-30: keep a named PDF change-clef that shares ink with a proven beam.
+ * svc-31: bound header key extraction at a proven numerical time column.
+ * svc-32: named quarter rest may own a staff whose last line it straddles.
+ * svc-33: recover a painted PDF tie when raster CURVES left the curve unowned.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-14';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-33';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the

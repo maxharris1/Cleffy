@@ -1,0 +1,1113 @@
+diff --git a/app/src/main/java/org/audiveris/omr/step/PageStep.java b/app/src/main/java/org/audiveris/omr/step/PageStep.java
+index a7ce3f2..65e6a4c 100644
+--- a/app/src/main/java/org/audiveris/omr/step/PageStep.java
++++ b/app/src/main/java/org/audiveris/omr/step/PageStep.java
+@@ -29,6 +29,7 @@ import org.audiveris.omr.sheet.Sheet;
+ import org.audiveris.omr.sheet.SheetReduction;
+ import org.audiveris.omr.sheet.SheetStub;
+ import org.audiveris.omr.sheet.SystemInfo;
++import org.audiveris.omr.sheet.rhythm.InternalDoubleBars;
+ import org.audiveris.omr.sheet.rhythm.MeasureStack;
+ import org.audiveris.omr.sheet.rhythm.Voices;
+ import org.audiveris.omr.sig.SIGraph;
+@@ -213,6 +214,9 @@ public class PageStep
+         // Clean up gutter between systems one under the other
+         new SheetReduction(sheet).process();
+ 
++        // After rhythm, before MeasureFixer numbering/export.
++        InternalDoubleBars.repair(sheet);
++
+         for (Page page : sheet.getPages()) {
+             processPage(page);
+         }
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java
+new file mode 100644
+index 0000000..bee2c51
+--- /dev/null
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBarEvidence.java
+@@ -0,0 +1,183 @@
++package org.audiveris.omr.sheet.rhythm;
++
++import java.awt.geom.Rectangle2D;
++import java.util.List;
++
++/**
++ * Source-only predicates for recovering a noncounting internal double barline.
++ * No piece name, hash, coordinate constant, corpus or reference MIDI is used.
++ */
++public final class InternalDoubleBarEvidence
++{
++    /** Digits sit just above the top staff, not in the title block. */
++    private static final double MAX_ABOVE_INTERLINES = 5.5;
++
++    private static final double MAX_BELOW_TOP_INTERLINES = 0.25;
++
++    private static final double MAX_LEFT_OUT_INTERLINES = 6;
++
++    private static final double MAX_LEFT_IN_INTERLINES = 4;
++
++    private InternalDoubleBarEvidence ()
++    {
++    }
++
++    /**
++     * Printed system-start numbers bind one span only when their difference is
++     * exactly one less than the otherwise valid raw stack count.
++     */
++    public static boolean sourceCountAllowsInternal (int startNumber,
++                                                      int nextSystemNumber,
++                                                      int rawStackCount)
++    {
++        if ((startNumber < 1) || (nextSystemNumber <= startNumber) || (rawStackCount < 2)) {
++            return false;
++        }
++        return (nextSystemNumber - startNumber) == (rawStackCount - 1);
++    }
++
++    /**
++     * Both fragments have positive content shorter than the unchanged meter, and
++     * the durations sum to that meter. Duration sum alone is never sufficient.
++     */
++    public static boolean complementaryDurations (int leftNum,
++                                                       int leftDen,
++                                                       int rightNum,
++                                                       int rightDen,
++                                                       int meterNum,
++                                                       int meterDen)
++    {
++        if ((leftDen <= 0) || (rightDen <= 0) || (meterDen <= 0)
++                || (leftNum <= 0) || (rightNum <= 0) || (meterNum <= 0)) {
++            return false;
++        }
++        final long leftMeter = (long) leftNum * (long) meterDen;
++        final long meterLeft = (long) meterNum * (long) leftDen;
++        final long rightMeter = (long) rightNum * (long) meterDen;
++        final long meterRight = (long) meterNum * (long) rightDen;
++        if ((leftMeter >= meterLeft) || (rightMeter >= meterRight)) {
++            return false;
++        }
++        final long sum = ((long) leftNum * rightDen * meterDen)
++                + ((long) rightNum * leftDen * meterDen);
++        final long meter = (long) meterNum * leftDen * rightDen;
++        return sum == meter;
++    }
++
++    /** Double-thin only. Repeats, endings and heavy/final styles are excluded. */
++    public static boolean isInternalDoubleThin (String style,
++                                                   boolean leftRepeat,
++                                                   boolean rightRepeat,
++                                                   boolean ending)
++    {
++        return "LIGHT_LIGHT".equals(style) && !leftRepeat && !rightRepeat && !ending;
++    }
++
++    /** Outline-clipped ink for a small printed digit, not the clef-sized thresholds. */
++    public static boolean digitInkAgrees (int pathPixels,
++                                            int inkInside,
++                                            int inkInBounds)
++    {
++        if ((pathPixels < 12) || (inkInside < 6) || (inkInBounds <= 0)) {
++            return false;
++        }
++        return ((inkInside / (double) pathPixels) >= 0.12)
++                && ((inkInside / (double) inkInBounds) >= 0.35);
++    }
++
++    /**
++     * A system-start number sits above the top staff at that system's left edge.
++     * Title digits, fingerings on the staff, and other systems do not bind.
++     */
++    public static boolean numberBindsSystemLeft (Rectangle2D outline,
++                                                    double staffLeft,
++                                                    double firstLineY,
++                                                    double interline)
++    {
++        if ((outline == null) || (interline <= 0) || (outline.getWidth() <= 0)
++                || (outline.getHeight() <= 0)) {
++            return false;
++        }
++        final double cy = outline.getCenterY();
++        final double cx = outline.getCenterX();
++        if (cy > (firstLineY + (MAX_BELOW_TOP_INTERLINES * interline))) {
++            return false;
++        }
++        if (cy < (firstLineY - (MAX_ABOVE_INTERLINES * interline))) {
++            return false;
++        }
++        if (outline.getMaxY() > (firstLineY + interline)) {
++            return false;
++        }
++        if (cx < (staffLeft - (MAX_LEFT_OUT_INTERLINES * interline))) {
++            return false;
++        }
++        if (cx > (staffLeft + (MAX_LEFT_IN_INTERLINES * interline))) {
++            return false;
++        }
++        return true;
++    }
++
++    /**
++     * Return the single matching system index, or {@code null} when none or more
++     * than one system matches.
++     */
++    public static Integer uniqueSystemIndex (Rectangle2D outline,
++                                              List<SystemGeom> systems)
++    {
++        if ((outline == null) || (systems == null) || systems.isEmpty()) {
++            return null;
++        }
++        Integer found = null;
++        for (SystemGeom system : systems) {
++            if (!numberBindsSystemLeft(outline, system.staffLeft, system.firstLineY, system.interline)) {
++                continue;
++            }
++            if (found != null) {
++                return null;
++            }
++            found = system.index;
++        }
++        return found;
++    }
++
++    /** Adjacent-pair index when exactly one candidate is eligible, else {@code -1}. */
++    public static int uniqueEligiblePairIndex (boolean[] eligible)
++    {
++        if (eligible == null) {
++            return -1;
++        }
++        int found = -1;
++        int count = 0;
++        for (int i = 0; i < eligible.length; i++) {
++            if (eligible[i]) {
++                count++;
++                found = i;
++            }
++        }
++        return (count == 1) ? found : -1;
++    }
++
++    /** Geometry used to bind a printed number to one system. */
++    public static final class SystemGeom
++    {
++        public final int index;
++
++        public final double staffLeft;
++
++        public final double firstLineY;
++
++        public final double interline;
++
++        public SystemGeom (int index,
++                            double staffLeft,
++                            double firstLineY,
++                            double interline)
++        {
++            this.index = index;
++            this.staffLeft = staffLeft;
++            this.firstLineY = firstLineY;
++            this.interline = interline;
++        }
++    }
++}
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java b/app/src/main/java/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java
+new file mode 100644
+index 0000000..bd25818
+--- /dev/null
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/PdfSystemNumbers.java
+@@ -0,0 +1,435 @@
++package org.audiveris.omr.sheet.rhythm;
++
++import org.apache.pdfbox.Loader;
++import org.apache.pdfbox.contentstream.PDFStreamEngine;
++import org.apache.pdfbox.contentstream.operator.state.Concatenate;
++import org.apache.pdfbox.contentstream.operator.state.Restore;
++import org.apache.pdfbox.contentstream.operator.state.Save;
++import org.apache.pdfbox.contentstream.operator.state.SetGraphicsStateParameters;
++import org.apache.pdfbox.contentstream.operator.state.SetMatrix;
++import org.apache.pdfbox.contentstream.operator.text.BeginText;
++import org.apache.pdfbox.contentstream.operator.text.EndText;
++import org.apache.pdfbox.contentstream.operator.text.MoveText;
++import org.apache.pdfbox.contentstream.operator.text.MoveTextSetLeading;
++import org.apache.pdfbox.contentstream.operator.text.NextLine;
++import org.apache.pdfbox.contentstream.operator.text.SetCharSpacing;
++import org.apache.pdfbox.contentstream.operator.text.SetFontAndSize;
++import org.apache.pdfbox.contentstream.operator.text.SetTextHorizontalScaling;
++import org.apache.pdfbox.contentstream.operator.text.SetTextLeading;
++import org.apache.pdfbox.contentstream.operator.text.SetTextRenderingMode;
++import org.apache.pdfbox.contentstream.operator.text.SetTextRise;
++import org.apache.pdfbox.contentstream.operator.text.SetWordSpacing;
++import org.apache.pdfbox.contentstream.operator.text.ShowText;
++import org.apache.pdfbox.contentstream.operator.text.ShowTextAdjusted;
++import org.apache.pdfbox.contentstream.operator.text.ShowTextLine;
++import org.apache.pdfbox.contentstream.operator.text.ShowTextLineAndSpace;
++import org.apache.pdfbox.pdmodel.PDDocument;
++import org.apache.pdfbox.pdmodel.PDPage;
++import org.apache.pdfbox.pdmodel.common.PDRectangle;
++import org.apache.pdfbox.pdmodel.font.PDFont;
++import org.apache.pdfbox.pdmodel.font.PDSimpleFont;
++import org.apache.pdfbox.pdmodel.font.PDVectorFont;
++import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode;
++import org.apache.pdfbox.util.Matrix;
++import org.apache.pdfbox.util.Vector;
++
++import org.audiveris.omr.sheet.clef.PdfClefHints;
++
++import java.awt.Shape;
++import java.awt.geom.AffineTransform;
++import java.awt.geom.Path2D;
++import java.awt.geom.Rectangle2D;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Locale;
++import java.util.concurrent.ConcurrentHashMap;
++
++/**
++ * Recover printed system-start measure numbers from visible PDF text.
++ * Identity comes from the embedded font encoding or unicode digit, transformed
++ * outline and ink. No OCR, piece name, hash or coordinate rule is used.
++ */
++public final class PdfSystemNumbers
++{
++    private static final ConcurrentHashMap<String, List<NumberHint>> CACHE =
++            new ConcurrentHashMap<>();
++
++    private PdfSystemNumbers ()
++    {
++    }
++
++    /** One grouped integer painted on the page, with optional trailing period. */
++    public static final class NumberHint
++    {
++        public final int value;
++
++        public final Path2D pdfPath;
++
++        public final Rectangle2D pageBox;
++
++        public final boolean followedByPeriod;
++
++        NumberHint (int value,
++                     Path2D pdfPath,
++                     Rectangle2D pageBox,
++                     boolean followedByPeriod)
++        {
++            this.value = value;
++            this.pdfPath = pdfPath;
++            this.pageBox = pageBox;
++            this.followedByPeriod = followedByPeriod;
++        }
++    }
++
++    public static List<NumberHint> scan (Path pdf,
++                                           int pageIndex)
++    {
++        if ((pdf == null) || (pageIndex < 0) || !Files.isRegularFile(pdf)) {
++            return List.of();
++        }
++        final String name = pdf.getFileName().toString().toLowerCase(Locale.ROOT);
++        if (!name.endsWith(".pdf")) {
++            return List.of();
++        }
++        final String key;
++        try {
++            key = pdf.toAbsolutePath().normalize() + "|sysnum|" + Files.size(pdf) + "|" + pageIndex;
++        } catch (IOException ex) {
++            return List.of();
++        }
++        return CACHE.computeIfAbsent(key, ignored -> readPage(pdf, pageIndex));
++    }
++
++    public static List<NumberHint> scanUncached (Path pdf,
++                                                 int pageIndex)
++    {
++        return readPage(pdf, pageIndex);
++    }
++
++    public static Integer digitOf (String glyphName,
++                                    String unicode)
++    {
++        final Integer named = digitOfName(glyphName);
++        if (named != null) {
++            return named;
++        }
++        if ((unicode != null) && (unicode.length() == 1)) {
++            final char ch = unicode.charAt(0);
++            if ((ch >= '0') && (ch <= '9')) {
++                return ch - '0';
++            }
++        }
++        return null;
++    }
++
++    public static boolean isPeriod (String glyphName,
++                                     String unicode)
++    {
++        if ("period".equals(glyphName)) {
++            return true;
++        }
++        return ".".equals(unicode);
++    }
++
++    public static boolean isMusicGlyphName (String glyphName)
++    {
++        if (glyphName == null) {
++            return false;
++        }
++        return glyphName.startsWith("clefs.")
++                || glyphName.startsWith("noteheads.")
++                || glyphName.startsWith("rests.")
++                || glyphName.startsWith("flags.")
++                || glyphName.startsWith("accidentals.")
++                || glyphName.startsWith("scripts.")
++                || glyphName.startsWith("timesig.")
++                || glyphName.startsWith("rests");
++    }
++
++    /**
++     * Group left-to-right digits that share a baseline into decimal integers.
++     * A trailing period marks a title/piece number, which must not be used.
++     */
++    public static List<NumberHint> groupDigits (List<GlyphHit> digits,
++                                                  List<GlyphHit> periods)
++    {
++        if ((digits == null) || digits.isEmpty()) {
++            return List.of();
++        }
++        final List<GlyphHit> ordered = new ArrayList<>(digits);
++        ordered.sort(Comparator.comparingDouble(g -> g.bounds.getMinX()));
++        final List<NumberHint> numbers = new ArrayList<>();
++        List<GlyphHit> run = new ArrayList<>();
++        for (GlyphHit digit : ordered) {
++            if (run.isEmpty()) {
++                run.add(digit);
++                continue;
++            }
++            final GlyphHit prev = run.get(run.size() - 1);
++            if (sameNumberRun(prev, digit)) {
++                run.add(digit);
++            } else {
++                numbers.add(toNumber(run, periods));
++                run = new ArrayList<>();
++                run.add(digit);
++            }
++        }
++        if (!run.isEmpty()) {
++            numbers.add(toNumber(run, periods));
++        }
++        return List.copyOf(numbers);
++    }
++
++    public static Path2D toSheetPath (NumberHint hint,
++                                       int sheetWidth,
++                                       int sheetHeight)
++    {
++        if (hint == null) {
++            return null;
++        }
++        final AffineTransform at = PdfClefHints.pdfToSheet(hint.pageBox, sheetWidth, sheetHeight);
++        if (at == null) {
++            return null;
++        }
++        return new Path2D.Double(hint.pdfPath, at);
++    }
++
++    private static boolean sameNumberRun (GlyphHit left,
++                                             GlyphHit right)
++    {
++        final Rectangle2D a = left.bounds;
++        final Rectangle2D b = right.bounds;
++        final double height = Math.max(a.getHeight(), b.getHeight());
++        if (height <= 0) {
++            return false;
++        }
++        if (Math.abs(a.getCenterY() - b.getCenterY()) > (0.4 * height)) {
++            return false;
++        }
++        final double gap = b.getMinX() - a.getMaxX();
++        if (gap < -0.15 * height) {
++            return false;
++        }
++        return gap <= (0.55 * height);
++    }
++
++    private static NumberHint toNumber (List<GlyphHit> run,
++                                           List<GlyphHit> periods)
++    {
++        int value = 0;
++        final Path2D path = new Path2D.Double();
++        Rectangle2D box = null;
++        for (GlyphHit digit : run) {
++            value = (value * 10) + digit.value;
++            path.append(digit.pdfPath, false);
++            box = (box == null) ? digit.pageBox : box;
++        }
++        final GlyphHit last = run.get(run.size() - 1);
++        final boolean period = hasTrailingPeriod(last, periods);
++        return new NumberHint(value, path, box, period);
++    }
++
++    private static boolean hasTrailingPeriod (GlyphHit last,
++                                                List<GlyphHit> periods)
++    {
++        if ((periods == null) || periods.isEmpty()) {
++            return false;
++        }
++        final Rectangle2D digit = last.bounds;
++        final double height = digit.getHeight();
++        for (GlyphHit period : periods) {
++            final Rectangle2D p = period.bounds;
++            if (Math.abs(p.getCenterY() - digit.getCenterY()) > (0.5 * height)) {
++                continue;
++            }
++            final double gap = p.getMinX() - digit.getMaxX();
++            if ((gap >= -0.1 * height) && (gap <= (0.45 * height))) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private static Integer digitOfName (String name)
++    {
++        if (name == null) {
++            return null;
++        }
++        return switch (name) {
++        case "zero" -> 0;
++        case "one" -> 1;
++        case "two" -> 2;
++        case "three" -> 3;
++        case "four" -> 4;
++        case "five" -> 5;
++        case "six" -> 6;
++        case "seven" -> 7;
++        case "eight" -> 8;
++        case "nine" -> 9;
++        default -> null;
++        };
++    }
++
++    private static List<NumberHint> readPage (Path pdf,
++                                                int pageIndex)
++    {
++        try (PDDocument doc = Loader.loadPDF(pdf.toFile())) {
++            if (pageIndex >= doc.getNumberOfPages()) {
++                return List.of();
++            }
++            final PDPage page = doc.getPage(pageIndex);
++            if (page.getRotation() != 0) {
++                return List.of();
++            }
++            final Collector engine = new Collector(page);
++            engine.processPage(page);
++            return Collections.unmodifiableList(groupDigits(engine.digits, engine.periods));
++        } catch (Exception ex) {
++            return List.of();
++        }
++    }
++
++    public static GlyphHit hit (int value,
++                                   Rectangle2D pdfBounds,
++                                   Rectangle2D pageBox)
++    {
++        final Path2D path = new Path2D.Double();
++        path.append(pdfBounds, false);
++        return new GlyphHit(value, path, pdfBounds, pageBox);
++    }
++
++    public static final class GlyphHit
++    {
++        final int value;
++
++        final Path2D pdfPath;
++
++        final Rectangle2D bounds;
++
++        final Rectangle2D pageBox;
++
++        GlyphHit (int value,
++                   Path2D pdfPath,
++                   Rectangle2D bounds,
++                   Rectangle2D pageBox)
++        {
++            this.value = value;
++            this.pdfPath = pdfPath;
++            this.bounds = bounds;
++            this.pageBox = pageBox;
++        }
++    }
++
++    private static final class Collector
++            extends PDFStreamEngine
++    {
++        private final PDPage page;
++
++        private final List<GlyphHit> digits = new ArrayList<>();
++
++        private final List<GlyphHit> periods = new ArrayList<>();
++
++        Collector (PDPage page)
++        {
++            this.page = page;
++            addOperator(new BeginText(this));
++            addOperator(new EndText(this));
++            addOperator(new SetFontAndSize(this));
++            addOperator(new ShowText(this));
++            addOperator(new ShowTextAdjusted(this));
++            addOperator(new ShowTextLine(this));
++            addOperator(new ShowTextLineAndSpace(this));
++            addOperator(new MoveText(this));
++            addOperator(new MoveTextSetLeading(this));
++            addOperator(new NextLine(this));
++            addOperator(new SetCharSpacing(this));
++            addOperator(new SetTextLeading(this));
++            addOperator(new SetMatrix(this));
++            addOperator(new SetTextRenderingMode(this));
++            addOperator(new SetTextRise(this));
++            addOperator(new SetWordSpacing(this));
++            addOperator(new SetTextHorizontalScaling(this));
++            addOperator(new Concatenate(this));
++            addOperator(new Save(this));
++            addOperator(new Restore(this));
++            addOperator(new SetGraphicsStateParameters(this));
++        }
++
++        @Override
++        protected void showFontGlyph (Matrix trm,
++                                       PDFont font,
++                                       int code,
++                                       Vector displacement)
++            throws IOException
++        {
++            if (!PdfClefHints.uprightMatrix(trm) || (font == null) || !font.isEmbedded()
++                    || font.isVertical()) {
++                return;
++            }
++            if (getGraphicsState().getTextState().getRenderingMode() != RenderingMode.FILL) {
++                return;
++            }
++            if (!(font instanceof PDSimpleFont simple) || (simple.getEncoding() == null)) {
++                return;
++            }
++            if (!(font instanceof PDVectorFont vector)) {
++                return;
++            }
++            final String glyphName = simple.getEncoding().getName(code);
++            if (isMusicGlyphName(glyphName)) {
++                return;
++            }
++            String unicode = null;
++            try {
++                unicode = font.toUnicode(code);
++            } catch (IOException ex) {
++                unicode = null;
++            }
++            final Integer digit = digitOf(glyphName, unicode);
++            final boolean period = isPeriod(glyphName, unicode);
++            if ((digit == null) && !period) {
++                return;
++            }
++            final Shape glyph;
++            try {
++                glyph = vector.getPath(code);
++            } catch (IOException ex) {
++                return;
++            }
++            if ((glyph == null) || glyph.getBounds2D().isEmpty()) {
++                return;
++            }
++            final AffineTransform at = trm.createAffineTransform();
++            at.concatenate(font.getFontMatrix().createAffineTransform());
++            final Shape pageShape = at.createTransformedShape(glyph);
++            if ((pageShape == null) || pageShape.getBounds2D().isEmpty()) {
++                return;
++            }
++            final Shape clip = getGraphicsState().getCurrentClippingPath();
++            if (!PdfClefHints.clipContains(clip, pageShape.getBounds2D(), page.getCropBox())) {
++                return;
++            }
++            final PDRectangle crop = page.getCropBox();
++            final Rectangle2D pageBox = new Rectangle2D.Double(
++                    crop.getLowerLeftX(),
++                    crop.getLowerLeftY(),
++                    crop.getWidth(),
++                    crop.getHeight());
++            final GlyphHit hit = new GlyphHit(
++                    (digit == null) ? -1 : digit,
++                    new Path2D.Double(pageShape),
++                    pageShape.getBounds2D(),
++                    pageBox);
++            if (period) {
++                periods.add(hit);
++            } else {
++                digits.add(hit);
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java
+new file mode 100644
+index 0000000..13edb75
+--- /dev/null
++++ b/app/src/main/java/org/audiveris/omr/sheet/rhythm/InternalDoubleBars.java
+@@ -0,0 +1,455 @@
++package org.audiveris.omr.sheet.rhythm;
++
++import org.audiveris.omr.math.Rational;
++import org.audiveris.omr.score.Page;
++import org.audiveris.omr.sheet.PartBarline;
++import org.audiveris.omr.sheet.Picture;
++import org.audiveris.omr.sheet.Sheet;
++import org.audiveris.omr.sheet.Staff;
++import org.audiveris.omr.sheet.SystemInfo;
++import org.audiveris.omr.sheet.clef.PdfClefHints;
++import org.audiveris.omr.sig.inter.AbstractChordInter;
++import org.audiveris.omr.sig.inter.StaffBarlineInter;
++import org.audiveris.omr.sheet.rhythm.SlotVoice.ChordStatus;
++import org.audiveris.omr.util.HorizontalSide;
++
++import ij.process.ByteProcessor;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.awt.geom.Path2D;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++
++/**
++ * Recover a noncounting internal double-thin barline that Audiveris treated as a
++ * logical measure boundary. Requires printed system-number anchors, a unique
++ * complementary pair, and double-thin ink on every staff. Does not invent rhythm.
++ */
++public final class InternalDoubleBars
++{
++    private static final Logger logger = LoggerFactory.getLogger(InternalDoubleBars.class);
++
++    private InternalDoubleBars ()
++    {
++    }
++
++    /**
++     * After initial rhythm, before {@code MeasureFixer} numbering/export.
++     * Missing PDF, ambiguous numbers, or a second eligible pair leave the sheet unchanged.
++     */
++    public static void repair (Sheet sheet)
++    {
++        if (sheet == null) {
++            return;
++        }
++        final Path input;
++        try {
++            input = sheet.getStub().getBook().getInputPath();
++        } catch (RuntimeException ex) {
++            logger.info("Internal double-bar skipped: no input path ({})", ex.toString());
++            return;
++        }
++        if ((input == null) || !Files.isRegularFile(input)
++                || !input.getFileName().toString().toLowerCase().endsWith(".pdf")) {
++            logger.info("Internal double-bar skipped: unsupported or raster input");
++            return;
++        }
++        if ((sheet.getSkew() != null) && (Math.abs(sheet.getSkew().getSlope()) > 0.02)) {
++            logger.info("Internal double-bar skipped: unsupported sheet skew {}",
++                    sheet.getSkew().getSlope());
++            return;
++        }
++        if ((sheet.getWidth() <= 0) || (sheet.getHeight() <= 0)) {
++            logger.info("Internal double-bar skipped: missing sheet geometry");
++            return;
++        }
++
++        final ByteProcessor source = sheet.getPicture().getSource(Picture.SourceKey.NO_STAFF);
++        if (source == null) {
++            logger.info("Internal double-bar skipped: missing source ink");
++            return;
++        }
++        final PdfClefHints.PixelSource pixels = (x, y) -> (x >= 0) && (y >= 0)
++                && (x < source.getWidth()) && (y < source.getHeight())
++                && (source.get(x, y) < 128);
++
++        for (Page page : sheet.getPages()) {
++            repairPage(sheet, page, input, pixels);
++        }
++    }
++
++    private static void repairPage (Sheet sheet,
++                                      Page page,
++                                      Path input,
++                                      PdfClefHints.PixelSource pixels)
++    {
++        final List<SystemInfo> systems = page.getSystems();
++        if ((systems == null) || (systems.size() < 2)) {
++            logger.info("Internal double-bar skipped: need two numbered systems");
++            return;
++        }
++
++        final List<PdfSystemNumbers.NumberHint> scanned = PdfSystemNumbers.scan(
++                input,
++                sheet.getStub().getNumber() - 1);
++        if (scanned.isEmpty()) {
++            logger.info("Internal double-bar skipped: no PDF digit glyphs page={}",
++                    sheet.getStub().getNumber());
++            return;
++        }
++
++        final List<InternalDoubleBarEvidence.SystemGeom> geoms = new ArrayList<>();
++        for (int i = 0; i < systems.size(); i++) {
++            final SystemInfo system = systems.get(i);
++            final Staff top = system.getFirstStaff();
++            if ((top == null) || top.isTablature()) {
++                logger.info("Internal double-bar skipped: system {} has no top staff", i);
++                return;
++            }
++            final int left = top.getAbscissa(HorizontalSide.LEFT);
++            geoms.add(new InternalDoubleBarEvidence.SystemGeom(
++                    i,
++                    left,
++                    top.getFirstLine().yAt(left),
++                    top.getSpecificInterline()));
++        }
++
++        final Integer[] bound = new Integer[systems.size()];
++        final PdfSystemNumbers.NumberHint[] anchors = new PdfSystemNumbers.NumberHint[systems.size()];
++        for (PdfSystemNumbers.NumberHint hint : scanned) {
++            if (hint.followedByPeriod || (hint.value < 1)) {
++                logger.info("Internal double-bar ignored title/zero number value={} period={}",
++                        hint.value,
++                        hint.followedByPeriod);
++                continue;
++            }
++            final Path2D sheetPath = PdfSystemNumbers.toSheetPath(
++                    hint,
++                    sheet.getWidth(),
++                    sheet.getHeight());
++            if (sheetPath == null) {
++                logger.info("Internal double-bar skipped number {}: unsupported transform", hint.value);
++                continue;
++            }
++            final PdfClefHints.InkEvidence ink = PdfClefHints.measureInk(sheetPath, pixels);
++            if (!InternalDoubleBarEvidence.digitInkAgrees(
++                    ink.pathPixels,
++                    ink.inkInside,
++                    ink.inkInBounds)) {
++                logger.info(
++                        "Internal double-bar rejected number {}: ink path={} inside={} bounds={}",
++                        hint.value,
++                        ink.pathPixels,
++                        ink.inkInside,
++                        ink.inkInBounds);
++                continue;
++            }
++            logger.info(
++                    "Internal double-bar number {} geometry=({},{},{},{}) ink path={} inside={}",
++                    hint.value,
++                    sheetPath.getBounds2D().getX(),
++                    sheetPath.getBounds2D().getY(),
++                    sheetPath.getBounds2D().getWidth(),
++                    sheetPath.getBounds2D().getHeight(),
++                    ink.pathPixels,
++                    ink.inkInside);
++            final Integer systemIndex = InternalDoubleBarEvidence.uniqueSystemIndex(
++                    sheetPath.getBounds2D(),
++                    geoms);
++            if (systemIndex == null) {
++                logger.info("Internal double-bar number {} did not uniquely bind a system",
++                        hint.value);
++                continue;
++            }
++            if (bound[systemIndex] != null) {
++                logger.info("Internal double-bar skipped: system {} has two printed numbers {} and {}",
++                        systemIndex,
++                        bound[systemIndex],
++                        hint.value);
++                bound[systemIndex] = null;
++                anchors[systemIndex] = null;
++                continue;
++            }
++            bound[systemIndex] = hint.value;
++            anchors[systemIndex] = hint;
++        }
++
++        for (int i = 0; i < systems.size() - 1; i++) {
++            final Integer start = bound[i];
++            final Integer next = bound[i + 1];
++            if ((start == null) || (next == null)) {
++                logger.info("Internal double-bar skipped system {}: missing printed anchors {} / {}",
++                        i,
++                        start,
++                        next);
++                continue;
++            }
++            recoverSpan(systems.get(i), start, next, anchors[i], anchors[i + 1]);
++        }
++    }
++
++    private static void recoverSpan (SystemInfo system,
++                                        int startNumber,
++                                        int nextNumber,
++                                        PdfSystemNumbers.NumberHint startHint,
++                                        PdfSystemNumbers.NumberHint nextHint)
++    {
++        final List<MeasureStack> stacks = system.getStacks();
++        if ((stacks == null) || stacks.isEmpty()) {
++            logger.info("Internal double-bar skipped system {}: no stacks", system.getId());
++            return;
++        }
++        logger.info(
++                "Internal double-bar anchors system={} start={} next={} rawStacks={} startBox={} nextBox={}",
++                system.getId(),
++                startNumber,
++                nextNumber,
++                stacks.size(),
++                startHint.pdfPath.getBounds2D(),
++                nextHint.pdfPath.getBounds2D());
++        if (!InternalDoubleBarEvidence.sourceCountAllowsInternal(
++                startNumber,
++                nextNumber,
++                stacks.size())) {
++            logger.info(
++                    "Internal double-bar skipped system {}: printed {}..{} does not allow an internal bar among {} stacks",
++                    system.getId(),
++                    startNumber,
++                    nextNumber,
++                    stacks.size());
++            return;
++        }
++
++        final boolean[] eligible = new boolean[Math.max(0, stacks.size() - 1)];
++        for (int i = 0; i < stacks.size() - 1; i++) {
++            eligible[i] = isEligiblePair(stacks.get(i), stacks.get(i + 1));
++            if (eligible[i]) {
++                logger.info(
++                        "Internal double-bar candidate pair {}+{} durations {}+{} expected={}",
++                        i,
++                        i + 1,
++                        stacks.get(i).getActualDuration(),
++                        stacks.get(i + 1).getActualDuration(),
++                        stacks.get(i).getExpectedDuration());
++            }
++        }
++        final int pair = InternalDoubleBarEvidence.uniqueEligiblePairIndex(eligible);
++        if (pair < 0) {
++            logger.info("Internal double-bar skipped system {}: no unique eligible complementary pair",
++                    system.getId());
++            return;
++        }
++
++        final MeasureStack left = stacks.get(pair);
++        final MeasureStack right = stacks.get(pair + 1);
++        logger.info(
++                "Internal double-bar merging system={} pair {}+{} leftDur={} rightDur={} expected={} separator=LIGHT_LIGHT",
++                system.getId(),
++                pair,
++                pair + 1,
++                left.getActualDuration(),
++                right.getActualDuration(),
++                left.getExpectedDuration());
++        mergePair(left, right);
++    }
++
++    private static boolean isEligiblePair (MeasureStack left,
++                                              MeasureStack right)
++    {
++        if ((left == null) || (right == null) || (right != left.getNextSibling())) {
++            return false;
++        }
++        if (left.isCautionary() || right.isCautionary() || left.isImplicit() || right.isImplicit()
++                || left.isMultiRest() || right.isMultiRest()) {
++            return false;
++        }
++        if (left.isRepeat(HorizontalSide.LEFT) || left.isRepeat(HorizontalSide.RIGHT)
++                || right.isRepeat(HorizontalSide.LEFT) || right.isRepeat(HorizontalSide.RIGHT)) {
++            return false;
++        }
++        if (right.getTimeSignature() != null) {
++            logger.info("Internal double-bar rejected pair: time signature on right fragment");
++            return false;
++        }
++        for (Measure measure : right.getMeasures()) {
++            if (measure.hasKeys()) {
++                logger.info("Internal double-bar rejected pair: key signature on right fragment");
++                return false;
++            }
++        }
++        for (Measure measure : left.getMeasures()) {
++            if (measure.getMidPartBarline() != null) {
++                logger.info("Internal double-bar skipped: left already has an internal barline");
++                return false;
++            }
++        }
++        if (!hasPositiveContent(left) || !hasPositiveContent(right)) {
++            return false;
++        }
++        final Rational expected = left.getExpectedDuration();
++        final Rational leftDur = left.getActualDuration();
++        final Rational rightDur = right.getActualDuration();
++        if ((expected == null) || (leftDur == null) || (rightDur == null)
++                || !expected.equals(right.getExpectedDuration())) {
++            return false;
++        }
++        if ((leftDur.compareTo(Rational.ZERO) <= 0) || (rightDur.compareTo(Rational.ZERO) <= 0)
++                || (leftDur.compareTo(expected) >= 0) || (rightDur.compareTo(expected) >= 0)
++                || !leftDur.plus(rightDur).equals(expected)) {
++            return false;
++        }
++        if (!voicesInternallyConsistent(left) || !voicesInternallyConsistent(right)) {
++            logger.info("Internal double-bar rejected pair: inconsistent recognized rhythm");
++            return false;
++        }
++        return everyStaffHasInternalDoubleThin(left);
++    }
++
++    private static boolean hasPositiveContent (MeasureStack stack)
++    {
++        boolean any = false;
++        for (Measure measure : stack.getMeasures()) {
++            if (measure.getStandardChords().isEmpty()) {
++                return false;
++            }
++            any = true;
++        }
++        return any;
++    }
++
++    private static boolean voicesInternallyConsistent (MeasureStack stack)
++    {
++        Rational termination = null;
++        boolean sawVoice = false;
++        for (Measure measure : stack.getMeasures()) {
++            for (Voice voice : measure.getVoices()) {
++                final Rational voiceTermination = voice.getTermination();
++                if (voiceTermination == null) {
++                    continue;
++                }
++                sawVoice = true;
++                if (termination == null) {
++                    termination = voiceTermination;
++                } else if (!voiceTermination.equals(termination)) {
++                    return false;
++                }
++            }
++        }
++        return sawVoice || (stack.getActualDuration() != null);
++    }
++
++    private static boolean everyStaffHasInternalDoubleThin (MeasureStack left)
++    {
++        int staffBars = 0;
++        final int staffCount = left.getSystem().getStaves().size();
++        for (Measure measure : left.getMeasures()) {
++            final PartBarline bar = measure.getRightPartBarline();
++            if (bar == null) {
++                logger.info("Internal double-bar rejected: missing right barline");
++                return false;
++            }
++            final List<StaffBarlineInter> members = bar.getStaffBarlines();
++            if ((members == null) || members.isEmpty()) {
++                logger.info("Internal double-bar rejected: missing staff barlines");
++                return false;
++            }
++            String style = null;
++            for (StaffBarlineInter staffBar : members) {
++                final String thisStyle = String.valueOf(staffBar.getStyle());
++                if (style == null) {
++                    style = thisStyle;
++                } else if (!style.equals(thisStyle)) {
++                    logger.info("Internal double-bar rejected: conflicting staff bar styles");
++                    return false;
++                }
++                final boolean ending = (staffBar.getEnding(HorizontalSide.LEFT) != null)
++                        || (staffBar.getEnding(HorizontalSide.RIGHT) != null);
++                if (!InternalDoubleBarEvidence.isInternalDoubleThin(
++                        thisStyle,
++                        staffBar.isLeftRepeat(),
++                        staffBar.isRightRepeat(),
++                        ending)) {
++                    logger.info("Internal double-bar rejected separator style={}", thisStyle);
++                    return false;
++                }
++                staffBars++;
++            }
++        }
++        if (staffBars != staffCount) {
++            logger.info("Internal double-bar rejected: staff barlines {} vs staves {}",
++                    staffBars,
++                    staffCount);
++            return false;
++        }
++        return true;
++    }
++
++    private static void mergePair (MeasureStack left,
++                                       MeasureStack right)
++    {
++        final Rational shift = left.getActualDuration();
++        if (shift == null) {
++            return;
++        }
++        for (Measure measure : right.getMeasures()) {
++            for (AbstractChordInter chord : measure.getStandardChords()) {
++                if (chord.getTimeOffset() != null) {
++                    chord.setTimeOffset(chord.getTimeOffset().plus(shift));
++                }
++            }
++        }
++        for (Slot slot : right.getSlots()) {
++            if (slot.getTimeOffset() != null) {
++                slot.setTimeOffset(slot.getTimeOffset().plus(shift));
++            }
++        }
++
++        left.mergeWithRight(right);
++
++        final List<Slot> slots = left.getSlots();
++        slots.sort(Comparator
++                .comparing((Slot slot) -> slot.getTimeOffset(),
++                        Comparator.nullsLast(Comparator.naturalOrder()))
++                .thenComparingInt(Slot::getXOffset));
++        int id = 1;
++        for (Slot slot : slots) {
++            slot.setId(id++);
++        }
++
++        for (Measure measure : left.getMeasures()) {
++            for (AbstractChordInter chord : measure.getStandardChords()) {
++                chord.setMeasure(measure);
++            }
++            for (Voice voice : measure.getVoices()) {
++                voice.setMeasure(measure);
++                rebuildVoiceSlots(voice, left);
++                voice.checkDuration();
++            }
++            measure.renameVoices();
++        }
++
++        left.getSystem().removeStack(right);
++        logger.info("Internal double-bar merged to one logical measure mid=LIGHT_LIGHT actual={}",
++                left.getActualDuration());
++    }
++
++    private static void rebuildVoiceSlots (Voice voice,
++                                              MeasureStack stack)
++    {
++        for (Slot slot : stack.getSlots()) {
++            voice.putSlotInfo(slot, null);
++        }
++        for (AbstractChordInter chord : voice.getChords()) {
++            final Slot slot = chord.getSlot();
++            if (slot != null) {
++                voice.putSlotInfo(slot, new SlotVoice(chord, ChordStatus.BEGIN));
++            }
++        }
++        voice.completeSlotTable();
++    }
++}

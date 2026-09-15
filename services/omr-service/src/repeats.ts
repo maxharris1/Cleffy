@@ -312,6 +312,12 @@ export const planRepeats = (
     marks: readonly MeasureRepeatMarks[],
     limits: RepeatLimits,
     isPickup: (index: number) => boolean = () => false,
+    /**
+     * True when the bar at this index is short by EXACTLY the anacrusis — the
+     * engraver's own proof that the two halves make one bar, so a repeat sitting
+     * on it retakes from the anacrusis. See the retake below.
+     */
+    completesPickup: (index: number) => boolean = () => false,
 ): RepeatPlan => {
     const n = marks.length;
     if (n === 0) {
@@ -340,6 +346,11 @@ export const planRepeats = (
     let i = 0;
     let afterJump = false;
     let performsRepeats = false;
+    // A bare :| starts a new section after its final pass. Keep this separate
+    // from the repeat pass while a volta is being skipped: the next ending in
+    // the same repeat still needs the old pass number, but a later bare :| must
+    // not reuse the exhausted section's anchor.
+    let resetBareSectionAfterEnding = false;
     let performsJumps = false;
     // A jump buys the performance up to one whole extra traversal of the score.
     const guard = 6 * n + 64;
@@ -377,6 +388,12 @@ export const planRepeats = (
             if (skipTo <= i) {
                 return linear(n, true);
             }
+            if (!afterJump && marks.slice(i, skipTo).some((candidate) => candidate?.repeatBackward)) {
+                // The first ending often carries the only :|. On the next
+                // pass it is skipped, so the reset cannot happen at that
+                // backward mark; defer it until the matching ending closes.
+                resetBareSectionAfterEnding = true;
+            }
             i = skipTo;
             continue;
         }
@@ -389,7 +406,16 @@ export const planRepeats = (
             if (mark.repeatBackward && pass < mark.repeatTimes) {
                 passOf.set(lastForward, pass + 1);
                 performsRepeats = true;
-                i = lastForward;
+                // When the opening section repeats and the music began with an
+                // anacrusis, the engraver shortens the bar before the repeat
+                // sign by exactly that anacrusis, and the retake starts at the
+                // anacrusis — the two halves are one bar (Gould, Behind Bars).
+                // That short bar is the printed proof, and without it the
+                // default stands: the pickup is played once on the way in. A
+                // printed `|:` is what a retake goes back to, so a short bar
+                // under one says nothing about the head of the piece.
+                const retakesHead = lastForward === top && marks[lastForward]?.repeatForward !== true;
+                i = retakesHead && completesPickup(i) ? 0 : lastForward;
                 continue;
             }
             if (jump && i === jump.at) {
@@ -407,6 +433,20 @@ export const planRepeats = (
                 i = jump.codaTarget;
                 continue;
             }
+        }
+
+        if (!afterJump && resetBareSectionAfterEnding && mark.endingStop) {
+            // Keep the current volta's pass for the bar just emitted, then
+            // make the following printed section a fresh bare-repeat section.
+            lastForward = i + 1;
+            passOf.set(lastForward, 1);
+            resetBareSectionAfterEnding = false;
+        } else if (!afterJump && mark.repeatBackward && pass >= mark.repeatTimes) {
+            // An exhausted bare backward repeat must not lend its old anchor
+            // or pass counter to a later bare backward repeat. An explicit
+            // |: encountered later will replace this anchor as usual.
+            lastForward = i + 1;
+            passOf.set(lastForward, 1);
         }
         i += 1;
     }
@@ -543,7 +583,9 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
         }
     }
 
-    const point = <T extends { tick: number; k?: 'down' | 'up' }>(events: readonly T[] | undefined): T[] | undefined => {
+    const point = <T extends { tick: number; k?: 'down' | 'up' }>(
+        events: readonly T[] | undefined,
+    ): T[] | undefined => {
         if (!events) {
             return undefined;
         }
