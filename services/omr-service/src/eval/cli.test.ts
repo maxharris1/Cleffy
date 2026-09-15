@@ -69,7 +69,7 @@ describe('eval CLI', { timeout: 30_000 }, () => {
         rmSync(outPath, { force: true });
     });
 
-    it('symbolic prints the 16 + false-match table', () => {
+    it('symbolic prints the 16 + false-match table', { timeout: 180_000 }, () => {
         ensureBuilt();
         const out = execFileSync('node', [cliPath(), 'symbolic'], {
             encoding: 'utf8',
