@@ -13,11 +13,13 @@ import { decideSymbolic, type Decision, type MatchReason } from './match.js';
 import { pdfSignalsFromPdf } from './pdfRead.js';
 import type { MatchCandidateInput, PdfSignals } from './signals.js';
 import type { RankedCandidate, WorkKey } from './types.js';
+import { pdfTextWorkKeyProvider, pickWorkKey, type WorkKeyProvider } from './workKeyProvider.js';
 
 export interface TrySymbolicContext {
     uploadId: string;
     pageCount: number;
     imslpPageTitle?: string;
+    filename?: string;
 }
 
 export interface TrySymbolicDeps {
@@ -27,6 +29,7 @@ export interface TrySymbolicDeps {
     ingest?: typeof ingestSymbolic;
     align?: typeof alignMutopia;
     log?: (line: string) => void;
+    workKeyProvider?: WorkKeyProvider;
 }
 
 let cachedDefaultClient: SymbolicJobClient | null = null;
@@ -134,6 +137,7 @@ export const trySymbolicJob = async (
     const fingerprint = deps.fingerprint ?? fingerprintCandidate;
     const ingest = deps.ingest ?? ingestSymbolic;
     const align = deps.align ?? alignMutopia;
+    const workKeyProvider = deps.workKeyProvider ?? pdfTextWorkKeyProvider;
 
     let pdf: PdfSignals;
     try {
@@ -142,7 +146,16 @@ export const trySymbolicJob = async (
         return fallthrough(ctx, pdfSha256, unknownWorkKey(), emptyDecision(), 'no_candidate', deps);
     }
 
-    const workKey = pdf.workKey;
+    const hits = await workKeyProvider.identify({
+        pdfBytes,
+        pdfTextWorkKey: pdf.workKey,
+        ...(ctx.imslpPageTitle !== undefined
+            ? { imslpTitle: ctx.imslpPageTitle, imslpPageTitle: ctx.imslpPageTitle }
+            : {}),
+        ...(ctx.filename !== undefined ? { filename: ctx.filename } : {}),
+    });
+    const workKey = pickWorkKey(hits, pdf.workKey);
+    pdf = { ...pdf, workKey };
     let ranked: RankedCandidate[];
     try {
         ranked = await deps.client.discover(workKey, { imslpPageTitle: ctx.imslpPageTitle });

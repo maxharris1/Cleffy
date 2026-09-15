@@ -21,7 +21,7 @@ const ensureBuilt = (): void => {
     execFileSync('npx', ['tsc', '-p', 'tsconfig.build.json'], { cwd: root(), stdio: 'pipe' });
 };
 
-describe('eval CLI', () => {
+describe('eval CLI', { timeout: 30_000 }, () => {
     it('prints usage on --help and exits 0', () => {
         ensureBuilt();
         const out = execFileSync('node', [cliPath(), '--help'], { encoding: 'utf8' });

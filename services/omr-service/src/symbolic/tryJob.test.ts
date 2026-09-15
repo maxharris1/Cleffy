@@ -213,4 +213,50 @@ describe('trySymbolicJob', () => {
         }
         expect(result.source.reason).toBe('no_candidate');
     });
+
+    it('discovers with the WorkKeyProvider hit when PDF text is unknown', async () => {
+        const seen: WorkKey[] = [];
+        const result = await trySymbolicJob(Buffer.from('%PDF'), {
+            ...ctx,
+            imslpPageTitle: 'Inventions, BWV 772 (Bach, Johann Sebastian)',
+        }, depsOf({
+            pdfSignals: async () => pdf({ workKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 } }),
+            client: {
+                discover: async (key) => {
+                    seen.push(key);
+                    return [];
+                },
+                fetchBytes: async () => {
+                    throw new Error('unused');
+                },
+            },
+        }));
+        expect(seen[0]).toEqual(WORK);
+        expect(result.kind).toBe('fallthrough');
+        if (result.kind !== 'fallthrough') {
+            return;
+        }
+        expect(result.source.reason).toBe('no_candidate');
+    });
+
+    it('discovers with a filename WorkKey when PDF text is unknown', async () => {
+        const seen: WorkKey[] = [];
+        const result = await trySymbolicJob(Buffer.from('%PDF'), {
+            ...ctx,
+            filename: 'bach-invention-bwv772.pdf',
+        }, depsOf({
+            pdfSignals: async () => pdf({ workKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 } }),
+            client: {
+                discover: async (key) => {
+                    seen.push(key);
+                    return [];
+                },
+                fetchBytes: async () => {
+                    throw new Error('unused');
+                },
+            },
+        }));
+        expect(seen[0]).toEqual(WORK);
+        expect(result.kind).toBe('fallthrough');
+    });
 });
