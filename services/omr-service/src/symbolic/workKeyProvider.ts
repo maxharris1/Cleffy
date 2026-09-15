@@ -4,17 +4,16 @@ import type { WorkKey } from './types.js';
 import { workKeyFromText } from './workKey.js';
 
 /**
- * Ranked WorkKey sources. Same order as `visionId.ts` on
- * `mh/symbolic-vision-id-5825` so that branch can rebase here without renaming
- * the hit shape:
+ * Ranked WorkKey sources (try order; first hit wins for the job):
  *
  * 1. IMSLP page title
  * 2. PDF text layer
  * 3. filename
  * 4. vision (Gemini) — proposes a WorkKey only; never ingest
  *
- * This module implements ranks 1–3. Rank 4 lives on that branch as a
- * `WorkKeyProvider` that calls Gemini and returns `source: 'vision'`.
+ * This module implements ranks 1–3. Rank 4 is `createVisionWorkKeyProvider`
+ * in `visionId.ts`. `pickWorkKey` sorts by this rank, so a 0.99 vision hit
+ * cannot beat IMSLP or PDF text.
  */
 export type WorkKeySource = 'imslp' | 'pdf_text' | 'filename' | 'vision';
 
@@ -56,9 +55,9 @@ export interface IdentifyWorkInput {
  * Input: PDF bytes plus optional IMSLP title / PDF text / filename.
  * Output: WorkKey hits in rank order (1 IMSLP → 2 PDF text → 3 filename → 4 vision).
  *
- * Vision (worker bc-616f01d7 / `mh/symbolic-vision-id-5825`) implements this
- * same interface, `source: 'vision'`. It only proposes a WorkKey for discover;
- * it never ingests. Do not add an LLM path in this module.
+ * Vision implements this same interface (`source: 'vision'`). It only
+ * proposes a WorkKey for discover; it never ingests. Do not add an LLM
+ * path in this module.
  */
 export interface WorkKeyProvider {
     identify(input: IdentifyWorkInput): Promise<WorkKeyHit[]>;

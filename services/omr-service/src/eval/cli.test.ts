@@ -29,6 +29,7 @@ describe('eval CLI', { timeout: 30_000 }, () => {
         expect(out).toContain('not an accuracy');
         expect(out).toContain('shootout');
         expect(out).toContain('symbolic');
+        expect(out).toContain('identify');
     });
 
     it('scores the committed toy artifacts without network', async () => {

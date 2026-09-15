@@ -6,6 +6,17 @@ import type { TextFetcher } from './http.js';
 import { harvestMutopiaFtp, parseMutopiaHtml, type MutopiaPiece } from './mutopia.js';
 import type { RankedCandidate, WorkKey } from './types.js';
 import { workKeyFromText } from './workKey.js';
+import {
+    pdfTextWorkKeyProvider,
+    WORK_KEY_SOURCE_RANK,
+    workKeyFromMetadata,
+    type IdentifyWorkInput,
+    type WorkKeyHit,
+    type WorkKeyProvider,
+    type WorkKeySource,
+} from './workKeyProvider.js';
+
+export { workKeyFromMetadata, type WorkKeyHit, type WorkKeySource };
 
 /**
  * Cheapest-first Gemini vision+PDF models. New API keys cannot call
@@ -20,21 +31,9 @@ export const GEMINI_GENERATE_URL = `https://generativelanguage.googleapis.com/v1
 
 export const VISION_CONFIDENCE_FLOOR = 0.5;
 
-export type WorkKeySource = 'imslp' | 'pdf_text' | 'filename' | 'vision';
-
 export interface VisionCaller {
     generateJson: (pdfBytes: Buffer, prompt: string) => Promise<string>;
     lastModel?: () => string | undefined;
-}
-
-export interface WorkKeyHit {
-    workKey: WorkKey;
-    source: WorkKeySource;
-    title?: string;
-    composer?: string;
-    catalog?: string;
-    confidence: number;
-    model?: string;
 }
 
 export interface IdentifyLookupResult {
@@ -232,12 +231,10 @@ export const createGeminiCaller = (input: {
     };
 };
 
-export const createGeminiCallerFromEnv = (env: NodeJS.ProcessEnv = process.env): VisionCaller => {
+export const createGeminiCallerFromEnv = (env: NodeJS.ProcessEnv = process.env): VisionCaller | null => {
     const key = geminiApiKeyFromEnv(env);
     if (key === undefined || key === '') {
-        throw new Error(
-            'Set GEMINI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY for symbolic vision identify',
-        );
+        return null;
     }
     return createGeminiCaller({ apiKey: key });
 };
@@ -276,65 +273,21 @@ export const workKeyFromVisionJson = (parsed: VisionJson): WorkKey | null => {
     return workKeyFromText([composer, title, catalog].filter((s) => s !== '').join(' '));
 };
 
-/**
- * Ranks 1–3 of symbolic-first metadata. Vision is rank 4 and is not called here.
- */
-export const workKeyFromMetadata = (input: {
-    imslpTitle?: string;
-    pdfText?: string;
-    filename?: string;
-}): WorkKeyHit | null => {
-    const imslp = input.imslpTitle?.trim();
-    if (imslp) {
-        const key = workKeyFromText(imslp);
-        if (key) {
-            return { workKey: key, source: 'imslp', title: imslp, confidence: 1 };
-        }
-    }
-    const pdfText = input.pdfText?.trim();
-    if (pdfText) {
-        const key = workKeyFromText(pdfText);
-        if (key) {
-            return { workKey: key, source: 'pdf_text', confidence: 1 };
-        }
-    }
-    const filename = input.filename?.trim();
-    if (filename) {
-        const key = workKeyFromText(filename);
-        if (key) {
-            return { workKey: key, source: 'filename', confidence: 0.4 };
-        }
-    }
-    return null;
-};
-
-export const identifyPdfWorkKey = async (input: {
-    pdfBytes: Buffer;
-    imslpTitle?: string;
-    pdfText?: string;
-    filename?: string;
-    caller: VisionCaller;
-    prompt?: string;
-}): Promise<WorkKeyHit | null> => {
-    const ranked = workKeyFromMetadata(input);
-    if (ranked && ranked.source !== 'filename') {
-        return ranked;
-    }
-    const raw = await input.caller.generateJson(input.pdfBytes, input.prompt ?? IDENTIFY_PROMPT);
+const visionHitFromJson = (raw: string, model: string): WorkKeyHit | null => {
     const parsed = parseVisionJson(raw);
     const confidence = asConfidence(parsed.confidence);
     if (confidence < VISION_CONFIDENCE_FLOOR) {
-        return ranked;
+        return null;
     }
     const workKey = workKeyFromVisionJson(parsed);
     if (!workKey) {
-        return ranked;
+        return null;
     }
     const hit: WorkKeyHit = {
         workKey,
         source: 'vision',
         confidence,
-        model: input.caller.lastModel?.() ?? VISION_MODEL,
+        model,
     };
     const title = asString(parsed.title);
     const composer = asString(parsed.composer);
@@ -351,12 +304,64 @@ export const identifyPdfWorkKey = async (input: {
     return hit;
 };
 
+/**
+ * Ranks 1–2 skip vision. Filename is rank 3 but never sufficient alone, so a
+ * confident vision hit may replace it. With no caller (no API key) this
+ * returns metadata only.
+ */
+export const identifyPdfWorkKey = async (input: {
+    pdfBytes: Buffer;
+    imslpTitle?: string;
+    pdfText?: string;
+    filename?: string;
+    caller?: VisionCaller | null;
+    prompt?: string;
+}): Promise<WorkKeyHit | null> => {
+    const ranked = workKeyFromMetadata(input);
+    if (ranked && ranked.source !== 'filename') {
+        return ranked;
+    }
+    if (!input.caller) {
+        return ranked;
+    }
+    const raw = await input.caller.generateJson(input.pdfBytes, input.prompt ?? IDENTIFY_PROMPT);
+    return visionHitFromJson(raw, input.caller.lastModel?.() ?? VISION_MODEL) ?? ranked;
+};
+
+/**
+ * Job seam: ranks 1–3 from `pdfTextWorkKeyProvider`, then rank 4 vision only
+ * when those are empty. A missing caller (no Gemini key) is a no-op.
+ * Vision proposes a WorkKey; ingest still goes through symbolicMatchScore.
+ */
+export const createVisionWorkKeyProvider = (caller: VisionCaller | null): WorkKeyProvider => ({
+    identify: async (input: IdentifyWorkInput) => {
+        const hits = await pdfTextWorkKeyProvider.identify(input);
+        if (hits.length > 0 || caller === null) {
+            return hits;
+        }
+        try {
+            const raw = await caller.generateJson(input.pdfBytes, IDENTIFY_PROMPT);
+            const hit = visionHitFromJson(raw, caller.lastModel?.() ?? VISION_MODEL);
+            if (hit) {
+                hits.push(hit);
+            }
+        } catch {
+            // Network / API failure → ranks 1–3 only (often empty → OMR).
+        }
+        return hits.sort(
+            (a, b) =>
+                WORK_KEY_SOURCE_RANK[a.source] - WORK_KEY_SOURCE_RANK[b.source] ||
+                b.confidence - a.confidence,
+        );
+    },
+});
+
 export const identifyAndLookup = async (input: {
     pdfBytes: Buffer;
     imslpTitle?: string;
     pdfText?: string;
     filename?: string;
-    caller: VisionCaller;
+    caller?: VisionCaller | null;
     mutopiaIndex?: readonly MutopiaPiece[];
     mutopiaHtml?: string;
     fetcher?: TextFetcher;

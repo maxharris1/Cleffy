@@ -13,6 +13,11 @@ import { decideSymbolic, type Decision, type MatchReason } from './match.js';
 import { pdfSignalsFromPdf } from './pdfRead.js';
 import type { MatchCandidateInput, PdfSignals } from './signals.js';
 import type { RankedCandidate, WorkKey } from './types.js';
+import {
+    createGeminiCallerFromEnv,
+    createVisionWorkKeyProvider,
+    hydrateGeminiKeyFromFiles,
+} from './visionId.js';
 import { pdfTextWorkKeyProvider, pickWorkKey, type WorkKeyProvider } from './workKeyProvider.js';
 
 export interface TrySymbolicContext {
@@ -44,9 +49,13 @@ export const defaultSymbolicClient = (): SymbolicJobClient => {
     return cachedDefaultClient;
 };
 
-export const defaultSymbolicDeps = (): TrySymbolicDeps => ({
-    client: defaultSymbolicClient(),
-});
+export const defaultSymbolicDeps = (): TrySymbolicDeps => {
+    hydrateGeminiKeyFromFiles();
+    return {
+        client: defaultSymbolicClient(),
+        workKeyProvider: createVisionWorkKeyProvider(createGeminiCallerFromEnv()),
+    };
+};
 
 const emptyDecision = (): Decision => ({ band: 'reject', reason: 'no_candidate', best: null, results: [] });
 

@@ -4,6 +4,8 @@ import { loadCorpusEntry } from '../eval/manifest.js';
 import { parseMutopiaHtml } from './mutopia.js';
 import {
     createGeminiCaller,
+    createGeminiCallerFromEnv,
+    createVisionWorkKeyProvider,
     identifyAndLookup,
     identifyPdfWorkKey,
     parseVisionJson,
@@ -176,6 +178,15 @@ describe('identifyPdfWorkKey', () => {
         expect(hit?.source).toBe('vision');
         expect(hit?.workKey).toEqual({ composerId: 'satie', catalogType: 'No', catalogN: 2 });
     });
+
+    it('skips vision when the caller is absent and keeps filename metadata', async () => {
+        const hit = await identifyPdfWorkKey({
+            pdfBytes: Buffer.from('%PDF-1.4'),
+            filename: 'Satie Gymnopédie No. 2.pdf',
+        });
+        expect(hit?.source).toBe('filename');
+        expect(hit?.workKey).toEqual({ composerId: 'satie', catalogType: 'No', catalogN: 2 });
+    });
 });
 
 describe('identifyAndLookup', () => {
@@ -295,5 +306,52 @@ describe('createGeminiCaller', () => {
         await caller.generateJson(Buffer.from('pdf-bytes'), 'identify');
         expect(models).toEqual(['3.1', '3.5']);
         expect(caller.lastModel?.()).toBe('gemini-3.5-flash-lite');
+    });
+});
+
+describe('vision skipped without a Gemini key', () => {
+    it('createGeminiCallerFromEnv returns null when no key is set', () => {
+        expect(createGeminiCallerFromEnv({})).toBeNull();
+        expect(createGeminiCallerFromEnv({ GEMINI_API_KEY: '', GOOGLE_GENERATIVE_AI_API_KEY: '' })).toBeNull();
+    });
+
+    it('createVisionWorkKeyProvider(null) never calls Gemini', async () => {
+        const hits = await createVisionWorkKeyProvider(null).identify({
+            pdfBytes: Buffer.from('%PDF'),
+            pdfTextWorkKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 },
+        });
+        expect(hits).toEqual([]);
+    });
+
+    it('does not call vision when filename already yields a WorkKey', async () => {
+        const calls: string[] = [];
+        const hits = await createVisionWorkKeyProvider(fakeCaller('{}', calls)).identify({
+            pdfBytes: Buffer.from('%PDF'),
+            pdfTextWorkKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 },
+            filename: 'bach-invention-bwv772.pdf',
+        });
+        expect(calls).toEqual([]);
+        expect(hits[0]?.source).toBe('filename');
+    });
+
+    it('proposes a vision WorkKey when ranks 1–3 are empty', async () => {
+        const calls: string[] = [];
+        const hits = await createVisionWorkKeyProvider(
+            fakeCaller(
+                JSON.stringify({
+                    title: 'Invention No. 1',
+                    composer: 'Bach',
+                    catalog: 'BWV 772',
+                    confidence: 0.9,
+                }),
+                calls,
+            ),
+        ).identify({
+            pdfBytes: Buffer.from('%PDF'),
+            pdfTextWorkKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 },
+        });
+        expect(calls).toEqual(['vision']);
+        expect(hits[0]?.source).toBe('vision');
+        expect(hits[0]?.workKey).toEqual({ composerId: 'bach', catalogType: 'BWV', catalogN: 772 });
     });
 });
