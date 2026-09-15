@@ -146,6 +146,7 @@ export const matchCandidateForPin = (
         arrangement: false,
         // Always the engraved count. Unfolded Mutopia MIDI is longer.
         printedBars: mov.printedBars,
+        partialBars: mov.partialBars,
     });
 };
 

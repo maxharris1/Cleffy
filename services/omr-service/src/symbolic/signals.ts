@@ -37,6 +37,8 @@ export interface MatchCandidateInput {
     opening: BarNote[][];
     arrangement: boolean;
     midi?: Buffer;
+    /** Mid-piece printed fragments (`place()` / pin `partialBars`). */
+    partialBars?: ReadonlyArray<{ bar: number; quarters: number }>;
 }
 
 const beatsOf = (meter: Meter): number => (meter.num * 4) / meter.den;
@@ -150,6 +152,7 @@ export const candidateFromMidi = (
          * srcIndex-deduped measures. Never the performed/unfolded length.
          */
         printedBars?: number;
+        partialBars?: ReadonlyArray<{ bar: number; quarters: number }>;
     },
 ): MatchCandidateInput => {
     const parsed = parseSmfForTest(buf);
@@ -179,6 +182,9 @@ export const candidateFromMidi = (
     };
     if (meta.sha256 !== undefined) {
         out.sha256 = meta.sha256;
+    }
+    if (meta.partialBars !== undefined) {
+        out.partialBars = meta.partialBars;
     }
     return out;
 };

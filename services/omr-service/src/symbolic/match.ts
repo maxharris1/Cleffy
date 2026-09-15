@@ -12,7 +12,8 @@ export type MatchReason =
     | 'bars'
     | 'arrangement'
     | 'performance_midi'
-    | 'no_candidate';
+    | 'no_candidate'
+    | 'parser_unusable';
 
 export interface ScoreParts {
     meter: number;

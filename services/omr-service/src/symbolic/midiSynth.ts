@@ -36,6 +36,8 @@ export interface SynthMidiOpts {
     tpq?: number;
     /** Added to every note-on tick.  tpq/24 lands on the 1/24-quarter residual. */
     onsetJitterTicks?: number;
+    /** Last printed bar length in quarters. Omit to fill the meter (no padding). */
+    lastBarQuarters?: number;
 }
 
 const denLog2 = (den: number): number => {
@@ -67,6 +69,9 @@ export const synthQuantizedMidi = (opts: SynthMidiOpts): Buffer => {
     const jitter = opts.onsetJitterTicks ?? 0;
     const pitches = opts.pitches.length > 0 ? opts.pitches : [60];
     const sf = opts.fifths & 0xff;
+    const lastBarTicks =
+        opts.lastBarQuarters !== undefined ? Math.max(1, Math.round(opts.lastBarQuarters * tpq)) : barTicks;
+    const durOf = (isLast: boolean): number => (isLast ? lastBarTicks : barTicks);
 
     const events: number[] = [
         0,
@@ -102,7 +107,7 @@ export const synthQuantizedMidi = (opts: SynthMidiOpts): Buffer => {
             onsets.push({
                 tick: pickupTicks + (bar - 1) * barTicks + jitter,
                 pitch: pitches[bar % pitches.length] ?? 60,
-                dur: barTicks,
+                dur: durOf(bar === opts.printedBars - 1),
             });
         }
     } else {
@@ -110,7 +115,7 @@ export const synthQuantizedMidi = (opts: SynthMidiOpts): Buffer => {
             onsets.push({
                 tick: bar * barTicks + jitter,
                 pitch: pitches[bar % pitches.length] ?? 60,
-                dur: barTicks,
+                dur: durOf(bar === opts.printedBars - 1),
             });
         }
     }
