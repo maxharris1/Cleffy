@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 import { describe, expect, it } from 'vitest';
 
@@ -45,6 +46,24 @@ describe('pdfSignalsFromPdf — layout bar count', () => {
         expect(entry.movements[0]?.pickupQuarters).toBeGreaterThan(0);
         expect(signals.pickupFlagged).toBe(true);
     }, 60_000);
+
+    it('flags Chopin Op. 28/4 pickup and counts the anacrusis as the extra box', async () => {
+        const entry = loadCorpusEntry('chopin-prelude-4');
+        const bytes = await loadPinnedPdf('chopin-prelude-4');
+        const signals = await pdfSignalsFromPdf(bytes);
+        expect(entry.movements[0]?.pickupQuarters).toBe(1);
+        expect(signals.pickupFlagged).toBe(true);
+        expect(Math.abs(signals.layoutBars - (entry.movements[0]?.printedBars ?? 0))).toBe(1);
+    }, 60_000);
+
+    it('counts Schumann Op. 68/5 anacrusis as ±1 vs pin even when the first box is not narrow', async () => {
+        const entry = loadCorpusEntry('schumann-op68-05');
+        const bytes = await loadPinnedPdf('schumann-op68-05');
+        const signals = await pdfSignalsFromPdf(bytes);
+        expect(entry.movements[0]?.pickupQuarters).toBe(3);
+        expect(Math.abs(signals.layoutBars - (entry.movements[0]?.printedBars ?? 0))).toBe(1);
+        expect(signals.pickupFlagged).toBe(false);
+    }, 60_000);
 });
 
 describe('pdfSignalsFromPdf — WorkKey from Mutopia header', () => {
@@ -78,5 +97,30 @@ describe('pdfSignalsFromArtifact', () => {
         expect(art.measureCount).toBeGreaterThan(0);
         expect(art.opening.length).toBeGreaterThan(0);
         expect(art.opening[0]?.length).toBeGreaterThan(0);
+        expect(art.fifths).toBe(1);
+    });
+
+    it('returns null fifths when the MusicXML has no key element', () => {
+        const dir = join(tmpdir(), `cleffy-nokey-${process.pid}`);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+            join(dir, 'nokey.musicxml'),
+            `<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"/></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>16</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`,
+        );
+        const art = pdfSignalsFromArtifact(dir);
+        expect(art.fifths).toBeNull();
+        expect(art.meter).toEqual({ num: 4, den: 4 });
     });
 });

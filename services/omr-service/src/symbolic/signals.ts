@@ -18,7 +18,7 @@ export interface Meter {
 export interface PdfSignals {
     /** Null when the PDF text layer has no meter token. */
     meter: Meter | null;
-    /** Null when the PDF text layer has no key and no OMR artifact is merged. */
+    /** Null when neither the PDF text nor an OMR artifact supplies a key. */
     fifths: number | null;
     printedBars: number;
     pickupQuarters: number;
@@ -38,7 +38,8 @@ export interface MatchCandidateInput {
     sha256?: string;
     workKey: WorkKey;
     meter: Meter;
-    fifths: number;
+    /** Null when the MIDI has no key-signature meta (FF 59). */
+    fifths: number | null;
     barCount: number;
     pickupQuarters: number;
     opening: BarNote[][];
@@ -126,6 +127,13 @@ const movementStub = (meter: Meter, pickupQuarters: number, printedBars: number,
     expectedExtraNotes: 0,
 });
 
+/** First MIDI key-signature meta (FF 59). Null when the file has none. */
+export const fifthsFromMidi = (buf: Buffer): number | null => {
+    const keys = parseSmfForTest(buf).keySignatures;
+    const first = keys[0];
+    return first === undefined ? null : fifthsViaLibrary(first.fifths);
+};
+
 export const fifthsViaLibrary = (fifths: number): number => {
     const score: ScoreData = {
         version: SCORE_DATA_VERSION,
@@ -180,7 +188,7 @@ export const candidateFromMidi = (
         url: meta.url,
         workKey: meta.workKey,
         meter: meta.meter,
-        fifths: fifthsViaLibrary(meta.fifths),
+        fifths: fifthsFromMidi(buf),
         barCount,
         pickupQuarters: meta.pickupQuarters,
         opening: openingFromNotes(notes),

@@ -30,7 +30,8 @@ export interface SynthMidiOpts {
     meter: { num: number; den: number };
     pickupQuarters: number;
     printedBars: number;
-    fifths: number;
+    /** Circle-of-fifths. Null omits the MIDI key-signature meta (unknown key). */
+    fifths: number | null;
     /** One MIDI pitch per printed bar (cycled if shorter). */
     pitches: readonly number[];
     tpq?: number;
@@ -68,7 +69,6 @@ export const synthQuantizedMidi = (opts: SynthMidiOpts): Buffer => {
     const pickupTicks = Math.round(opts.pickupQuarters * tpq);
     const jitter = opts.onsetJitterTicks ?? 0;
     const pitches = opts.pitches.length > 0 ? opts.pitches : [60];
-    const sf = opts.fifths & 0xff;
     const lastBarTicks =
         opts.lastBarQuarters !== undefined ? Math.max(1, Math.round(opts.lastBarQuarters * tpq)) : barTicks;
     const durOf = (isLast: boolean): number => (isLast ? lastBarTicks : barTicks);
@@ -88,13 +88,10 @@ export const synthQuantizedMidi = (opts: SynthMidiOpts): Buffer => {
         denLog2(opts.meter.den),
         24,
         8,
-        0,
-        0xff,
-        0x59,
-        2,
-        sf,
-        0,
     ];
+    if (opts.fifths !== null) {
+        events.push(0, 0xff, 0x59, 2, opts.fifths & 0xff, 0);
+    }
 
     const onsets: { tick: number; pitch: number; dur: number }[] = [];
     if (pickupTicks > 0) {

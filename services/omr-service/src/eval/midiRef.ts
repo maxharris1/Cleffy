@@ -83,17 +83,24 @@ class Cursor {
     }
 }
 
+const signedSf = (n: number): number => (n >= 128 ? n - 256 : n);
+
 const parseTrack = (
     buf: Buffer,
     start: number,
     length: number,
-): { name: string; notes: Array<{ tick: number; pitch: number; dur: number }> } => {
+): {
+    name: string;
+    notes: Array<{ tick: number; pitch: number; dur: number }>;
+    keySignatures: Array<{ tick: number; fifths: number }>;
+} => {
     const cur = new Cursor(buf, start, start + length);
     let tick = 0;
     let running = 0;
     let name = '';
     const pending = new Map<number, number[]>();
     const notes: Array<{ tick: number; pitch: number; dur: number }> = [];
+    const keySignatures: Array<{ tick: number; fifths: number }> = [];
 
     const pushOn = (pitch: number, at: number): void => {
         const stack = pending.get(pitch) ?? [];
@@ -135,6 +142,12 @@ const parseTrack = (
             if (type === 0x03) {
                 name = payload.toString('ascii').trim();
             }
+            if (type === 0x59 && payload.length >= 1) {
+                const sf = payload[0];
+                if (sf !== undefined) {
+                    keySignatures.push({ tick, fifths: signedSf(sf) });
+                }
+            }
             running = 0;
             continue;
         } else if (first === 0xf0 || first === 0xf7) {
@@ -174,7 +187,7 @@ const parseTrack = (
                 break;
         }
     }
-    return { name, notes };
+    return { name, notes, keySignatures };
 };
 
 const parseSmf = (buf: Buffer): { tpq: number; tracks: ReturnType<typeof parseTrack>[] } => {
@@ -322,15 +335,25 @@ export const refBarsOf = (notes: readonly RefNote[]): Map<number, RefNote[]> => 
 };
 
 /** Exposed for tests that need to inspect the raw SMF parse. */
-export const parseSmfForTest = (buf: Buffer): { tpq: number; trackNames: string[]; notes: SmfNote[] } => {
+export const parseSmfForTest = (
+    buf: Buffer,
+): {
+    tpq: number;
+    trackNames: string[];
+    notes: SmfNote[];
+    keySignatures: Array<{ tick: number; fifths: number }>;
+} => {
     const { tpq, tracks } = parseSmf(buf);
     const hands = handOf(tracks);
     const notes: SmfNote[] = [];
+    const keySignatures: Array<{ tick: number; fifths: number }> = [];
     tracks.forEach((track, i) => {
         const hand = hands[i] ?? 0;
         for (const note of track.notes) {
             notes.push({ tick: note.tick, dur: note.dur, pitch: note.pitch, hand });
         }
+        keySignatures.push(...track.keySignatures);
     });
-    return { tpq, trackNames: tracks.map((t) => t.name), notes };
+    keySignatures.sort((a, b) => a.tick - b.tick);
+    return { tpq, trackNames: tracks.map((t) => t.name), notes, keySignatures };
 };

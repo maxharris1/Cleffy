@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
+import { fetchCorpus } from '../eval/fetch.js';
 import { loadCorpusEntry } from '../eval/manifest.js';
 import { falseMatchFixtures, matchCandidateForPin, midiForPin, pdfSignalsForEntry, runSymbolicEval, SYMBOLIC_BENCH_SLUGS } from './evalRun.js';
 import { decideSymbolic, symbolicMatchScore } from './match.js';
 import { synthQuantizedMidi } from './midiSynth.js';
-import { candidateFromMidi, isPerformanceMidi, pdfSignalsFromPin, printedBarCountFromMeasures } from './signals.js';
+import {
+    candidateFromMidi,
+    fifthsFromMidi,
+    isPerformanceMidi,
+    pdfSignalsFromPin,
+    printedBarCountFromMeasures,
+} from './signals.js';
 import { workKeyFromText } from './workKey.js';
 
 /**
@@ -149,6 +156,118 @@ describe('decideSymbolic', () => {
         expect(result.score).toBeLessThan(85);
         expect(result.band).toBe('ambiguous');
         expect(result.reason).toBe('ambiguous');
+    });
+});
+
+describe('fifths unknown is omitted', () => {
+    const czerny = () => {
+        const entry = loadCorpusEntry('czerny-op821-01');
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        return { pdf, cand };
+    };
+
+    it('omits and redistributes when the PDF fifths is null', () => {
+        const { pdf, cand } = czerny();
+        pdf.fifths = null;
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.signals.fifths).toBeNull();
+        expect(result.parts.fifths).toBe(0);
+        expect(result.band).toBe('accept');
+        expect(result.score).toBeGreaterThanOrEqual(85);
+    });
+
+    it('omits and redistributes when the candidate fifths is null', () => {
+        const { pdf, cand } = czerny();
+        cand.fifths = null;
+        const result = symbolicMatchScore(pdf, cand);
+        expect(pdf.fifths).not.toBeNull();
+        expect(result.signals.fifths).toBeNull();
+        expect(result.parts.fifths).toBe(0);
+        expect(result.band).toBe('accept');
+        expect(result.score).toBeGreaterThanOrEqual(85);
+    });
+
+    it('omits when both sides are null', () => {
+        const { pdf, cand } = czerny();
+        pdf.fifths = null;
+        cand.fifths = null;
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.signals.fifths).toBeNull();
+        expect(result.parts.fifths).toBe(0);
+        expect(result.band).toBe('accept');
+    });
+
+    it('keeps −15 on a known-vs-known disagreement', () => {
+        const { pdf, cand } = czerny();
+        pdf.fifths = 0;
+        cand.fifths = -1;
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.signals.fifths).toBe(false);
+        expect(result.parts.fifths).toBe(0);
+        expect(result.score).toBeCloseTo(85, 5);
+    });
+
+    it('reads Mutopia MIDI key meta and treats a missing FF 59 as null', async () => {
+        await fetchCorpus(loadCorpusEntry('gymnopedie-2'), { allowNetwork: true, mode: 'midi' });
+        await fetchCorpus(loadCorpusEntry('chopin-prelude-4'), { allowNetwork: true, mode: 'midi' });
+        const gym = midiForPin(loadCorpusEntry('gymnopedie-2'));
+        const chopin = midiForPin(loadCorpusEntry('chopin-prelude-4'));
+        expect(fifthsFromMidi(gym)).toBe(0);
+        expect(fifthsFromMidi(chopin)).toBe(1);
+        const noKey = synthQuantizedMidi({
+            meter: { num: 4, den: 4 },
+            pickupQuarters: 0,
+            printedBars: 2,
+            fifths: null,
+            pitches: [60],
+        });
+        expect(fifthsFromMidi(noKey)).toBeNull();
+        const cand = candidateFromMidi(noKey, {
+            source: 'mutopia',
+            format: 'mid',
+            url: 'https://example.test/nokey.mid',
+            workKey: { composerId: 'bach', catalogType: 'BWV', catalogN: 1 },
+            meter: { num: 4, den: 4 },
+            fifths: 3,
+            pickupQuarters: 0,
+            arrangement: false,
+        });
+        expect(cand.fifths).toBeNull();
+    });
+
+    it('scores Chopin against MIDI fifths=1 (E minor), not pin expectedFifths=-1', async () => {
+        const entry = loadCorpusEntry('chopin-prelude-4');
+        await fetchCorpus(entry, { allowNetwork: true, mode: 'midi' });
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        expect(entry.movements[0]?.expectedFifths).toBe(-1);
+        expect(cand.fifths).toBe(1);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        pdf.fifths = 1;
+        const agree = symbolicMatchScore(pdf, cand);
+        expect(agree.signals.fifths).toBe(true);
+        pdf.fifths = null;
+        const omitted = symbolicMatchScore(pdf, cand);
+        expect(omitted.signals.fifths).toBeNull();
+        expect(omitted.band).toBe('accept');
+    });
+
+    it('keeps Gymnopédie fifths:false when OMR is −1 and MIDI is 0', async () => {
+        const entry = loadCorpusEntry('gymnopedie-2');
+        await fetchCorpus(entry, { allowNetwork: true, mode: 'midi' });
+        const workKey = workKeyFromText(entry.title)!;
+        const midi = midiForPin(entry);
+        const pdf = pdfSignalsFromPin(entry, midi, workKey);
+        const cand = matchCandidateForPin(entry, midi, workKey);
+        pdf.fifths = -1;
+        expect(cand.fifths).toBe(0);
+        const result = symbolicMatchScore(pdf, cand);
+        expect(result.signals.fifths).toBe(false);
+        expect(result.parts.fifths).toBe(0);
     });
 });
 

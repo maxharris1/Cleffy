@@ -38,7 +38,7 @@ export const gitSha = (): string => {
 
 export const emptySignalVector = (): SignalVector => ({
     meter: false,
-    fifths: false,
+    fifths: null,
     barCountPdf: 0,
     barCountCand: 0,
     openingSim: null,

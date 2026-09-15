@@ -26,7 +26,8 @@ export interface ScoreParts {
 
 export interface SignalVector {
     meter: boolean;
-    fifths: boolean;
+    /** Null when fifths is unknown on either side (weight omitted). */
+    fifths: boolean | null;
     barCountPdf: number;
     barCountCand: number;
     openingSim: number | null;
@@ -97,29 +98,31 @@ const bandFor = (
  * Does not call playAlongGate / compareScore.
  *
  * When `pdf.opening` is null the 30-point opening weight is redistributed
- * over the remaining present signals. Accept then still requires ≥85, so
- * meter+bars+key+catalog must all agree when those signals are known.
+ * over the remaining present signals. The same rule applies when fifths is
+ * unknown on either side. A known-vs-known fifths disagreement stays −15.
+ * Accept still requires ≥85, so meter+bars+key+catalog must all agree when
+ * those signals are known.
  */
 export const symbolicMatchScore = (pdf: PdfSignals, candidate: MatchCandidateInput): MatchResult => {
     const performanceMidi = candidate.midi !== undefined && isPerformanceMidi(candidate.midi);
     const meterKnown = pdf.meter !== null;
-    const fifthsKnown = pdf.fifths !== null;
+    const fifthsPresent = pdf.fifths !== null && candidate.fifths !== null;
     const openingKnown = pdf.opening !== null;
     const meterOk = pdf.meter === null || metersEqual(pdf.meter, candidate.meter);
-    const fifthsOk = pdf.fifths === null || pdf.fifths === candidate.fifths;
+    const fifthsOk = !fifthsPresent || pdf.fifths === candidate.fifths;
     const barError = Math.abs(pdf.printedBars - candidate.barCount);
     const sim = pdf.opening !== null ? openingSim(pdf.opening, candidate.opening) : null;
     const catalogHit = catalogAgrees(pdf.workKey, candidate.workKey);
     const rawPool =
         (meterKnown ? WEIGHTS.meter : 0) +
-        (fifthsKnown ? WEIGHTS.fifths : 0) +
+        (fifthsPresent ? WEIGHTS.fifths : 0) +
         WEIGHTS.barCount +
         (openingKnown ? WEIGHTS.opening : 0) +
         WEIGHTS.catalog;
     const scale = rawPool > 0 ? 100 / rawPool : 1;
     const parts: ScoreParts = {
         meter: meterKnown && meterOk ? WEIGHTS.meter * scale : 0,
-        fifths: fifthsKnown && fifthsOk ? WEIGHTS.fifths * scale : 0,
+        fifths: fifthsPresent && fifthsOk ? WEIGHTS.fifths * scale : 0,
         barCount: barCountPart(barError) * scale,
         opening: openingKnown && sim !== null ? Math.round(WEIGHTS.opening * sim * scale * 1000) / 1000 : 0,
         catalog: catalogHit ? WEIGHTS.catalog * scale : 0,
@@ -144,7 +147,7 @@ export const symbolicMatchScore = (pdf: PdfSignals, candidate: MatchCandidateInp
         candidate,
         signals: {
             meter: meterOk,
-            fifths: fifthsOk,
+            fifths: fifthsPresent ? fifthsOk : null,
             barCountPdf: pdf.printedBars,
             barCountCand: candidate.barCount,
             openingSim: sim,

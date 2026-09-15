@@ -37,9 +37,9 @@ describe('symbolic decision log', () => {
         expect(line.candidate.format).toBe('mid');
         expect(line.signals).toMatchObject({
             meter: true,
-            fifths: true,
             catalogHit: true,
         });
+        expect(line.signals.fifths === true || line.signals.fifths === null).toBe(true);
         expect(line.score).toBeGreaterThanOrEqual(85);
         expect(line.band).toBe('accept');
         expect(line.reason).toBe('accept');

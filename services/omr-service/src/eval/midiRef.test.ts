@@ -62,6 +62,7 @@ describe('midiRef', () => {
         const parsed = parseSmfForTest(buf);
         expect(parsed.tpq).toBe(96);
         expect(parsed.trackNames).toEqual(['up', 'down']);
+        expect(parsed.keySignatures).toEqual([]);
         expect(parsed.notes).toEqual([
             { tick: 0, dur: 96, pitch: 60, hand: 0 },
             { tick: 48, dur: 48, pitch: 62, hand: 0 },

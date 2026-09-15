@@ -103,7 +103,7 @@ const parseAccepted = (
             return scoreDataFromMidi(bytes, {
                 meter: candidate.meter,
                 pickupQuarters: candidate.pickupQuarters,
-                fifths: candidate.fifths,
+                fifths: candidate.fifths ?? 0,
                 ...(candidate.partialBars !== undefined ? { partialBars: candidate.partialBars } : {}),
             });
         case 'ly':
