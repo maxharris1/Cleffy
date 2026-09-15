@@ -2,13 +2,19 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 import { discoverCandidates } from './discover.js';
-import { MUTOPIA_PIECE_LIST_URL, type TextFetcher } from './http.js';
-import { parseMutopiaHtml, type MutopiaPiece } from './mutopia.js';
+import type { TextFetcher } from './http.js';
+import { harvestMutopiaFtp, parseMutopiaHtml, type MutopiaPiece } from './mutopia.js';
 import type { RankedCandidate, WorkKey } from './types.js';
 import { workKeyFromText } from './workKey.js';
 
-/** Cheapest live Gemini vision+PDF model as of 2026-09-15. */
-export const VISION_MODEL = 'gemini-2.5-flash-lite';
+/**
+ * Cheapest-first Gemini vision+PDF models. New API keys cannot call
+ * gemini-2.5-flash-lite (404). 3.1 is cheaper; 3.5 is what Google routes
+ * new users to and is the reliable fallback.
+ */
+export const VISION_MODEL_CANDIDATES = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'] as const;
+
+export const VISION_MODEL = 'gemini-3.5-flash-lite';
 
 export const GEMINI_GENERATE_URL = `https://generativelanguage.googleapis.com/v1beta/models/${VISION_MODEL}:generateContent`;
 
@@ -18,6 +24,7 @@ export type WorkKeySource = 'imslp' | 'pdf_text' | 'filename' | 'vision';
 
 export interface VisionCaller {
     generateJson: (pdfBytes: Buffer, prompt: string) => Promise<string>;
+    lastModel?: () => string | undefined;
 }
 
 export interface WorkKeyHit {
@@ -133,58 +140,94 @@ const parseGeminiText = (body: GeminiResponse): string => {
         .trim();
 };
 
+const fallbackableStatus = (status: number): boolean => status === 404 || status === 503;
+
+const generateOnce = async (
+    fetchImpl: typeof fetch,
+    apiKey: string,
+    model: string,
+    pdfBytes: Buffer,
+    prompt: string,
+): Promise<{ text: string; status: number; errorText: string }> => {
+    const url =
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent` +
+        `?key=${encodeURIComponent(apiKey)}`;
+    const res = await fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            contents: [
+                {
+                    role: 'user',
+                    parts: [
+                        {
+                            inlineData: {
+                                mimeType: 'application/pdf',
+                                data: pdfBytes.toString('base64'),
+                            },
+                        },
+                        { text: prompt },
+                    ],
+                },
+            ],
+            generationConfig: {
+                temperature: 0,
+                responseMimeType: 'application/json',
+                responseSchema: IDENTIFY_SCHEMA,
+            },
+        }),
+    });
+    const raw = await res.text();
+    if (!res.ok) {
+        let message = raw.slice(0, 200);
+        try {
+            const body = JSON.parse(raw) as GeminiResponse;
+            message = body.error?.message ?? message;
+        } catch {
+            // keep slice
+        }
+        return { text: '', status: res.status, errorText: message };
+    }
+    let body: GeminiResponse;
+    try {
+        body = JSON.parse(raw) as GeminiResponse;
+    } catch {
+        throw new Error(`Gemini ${model} returned non-JSON: ${res.status} ${raw.slice(0, 200)}`);
+    }
+    const text = parseGeminiText(body);
+    if (text === '') {
+        throw new Error(`Gemini ${model} returned empty content`);
+    }
+    return { text, status: res.status, errorText: '' };
+};
+
 export const createGeminiCaller = (input: {
     apiKey: string;
     fetchImpl?: typeof fetch;
     model?: string;
+    models?: readonly string[];
 }): VisionCaller => {
     const fetchImpl = input.fetchImpl ?? fetch;
-    const model = input.model ?? VISION_MODEL;
+    const models =
+        input.models ??
+        (input.model !== undefined ? [input.model] : [...VISION_MODEL_CANDIDATES]);
+    let used: string | undefined;
     return {
+        lastModel: () => used,
         async generateJson(pdfBytes: Buffer, prompt: string): Promise<string> {
-            const url =
-                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent` +
-                `?key=${encodeURIComponent(input.apiKey)}`;
-            const res = await fetchImpl(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [
-                        {
-                            role: 'user',
-                            parts: [
-                                {
-                                    inlineData: {
-                                        mimeType: 'application/pdf',
-                                        data: pdfBytes.toString('base64'),
-                                    },
-                                },
-                                { text: prompt },
-                            ],
-                        },
-                    ],
-                    generationConfig: {
-                        temperature: 0,
-                        responseMimeType: 'application/json',
-                        responseSchema: IDENTIFY_SCHEMA,
-                    },
-                }),
-            });
-            const raw = await res.text();
-            let body: GeminiResponse;
-            try {
-                body = JSON.parse(raw) as GeminiResponse;
-            } catch {
-                throw new Error(`Gemini ${model} returned non-JSON: ${res.status} ${raw.slice(0, 200)}`);
+            let lastError = 'Gemini returned no model';
+            for (const model of models) {
+                const once = await generateOnce(fetchImpl, input.apiKey, model, pdfBytes, prompt);
+                if (once.text !== '') {
+                    used = model;
+                    return once.text;
+                }
+                lastError = `Gemini ${model} failed: ${once.status} ${once.errorText}`;
+                if (!fallbackableStatus(once.status)) {
+                    throw new Error(lastError);
+                }
             }
-            if (!res.ok) {
-                throw new Error(`Gemini ${model} failed: ${res.status} ${body.error?.message ?? raw.slice(0, 200)}`);
-            }
-            const text = parseGeminiText(body);
-            if (text === '') {
-                throw new Error(`Gemini ${model} returned empty content`);
-            }
-            return text;
+            throw new Error(lastError);
         },
     };
 };
@@ -291,7 +334,7 @@ export const identifyPdfWorkKey = async (input: {
         workKey,
         source: 'vision',
         confidence,
-        model: VISION_MODEL,
+        model: input.caller.lastModel?.() ?? VISION_MODEL,
     };
     const title = asString(parsed.title);
     const composer = asString(parsed.composer);
@@ -324,10 +367,14 @@ export const identifyAndLookup = async (input: {
     }
     let index = input.mutopiaIndex;
     if (index === undefined) {
-        const html =
-            input.mutopiaHtml ??
-            (input.fetcher !== undefined ? await input.fetcher.fetchText(MUTOPIA_PIECE_LIST_URL) : undefined);
-        index = html === undefined ? [] : parseMutopiaHtml(html);
+        if (input.mutopiaHtml !== undefined) {
+            index = parseMutopiaHtml(input.mutopiaHtml);
+        } else if (input.fetcher !== undefined) {
+            const fetcher = input.fetcher;
+            index = await harvestMutopiaFtp((url) => fetcher.fetchText(url), hit.workKey);
+        } else {
+            index = [];
+        }
     }
     const candidates = discoverCandidates({
         workKey: hit.workKey,

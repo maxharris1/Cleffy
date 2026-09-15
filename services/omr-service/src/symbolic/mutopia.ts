@@ -280,3 +280,140 @@ export const lookupMutopia = (index: readonly MutopiaPiece[], workKey: WorkKey):
     }
     return out;
 };
+
+const MUTOPIA_ORIGIN = 'https://www.mutopiaproject.org';
+
+const LISTING_HREF_RE = /<a\s+href="([^"]+)"/gi;
+
+export const mutopiaFtpComposerDir = (composerId: string): string | undefined => {
+    switch (composerId) {
+        case 'bach':
+            return 'BachJS';
+        case 'beethoven':
+            return 'BeethovenLv';
+        case 'chopin':
+            return 'ChopinFF';
+        case 'mozart':
+            return 'MozartWA';
+        case 'schumann':
+            return 'SchumannR';
+        case 'czerny':
+            return 'CzernyC';
+        case 'burgmuller':
+            return 'BurgmullerJFF';
+        case 'satie':
+            return 'SatieE';
+        case 'petzold':
+            return 'Petzold';
+        default:
+            return undefined;
+    }
+};
+
+export const mutopiaFtpCatalogDirs = (workKey: WorkKey): string[] => {
+    switch (workKey.catalogType) {
+        case 'BWV':
+            return [`BWV${workKey.catalogN}`];
+        case 'Anh':
+            return [`BWVAnh${workKey.catalogN}`];
+        case 'WoO':
+            return [`WoO${workKey.catalogN}`];
+        case 'Op':
+            return [`Op_${workKey.catalogN}`, `Op${workKey.catalogN}`, `O${workKey.catalogN}`];
+        case 'K':
+            return [`K${workKey.catalogN}`];
+        case 'No':
+        case 'Hob':
+        case 'D':
+        case 'H':
+            return [];
+        default: {
+            const exhaustive: never = workKey.catalogType;
+            throw new Error(`unhandled catalog type ${exhaustive}`);
+        }
+    }
+};
+
+const listingEntries = (html: string, baseUrl: string): { dirs: string[]; files: string[] } => {
+    const dirs: string[] = [];
+    const files: string[] = [];
+    const base = new URL(baseUrl);
+    const basePath = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`;
+    for (const match of html.matchAll(LISTING_HREF_RE)) {
+        const href = match[1] ?? '';
+        if (href.startsWith('?') || href.startsWith('#')) {
+            continue;
+        }
+        let abs: URL;
+        try {
+            abs = new URL(href, base);
+        } catch {
+            continue;
+        }
+        if (!/(?:^|\.)mutopiaproject\.org$/i.test(abs.hostname)) {
+            continue;
+        }
+        if (!abs.pathname.startsWith('/ftp/')) {
+            continue;
+        }
+        if (abs.pathname.length <= basePath.length && basePath.startsWith(abs.pathname)) {
+            continue;
+        }
+        const last = abs.pathname.split('/').filter(Boolean).pop() ?? '';
+        if (abs.pathname.endsWith('/') && formatFromFilename(last) === null) {
+            dirs.push(abs.toString());
+        } else if (formatFromFilename(last) !== null) {
+            files.push(abs.toString());
+        }
+    }
+    return { dirs, files };
+};
+
+const htmlFromFtpUrls = (urls: readonly string[]): string =>
+    `<table>${urls.map((url) => `<a href="${url}">file</a>`).join('\n')}</table>`;
+
+/**
+ * WorkKey → Mutopia FTP directory listing. piece-list.html no longer embeds
+ * ftp:// links, so live identify walks `/ftp/{Composer}/{Catalog}/`.
+ */
+export const harvestMutopiaFtp = async (
+    fetchText: (url: string) => Promise<string>,
+    workKey: WorkKey,
+): Promise<MutopiaPiece[]> => {
+    const composer = mutopiaFtpComposerDir(workKey.composerId);
+    if (composer === undefined) {
+        return [];
+    }
+    const catalogs = mutopiaFtpCatalogDirs(workKey);
+    const fileUrls: string[] = [];
+    for (const catalog of catalogs) {
+        const dirUrl = `${MUTOPIA_ORIGIN}/ftp/${composer}/${catalog}/`;
+        let html: string;
+        try {
+            html = await fetchText(dirUrl);
+        } catch {
+            continue;
+        }
+        const listing = listingEntries(html, dirUrl);
+        fileUrls.push(...listing.files);
+        const wanted = listing.dirs.filter((dir) => {
+            if (workKey.movementIndex === undefined) {
+                return true;
+            }
+            const n = movementIndexFromFilename(dir.replace(/\/$/, ''));
+            return n === undefined || n === workKey.movementIndex;
+        });
+        for (const sub of wanted.slice(0, 40)) {
+            try {
+                const subHtml = await fetchText(sub);
+                fileUrls.push(...listingEntries(subHtml, sub).files);
+            } catch {
+                continue;
+            }
+        }
+    }
+    if (fileUrls.length === 0) {
+        return [];
+    }
+    return parseMutopiaHtml(htmlFromFtpUrls(fileUrls));
+};
