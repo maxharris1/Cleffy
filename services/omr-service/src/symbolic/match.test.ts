@@ -179,5 +179,12 @@ describe('runSymbolicEval', () => {
         expect(report.benchAccept).toBe(16);
         expect(report.falseAccepts).toBe(0);
         expect(report.falseTotal).toBe(5);
+        for (const row of report.rows.filter((r) => r.set === 'bench')) {
+            expect(row.onGrid, row.id).toBeGreaterThanOrEqual(99);
+            expect(row.reason).not.toBe('parser_unusable');
+        }
+        for (const row of report.rows.filter((r) => r.set === 'false-match')) {
+            expect(row.onGrid).toBeUndefined();
+        }
     });
 });

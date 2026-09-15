@@ -78,6 +78,7 @@ describe('eval CLI', () => {
         expect(out).toContain('schumann-68-2-vs-1');
         expect(out).toContain('16/16 bench accept');
         expect(out).toContain('0/5 false accepts');
+        expect(out).toContain('onGrid');
         expect(out).not.toContain('playAlong');
     });
 });

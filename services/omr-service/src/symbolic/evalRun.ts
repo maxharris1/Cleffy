@@ -1,8 +1,12 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { compareScore } from '../eval/compare.js';
 import { loadCorpusEntry, type CorpusEntry } from '../eval/manifest.js';
+import { notesFromMidi } from '../eval/midiRef.js';
 import { downloadsDir } from '../eval/paths.js';
+import { segmentMovements } from '../eval/segment.js';
+import { ingestSymbolic } from './ingest.js';
 import { decisionLogLine, formatDecisionLine, sha256Hex } from './log.js';
 import { decideSymbolic, type MatchBand, type MatchReason } from './match.js';
 import { synthQuantizedMidi } from './midiSynth.js';
@@ -40,6 +44,11 @@ export interface SymbolicEvalRow {
     reason: MatchReason;
     score: number;
     logLine: string;
+    /** compareScore vs the same MIDI as a library. Provenance, not a gate. */
+    onGrid?: number;
+    exact?: number;
+    missing?: number;
+    extra?: number;
 }
 
 export interface SymbolicEvalReport {
@@ -112,16 +121,19 @@ export const midiForPin = (entry: CorpusEntry): Buffer => {
 const pad = (s: string, n: number): string => (s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length));
 
 export const formatSymbolicTable = (report: SymbolicEvalReport): string => {
-    const header = `${pad('id', 28)} ${pad('set', 12)} ${pad('band', 10)} ${pad('score', 7)} reason`;
+    const header = `${pad('id', 28)} ${pad('set', 12)} ${pad('band', 10)} ${pad('score', 7)} ${pad('reason', 18)} ${pad('onGrid', 7)} ${pad('exact', 7)} ${pad('miss', 5)} extra`;
     const lines = [header, '-'.repeat(header.length)];
+    const dash = (n: number | undefined, digits: number): string =>
+        n === undefined ? '-' : n.toFixed(digits);
     for (const row of report.rows) {
         lines.push(
-            `${pad(row.id, 28)} ${pad(row.set, 12)} ${pad(row.band, 10)} ${pad(row.score.toFixed(1), 7)} ${row.reason}`,
+            `${pad(row.id, 28)} ${pad(row.set, 12)} ${pad(row.band, 10)} ${pad(row.score.toFixed(1), 7)} ${pad(row.reason, 18)} ${pad(dash(row.onGrid, 1), 7)} ${pad(dash(row.exact, 1), 7)} ${pad(dash(row.missing, 0), 5)} ${dash(row.extra, 0)}`,
         );
     }
     lines.push(
         `${report.benchAccept}/${report.benchTotal} bench accept; ${report.falseAccepts}/${report.falseTotal} false accepts`,
     );
+    lines.push('onGrid/exact/miss/extra is compareScore provenance (not an accept predicate)');
     return `${lines.join('\n')}\n`;
 };
 
@@ -166,7 +178,7 @@ const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow 
         band: decision.band,
         reason: decision.reason,
     });
-    return {
+    const row: SymbolicEvalRow = {
         id: slug,
         set: 'bench',
         band: decision.band,
@@ -174,6 +186,26 @@ const benchRow = (slug: (typeof SYMBOLIC_BENCH_SLUGS)[number]): SymbolicEvalRow 
         score: decision.best?.score ?? 0,
         logLine: formatDecisionLine(log),
     };
+    if (decision.band !== 'accept') {
+        return row;
+    }
+    const ingested = ingestSymbolic(decision, midi, { log: () => undefined });
+    const mov = entry.movements[0];
+    if (!ingested.ok || !mov) {
+        row.reason = 'parser_unusable';
+        return row;
+    }
+    const compared = compareScore(
+        ingested.score,
+        entry,
+        [notesFromMidi(midi, mov)],
+        segmentMovements(ingested.score, entry),
+    );
+    row.onGrid = compared.overall.onGrid;
+    row.exact = compared.overall.exact;
+    row.missing = compared.overall.missing;
+    row.extra = compared.overall.extra;
+    return row;
 };
 
 export const falseMatchFixtures = (): SymbolicEvalRow[] => {
