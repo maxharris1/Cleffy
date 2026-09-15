@@ -103,6 +103,8 @@ RUN set -eux; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
         | grep -q mergeQuarterRest; \
     javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
+        | grep -q loaderPdfToSheet; \
+    javap -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.PdfQuarterRestHints \
         | grep -q uniqueStaff; \
     javap -c -p -cp "$app/audiveris.jar" org.audiveris.omr.sheet.symbol.SymbolsBuilder \
         | grep -q PdfQuarterRestHints; \
