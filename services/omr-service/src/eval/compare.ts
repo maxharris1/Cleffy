@@ -460,7 +460,7 @@ const omrBarList = (
     return out;
 };
 
-const fifthsAt = (score: ScoreData, tick: number): number => {
+export const fifthsAt = (score: ScoreData, tick: number): number => {
     let fifths = 0;
     for (const sig of score.keySignatures ?? []) {
         if (sig.tick > tick) {

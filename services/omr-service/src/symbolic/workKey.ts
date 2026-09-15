@@ -40,7 +40,7 @@ const MUTOPIA_COMPOSER: Record<string, string> = {
 };
 
 const fold = (text: string): string =>
-    text.normalize('NFKD').replace(/\p{M}/gu, ' ').replace(/\s+/g, ' ').trim();
+    text.normalize('NFKD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').trim();
 
 export const composerIdFromText = (text: string): string | undefined => {
     const folded = fold(text);

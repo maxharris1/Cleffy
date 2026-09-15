@@ -72,6 +72,14 @@ describe('WorkKey normalization', () => {
         });
     });
 
+    it('parses a Gymnopédie title after stripping accents', () => {
+        expect(workKeyFromText('Satie — Gymnopédie No. 2')).toEqual({
+            composerId: 'satie',
+            catalogType: 'No',
+            catalogN: 2,
+        });
+    });
+
     it('reads a Mutopia FTP path', () => {
         expect(
             workKeyFromMutopiaPath(

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 
+import { formatSymbolicTable, runSymbolicEval } from '../symbolic/evalRun.js';
 import { BENCH_SUITE, formatBench, runBench, writeBench } from './bench.js';
 import { fromArtifacts, fromDocument, fromPdf, fromScoreFile, type Candidate } from './candidate.js';
 import { compareScore } from './compare.js';
@@ -34,6 +35,7 @@ const usage = `Usage:
        [--exact-floor 95] [--ongrid-floor 90] [--no-gate]
   node dist/eval/cli.js bench [--piece <slug>] [--force-audiveris] [--json]
        [--exact-floor 95] [--ongrid-floor 90]
+  node dist/eval/cli.js symbolic [--json]
   node dist/eval/cli.js shootout fetch --piece <slug> --document <uuid>
   node dist/eval/cli.js shootout local --piece <slug> [--force-audiveris]
   node dist/eval/cli.js shootout compare --piece <slug> [--prod <score.json>] [--local <score.json>]
@@ -44,6 +46,11 @@ bench is the objective play-along benchmark: it fetches and hash-checks every
 pinned piece, runs the current engine on the pinned PDF bytes, and writes
 eval/results/bench/{bench.json,bench.md}. Suite: ${BENCH_SUITE.join(', ')}.
 Needs cleffy-omr. Exit 1 if any piece fails the gate.
+
+symbolic scores the 16 pinned pieces plus the false-match attack set through
+symbolicMatchScore (not playAlongGate). Offline; synthesizes quantized MIDI
+from pin meters/pickup/printedBars when Mutopia bytes are not cached. Exit 1
+if any bench piece is not accept or any attack is accept.
 
 The play-along gate is on by default for run and bench. It reads the CURRENT
 result, so it fails a broken piece with no baseline to diff against. It checks
@@ -63,7 +70,7 @@ fetch is hosted read-only (project jibgwgosihadbjgxdsfe). local needs cleffy-omr
 Cloud agents without Audiveris may fetch + compare once both score.json files exist.
 `;
 
-type Command = 'fetch' | 'audiveris' | 'run' | 'bench' | 'shootout' | 'help';
+type Command = 'fetch' | 'audiveris' | 'run' | 'bench' | 'symbolic' | 'shootout' | 'help';
 type ShootoutSub = 'fetch' | 'local' | 'compare';
 
 const fail = (message: string, code = 1): never => {
@@ -80,6 +87,7 @@ const asCommand = (raw: string | undefined): Command | undefined => {
         case 'audiveris':
         case 'run':
         case 'bench':
+        case 'symbolic':
         case 'shootout':
         case 'help':
             return raw;
@@ -172,7 +180,7 @@ const main = async (): Promise<number> => {
     const command = asCommand(positionals[0]);
     const slug = values.piece;
     // bench scores the whole pinned suite, so --piece is optional there.
-    if (command === undefined || (command !== 'help' && command !== 'bench' && slug === undefined)) {
+    if (command === undefined || (command !== 'help' && command !== 'bench' && command !== 'symbolic' && slug === undefined)) {
         return fail(usage);
     }
     if (command === 'help') {
@@ -213,6 +221,16 @@ const main = async (): Promise<number> => {
             process.stdout.write(`${formatBench(report)}\nwrote ${dir}\n`);
         }
         return report.totals.piecesPassed === report.totals.pieces ? 0 : 1;
+    }
+
+    if (command === 'symbolic') {
+        const report = runSymbolicEval();
+        if (values.json === true) {
+            process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        } else {
+            process.stdout.write(formatSymbolicTable(report));
+        }
+        return report.benchAccept === report.benchTotal && report.falseAccepts === 0 ? 0 : 1;
     }
 
     if (slug === undefined) {

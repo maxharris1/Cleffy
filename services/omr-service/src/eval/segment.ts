@@ -17,8 +17,10 @@ export interface SegmentResult {
     metersOk: boolean;
 }
 
-const metersEqual = (sig: ScoreTimeSig, movement: CorpusMovement): boolean =>
-    sig.num === movement.meter.num && sig.den === movement.meter.den;
+export const metersEqual = (
+    a: { readonly num: number; readonly den: number },
+    b: { readonly num: number; readonly den: number },
+): boolean => a.num === b.num && a.den === b.den;
 
 const headingTicks = (score: ScoreData): Set<number> => {
     const ticks = new Set<number>([0]);
@@ -63,7 +65,7 @@ const assignLeftToRight = (
         let found = -1;
         for (let j = cursor; j < sigs.length; j++) {
             const sig = sigs[j];
-            if (sig && metersEqual(sig, movement)) {
+            if (sig && metersEqual(sig, movement.meter)) {
                 found = j;
                 break;
             }

@@ -18,9 +18,6 @@ const root = (): string => packageRoot();
 const cliPath = (): string => join(root(), 'dist/eval/cli.js');
 
 const ensureBuilt = (): void => {
-    if (existsSync(cliPath())) {
-        return;
-    }
     execFileSync('npx', ['tsc', '-p', 'tsconfig.build.json'], { cwd: root(), stdio: 'pipe' });
 };
 
@@ -31,6 +28,7 @@ describe('eval CLI', () => {
         expect(out).toContain('Usage:');
         expect(out).toContain('not an accuracy');
         expect(out).toContain('shootout');
+        expect(out).toContain('symbolic');
     });
 
     it('scores the committed toy artifacts without network', async () => {
@@ -68,6 +66,19 @@ describe('eval CLI', () => {
         }
         expect(record.movements[0]?.pitchMatch).toBeGreaterThan(0);
         rmSync(outPath, { force: true });
+    });
+
+    it('symbolic prints the 16 + false-match table without network', () => {
+        ensureBuilt();
+        const out = execFileSync('node', [cliPath(), 'symbolic'], {
+            encoding: 'utf8',
+            cwd: root(),
+        });
+        expect(out).toContain('czerny-op821-01');
+        expect(out).toContain('schumann-68-2-vs-1');
+        expect(out).toContain('16/16 bench accept');
+        expect(out).toContain('0/5 false accepts');
+        expect(out).not.toContain('playAlong');
     });
 });
 

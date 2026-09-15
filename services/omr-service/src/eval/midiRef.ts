@@ -239,7 +239,7 @@ const handOf = (tracks: ReturnType<typeof parseTrack>[]): Array<RefHand | null> 
  * not computable from the tick alone, and a uniform grid would quietly hand the
  * scorer bars the page never drew.
  */
-const place = (
+export const place = (
     tick: number,
     tpq: number,
     beats: number,
