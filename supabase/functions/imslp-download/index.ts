@@ -10,6 +10,7 @@ import {
     tryDownloadPdf,
     workPageUrl,
 } from '../_shared/imslp.ts';
+import { gateGlobalImslpDownload, readGlobalDownloadGateConfig } from '../_shared/imslpDownloadGate.ts';
 import {
     LICENSE_TTL_MS,
     canonicalImslpFilename,
@@ -231,8 +232,20 @@ Deno.serve(async (req) => {
         }
     }
 
-    // Metered as smart_imports, and gated BEFORE any Storage work. Every failure
-    // path below refunds, so a teacher is only charged for an import that landed.
+    // Deployment-wide pacing of live IMSLP fetches only. Catalog copies from
+    // pd-pdfs skip this gate. Checked before the quota so a queued caller is
+    // neither charged nor holds the invocation open: the client retries after
+    // retryAfterSec. Per-caller limiting above is unchanged.
+    if (!catalogRow) {
+        const pacing = await gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get));
+        if (!pacing.ok) {
+            return jsonResponse(pacing.body, pacing.status);
+        }
+    }
+
+    // Metered as smart_imports, and gated BEFORE the IMSLP fetch / Storage copy.
+    // Every failure path below refunds, so a teacher is only charged for an
+    // import that actually landed in Storage.
     const gate = await enforce(admin, doc.owner_id, 'smart_imports');
     if (!gate.ok) {
         return jsonResponse(gate.body, gate.status);

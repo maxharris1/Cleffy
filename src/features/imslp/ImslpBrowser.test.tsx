@@ -674,11 +674,8 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('checkbox'));
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
 
-<<<<<<< HEAD
-=======
         // Stage 1: the PDF is coming down. The Queued step is not promised —
         // most imports never enter it.
->>>>>>> ae1910c (Show Queued for analysis only when the job has actually been seen waiting)
         const card = await screen.findByTestId('imslp-import-progress');
         expect(card).toHaveTextContent('Preparing Nocturnes, Op.9');
         const steps = () => within(card).getAllByRole('listitem').map((li) => li.textContent?.trim());
@@ -688,10 +685,7 @@ describe('ImslpBrowser', () => {
         expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
         expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toHaveAttribute('aria-busy', 'true');
 
-<<<<<<< HEAD
-=======
         // Stage 2: the poll has seen the job genuinely waiting — the step appears now.
->>>>>>> ae1910c (Show Queued for analysis only when the job has actually been seen waiting)
         stage?.('queued');
         await waitFor(() =>
             expect(within(card).getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued for analysis'),
