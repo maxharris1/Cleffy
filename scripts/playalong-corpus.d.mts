@@ -318,3 +318,8 @@ export function editionSignals(
     res: { origin: string; filename: string } | null,
     editions: readonly ImslpEdition[] | null | undefined,
 ): EditionSignals;
+
+export function seedPokeTarget(env?: {
+    OMR_SEED_SERVICE_URL?: string | undefined;
+    OMR_SERVICE_SECRET?: string | undefined;
+}): { url: string; headers: Record<string, string> } | null;
