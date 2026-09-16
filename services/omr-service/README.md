@@ -18,16 +18,17 @@ score-analyze Edge Fn ──insert omr_jobs + POST /poke──▶ this service
 
 ## Environment
 
-| Var                         | Purpose                                                                 |
-| --------------------------- | ----------------------------------------------------------------------- |
-| `OMR_SERVICE_SECRET`        | shared secret; Edge / sweeper send it as `x-omr-secret`                 |
-| `SUPABASE_URL`              | project URL (SSRF allowlist for push-mode URLs; writeback target)       |
-| `SUPABASE_SERVICE_ROLE_KEY` | write-back, claim RPCs, worker-minted signed URLs                       |
-| `SELF_URL`                  | public base URL of this service (drain-chain self-poke)                 |
-| `PORT`                      | default 8080                                                            |
-| `AUDIVERIS_BIN`             | default `/opt/audiveris/bin/Audiveris` (Docker image sets its own path) |
-| `DEV_POLL_MS`               | **local only** — self-claim interval. NEVER set in production.          |
-| `OMR_PARALLEL`              | `0`/`off` forces one JVM. Unset: parallel only if container RAM > 8Gi.  |
+| Var                         | Purpose                                                                                       |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| `OMR_SERVICE_SECRET`        | shared secret; Edge / sweeper send it as `x-omr-secret`                                       |
+| `SUPABASE_URL`              | project URL (SSRF allowlist for push-mode URLs; writeback target)                             |
+| `SUPABASE_SERVICE_ROLE_KEY` | write-back, claim RPCs, worker-minted signed URLs                                             |
+| `SELF_URL`                  | public base URL of this service (drain-chain self-poke)                                       |
+| `PORT`                      | default 8080                                                                                  |
+| `AUDIVERIS_BIN`             | default `/opt/audiveris/bin/Audiveris` (Docker image sets its own path)                       |
+| `DEV_POLL_MS`               | **local only** — self-claim interval. NEVER set in production.                                |
+| `OMR_PARALLEL`              | `0`/`off` forces one JVM. Unset: parallel only if container RAM > 8Gi.                        |
+| `CLEFFY_CLAIM_MAX_PRIORITY` | Unset: claim any job (user worker). `-1`: seed-only pool, see [`SEED_POOL.md`](SEED_POOL.md). |
 
 ## Run locally
 
@@ -64,6 +65,8 @@ auto-deploy via that workflow. CI does not pass `--set-env-vars`, so existing
 Cloud Run env stays in place; the command above is for a one-off manual deploy.
 
 - **1 JVM per instance** (`--concurrency 1`). Throughput knob = `--max-instances`.
+- Corpus seed rows (`priority -10`) drain on a separate `cleffy-omr-seed` service
+  (`scripts/deploy-seed.sh`, `SEED_POOL.md`); do not raise `--max-instances` here for a crawl.
 - `/tmp` is tmpfs and counts against memory alongside `-Xmx3g`.
 - Point the Edge Function at it (`OMR_SERVICE_URL` + `OMR_SERVICE_SECRET`).
 - Set `OMR_QUEUE_MODE=pull` on the Edge Function **after** worker v2 + sweeper

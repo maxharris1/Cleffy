@@ -233,6 +233,14 @@ If `pg_cron` / `pg_net` are unavailable, schedule Cloud Scheduler to
 `POST /poke` every minute instead; the worker calls `omr_reap_expired_leases`
 at the top of each poke.
 
+The seed-only pool (`cleffy-omr-seed`, `services/omr-service/SEED_POOL.md`) is
+woken by `omr_seed_sweep` from a second vault secret; it reuses
+`omr_service_secret` and is a no-op until the URL exists:
+
+```sql
+select vault.create_secret('https://your-omr-seed-service.example.com', 'omr_seed_service_url');
+```
+
 IMSLP chip browse uses the same vault + cron pattern. After deploying
 `imslp-sync` (`--no-verify-jwt`) and setting `IMSLP_SYNC_SECRET` as an Edge
 secret, store the function URL and the same secret in Vault so
