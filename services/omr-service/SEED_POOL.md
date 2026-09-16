@@ -42,7 +42,7 @@ Resources: `--memory 4Gi --cpu 2 --timeout 3600 --concurrency 1 --min-instances 
 
 ### Prerequisites (one-time, by hand)
 
-1. Migrations `20260916160000_omr_claim_priority_filter.sql` and `20260916160100_omr_seed_sweep.sql` applied (`npx supabase db push` or the `scripts/apply-migrations.sql` tail). Both are safe before the service exists: the claim RPC defaults to today's behaviour and the sweep is a no-op without the vault secret.
+1. Migrations `20260916170000_omr_claim_priority_filter.sql` and `20260916170100_omr_seed_sweep.sql` applied (`npx supabase db push` or the `scripts/apply-migrations.sql` tail). Both are safe before the service exists: the claim RPC defaults to today's behaviour and the sweep is a no-op without the vault secret.
 2. Corpus owner user exists in prod `auth.users` (`corpus@cleffy.app`) with the academy plan row (`npm run corpus:seed -- --ensure-owner-plan …` does the plan row; the user itself is created in the dashboard / admin API).
 3. Secret Manager: `printf '%s' "<corpus owner uuid>" | gcloud secrets create cleffy-corpus-owner-user-id --data-file=-` and grant `roles/secretmanager.secretAccessor` to the Cloud Run runtime service account.
 
