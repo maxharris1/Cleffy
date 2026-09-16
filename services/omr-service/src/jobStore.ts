@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { claimMaxPriority } from './claimPriority.js';
 import type { ErrorCode } from './errors.js';
 import { serviceClient } from './supabaseClient.js';
 import { scoreDataSchema, type ScoreData } from './scoreData.js';
@@ -43,7 +44,16 @@ export const reapExpiredLeases = async (): Promise<number> => {
     return typeof data === 'number' ? data : 0;
 };
 
-export const claimJob = async (workerId: string): Promise<OmJobRow | null> => {
+/**
+ * Claim ≤1 queued job. `maxPriority` (default: CLEFFY_CLAIM_MAX_PRIORITY) limits
+ * the claim to rows with `priority <= maxPriority`; null claims anything. The
+ * parameter is only sent when set, so an unfiltered worker keeps calling the
+ * RPC exactly as before the migration that added `p_max_priority`.
+ */
+export const claimJob = async (
+    workerId: string,
+    maxPriority: number | null = claimMaxPriority(),
+): Promise<OmJobRow | null> => {
     const supabase = serviceClient();
     if (!supabase) {
         return null;
@@ -51,6 +61,7 @@ export const claimJob = async (workerId: string): Promise<OmJobRow | null> => {
     const { data, error } = await supabase.rpc('omr_claim_job', {
         p_worker_id: workerId,
         p_lease_seconds: LEASE_SECONDS,
+        ...(maxPriority !== null ? { p_max_priority: maxPriority } : {}),
     });
     if (error) {
         console.warn('[jobStore] claim failed:', error.message);
@@ -209,16 +220,25 @@ export const cacheStore = async (
     }
 };
 
-export const hasQueuedWork = async (): Promise<boolean> => {
+/**
+ * Fan-out decision for pokeSelf. Must apply the same priority filter as
+ * claimJob: a seed instance that counted user rows would wake another seed
+ * instance that then claims nothing.
+ */
+export const hasQueuedWork = async (maxPriority: number | null = claimMaxPriority()): Promise<boolean> => {
     const supabase = serviceClient();
     if (!supabase) {
         return false;
     }
-    const { count, error } = await supabase
+    let query = supabase
         .from('omr_jobs')
         .select('id', { count: 'exact', head: true })
         .eq('status', 'queued')
         .lte('run_after', new Date().toISOString());
+    if (maxPriority !== null) {
+        query = query.lte('priority', maxPriority);
+    }
+    const { count, error } = await query;
     if (error) {
         return false;
     }

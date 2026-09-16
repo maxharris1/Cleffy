@@ -42,10 +42,13 @@
  *   --eval-dir P         eval pins directory (services/omr-service/eval/corpus)
  *
  * Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (both unset → local stack),
- *      CORPUS_OWNER_USER_ID (auth.users id; required unless --dry-run).
+ *      CORPUS_OWNER_USER_ID (auth.users id; required unless --dry-run),
+ *      OMR_SEED_SERVICE_URL + OMR_SERVICE_SECRET (optional; when both are set the
+ *      script POSTs `/poke` to the seed-only worker pool after each batch and at
+ *      exit so it wakes without waiting for pg_cron — see services/omr-service/SEED_POOL.md).
  */
 
-/* global AbortSignal */
+/* global AbortController, AbortSignal */
 
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -105,6 +108,7 @@ import {
     progressEvent,
     rankWorks,
     reconcileQueued,
+    seedPokeTarget,
     shouldProcess,
     sourceEnabled,
     titleForMutopiaPiece,
@@ -1055,6 +1059,29 @@ const isPaused = async (db) => {
 };
 
 /**
+ * Wake the seed-only worker pool. `/poke` holds the request for the whole job,
+ * so only the send is awaited (same race as the worker's own pokeSelf); one
+ * wake fans out to `--max-instances` through the worker's drain chain.
+ */
+const SEED_POKE_SEND_RACE_MS = 1000;
+const pokeSeedPool = async (target) => {
+    if (!target) {
+        return;
+    }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), SEED_POKE_SEND_RACE_MS);
+    try {
+        await fetch(target.url, { method: 'POST', headers: target.headers, body: '{}', signal: ac.signal });
+    } catch (err) {
+        if (!(err instanceof Error && err.name === 'AbortError')) {
+            info(`seed pool poke failed: ${err instanceof Error ? err.message : err}`);
+        }
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
+/**
  * `documents_enforce_score_cap` counts the corpus owner like any account; the
  * seed needs an unlimited plan. Refuse to run against a capped owner unless
  * `--ensure-owner-plan` writes the (non-Stripe) academy row.
@@ -1300,7 +1327,7 @@ const heartbeat = (ledger, { target, batchId, mode, attempted, startedAt }) => {
 };
 
 /** `--enqueue-fetched`: every `fetched` ledger row → document + job. */
-const enqueueFetched = async (ctx, args, startedAt, deadlineMs) => {
+const enqueueFetched = async (ctx, args, startedAt, deadlineMs, seedPoke = null) => {
     const rows = [...ctx.ledger.values()].filter((row) => row.status === 'fetched');
     info(`enqueue: ${rows.length} fetched ledger rows`);
     let batchId = Math.max(0, ...[...ctx.ledger.values()].map((r) => Number(r.batch_id ?? 0))) + 1;
@@ -1313,6 +1340,7 @@ const enqueueFetched = async (ctx, args, startedAt, deadlineMs) => {
             console.log(
                 heartbeat(ctx.ledger, { target: rows.length, batchId, mode: 'enqueue', attempted: done, startedAt }),
             );
+            await pokeSeedPool(seedPoke);
             batchId += 1;
             if (await isPaused(ctx.db)) {
                 info('paused between batches — stopping');
@@ -1323,6 +1351,7 @@ const enqueueFetched = async (ctx, args, startedAt, deadlineMs) => {
         done += 1;
     }
     console.log(heartbeat(ctx.ledger, { target: rows.length, batchId, mode: 'enqueue', attempted: done, startedAt }));
+    await pokeSeedPool(seedPoke);
     if (stopReason) {
         info(`stopped (${stopReason}) after ${done}/${rows.length} rows; rerun to continue`);
     }
@@ -1352,7 +1381,12 @@ const main = async () => {
     const supabase = resolveTarget();
     const db = makeDb(supabase);
     const cache = makeCache(args.cacheDir);
-    info(`mode ${mode}; target ${supabase.label}; sources ${args.sources.join(',')}`);
+    // Only modes that queue omr_jobs wake the seed-only pool.
+    const seedPoke = mode === 'seed' || mode === 'enqueue' ? seedPokeTarget(process.env) : null;
+    info(
+        `mode ${mode}; target ${supabase.label}; sources ${args.sources.join(',')}` +
+            (seedPoke ? `; poking seed pool at ${seedPoke.url}` : ''),
+    );
 
     let ledger = new Map();
     let dbReachable = true;
@@ -1399,7 +1433,7 @@ const main = async () => {
     };
 
     if (mode === 'enqueue') {
-        await enqueueFetched(ctx, args, startedAt, deadlineMs);
+        await enqueueFetched(ctx, args, startedAt, deadlineMs, seedPoke);
         return;
     }
 
@@ -1510,6 +1544,7 @@ const main = async () => {
 
         if (processedInBatch >= args.batch) {
             console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
+            await pokeSeedPool(seedPoke);
             batchId += 1;
             processedInBatch = 0;
             if (dbReachable && (await isPaused(db))) {
@@ -1578,6 +1613,7 @@ const main = async () => {
     }
 
     console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
+    await pokeSeedPool(seedPoke);
     if (stopReason) {
         info(`stopped (${stopReason}) after ${attempted} works this run; ledger is consistent — rerun to resume`);
     }

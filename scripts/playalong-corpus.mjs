@@ -1990,6 +1990,31 @@ export const progressEvent = ({
 export const workEvent = ({ workTitle, status, origin = null, filename = null, pdfSha256 = null, reason = null }) =>
     JSON.stringify({ event: 'corpus_seed', workTitle, status, origin, filename, pdfSha256, reason });
 
+/**
+ * Where the CLI POSTs `/poke` after each batch so the seed-only Cloud Run pool
+ * (`cleffy-omr-seed`, plan Phase 2c) wakes as soon as rows are queued instead of
+ * waiting for the next pg_cron `omr_seed_sweep` minute. Both variables must be
+ * set; otherwise the script does not poke anything (the sweep still wakes the
+ * pool). Never the user worker's URL: that one is poked by score-analyze / omr_sweep.
+ */
+export const seedPokeTarget = ({ OMR_SEED_SERVICE_URL, OMR_SERVICE_SECRET } = {}) => {
+    const url = (OMR_SEED_SERVICE_URL ?? '').trim().replace(/\/+$/, '');
+    const secret = (OMR_SERVICE_SECRET ?? '').trim();
+    if (!url || !secret) {
+        return null;
+    }
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return null;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return null;
+    }
+    return { url: `${url}/poke`, headers: { 'Content-Type': 'application/json', 'x-omr-secret': secret } };
+};
+
 /** Count distinct work titles at or past `queued` — what `--limit` floors. */
 export const coveredWorkCount = (rows) => {
     const titles = new Set();
