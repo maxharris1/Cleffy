@@ -29,6 +29,7 @@ import {
     expandZipResolution,
     iaExactQuery,
     iaFallbackQueries,
+    iaFileIsPartOrArrangement,
     iaResolution,
     imslpEditions,
     imslpFileLicenceFor,
@@ -727,6 +728,28 @@ describe('Internet Archive', () => {
                 { name: 'Mozart - Piano Sonata, K 545.pdf', source: 'original', size: '10' },
             ])?.name,
         ).toBe('Mozart - Piano Sonata, K 545.pdf');
+        // Abbreviated part names: the whole `imslp-concerto-no5-op73-…` item is a
+        // string-quintet arrangement filed one instrument per PDF.
+        expect(
+            pickIaPdf([
+                { name: 'Beeethoven_-_PC_SQ_No.5_cb.pdf', source: 'original', size: '397725' },
+                { name: 'Beeethoven_-_PC_SQ_No.5_va.pdf', source: 'original', size: '520468' },
+                { name: 'Beeethoven_-_PC_SQ_No.5_vc.pdf', source: 'original', size: '523927' },
+                { name: 'Beeethoven_-_PC_SQ_No.5_vn1.pdf', source: 'original', size: '565194' },
+                { name: 'Beeethoven_-_PC_SQ_No.5_vn2.pdf', source: 'original', size: '554929' },
+            ]),
+        ).toBeNull();
+        expect(iaFileIsPartOrArrangement('Beethoven_Op57_org.pdf')).toBe(true);
+        // Real score names must survive the abbreviation list.
+        for (const name of [
+            'PMLP01480-Beethoven_Werke_Breitkopf_Serie_16_No_144_Op_57_scan.pdf',
+            'Mozart - Piano Sonata, K 545.pdf',
+            'bwv1007-let.pdf',
+            'fur_Elise_WoO59-let.pdf',
+            'moonlight-let.pdf',
+        ]) {
+            expect(iaFileIsPartOrArrangement(name)).toBe(false);
+        }
         const item = {
             metadata: {
                 identifier: 'imslp-elise-woo-59-beethoven-ludwig-van',

@@ -998,12 +998,27 @@ export const IA_PART_OR_ARRANGEMENT_RE =
     /(?:^|[-_ .(])(?:parts?|pf ?4h|4 ?hands|four ?hands|arr|arrangement|transc\w*|duet|vn ?\d|vl ?\d|violin[oi]?|viola|cello|violoncello|contrabass[oi]?|clarinet[ti]?|clarinetti|oboe|oboi|flute|flauti|flauto|fagott[oi]|bassoon|horn|corni|corno|trumpet|tromba|trombe|trombone|timpani|tuba|bass|continuo|soprano|alto|tenor|quartet|kwartet|overture|ouverture)[a-z]?\d*(?:$|[-_ .)])/i;
 
 /**
+ * Orchestral-part abbreviations as engravers file them (`…_vc.pdf`, `…-vn1.pdf`),
+ * plus the keyboard instruments a transcription is filed under. Kept apart from
+ * the spelled-out list because these are short enough that the trailing
+ * `[a-z]?\d*` of that pattern would make them match unrelated words.
+ */
+export const IA_PART_ABBREV_RE =
+    /(?:^|[-_ .(])(?:vn|vln|vl|va|vla|vc|vcl|vlc|cb|db|kb|fl|ob|cl|bn|bsn|fg|hn|cor|tpt|trp|tbn|trb|timp|perc|org|harm|sq)\d?(?:$|[-_ .)])/i;
+
+/** True when an IA file name marks the file as a single part or another scoring. */
+export const iaFileIsPartOrArrangement = (name) => {
+    const stem = name.replace(/\.pdf$/i, '');
+    return IA_PART_OR_ARRANGEMENT_RE.test(stem) || IA_PART_ABBREV_RE.test(stem);
+};
+
+/**
  * The original PDF of an IA item (not the `_text.pdf` OCR derivative), skipping
  * files named as a part or an arrangement. Null when only those remain.
  */
 export const pickIaPdf = (files, editions = []) => {
     const pdfs = (files ?? []).filter((f) => /\.pdf$/i.test(f.name ?? '') && !/_text\.pdf$/i.test(f.name));
-    const scores = pdfs.filter((f) => !IA_PART_OR_ARRANGEMENT_RE.test(f.name.replace(/\.pdf$/i, '')));
+    const scores = pdfs.filter((f) => !iaFileIsPartOrArrangement(f.name));
     const originals = scores.filter((f) => f.source === 'original');
     const pool = originals.length > 0 ? originals : scores;
     // Best IMSLP edition first (typeset > scan, complete, rating, downloads); unmatched
