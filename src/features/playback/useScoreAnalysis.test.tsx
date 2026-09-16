@@ -78,6 +78,39 @@ describe('useScoreAnalysis', () => {
         expect(state.bpmDefault).toBe(96);
     });
 
+    it('carries a corpus hit on the ready state, and omits it when the row has none', async () => {
+        fake.row = {
+            document_id: DOC,
+            status: 'ready',
+            error: null,
+            progress: null,
+            engine_version: 'audiveris-test',
+            bpm_default: 96,
+            score: JSON.parse(JSON.stringify(tinyScore)) as unknown,
+            timings: { corpusHit: 'hash' },
+            created_by: null,
+            created_at: now(),
+            updated_at: now(),
+        };
+        const { result, unmount } = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(result.current.state.kind).toBe('ready'));
+        expect(result.current.state).toMatchObject({ kind: 'ready', corpusHit: 'hash' });
+        unmount();
+
+        // Cached path: the hit survives the Dexie round trip too.
+        fake.row = { ...fake.row, updated_at: '2026-01-01T00:00:00Z' };
+        const second = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(second.result.current.state.kind).toBe('ready'));
+        expect(second.result.current.state).toMatchObject({ kind: 'ready', corpusHit: 'hash' });
+        second.unmount();
+
+        await getDb().scoreCache.clear();
+        delete fake.row.timings;
+        const third = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(third.result.current.state.kind).toBe('ready'));
+        expect(third.result.current.state).not.toHaveProperty('corpusHit');
+    });
+
     it('surfaces processing progress and stale jobs', async () => {
         fake.row = { status: 'processing', error: null, progress: 4, updated_at: now() };
         const { result, unmount } = renderHook(() => useScoreAnalysis(DOC, true));
