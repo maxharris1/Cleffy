@@ -15,8 +15,10 @@ import type { ScoreData } from '@/types/scoreData';
 export type ScoreAnalysisState =
     | { kind: 'unavailable' } // local doc, offline without cache, …
     | { kind: 'none' } // no analysis requested yet
-    | { kind: 'pending' }
-    | { kind: 'processing'; progress: number | null }
+    /** `queued` is set only once the row has been seen still pending a poll interval later — a real wait. */
+    | { kind: 'pending'; queued?: boolean }
+    /** `queued` carries over from a pending that had earned it, so the step strip keeps the stage it drew. */
+    | { kind: 'processing'; progress: number | null; queued?: boolean }
     | {
           kind: 'ready';
           score: ScoreData;
@@ -44,6 +46,22 @@ const readyFromCache = (cached: CachedScoreAnalysis & { score: ScoreData }): Ext
 
 /** Fallback poll while pending/processing — Realtime is primary. */
 const POLL_MS = 30_000;
+
+/**
+ * A pending row is only called "queued" once it has been re-read and found
+ * still pending this long after it was first seen. A worker that claims the
+ * job (or a corpus hit that finishes) inside this window never shows a queue.
+ */
+export const QUEUED_AFTER_MS = 2_000;
+
+const wasQueued = (state: ScoreAnalysisState): boolean =>
+    (state.kind === 'pending' || state.kind === 'processing') && state.queued === true;
+
+const processing = (prev: ScoreAnalysisState, progress: number | null): ScoreAnalysisState => ({
+    kind: 'processing',
+    progress,
+    ...(wasQueued(prev) ? { queued: true } : {}),
+});
 
 /**
  * Lifecycle of a document's play-along analysis: read the existing status on
@@ -95,9 +113,12 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                 if (isProcessingStale(status.updatedAt)) {
                     set({ kind: 'failed', code: 'stale' });
                 } else if (status.status === 'processing') {
-                    set({ kind: 'processing', progress: status.progress });
-                } else {
-                    set({ kind: 'pending' });
+                    if (aliveRef.current) {
+                        setState((prev) => processing(prev, status.progress));
+                    }
+                } else if (aliveRef.current) {
+                    // Keep an earned `queued`; a fresh pending starts unproven.
+                    setState((prev) => (prev.kind === 'pending' ? prev : { kind: 'pending' }));
                 }
                 return;
             }
@@ -140,6 +161,23 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         return () => clearInterval(timer);
     }, [inFlight, enabled, docId, applyStatus]);
 
+    // Prove the queue before naming it: re-read the row QUEUED_AFTER_MS after
+    // a pending was first seen, and only a still-pending answer earns `queued`.
+    const unprovenPending = state.kind === 'pending' && state.queued !== true;
+    useEffect(() => {
+        if (!unprovenPending || !enabled) {
+            return;
+        }
+        const timer = setTimeout(async () => {
+            const status = await fetchScoreAnalysisStatus(docId).catch(() => null);
+            if (!aliveRef.current || status?.status !== 'pending' || isProcessingStale(status.updatedAt)) {
+                return;
+            }
+            setState((prev) => (prev.kind === 'pending' ? { kind: 'pending', queued: true } : prev));
+        }, QUEUED_AFTER_MS);
+        return () => clearTimeout(timer);
+    }, [unprovenPending, enabled, docId]);
+
     const generate = useCallback(async () => {
         setState({ kind: 'pending' });
         const result = await requestScoreAnalysis(docId);
@@ -177,10 +215,10 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
             }
             switch (msg.status) {
                 case 'pending':
-                    setState({ kind: 'pending' });
+                    setState((prev) => (prev.kind === 'pending' ? prev : { kind: 'pending' }));
                     return;
                 case 'processing':
-                    setState({ kind: 'processing', progress: msg.progress ?? null });
+                    setState((prev) => processing(prev, msg.progress ?? null));
                     return;
                 case 'failed':
                     setState({ kind: 'failed', code: msg.error ?? 'internal' });

@@ -12,7 +12,8 @@ import {
     readCachedLibraryList,
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
-import { requestScoreAnalysis, waitForAnalysisToLeaveQueue } from '@/features/playback/scoreAnalysisService';
+import type { ImslpDownloadStage } from '@/features/imslp/imslpApi';
+import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -30,12 +31,12 @@ const PricingDialog = lazy(() =>
 );
 
 /**
- * Where an IMSLP import is, after the PDF has landed: the omr_jobs row has
- * been observed waiting for a worker. Only reported for a real wait — a job
- * claimed or finished straight away is never "queued". (`downloading` is the
- * caller's own initial stage; the shell only reports what comes after.)
+ * Where an IMSLP import is while the PDF is fetched. `downloadQueued` is
+ * only reported after the deployment-wide IMSLP pacing actually turned a
+ * request away and the wait has run a real interval; `downloading` follows
+ * when the retry goes out. A first-try success reports nothing.
  */
-export type ImslpImportStage = 'queued';
+export type ImslpImportStage = ImslpDownloadStage;
 
 export type ImslpImportResult =
     | {
@@ -204,9 +205,9 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
     /**
      * IMSLP import is the one path that analyzes without a Generate click:
-     * the reader asked for this score to play along with, so the queue is
-     * waited out here, on the panel, and the score opens once a worker has
-     * it (or after a short cap). Uploads are unchanged — Generate only.
+     * the reader asked for this score to play along with, so analysis is
+     * requested here and the score opens at once — the score page shows the
+     * analysis queue if there is one. Uploads are unchanged — Generate only.
      */
     const onImportImslp = async (
         filename: string,
@@ -227,6 +228,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 userId,
                 acceptedDisclaimer,
                 pdfSha256,
+                onStage,
             );
             if (!result.ok) {
                 return {
@@ -243,10 +245,6 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 // shows them beside a link to the score, where Generate waits.
                 return { ok: true, analysisFailed: { code: analysis.code ?? 'internal', documentId } };
             }
-            // "Queued" is only shown once the row has actually sat unclaimed
-            // for a poll interval; a fast claim or a corpus hit goes straight
-            // from downloading to the score.
-            await waitForAnalysisToLeaveQueue(documentId, { onQueued: () => onStage?.('queued') });
             navigate(`/doc/${documentId}`);
             return { ok: true };
         } catch (err) {

@@ -1,12 +1,16 @@
 /**
- * The score page's view of a running analysis: analyzing → ready. Getting
- * the score and waiting in the queue happen before the score opens (the
- * IMSLP panel shows those), so neither is a stage here.
+ * The score page's view of a requested play-along: (queued →) analyzing →
+ * ready. The queue step is drawn only when the job has actually been seen
+ * waiting for a worker (`useScoreAnalysis` proves it before setting
+ * `queued`); a fast claim or a corpus hit never shows it. Queue position is
+ * not exposed to the client, so the queued stage says so in words.
  */
-export type PlayAlongStage = 'analyzing' | 'ready';
+export type PlayAlongStage = 'queued' | 'analyzing' | 'ready';
 
 export interface PlayAlongProgressProps {
     stage: PlayAlongStage;
+    /** The job was observed waiting earlier, so keep the Queued step drawn as done. */
+    queued?: boolean;
     /** Pages processed so far, while analyzing. */
     progress?: number | null;
     pageCount?: number | null;
@@ -14,12 +18,15 @@ export interface PlayAlongProgressProps {
 }
 
 const STEPS: readonly { stage: PlayAlongStage; label: string }[] = [
+    { stage: 'queued', label: 'Queued for analysis' },
     { stage: 'analyzing', label: 'Analyzing' },
     { stage: 'ready', label: 'Ready' },
 ];
 
 const statusText = (props: PlayAlongProgressProps): string => {
     switch (props.stage) {
+        case 'queued':
+            return 'Every worker is busy — analysis starts as soon as one is free.';
         case 'analyzing': {
             const progress = props.progress ?? null;
             const pages =
@@ -38,15 +45,16 @@ const statusText = (props: PlayAlongProgressProps): string => {
 };
 
 export const PlayAlongProgress = (props: PlayAlongProgressProps) => {
-    const { stage, className = '' } = props;
-    const currentIndex = STEPS.findIndex((step) => step.stage === stage);
+    const { stage, queued = false, className = '' } = props;
+    const steps = STEPS.filter((step) => step.stage !== 'queued' || stage === 'queued' || queued);
+    const currentIndex = steps.findIndex((step) => step.stage === stage);
     return (
         <div
             className={`flex flex-col items-center gap-1${className ? ` ${className}` : ''}`}
             data-testid="play-along-progress"
         >
             <ol aria-label="Preparing your play-along" className="flex items-center gap-1.5">
-                {STEPS.map((step, index) => {
+                {steps.map((step, index) => {
                     const done = index < currentIndex;
                     const current = index === currentIndex;
                     return (
@@ -65,7 +73,7 @@ export const PlayAlongProgress = (props: PlayAlongProgressProps) => {
                             <span className={current ? 'text-accent' : done ? 'text-stone-600' : 'text-stone-400'}>
                                 {step.label}
                             </span>
-                            {index < STEPS.length - 1 ? (
+                            {index < steps.length - 1 ? (
                                 <span
                                     aria-hidden="true"
                                     className={`h-px w-4 ${done ? 'bg-accent' : 'bg-stone-300'}`}

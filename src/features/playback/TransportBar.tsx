@@ -259,22 +259,24 @@ const StatusRow = ({ state, role, onGenerate, pageCount }: TransportBarProps) =>
             </div>
         );
     }
-    if (state.kind === 'pending') {
-        // The queue is normally waited out on the IMSLP panel before the
-        // score opens; this is only seen on a reload or direct link while an
-        // omr_jobs row is still unclaimed, so it is a line, not a stage.
+    if (state.kind === 'pending' && state.queued !== true) {
+        // Freshly requested: a worker usually claims within a couple of
+        // seconds (and a corpus hit is ready in about that), so this is a
+        // line, not a stage. The hook promotes it to `queued` only once the
+        // row has been re-read and found still waiting.
         return (
             <div className="flex min-h-9 items-center justify-center gap-2 text-sm text-stone-500">
                 <span className="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
-                <span role="status">Waiting for an analysis slot…</span>
+                <span role="status">Starting analysis…</span>
             </div>
         );
     }
-    if (state.kind === 'processing') {
+    if (state.kind === 'pending' || state.kind === 'processing') {
         return (
             <PlayAlongProgress
-                stage="analyzing"
-                progress={state.progress}
+                stage={state.kind === 'processing' ? 'analyzing' : 'queued'}
+                queued={state.queued === true}
+                progress={state.kind === 'processing' ? state.progress : null}
                 pageCount={pageCount}
                 className="min-h-9 justify-center py-1"
             />

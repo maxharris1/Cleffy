@@ -22,15 +22,16 @@ const DISCLAIMER =
 const EDITION_PREVIEW = 6;
 
 /**
- * Getting the score is a two-stage wait — the PDF comes down from IMSLP,
- * then the play-along analysis sits in the worker queue — and both happen
- * here, before the score opens. `analysisFailed` is the score being in the
- * library with no analysis running (rate limit, too long, service down).
+ * The PDF coming down from IMSLP, as seen from the panel. `downloadQueued`
+ * only ever follows a real refusal from the deployment-wide IMSLP pacing;
+ * `downloading` with `queued: true` is the retry going out after that wait.
+ * `analysisFailed` is the score being in the library with no analysis
+ * running (rate limit, too long, service down).
  */
 export type DownloadStatus =
     | { kind: 'idle' }
-    | { kind: 'downloading' }
-    | { kind: 'queued' }
+    | { kind: 'downloading'; queued?: boolean }
+    | { kind: 'downloadQueued' }
     | { kind: 'analysisFailed'; code: string; documentId: string }
     | { kind: 'fallback'; openUrl: string; message: string };
 
@@ -102,14 +103,14 @@ export const ImslpWorkPanel = ({
 
     const hiddenCount = Math.max(0, orderedEditions.length - visibleEditions.length);
 
-    const inProgress = download.kind === 'downloading' || download.kind === 'queued';
+    const inProgress = download.kind === 'downloading' || download.kind === 'downloadQueued';
     const buttonLabel =
         download.kind === 'downloading'
             ? catalogSelected
                 ? 'Adding from library…'
                 : 'Downloading from IMSLP…'
-            : download.kind === 'queued'
-              ? 'Queued for analysis…'
+            : download.kind === 'downloadQueued'
+              ? 'Queued for download…'
               : busy
                 ? 'Adding to library…'
                 : 'Add to my library';
@@ -287,8 +288,12 @@ export const ImslpWorkPanel = ({
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
-                    {download.kind === 'downloading' || download.kind === 'queued' ? (
-                        <ImportProgress stage={download.kind} title={parsed.work} />
+                    {download.kind === 'downloading' || download.kind === 'downloadQueued' ? (
+                        <ImportProgress
+                            stage={download.kind}
+                            queued={download.kind === 'downloadQueued' || download.queued === true}
+                            title={parsed.work}
+                        />
                     ) : null}
                     {download.kind === 'analysisFailed' ? (
                         <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3" role="status">
@@ -330,33 +335,33 @@ export const ImslpWorkPanel = ({
     );
 };
 
-type ImportStage = 'downloading' | 'queued';
+type ImportStage = 'downloadQueued' | 'downloading';
 
 const IMPORT_STEPS: readonly { stage: ImportStage; label: string; detail: string }[] = [
+    {
+        stage: 'downloadQueued',
+        label: 'Queued for download',
+        detail: 'IMSLP downloads are paced for everyone — yours goes out at the next slot.',
+    },
     {
         stage: 'downloading',
         label: 'Downloading from IMSLP',
         detail: 'Fetching the PDF into your library and starting its play-along…',
     },
-    {
-        stage: 'queued',
-        label: 'Queued for analysis',
-        detail: 'Every worker is busy — the score opens as soon as one picks this up.',
-    },
 ];
 
 /**
- * The visible wait while a score is fetched and, if a worker is busy, its
- * play-along waits in the queue. Deliberately a card, not a button state:
- * the reader may be here for tens of seconds and needs to see that something
- * is happening and what. The Queued step is only drawn once the job has
- * actually been seen waiting — most imports go straight to the score, and a
- * stage that never happens must not be promised.
+ * The visible wait while a score is fetched. Deliberately a card, not a
+ * button state: the reader may be here for tens of seconds and needs to see
+ * that something is happening and what. The Queued step is only drawn once
+ * the server has actually turned a request away and the wait is real — most
+ * imports go straight through, and a stage that never happens must not be
+ * promised. Strip reads Queued for download → Downloading from IMSLP.
  */
-const ImportProgress = ({ stage, title }: { stage: ImportStage; title: string }) => {
-    const currentIndex = IMPORT_STEPS.findIndex((step) => step.stage === stage);
-    const steps = IMPORT_STEPS.slice(0, currentIndex + 1);
-    const current = IMPORT_STEPS[currentIndex];
+const ImportProgress = ({ stage, queued, title }: { stage: ImportStage; queued: boolean; title: string }) => {
+    const steps = IMPORT_STEPS.filter((step) => step.stage !== 'downloadQueued' || queued);
+    const currentIndex = steps.findIndex((step) => step.stage === stage);
+    const current = steps[currentIndex];
     return (
         <div
             className="mt-4 flex items-start gap-3 rounded-lg border border-accent/30 bg-accent-soft/50 p-3"

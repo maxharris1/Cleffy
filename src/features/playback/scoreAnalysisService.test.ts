@@ -12,7 +12,6 @@ import {
     isProcessingStale,
     requestScoreAnalysis,
     saveBpmOverride,
-    waitForAnalysisToLeaveQueue,
 } from '@/features/playback/scoreAnalysisService';
 import { getDb } from '@/sync/db';
 
@@ -167,56 +166,6 @@ describe('fetchScoreAnalysisFull', () => {
 
         fake.row = readyRow;
         expect((await fetchScoreAnalysisFull(DOC))?.corpusHit).toBeUndefined();
-    });
-});
-
-describe('waitForAnalysisToLeaveQueue', () => {
-    it('returns as soon as the row is no longer pending', async () => {
-        fake.row = { status: 'pending', error: null, progress: null, updated_at: 'now' };
-        setTimeout(() => {
-            fake.row = { status: 'processing', error: null, progress: 1, updated_at: 'now' };
-        }, 15);
-        const start = Date.now();
-        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 5, capMs: 5_000 })).toBe('processing');
-        expect(Date.now() - start).toBeLessThan(1_000);
-    });
-
-    it('reports queued once, and only after the row has sat pending for a full interval', async () => {
-        fake.row = { status: 'pending', error: null, progress: null, updated_at: 'now' };
-        const onQueued = vi.fn();
-        setTimeout(() => {
-            fake.row = { status: 'processing', error: null, progress: 1, updated_at: 'now' };
-        }, 60);
-        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 20, capMs: 5_000, onQueued })).toBe(
-            'processing',
-        );
-        expect(onQueued).toHaveBeenCalledTimes(1);
-    });
-
-    it('never reports queued for a job claimed or finished before the first interval (corpus hit)', async () => {
-        const onQueued = vi.fn();
-        fake.row = { status: 'ready', error: null, progress: null, updated_at: 'now' };
-        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 20, capMs: 5_000, onQueued })).toBe('ready');
-
-        fake.row = { status: 'pending', error: null, progress: null, updated_at: 'now' };
-        setTimeout(() => {
-            fake.row = { status: 'processing', error: null, progress: 1, updated_at: 'now' };
-        }, 5);
-        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 50, capMs: 5_000, onQueued })).toBe(
-            'processing',
-        );
-        expect(onQueued).not.toHaveBeenCalled();
-    });
-
-    it('gives up at the cap while still pending, and shrugs off read errors', async () => {
-        fake.row = { status: 'pending', error: null, progress: null, updated_at: 'now' };
-        const start = Date.now();
-        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 5, capMs: 40 })).toBe('pending');
-        expect(Date.now() - start).toBeGreaterThanOrEqual(35);
-
-        fake.row = null;
-        fake.selectError = { message: 'offline' };
-        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 5, capMs: 20 })).toBeNull();
     });
 });
 
