@@ -41,4 +41,15 @@ describe('20260916150000_playalong_corpus_seed_bucket.sql', () => {
         expect(sql).not.toMatch(/alter table public\.playalong_corpus\b(?!_seed)/);
         expect(sql).not.toMatch(/score_cache/);
     });
+
+    it('records edition signals as jsonb on the ledger and the store (20260916160000)', () => {
+        const editions = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20260916160000_playalong_corpus_edition_signals.sql'),
+            'utf8',
+        );
+        expect(editions).toContain('alter table public.playalong_corpus_seed');
+        expect(editions).toContain('alter table public.pd_pdf_store');
+        expect(editions.match(/add column edition jsonb/g)).toHaveLength(2);
+        expect(editions).not.toMatch(/create policy|grant/i);
+    });
 });
