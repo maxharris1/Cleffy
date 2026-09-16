@@ -101,11 +101,10 @@ describe('TransportBar states', () => {
         expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
     });
 
-    it('starts the wait at the IMSLP download for a score that was just imported', () => {
-        renderBar({ state: { kind: 'pending' }, fromImslp: true });
+    it('tracks the analysis only — no IMSLP download step on the score page', () => {
+        renderBar({ state: { kind: 'pending' } });
         const steps = screen.getAllByRole('listitem').map((item) => item.textContent?.trim());
-        expect(steps).toEqual(['Download', 'Queued', 'Analyzing', 'Ready']);
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued');
+        expect(steps).toEqual(['Queued', 'Analyzing', 'Ready']);
     });
 
     it('shows no progress indicator once the analysis is ready', () => {

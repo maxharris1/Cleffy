@@ -474,7 +474,7 @@ describe('ImslpBrowser', () => {
         });
     });
 
-    it('shows the preparing-your-score stepper at its download step while IMSLP is fetched', async () => {
+    it('shows a compact downloading spinner on the import button while IMSLP is fetched', async () => {
         const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
@@ -496,18 +496,23 @@ describe('ImslpBrowser', () => {
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
         await screen.findByText('Choose a PDF edition');
-        expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
+        const importButton = screen.getByRole('button', { name: 'Add to my library' });
+        expect(importButton.querySelector('svg')).toBeNull();
+        expect(importButton).not.toHaveAttribute('aria-busy');
 
         await userEvent.click(screen.getByRole('checkbox'));
-        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+        await userEvent.click(importButton);
 
-        const stepper = await screen.findByTestId('play-along-progress');
-        expect(stepper).toHaveTextContent('Downloading from IMSLP…');
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Download');
-        expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
+        const downloading = await screen.findByRole('button', { name: 'Downloading from IMSLP…' });
+        expect(downloading).toBeDisabled();
+        expect(downloading).toHaveAttribute('aria-busy', 'true');
+        expect(downloading.querySelector('svg')).not.toBeNull();
+        // The analysis stepper belongs to the score page, never to the search.
+        expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
 
         finish({ ok: true });
-        await waitFor(() => expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument());
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled());
+        expect(screen.getByRole('button', { name: 'Add to my library' }).querySelector('svg')).toBeNull();
     });
 
     it('shows the guidance state when every edition is restricted', async () => {

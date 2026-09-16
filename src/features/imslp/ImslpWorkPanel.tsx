@@ -8,9 +8,9 @@ import {
     formatBytes,
     recommendEdition,
 } from '@/features/imslp/imslpDisplay';
-import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { Spinner } from '@/ui/Loading';
 
 const DISCLAIMER =
     'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
@@ -73,8 +73,8 @@ export const ImslpWorkPanel = ({
 
     const hiddenCount = Math.max(0, orderedEditions.length - visibleEditions.length);
 
-    const buttonLabel =
-        download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
+    const downloading = download.kind === 'downloading';
+    const buttonLabel = downloading ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
 
     const countLine = (() => {
         const total = work.editions.length;
@@ -212,12 +212,16 @@ export const ImslpWorkPanel = ({
                     ) : null}
 
                     <div className="mt-4 flex flex-wrap items-center gap-3">
+                        {/* The Edge fetch has no byte progress to report, so the
+                            button itself carries the "still working" signal. */}
                         <button
                             type="button"
                             onClick={() => onImportSelected(acceptedDisclaimer)}
                             disabled={!selected || importing || work.editions.length === 0 || !acceptedDisclaimer}
+                            aria-busy={downloading || undefined}
                             className={buttonClassName('primary', 'sm')}
                         >
+                            {downloading ? <Spinner className="h-3.5 w-3.5" /> : null}
                             {buttonLabel}
                         </button>
                         {selected ? (
@@ -226,9 +230,6 @@ export const ImslpWorkPanel = ({
                             </a>
                         ) : null}
                     </div>
-                    {download.kind === 'downloading' ? (
-                        <PlayAlongProgress stage="downloading" fromImslp align="start" className="mt-4" />
-                    ) : null}
                 </>
             )}
 
