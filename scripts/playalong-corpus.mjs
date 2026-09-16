@@ -2142,7 +2142,25 @@ export const shouldProcess = (row, { retrySkipped = false } = {}) => {
  * Reconcile a `queued` row against the worker's outcome.
  * @returns {{ status: 'ready' | 'failed', error: string | null } | null}
  */
+/**
+ * `needs_review:<reason>` when the worker's corpus-promotion gate withheld this
+ * analysis. The score is still served to whoever asked for it; it just does not
+ * become a corpus row, because the file is probably not the work it is filed
+ * under (an organ transcription, a single orchestral part, a quartet score).
+ */
+export const gateReviewError = (timings) => {
+    const gate = timings?.corpusGate;
+    if (!gate || gate.promoted !== false) {
+        return null;
+    }
+    return `needs_review:${gate.reason ?? 'unknown'}`;
+};
+
 export const reconcileQueued = (job, analysis) => {
+    const review = analysis?.status === 'ready' ? gateReviewError(analysis.timings) : null;
+    if (review !== null) {
+        return { status: 'skipped', error: review };
+    }
     if (analysis?.status === 'ready' || job?.status === 'succeeded') {
         return { status: 'ready', error: null };
     }

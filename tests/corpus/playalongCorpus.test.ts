@@ -64,6 +64,7 @@ import {
     reconcileQueued,
     shouldProcess,
     shouldVisitWork,
+    gateReviewError,
     titleForMutopiaPiece,
     titleWordsMatch,
     wikiArticleFor,
@@ -1320,6 +1321,22 @@ describe('ledger', () => {
         expect(reconcileQueued({ status: 'queued' }, { status: 'pending' })).toBeNull();
         expect(reconcileQueued({ status: 'queued' }, { status: 'failed', error: 'worker_lost' })).toBeNull();
         expect(reconcileQueued(null, { status: 'failed', error: 'x' })).toEqual({ status: 'failed', error: 'x' });
+    });
+
+    it('holds a ready analysis the corpus gate withheld at needs_review instead of ready', () => {
+        expect(
+            reconcileQueued(
+                { status: 'succeeded' },
+                { status: 'ready', timings: { corpusGate: { promoted: false, reason: 'staves' } } },
+            ),
+        ).toEqual({ status: 'skipped', error: 'needs_review:staves' });
+        expect(
+            reconcileQueued({ status: 'succeeded' }, { status: 'ready', timings: { corpusGate: { promoted: true } } }),
+        ).toEqual({ status: 'ready', error: null });
+        expect(gateReviewError({ corpusGate: { promoted: false } })).toBe('needs_review:unknown');
+        expect(gateReviewError({ corpusGate: { promoted: true, reason: 'staves' } })).toBeNull();
+        expect(gateReviewError({})).toBeNull();
+        expect(gateReviewError(null)).toBeNull();
     });
 
     it('floors --limit on distinct works at or past queued', () => {
