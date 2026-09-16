@@ -4766,6 +4766,161 @@ alter table public.playalong_corpus_seed
 alter table public.pd_pdf_store
     add column if not exists edition jsonb;
 
+-- ===== supabase/migrations/20260916170000_omr_claim_priority_filter.sql =====
+-- Seed-only claimers for the play-along corpus (plan Phase 2c).
+--
+-- The corpus seed inserts omr_jobs rows at priority -10; user rows stay at 0.
+-- A second Cloud Run service (cleffy-omr-seed) drains those seed rows in
+-- parallel and must never take a user's job. omr_claim_job therefore gains an
+-- optional upper bound on priority: null (the default, and what the user worker
+-- passes) keeps today's behaviour exactly; a seed instance passes -1 and only
+-- ever sees rows with priority <= -1. The user worker still claims everything,
+-- and its `order by priority desc` keeps user rows ahead of seed rows.
+--
+-- The (text, int) overload is dropped rather than left beside the new one: with
+-- both present a PostgREST call that names only p_worker_id / p_lease_seconds
+-- would match two functions. Existing two-argument callers keep working
+-- because the new parameter defaults to null.
+
+drop function if exists public.omr_claim_job (text, int);
+
+create or replace function public.omr_claim_job (
+    p_worker_id text,
+    p_lease_seconds int default 300,
+    p_max_priority int default null
+)
+returns public.omr_jobs
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    claimed public.omr_jobs;
+begin
+    if p_worker_id is null or length(trim(p_worker_id)) = 0 then
+        raise exception 'omr_claim_job: worker_id required';
+    end if;
+
+    select *
+    into claimed
+    from public.omr_jobs
+    where status = 'queued'
+      and run_after <= now()
+      and (p_max_priority is null or priority <= p_max_priority)
+    order by priority desc, id
+    for update skip locked
+    limit 1;
+
+    if claimed.id is null then
+        return null;
+    end if;
+
+    update public.omr_jobs
+    set
+        status = 'running',
+        attempt = claimed.attempt + 1,
+        claimed_at = now(),
+        worker_id = p_worker_id,
+        lease_expires_at = now() + make_interval(secs => greatest(p_lease_seconds, 60)),
+        last_error = null
+    where id = claimed.id
+    returning * into claimed;
+
+    return claimed;
+end;
+$$;
+
+revoke all on function public.omr_claim_job (text, int, int) from public, anon, authenticated;
+grant execute on function public.omr_claim_job (text, int, int) to service_role;
+
+-- ===== supabase/migrations/20260916170100_omr_seed_sweep.sql =====
+-- Wake the seed-only worker pool (cleffy-omr-seed) while corpus seed rows are
+-- queued. Same pg_cron + pg_net + vault pattern as omr_sweep, but:
+--
+--   * it only counts seed rows (priority < 0) — a user backlog never wakes the
+--     seed pool, and omr_sweep keeps poking the user URL exactly as today;
+--   * it does not reap or purge (omr_sweep already does both every minute);
+--   * it is silent while playalong_corpus_control.paused is true, so flipping
+--     that switch drains the pool to zero instances without touching jobs;
+--   * it is a no-op until vault holds `omr_seed_service_url` — the seed service
+--     is opt-in and this migration is safe to apply before it exists.
+--
+-- One poke per minute is enough: the worker self-pokes before it responds
+-- (server.ts pokeSelf, now priority-filtered) so a single wake fans out to
+-- --max-instances within seconds. When the last seed row is claimed the poke
+-- stops, in-flight jobs finish, and --min-instances 0 scales the pool to zero.
+
+create or replace function public.omr_seed_sweep ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    queued int;
+    paused boolean;
+    svc_url text;
+    svc_secret text;
+begin
+    select c.paused into paused
+    from public.playalong_corpus_control c
+    limit 1;
+    if coalesce(paused, false) then
+        return;
+    end if;
+
+    select count(*)::int into queued
+    from public.omr_jobs
+    where status = 'queued'
+      and priority < 0
+      and run_after <= now();
+    if queued is null or queued <= 0 then
+        return;
+    end if;
+
+    select decrypted_secret into svc_url
+    from vault.decrypted_secrets
+    where name = 'omr_seed_service_url'
+    limit 1;
+
+    select decrypted_secret into svc_secret
+    from vault.decrypted_secrets
+    where name = 'omr_service_secret'
+    limit 1;
+
+    if svc_url is null or svc_secret is null or length(trim(svc_url)) = 0 then
+        -- Seed pool not deployed: seed rows drain on the user worker via omr_sweep.
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(svc_url, '/') || '/poke',
+        headers := jsonb_build_object(
+            'Content-Type', 'application/json',
+            'x-omr-secret', svc_secret
+        ),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.omr_seed_sweep () from public, anon, authenticated;
+grant execute on function public.omr_seed_sweep () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid)
+    from cron.job
+    where jobname = 'omr-seed-sweep';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('omr-seed-sweep', '* * * * *', $$select public.omr_seed_sweep ()$$);
+
 -- ===== supabase/migrations/20260916180000_playalong_corpus_imslp_origin.sql =====
 -- Play-along corpus: allow `imslp` as a pd_pdf_store / seed-ledger origin.
 -- The seed script can fetch one IMSLP PDF at a time via the same wait-page →
