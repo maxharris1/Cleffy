@@ -92,7 +92,9 @@ export const parseWorkLine = (line) => {
         page_id: raw.page_id,
         page_title: raw.page_title,
         composer: typeof raw.composer === 'string' && raw.composer.length > 0 ? raw.composer : null,
-        categories: Array.isArray(raw.categories) ? raw.categories.filter((c) => typeof c === 'string' && c.length > 0) : [],
+        categories: Array.isArray(raw.categories)
+            ? raw.categories.filter((c) => typeof c === 'string' && c.length > 0)
+            : [],
         touched: typeof raw.touched === 'string' && raw.touched.length > 0 ? raw.touched : null,
     };
 };
@@ -124,7 +126,10 @@ export const readCatalog = (jsonlPath = CATALOG_JSONL_PATH, syncPath = SYNC_JSON
     };
 };
 
-export const writeCatalog = ({ works, categories, generatedAt }, { jsonlPath = CATALOG_JSONL_PATH, syncPath = SYNC_JSON_PATH } = {}) => {
+export const writeCatalog = (
+    { works, categories, generatedAt },
+    { jsonlPath = CATALOG_JSONL_PATH, syncPath = SYNC_JSON_PATH } = {},
+) => {
     mkdirSync(dirname(jsonlPath), { recursive: true });
     const sorted = [...works].sort((a, b) => a.page_id - b.page_id);
     const lines = sorted.map((work) =>
@@ -258,9 +263,7 @@ export const writeCatalogSql = (catalog, { migrationsDir = MIGRATIONS_DIR, maxBy
 
 export const rebuildApplyMigrations = () => {
     const files = existsSync(MIGRATIONS_DIR)
-        ? [...readdirSync(MIGRATIONS_DIR)]
-              .filter((name) => name.endsWith('.sql') && !isCatalogSqlName(name))
-              .sort()
+        ? [...readdirSync(MIGRATIONS_DIR)].filter((name) => name.endsWith('.sql') && !isCatalogSqlName(name)).sort()
         : [];
     const parts = [
         '-- Combined migrations for the Supabase SQL editor (generated from supabase/migrations/*.sql)',

@@ -977,15 +977,29 @@ describe('planning', () => {
             total: 4,
         });
         expect(
-            JSON.parse(progressEvent({ ready: 1, queued: 2, skipped: 3, failed: 4, target: 131, batchId: 7 })),
+            JSON.parse(
+                progressEvent({
+                    ready: 1,
+                    queued: 2,
+                    skipped: 3,
+                    failed: 4,
+                    target: 131,
+                    batchId: 7,
+                    mode: 'fetch',
+                    eta_s: 9,
+                }),
+            ),
         ).toEqual({
             event: 'corpus_seed',
             ready: 1,
             queued: 2,
+            fetched: 0,
             skipped: 3,
             failed: 4,
             target: 131,
             batch_id: 7,
+            mode: 'fetch',
+            eta_s: 9,
         });
         expect(backoffDelayMs(1)).toBe(1000);
         expect(backoffDelayMs(3)).toBe(4000);

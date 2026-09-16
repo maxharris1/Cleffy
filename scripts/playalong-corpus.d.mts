@@ -213,10 +213,12 @@ export function coverageByOrigin(
 export function progressEvent(counts: {
     ready?: number;
     queued?: number;
+    fetched?: number;
     skipped?: number;
     failed?: number;
     target?: number;
     batchId?: number | null;
+    [extra: string]: unknown;
 }): string;
 export function workEvent(event: {
     workTitle: string;

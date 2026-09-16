@@ -124,7 +124,7 @@ describe('seed-playalong-corpus --dry-run (mocked network)', () => {
             {},
         );
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stderr).toMatch(/dry run \(no downloads, no writes\)/);
+        expect(result.stderr).toMatch(/mode dry-run/);
         expect(result.stderr).toMatch(/ledger unavailable/);
         expect(result.stderr).toMatch(/mutopia index: 3 pieces/);
 
@@ -148,6 +148,8 @@ describe('seed-playalong-corpus --dry-run (mocked network)', () => {
             skipped: 0,
             failed: 0,
             target: 3,
+            mode: 'dry-run',
+            fetched: 0,
         });
         expect(events.at(-1)).toMatchObject({
             event: 'corpus_seed_coverage',
