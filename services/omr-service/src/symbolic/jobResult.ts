@@ -5,6 +5,9 @@ import type { ScoreData } from '../scoreData.js';
 
 export type AnalysisSourceName = 'Mutopia' | 'IMSLP XML' | 'MIDI' | 'You uploaded';
 
+/** Licences the corpus accepts. CC-BY and CC-BY-SA oblige us to attribute. */
+export type AnalysisLicence = 'PD' | 'CC0' | 'CC-BY' | 'CC-BY-SA';
+
 /**
  * Sibling of ScoreData on the job result. Not part of scoreDataSchema.
  * Persisted on `score_analyses.timings` so the client can badge the player
@@ -17,6 +20,14 @@ export interface AnalysisSource {
     matchScore?: number;
     band: MatchBand;
     reason: MatchReason;
+    /**
+     * Provenance of the edition this analysis was made from, carried so the
+     * player can attribute it. Only set for corpus / seeded editions — a user's
+     * own upload has no licence we know of.
+     */
+    licence?: AnalysisLicence;
+    editorCredit?: string;
+    sourceUrl?: string;
 }
 
 export const sourceNameOf = (source: SymbolicSource, format: SymbolicFormat): AnalysisSourceName => {
