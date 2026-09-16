@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { ERROR_CODES, JobError } from './errors.js';
@@ -544,9 +544,17 @@ const recoverWithoutInvalidSheets = async (
     run: AudiverisRunner,
 ): Promise<AudiverisResult> => {
     const retryOptions: AudiverisOptions = { ...options, sheets: validRanges };
+    // Audiveris does not create a nested -output folder, and discoverOutputs
+    // readdir()s it: without these the recovery dies with ENOENT (not a JobError,
+    // so it is rethrown) instead of skipping the invalid sheets. Best effort —
+    // a refused mkdir leaves exactly the behaviour this line replaces.
+    const reexportDir = join(outDir, 'reexport');
+    const retryDir = join(outDir, 'retry');
+    await mkdir(reexportDir, { recursive: true }).catch(() => undefined);
+    await mkdir(retryDir, { recursive: true }).catch(() => undefined);
     if (first.omrPath) {
         try {
-            const reexport = await run(first.omrPath, join(outDir, 'reexport'), retryOptions);
+            const reexport = await run(first.omrPath, reexportDir, retryOptions);
             if (reexport.exitCode === 0 && reexport.mxlPaths.length > 0) {
                 return reexport;
             }
@@ -557,7 +565,7 @@ const recoverWithoutInvalidSheets = async (
         }
     }
 
-    const retry = await run(pdfPath, join(outDir, 'retry'), retryOptions);
+    const retry = await run(pdfPath, retryDir, retryOptions);
     if (retry.mxlPaths.length === 0) {
         throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML after skipping invalid sheets');
     }
