@@ -4,9 +4,14 @@
 -- it). Stored as one jsonb blob per ledger row / store row so the pick can be
 -- revisited without re-crawling. See docs/omr-midi-preload-plan.md and
 -- internal/research/imslp-popularity-and-edition-signals.md.
+--
+-- Both adds are guarded with `if not exists` because production received this
+-- schema out-of-band ahead of the merge: the columns already exist there, so an
+-- unguarded `add column` would fail the deploy. On a fresh database the guards
+-- change nothing.
 
 alter table public.playalong_corpus_seed
-    add column edition jsonb;
+    add column if not exists edition jsonb;
 
 alter table public.pd_pdf_store
-    add column edition jsonb;
+    add column if not exists edition jsonb;

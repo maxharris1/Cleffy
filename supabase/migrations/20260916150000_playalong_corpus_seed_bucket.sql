@@ -7,6 +7,11 @@
 -- so the same bytes are stored once. It is service-role only: a user who picks
 -- a corpus work gets a Storage copy into `scores/{docId}/original.pdf`, so
 -- there is never a client read of this bucket and never an IMSLP fetch.
+--
+-- Every statement here is guarded (`if not exists` / `on conflict do nothing`)
+-- because production received this schema out-of-band ahead of the merge: the
+-- objects already exist there, so an unguarded `create` or `add column` would
+-- fail the deploy. On a fresh database the guards change nothing.
 
 -- ---------------------------------------------------------------------------
 -- pd-pdfs bucket (no client policies; service_role bypasses storage RLS)
@@ -27,7 +32,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- pd_pdf_store: index of what is in the bucket, with provenance per file
 -- ---------------------------------------------------------------------------
-create table public.pd_pdf_store (
+create table if not exists public.pd_pdf_store (
     pdf_sha256 text primary key,
     filename text not null,
     -- IMSLP work page title: identity for ranking / the corpus-first client path.
@@ -42,7 +47,7 @@ create table public.pd_pdf_store (
     created_at timestamptz not null default now()
 );
 
-create index pd_pdf_store_work_title_idx on public.pd_pdf_store (work_title);
+create index if not exists pd_pdf_store_work_title_idx on public.pd_pdf_store (work_title);
 
 alter table public.pd_pdf_store enable row level security;
 -- Zero policies — service_role only, like playalong_corpus.
@@ -52,8 +57,8 @@ grant all on public.pd_pdf_store to service_role;
 -- Ledger columns the seed script checkpoints on
 -- ---------------------------------------------------------------------------
 alter table public.playalong_corpus_seed
-    add column us_pd boolean,
+    add column if not exists us_pd boolean,
     -- Fetch / enqueue attempts for this row; the script stops retrying at 3.
-    add column attempts smallint not null default 0,
+    add column if not exists attempts smallint not null default 0,
     -- Optional symbolic-source URL (Mutopia .mid / OpenScore .mxl) next to the PDF.
-    add column candidate_url text;
+    add column if not exists candidate_url text;
