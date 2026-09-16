@@ -51,6 +51,8 @@ export type Resolution = {
     pianoSolo?: boolean;
     pieceTitle?: string;
     byteLength?: number | null;
+    zipUrl?: string | null;
+    zipEntry?: string;
 };
 
 export type RankedWork = {
@@ -99,6 +101,8 @@ export function composerMatchesFolder(composerName: string, folder: string): boo
 export function catalogRefsFromText(text: unknown): CatalogRef[];
 export function catalogMatches(wantRefs: CatalogRef[], haveRefs: CatalogRef[]): boolean;
 export function catalogEquals(wantRefs: CatalogRef[], haveRefs: CatalogRef[]): boolean;
+export const DEBUSSY_CD_TO_LESURE: Readonly<Record<number, number>>;
+export function expandCatalogRefs(refs: readonly CatalogRef[]): CatalogRef[];
 export function significantWords(title: string): string[];
 export function titleWordsMatch(workTitle: string, candidateText: string): boolean;
 export function titleCore(title: string): string;
@@ -157,6 +161,17 @@ export function iaResolution(
     licences: Map<string, FileLicence>,
 ): Resolution;
 export function imslpParseUrl(title: string): string;
+export function imslpRedirectsUrl(title: string): string;
+export function imslpRedirectAliases(
+    title: string,
+    response: { query?: { backlinks?: Array<{ title?: string; ns?: number }> } } | null | undefined,
+): string[];
+
+export type ZipEntry = { name: string; method: number; compressedSize: number; size: number; offset: number };
+export function expandZipResolution(res: Resolution, entryNames: readonly string[]): Resolution[];
+export function zipEntries(buf: Buffer): ZipEntry[];
+export function zipEntrySlice(buf: Buffer, entry: ZipEntry): { method: number; data: Buffer };
+export function zipExtract(buf: Buffer, entry: ZipEntry): Buffer;
 
 export function canonicalComposerOrder(popular: readonly Work[], extraSurnames?: readonly string[]): string[];
 export function rankWorks(input: {

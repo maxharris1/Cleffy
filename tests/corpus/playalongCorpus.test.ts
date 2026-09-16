@@ -20,10 +20,13 @@ import {
     coveredWorkCount,
     demandFromDocumentTitles,
     evalPinPieceDirs,
+    expandCatalogRefs,
+    expandZipResolution,
     iaExactQuery,
     iaFallbackQueries,
     iaResolution,
     imslpFileLicenceFor,
+    imslpRedirectAliases,
     licenceTagOf,
     licenceVerdict,
     mutopiaPieceCandidate,
@@ -45,6 +48,8 @@ import {
     titleForMutopiaPiece,
     titleWordsMatch,
     workLevelLicence,
+    zipEntries,
+    zipExtract,
 } from '../../scripts/playalong-corpus.mjs';
 import { POPULAR_WORKS } from '../../supabase/functions/_shared/popularWorks';
 
@@ -124,7 +129,30 @@ describe('catalog references', () => {
         expect(catalogRefsFromText('Kinderszenen')).toEqual([]);
     });
 
+    it('maps Debussy CD numbers onto the Lesure dirs Mutopia uses', () => {
+        expect(expandCatalogRefs([{ type: 'CD', n: 74 }])).toEqual([
+            { type: 'CD', n: 74 },
+            { type: 'L', n: 66 },
+        ]);
+        expect(expandCatalogRefs([{ type: 'L', n: 117 }])).toEqual([
+            { type: 'L', n: 117 },
+            { type: 'CD', n: 125 },
+        ]);
+        expect(expandCatalogRefs([{ type: 'Op', n: 9 }])).toEqual([{ type: 'Op', n: 9 }]);
+        const arabesque = {
+            dir: 'ftp/DebussyC/L66/arabesque-1',
+            piece: 'arabesque-1',
+            composerId: 'DebussyC',
+            catalogDir: 'L66',
+        };
+        expect(mutopiaPieceCandidate({ title: '2 Arabesques, CD 74 (Debussy, Claude)' }, arabesque)).toBe(true);
+        expect(mutopiaPieceCandidate({ title: 'Suite bergamasque, CD 82 (Debussy, Claude)' }, arabesque)).toBe(false);
+    });
+
     it('reads Mutopia catalog directories', () => {
+        expect(catalogRefsFromMutopiaDir('L117')).toEqual([{ type: 'L', n: 117 }]);
+        expect(catalogRefsFromMutopiaDir('S.172')).toEqual([{ type: 'S', n: 172 }]);
+        expect(catalogRefsFromMutopiaDir('HOB-XVI-27')).toEqual([{ type: 'Hob.XVI', n: 27 }]);
         expect(catalogRefsFromMutopiaDir('O27')).toEqual([{ type: 'Op', n: 27 }]);
         expect(catalogRefsFromMutopiaDir('Op_821')).toEqual([{ type: 'Op', n: 821 }]);
         expect(catalogRefsFromMutopiaDir('BWVAnh114')).toEqual([{ type: 'Anh', n: 114 }]);
@@ -338,7 +366,7 @@ describe('Mutopia', () => {
         expect(res.pdfUrl).not.toMatch(/imslp\.org/);
     });
 
-    it('skips non-commercial licences and multi-PDF zips', () => {
+    it('skips non-commercial licences and pieces without a PDF', () => {
         const nc = parseMutopiaRdf(
             rdfXml({ licence: 'Creative Commons Attribution-NonCommercial 3.0', pdfFileLet: 'x-let.pdf' }),
         );
@@ -346,10 +374,8 @@ describe('Mutopia', () => {
             ok: false,
             reason: 'non_commercial',
         });
-        const zip = parseMutopiaRdf(
-            rdfXml({ licence: 'Public Domain', pdfFileLet: 'x-let-pdfs.zip', pdfFileA4: 'x-a4-pdfs.zip' }),
-        );
-        expect(mutopiaResolution({ title: FUR_ELISE }, furElisePiece, zip)).toMatchObject({
+        const none = parseMutopiaRdf(rdfXml({ licence: 'Public Domain' }));
+        expect(mutopiaResolution({ title: FUR_ELISE }, furElisePiece, none)).toMatchObject({
             ok: false,
             reason: 'no_source',
         });
@@ -386,7 +412,7 @@ describe('Mutopia', () => {
                 POPULAR_WORKS,
                 [],
             ),
-        ).toBe('Minuet in G major, BWV Anh.114 (Petzold, Christian)');
+        ).toBe('Minuet in G major, BWV Anh.114 (Pezold, Christian)');
         const bwv939 = {
             dir: 'ftp/BachJS/BWV939/bwv-939',
             piece: 'bwv-939',
@@ -415,10 +441,130 @@ describe('Mutopia', () => {
                 catalog,
             ),
         ).toBe('Prelude in C major, BWV 939 (Bach, Johann Sebastian)');
+        // An opus number never crosses composers: Schumann's Op.68 is not Beethoven's Pastoral.
+        const op68 = {
+            dir: 'ftp/SchumannR/O68/schumann-op68-01-melodie',
+            piece: 'schumann-op68-01-melodie',
+            composerId: 'SchumannR',
+            catalogDir: 'O68',
+        };
+        const schumann = [
+            {
+                page_title: 'Album für die Jugend, Op.68 (Schumann, Robert)',
+                composer: 'Schumann, Robert',
+                categories: [],
+                touched: null,
+            },
+        ];
+        expect(
+            titleForMutopiaPiece(
+                op68,
+                parseMutopiaRdf(rdfXml({ title: 'Melodie', opus: 'Op. 68' })),
+                POPULAR_WORKS,
+                schumann,
+            ),
+        ).toBe('Album für die Jugend, Op.68 (Schumann, Robert)');
+        expect(
+            titleForMutopiaPiece(
+                op68,
+                parseMutopiaRdf(rdfXml({ title: 'Melodie', opus: 'Op. 68' })),
+                POPULAR_WORKS,
+                [],
+            ),
+        ).toBeNull();
         const gym = { dir: 'ftp/SatieE/gymnopedie_2', piece: 'gymnopedie_2', composerId: 'SatieE', catalogDir: null };
         expect(
             titleForMutopiaPiece(gym, parseMutopiaRdf(rdfXml({ title: 'Gymnopédie No. 2' })), POPULAR_WORKS, []),
         ).toBe(GYMNOPEDIES);
+    });
+});
+
+describe('Mutopia zips', () => {
+    /** Build a stored (method 0) zip in memory: local headers, central directory, EOCD. */
+    const storedZip = (files: Array<[string, string]>): Buffer => {
+        const locals: Buffer[] = [];
+        const centrals: Buffer[] = [];
+        let offset = 0;
+        for (const [name, text] of files) {
+            const nameBuf = Buffer.from(name, 'utf8');
+            const data = Buffer.from(text, 'utf8');
+            const local = Buffer.alloc(30);
+            local.writeUInt32LE(0x04034b50, 0);
+            local.writeUInt16LE(0, 8);
+            local.writeUInt32LE(data.length, 18);
+            local.writeUInt32LE(data.length, 22);
+            local.writeUInt16LE(nameBuf.length, 26);
+            locals.push(local, nameBuf, data);
+            const central = Buffer.alloc(46);
+            central.writeUInt32LE(0x02014b50, 0);
+            central.writeUInt16LE(0, 10);
+            central.writeUInt32LE(data.length, 20);
+            central.writeUInt32LE(data.length, 24);
+            central.writeUInt16LE(nameBuf.length, 28);
+            central.writeUInt32LE(offset, 42);
+            centrals.push(central, nameBuf);
+            offset += local.length + nameBuf.length + data.length;
+        }
+        const centralBytes = Buffer.concat(centrals);
+        const eocd = Buffer.alloc(22);
+        eocd.writeUInt32LE(0x06054b50, 0);
+        eocd.writeUInt16LE(files.length, 8);
+        eocd.writeUInt16LE(files.length, 10);
+        eocd.writeUInt32LE(centralBytes.length, 12);
+        eocd.writeUInt32LE(offset, 16);
+        return Buffer.concat([...locals, centralBytes, eocd]);
+    };
+
+    it('lists and extracts entries from a Mutopia-style *-pdfs.zip', () => {
+        const zip = storedZip([
+            ['moonlight1-let.pdf', '%PDF-1'],
+            ['moonlight2-let.pdf', '%PDF-2'],
+            ['violino-1-part-let.pdf', '%PDF-part'],
+            ['__MACOSX/._moonlight1-let.pdf', 'junk'],
+            ['README.txt', 'hi'],
+        ]);
+        const entries = zipEntries(zip);
+        expect(entries.map((e) => e.name)).toEqual([
+            'moonlight1-let.pdf',
+            'moonlight2-let.pdf',
+            'violino-1-part-let.pdf',
+            '__MACOSX/._moonlight1-let.pdf',
+            'README.txt',
+        ]);
+        expect(zipExtract(zip, entries[1]!).toString()).toBe('%PDF-2');
+        const zipRes = {
+            ok: true,
+            origin: 'mutopia',
+            workTitle: MOONLIGHT,
+            filename: 'moonlight-let-pdfs.zip',
+            zipUrl: 'https://www.mutopiaproject.org/ftp/BeethovenLv/O27/moonlight/moonlight-let-pdfs.zip',
+            pdfUrl: null,
+        };
+        const expanded = expandZipResolution(
+            zipRes,
+            entries.map((e) => e.name),
+        );
+        expect(expanded.map((r) => [r.filename, r.zipEntry, r.pdfUrl, r.zipUrl])).toEqual([
+            ['moonlight1-let.pdf', 'moonlight1-let.pdf', null, zipRes.zipUrl],
+            ['moonlight2-let.pdf', 'moonlight2-let.pdf', null, zipRes.zipUrl],
+        ]);
+    });
+
+    it('resolves a zip-only piece to a zip resolution the CLI expands', () => {
+        const zip = parseMutopiaRdf(
+            rdfXml({
+                licence: 'Public Domain',
+                pdfFileLet: 'x-let-pdfs.zip',
+                pdfFileA4: 'x-a4-pdfs.zip',
+                date: '1802',
+            }),
+        );
+        expect(mutopiaResolution({ title: FUR_ELISE }, furElisePiece, zip)).toMatchObject({
+            ok: true,
+            filename: 'x-let-pdfs.zip',
+            pdfUrl: null,
+            zipUrl: 'https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/x-let-pdfs.zip',
+        });
     });
 });
 
@@ -503,6 +649,28 @@ describe('Internet Archive', () => {
                 { title: 'Canon and Gigue in D major', creator: 'Someone Else' },
             ]),
         ).toBeNull();
+    });
+
+    it('keeps only same-composer former titles from the redirect table', () => {
+        const response = {
+            query: {
+                backlinks: [
+                    { pageid: 1, ns: 0, title: 'Swan Lake, Op.20 (Tchaikovsky, Pyotr Ilyich)', redirect: '' },
+                    { pageid: 2, ns: 0, title: 'Swan Lake (ballet), Op.20 (Tchaikovsky, Pyotr)', redirect: '' },
+                    {
+                        pageid: 3,
+                        ns: 0,
+                        title: "Selections from Tchaikovsky's 'Swan Lake' (Bantock, Granville)",
+                        redirect: '',
+                    },
+                    { pageid: 4, ns: 4, title: 'IMSLP:Swan Lake', redirect: '' },
+                ],
+            },
+        };
+        expect(imslpRedirectAliases('Swan Lake (ballet), Op.20 (Tchaikovsky, Pyotr)', response)).toEqual([
+            'Swan Lake, Op.20 (Tchaikovsky, Pyotr Ilyich)',
+        ]);
+        expect(imslpRedirectAliases('X (Y, Z)', null)).toEqual([]);
     });
 
     it('picks the original PDF and applies the IMSLP tag for the bound file', () => {

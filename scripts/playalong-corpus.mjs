@@ -14,6 +14,8 @@
  * docs/imslp-access-options.md (why no IMSLP PDF fetch).
  */
 
+import { inflateRawSync } from 'node:zlib';
+
 /** Values accepted by the `playalong_corpus.licence_tag` / `pd_pdf_store.licence_tag` check constraints. */
 export const LICENCE_TAGS = Object.freeze(['PD', 'CC0', 'CC-BY', 'CC-BY-SA']);
 /** Values accepted by the `playalong_corpus_seed.status` check constraint. */
@@ -506,14 +508,17 @@ export const catalogRefsFromMutopiaDir = (catalogDir) => {
         /^(?:Op_?|O)(\d+)$/i.exec(catalogDir) ??
         /^(WoO)(\d+)$/i.exec(catalogDir) ??
         /^(BWVAnh)(\d+)$/i.exec(catalogDir) ??
-        /^(BWV|HWV|RV|TWV|K|D|S)(\d+)$/i.exec(catalogDir);
+        /^(BWV|HWV|RV|TWV|K|D|S|L)\.?(\d+)$/i.exec(catalogDir) ??
+        /^(HOB)-XVI-(\d+)$/i.exec(catalogDir);
     if (!m) {
         return [];
     }
     if (m.length === 2) {
         return [{ type: 'Op', n: Number(m[1]) }];
     }
-    const type = m[1].toLowerCase() === 'bwvanh' ? 'Anh' : m[1].toUpperCase() === 'WOO' ? 'WoO' : m[1].toUpperCase();
+    const upper = m[1].toUpperCase();
+    // Hoboken dirs are keyboard sonatas (`HOB-XVI-27`), the `Hob.XVI` ref type.
+    const type = upper === 'BWVANH' ? 'Anh' : upper === 'WOO' ? 'WoO' : upper === 'HOB' ? 'Hob.XVI' : upper;
     return [{ type, n: Number(m[2]) }];
 };
 
@@ -575,12 +580,38 @@ export const isPianoSolo = (instrument) => {
 };
 
 /**
+ * IMSLP titles Debussy by the Catalogue Debussy (`CD 82`); Mutopia files him by
+ * Lesure (`L75`). Mirrors DEBUSSY_CD_TO_LESURE in services/omr-service/src/symbolic/mutopia.ts.
+ */
+export const DEBUSSY_CD_TO_LESURE = Object.freeze({ 74: 66, 76: 68, 82: 75, 119: 113, 125: 117 });
+
+/** Refs plus their cross-catalogue equivalents (CD ↔ L for Debussy). */
+export const expandCatalogRefs = (refs) => {
+    const out = [...refs];
+    for (const ref of refs) {
+        if (ref.type === 'CD' && DEBUSSY_CD_TO_LESURE[ref.n] !== undefined) {
+            out.push({ ...ref, type: 'L', n: DEBUSSY_CD_TO_LESURE[ref.n] });
+        } else if (ref.type === 'L') {
+            for (const [cd, lesure] of Object.entries(DEBUSSY_CD_TO_LESURE)) {
+                if (lesure === ref.n) {
+                    out.push({ ...ref, type: 'CD', n: Number(cd) });
+                }
+            }
+        }
+    }
+    return out;
+};
+
+/** A work's catalog refs as Mutopia would file them. */
+const wantRefsOf = (work) => expandCatalogRefs(catalogRefsFromText(workTitleOf(work.title)));
+
+/**
  * Cheap pre-filter before fetching a piece's RDF: composer must match, and the
  * catalog directory (when the tree has one) must agree with the work's refs.
  */
 export const mutopiaPieceCandidate = (work, piece) => {
     const surname = composerSurnameOf(work.title);
-    const wantRefs = catalogRefsFromText(workTitleOf(work.title));
+    const wantRefs = wantRefsOf(work);
     // Mutopia files every BWV / BWV Anh. number under BachJS, whoever IMSLP credits.
     const bachCatalog = piece.composerId === 'BachJS' && wantRefs.some((r) => r.type === 'BWV' || r.type === 'Anh');
     if (!surname || (!bachCatalog && !composerMatchesMutopiaId(surname, piece.composerId))) {
@@ -601,7 +632,7 @@ export const mutopiaPieceMatches = (work, piece, rdf) => {
     if (rdf.arranger && rdf.arranger.trim() !== '') {
         return false;
     }
-    const wantRefs = catalogRefsFromText(workTitleOf(work.title));
+    const wantRefs = wantRefsOf(work);
     if (wantRefs.length > 0) {
         const haveRefs = [
             ...catalogRefsFromText(rdf.opus),
@@ -620,10 +651,12 @@ export const mutopiaPieceMatches = (work, piece, rdf) => {
 export const mutopiaResolution = (work, piece, rdf) => {
     const verdict = licenceVerdict({ label: rdf.licence, year: publicationYearOf(rdf.date) });
     const base = `${MUTOPIA_ORIGIN}/${piece.dir}/`;
-    const filename = [rdf.pdfFileLet, rdf.pdfFileA4].find((f) => /\.pdf$/i.test(f ?? ''));
+    // Multi-movement pieces ship one `*-pdfs.zip` per paper size; the caller
+    // expands it into one resolution per PDF inside (see expandZipResolution).
+    const zip = [rdf.pdfFileLet, rdf.pdfFileA4].find((f) => /\.zip$/i.test(f ?? ''));
+    const filename = [rdf.pdfFileLet, rdf.pdfFileA4].find((f) => /\.pdf$/i.test(f ?? '')) ?? zip;
     if (!filename) {
-        // Multi-file pieces ship `*-pdfs.zip`; not a single PDF we can hash.
-        return { ok: false, reason: 'no_source', origin: 'mutopia', filename: rdf.pdfFileLet || `${piece.piece}.pdf` };
+        return { ok: false, reason: 'no_source', origin: 'mutopia', filename: `${piece.piece}.pdf` };
     }
     if (!verdict.accept) {
         return { ok: false, reason: verdict.reason, origin: 'mutopia', filename };
@@ -634,7 +667,8 @@ export const mutopiaResolution = (work, piece, rdf) => {
         origin: 'mutopia',
         workTitle: work.title,
         filename,
-        pdfUrl: `${base}${filename}`,
+        pdfUrl: filename === zip ? null : `${base}${filename}`,
+        zipUrl: filename === zip ? `${base}${zip}` : null,
         candidateUrl: rdf.midFile ? `${base}${rdf.midFile}` : null,
         sourceUrl: mutopiaPieceInfoUrl(rdf.id, piece.dir),
         licenceTag: verdict.tag,
@@ -643,6 +677,97 @@ export const mutopiaResolution = (work, piece, rdf) => {
         pianoSolo: isPianoSolo(rdf.instrument),
         pieceTitle: rdf.title,
     };
+};
+
+/**
+ * One resolution per PDF inside a Mutopia `*-pdfs.zip`: the ledger row is the
+ * entry name, the bytes come from `zipUrl` + `zipEntry`. Non-PDF entries and
+ * macOS resource forks are ignored.
+ */
+export const expandZipResolution = (res, entryNames) =>
+    entryNames
+        .filter(
+            (name) =>
+                /\.pdf$/i.test(name) &&
+                !/(^|\/)(__MACOSX|\.)/.test(name) &&
+                !IA_PART_OR_ARRANGEMENT_RE.test(
+                    name
+                        .split('/')
+                        .pop()
+                        .replace(/\.pdf$/i, ''),
+                ),
+        )
+        .sort()
+        .map((name) => ({
+            ...res,
+            filename: name.split('/').pop(),
+            zipEntry: name,
+            pdfUrl: null,
+        }));
+
+// ---------------------------------------------------------------------------
+// Minimal ZIP reader (central directory + deflate), enough for Mutopia's zips
+// ---------------------------------------------------------------------------
+
+const EOCD_SIG = 0x06054b50;
+const CEN_SIG = 0x02014b50;
+const LOC_SIG = 0x04034b50;
+
+/** @returns {Array<{ name: string, method: number, compressedSize: number, size: number, offset: number }>} */
+export const zipEntries = (buf) => {
+    const maxBack = Math.min(buf.length - 22, 0xffff + 22);
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= buf.length - 22 - maxBack && i >= 0; i--) {
+        if (buf.readUInt32LE(i) === EOCD_SIG) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd < 0) {
+        throw new Error('zip: no end-of-central-directory record');
+    }
+    const count = buf.readUInt16LE(eocd + 10);
+    let pos = buf.readUInt32LE(eocd + 16);
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+        if (buf.readUInt32LE(pos) !== CEN_SIG) {
+            throw new Error('zip: bad central directory entry');
+        }
+        const method = buf.readUInt16LE(pos + 10);
+        const compressedSize = buf.readUInt32LE(pos + 20);
+        const size = buf.readUInt32LE(pos + 24);
+        const nameLen = buf.readUInt16LE(pos + 28);
+        const extraLen = buf.readUInt16LE(pos + 30);
+        const commentLen = buf.readUInt16LE(pos + 32);
+        const offset = buf.readUInt32LE(pos + 42);
+        const name = buf.subarray(pos + 46, pos + 46 + nameLen).toString('utf8');
+        entries.push({ name, method, compressedSize, size, offset });
+        pos += 46 + nameLen + extraLen + commentLen;
+    }
+    return entries;
+};
+
+/** Raw (still compressed) bytes and method for one entry, from its local header. */
+export const zipEntrySlice = (buf, entry) => {
+    if (buf.readUInt32LE(entry.offset) !== LOC_SIG) {
+        throw new Error(`zip: bad local header for ${entry.name}`);
+    }
+    const nameLen = buf.readUInt16LE(entry.offset + 26);
+    const extraLen = buf.readUInt16LE(entry.offset + 28);
+    const start = entry.offset + 30 + nameLen + extraLen;
+    return { method: entry.method, data: buf.subarray(start, start + entry.compressedSize) };
+};
+
+/** Decompressed bytes of one entry (stored or deflate). */
+export const zipExtract = (buf, entry) => {
+    const { method, data } = zipEntrySlice(buf, entry);
+    if (method === 0) {
+        return Buffer.from(data);
+    }
+    if (method === 8) {
+        return inflateRawSync(data);
+    }
+    throw new Error(`zip: unsupported compression method ${method} for ${entry.name}`);
 };
 
 // ---------------------------------------------------------------------------
@@ -919,6 +1044,38 @@ export const imslpParseUrl = (title) => {
     return url.toString();
 };
 
+/**
+ * Pages that redirect to this work page — IMSLP's former titles for it. IA
+ * mirrored IMSLP in 2012 under those, so each alias is another exact record id.
+ */
+export const imslpRedirectsUrl = (title) => {
+    const url = new URL(IMSLP_API);
+    url.searchParams.set('action', 'query');
+    url.searchParams.set('list', 'backlinks');
+    url.searchParams.set('bltitle', title);
+    url.searchParams.set('blfilterredir', 'redirects');
+    url.searchParams.set('bllimit', '50');
+    url.searchParams.set('format', 'json');
+    return url.toString();
+};
+
+/** Former titles from a backlinks response, same-composer only (no arrangements by others). */
+export const imslpRedirectAliases = (title, response) => {
+    const composer = fold(composerSurnameOf(title) ?? '');
+    const out = [];
+    for (const link of response?.query?.backlinks ?? []) {
+        const alias = link?.title;
+        if (typeof alias !== 'string' || alias === title || link.ns !== 0) {
+            continue;
+        }
+        if (composer !== '' && fold(composerSurnameOf(alias) ?? '') !== composer) {
+            continue;
+        }
+        out.push(alias);
+    }
+    return out;
+};
+
 // ---------------------------------------------------------------------------
 // Ranking
 // ---------------------------------------------------------------------------
@@ -1086,15 +1243,15 @@ export const evalPinPieceDirs = (pins) => {
 
 /**
  * Reverse resolution: which IMSLP work page is this Mutopia piece? POPULAR
- * titles by catalog refs first (BWV Anh.114 lives under Petzold there), then
+ * titles by catalog refs first (BWV Anh.114 lives under Pezold there), then
  * catalog titles whose composer is the piece's composer.
  */
 export const titleForMutopiaPiece = (piece, rdf, popular, catalogWorks = []) => {
-    const haveRefs = [
+    const haveRefs = expandCatalogRefs([
         ...catalogRefsFromText(rdf.opus),
         ...catalogRefsFromMutopiaDir(piece.catalogDir),
         ...catalogRefsFromText(piece.piece.replace(/[_-]/g, ' ')),
-    ];
+    ]);
     // Narrowest matching reference wins: `Prelude in C major, BWV 939` over
     // a `BWV 939-943` collection page.
     const exact = (candidates) => {
@@ -1118,9 +1275,13 @@ export const titleForMutopiaPiece = (piece, rdf, popular, catalogWorks = []) => 
     if (fromPopularComposer) {
         return fromPopularComposer;
     }
-    const fromPopularAny = exact(popular.map((w) => w.title));
-    if (fromPopularAny) {
-        return fromPopularAny;
+    // Across composers only for Bach catalogue numbers, which are unique (the
+    // BWV Anh. pieces IMSLP credits to Pezold); an `Op.68` belongs to many.
+    if (haveRefs.every((r) => r.type === 'BWV' || r.type === 'Anh')) {
+        const fromPopularAny = exact(popular.map((w) => w.title));
+        if (fromPopularAny) {
+            return fromPopularAny;
+        }
     }
     const catalogByComposer = catalogWorks
         .filter((w) => composerMatchesMutopiaId(composerSurnameOf(w.page_title) ?? '', piece.composerId))

@@ -63,11 +63,14 @@ import {
     coveredWorkCount,
     demandFromDocumentTitles,
     evalPinPieceDirs,
+    expandZipResolution,
     iaExactQuery,
     iaFallbackQueries,
     iaResolution,
     iaSearchUrl,
     imslpParseUrl,
+    imslpRedirectAliases,
+    imslpRedirectsUrl,
     mutopiaPieceCandidate,
     mutopiaPieceMatches,
     mutopiaPiecesFromTree,
@@ -87,6 +90,8 @@ import {
     sourceEnabled,
     titleForMutopiaPiece,
     workEvent,
+    zipEntries,
+    zipExtract,
 } from './playalong-corpus.mjs';
 
 const { PDFDocument } = pdfLib;
@@ -503,9 +508,43 @@ const resolveMutopia = async (ctx, work) => {
         if (!mutopiaPieceMatches(work, piece, rdf)) {
             continue;
         }
-        out.push(mutopiaResolution(work, piece, rdf));
+        const res = mutopiaResolution(work, piece, rdf);
+        if (res.ok && res.zipUrl) {
+            // Multi-movement piece: one ledger row per PDF inside the zip.
+            out.push(
+                ...expandZipResolution(
+                    res,
+                    zipEntries(await zipBytes(ctx, res.zipUrl)).map((e) => e.name),
+                ),
+            );
+            continue;
+        }
+        out.push(res);
     }
     return out;
+};
+
+/** Download a Mutopia zip once per run; several resolutions share it. */
+const zipBytes = async (ctx, url) => {
+    if (!ctx.zips.has(url)) {
+        ctx.zips.set(url, await fetchBytes(url));
+    }
+    return ctx.zips.get(url);
+};
+
+const pdfBytesFor = async (ctx, res) => {
+    if (res.zipUrl && res.zipEntry) {
+        const buf = await zipBytes(ctx, res.zipUrl);
+        const entry = zipEntries(buf).find((e) => e.name === res.zipEntry);
+        if (!entry) {
+            throw new Error(`zip entry missing: ${res.zipEntry}`);
+        }
+        return zipExtract(buf, entry);
+    }
+    if (res.pdfUrl) {
+        return fetchBytes(res.pdfUrl);
+    }
+    return renderWithMusescore(ctx, res.renderFrom);
 };
 
 const resolveOpenscore = (ctx, work) =>
@@ -515,18 +554,22 @@ const resolveOpenscore = (ctx, work) =>
 
 let lastImslpCallAt = 0;
 
-/** Per-file IMSLP licence tags for a work page (metadata only, crawl-delay honoured). */
-const imslpLicences = async (ctx, title) => {
-    const url = imslpParseUrl(title);
-    const hit = ctx.cache.get(url);
-    if (hit === null) {
+/** Cached api.php JSON; uncached calls are spaced by the robots.txt crawl delay. */
+const imslpJson = async (ctx, url) => {
+    if (ctx.cache.get(url) === null) {
         const wait = lastImslpCallAt + IMSLP_CRAWL_DELAY_MS - Date.now();
         if (wait > 0) {
             await sleep(wait);
         }
         lastImslpCallAt = Date.now();
     }
-    const json = JSON.parse(await cachedText(ctx.cache, url, { Accept: 'application/json' }));
+    return JSON.parse(await cachedText(ctx.cache, url, { Accept: 'application/json' }));
+};
+
+/** Per-file IMSLP licence tags for a work page (metadata only). */
+const imslpLicences = async (ctx, title) => {
+    const url = imslpParseUrl(title);
+    const json = await imslpJson(ctx, url);
     const html = json?.parse?.text?.['*'];
     if (typeof html !== 'string') {
         // Missing page / API error: do not pin that answer in the cache.
@@ -536,10 +579,31 @@ const imslpLicences = async (ctx, title) => {
     return parseWorkPageLicenses(html);
 };
 
+/** Former IMSLP titles of a work (redirects into it), for IA record-id lookups. */
+const imslpAliases = async (ctx, title) => {
+    try {
+        return imslpRedirectAliases(title, await imslpJson(ctx, imslpRedirectsUrl(title)));
+    } catch (err) {
+        info(`imslp redirect lookup failed for ${title}: ${err instanceof Error ? err.message : err}`);
+        return [];
+    }
+};
+
+const MAX_IA_ALIASES = 8;
+
 const resolveIa = async (ctx, work) => {
     const search = async (query) => JSON.parse(await cachedText(ctx.cache, iaSearchUrl(query))).response?.docs ?? [];
-    // The record id encodes the exact IMSLP page title, so its hit is the work.
+    // The record id encodes the exact IMSLP page title, so its hit is the work —
+    // under the current title or any former title IMSLP still redirects from.
     let doc = (await search(iaExactQuery(work.title)))[0] ?? null;
+    if (!doc) {
+        for (const alias of (await imslpAliases(ctx, work.title)).slice(0, MAX_IA_ALIASES)) {
+            doc = (await search(iaExactQuery(alias)))[0] ?? null;
+            if (doc) {
+                break;
+            }
+        }
+    }
     for (const query of iaFallbackQueries(work.title)) {
         if (doc) {
             break;
@@ -660,7 +724,7 @@ const ingestFile = async (ctx, work, res, batchId) => {
     });
 
     try {
-        const bytes = res.pdfUrl ? await fetchBytes(res.pdfUrl) : await renderWithMusescore(ctx, res.renderFrom);
+        const bytes = await pdfBytesFor(ctx, res);
         if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
             throw new Error('not_pdf');
         }
@@ -888,6 +952,7 @@ const pinWorks = async (ctx, pins, catalogWorks) => {
         }
         works.push({ title, pieceDir: dir });
     }
+    info(`eval pins: ${works.length} Mutopia pieces → ${new Set(works.map((w) => w.title)).size} IMSLP titles`);
     return works;
 };
 
@@ -960,6 +1025,7 @@ const main = async () => {
         musescore: args.musescore,
         mutopia: [],
         openscore: [],
+        zips: new Map(),
     };
     if (ctx.sources.includes('mutopia')) {
         ctx.mutopia = await loadMutopiaIndex(cache);
