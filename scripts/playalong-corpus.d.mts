@@ -1,0 +1,214 @@
+export type LicenceTag = 'PD' | 'CC0' | 'CC-BY' | 'CC-BY-SA';
+export type LedgerStatus = 'pending' | 'fetched' | 'queued' | 'ready' | 'skipped' | 'failed' | 'paused';
+export type Origin = 'mutopia' | 'openscore' | 'ia';
+
+export type CatalogRef = { type: string; n: number; nEnd?: number; no?: number };
+
+export type FileLicence = { licenseLabel: string | null; restriction: string | null; euHosted: boolean };
+
+export type LicenceVerdict = { accept: boolean; tag: LicenceTag | null; usPd: boolean; reason: string | null };
+
+export type Work = { title: string; tier?: number; composer?: string | null; instrument?: string | null };
+
+export type MutopiaPiece = { dir: string; piece: string; composerId: string; catalogDir: string | null };
+
+export type MutopiaRdf = {
+    title: string;
+    composer: string;
+    opus: string;
+    instrument: string;
+    date: string;
+    style: string;
+    arranger: string;
+    source: string;
+    licence: string;
+    lyFile: string;
+    midFile: string;
+    pdfFileLet: string;
+    pdfFileA4: string;
+    id: string;
+    maintainer: string;
+    moreInfo: string;
+};
+
+export type OpenscoreRepo = { id: string; treeUrl?: string; rawBase: string; htmlBase: string; credit: string };
+export type OpenscoreEntry = { dir: string; composerFolder: string; workFolder: string; files: string[] };
+
+/** `ok: true` carries the fetch/provenance fields; `ok: false` carries `reason`. */
+export type Resolution = {
+    ok: boolean;
+    origin: Origin | string;
+    filename: string;
+    reason?: string | null;
+    workTitle?: string;
+    pdfUrl?: string | null;
+    renderFrom?: string | null;
+    candidateUrl?: string | null;
+    sourceUrl?: string;
+    licenceTag?: LicenceTag | null;
+    usPd?: boolean;
+    editorCredit?: string | null;
+    pianoSolo?: boolean;
+    pieceTitle?: string;
+    byteLength?: number | null;
+};
+
+export type RankedWork = {
+    title: string;
+    tier: number;
+    prior: number;
+    composer: string | null;
+    instrument: string | null;
+    pin?: boolean;
+    score: number;
+};
+
+export type CatalogWork = { page_title: string; composer: string | null; categories: string[]; touched: string | null };
+
+export type LedgerRow = { work_title?: string; status: string; attempts?: number | string | null };
+
+export type Plan = { queue: Resolution[]; skips: Resolution[]; origin: Origin | null };
+
+export const LICENCE_TAGS: readonly LicenceTag[];
+export const LEDGER_STATUSES: readonly LedgerStatus[];
+export const ORIGINS: readonly Origin[];
+export const SEED_JOB_PRIORITY: number;
+export const MAX_PAGES: number;
+export const MAX_PDF_BYTES: number;
+export const US_PD_BEFORE_YEAR: number;
+export const MAX_ATTEMPTS: number;
+export const MAX_FILES_PER_WORK: number;
+export const MUTOPIA_ORIGIN: string;
+export const MUTOPIA_TREE_URL: string;
+export const OPENSCORE_REPOS: readonly OpenscoreRepo[];
+export const IA_SEARCH_URL: string;
+export const IA_METADATA_URL: string;
+export const IMSLP_API: string;
+export const IMSLP_CRAWL_DELAY_MS: number;
+export const CANONICAL_SURNAMES: readonly string[];
+export const PARK_AFTER_FAILURES: number;
+export const LEDGER_TRANSITIONS: Readonly<Record<LedgerStatus, readonly LedgerStatus[]>>;
+
+export function fold(text: unknown): string;
+export function composerNameOf(title: unknown): string | null;
+export function composerSurnameOf(title: unknown): string | null;
+export function workTitleOf(title: unknown): string;
+export function composerMatchesMutopiaId(surname: string, mutopiaId: string): boolean;
+export function composerMatchesFolder(composerName: string, folder: string): boolean;
+
+export function catalogRefsFromText(text: unknown): CatalogRef[];
+export function catalogMatches(wantRefs: CatalogRef[], haveRefs: CatalogRef[]): boolean;
+export function catalogEquals(wantRefs: CatalogRef[], haveRefs: CatalogRef[]): boolean;
+export function significantWords(title: string): string[];
+export function titleWordsMatch(workTitle: string, candidateText: string): boolean;
+export function titleCore(title: string): string;
+
+export function licenceTagOf(label: unknown): LicenceTag | null;
+export function publicationYearOf(value: unknown): number | null;
+export function licenceVerdict(input: {
+    label: string | null;
+    restriction?: string | null;
+    euHosted?: boolean;
+    year?: number | null;
+}): LicenceVerdict;
+export function imslpFileLicenceFor(
+    filename: string,
+    licences: Map<string, FileLicence> | null | undefined,
+): FileLicence | null;
+export function workLevelLicence(licences: Map<string, FileLicence> | null | undefined): FileLicence | null;
+
+export function mutopiaPiecesFromTree(paths: readonly string[]): MutopiaPiece[];
+export function catalogRefsFromMutopiaDir(catalogDir: string | null): CatalogRef[];
+export function parseMutopiaRdf(xml: string): MutopiaRdf;
+export function mutopiaPieceInfoUrl(id: string, dir: string): string;
+export function isPianoSolo(instrument: unknown): boolean;
+export function mutopiaPieceCandidate(work: Work, piece: MutopiaPiece): boolean;
+export function mutopiaPieceMatches(work: Work, piece: MutopiaPiece, rdf: MutopiaRdf): boolean;
+export function mutopiaResolution(work: Work, piece: MutopiaPiece, rdf: MutopiaRdf): Resolution;
+
+export function openscoreWorksFromTree(paths: readonly string[]): OpenscoreEntry[];
+export function openscoreWorkMatches(work: Work, entry: OpenscoreEntry): boolean;
+export function openscoreScorePdf(entry: OpenscoreEntry): string | null;
+export function openscoreResolution(
+    work: Work,
+    entry: OpenscoreEntry,
+    repo: OpenscoreRepo,
+    options?: { renderer?: boolean },
+): Resolution;
+
+export function iaRecordId(title: string): string;
+export function iaExactQuery(title: string): string;
+export function iaCatalogToken(title: string): string | null;
+export function iaFallbackQueries(title: string): string[];
+export function iaSearchUrl(query: string, rows?: number): string;
+export function pickIaDoc<T extends { title?: string; creator?: string | string[] }>(
+    title: string,
+    docs: readonly T[] | null | undefined,
+): T | null;
+export const IA_PART_OR_ARRANGEMENT_RE: RegExp;
+export function pickIaPdf<T extends { name?: string; source?: string; size?: string | number }>(
+    files: readonly T[] | null | undefined,
+): T | null;
+export function iaFileUrl(identifier: string, name: string): string;
+export function iaResolution(
+    work: Work,
+    item: { metadata: { identifier?: string; title?: string; date?: string | null; subject?: string[] } },
+    file: { name: string; size?: string | number },
+    licences: Map<string, FileLicence>,
+): Resolution;
+export function imslpParseUrl(title: string): string;
+
+export function canonicalComposerOrder(popular: readonly Work[], extraSurnames?: readonly string[]): string[];
+export function rankWorks(input: {
+    popular: readonly Work[];
+    pins?: readonly { title: string }[];
+    catalog?: readonly CatalogWork[];
+    demand?: Map<string, number>;
+    corpusUse?: Map<string, number>;
+}): RankedWork[];
+export function demandFromDocumentTitles(titles: readonly unknown[]): Map<string, number>;
+
+export function mutopiaPieceDirFromUrl(url: string): string | null;
+export function evalPinPieceDirs(pins: readonly unknown[]): string[];
+export function titleForMutopiaPiece(
+    piece: MutopiaPiece,
+    rdf: MutopiaRdf,
+    popular: readonly Work[],
+    catalogWorks?: readonly CatalogWork[],
+): string | null;
+
+export function canTransition(from: string, to: string): boolean;
+export function shouldProcess(
+    row: LedgerRow,
+    options?: { retrySkipped?: boolean },
+): { process: boolean; reason: string };
+export function reconcileQueued(
+    job: { status: string; last_error?: string | null } | null | undefined,
+    analysis: { status: string; error?: string | null } | null | undefined,
+): { status: 'ready' | 'failed'; error: string | null } | null;
+export function sourceEnabled(origin: string, options?: { sources?: readonly string[]; parked?: Set<string> }): boolean;
+export function parseSources(value: string | null | undefined): Origin[];
+export function backoffDelayMs(consecutiveFailures: number, options?: { baseMs?: number; maxMs?: number }): number;
+
+export function planWork(resolutions: readonly Resolution[], options?: { sources?: readonly string[] }): Plan;
+export function coverageByOrigin(
+    plans: Map<string, { origin: string | null } | undefined>,
+    titles: readonly string[],
+): Record<string, number>;
+export function progressEvent(counts: {
+    ready?: number;
+    queued?: number;
+    skipped?: number;
+    failed?: number;
+    target?: number;
+    batchId?: number | null;
+}): string;
+export function workEvent(event: {
+    workTitle: string;
+    status: string;
+    origin?: string | null;
+    filename?: string | null;
+    pdfSha256?: string | null;
+    reason?: string | null;
+}): string;
+export function coveredWorkCount(rows: Iterable<{ work_title: string; status: string }>): number;

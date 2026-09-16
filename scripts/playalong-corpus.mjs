@@ -1,0 +1,1285 @@
+#!/usr/bin/env node
+/**
+ * Play-along corpus seed — the pure parts of scripts/seed-playalong-corpus.mjs.
+ *
+ * Everything here is network-free and side-effect-free so the ranking, the
+ * licence filter, the source matching, the ledger state machine and the
+ * dry-run plan can be unit-tested. The CLI wires fetch / PostgREST / Storage
+ * around these.
+ *
+ * Sources are bulk-friendly public mirrors only (Mutopia, OpenScore, the
+ * Internet Archive `imslp` collection). IMSLP itself is identity + licence
+ * metadata: nothing in this module produces an IMSLP file URL.
+ * See docs/omr-midi-preload-plan.md (Phase 2 / 2b) and
+ * docs/imslp-access-options.md (why no IMSLP PDF fetch).
+ */
+
+/** Values accepted by the `playalong_corpus.licence_tag` / `pd_pdf_store.licence_tag` check constraints. */
+export const LICENCE_TAGS = Object.freeze(['PD', 'CC0', 'CC-BY', 'CC-BY-SA']);
+/** Values accepted by the `playalong_corpus_seed.status` check constraint. */
+export const LEDGER_STATUSES = Object.freeze(['pending', 'fetched', 'queued', 'ready', 'skipped', 'failed', 'paused']);
+/** Seed origins in resolution order (first hit wins). */
+export const ORIGINS = Object.freeze(['mutopia', 'openscore', 'ia']);
+
+export const SEED_JOB_PRIORITY = -10;
+/** Mirrors MAX_PAGES in services/omr-service/src/job.ts — skip before enqueue. */
+export const MAX_PAGES = 60;
+/** Matches the `scores` / `pd-pdfs` bucket file_size_limit. */
+export const MAX_PDF_BYTES = 50 * 1024 * 1024;
+/** US public domain by publication year (the plan's "published before 1931"). */
+export const US_PD_BEFORE_YEAR = 1931;
+/** Fetch / enqueue attempts per ledger row before it stays `failed`. */
+export const MAX_ATTEMPTS = 3;
+/** Per-work file cap (WTC I is 48 Mutopia pieces; Op.28 is 24). */
+export const MAX_FILES_PER_WORK = 48;
+
+export const MUTOPIA_ORIGIN = 'https://www.mutopiaproject.org';
+export const MUTOPIA_TREE_URL =
+    'https://api.github.com/repos/MutopiaProject/MutopiaProject/git/trees/master?recursive=1';
+export const OPENSCORE_REPOS = Object.freeze([
+    {
+        id: 'lieder',
+        treeUrl: 'https://api.github.com/repos/OpenScore/Lieder/git/trees/main?recursive=1',
+        rawBase: 'https://raw.githubusercontent.com/OpenScore/Lieder/main/',
+        htmlBase: 'https://github.com/OpenScore/Lieder/tree/main/',
+        credit: 'OpenScore Lieder contributors (CC0)',
+    },
+    {
+        id: 'string-quartets',
+        treeUrl: 'https://api.github.com/repos/OpenScore/StringQuartets/git/trees/main?recursive=1',
+        rawBase: 'https://raw.githubusercontent.com/OpenScore/StringQuartets/main/',
+        htmlBase: 'https://github.com/OpenScore/StringQuartets/tree/main/',
+        credit: 'OpenScore String Quartets contributors (CC0)',
+    },
+]);
+export const IA_SEARCH_URL = 'https://archive.org/advancedsearch.php';
+export const IA_METADATA_URL = 'https://archive.org/metadata/';
+export const IMSLP_API = 'https://imslp.org/api.php';
+/** robots.txt Crawl-delay on imslp.org; metadata calls only. */
+export const IMSLP_CRAWL_DELAY_MS = 2000;
+
+/**
+ * Copy of ERA_SURNAMES in supabase/functions/_shared/era.ts (not exported there;
+ * the three era.ts copies are kept in lockstep and this script must not edit
+ * them). tests/corpus/playalongCorpus.test.ts asserts this stays a superset.
+ */
+export const CANONICAL_SURNAMES = Object.freeze([
+    'Bach',
+    'Vivaldi',
+    'Handel',
+    'Pachelbel',
+    'Scarlatti',
+    'Couperin',
+    'Rameau',
+    'Telemann',
+    'Purcell',
+    'Mozart',
+    'Haydn',
+    'Beethoven',
+    'Clementi',
+    'Kuhlau',
+    'Diabelli',
+    'Hummel',
+    'Czerny',
+    'Dussek',
+    'Chopin',
+    'Schubert',
+    'Brahms',
+    'Liszt',
+    'Schumann',
+    'Tchaikovsky',
+    'Mendelssohn',
+    'Grieg',
+    'Dvořák',
+    'Fauré',
+    'Mussorgsky',
+    'Burgmüller',
+    'Heller',
+    'Field',
+    'Elgar',
+    'Scriabin',
+    'Debussy',
+    'Ravel',
+    'Satie',
+    'Rachmaninoff',
+    'Joplin',
+    'Bartók',
+    'Prokofiev',
+    'Shostakovich',
+    'Gershwin',
+    'Poulenc',
+    'Kabalevsky',
+    'Khachaturian',
+]);
+
+// ---------------------------------------------------------------------------
+// Text helpers
+// ---------------------------------------------------------------------------
+
+export const fold = (text) =>
+    String(text ?? '')
+        .normalize('NFKD')
+        .replace(/\p{M}/gu, '')
+        .replace(/[\u2010-\u2015\u2212]/g, '-')
+        .replace(/[\u2018\u2019]/g, "'")
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+
+/** `Für Elise, WoO 59 (Beethoven, Ludwig van)` → `Beethoven, Ludwig van`. */
+export const composerNameOf = (title) => {
+    const match = /\(([^()]+)\)\s*$/.exec(String(title ?? '').trim());
+    const name = match?.[1]?.trim();
+    return name ? name : null;
+};
+
+export const composerSurnameOf = (title) => {
+    const name = composerNameOf(title);
+    if (!name) {
+        return null;
+    }
+    const surname = (name.split(',')[0] ?? '').trim();
+    return surname ? surname : null;
+};
+
+/** Title without its `(Composer, Name)` suffix. */
+export const workTitleOf = (title) =>
+    String(title ?? '')
+        .replace(/\s*\([^()]+\)\s*$/, '')
+        .trim();
+
+const lettersOnly = (text) => fold(text).replace(/[^a-z]/g, '');
+
+/**
+ * Mutopia composer ids are surname + initials (`BeethovenLv`, `BachJS`,
+ * `Mendelssohn-BartholdyF`). A surname matches when the folded id starts with it.
+ */
+export const composerMatchesMutopiaId = (surname, mutopiaId) => {
+    const s = lettersOnly(surname);
+    const id = lettersOnly(mutopiaId);
+    return s.length >= 3 && id.startsWith(s);
+};
+
+/** `Beethoven,_Ludwig_van` (OpenScore folder) ↔ `Beethoven, Ludwig van`. */
+export const composerMatchesFolder = (composerName, folder) =>
+    fold(String(folder).replace(/_/g, ' ')) === fold(composerName);
+
+// ---------------------------------------------------------------------------
+// Catalog references (Op.27 No.2, BWV 846–869, K.331, D.899, …)
+// ---------------------------------------------------------------------------
+
+/** @typedef {{ type: string, n: number, nEnd?: number, no?: number }} CatalogRef */
+
+const REF_PATTERNS = [
+    { type: 'Anh', re: /\bBWV\s*Anh\.?\s*(\d+)/gi },
+    { type: 'BWV', re: /\bBWV\s*(\d+)(?:\s*-\s*(\d+))?/gi, range: true },
+    { type: 'WoO', re: /\bWoO\s*\.?\s*(\d+)/gi },
+    { type: 'Op', re: /\bOp(?:us)?[._]?\s*(\d+)[a-z]?(?:\s*,?\s*(?:No\.?|Nr\.?|n[o°]?\.?|#)\s*(\d+))?/gi, no: true },
+    { type: 'HWV', re: /\bHWV\s*(\d+)(?:\s*-\s*(\d+))?/gi, range: true },
+    { type: 'RV', re: /\bRV\s*(\d+)/gi },
+    { type: 'TWV', re: /\bTWV\s*(\d+)/gi },
+    { type: 'Hob', re: /\bHob\.?\s*([IVX]+[a-z]?)\s*[:.]\s*(\d+)/gi, group: true },
+    { type: 'K', re: /\bK\.?\s?V?\.?\s*(\d+)/g },
+    { type: 'D', re: /\bD\.\s?(\d+)/g },
+    { type: 'S', re: /\bS\.\s?(\d+)/g },
+    { type: 'M', re: /\bM\.\s?(\d+)/g },
+    { type: 'CD', re: /\bCD\s*(\d+)/g },
+    { type: 'L', re: /\bL\.\s?(\d+)/g },
+    { type: 'P', re: /\bP\.\s?(\d+)/g },
+];
+
+/**
+ * Every catalog reference in a title / Mutopia opus / folder name. `BWV Anh`
+ * is its own type so `BWV Anh.114` never reads as `BWV 114`.
+ */
+export const catalogRefsFromText = (text) => {
+    const source = String(text ?? '')
+        .normalize('NFKD')
+        .replace(/[\u2010-\u2015\u2212]/g, '-');
+    const refs = [];
+    let scan = source;
+    for (const { type, re, range, no, group } of REF_PATTERNS) {
+        re.lastIndex = 0;
+        for (const match of scan.matchAll(re)) {
+            // Hoboken keeps its roman group in the type (`Hob.I` vs `Hob.XVI`).
+            const n = Number(group ? match[2] : match[1]);
+            if (!Number.isFinite(n)) {
+                continue;
+            }
+            const ref = { type: group ? `${type}.${match[1].toUpperCase()}` : type, n };
+            if (range && match[2]) {
+                ref.nEnd = Number(match[2]);
+            }
+            if (no && match[2]) {
+                ref.no = Number(match[2]);
+            }
+            refs.push(ref);
+        }
+        if (type === 'Anh') {
+            // Strip `BWV Anh.114` so the BWV pattern does not see `114`.
+            scan = scan.replace(re, ' ');
+        }
+    }
+    return refs;
+};
+
+const refCovers = (want, have) => {
+    if (want.type !== have.type) {
+        return false;
+    }
+    const wantLo = want.n;
+    const wantHi = want.nEnd ?? want.n;
+    const haveLo = have.n;
+    const haveHi = have.nEnd ?? have.n;
+    if (haveHi < wantLo || haveLo > wantHi) {
+        return false;
+    }
+    if (want.no !== undefined && have.no !== undefined && want.no !== have.no) {
+        return false;
+    }
+    return true;
+};
+
+/**
+ * True when some reference of the candidate falls inside a reference of the
+ * wanted work. Ranges cover their members. When the work names a `No.`, a
+ * candidate that names a different `No.` anywhere is another piece of the set
+ * (`op76-n1` is not `Op.76 No.3`); a candidate naming no `No.` is the whole set.
+ */
+export const catalogMatches = (wantRefs, haveRefs) =>
+    wantRefs.some((want) => {
+        const same = haveRefs.filter((have) => refCovers({ ...want, no: undefined }, have));
+        if (same.length === 0) {
+            return false;
+        }
+        if (want.no === undefined) {
+            return true;
+        }
+        if (same.some((have) => have.no === want.no)) {
+            return true;
+        }
+        return same.every((have) => have.no === undefined);
+    });
+
+/** Exact agreement (same type, same number, same `No.` when either has it). */
+export const catalogEquals = (wantRefs, haveRefs) =>
+    wantRefs.length > 0 &&
+    wantRefs.every((want) =>
+        haveRefs.some(
+            (have) =>
+                have.type === want.type &&
+                have.n === want.n &&
+                (have.nEnd ?? null) === (want.nEnd ?? null) &&
+                (have.no ?? null) === (want.no ?? null),
+        ),
+    );
+
+const STOP_WORDS = new Set([
+    'the',
+    'a',
+    'an',
+    'in',
+    'of',
+    'no',
+    'major',
+    'minor',
+    'for',
+    'and',
+    'la',
+    'le',
+    'les',
+    'der',
+    'die',
+    'das',
+    'des',
+    'du',
+    'et',
+    'und',
+    'von',
+    'en',
+    'on',
+    'from',
+    'to',
+    'i',
+    'ii',
+    'iii',
+    'op',
+    'nr',
+    'sharp',
+    'flat',
+]);
+
+const stem = (word) => word.replace(/s$/, '').replace(/e$/, '');
+
+export const significantWords = (title) =>
+    fold(workTitleOf(title))
+        .replace(/[^a-z0-9 ]/g, ' ')
+        .split(' ')
+        .filter((w) => w.length > 1 && !/^\d+$/.test(w) && !STOP_WORDS.has(w))
+        .map(stem);
+
+/** Word-level match for works without a catalog number (`The Entertainer`, `3 Gymnopédies`). */
+export const titleWordsMatch = (workTitle, candidateText) => {
+    const want = significantWords(workTitle);
+    if (want.length === 0) {
+        return false;
+    }
+    const have = new Set(significantWords(`${candidateText} (x)`));
+    return want.every((w) => have.has(w));
+};
+
+// ---------------------------------------------------------------------------
+// Licence filter
+// ---------------------------------------------------------------------------
+
+/**
+ * Map an IMSLP / Mutopia / OpenScore licence label onto a `licence_tag`
+ * constraint value, or null when the label is not one we may ingest.
+ */
+export const licenceTagOf = (label) => {
+    const l = fold(label);
+    if (l === '') {
+        return null;
+    }
+    if (/performance restricted/.test(l)) {
+        return null;
+    }
+    if (/non-?pd/.test(l)) {
+        return null;
+    }
+    if (/\bcc0\b|creative commons zero|public domain dedication|public domain mark/.test(l)) {
+        return 'CC0';
+    }
+    if (/^public domain/.test(l)) {
+        return 'PD';
+    }
+    if (/creative commons/.test(l) || /^cc[- ]by/.test(l)) {
+        if (/non-?commercial|\bnc\b|no-?deriv|\bnd\b/.test(l)) {
+            return null;
+        }
+        if (/share[ -]?alike|\bsa\b/.test(l)) {
+            return 'CC-BY-SA';
+        }
+        if (/attribution|\bby\b/.test(l)) {
+            return 'CC-BY';
+        }
+        return null;
+    }
+    return null;
+};
+
+export const publicationYearOf = (value) => {
+    const match = /\b(1[5-9]\d\d|20\d\d)\b/.exec(String(value ?? ''));
+    return match ? Number(match[1]) : null;
+};
+
+/**
+ * Ingest decision for one file.
+ *
+ * @param {{ label: string | null, restriction?: string | null, euHosted?: boolean, year?: number | null }} input
+ * @returns {{ accept: boolean, tag: string | null, usPd: boolean, reason: string | null }}
+ */
+export const licenceVerdict = ({ label, restriction = null, euHosted = false, year = null }) => {
+    const l = fold(label);
+    if (/performance restricted/.test(l)) {
+        return { accept: false, tag: null, usPd: false, reason: 'performance_restricted' };
+    }
+    if (/creative commons/.test(l) && /non-?commercial|\bnc\b|no-?deriv|\bnd\b/.test(l)) {
+        return { accept: false, tag: null, usPd: false, reason: 'non_commercial' };
+    }
+    const tag = licenceTagOf(label);
+    if (tag === null) {
+        return { accept: false, tag: null, usPd: false, reason: 'no_licence' };
+    }
+    if (euHosted) {
+        return { accept: false, tag, usPd: false, reason: 'eu_hosted' };
+    }
+    if (restriction && restriction.trim() !== '') {
+        return { accept: false, tag, usPd: false, reason: 'not_us_pd' };
+    }
+    // US-PD: published before 1931, or an IMSLP-reviewed tag with no regional flag
+    // (a CC edition grants the rights itself).
+    const usPd = tag !== 'PD' || year === null || year < US_PD_BEFORE_YEAR;
+    if (!usPd) {
+        return { accept: false, tag, usPd: false, reason: 'not_us_pd' };
+    }
+    return { accept: true, tag, usPd: true, reason: null };
+};
+
+/** IMSLP file names carry a `PMLP1234-` prefix; IA copies often drop it. */
+const looseFilenameKey = (name) =>
+    lettersOnly(
+        String(name)
+            .replace(/^PMLP\d+-/i, '')
+            .replace(/\.pdf$/i, ''),
+    );
+
+/**
+ * The IMSLP licence row for a file, by canonical name first, then loosely
+ * (prefix / case / punctuation-insensitive). `licences` is
+ * `parseWorkPageLicenses(html)` from supabase/functions/_shared/imslpLicense.ts.
+ */
+export const imslpFileLicenceFor = (filename, licences) => {
+    if (!licences || licences.size === 0) {
+        return null;
+    }
+    const spaced = String(filename).replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+    const canonical = spaced.charAt(0).toUpperCase() + spaced.slice(1);
+    const direct = licences.get(canonical) ?? licences.get(filename);
+    if (direct) {
+        return direct;
+    }
+    const key = looseFilenameKey(filename);
+    if (key === '') {
+        return null;
+    }
+    for (const [name, licence] of licences) {
+        if (looseFilenameKey(name) === key) {
+            return licence;
+        }
+    }
+    return null;
+};
+
+/**
+ * Work-level fallback when the scan's filename cannot be bound to one IMSLP
+ * file: the work must carry at least one clean (unflagged, non-EU) PD / CC
+ * file. The caller still requires the scan's own publication year to be
+ * US-PD, which is what keeps a flagged later edition out.
+ */
+export const workLevelLicence = (licences) => {
+    if (!licences || licences.size === 0) {
+        return null;
+    }
+    for (const licence of licences.values()) {
+        if (!licence.euHosted && !licence.restriction && licenceTagOf(licence.licenseLabel) === 'PD') {
+            return licence;
+        }
+    }
+    return null;
+};
+
+// ---------------------------------------------------------------------------
+// Mutopia
+// ---------------------------------------------------------------------------
+
+/**
+ * Piece directories from the MutopiaProject git tree (`git/trees/…?recursive=1`).
+ * A piece is the deepest directory holding `.ly` files, with a `*-lys/`
+ * sub-directory collapsed onto its parent (multi-movement pieces).
+ *
+ * @returns {Array<{ dir: string, piece: string, composerId: string, catalogDir: string | null }>}
+ */
+export const mutopiaPiecesFromTree = (paths) => {
+    const dirs = new Set();
+    for (const path of paths) {
+        if (!path.startsWith('ftp/') || !/\.ly$/i.test(path)) {
+            continue;
+        }
+        const parts = path.split('/');
+        parts.pop();
+        if (parts.length > 0 && /-lys$/i.test(parts[parts.length - 1])) {
+            parts.pop();
+        }
+        if (parts.length < 3) {
+            continue;
+        }
+        dirs.add(parts.join('/'));
+    }
+    return [...dirs].sort().map((dir) => {
+        const parts = dir.split('/');
+        return {
+            dir,
+            piece: parts[parts.length - 1],
+            composerId: parts[1],
+            catalogDir: parts.length >= 4 ? parts[2] : null,
+        };
+    });
+};
+
+/** `O27` / `Op_27` / `WoO59` / `BWVAnh114` / `BWV846` / `K331` → refs. */
+export const catalogRefsFromMutopiaDir = (catalogDir) => {
+    if (!catalogDir) {
+        return [];
+    }
+    const m =
+        /^(?:Op_?|O)(\d+)$/i.exec(catalogDir) ??
+        /^(WoO)(\d+)$/i.exec(catalogDir) ??
+        /^(BWVAnh)(\d+)$/i.exec(catalogDir) ??
+        /^(BWV|HWV|RV|TWV|K|D|S)(\d+)$/i.exec(catalogDir);
+    if (!m) {
+        return [];
+    }
+    if (m.length === 2) {
+        return [{ type: 'Op', n: Number(m[1]) }];
+    }
+    const type = m[1].toLowerCase() === 'bwvanh' ? 'Anh' : m[1].toUpperCase() === 'WOO' ? 'WoO' : m[1].toUpperCase();
+    return [{ type, n: Number(m[2]) }];
+};
+
+const decodeXmlEntities = (value) =>
+    String(value ?? '')
+        .replace(/&amp;/g, '&')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+        .trim();
+
+const rdfField = (xml, name) => {
+    const match = new RegExp(`<mp:${name}>([\\s\\S]*?)</mp:${name}>`).exec(xml);
+    return match ? decodeXmlEntities(match[1]) : '';
+};
+
+/** Parse a Mutopia `<piece>.rdf` (served next to the PDF / MIDI on the FTP tree). */
+export const parseMutopiaRdf = (xml) => ({
+    title: rdfField(xml, 'title'),
+    composer: rdfField(xml, 'composer'),
+    opus: rdfField(xml, 'opus'),
+    instrument: rdfField(xml, 'for'),
+    date: rdfField(xml, 'date'),
+    style: rdfField(xml, 'style'),
+    arranger: rdfField(xml, 'arranger'),
+    source: rdfField(xml, 'source'),
+    licence: rdfField(xml, 'licence'),
+    lyFile: rdfField(xml, 'lyFile'),
+    midFile: rdfField(xml, 'midFile'),
+    pdfFileLet: rdfField(xml, 'pdfFileLet'),
+    pdfFileA4: rdfField(xml, 'pdfFileA4'),
+    id: rdfField(xml, 'id'),
+    maintainer: rdfField(xml, 'maintainer'),
+    moreInfo: rdfField(xml, 'moreInfo'),
+});
+
+/** `Mutopia-2015/08/18-931` → the piece-info page (the courtesy source link). */
+export const mutopiaPieceInfoUrl = (id, dir) => {
+    const match = /-(\d+)$/.exec(String(id ?? ''));
+    if (match) {
+        return `${MUTOPIA_ORIGIN}/cgibin/piece-info.cgi?id=${match[1]}`;
+    }
+    return `${MUTOPIA_ORIGIN}/${dir}/`;
+};
+
+export const isPianoSolo = (instrument) => {
+    const text = String(instrument ?? '').trim();
+    if (text === '') {
+        return false;
+    }
+    if (!/piano|harpsichord|clavier|keyboard/i.test(text)) {
+        return false;
+    }
+    return !/4\s*hands|four\s*hands|2\s*pianos|two\s*pianos|duet|ensemble|voice|violin|cello|flute|orchestra|quartet|trio/i.test(
+        text,
+    );
+};
+
+/**
+ * Cheap pre-filter before fetching a piece's RDF: composer must match, and the
+ * catalog directory (when the tree has one) must agree with the work's refs.
+ */
+export const mutopiaPieceCandidate = (work, piece) => {
+    const surname = composerSurnameOf(work.title);
+    const wantRefs = catalogRefsFromText(workTitleOf(work.title));
+    // Mutopia files every BWV / BWV Anh. number under BachJS, whoever IMSLP credits.
+    const bachCatalog = piece.composerId === 'BachJS' && wantRefs.some((r) => r.type === 'BWV' || r.type === 'Anh');
+    if (!surname || (!bachCatalog && !composerMatchesMutopiaId(surname, piece.composerId))) {
+        return false;
+    }
+    if (wantRefs.length === 0) {
+        return true;
+    }
+    const dirRefs = catalogRefsFromMutopiaDir(piece.catalogDir);
+    if (dirRefs.length === 0) {
+        return true;
+    }
+    return catalogMatches(wantRefs, dirRefs);
+};
+
+/** Confirm a candidate against its RDF: opus / piece name refs, or title words. */
+export const mutopiaPieceMatches = (work, piece, rdf) => {
+    if (rdf.arranger && rdf.arranger.trim() !== '') {
+        return false;
+    }
+    const wantRefs = catalogRefsFromText(workTitleOf(work.title));
+    if (wantRefs.length > 0) {
+        const haveRefs = [
+            ...catalogRefsFromText(rdf.opus),
+            ...catalogRefsFromMutopiaDir(piece.catalogDir),
+            ...catalogRefsFromText(piece.piece.replace(/[_-]/g, ' ')),
+        ];
+        return haveRefs.length > 0 && catalogMatches(wantRefs, haveRefs);
+    }
+    return titleWordsMatch(work.title, `${rdf.title} ${rdf.moreInfo} ${piece.piece.replace(/[_-]/g, ' ')}`);
+};
+
+/**
+ * Resolution record for a Mutopia piece, or null with a skip reason when the
+ * RDF licence is not ingestable.
+ */
+export const mutopiaResolution = (work, piece, rdf) => {
+    const verdict = licenceVerdict({ label: rdf.licence, year: publicationYearOf(rdf.date) });
+    const base = `${MUTOPIA_ORIGIN}/${piece.dir}/`;
+    const filename = [rdf.pdfFileLet, rdf.pdfFileA4].find((f) => /\.pdf$/i.test(f ?? ''));
+    if (!filename) {
+        // Multi-file pieces ship `*-pdfs.zip`; not a single PDF we can hash.
+        return { ok: false, reason: 'no_source', origin: 'mutopia', filename: rdf.pdfFileLet || `${piece.piece}.pdf` };
+    }
+    if (!verdict.accept) {
+        return { ok: false, reason: verdict.reason, origin: 'mutopia', filename };
+    }
+    const credit = [rdf.maintainer, rdf.source ? `after ${rdf.source}` : null].filter(Boolean).join(', ');
+    return {
+        ok: true,
+        origin: 'mutopia',
+        workTitle: work.title,
+        filename,
+        pdfUrl: `${base}${filename}`,
+        candidateUrl: rdf.midFile ? `${base}${rdf.midFile}` : null,
+        sourceUrl: mutopiaPieceInfoUrl(rdf.id, piece.dir),
+        licenceTag: verdict.tag,
+        usPd: verdict.usPd,
+        editorCredit: credit ? `${credit} (Mutopia)` : 'Mutopia Project',
+        pianoSolo: isPianoSolo(rdf.instrument),
+        pieceTitle: rdf.title,
+    };
+};
+
+// ---------------------------------------------------------------------------
+// OpenScore (CC0) — Lieder ships mscz/mxl only; String Quartets ship PDFs too
+// ---------------------------------------------------------------------------
+
+/**
+ * Work folders from an OpenScore repo tree: `scores/<Composer,_Name>/<Work>/…`.
+ * @returns {Array<{ dir: string, composerFolder: string, workFolder: string, files: string[] }>}
+ */
+export const openscoreWorksFromTree = (paths) => {
+    const byDir = new Map();
+    for (const path of paths) {
+        const parts = path.split('/');
+        if (parts[0] !== 'scores' || parts.length < 4) {
+            continue;
+        }
+        const dir = parts.slice(0, 3).join('/');
+        const entry = byDir.get(dir) ?? { dir, composerFolder: parts[1], workFolder: parts[2], files: [] };
+        entry.files.push(path);
+        byDir.set(dir, entry);
+    }
+    return [...byDir.values()];
+};
+
+export const openscoreWorkMatches = (work, entry) => {
+    const composer = composerNameOf(work.title);
+    if (!composer || !composerMatchesFolder(composer, entry.composerFolder)) {
+        return false;
+    }
+    const folderTitle = entry.workFolder.replace(/_/g, ' ');
+    if (fold(folderTitle) === fold(workTitleOf(work.title))) {
+        return true;
+    }
+    const wantRefs = catalogRefsFromText(workTitleOf(work.title));
+    if (wantRefs.length > 0) {
+        return catalogEquals(wantRefs, catalogRefsFromText(folderTitle));
+    }
+    return titleWordsMatch(work.title, folderTitle);
+};
+
+/** The full-score PDF (`sq123.pdf`, never a `-Part-`), else null. */
+export const openscoreScorePdf = (entry) =>
+    entry.files.find((f) => /\.pdf$/i.test(f) && !/-Part-/i.test(f) && !/_text\.pdf$/i.test(f)) ?? null;
+
+export const openscoreResolution = (work, entry, repo, { renderer = false } = {}) => {
+    const pdf = openscoreScorePdf(entry);
+    const mxl = entry.files.find((f) => /\.mxl$/i.test(f)) ?? null;
+    const mscz = entry.files.find((f) => /\.mscz$/i.test(f)) ?? null;
+    if (!pdf && !(renderer && mscz)) {
+        return { ok: false, reason: 'no_renderer', origin: 'openscore', filename: `${entry.workFolder}.pdf` };
+    }
+    const filename = pdf
+        ? pdf.split('/').pop()
+        : `${mscz
+              .split('/')
+              .pop()
+              .replace(/\.mscz$/i, '')}.pdf`;
+    return {
+        ok: true,
+        origin: 'openscore',
+        workTitle: work.title,
+        filename,
+        pdfUrl: pdf ? `${repo.rawBase}${pdf}` : null,
+        renderFrom: pdf ? null : `${repo.rawBase}${mscz}`,
+        candidateUrl: mxl ? `${repo.rawBase}${mxl}` : null,
+        sourceUrl: `${repo.htmlBase}${entry.dir}`,
+        licenceTag: 'CC0',
+        usPd: true,
+        editorCredit: repo.credit,
+        pianoSolo: false,
+        pieceTitle: entry.workFolder.replace(/_/g, ' '),
+    };
+};
+
+// ---------------------------------------------------------------------------
+// Internet Archive `imslp` collection
+// ---------------------------------------------------------------------------
+
+/** IA items carry `external-identifier: urn:imslp_record_id:<base64(page title)>`. */
+export const iaRecordId = (title) => `urn:imslp_record_id:${Buffer.from(title, 'utf8').toString('base64')}`;
+
+export const iaExactQuery = (title) => `collection:imslp AND external-identifier:"${iaRecordId(title)}"`;
+
+/** Catalog token for the fallback search (`Op.27 No.2`, `WoO 59`, `BWV 846`). */
+export const iaCatalogToken = (title) => {
+    const ref = catalogRefsFromText(workTitleOf(title))[0];
+    if (!ref) {
+        return null;
+    }
+    if (ref.type.startsWith('Hob.')) {
+        return `${ref.type}:${ref.n}`;
+    }
+    switch (ref.type) {
+        case 'Op':
+            return ref.no !== undefined ? `Op.${ref.n} No.${ref.no}` : `Op.${ref.n}`;
+        case 'Anh':
+            return `BWV Anh.${ref.n}`;
+        case 'BWV':
+        case 'HWV':
+        case 'RV':
+        case 'TWV':
+        case 'WoO':
+        case 'CD':
+            return `${ref.type} ${ref.n}`;
+        case 'K':
+        case 'D':
+        case 'S':
+        case 'M':
+        case 'L':
+        case 'P':
+            return `${ref.type}.${ref.n}`;
+        default:
+            return null;
+    }
+};
+
+/** Title with every catalog reference and all punctuation removed, folded. */
+export const titleCore = (title) => {
+    let text = workTitleOf(title)
+        .normalize('NFKD')
+        .replace(/[\u2010-\u2015\u2212]/g, '-');
+    for (const { re } of REF_PATTERNS) {
+        re.lastIndex = 0;
+        text = text.replace(re, ' ');
+    }
+    return fold(text)
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+};
+
+/**
+ * Fallback searches for a work the record id did not find (IA mirrored IMSLP
+ * in 2012 under the page titles of the time): the catalog token, then the
+ * title phrase. Both are accepted only through `pickIaDoc`.
+ */
+export const iaFallbackQueries = (title) => {
+    const composer = composerNameOf(title);
+    if (!composer) {
+        return [];
+    }
+    const out = [];
+    const token = iaCatalogToken(title);
+    if (token) {
+        out.push(`collection:imslp AND creator:"${composer}" AND title:"${token}"`);
+    }
+    const core = titleCore(title);
+    if (core.length >= 6) {
+        out.push(`collection:imslp AND creator:"${composer}" AND title:"${core}"`);
+    }
+    return out;
+};
+
+export const iaSearchUrl = (query, rows = 10) => {
+    const url = new URL(IA_SEARCH_URL);
+    url.searchParams.set('q', query);
+    url.searchParams.append('fl[]', 'identifier');
+    url.searchParams.append('fl[]', 'title');
+    url.searchParams.append('fl[]', 'creator');
+    url.searchParams.append('fl[]', 'date');
+    url.searchParams.set('rows', String(rows));
+    url.searchParams.set('output', 'json');
+    return url.toString();
+};
+
+/**
+ * Pick the IA document that is this work: title equality (sans composer), or
+ * exact catalog agreement with a creator match. Anything looser is a wrong
+ * edition, which is worse than a miss.
+ */
+export const pickIaDoc = (title, docs) => {
+    const want = fold(workTitleOf(title));
+    const wantRefs = catalogRefsFromText(workTitleOf(title));
+    const composer = fold(composerNameOf(title) ?? '');
+    const sameCreator = (doc) => {
+        const creator = Array.isArray(doc.creator) ? doc.creator.join(' ') : doc.creator;
+        return fold(creator) === composer;
+    };
+    for (const doc of docs ?? []) {
+        if (fold(doc.title) === want) {
+            return doc;
+        }
+    }
+    for (const doc of docs ?? []) {
+        if (!sameCreator(doc)) {
+            continue;
+        }
+        const haveRefs = catalogRefsFromText(doc.title);
+        if (wantRefs.length > 0 && catalogEquals(wantRefs, haveRefs)) {
+            return doc;
+        }
+        // Same words, and neither side names a catalog number the other contradicts.
+        if (
+            titleCore(title) === titleCore(doc.title) &&
+            (wantRefs.length === 0 || haveRefs.length === 0 || catalogEquals(wantRefs, haveRefs))
+        ) {
+            return doc;
+        }
+    }
+    return null;
+};
+
+/** File names that are a single part or another scoring, not the work's score. */
+export const IA_PART_OR_ARRANGEMENT_RE =
+    /(?:^|[-_ .(])(?:parts?|pf ?4h|4 ?hands|four ?hands|arr|arrangement|transc\w*|duet|vn ?\d|vl ?\d|violin|viola|cello|violoncello|clarinet|trumpet|horn|flute|oboe|bassoon|quartet|kwartet|overture|ouverture)(?:$|[-_ .)])/i;
+
+/**
+ * The original PDF of an IA item (not the `_text.pdf` OCR derivative), skipping
+ * files named as a part or an arrangement. Null when only those remain.
+ */
+export const pickIaPdf = (files) => {
+    const pdfs = (files ?? []).filter((f) => /\.pdf$/i.test(f.name ?? '') && !/_text\.pdf$/i.test(f.name));
+    const scores = pdfs.filter((f) => !IA_PART_OR_ARRANGEMENT_RE.test(f.name.replace(/\.pdf$/i, '')));
+    const originals = scores.filter((f) => f.source === 'original');
+    const pool = originals.length > 0 ? originals : scores;
+    pool.sort((a, b) => Number(b.size ?? 0) - Number(a.size ?? 0));
+    return pool[0] ?? null;
+};
+
+export const iaFileUrl = (identifier, name) =>
+    `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeURIComponent(name)}`;
+
+export const iaResolution = (work, item, file, licences) => {
+    const filename = file.name;
+    const year = publicationYearOf(item.metadata?.date);
+    const bound = imslpFileLicenceFor(filename, licences);
+    const licence = bound ?? workLevelLicence(licences);
+    if (!licence) {
+        return { ok: false, reason: 'no_licence', origin: 'ia', filename };
+    }
+    const verdict = licenceVerdict({
+        label: licence.licenseLabel,
+        restriction: licence.restriction,
+        euHosted: licence.euHosted,
+        // An unbound scan must clear US-PD on its own publication year.
+        year: bound ? year : (year ?? US_PD_BEFORE_YEAR),
+    });
+    if (!verdict.accept) {
+        return { ok: false, reason: verdict.reason, origin: 'ia', filename };
+    }
+    const size = Number(file.size ?? 0);
+    if (size > MAX_PDF_BYTES) {
+        return { ok: false, reason: 'too_large', origin: 'ia', filename };
+    }
+    return {
+        ok: true,
+        origin: 'ia',
+        workTitle: work.title,
+        filename,
+        pdfUrl: iaFileUrl(item.metadata.identifier, filename),
+        candidateUrl: null,
+        sourceUrl: `https://archive.org/details/${item.metadata.identifier}`,
+        licenceTag: verdict.tag,
+        usPd: verdict.usPd,
+        editorCredit: null,
+        pianoSolo: (item.metadata?.subject ?? []).includes('For piano'),
+        pieceTitle: item.metadata?.title ?? '',
+        byteLength: size || null,
+    };
+};
+
+// ---------------------------------------------------------------------------
+// IMSLP metadata (identity + licence only)
+// ---------------------------------------------------------------------------
+
+/** `action=parse` for the rendered work page — the one place per-file tags live. */
+export const imslpParseUrl = (title) => {
+    const url = new URL(IMSLP_API);
+    url.searchParams.set('action', 'parse');
+    url.searchParams.set('page', title);
+    url.searchParams.set('prop', 'text');
+    url.searchParams.set('redirects', '1');
+    url.searchParams.set('format', 'json');
+    return url.toString();
+};
+
+// ---------------------------------------------------------------------------
+// Ranking
+// ---------------------------------------------------------------------------
+
+/** @typedef {{ title: string, tier: number, prior: number, composer: string | null, instrument: string | null, pin?: boolean }} RankedWork */
+
+/**
+ * Composer surnames in demand order: first appearance in POPULAR_WORKS, then
+ * the era table. Folded.
+ */
+export const canonicalComposerOrder = (popular, extraSurnames = CANONICAL_SURNAMES) => {
+    const order = [];
+    const seen = new Set();
+    const push = (name) => {
+        const key = fold(name);
+        if (key !== '' && !seen.has(key)) {
+            seen.add(key);
+            order.push(key);
+        }
+    };
+    for (const work of popular) {
+        push(composerSurnameOf(work.title) ?? work.composer);
+    }
+    for (const name of extraSurnames) {
+        push(name);
+    }
+    return order;
+};
+
+/**
+ * Cold-start + demand ranking.
+ *
+ * Tier 0: POPULAR_WORKS in list order (prior N..1) then eval pins. Tier 1:
+ * catalog works `For piano` by a canonical composer, POPULAR composer order,
+ * then `touched desc`. Score = 1000·downloads + 100·corpus use + prior; a
+ * title with downloads that is in neither set is inserted (tier 1).
+ *
+ * @param {{ popular: Array<{ title: string, composer?: string, instrument?: string }>,
+ *           pins?: Array<{ title: string }>,
+ *           catalog?: Array<{ page_title: string, composer: string | null, categories: string[], touched: string | null }>,
+ *           demand?: Map<string, number>, corpusUse?: Map<string, number> }} input
+ * @returns {RankedWork[]}
+ */
+export const rankWorks = ({ popular, pins = [], catalog = [], demand = new Map(), corpusUse = new Map() }) => {
+    const byTitle = new Map();
+    const n = popular.length;
+    popular.forEach((work, index) => {
+        if (!byTitle.has(work.title)) {
+            byTitle.set(work.title, {
+                title: work.title,
+                tier: 0,
+                prior: n - index,
+                composer: composerSurnameOf(work.title) ?? work.composer ?? null,
+                instrument: work.instrument ?? null,
+            });
+        }
+    });
+    for (const pin of pins) {
+        if (!byTitle.has(pin.title)) {
+            byTitle.set(pin.title, {
+                title: pin.title,
+                tier: 0,
+                prior: 0,
+                composer: composerSurnameOf(pin.title),
+                instrument: 'piano',
+                pin: true,
+            });
+        }
+    }
+
+    const composerOrder = canonicalComposerOrder(popular);
+    const composerRank = new Map(composerOrder.map((name, index) => [name, index]));
+    const fill = [];
+    for (const work of catalog) {
+        if (byTitle.has(work.page_title) || !Array.isArray(work.categories) || !work.categories.includes('For piano')) {
+            continue;
+        }
+        const surname = fold(composerSurnameOf(work.page_title) ?? (work.composer ?? '').split(',')[0]);
+        const rank = composerRank.get(surname);
+        if (rank === undefined) {
+            continue;
+        }
+        fill.push({ work, rank, touched: work.touched ?? '' });
+    }
+    fill.sort((a, b) => a.rank - b.rank || (a.touched < b.touched ? 1 : a.touched > b.touched ? -1 : 0));
+    for (const { work } of fill) {
+        byTitle.set(work.page_title, {
+            title: work.page_title,
+            tier: 1,
+            prior: 0,
+            composer: composerSurnameOf(work.page_title),
+            instrument: 'piano',
+        });
+    }
+
+    for (const [title, downloads] of demand) {
+        if (downloads > 0 && !byTitle.has(title)) {
+            byTitle.set(title, { title, tier: 1, prior: 0, composer: composerSurnameOf(title), instrument: null });
+        }
+    }
+
+    const ordered = [...byTitle.values()];
+    const position = new Map(ordered.map((w, i) => [w.title, i]));
+    const scoreOf = (w) => 1000 * (demand.get(w.title) ?? 0) + 100 * (corpusUse.get(w.title) ?? 0) + w.prior;
+    ordered.sort((a, b) => scoreOf(b) - scoreOf(a) || position.get(a.title) - position.get(b.title));
+    return ordered.map((w) => ({ ...w, score: scoreOf(w) }));
+};
+
+/**
+ * Demand from `documents.title` rows (IMSLP imports store the work page title;
+ * uploads store a file name, which has no `(Last, First)` suffix). The corpus
+ * owner's own documents are excluded by the caller's query.
+ */
+export const demandFromDocumentTitles = (titles) => {
+    const counts = new Map();
+    for (const title of titles) {
+        if (typeof title !== 'string' || composerSurnameOf(title) === null) {
+            continue;
+        }
+        counts.set(title, (counts.get(title) ?? 0) + 1);
+    }
+    return counts;
+};
+
+// ---------------------------------------------------------------------------
+// Eval pins → Mutopia pieces
+// ---------------------------------------------------------------------------
+
+/** `https://www.mutopiaproject.org/ftp/BachJS/BWV772/bach-invention-01/x.mid` → piece dir. */
+export const mutopiaPieceDirFromUrl = (url) => {
+    try {
+        const path = new URL(url).pathname;
+        const parts = path.split('/').filter(Boolean);
+        if (parts[0] !== 'ftp') {
+            return null;
+        }
+        parts.pop();
+        if (parts.length < 3) {
+            return null;
+        }
+        return parts.join('/');
+    } catch {
+        return null;
+    }
+};
+
+/**
+ * Mutopia piece dirs referenced by the eval corpus (`pdf.url` or
+ * `reference.url` on mutopiaproject.org). IMSLP URLs are ignored on purpose.
+ */
+export const evalPinPieceDirs = (pins) => {
+    const dirs = new Set();
+    for (const pin of pins) {
+        for (const url of [pin?.pdf?.url, pin?.reference?.url]) {
+            if (typeof url === 'string' && /mutopiaproject\.org\/ftp\//.test(url)) {
+                const dir = mutopiaPieceDirFromUrl(url);
+                if (dir) {
+                    dirs.add(dir);
+                }
+            }
+        }
+    }
+    return [...dirs].sort();
+};
+
+/**
+ * Reverse resolution: which IMSLP work page is this Mutopia piece? POPULAR
+ * titles by catalog refs first (BWV Anh.114 lives under Petzold there), then
+ * catalog titles whose composer is the piece's composer.
+ */
+export const titleForMutopiaPiece = (piece, rdf, popular, catalogWorks = []) => {
+    const haveRefs = [
+        ...catalogRefsFromText(rdf.opus),
+        ...catalogRefsFromMutopiaDir(piece.catalogDir),
+        ...catalogRefsFromText(piece.piece.replace(/[_-]/g, ' ')),
+    ];
+    // Narrowest matching reference wins: `Prelude in C major, BWV 939` over
+    // a `BWV 939-943` collection page.
+    const exact = (candidates) => {
+        let best = null;
+        for (const title of candidates) {
+            const wantRefs = catalogRefsFromText(workTitleOf(title));
+            if (wantRefs.length === 0 || haveRefs.length === 0 || !catalogMatches(wantRefs, haveRefs)) {
+                continue;
+            }
+            const span = Math.min(...wantRefs.map((r) => (r.nEnd ?? r.n) - r.n));
+            if (best === null || span < best.span) {
+                best = { title, span };
+            }
+        }
+        return best?.title;
+    };
+    const popularByComposer = popular
+        .map((w) => w.title)
+        .filter((title) => composerMatchesMutopiaId(composerSurnameOf(title) ?? '', piece.composerId));
+    const fromPopularComposer = exact(popularByComposer);
+    if (fromPopularComposer) {
+        return fromPopularComposer;
+    }
+    const fromPopularAny = exact(popular.map((w) => w.title));
+    if (fromPopularAny) {
+        return fromPopularAny;
+    }
+    const catalogByComposer = catalogWorks
+        .filter((w) => composerMatchesMutopiaId(composerSurnameOf(w.page_title) ?? '', piece.composerId))
+        .map((w) => w.page_title);
+    const fromCatalog = exact(catalogByComposer);
+    if (fromCatalog) {
+        return fromCatalog;
+    }
+    const byWords =
+        popularByComposer.find((title) => titleWordsMatch(title, `${rdf.title} ${rdf.moreInfo}`)) ??
+        catalogByComposer.find((title) => titleWordsMatch(title, `${rdf.title} ${rdf.moreInfo}`));
+    return byWords ?? null;
+};
+
+// ---------------------------------------------------------------------------
+// Ledger state machine (`playalong_corpus_seed.status`)
+// ---------------------------------------------------------------------------
+
+export const LEDGER_TRANSITIONS = Object.freeze({
+    pending: ['fetched', 'skipped', 'failed', 'paused'],
+    paused: ['pending', 'fetched', 'skipped', 'failed'],
+    fetched: ['queued', 'failed', 'skipped'],
+    queued: ['ready', 'failed'],
+    failed: ['pending', 'fetched', 'skipped', 'failed'],
+    skipped: ['pending', 'fetched'],
+    ready: [],
+});
+
+export const canTransition = (from, to) => (LEDGER_TRANSITIONS[from] ?? []).includes(to);
+
+/**
+ * Whether a rerun should touch this ledger row.
+ * @returns {{ process: boolean, reason: string }}
+ */
+export const shouldProcess = (row, { retrySkipped = false } = {}) => {
+    const attempts = Number(row.attempts ?? 0);
+    switch (row.status) {
+        case 'ready':
+            return { process: false, reason: 'already_ready' };
+        case 'queued':
+            return { process: false, reason: 'in_flight' };
+        case 'pending':
+        case 'paused':
+        case 'fetched':
+            return { process: true, reason: 'resume' };
+        case 'failed':
+            return attempts < MAX_ATTEMPTS
+                ? { process: true, reason: 'retry' }
+                : { process: false, reason: 'attempts_exhausted' };
+        case 'skipped':
+            return retrySkipped ? { process: true, reason: 'retry_skipped' } : { process: false, reason: 'skipped' };
+        default:
+            return { process: false, reason: `unknown_status:${row.status}` };
+    }
+};
+
+/**
+ * Reconcile a `queued` row against the worker's outcome.
+ * @returns {{ status: 'ready' | 'failed', error: string | null } | null}
+ */
+export const reconcileQueued = (job, analysis) => {
+    if (analysis?.status === 'ready' || job?.status === 'succeeded') {
+        return { status: 'ready', error: null };
+    }
+    if (job?.status === 'failed_permanent' || job?.status === 'dead') {
+        return { status: 'failed', error: job.last_error ?? analysis?.error ?? 'omr_failed' };
+    }
+    if (analysis?.status === 'failed' && (!job || !['queued', 'running'].includes(job.status))) {
+        return { status: 'failed', error: analysis.error ?? 'omr_failed' };
+    }
+    return null;
+};
+
+/**
+ * Whether a source should be tried for this run. `--source` filters; the
+ * per-origin backoff (consecutive upstream failures) parks a source.
+ */
+export const sourceEnabled = (origin, { sources = ORIGINS, parked = new Set() } = {}) =>
+    sources.includes(origin) && !parked.has(origin);
+
+export const parseSources = (value) => {
+    if (!value || value === 'all') {
+        return [...ORIGINS];
+    }
+    const wanted = String(value)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    for (const w of wanted) {
+        if (!ORIGINS.includes(w)) {
+            throw new Error(`--source must be one of ${ORIGINS.join('|')}|all (got ${w})`);
+        }
+    }
+    return ORIGINS.filter((o) => wanted.includes(o));
+};
+
+/** Exponential per-source backoff (1s, 2s, 4s … capped) with a park threshold. */
+export const backoffDelayMs = (consecutiveFailures, { baseMs = 1000, maxMs = 60_000 } = {}) =>
+    Math.min(maxMs, baseMs * 2 ** Math.max(0, consecutiveFailures - 1));
+
+export const PARK_AFTER_FAILURES = 5;
+
+// ---------------------------------------------------------------------------
+// Dry-run planning + progress
+// ---------------------------------------------------------------------------
+
+/**
+ * Choose the resolutions to act on for one work: first enabled origin with an
+ * accepted file wins (Mutopia → OpenScore → IA); piano-solo Mutopia pieces
+ * first; capped per work. Skips from every origin are kept for the ledger.
+ *
+ * @param {Array<object>} resolutions  mutopiaResolution / openscoreResolution / iaResolution outputs
+ * @param {{ sources?: string[] }} options
+ * @returns {{ queue: object[], skips: object[], origin: string | null }}
+ */
+export const planWork = (resolutions, { sources = ORIGINS } = {}) => {
+    const skips = resolutions.filter((r) => !r.ok && sources.includes(r.origin));
+    for (const origin of ORIGINS) {
+        if (!sources.includes(origin)) {
+            continue;
+        }
+        const hits = resolutions.filter((r) => r.ok && r.origin === origin);
+        if (hits.length === 0) {
+            continue;
+        }
+        hits.sort((a, b) => Number(b.pianoSolo) - Number(a.pianoSolo) || a.filename.localeCompare(b.filename));
+        return { queue: hits.slice(0, MAX_FILES_PER_WORK), skips, origin };
+    }
+    return { queue: [], skips, origin: null };
+};
+
+/** Coverage of a title set by winning origin (the dry-run summary). */
+export const coverageByOrigin = (plans, titles) => {
+    const out = { mutopia: 0, openscore: 0, ia: 0, none: 0, total: 0 };
+    for (const title of titles) {
+        out.total += 1;
+        const plan = plans.get(title);
+        if (plan?.origin) {
+            out[plan.origin] += 1;
+        } else {
+            out.none += 1;
+        }
+    }
+    return out;
+};
+
+export const progressEvent = ({ ready = 0, queued = 0, skipped = 0, failed = 0, target = 0, batchId = null }) =>
+    JSON.stringify({ event: 'corpus_seed', ready, queued, skipped, failed, target, batch_id: batchId });
+
+export const workEvent = ({ workTitle, status, origin = null, filename = null, pdfSha256 = null, reason = null }) =>
+    JSON.stringify({ event: 'corpus_seed', workTitle, status, origin, filename, pdfSha256, reason });
+
+/** Count distinct work titles at or past `queued` — what `--limit` floors. */
+export const coveredWorkCount = (rows) => {
+    const titles = new Set();
+    for (const row of rows) {
+        if (row.status === 'queued' || row.status === 'ready' || row.status === 'fetched') {
+            titles.add(row.work_title);
+        }
+    }
+    return titles.size;
+};
