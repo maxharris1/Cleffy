@@ -165,6 +165,8 @@ export function pickIaDoc<T extends { title?: string; creator?: string | string[
     docs: readonly T[] | null | undefined,
 ): T | null;
 export const IA_PART_OR_ARRANGEMENT_RE: RegExp;
+export const IA_PART_ABBREV_RE: RegExp;
+export function iaFileIsPartOrArrangement(name: string): boolean;
 export function pickIaPdf<T extends { name?: string; source?: string; size?: string | number }>(
     files: readonly T[] | null | undefined,
     editions?: readonly ImslpEdition[],
