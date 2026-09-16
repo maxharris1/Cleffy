@@ -58,12 +58,14 @@ import type { ScoreData } from './scoreData.js';
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
  * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
+ * svc-35: a near-blank scanned leaf is skipped like a cover instead of failing
+ * the whole book export. Only PDFs that produced nothing under svc-34 change.
  * svc-34: raster-honest Audiveris patches 0001-0004 and 0007 (octave G clef,
  * ottava ink, tuplet bracket, ledger head, ledger-fragment dots). Parser
  * repairs from the RSI cycles land in the same stamp. Not svc-15..33: those
  * numbers were vector-hint images or mixed patch sets this product image omits.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-34';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-35';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
@@ -363,9 +365,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 era: omrEra,
                 score,
                 source,
-                ...(omrLayout !== undefined
-                    ? { workKey: omrLayout.workKey, printedBars: omrLayout.printedBars }
-                    : {}),
+                ...(omrLayout !== undefined ? { workKey: omrLayout.workKey, printedBars: omrLayout.printedBars } : {}),
                 ...(timings.pageCount !== undefined ? { pageCount: timings.pageCount } : {}),
                 symbolicSource: 'omr',
                 ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
@@ -787,22 +787,15 @@ export const collectRangeArtifacts = async (
 
     const remaining = sheets ? sheetRangesExcluding(sheets, result.invalidSheets) : [];
     const effectiveSheets =
-        remaining.length > 0
-            ? { from: remaining[0]!.from, to: remaining[remaining.length - 1]!.to }
-            : sheets;
+        remaining.length > 0 ? { from: remaining[0]!.from, to: remaining[remaining.length - 1]!.to } : sheets;
 
     const mxlBuffers = await Promise.all(result.mxlPaths.map((path) => readFile(path)));
     const geometry = result.omrPath ? parseOmrGeometry(await readFile(result.omrPath)) : null;
     return { mxlBuffers, geometry, invalidSheets: result.invalidSheets, sheets: effectiveSheets };
 };
 
-export const unionSheetNumbers = (
-    existing: readonly number[] | undefined,
-    added: readonly number[],
-): number[] =>
-    [...new Set([...(existing ?? []), ...added])]
-        .filter((n) => Number.isInteger(n) && n >= 1)
-        .sort((a, b) => a - b);
+export const unionSheetNumbers = (existing: readonly number[] | undefined, added: readonly number[]): number[] =>
+    [...new Set([...(existing ?? []), ...added])].filter((n) => Number.isInteger(n) && n >= 1).sort((a, b) => a - b);
 
 /** Record skipped staff-less pages on timings and the score warning list. */
 export const recordInvalidSheets = (
