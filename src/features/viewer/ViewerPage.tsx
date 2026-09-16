@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useParams, useSearchParams } from 'react-router';
+import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
@@ -87,6 +87,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // the analysis starts on its own — Generate inside the panel is the only
     // thing that requests an OMR run.
     const [playAlongOpen, setPlayAlongOpen] = useState(false);
+    // Set by the shell when it navigates here straight after an IMSLP import,
+    // so the play-along wait can show that download as its first step.
+    // Deliberately not persisted: a reload starts the story at the queue.
+    const { state: navState } = useLocation();
+    const fromImslp = (navState as { imslpImport?: boolean } | null)?.imslpImport === true;
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     const [staleBytes, setStaleBytes] = useState(false);
@@ -378,7 +383,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         {analysisInFlight ? (
                             <span
                                 aria-hidden="true"
-                                title="Analyzing score…"
+                                title={analysisState.kind === 'pending' ? 'Queued for analysis…' : 'Analyzing score…'}
                                 className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-accent"
                             />
                         ) : null}
@@ -448,6 +453,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         warning={warning}
                         onDismissWarning={dismissWarning}
                         documentTitle={state.doc.title}
+                        fromImslp={fromImslp}
                     />
                 </div>
             ) : null}

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { Era } from '@/features/playback/era';
+import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
 import { SourceAttribution } from '@/features/playback/SourceAttribution';
@@ -41,6 +42,8 @@ export interface TransportBarProps {
     onDismissWarning: () => void;
     /** Live document title, so an era-stamped analysis can go stale on rename. */
     documentTitle?: string | null;
+    /** The score was just added via Find on IMSLP, so the wait started with that download. */
+    fromImslp?: boolean;
 }
 
 const ERROR_COPY: Record<string, string> = {
@@ -256,7 +259,7 @@ export const TransportBar = (props: TransportBarProps) => {
     );
 };
 
-const StatusRow = ({ state, role, onGenerate, pageCount }: TransportBarProps) => {
+const StatusRow = ({ state, role, onGenerate, pageCount, fromImslp = false }: TransportBarProps) => {
     const canManage = role === 'owner' || role === 'editor';
     if (state.kind === 'none') {
         return (
@@ -273,15 +276,17 @@ const StatusRow = ({ state, role, onGenerate, pageCount }: TransportBarProps) =>
         );
     }
     if (state.kind === 'pending' || state.kind === 'processing') {
-        const progress = state.kind === 'processing' ? state.progress : null;
+        // pending = an omr_jobs row is waiting for a worker; processing = one
+        // has claimed it. The reader sees "queued" vs "analyzing" so a busy
+        // queue never reads as a hung analysis.
         return (
-            <div className="flex min-h-9 items-center justify-center gap-2 text-sm text-stone-500">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
-                <span role="status">
-                    Analyzing score…
-                    {progress !== null && progress > 0 ? ` ${progress}${pageCount ? ` / ${pageCount}` : ''} pages` : ''}
-                </span>
-            </div>
+            <PlayAlongProgress
+                stage={state.kind === 'processing' ? 'analyzing' : 'queued'}
+                fromImslp={fromImslp}
+                progress={state.kind === 'processing' ? state.progress : null}
+                pageCount={pageCount}
+                className="min-h-9 justify-center py-1"
+            />
         );
     }
     // failed

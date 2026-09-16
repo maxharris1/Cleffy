@@ -8,6 +8,7 @@ import {
     formatBytes,
     recommendEdition,
 } from '@/features/imslp/imslpDisplay';
+import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 import { asCatalogOrigin, catalogAttribution, originLabel } from '../../../supabase/functions/_shared/pdPdfCatalog';
@@ -270,6 +271,9 @@ export const ImslpWorkPanel = ({
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
+                    {download.kind === 'downloading' ? (
+                        <PlayAlongProgress stage="downloading" fromImslp align="start" className="mt-4" />
+                    ) : null}
                 </>
             )}
 
