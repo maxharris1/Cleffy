@@ -1133,17 +1133,16 @@ export const imslpResolution = (work, editions, licences) => {
  * as a bot wall, which would skip the CDN parse).
  *
  * @param {Uint8Array} bytes
- * @param {string | null} contentType
  * @returns {{ action: 'accept' } | { action: 'cdn', url: string } | { action: 'circuit', code: 'bot_check' } | { action: 'fail', code: string }}
  */
-export const nextImslpDownloadStep = (bytes, _contentType) => {
+export const nextImslpDownloadStep = (bytes) => {
     if (bytes.length > MAX_PDF_BYTES) {
         return { action: 'fail', code: 'too_large' };
     }
     if (looksLikePdf(bytes)) {
         return { action: 'accept' };
     }
-    const html = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    const html = Buffer.from(bytes).toString('utf8');
     const lower = html.toLowerCase();
     if (lower.includes('bot check') || lower.includes('mtcaptcha') || lower.includes('friendlytest')) {
         return { action: 'circuit', code: 'bot_check' };

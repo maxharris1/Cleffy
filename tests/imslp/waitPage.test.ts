@@ -46,26 +46,23 @@ describe('extractCdnUrlFromWaitPage', () => {
 describe('nextImslpDownloadStep', () => {
     it('accepts a PDF immediately, parses the wait page, and circuits on bot check', () => {
         expect(looksLikePdf(pdfBytes())).toBe(true);
-        expect(nextImslpDownloadStep(pdfBytes(), 'application/pdf')).toEqual({ action: 'accept' });
+        expect(nextImslpDownloadStep(pdfBytes())).toEqual({ action: 'accept' });
 
         const cdn = 'https://cdn.imslp.org/files/imglnks/usimg/1/11/score.pdf';
-        expect(nextImslpDownloadStep(bytesOf(waitPage(cdn)), 'text/html')).toEqual({ action: 'cdn', url: cdn });
+        expect(nextImslpDownloadStep(bytesOf(waitPage(cdn)))).toEqual({ action: 'cdn', url: cdn });
 
         expect(
-            nextImslpDownloadStep(
-                bytesOf('<html><title>IMSLP - Bot Check</title><p>mtcaptcha</p></html>'),
-                'text/html',
-            ),
+            nextImslpDownloadStep(bytesOf('<html><title>IMSLP - Bot Check</title><p>mtcaptcha</p></html>')),
         ).toEqual({ action: 'circuit', code: 'bot_check' });
-        expect(nextImslpDownloadStep(bytesOf('<html>friendlytest bot wall</html>'), 'text/html')).toEqual({
+        expect(nextImslpDownloadStep(bytesOf('<html>friendlytest bot wall</html>'))).toEqual({
             action: 'circuit',
             code: 'bot_check',
         });
-        expect(nextImslpDownloadStep(bytesOf('<html>imslpdisclaimer copyright</html>'), 'text/html')).toEqual({
+        expect(nextImslpDownloadStep(bytesOf('<html>imslpdisclaimer copyright</html>'))).toEqual({
             action: 'fail',
             code: 'disclaimer',
         });
-        expect(nextImslpDownloadStep(bytesOf('<html>no pdf here</html>'), 'text/html')).toEqual({
+        expect(nextImslpDownloadStep(bytesOf('<html>no pdf here</html>'))).toEqual({
             action: 'fail',
             code: 'not_pdf',
         });

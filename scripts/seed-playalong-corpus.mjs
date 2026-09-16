@@ -427,7 +427,7 @@ const downloadImslpPdf = async (ctx, filename) => {
     for (let attempt = 1; attempt <= PARK_AFTER_FAILURES; attempt++) {
         try {
             const page = await imslpFetchBytes(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*');
-            const step = nextImslpDownloadStep(page.bytes, page.contentType);
+            const step = nextImslpDownloadStep(page.bytes);
             switch (step.action) {
                 case 'accept':
                     state.failures = 0;

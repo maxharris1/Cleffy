@@ -181,7 +181,7 @@ export type ImslpDownloadStep =
     | { action: 'cdn'; url: string }
     | { action: 'circuit'; code: 'bot_check' }
     | { action: 'fail'; code: string };
-export function nextImslpDownloadStep(bytes: Uint8Array, contentType: string | null): ImslpDownloadStep;
+export function nextImslpDownloadStep(bytes: Uint8Array): ImslpDownloadStep;
 export function retryAfterMs(
     header: string | null | undefined,
     options?: { fallbackMs?: number; maxMs?: number },
