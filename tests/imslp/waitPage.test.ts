@@ -68,11 +68,13 @@ describe('nextImslpDownloadStep', () => {
         });
     });
 
-    it('honours Retry-After seconds with the live cap', () => {
-        expect(retryAfterMs(null)).toBe(2000);
+    it('honours Retry-After in full (seconds or HTTP date); only a missing header falls back', () => {
+        expect(retryAfterMs(null)).toBe(30_000);
         expect(retryAfterMs('0')).toBe(500);
         expect(retryAfterMs('5')).toBe(5000);
-        expect(retryAfterMs('120')).toBe(30_000);
-        expect(retryAfterMs('nope')).toBe(2000);
+        expect(retryAfterMs('120')).toBe(120_000);
+        expect(retryAfterMs('900')).toBe(900_000);
+        expect(retryAfterMs(new Date(5_000_000).toUTCString(), { now: 4_000_000 })).toBe(1_000_000);
+        expect(retryAfterMs('nope')).toBe(30_000);
     });
 });

@@ -1248,11 +1248,25 @@ describe('ledger', () => {
             visit: false,
             reason: 'already_covered',
         });
+        // A `none` / bulk-source skip is exactly what the IMSLP pass exists for: no --retry-skipped needed.
         expect(shouldVisitWork(miss, { sources: ['imslp'], retrySkipped: false, fetchOnly: true })).toEqual({
+            visit: true,
+            reason: 'uncovered',
+        });
+        const iaSkip = [{ status: 'skipped', origin: 'ia', filename: 'x.pdf', last_error: 'not_us_pd', attempts: 1 }];
+        expect(shouldVisitWork(iaSkip, { sources: ['imslp'], fetchOnly: true })).toEqual({
+            visit: true,
+            reason: 'uncovered',
+        });
+        // Its own skip still blocks it (until --retry-skipped), like any other source.
+        const imslpSkip = [
+            { status: 'skipped', origin: 'imslp', filename: 'x.pdf', last_error: 'no_licence', attempts: 1 },
+        ];
+        expect(shouldVisitWork(imslpSkip, { sources: ['imslp'], fetchOnly: true })).toEqual({
             visit: false,
             reason: 'not_retryable',
         });
-        expect(shouldVisitWork(miss, { sources: ['imslp'], retrySkipped: true, fetchOnly: true })).toEqual({
+        expect(shouldVisitWork(imslpSkip, { sources: ['imslp'], retrySkipped: true, fetchOnly: true })).toEqual({
             visit: true,
             reason: 'uncovered',
         });

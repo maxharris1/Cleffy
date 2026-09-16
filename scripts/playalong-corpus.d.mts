@@ -74,10 +74,10 @@ export type CatalogWork = { page_title: string; composer: string | null; categor
 
 export type LedgerRow = {
     work_title?: string;
-    status: string;
-    attempts?: number | string | null;
     origin?: string;
     filename?: string;
+    status: string;
+    attempts?: number | string | null;
     last_error?: string | null;
 };
 
@@ -191,7 +191,7 @@ export type ImslpDownloadStep =
 export function nextImslpDownloadStep(bytes: Uint8Array): ImslpDownloadStep;
 export function retryAfterMs(
     header: string | null | undefined,
-    options?: { fallbackMs?: number; maxMs?: number },
+    options?: { fallbackMs?: number; now?: number; floorMs?: number },
 ): number;
 export function imslpParseUrl(title: string): string;
 export function imslpRedirectsUrl(title: string): string;
@@ -353,3 +353,22 @@ export function editionSignals(
     res: { origin: string; filename: string } | null,
     editions: readonly ImslpEdition[] | null | undefined,
 ): EditionSignals;
+
+export const IMSLP_BACKOFF_MS: readonly number[];
+export const IMSLP_PAUSE_AFTER: number;
+export const IMSLP_AUTO_PAUSE_MS: number;
+export const DEFAULT_IMSLP_CRAWLER_USER_AGENT: string;
+export function crawlerUserAgent(env?: Record<string, string | undefined>): { value: string; contactUnset: boolean };
+export type ImslpBreakerOutcome = { paused: boolean; parkedUntil: number; delayMs: number; reason: string };
+export function createImslpBreaker(options?: {
+    now?: () => number;
+    backoffMs?: readonly number[];
+    pauseAfter?: number;
+    pauseMs?: number;
+}): {
+    state: { consecutiveBlocks: number; parkedUntil: number | null; paused: boolean; pauseReason: string | null };
+    available: () => boolean;
+    recordSuccess: () => void;
+    recordBlock: (code: string, detail?: string) => ImslpBreakerOutcome;
+    pauseUntil: (untilMs: number, reason?: string) => void;
+};

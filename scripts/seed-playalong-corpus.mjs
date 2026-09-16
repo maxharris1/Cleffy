@@ -94,6 +94,8 @@ import {
     iaResolution,
     iaSearchUrl,
     imslpEditions,
+    createImslpBreaker,
+    crawlerUserAgent,
     imslpImagefromIndexUrl,
     imslpParseUrl,
     imslpRedirectAliases,
@@ -139,10 +141,9 @@ const DEFAULT_CACHE_DIR = resolve(ROOT, 'scripts/data/.corpus-seed-cache');
 const LOCAL_SERVICE_ROLE_KEY =
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
 const USER_AGENT = 'Cleffy corpus seed (+https://cleffy.app; metadata + public-domain mirrors only)';
-/** Honest crawler UA for IMSLP file GETs. Placeholder contact is fine if unset. */
-const IMSLP_CRAWLER_USER_AGENT =
-    (process.env.IMSLP_CRAWLER_USER_AGENT ?? '').trim() ||
-    'CleffyCorpusSeed/1.0 (+https://cleffy.app; public-domain corpus seed; contact unset)';
+/** Honest crawler UA for IMSLP file GETs (env IMSLP_CRAWLER_USER_AGENT); a missing contact is shouted at start-up. */
+const IMSLP_CRAWLER = crawlerUserAgent();
+const IMSLP_CRAWLER_USER_AGENT = IMSLP_CRAWLER.value;
 const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
 const HTTP_TIMEOUT_MS = 60_000;
 const PAGE_SIZE = 1000;
@@ -385,12 +386,13 @@ const isTransient = (err) =>
         ? err.status === 429 || err.status >= 500
         : /timeout|ECONN|EAI_AGAIN|fetch failed/i.test(String(err?.message));
 
-/** Circuit-breaker: bot check / MTCaptcha / repeated 429 → pause the crawl. */
+/** Thrown when IMSLP put up a wall; the breaker decides how long to stay away. */
 class ImslpCircuitOpen extends Error {
-    constructor(code, filename) {
-        super(`${code}:${filename}`);
+    constructor(code, filename, outcome) {
+        super(`imslp:${code}:${filename}`);
         this.code = code;
         this.filename = filename;
+        this.outcome = outcome;
     }
 }
 
@@ -416,73 +418,107 @@ const imslpFetchBytes = async (url, accept) => {
 };
 
 /**
- * Live wait-page → CDN parse (same as `tryDownloadPdf`). No 15s sleep unless
- * `ctx.imslpWaitMs` (`--imslp-wait`). 429 honors Retry-After; bot_check /
- * MTCaptcha opens the circuit after a backoff.
+ * One IMSLP file: wait-page → CDN parse (same step as the live `tryDownloadPdf`),
+ * no 15s sleep unless `--imslp-wait`. A 429 is retried once after its full
+ * Retry-After; a second 429, a bot check, MTCaptcha or a disclaimer wall hands
+ * the outcome to the breaker (15 min → 1 h → 6 h, then a 24 h source pause).
+ * Never a tight loop: a wall ends this download at once.
  */
 const downloadImslpPdf = async (ctx, filename) => {
-    const openUrl = imslpImagefromIndexUrl(filename);
-    const state = ctx.sourceState.imslp ?? (ctx.sourceState.imslp = { failures: 0 });
-    let lastErr = null;
-    for (let attempt = 1; attempt <= PARK_AFTER_FAILURES; attempt++) {
+    const wall = (code, detail) => new ImslpCircuitOpen(code, filename, ctx.imslpBreaker.recordBlock(code, detail));
+    const get = async (url, accept) => {
         try {
-            const page = await imslpFetchBytes(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*');
-            const step = nextImslpDownloadStep(page.bytes);
-            switch (step.action) {
-                case 'accept':
-                    state.failures = 0;
-                    return page.bytes;
-                case 'circuit':
-                    throw new ImslpCircuitOpen(step.code, filename);
-                case 'cdn': {
-                    if (ctx.imslpWaitMs > 0) {
-                        await sleep(ctx.imslpWaitMs);
-                    }
-                    const pdf = await imslpFetchBytes(step.url, 'application/pdf,*/*');
-                    const classified = classifyDownloadBody(pdf.bytes, pdf.contentType);
-                    if (classified.ok) {
-                        state.failures = 0;
-                        return pdf.bytes;
-                    }
-                    if (classified.code === 'bot_check') {
-                        throw new ImslpCircuitOpen('bot_check', filename);
-                    }
-                    throw new Error(classified.code);
-                }
-                case 'fail':
-                    throw new Error(step.code);
-                default: {
-                    const _exhaustive = step;
-                    throw new Error(`unknown imslp step: ${_exhaustive.action}`);
-                }
-            }
+            return await imslpFetchBytes(url, accept);
         } catch (err) {
-            lastErr = err;
-            if (err instanceof ImslpCircuitOpen) {
-                state.failures += 1;
-                await sleep(backoffDelayMs(state.failures));
-                throw err;
-            }
             if (err instanceof HttpError && (err.status === 429 || err.status === 503)) {
-                state.failures += 1;
-                await sleep(err.retryAfterMs ?? backoffDelayMs(state.failures));
-                if (state.failures >= PARK_AFTER_FAILURES) {
-                    throw new ImslpCircuitOpen('rate_limit', filename);
+                const wait = err.retryAfterMs ?? 30_000;
+                info(`imslp: ${err.status} on ${url} — honouring Retry-After (${Math.round(wait / 1000)}s)`);
+                await sleep(wait);
+                try {
+                    return await imslpFetchBytes(url, accept);
+                } catch (again) {
+                    if (again instanceof HttpError && (again.status === 429 || again.status === 503)) {
+                        throw wall('rate_limited', `${again.status} twice on ${url}`);
+                    }
+                    throw again;
                 }
-                continue;
             }
             throw err;
         }
+    };
+
+    const openUrl = imslpImagefromIndexUrl(filename);
+    const page = await get(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*');
+    const step = nextImslpDownloadStep(page.bytes);
+    switch (step.action) {
+        case 'accept':
+            ctx.imslpBreaker.recordSuccess();
+            return page.bytes;
+        case 'circuit':
+            throw wall(step.code, `${page.finalUrl}`);
+        case 'cdn': {
+            if (ctx.imslpWaitMs > 0) {
+                await sleep(ctx.imslpWaitMs);
+            }
+            const pdf = await get(step.url, 'application/pdf,*/*');
+            const classified = classifyDownloadBody(pdf.bytes, pdf.contentType);
+            if (classified.ok) {
+                ctx.imslpBreaker.recordSuccess();
+                return pdf.bytes;
+            }
+            if (classified.code === 'bot_check' || classified.code === 'disclaimer') {
+                throw wall(classified.code, `${pdf.finalUrl}`);
+            }
+            throw new Error(classified.code);
+        }
+        case 'fail':
+            if (step.code === 'disclaimer') {
+                throw wall('disclaimer', `${page.finalUrl}`);
+            }
+            throw new Error(step.code);
+        default: {
+            const _exhaustive = step;
+            throw new Error(`unknown imslp step: ${_exhaustive.action}`);
+        }
     }
-    throw lastErr instanceof Error ? lastErr : new ImslpCircuitOpen('rate_limit', filename);
 };
 
-const pauseCorpus = async (db, reason) => {
-    await db.update('playalong_corpus_control', 'singleton=eq.true', {
-        paused: true,
-        updated_at: new Date().toISOString(),
-    });
-    info(`auto-paused playalong_corpus_control (${reason})`);
+/**
+ * The breaker tripped: log the backoff, and on a pause write it to
+ * playalong_corpus_control so later runs stay away from imslp.org until it
+ * lapses (or Max clears `imslp_paused_until`). Other sources keep running.
+ */
+const recordImslpOutcome = async (ctx, err) => {
+    const { outcome } = err;
+    if (outcome.paused) {
+        info(
+            `imslp: ${outcome.reason} — pausing the IMSLP source for 24h (until ${new Date(outcome.parkedUntil).toISOString()})`,
+        );
+        ctx.parked.add('imslp');
+        if (ctx.dbReachable && !ctx.dryRun) {
+            try {
+                await ctx.db.update('playalong_corpus_control', 'singleton=eq.true', {
+                    imslp_paused_until: new Date(outcome.parkedUntil).toISOString(),
+                    imslp_pause_reason: outcome.reason,
+                    updated_at: new Date().toISOString(),
+                });
+            } catch (writeErr) {
+                info(`could not record the IMSLP pause: ${writeErr instanceof Error ? writeErr.message : writeErr}`);
+            }
+        }
+        return;
+    }
+    info(
+        `imslp: ${outcome.reason} — backing off ${Math.round(outcome.delayMs / 60_000)} min (until ${new Date(outcome.parkedUntil).toISOString()})`,
+    );
+};
+
+/** Idle (in 30 s slices, stoppable) until the IMSLP breaker's backoff window has passed. */
+const waitForImslp = async (ctx, deadlineMs) => {
+    const until = ctx.imslpBreaker.state.parkedUntil ?? Date.now();
+    while (!ctx.imslpBreaker.available() && !shouldStop(deadlineMs)) {
+        await sleep(Math.min(30_000, Math.max(1000, until - Date.now())));
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -867,6 +903,17 @@ const resolveIa = async (ctx, work) => {
 };
 
 const resolveImslp = async (ctx, work) => {
+    if (!ctx.imslpBreaker.available()) {
+        return [
+            {
+                ok: false,
+                deferred: true,
+                origin: 'imslp',
+                filename: '-',
+                reason: ctx.imslpBreaker.state.paused ? 'imslp_paused' : 'imslp_backoff',
+            },
+        ];
+    }
     const page = await imslpWorkPage(ctx, work.title, { required: true });
     return [imslpResolution(work, page.editions, page.licences)];
 };
@@ -904,7 +951,11 @@ const resolveWork = async (ctx, work) => {
             }
         }
     }
-    const plan = planWork(resolutions, { sources: ctx.sources });
+    const plan = planWork(
+        resolutions.filter((r) => !r.deferred),
+        { sources: ctx.sources },
+    );
+    plan.deferred = plan.queue.length === 0 && resolutions.some((r) => r.deferred);
     // Edition signals for every chosen file (and for the work itself when
     // nothing was chosen, so the best IMSLP edition is on record for --from-dir).
     const { editions } = await imslpWorkPage(ctx, work.title);
@@ -1048,11 +1099,17 @@ const fetchFile = async (ctx, work, res, batchId) => {
         return { status: 'fetched', bytes };
     } catch (err) {
         if (err instanceof ImslpCircuitOpen) {
-            await upsertLedger(db, ledger, { ...key, status: 'paused', last_error: err.message });
+            // IMSLP put up a wall: not this file's fault. Keep it pending, do not spend an attempt.
+            await upsertLedger(db, ledger, {
+                ...key,
+                status: 'pending',
+                attempts: attempts - 1,
+                last_error: err.message,
+            });
             console.log(
                 workEvent({
                     workTitle: res.workTitle,
-                    status: 'paused',
+                    status: 'pending',
                     origin: res.origin,
                     filename: res.filename,
                     reason: err.message,
@@ -1209,6 +1266,19 @@ const recordSkip = async (ctx, work, skip, batchId, edition = null) => {
 const isPaused = async (db) => {
     const rows = await db.request('/playalong_corpus_control?select=paused&limit=1');
     return Boolean(rows?.[0]?.paused);
+};
+
+/** The whole control row, including the IMSLP source's own pause (columns from 20260916190000). */
+const readControl = async (db) => {
+    try {
+        const rows = await db.request(
+            '/playalong_corpus_control?select=paused,imslp_paused_until,imslp_pause_reason&limit=1',
+        );
+        return rows?.[0] ?? null;
+    } catch {
+        // Before 20260916190000 the IMSLP columns do not exist: fall back to the pause flag alone.
+        return { paused: await isPaused(db), imslp_paused_until: null, imslp_pause_reason: null };
+    }
 };
 
 /**
@@ -1514,6 +1584,11 @@ const main = async () => {
         info(
             `imslp file fetch: wait-page→CDN parse, serial, --imslp-wait ${args.imslpWaitMs > 0 ? 'on' : 'off'}; UA ${IMSLP_CRAWLER_USER_AGENT}`,
         );
+        if (IMSLP_CRAWLER.contactUnset) {
+            info(
+                '!!! IMSLP_CRAWLER_USER_AGENT has no contact address — set it, e.g. "Cleffy-corpus/1.0 (+https://cleffy.app; contact: max@cleffy.app)". A crawler IMSLP cannot e-mail gets blocked instead.',
+            );
+        }
     }
 
     let ledger = new Map();
@@ -1528,8 +1603,10 @@ const main = async () => {
         info(`ledger unavailable (${err instanceof Error ? err.message : err}); planning against an empty ledger`);
     }
 
+    let control = null;
     if (dbReachable) {
-        if (await isPaused(db)) {
+        control = await readControl(db);
+        if (control?.paused) {
             info('playalong_corpus_control.paused is true — nothing to do');
             console.log(progressEvent({ ...ledgerCounts(ledger), target: args.limit ?? DEFAULT_LIMIT, mode }));
             return;
@@ -1550,6 +1627,9 @@ const main = async () => {
         owner,
         sources: args.sources,
         imslpWaitMs: args.imslpWaitMs,
+        imslpBreaker: createImslpBreaker(),
+        dryRun: mode === 'dry-run',
+        dbReachable,
         parked: new Set(),
         sourceState: Object.fromEntries(ORIGIN_ORDER.map((o) => [o, { failures: 0 }])),
         musescore: args.musescore,
@@ -1560,6 +1640,17 @@ const main = async () => {
         noEditions: args.noEditions,
         noWiki: args.noWiki,
     };
+    if (ctx.sources.includes('imslp')) {
+        // A pause an earlier run wrote keeps this one away from imslp.org until it lapses.
+        const pausedUntil = control?.imslp_paused_until ? Date.parse(control.imslp_paused_until) : NaN;
+        if (Number.isFinite(pausedUntil) && pausedUntil > Date.now()) {
+            ctx.imslpBreaker.pauseUntil(pausedUntil, control.imslp_pause_reason ?? 'paused');
+            ctx.parked.add('imslp');
+            info(
+                `imslp: source paused until ${new Date(pausedUntil).toISOString()} (${control.imslp_pause_reason ?? 'paused'}); clear playalong_corpus_control.imslp_paused_until to resume`,
+            );
+        }
+    }
 
     if (mode === 'enqueue') {
         await enqueueFetched(ctx, args, startedAt, deadlineMs);
@@ -1651,6 +1742,8 @@ const main = async () => {
     let batchId = maxBatch + 1;
     let processedInBatch = 0;
     let attempted = 0;
+    let deferred = 0;
+    const imslpOnly = ctx.sources.length === 1 && ctx.sources[0] === 'imslp';
 
     for (const work of ranked) {
         if (shouldStop(deadlineMs)) {
@@ -1683,6 +1776,18 @@ const main = async () => {
         processedInBatch += 1;
         attempted += 1;
 
+        if (imslpOnly && !ctx.imslpBreaker.available()) {
+            if (ctx.imslpBreaker.state.paused) {
+                info('imslp: source is paused — stopping this run');
+                break;
+            }
+            // Backing off is the point: idle until the window ends instead of skipping through the ranking.
+            await waitForImslp(ctx, deadlineMs);
+            if (stopReason) {
+                break;
+            }
+        }
+
         const plan = await resolveWork(ctx, work);
         plans.set(work.title, plan);
 
@@ -1703,6 +1808,11 @@ const main = async () => {
                 console.log(workEvent({ workTitle: work.title, status: 'plan_skip', reason }));
             }
         } else {
+            if (plan.deferred) {
+                // IMSLP is backing off: leave the work untouched for a later run.
+                deferred += 1;
+                continue;
+            }
             for (const skip of plan.skips) {
                 await recordSkip(ctx, work, skip, batchId, plan.queue.length === 0 ? plan.edition : null);
             }
@@ -1738,12 +1848,7 @@ const main = async () => {
                     if (!(err instanceof ImslpCircuitOpen)) {
                         throw err;
                     }
-                    ctx.parked.add('imslp');
-                    if (dbReachable) {
-                        await pauseCorpus(ctx.db, err.message);
-                    }
-                    stopReason = 'imslp_circuit';
-                    info(`IMSLP circuit open (${err.message}) — stopping`);
+                    await recordImslpOutcome(ctx, err);
                     break;
                 }
             }
@@ -1754,6 +1859,9 @@ const main = async () => {
     }
 
     console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
+    if (deferred > 0) {
+        info(`imslp: ${deferred} works deferred while the source was backing off — rerun later to pick them up`);
+    }
     if (stopReason) {
         info(`stopped (${stopReason}) after ${attempted} works this run; ledger is consistent — rerun to resume`);
     }

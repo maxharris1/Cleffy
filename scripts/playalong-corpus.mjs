@@ -1144,7 +1144,12 @@ export const nextImslpDownloadStep = (bytes) => {
     }
     const html = Buffer.from(bytes).toString('utf8');
     const lower = html.toLowerCase();
-    if (lower.includes('bot check') || lower.includes('mtcaptcha') || lower.includes('friendlytest')) {
+    // A friendlyredirect / MTCaptcha wall never carries the wait span; check that first so a
+    // genuine wait page (~19 kB of chrome before `sm_dl_wait`) is never mistaken for a wall.
+    if (
+        !lower.includes('sm_dl_wait') &&
+        (lower.includes('bot check') || lower.includes('mtcaptcha') || lower.includes('friendlytest'))
+    ) {
         return { action: 'circuit', code: 'bot_check' };
     }
     const cdnUrl = extractCdnUrlFromWaitPage(html);
@@ -1157,16 +1162,79 @@ export const nextImslpDownloadStep = (bytes) => {
     return { action: 'fail', code: 'not_pdf' };
 };
 
-/** Honor `Retry-After` seconds (same cap as live `mwFetch`). Date form is ignored. */
-export const retryAfterMs = (header, { fallbackMs = 2000, maxMs = 30_000 } = {}) => {
+/**
+ * Honour `Retry-After` in full (seconds or HTTP date). IMSLP asking for a long
+ * pause is exactly the signal to obey; only a missing/garbled header falls back.
+ */
+export const retryAfterMs = (header, { fallbackMs = 30_000, now = Date.now(), floorMs = 500 } = {}) => {
     if (!header) {
         return fallbackMs;
     }
     const seconds = Number(header);
     if (Number.isFinite(seconds) && seconds >= 0) {
-        return Math.min(Math.max(seconds * 1000, 500), maxMs);
+        return Math.max(floorMs, Math.round(seconds * 1000));
     }
-    return fallbackMs;
+    const at = Date.parse(header);
+    return Number.isFinite(at) ? Math.max(floorMs, at - now) : fallbackMs;
+};
+
+/** Back off after a bot check / captcha / disclaimer wall: 15 min, 1 h, 6 h; the next one pauses the source. */
+export const IMSLP_BACKOFF_MS = Object.freeze([15 * 60_000, 60 * 60_000, 6 * 60 * 60_000]);
+export const IMSLP_PAUSE_AFTER = 3;
+/** How long an auto-pause recorded in playalong_corpus_control lasts. */
+export const IMSLP_AUTO_PAUSE_MS = 24 * 60 * 60_000;
+
+/**
+ * Circuit breaker for the IMSLP source. Pure state: `now` is injected so the
+ * schedule can be tested without a clock. A block backs the source off for
+ * IMSLP_BACKOFF_MS[n-1]; the IMSLP_PAUSE_AFTER-th consecutive block pauses it
+ * for IMSLP_AUTO_PAUSE_MS (the CLI writes that to playalong_corpus_control).
+ * Any successful download resets the streak. Never a tight loop: while parked,
+ * `available()` is false and the caller must not hit the network.
+ */
+export const createImslpBreaker = ({
+    now = Date.now,
+    backoffMs = IMSLP_BACKOFF_MS,
+    pauseAfter = IMSLP_PAUSE_AFTER,
+    pauseMs = IMSLP_AUTO_PAUSE_MS,
+} = {}) => {
+    const state = { consecutiveBlocks: 0, parkedUntil: null, paused: false, pauseReason: null };
+    return {
+        state,
+        available: () => !state.paused && (state.parkedUntil === null || state.parkedUntil <= now()),
+        recordSuccess: () => {
+            state.consecutiveBlocks = 0;
+            state.parkedUntil = null;
+        },
+        /** @returns {{ paused: boolean, parkedUntil: number, delayMs: number, reason: string }} */
+        recordBlock: (code, detail = '') => {
+            state.consecutiveBlocks += 1;
+            const n = state.consecutiveBlocks;
+            if (n >= pauseAfter) {
+                state.paused = true;
+                state.pauseReason = `${code} x${n}${detail ? `: ${detail}` : ''}`;
+                state.parkedUntil = now() + pauseMs;
+                return { paused: true, parkedUntil: state.parkedUntil, delayMs: pauseMs, reason: state.pauseReason };
+            }
+            const delayMs = backoffMs[Math.min(n, backoffMs.length) - 1];
+            state.parkedUntil = now() + delayMs;
+            return { paused: false, parkedUntil: state.parkedUntil, delayMs, reason: `${code} (${n}/${pauseAfter})` };
+        },
+        /** Resume from a pause recorded by an earlier run. */
+        pauseUntil: (untilMs, reason) => {
+            state.paused = true;
+            state.parkedUntil = untilMs;
+            state.pauseReason = reason ?? 'paused';
+        },
+    };
+};
+
+/** Crawler identity for imslp.org file fetches; `contactUnset` should be shouted, not tolerated. */
+export const DEFAULT_IMSLP_CRAWLER_USER_AGENT = 'Cleffy-corpus/1.0 (+https://cleffy.app; contact: unset)';
+export const crawlerUserAgent = (env = process.env) => {
+    const value = (env.IMSLP_CRAWLER_USER_AGENT ?? '').trim() || DEFAULT_IMSLP_CRAWLER_USER_AGENT;
+    const contactUnset = /contact:?\s*<?unset>?/i.test(value) || !/[\w.+-]+@[\w-]+\.[\w.-]+/.test(value);
+    return { value, contactUnset };
 };
 
 // ---------------------------------------------------------------------------
@@ -2053,8 +2121,9 @@ export const isImslpOnlySources = (sources) =>
  * Coverage is per work, any origin: one `fetched`/`queued`/`ready` row covers
  * it. IMSLP-only is fill-in — skip covered works even with `--retry-skipped`
  * so a Mutopia typeset is never displaced. Bulk sources may still retry extra
- * files on a covered work. Mutopia `skipped/none` misses need `--retry-skipped`
- * to become eligible for the IMSLP pass.
+ * files on a covered work. A `skipped` row only blocks when its origin is one
+ * of the sources in play, so an IMSLP pass reaches works the bulk mirrors
+ * skipped without `--retry-skipped`.
  *
  * @param {Iterable<{ status: string, attempts?: number | string | null }>} rows
  * @param {{ retrySkipped?: boolean, sources?: readonly string[], fetchOnly?: boolean }} options
@@ -2077,7 +2146,10 @@ export const shouldVisitWork = (rows, { retrySkipped = false, sources = BULK_ORI
     if (covered && retryable.length === 0) {
         return { visit: false, reason: 'already_covered' };
     }
-    if (list.length > 0 && retryable.length === 0 && !covered) {
+    // A skip recorded by a source that is not in play now (or the `none` marker
+    // of a run without this source) must not block a new source's pass.
+    const blocking = list.filter((row) => row.status !== 'skipped' || sources.includes(row.origin));
+    if (blocking.length > 0 && retryable.length === 0 && !covered) {
         return { visit: false, reason: 'not_retryable' };
     }
     return { visit: true, reason: covered ? 'retry_extra' : 'uncovered' };
