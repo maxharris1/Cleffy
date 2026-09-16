@@ -243,6 +243,16 @@ const catalogCompatible = (query: WorkKey, candidate: WorkKey): boolean => {
     return true;
 };
 
+/**
+ * Guitar / tab / ukulele transcriptions of a keyboard work. They share the
+ * work's catalogue number, so nothing else separates them from the piano
+ * edition — and because a MIDI candidate borrows the PDF's meter and printed
+ * bars, one of these scores exactly as high as the real edition and turns a
+ * clean accept into `ambiguous`. The instrument field alone is not a signal:
+ * BWV 999 is a lute piece and stays.
+ */
+const isTranscriptionFilename = (filename: string): boolean => /guitar|[-_]tab[-_.]|ukulele/i.test(filename);
+
 export const lookupMutopia = (index: readonly MutopiaPiece[], workKey: WorkKey): RankedCandidate[] => {
     const out: RankedCandidate[] = [];
     for (const piece of index) {
@@ -253,6 +263,9 @@ export const lookupMutopia = (index: readonly MutopiaPiece[], workKey: WorkKey):
             const format = formatFromFilename(file.filename);
             // .pdf (and other non-candidate suffixes) stay index-only.
             if (format === null) {
+                continue;
+            }
+            if (isTranscriptionFilename(file.filename)) {
                 continue;
             }
             const key = workKeyFromMutopiaPath(file.url) ?? piece.workKey ?? workKeyFromMutopiaPath(piece.ftpDir);
