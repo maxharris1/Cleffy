@@ -7,27 +7,39 @@
  * dry-run plan can be unit-tested. The CLI wires fetch / PostgREST / Storage
  * around these.
  *
- * Sources are bulk-friendly public mirrors only (Mutopia, OpenScore, the
- * Internet Archive `imslp` collection). IMSLP itself is identity + licence
- * metadata: nothing in this module produces an IMSLP file URL.
- * See docs/omr-midi-preload-plan.md (Phase 2 / 2b) and
- * docs/imslp-access-options.md (why no IMSLP PDF fetch).
+ * Default sources are bulk-friendly public mirrors (Mutopia, OpenScore, the
+ * Internet Archive `imslp` collection). `--source imslp` is opt-in and last:
+ * the CLI fetches one file at a time via the live wait-page → CDN parse
+ * (`extractCdnUrlFromWaitPage`); it does not sleep 15s unless `--imslp-wait`.
+ * See docs/omr-midi-preload-plan.md (Phase 2 / 2b).
  */
 
 import { inflateRawSync } from 'node:zlib';
+
+import {
+    extractCdnUrlFromWaitPage,
+    looksLikePdf,
+    MAX_PDF_BYTES as IMSLP_MAX_PDF_BYTES,
+} from '../supabase/functions/_shared/imslpWaitPage.ts';
 
 /** Values accepted by the `playalong_corpus.licence_tag` / `pd_pdf_store.licence_tag` check constraints. */
 export const LICENCE_TAGS = Object.freeze(['PD', 'CC0', 'CC-BY', 'CC-BY-SA']);
 /** Values accepted by the `playalong_corpus_seed.status` check constraint. */
 export const LEDGER_STATUSES = Object.freeze(['pending', 'fetched', 'queued', 'ready', 'skipped', 'failed', 'paused']);
-/** Seed origins in resolution order (first hit wins). */
-export const ORIGINS = Object.freeze(['mutopia', 'openscore', 'ia']);
+/** All seed origins in first-hit-wins order. `imslp` is last and opt-in. */
+export const ORIGINS = Object.freeze(['mutopia', 'openscore', 'ia', 'imslp']);
+/** `--source all` and the CLI default: bulk mirrors only — never imslp.org PDF bytes. */
+export const BULK_ORIGINS = Object.freeze(['mutopia', 'openscore', 'ia']);
+/** Same as ORIGINS; kept so callers can iterate the resolution order explicitly. */
+export const ORIGIN_ORDER = ORIGINS;
+/** Cosmetic 15s wait on the IMSLP wait page; `--imslp-wait` turns this on. Default off. */
+export const IMSLP_WAIT_MS = 15_000;
 
 export const SEED_JOB_PRIORITY = -10;
 /** Mirrors MAX_PAGES in services/omr-service/src/job.ts — skip before enqueue. */
 export const MAX_PAGES = 60;
 /** Matches the `scores` / `pd-pdfs` bucket file_size_limit. */
-export const MAX_PDF_BYTES = 50 * 1024 * 1024;
+export const MAX_PDF_BYTES = IMSLP_MAX_PDF_BYTES;
 /** US public domain by publication year (the plan's "published before 1931"). */
 export const US_PD_BEFORE_YEAR = 1931;
 /** Fetch / enqueue attempts per ledger row before it stays `failed`. */
@@ -1055,8 +1067,111 @@ export const iaResolution = (work, item, file, licences) => {
     };
 };
 
+export const imslpWorkPageUrl = (title) =>
+    `https://imslp.org/wiki/${encodeURIComponent(String(title).replace(/ /g, '_'))}`;
+
+/** Same ImagefromIndex URL the live `tryDownloadPdf` hits. */
+export const imslpImagefromIndexUrl = (filename) =>
+    `https://imslp.org/wiki/Special:ImagefromIndex/${encodeURIComponent(filename)}`;
+
+/**
+ * Best complete non-arrangement IMSLP edition of a work, licence-filtered.
+ * The CLI downloads it via wait-page → CDN parse (no 15s sleep). One file.
+ *
+ * @param {{ title: string }} work
+ * @param {Array<object> | null | undefined} editions  `imslpEditions(...)`
+ * @param {Map<string, { licenseLabel: string | null, restriction: string | null, euHosted: boolean }> | null | undefined} licences
+ */
+export const imslpResolution = (work, editions, licences) => {
+    const best = bestImslpEdition(editions ?? []);
+    if (!best?.filename) {
+        return { ok: false, reason: 'no_source', origin: 'imslp', filename: '-', workTitle: work.title };
+    }
+    const filename = best.filename;
+    if ((best.pages && best.pages > MAX_PAGES) || (best.sizeMb && best.sizeMb * 1024 * 1024 > MAX_PDF_BYTES)) {
+        return { ok: false, reason: 'too_large', origin: 'imslp', filename, workTitle: work.title };
+    }
+    const bound = imslpFileLicenceFor(filename, licences);
+    const licence = bound ?? workLevelLicence(licences);
+    if (!licence) {
+        return { ok: false, reason: 'no_licence', origin: 'imslp', filename, workTitle: work.title };
+    }
+    const year = publicationYearOf(best.publisher) ?? publicationYearOf(best.copyright) ?? publicationYearOf(best.misc);
+    const verdict = licenceVerdict({
+        label: licence.licenseLabel,
+        restriction: licence.restriction,
+        euHosted: licence.euHosted,
+        year: bound ? year : (year ?? US_PD_BEFORE_YEAR),
+    });
+    if (!verdict.accept) {
+        return { ok: false, reason: verdict.reason, origin: 'imslp', filename, workTitle: work.title };
+    }
+    const editor = best.editor ? cleanWikitext(best.editor) || null : null;
+    return {
+        ok: true,
+        origin: 'imslp',
+        workTitle: work.title,
+        filename,
+        pdfUrl: null,
+        imslpFile: true,
+        candidateUrl: null,
+        sourceUrl: imslpWorkPageUrl(work.title),
+        licenceTag: verdict.tag,
+        usPd: verdict.usPd,
+        editorCredit: editor ? `${editor} (IMSLP)` : 'IMSLP',
+        pianoSolo: true,
+        pieceTitle: work.title,
+        byteLength: best.sizeMb ? Math.round(best.sizeMb * 1024 * 1024) : null,
+    };
+};
+
+/**
+ * Decide what to do with an ImagefromIndex response. Same order as live
+ * `tryDownloadPdf`: accept a PDF immediately; treat bot-check / MTCaptcha as
+ * a circuit-breaker; otherwise parse `#sm_dl_wait[data-id]` for the CDN URL.
+ * Wait-page HTML is not classified as `bot_check` (that helper treats all HTML
+ * as a bot wall, which would skip the CDN parse).
+ *
+ * @param {Uint8Array} bytes
+ * @param {string | null} contentType
+ * @returns {{ action: 'accept' } | { action: 'cdn', url: string } | { action: 'circuit', code: 'bot_check' } | { action: 'fail', code: string }}
+ */
+export const nextImslpDownloadStep = (bytes, _contentType) => {
+    if (bytes.length > MAX_PDF_BYTES) {
+        return { action: 'fail', code: 'too_large' };
+    }
+    if (looksLikePdf(bytes)) {
+        return { action: 'accept' };
+    }
+    const html = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    const lower = html.toLowerCase();
+    if (lower.includes('bot check') || lower.includes('mtcaptcha') || lower.includes('friendlytest')) {
+        return { action: 'circuit', code: 'bot_check' };
+    }
+    const cdnUrl = extractCdnUrlFromWaitPage(html);
+    if (cdnUrl) {
+        return { action: 'cdn', url: cdnUrl };
+    }
+    if (lower.includes('disclaimer') || lower.includes('imslpdisclaimer')) {
+        return { action: 'fail', code: 'disclaimer' };
+    }
+    return { action: 'fail', code: 'not_pdf' };
+};
+
+/** Honor `Retry-After` seconds (same cap as live `mwFetch`). Date form is ignored. */
+export const retryAfterMs = (header, { fallbackMs = 2000, maxMs = 30_000 } = {}) => {
+    if (!header) {
+        return fallbackMs;
+    }
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return Math.min(Math.max(seconds * 1000, 500), maxMs);
+    }
+    return fallbackMs;
+};
+
 // ---------------------------------------------------------------------------
-// IMSLP metadata (identity + licence only)
+// IMSLP metadata (identity + licence tags + opt-in file fetch)
 // ---------------------------------------------------------------------------
 
 /** `action=parse` for the rendered work page — the one place per-file tags live. */
@@ -1551,9 +1666,12 @@ export const editionSignals = (res, editions) => {
         ? {
               origin: res.origin,
               filename: res.filename,
-              imageType: res.origin === 'ia' ? (matched?.imageType ?? 'Normal Scan') : 'Typeset',
+              imageType:
+                  res.origin === 'mutopia' || res.origin === 'openscore'
+                      ? 'Typeset'
+                      : (matched?.imageType ?? (matched?.typeset === true ? 'Typeset' : 'Normal Scan')),
               complete:
-                  res.origin === 'ia'
+                  res.origin === 'ia' || res.origin === 'imslp'
                       ? (matched?.complete ?? true)
                       : !IA_PART_OR_ARRANGEMENT_RE.test(res.filename.replace(/\.pdf$/i, '')),
               rating: matched?.rating ?? null,
@@ -1896,23 +2014,23 @@ export const reconcileQueued = (job, analysis) => {
  * Whether a source should be tried for this run. `--source` filters; the
  * per-origin backoff (consecutive upstream failures) parks a source.
  */
-export const sourceEnabled = (origin, { sources = ORIGINS, parked = new Set() } = {}) =>
+export const sourceEnabled = (origin, { sources = BULK_ORIGINS, parked = new Set() } = {}) =>
     sources.includes(origin) && !parked.has(origin);
 
 export const parseSources = (value) => {
     if (!value || value === 'all') {
-        return [...ORIGINS];
+        return [...BULK_ORIGINS];
     }
     const wanted = String(value)
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
     for (const w of wanted) {
-        if (!ORIGINS.includes(w)) {
-            throw new Error(`--source must be one of ${ORIGINS.join('|')}|all (got ${w})`);
+        if (!ORIGIN_ORDER.includes(w)) {
+            throw new Error(`--source must be one of ${ORIGIN_ORDER.join('|')}|all (got ${w})`);
         }
     }
-    return ORIGINS.filter((o) => wanted.includes(o));
+    return ORIGIN_ORDER.filter((o) => wanted.includes(o));
 };
 
 /** Exponential per-source backoff (1s, 2s, 4s … capped) with a park threshold. */
@@ -1921,22 +2039,68 @@ export const backoffDelayMs = (consecutiveFailures, { baseMs = 1000, maxMs = 60_
 
 export const PARK_AFTER_FAILURES = 5;
 
+/** Ledger statuses that count as "this work already has an accepted file". */
+export const COVERED_STATUSES = Object.freeze(['fetched', 'queued', 'ready']);
+
+export const isWorkCovered = (rows) => [...(rows ?? [])].some((row) => COVERED_STATUSES.includes(row.status));
+
+/** `--source imslp` (and only imslp): fill-in, never a second pipeline. */
+export const isImslpOnlySources = (sources) =>
+    Array.isArray(sources) && sources.length > 0 && sources.every((s) => s === 'imslp');
+
+/**
+ * Whether this run should resolve the work.
+ *
+ * Coverage is per work, any origin: one `fetched`/`queued`/`ready` row covers
+ * it. IMSLP-only is fill-in — skip covered works even with `--retry-skipped`
+ * so a Mutopia typeset is never displaced. Bulk sources may still retry extra
+ * files on a covered work. Mutopia `skipped/none` misses need `--retry-skipped`
+ * to become eligible for the IMSLP pass.
+ *
+ * @param {Iterable<{ status: string, attempts?: number | string | null }>} rows
+ * @param {{ retrySkipped?: boolean, sources?: readonly string[], fetchOnly?: boolean }} options
+ */
+export const shouldVisitWork = (rows, { retrySkipped = false, sources = BULK_ORIGINS, fetchOnly = false } = {}) => {
+    const list = [...(rows ?? [])];
+    const covered = isWorkCovered(list);
+    if (covered && isImslpOnlySources(sources)) {
+        return { visit: false, reason: 'already_covered' };
+    }
+    const retryable = list.filter((row) => {
+        if (!shouldProcess(row, { retrySkipped }).process) {
+            return false;
+        }
+        if (fetchOnly && row.status === 'fetched') {
+            return false;
+        }
+        return true;
+    });
+    if (covered && retryable.length === 0) {
+        return { visit: false, reason: 'already_covered' };
+    }
+    if (list.length > 0 && retryable.length === 0 && !covered) {
+        return { visit: false, reason: 'not_retryable' };
+    }
+    return { visit: true, reason: covered ? 'retry_extra' : 'uncovered' };
+};
+
 // ---------------------------------------------------------------------------
 // Dry-run planning + progress
 // ---------------------------------------------------------------------------
 
 /**
  * Choose the resolutions to act on for one work: first enabled origin with an
- * accepted file wins (Mutopia → OpenScore → IA); piano-solo Mutopia pieces
- * first; capped per work. Skips from every origin are kept for the ledger.
+ * accepted file wins (Mutopia → OpenScore → IA → IMSLP); piano-solo Mutopia
+ * pieces first; capped per work. IMSLP queues at most one file (the best
+ * edition). Skips from every origin are kept for the ledger.
  *
  * @param {Array<object>} resolutions  mutopiaResolution / openscoreResolution / iaResolution outputs
  * @param {{ sources?: string[] }} options
  * @returns {{ queue: object[], skips: object[], origin: string | null }}
  */
-export const planWork = (resolutions, { sources = ORIGINS } = {}) => {
+export const planWork = (resolutions, { sources = BULK_ORIGINS } = {}) => {
     const skips = resolutions.filter((r) => !r.ok && sources.includes(r.origin));
-    for (const origin of ORIGINS) {
+    for (const origin of ORIGIN_ORDER) {
         if (!sources.includes(origin)) {
             continue;
         }
@@ -1945,14 +2109,15 @@ export const planWork = (resolutions, { sources = ORIGINS } = {}) => {
             continue;
         }
         hits.sort((a, b) => Number(b.pianoSolo) - Number(a.pianoSolo) || a.filename.localeCompare(b.filename));
-        return { queue: hits.slice(0, MAX_FILES_PER_WORK), skips, origin };
+        const cap = origin === 'imslp' ? 1 : MAX_FILES_PER_WORK;
+        return { queue: hits.slice(0, cap), skips, origin };
     }
     return { queue: [], skips, origin: null };
 };
 
 /** Coverage of a title set by winning origin (the dry-run summary). */
 export const coverageByOrigin = (plans, titles) => {
-    const out = { mutopia: 0, openscore: 0, ia: 0, none: 0, total: 0 };
+    const out = { mutopia: 0, openscore: 0, ia: 0, imslp: 0, none: 0, total: 0 };
     for (const title of titles) {
         out.total += 1;
         const plan = plans.get(title);

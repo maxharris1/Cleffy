@@ -1,6 +1,6 @@
 export type LicenceTag = 'PD' | 'CC0' | 'CC-BY' | 'CC-BY-SA';
 export type LedgerStatus = 'pending' | 'fetched' | 'queued' | 'ready' | 'skipped' | 'failed' | 'paused';
-export type Origin = 'mutopia' | 'openscore' | 'ia';
+export type Origin = 'mutopia' | 'openscore' | 'ia' | 'imslp';
 
 export type CatalogRef = { type: string; n: number; nEnd?: number; no?: number };
 
@@ -53,6 +53,7 @@ export type Resolution = {
     byteLength?: number | null;
     zipUrl?: string | null;
     zipEntry?: string;
+    imslpFile?: boolean;
 };
 
 export type RankedWork = {
@@ -78,6 +79,9 @@ export type Plan = { queue: Resolution[]; skips: Resolution[]; origin: Origin | 
 export const LICENCE_TAGS: readonly LicenceTag[];
 export const LEDGER_STATUSES: readonly LedgerStatus[];
 export const ORIGINS: readonly Origin[];
+export const BULK_ORIGINS: readonly Origin[];
+export const ORIGIN_ORDER: readonly Origin[];
+export const IMSLP_WAIT_MS: number;
 export const SEED_JOB_PRIORITY: number;
 export const MAX_PAGES: number;
 export const MAX_PDF_BYTES: number;
@@ -165,6 +169,23 @@ export function iaResolution(
     file: { name: string; size?: string | number },
     licences: Map<string, FileLicence>,
 ): Resolution;
+export function imslpWorkPageUrl(title: string): string;
+export function imslpImagefromIndexUrl(filename: string): string;
+export function imslpResolution(
+    work: Work,
+    editions: readonly ImslpEdition[] | null | undefined,
+    licences: Map<string, FileLicence> | null | undefined,
+): Resolution;
+export type ImslpDownloadStep =
+    | { action: 'accept' }
+    | { action: 'cdn'; url: string }
+    | { action: 'circuit'; code: 'bot_check' }
+    | { action: 'fail'; code: string };
+export function nextImslpDownloadStep(bytes: Uint8Array, contentType: string | null): ImslpDownloadStep;
+export function retryAfterMs(
+    header: string | null | undefined,
+    options?: { fallbackMs?: number; maxMs?: number },
+): number;
 export function imslpParseUrl(title: string): string;
 export function imslpRedirectsUrl(title: string): string;
 export function imslpRedirectAliases(
@@ -207,6 +228,13 @@ export function shouldProcess(
     row: LedgerRow,
     options?: { retrySkipped?: boolean },
 ): { process: boolean; reason: string };
+export const COVERED_STATUSES: readonly LedgerStatus[];
+export function isWorkCovered(rows: Iterable<LedgerRow> | null | undefined): boolean;
+export function isImslpOnlySources(sources: readonly string[] | null | undefined): boolean;
+export function shouldVisitWork(
+    rows: Iterable<LedgerRow> | null | undefined,
+    options?: { retrySkipped?: boolean; sources?: readonly string[]; fetchOnly?: boolean },
+): { visit: boolean; reason: string };
 export function reconcileQueued(
     job: { status: string; last_error?: string | null } | null | undefined,
     analysis: { status: string; error?: string | null } | null | undefined,

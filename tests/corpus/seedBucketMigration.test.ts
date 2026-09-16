@@ -14,6 +14,7 @@ const read = (name: string): string => readFileSync(resolve(process.cwd(), 'supa
 
 const sql = read('20260916150000_playalong_corpus_seed_bucket.sql');
 const editionsSql = read('20260916160000_playalong_corpus_edition_signals.sql');
+const imslpOriginSql = read('20260916180000_playalong_corpus_imslp_origin.sql');
 
 describe('20260916150000_playalong_corpus_seed_bucket.sql', () => {
     it('creates the private pd-pdfs bucket with the scores limits and no client policies', () => {
@@ -49,8 +50,16 @@ describe('20260916150000_playalong_corpus_seed_bucket.sql', () => {
         expect(editionsSql).not.toMatch(/create policy|grant/i);
     });
 
+    it('widens pd_pdf_store.origin to imslp without touching RLS (20260916180000)', () => {
+        expect(imslpOriginSql).toContain('drop constraint if exists pd_pdf_store_origin_check');
+        expect(imslpOriginSql).toContain(
+            "check (origin in ('mutopia', 'openscore', 'ia', 'commons', 'library', 'imslp'))",
+        );
+        expect(imslpOriginSql).not.toMatch(/create policy|grant/i);
+    });
+
     it('guards every create and add column so a re-apply over prod is a no-op', () => {
-        for (const source of [sql, editionsSql]) {
+        for (const source of [sql, editionsSql, imslpOriginSql]) {
             expect(source).not.toMatch(/^create (table|index)(?! if not exists)/m);
             expect(source).not.toMatch(/add column (?!if not exists)/);
         }

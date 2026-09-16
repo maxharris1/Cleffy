@@ -168,8 +168,14 @@ describe('seed-playalong-corpus --dry-run (mocked network)', () => {
         expect(result.stderr).toMatch(/CORPUS_OWNER_USER_ID is required/);
     });
 
-    it('rejects unknown sources and flags', () => {
-        expect(runSeed(['--dry-run', '--source', 'imslp'], {}).stderr).toMatch(/--source must be one of/);
+    it('rejects unknown sources and flags; --source imslp and --imslp-wait are accepted', () => {
+        expect(runSeed(['--dry-run', '--source', 'ftp'], {}).stderr).toMatch(/--source must be one of/);
         expect(runSeed(['--dry-run', '--imslp'], {}).stderr).toMatch(/unknown flag/);
+        const accepted = runSeed(
+            ['--dry-run', '--source', 'imslp', '--imslp-wait', '--limit', '0', '--no-wiki', '--no-editions'],
+            {},
+        );
+        expect(accepted.stderr).not.toMatch(/unknown flag|--source must be one of/);
+        expect(accepted.status).not.toBe(2);
     });
 });

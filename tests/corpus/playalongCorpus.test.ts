@@ -33,6 +33,7 @@ import {
     imslpEditions,
     imslpFileLicenceFor,
     imslpRedirectAliases,
+    imslpResolution,
     licenceTagOf,
     licenceVerdict,
     mutopiaPieceCandidate,
@@ -40,9 +41,14 @@ import {
     mutopiaPiecesFromTree,
     mutopiaResolution,
     monthlyAverageViews,
+    nextImslpDownloadStep,
     openscoreResolution,
     openscoreWorkMatches,
     openscoreWorksFromTree,
+    ORIGIN_ORDER,
+    ORIGINS,
+    BULK_ORIGINS,
+    IMSLP_WAIT_MS,
     pageviewsWindow,
     parseImslpFileBlocks,
     parseImslpFileStats,
@@ -56,7 +62,9 @@ import {
     RANK_WEIGHTS,
     rankWorks,
     reconcileQueued,
+    retryAfterMs,
     shouldProcess,
+    shouldVisitWork,
     titleForMutopiaPiece,
     titleWordsMatch,
     wikiArticleFor,
@@ -1020,6 +1028,41 @@ describe('IMSLP edition signals', () => {
             matchesBest: false,
         });
         expect(editionSignals(mutopia, [])).toMatchObject({ bestImslp: null, matchesBest: null, imslpEditions: 0 });
+        const fromImslp = { origin: 'imslp', filename: 'PMLP02312-Chopin-Op09n2rje.pdf' };
+        expect(editionSignals(fromImslp, editions)).toMatchObject({
+            chosen: { origin: 'imslp', imageType: 'Typeset', complete: true },
+            matchesBest: true,
+        });
+    });
+
+    it('resolves the best complete IMSLP edition and skips unlicensed / incomplete works', () => {
+        const editions = imslpEditions(wikitext, html);
+        const work = { title: 'Nocturnes, Op.9 (Chopin, Frédéric)' };
+        const licences = new Map([
+            [
+                'PMLP02312-Chopin-Op09n2rje.pdf',
+                { licenseLabel: 'Creative Commons Attribution 4.0', restriction: null, euHosted: false },
+            ],
+        ]);
+        expect(imslpResolution(work, editions, licences)).toMatchObject({
+            ok: true,
+            origin: 'imslp',
+            filename: 'PMLP02312-Chopin-Op09n2rje.pdf',
+            licenceTag: 'CC-BY',
+            usPd: true,
+            imslpFile: true,
+            pdfUrl: null,
+            editorCredit: 'Carl Mikuli (IMSLP)',
+        });
+        expect(imslpResolution(work, editions, new Map()).reason).toBe('no_licence');
+        expect(imslpResolution(work, [], licences).reason).toBe('no_source');
+        const nc = new Map([
+            [
+                'PMLP02312-Chopin-Op09n2rje.pdf',
+                { licenseLabel: 'Creative Commons Attribution-NonCommercial 4.0', restriction: null, euHosted: false },
+            ],
+        ]);
+        expect(imslpResolution(work, editions, nc).reason).toBe('non_commercial');
     });
 });
 
@@ -1200,6 +1243,36 @@ describe('ledger', () => {
         });
     });
 
+    it('treats IMSLP-only as fill-in: skip covered works, retry skipped/none misses', () => {
+        const fetchedMutopia = [{ status: 'fetched', origin: 'mutopia', filename: 'a.pdf' }];
+        const miss = [{ status: 'skipped', origin: 'none', filename: '-', last_error: 'no_source' }];
+        expect(shouldVisitWork(fetchedMutopia, { sources: ['imslp'], retrySkipped: true, fetchOnly: true })).toEqual({
+            visit: false,
+            reason: 'already_covered',
+        });
+        expect(shouldVisitWork(miss, { sources: ['imslp'], retrySkipped: false, fetchOnly: true })).toEqual({
+            visit: false,
+            reason: 'not_retryable',
+        });
+        expect(shouldVisitWork(miss, { sources: ['imslp'], retrySkipped: true, fetchOnly: true })).toEqual({
+            visit: true,
+            reason: 'uncovered',
+        });
+        expect(
+            shouldVisitWork(
+                [
+                    { status: 'fetched', origin: 'mutopia', filename: 'a.pdf' },
+                    { status: 'skipped', origin: 'mutopia', filename: 'b.pdf' },
+                ],
+                { sources: ['mutopia'], retrySkipped: true, fetchOnly: true },
+            ),
+        ).toEqual({ visit: true, reason: 'retry_extra' });
+        expect(shouldVisitWork([], { sources: ['imslp'], retrySkipped: true, fetchOnly: true })).toEqual({
+            visit: true,
+            reason: 'uncovered',
+        });
+    });
+
     it('reconciles queued rows from the job / analysis outcome', () => {
         expect(reconcileQueued({ status: 'succeeded' }, { status: 'ready' })).toEqual({ status: 'ready', error: null });
         expect(
@@ -1259,7 +1332,25 @@ describe('planning', () => {
         expect(planWork([ok('mutopia', 'a.pdf')], { sources: ['ia'] })).toEqual({ queue: [], skips: [], origin: null });
         expect(parseSources('ia,mutopia')).toEqual(['mutopia', 'ia']);
         expect(parseSources('all')).toEqual(['mutopia', 'openscore', 'ia']);
-        expect(() => parseSources('imslp')).toThrow(/--source/);
+        expect(parseSources('imslp')).toEqual(['imslp']);
+        expect(parseSources('ia,imslp')).toEqual(['ia', 'imslp']);
+        expect(ORIGINS).toEqual(['mutopia', 'openscore', 'ia', 'imslp']);
+        expect(BULK_ORIGINS).toEqual(['mutopia', 'openscore', 'ia']);
+        expect(ORIGIN_ORDER).toEqual(ORIGINS);
+        expect(IMSLP_WAIT_MS).toBe(15_000);
+        expect(() => parseSources('ftp')).toThrow(/--source/);
+    });
+
+    it('takes IMSLP last, and only one best-edition file', () => {
+        const plan = planWork([ok('imslp', 'best.pdf'), ok('imslp', 'other.pdf'), ok('ia', 'scan.pdf')], {
+            sources: ['ia', 'imslp'],
+        });
+        expect(plan.origin).toBe('ia');
+        expect(planWork([ok('imslp', 'a.pdf'), ok('imslp', 'b.pdf')], { sources: ['imslp'] })).toEqual({
+            queue: [ok('imslp', 'a.pdf')],
+            skips: [],
+            origin: 'imslp',
+        });
     });
 
     it('summarises coverage by origin and formats the progress line', () => {
@@ -1272,6 +1363,7 @@ describe('planning', () => {
             mutopia: 1,
             openscore: 0,
             ia: 1,
+            imslp: 0,
             none: 2,
             total: 4,
         });

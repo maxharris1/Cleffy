@@ -1,17 +1,25 @@
 /** Shared IMSLP MediaWiki helpers for Edge Functions. */
 
+import {
+    MAX_PDF_BYTES,
+    classifyDownloadBody,
+    extractCdnUrlFromWaitPage,
+    looksLikeHtml,
+    looksLikePdf,
+    type DownloadFailureCode,
+} from './imslpWaitPage.ts';
+
 // Rate limiting moved to _shared/rateLimit.ts (matching the deployed split);
 // re-exported so existing function imports keep working unchanged.
 export { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
+export { MAX_PDF_BYTES, classifyDownloadBody, extractCdnUrlFromWaitPage, looksLikeHtml, looksLikePdf };
+export type { DownloadFailureCode };
 
 export const IMSLP_ORIGIN = 'https://imslp.org';
 export const IMSLP_API = `${IMSLP_ORIGIN}/api.php`;
 /** Browser-like UA — IMSLP's friendly-redirect gate is stricter with bare bot UAs. */
 export const USER_AGENT =
     'Mozilla/5.0 (compatible; Cleffy/1.0; +https://cleffy.app) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-
-/** Soft size cap — matches the private `scores` bucket limit. */
-export const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
 /** Cookies that skip IMSLP's JS redirect interstitial + disclaimer confirm. */
 const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
@@ -73,7 +81,10 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
             const err = (payload as { error: unknown }).error;
             if (err) {
                 const info =
-                    typeof err === 'object' && err && 'info' in err && typeof (err as { info: unknown }).info === 'string'
+                    typeof err === 'object' &&
+                    err &&
+                    'info' in err &&
+                    typeof (err as { info: unknown }).info === 'string'
                         ? (err as { info: string }).info
                         : 'IMSLP API error';
                 throw new Error(info);
@@ -114,81 +125,6 @@ export const parseComposerFromTitle = (title: string): string | null => {
 export const stripFilePrefix = (title: string): string => title.replace(/^File:/i, '');
 
 export const isPdfFileTitle = (title: string): boolean => stripFilePrefix(title).toLowerCase().endsWith('.pdf');
-
-export const looksLikePdf = (bytes: Uint8Array): boolean => {
-    if (bytes.length < 5) {
-        return false;
-    }
-    // %PDF-
-    return bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
-};
-
-export const looksLikeHtml = (bytes: Uint8Array): boolean => {
-    const sample = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 512)).toLowerCase();
-    return (
-        sample.includes('<!doctype html') ||
-        sample.includes('<html') ||
-        sample.includes('bot check') ||
-        sample.includes('friendlytest') ||
-        sample.includes('disclaimer')
-    );
-};
-
-export type DownloadFailureCode = 'bot_check' | 'disclaimer' | 'not_pdf' | 'too_large' | 'upstream';
-
-export const classifyDownloadBody = (
-    bytes: Uint8Array,
-    contentType: string | null,
-): { ok: true } | { ok: false; code: DownloadFailureCode } => {
-    if (bytes.length > MAX_PDF_BYTES) {
-        return { ok: false, code: 'too_large' };
-    }
-    if (looksLikePdf(bytes)) {
-        return { ok: true };
-    }
-    const type = (contentType ?? '').toLowerCase();
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 2000)).toLowerCase();
-    if (text.includes('bot check') || text.includes('friendlytest') || text.includes('mtcaptcha')) {
-        return { ok: false, code: 'bot_check' };
-    }
-    if (text.includes('disclaimer') || text.includes('imslpdisclaimer')) {
-        return { ok: false, code: 'disclaimer' };
-    }
-    if (type.includes('html') || looksLikeHtml(bytes)) {
-        return { ok: false, code: 'bot_check' };
-    }
-    return { ok: false, code: 'not_pdf' };
-};
-
-const decodeHtmlEntities = (value: string): string =>
-    value
-        .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-        .replace(/&#(\d+);/g, (_, dec: string) => String.fromCharCode(Number(dec)))
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-
-/**
- * IMSLP's free-user "wait 15 seconds" page already embeds the real CDN URL in
- * `#sm_dl_wait[data-id]` — the timer only delays revealing it in the browser.
- */
-export const extractCdnUrlFromWaitPage = (html: string): string | null => {
-    const patterns = [
-        /id=["']sm_dl_wait["'][^>]*data-id=["']([^"']+)["']/i,
-        /data-id=["']([^"']+)["'][^>]*id=["']sm_dl_wait["']/i,
-    ];
-    for (const pattern of patterns) {
-        const match = html.match(pattern);
-        if (match?.[1]) {
-            const url = decodeHtmlEntities(match[1]).trim();
-            if (/^https?:\/\//i.test(url) && /\.pdf(\?|#|$)/i.test(url)) {
-                return url;
-            }
-        }
-    }
-    return null;
-};
 
 const fetchBytes = async (
     url: string,

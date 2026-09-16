@@ -1,0 +1,81 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { describe, expect, it } from 'vitest';
+
+import { nextImslpDownloadStep, retryAfterMs } from '../../scripts/playalong-corpus.mjs';
+import { extractCdnUrlFromWaitPage, looksLikePdf } from '../../supabase/functions/_shared/imslpWaitPage';
+
+/**
+ * Wait-page → CDN parse used by live `tryDownloadPdf` and the corpus seed.
+ * Fixtures only — no imslp.org fetch.
+ */
+const waitPage = (url: string, attrOrder: 'id-first' | 'data-first' = 'id-first'): string => {
+    const attrs = attrOrder === 'id-first' ? `id="sm_dl_wait" data-id="${url}"` : `data-id="${url}" id="sm_dl_wait"`;
+    return `<!doctype html><html><body><div ${attrs}>Please wait 15 seconds</div></body></html>`;
+};
+
+const bytesOf = (text: string): Uint8Array => new TextEncoder().encode(text);
+const pdfBytes = (): Uint8Array => new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+
+describe('extractCdnUrlFromWaitPage', () => {
+    it('is re-exported from the live Edge helper without changing tryDownloadPdf', () => {
+        const imslpTs = readFileSync(resolve(process.cwd(), 'supabase/functions/_shared/imslp.ts'), 'utf8');
+        expect(imslpTs).toContain("from './imslpWaitPage.ts'");
+        expect(imslpTs).toContain('extractCdnUrlFromWaitPage');
+        expect(imslpTs).toContain('export const tryDownloadPdf');
+    });
+
+    it('reads sm_dl_wait[data-id] in either attribute order and decodes entities', () => {
+        const url = 'https://cdn.imslp.org/files/imglnks/usimg/0/0a/PMLP123-score.pdf';
+        expect(extractCdnUrlFromWaitPage(waitPage(url))).toBe(url);
+        expect(extractCdnUrlFromWaitPage(waitPage(url, 'data-first'))).toBe(url);
+        expect(
+            extractCdnUrlFromWaitPage(
+                `<span id="sm_dl_wait" data-id="https://cdn.example.org/a.pdf?x=1&amp;y=2"></span>`,
+            ),
+        ).toBe('https://cdn.example.org/a.pdf?x=1&y=2');
+        expect(extractCdnUrlFromWaitPage('<div id="sm_dl_wait" data-id="/relative.pdf"></div>')).toBeNull();
+        expect(
+            extractCdnUrlFromWaitPage('<div id="sm_dl_wait" data-id="https://x.example/not-a-score"></div>'),
+        ).toBeNull();
+        expect(extractCdnUrlFromWaitPage('<p>no wait widget</p>')).toBeNull();
+    });
+});
+
+describe('nextImslpDownloadStep', () => {
+    it('accepts a PDF immediately, parses the wait page, and circuits on bot check', () => {
+        expect(looksLikePdf(pdfBytes())).toBe(true);
+        expect(nextImslpDownloadStep(pdfBytes(), 'application/pdf')).toEqual({ action: 'accept' });
+
+        const cdn = 'https://cdn.imslp.org/files/imglnks/usimg/1/11/score.pdf';
+        expect(nextImslpDownloadStep(bytesOf(waitPage(cdn)), 'text/html')).toEqual({ action: 'cdn', url: cdn });
+
+        expect(
+            nextImslpDownloadStep(
+                bytesOf('<html><title>IMSLP - Bot Check</title><p>mtcaptcha</p></html>'),
+                'text/html',
+            ),
+        ).toEqual({ action: 'circuit', code: 'bot_check' });
+        expect(nextImslpDownloadStep(bytesOf('<html>friendlytest bot wall</html>'), 'text/html')).toEqual({
+            action: 'circuit',
+            code: 'bot_check',
+        });
+        expect(nextImslpDownloadStep(bytesOf('<html>imslpdisclaimer copyright</html>'), 'text/html')).toEqual({
+            action: 'fail',
+            code: 'disclaimer',
+        });
+        expect(nextImslpDownloadStep(bytesOf('<html>no pdf here</html>'), 'text/html')).toEqual({
+            action: 'fail',
+            code: 'not_pdf',
+        });
+    });
+
+    it('honours Retry-After seconds with the live cap', () => {
+        expect(retryAfterMs(null)).toBe(2000);
+        expect(retryAfterMs('0')).toBe(500);
+        expect(retryAfterMs('5')).toBe(5000);
+        expect(retryAfterMs('120')).toBe(30_000);
+        expect(retryAfterMs('nope')).toBe(2000);
+    });
+});

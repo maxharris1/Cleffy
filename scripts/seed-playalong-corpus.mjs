@@ -6,15 +6,18 @@
  * shared `pd-pdfs` store, mint a corpus-owner document, and queue a low-priority
  * OMR job so the existing worker fills `playalong_corpus`.
  *
- * IMSLP is metadata only (work identity, per-file licence tags via api.php,
- * crawl-delay 2s). This script never requests an IMSLP file URL — see
- * docs/imslp-access-options.md.
+ * IMSLP is metadata by default (work identity, per-file licence tags via
+ * api.php, crawl-delay 2s). `--source imslp` is opt-in and last: one file at
+ * a time, wait-page → CDN parse (same as live `tryDownloadPdf`), no 15s sleep
+ * unless `--imslp-wait`. Bot-check / MTCaptcha / Retry-After trip a circuit
+ * breaker that auto-pauses `playalong_corpus_control`.
  *
  * Usage:
  *   npm run corpus:seed -- --dry-run
  *   npm run corpus:seed -- --fetch-only --limit 5000 --batch 40        # PDFs into pd-pdfs, no owner needed
  *   npm run corpus:seed -- --enqueue-fetched                           # fetched rows → documents + jobs
  *   npm run corpus:seed -- --limit 2000 --batch 40 --re-rank           # both in one pass
+ *   npm run corpus:seed -- --fetch-only --source imslp --sleep 0       # IMSLP.org, one file at a time
  *
  * Modes:
  *   --fetch-only         rank, resolve, licence-filter, download, pd-pdfs + pd_pdf_store, ledger `fetched`;
@@ -27,11 +30,12 @@
  * Flags:
  *   --limit N            hard cap on ranked works and floor on covered works (5000)
  *   --no-wiki            skip the Wikipedia pageviews demand proxy (cold-start order only)
- *   --no-editions        skip the IMSLP edition lookup (no per-work api.php call)
+ *   --no-editions        skip the IMSLP edition lookup (no per-work api.php call; ignored for --source imslp)
  *   --max-runtime M      stop cleanly after M minutes (finishes the current file)
  *   --batch N            works per batch before a progress line + pause check (40)
  *   --sleep S            seconds between works (2)
- *   --source X           mutopia|openscore|ia|all, comma list allowed (all)
+ *   --source X           mutopia|openscore|ia|imslp|all, comma list allowed (`all` = mutopia,openscore,ia)
+ *   --imslp-wait         sleep 15s on the IMSLP wait page before the CDN GET (default off)
  *   --retry-skipped      re-try ledger rows the licence / size filter skipped
  *   --re-rank            merge live demand (documents.title, playalong_corpus.use_count)
  *   --dry-run            resolve + plan only; no downloads, no writes
@@ -42,7 +46,8 @@
  *   --eval-dir P         eval pins directory (services/omr-service/eval/corpus)
  *
  * Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (both unset → local stack),
- *      CORPUS_OWNER_USER_ID (auth.users id; required unless --dry-run).
+ *      CORPUS_OWNER_USER_ID (auth.users id; required unless --dry-run / --fetch-only),
+ *      IMSLP_CRAWLER_USER_AGENT (honest crawler UA for --source imslp; placeholder ok).
  */
 
 /* global AbortSignal */
@@ -58,17 +63,20 @@ import { promisify } from 'node:util';
 import pdfLib from 'pdf-lib';
 
 import { parseWorkPageLicenses } from '../supabase/functions/_shared/imslpLicense.ts';
+import { classifyDownloadBody } from '../supabase/functions/_shared/imslpWaitPage.ts';
 import { POPULAR_WORKS } from '../supabase/functions/_shared/popularWorks.ts';
 import { CATALOG_JSONL_PATH, SYNC_JSON_PATH, readCatalog } from './imslp-catalog.mjs';
 import {
     IMSLP_CRAWL_DELAY_MS,
+    IMSLP_WAIT_MS,
     WIKI_DELAY_MS,
     MAX_PAGES,
     MAX_PDF_BYTES,
     MUTOPIA_ORIGIN,
     MUTOPIA_TREE_URL,
     OPENSCORE_REPOS,
-    ORIGINS,
+    ORIGIN_ORDER,
+    BULK_ORIGINS,
     PARK_AFTER_FAILURES,
     SEED_JOB_PRIORITY,
     backoffDelayMs,
@@ -86,14 +94,17 @@ import {
     iaResolution,
     iaSearchUrl,
     imslpEditions,
+    imslpImagefromIndexUrl,
     imslpParseUrl,
     imslpRedirectAliases,
     imslpRedirectsUrl,
+    imslpResolution,
     mutopiaPieceCandidate,
     mutopiaPieceMatches,
     monthlyAverageViews,
     mutopiaPiecesFromTree,
     mutopiaResolution,
+    nextImslpDownloadStep,
     openscoreResolution,
     openscoreWorkMatches,
     openscoreWorksFromTree,
@@ -105,7 +116,9 @@ import {
     progressEvent,
     rankWorks,
     reconcileQueued,
+    retryAfterMs,
     shouldProcess,
+    shouldVisitWork,
     sourceEnabled,
     titleForMutopiaPiece,
     wikiArticleFor,
@@ -126,6 +139,11 @@ const DEFAULT_CACHE_DIR = resolve(ROOT, 'scripts/data/.corpus-seed-cache');
 const LOCAL_SERVICE_ROLE_KEY =
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
 const USER_AGENT = 'Cleffy corpus seed (+https://cleffy.app; metadata + public-domain mirrors only)';
+/** Honest crawler UA for IMSLP file GETs. Placeholder contact is fine if unset. */
+const IMSLP_CRAWLER_USER_AGENT =
+    (process.env.IMSLP_CRAWLER_USER_AGENT ?? '').trim() ||
+    'CleffyCorpusSeed/1.0 (+https://cleffy.app; public-domain corpus seed; contact unset)';
+const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
 const HTTP_TIMEOUT_MS = 60_000;
 const PAGE_SIZE = 1000;
 const PD_BUCKET = 'pd-pdfs';
@@ -152,7 +170,7 @@ const parseArgs = (argv) => {
         limit: null,
         batch: 40,
         sleepMs: 2000,
-        sources: [...ORIGINS],
+        sources: [...BULK_ORIGINS],
         retrySkipped: false,
         reRank: false,
         dryRun: false,
@@ -161,6 +179,7 @@ const parseArgs = (argv) => {
         rankOnly: false,
         noWiki: false,
         noEditions: false,
+        imslpWaitMs: 0,
         maxRuntimeMs: null,
         ensureOwnerPlan: false,
         cacheDir: DEFAULT_CACHE_DIR,
@@ -212,6 +231,9 @@ const parseArgs = (argv) => {
                 break;
             case '--no-editions':
                 out.noEditions = true;
+                break;
+            case '--imslp-wait':
+                out.imslpWaitMs = IMSLP_WAIT_MS;
                 break;
             case '--enqueue-fetched':
                 out.enqueueFetched = true;
@@ -308,9 +330,10 @@ const makeCache = (dir) => {
 };
 
 class HttpError extends Error {
-    constructor(status, url) {
+    constructor(status, url, retryAfterHeader = null) {
         super(`HTTP ${status} ${url}`);
         this.status = status;
+        this.retryAfterMs = retryAfterMs(retryAfterHeader);
     }
 }
 
@@ -321,7 +344,7 @@ const fetchText = async (url, { headers = {} } = {}) => {
         redirect: 'follow',
     });
     if (!res.ok) {
-        throw new HttpError(res.status, url);
+        throw new HttpError(res.status, url, res.headers.get('Retry-After'));
     }
     return res.text();
 };
@@ -344,7 +367,7 @@ const fetchBytes = async (url, maxBytes = MAX_PDF_BYTES) => {
         redirect: 'follow',
     });
     if (!res.ok) {
-        throw new HttpError(res.status, url);
+        throw new HttpError(res.status, url, res.headers.get('Retry-After'));
     }
     const declared = Number(res.headers.get('content-length') ?? 0);
     if (declared > maxBytes) {
@@ -361,6 +384,106 @@ const isTransient = (err) =>
     err instanceof HttpError
         ? err.status === 429 || err.status >= 500
         : /timeout|ECONN|EAI_AGAIN|fetch failed/i.test(String(err?.message));
+
+/** Circuit-breaker: bot check / MTCaptcha / repeated 429 → pause the crawl. */
+class ImslpCircuitOpen extends Error {
+    constructor(code, filename) {
+        super(`${code}:${filename}`);
+        this.code = code;
+        this.filename = filename;
+    }
+}
+
+const imslpFetchBytes = async (url, accept) => {
+    const res = await fetch(url, {
+        redirect: 'follow',
+        headers: {
+            'User-Agent': IMSLP_CRAWLER_USER_AGENT,
+            Accept: accept,
+            Cookie: IMSLP_SESSION_COOKIES,
+            Referer: 'https://imslp.org/',
+        },
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS * 3),
+    });
+    if (!res.ok) {
+        throw new HttpError(res.status, url, res.headers.get('Retry-After'));
+    }
+    return {
+        bytes: Buffer.from(await res.arrayBuffer()),
+        contentType: res.headers.get('content-type'),
+        finalUrl: res.url,
+    };
+};
+
+/**
+ * Live wait-page → CDN parse (same as `tryDownloadPdf`). No 15s sleep unless
+ * `ctx.imslpWaitMs` (`--imslp-wait`). 429 honors Retry-After; bot_check /
+ * MTCaptcha opens the circuit after a backoff.
+ */
+const downloadImslpPdf = async (ctx, filename) => {
+    const openUrl = imslpImagefromIndexUrl(filename);
+    const state = ctx.sourceState.imslp ?? (ctx.sourceState.imslp = { failures: 0 });
+    let lastErr = null;
+    for (let attempt = 1; attempt <= PARK_AFTER_FAILURES; attempt++) {
+        try {
+            const page = await imslpFetchBytes(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*');
+            const step = nextImslpDownloadStep(page.bytes, page.contentType);
+            switch (step.action) {
+                case 'accept':
+                    state.failures = 0;
+                    return page.bytes;
+                case 'circuit':
+                    throw new ImslpCircuitOpen(step.code, filename);
+                case 'cdn': {
+                    if (ctx.imslpWaitMs > 0) {
+                        await sleep(ctx.imslpWaitMs);
+                    }
+                    const pdf = await imslpFetchBytes(step.url, 'application/pdf,*/*');
+                    const classified = classifyDownloadBody(pdf.bytes, pdf.contentType);
+                    if (classified.ok) {
+                        state.failures = 0;
+                        return pdf.bytes;
+                    }
+                    if (classified.code === 'bot_check') {
+                        throw new ImslpCircuitOpen('bot_check', filename);
+                    }
+                    throw new Error(classified.code);
+                }
+                case 'fail':
+                    throw new Error(step.code);
+                default: {
+                    const _exhaustive = step;
+                    throw new Error(`unknown imslp step: ${_exhaustive.action}`);
+                }
+            }
+        } catch (err) {
+            lastErr = err;
+            if (err instanceof ImslpCircuitOpen) {
+                state.failures += 1;
+                await sleep(backoffDelayMs(state.failures));
+                throw err;
+            }
+            if (err instanceof HttpError && (err.status === 429 || err.status === 503)) {
+                state.failures += 1;
+                await sleep(err.retryAfterMs ?? backoffDelayMs(state.failures));
+                if (state.failures >= PARK_AFTER_FAILURES) {
+                    throw new ImslpCircuitOpen('rate_limit', filename);
+                }
+                continue;
+            }
+            throw err;
+        }
+    }
+    throw lastErr instanceof Error ? lastErr : new ImslpCircuitOpen('rate_limit', filename);
+};
+
+const pauseCorpus = async (db, reason) => {
+    await db.update('playalong_corpus_control', 'singleton=eq.true', {
+        paused: true,
+        updated_at: new Date().toISOString(),
+    });
+    info(`auto-paused playalong_corpus_control (${reason})`);
+};
 
 // ---------------------------------------------------------------------------
 // PostgREST + Storage (service role)
@@ -615,6 +738,9 @@ const zipBytes = async (ctx, url) => {
 };
 
 const pdfBytesFor = async (ctx, res) => {
+    if (res.origin === 'imslp' || res.imslpFile) {
+        return downloadImslpPdf(ctx, res.filename);
+    }
     if (res.zipUrl && res.zipEntry) {
         const buf = await zipBytes(ctx, res.zipUrl);
         const entry = zipEntries(buf).find((e) => e.name === res.zipEntry);
@@ -656,8 +782,8 @@ const EMPTY_PAGE = Object.freeze({ licences: new Map(), editions: [] });
  * (rendered page) and edition signals (wikitext blocks + rendered stats).
  * Memoised per run; the disk cache makes reruns free.
  */
-const imslpWorkPage = async (ctx, title) => {
-    if (ctx.noEditions) {
+const imslpWorkPage = async (ctx, title, { required = false } = {}) => {
+    if (ctx.noEditions && !required) {
         return EMPTY_PAGE;
     }
     if (ctx.pages.has(title)) {
@@ -740,7 +866,12 @@ const resolveIa = async (ctx, work) => {
     return [iaResolution(work, item, file, page.licences)];
 };
 
-const RESOLVERS = { mutopia: resolveMutopia, openscore: resolveOpenscore, ia: resolveIa };
+const resolveImslp = async (ctx, work) => {
+    const page = await imslpWorkPage(ctx, work.title, { required: true });
+    return [imslpResolution(work, page.editions, page.licences)];
+};
+
+const RESOLVERS = { mutopia: resolveMutopia, openscore: resolveOpenscore, ia: resolveIa, imslp: resolveImslp };
 
 /**
  * Resolve one work across the enabled origins, stopping at the first origin
@@ -749,11 +880,11 @@ const RESOLVERS = { mutopia: resolveMutopia, openscore: resolveOpenscore, ia: re
  */
 const resolveWork = async (ctx, work) => {
     const resolutions = [];
-    for (const origin of ORIGINS) {
+    for (const origin of ORIGIN_ORDER) {
         if (!sourceEnabled(origin, { sources: ctx.sources, parked: ctx.parked })) {
             continue;
         }
-        const state = ctx.sourceState[origin];
+        const state = ctx.sourceState[origin] ?? (ctx.sourceState[origin] = { failures: 0 });
         try {
             const found = await RESOLVERS[origin](ctx, work);
             state.failures = 0;
@@ -866,26 +997,38 @@ const fetchFile = async (ctx, work, res, batchId) => {
             return { status: 'skipped' };
         }
 
-        await db.upload(PD_BUCKET, pdObjectPath(sha, res.filename), bytes);
-        await db.insert(
-            'pd_pdf_store',
-            [
-                {
-                    pdf_sha256: sha,
-                    filename: res.filename,
-                    work_title: res.workTitle,
-                    origin: res.origin,
-                    source_url: res.sourceUrl,
-                    licence_tag: res.licenceTag,
-                    editor_credit: res.editorCredit,
-                    us_pd: res.usPd,
-                    byte_length: bytes.length,
-                    page_count: pageCount,
-                    edition: res.edition ?? null,
-                },
-            ],
-            { onConflict: 'pdf_sha256', merge: true },
+        const existingStore = await db.request(
+            `/pd_pdf_store?select=pdf_sha256,filename,origin&pdf_sha256=eq.${sha}&limit=1`,
         );
+        if (!existingStore?.length) {
+            await db.upload(PD_BUCKET, pdObjectPath(sha, res.filename), bytes);
+            try {
+                await db.insert(
+                    'pd_pdf_store',
+                    [
+                        {
+                            pdf_sha256: sha,
+                            filename: res.filename,
+                            work_title: res.workTitle,
+                            origin: res.origin,
+                            source_url: res.sourceUrl,
+                            licence_tag: res.licenceTag,
+                            editor_credit: res.editorCredit,
+                            us_pd: res.usPd,
+                            byte_length: bytes.length,
+                            page_count: pageCount,
+                            edition: res.edition ?? null,
+                        },
+                    ],
+                    { onConflict: 'pdf_sha256' },
+                );
+            } catch (err) {
+                // Lost the insert race: reuse the winner. Do not merge-overwrite origin.
+                if (err.status !== 409) {
+                    throw err;
+                }
+            }
+        }
         await upsertLedger(db, ledger, {
             ...key,
             status: 'fetched',
@@ -904,6 +1047,19 @@ const fetchFile = async (ctx, work, res, batchId) => {
         );
         return { status: 'fetched', bytes };
     } catch (err) {
+        if (err instanceof ImslpCircuitOpen) {
+            await upsertLedger(db, ledger, { ...key, status: 'paused', last_error: err.message });
+            console.log(
+                workEvent({
+                    workTitle: res.workTitle,
+                    status: 'paused',
+                    origin: res.origin,
+                    filename: res.filename,
+                    reason: err.message,
+                }),
+            );
+            throw err;
+        }
         const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
         const status = message === 'too_large' || message === 'not_pdf' ? 'skipped' : 'failed';
         await upsertLedger(db, ledger, { ...key, status, last_error: message });
@@ -951,7 +1107,8 @@ const enqueueRow = async (ctx, row, bytes = null) => {
             ]);
         }
 
-        const source = pdObjectPath(row.pdf_sha256, row.filename);
+        const store = await db.request(`/pd_pdf_store?select=filename&pdf_sha256=eq.${row.pdf_sha256}&limit=1`);
+        const source = pdObjectPath(row.pdf_sha256, store?.[0]?.filename ?? row.filename);
         if (bytes) {
             await db.upload(SCORES_BUCKET, storagePath, bytes);
         } else if (!(await db.copy(PD_BUCKET, source, SCORES_BUCKET, storagePath))) {
@@ -1353,6 +1510,11 @@ const main = async () => {
     const db = makeDb(supabase);
     const cache = makeCache(args.cacheDir);
     info(`mode ${mode}; target ${supabase.label}; sources ${args.sources.join(',')}`);
+    if (args.sources.includes('imslp')) {
+        info(
+            `imslp file fetch: wait-page→CDN parse, serial, --imslp-wait ${args.imslpWaitMs > 0 ? 'on' : 'off'}; UA ${IMSLP_CRAWLER_USER_AGENT}`,
+        );
+    }
 
     let ledger = new Map();
     let dbReachable = true;
@@ -1387,8 +1549,9 @@ const main = async () => {
         ledger,
         owner,
         sources: args.sources,
+        imslpWaitMs: args.imslpWaitMs,
         parked: new Set(),
-        sourceState: Object.fromEntries(ORIGINS.map((o) => [o, { failures: 0 }])),
+        sourceState: Object.fromEntries(ORIGIN_ORDER.map((o) => [o, { failures: 0 }])),
         musescore: args.musescore,
         mutopia: [],
         openscore: [],
@@ -1498,13 +1661,13 @@ const main = async () => {
             break;
         }
         const rows = rowsFor(work.title);
-        const covered = rows.some((row) => ['queued', 'ready', 'fetched'].includes(row.status));
-        const retryable = rows.filter(rowIsOpen);
-        if (covered && retryable.length === 0) {
-            continue;
-        }
-        if (rows.length > 0 && retryable.length === 0 && !covered) {
-            // Every row skipped / exhausted and no retry requested.
+        if (
+            !shouldVisitWork(rows, {
+                retrySkipped: args.retrySkipped,
+                sources: ctx.sources,
+                fetchOnly: mode === 'fetch',
+            }).visit
+        ) {
             continue;
         }
 
@@ -1562,13 +1725,26 @@ const main = async () => {
                 if (existing && !rowIsOpen(existing)) {
                     continue;
                 }
-                if (mode === 'fetch') {
-                    await fetchFile(ctx, work, res, batchId);
-                } else if (existing?.status === 'fetched') {
-                    // Already in the store from a --fetch-only pass: no second download.
-                    await enqueueRow(ctx, existing);
-                } else {
-                    await ingestFile(ctx, work, res, batchId);
+                try {
+                    if (mode === 'fetch') {
+                        await fetchFile(ctx, work, res, batchId);
+                    } else if (existing?.status === 'fetched') {
+                        // Already in the store from a --fetch-only pass: no second download.
+                        await enqueueRow(ctx, existing);
+                    } else {
+                        await ingestFile(ctx, work, res, batchId);
+                    }
+                } catch (err) {
+                    if (!(err instanceof ImslpCircuitOpen)) {
+                        throw err;
+                    }
+                    ctx.parked.add('imslp');
+                    if (dbReachable) {
+                        await pauseCorpus(ctx.db, err.message);
+                    }
+                    stopReason = 'imslp_circuit';
+                    info(`IMSLP circuit open (${err.message}) — stopping`);
+                    break;
                 }
             }
         }
