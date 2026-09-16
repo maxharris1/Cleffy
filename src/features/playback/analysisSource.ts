@@ -185,16 +185,29 @@ export const parseAlignmentMap = (raw: unknown): AlignmentMap | undefined => {
     };
 };
 
-export const parseTimingsExtras = (timings: unknown): { source?: AnalysisSource; alignmentMap?: AlignmentMap } => {
+/**
+ * How the shared play-along corpus answered this PDF: by exact bytes or by
+ * matching the printed layout. Absent on every row the worker computed itself.
+ */
+export type CorpusHit = 'hash' | 'layout';
+
+export const parseCorpusHit = (raw: unknown): CorpusHit | undefined =>
+    raw === 'hash' || raw === 'layout' ? raw : undefined;
+
+export const parseTimingsExtras = (
+    timings: unknown,
+): { source?: AnalysisSource; alignmentMap?: AlignmentMap; corpusHit?: CorpusHit } => {
     if (typeof timings !== 'object' || timings === null) {
         return {};
     }
     const o = timings as Record<string, unknown>;
     const source = parseAnalysisSource(o.source);
     const alignmentMap = parseAlignmentMap(o.alignmentMap);
+    const corpusHit = parseCorpusHit(o.corpusHit);
     return {
         ...(source ? { source } : {}),
         ...(alignmentMap ? { alignmentMap } : {}),
+        ...(corpusHit ? { corpusHit } : {}),
     };
 };
 
@@ -233,11 +246,10 @@ const bandTitle = (source: AnalysisSource): string => {
     }
 };
 
-export const sourceBadgeTitle = (source: AnalysisSource): string => {
+export const sourceBadgeTitle = (source: AnalysisSource, corpusHit?: CorpusHit): string => {
     const attribution = attributionOf(source);
-    if (!attribution) {
-        return bandTitle(source);
-    }
-    const who = attribution.credit ?? 'Unnamed editor';
-    return `${bandTitle(source)} — edition by ${who}, licensed ${attribution.licence}`;
+    const base = attribution
+        ? `${bandTitle(source)} — edition by ${attribution.credit ?? 'Unnamed editor'}, licensed ${attribution.licence}`
+        : bandTitle(source);
+    return corpusHit ? `${base} · From library (precomputed)` : base;
 };

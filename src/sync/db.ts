@@ -1,7 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 
 import type { RecognizedRegion } from '@/features/fingering/model';
-import type { AlignmentMap, AnalysisSource } from '@/features/playback/analysisSource';
+import type { AlignmentMap, AnalysisSource, CorpusHit } from '@/features/playback/analysisSource';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import type {
     AssignmentRow,
@@ -88,6 +88,8 @@ export interface CachedScoreAnalysis {
     source?: AnalysisSource;
     /** Printed-bar highlight when the symbolic path accepted. */
     alignmentMap?: AlignmentMap;
+    /** Set when the shared corpus answered instead of a fresh OMR/symbolic run. */
+    corpusHit?: CorpusHit;
 }
 
 /** First-page render for the library row (local-only, never synced). */

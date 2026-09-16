@@ -155,6 +155,7 @@ export const fetchScoreAnalysisFull = async (docId: string): Promise<CachedScore
         ...(previous?.bpmOverride !== undefined ? { bpmOverride: previous.bpmOverride } : {}),
         ...(extras.source ? { source: extras.source } : {}),
         ...(extras.alignmentMap ? { alignmentMap: extras.alignmentMap } : {}),
+        ...(extras.corpusHit ? { corpusHit: extras.corpusHit } : {}),
     };
     await getDb().scoreCache.put(cached);
     return cached;
