@@ -1,4 +1,8 @@
-import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/imslp/imslpApi';
+import {
+    importImslpPdfToStorage,
+    type ImslpDownloadFallback,
+    type ImslpDownloadStage,
+} from '@/features/imslp/imslpApi';
 import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
@@ -243,6 +247,7 @@ export const importDocumentFromImslp = async (
     workTitle: string,
     ownerId: string,
     acceptedDisclaimer: boolean,
+    onStage?: (stage: ImslpDownloadStage) => void,
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
     noteLibraryMutation();
     const supabase = getSupabase();
@@ -275,7 +280,7 @@ export const importDocumentFromImslp = async (
     };
 
     try {
-        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle);
+        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle, onStage);
         if (!result.ok) {
             await rollback();
             return { ok: false, fallback: result };
