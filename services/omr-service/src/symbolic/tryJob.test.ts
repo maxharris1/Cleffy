@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import type { CorpusHit } from '../corpus/store.js';
+import type { ScoreData } from '../scoreData.js';
 import { ingestSymbolic } from './ingest.js';
 import { sourceNameOf } from './jobResult.js';
 import { synthQuantizedMidi } from './midiSynth.js';
@@ -258,5 +260,112 @@ describe('trySymbolicJob', () => {
         }));
         expect(seen[0]).toEqual(WORK);
         expect(result.kind).toBe('fallthrough');
+    });
+});
+
+const corpusScore = (bars: number): ScoreData =>
+    ({
+        version: 3,
+        ticksPerQuarter: 480,
+        defaultBpm: 90,
+        timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        totalTicks: bars * 1920,
+        notes: [{ t: 0, d: 480, p: 72, h: 0 }],
+        measures: Array.from({ length: bars }, (_, i) => ({
+            n: i + 1,
+            tick: i * 1920,
+            dTicks: 1920,
+            page: 0,
+            sys: 0,
+            x0: i / bars,
+            x1: (i + 1) / bars,
+        })),
+        systems: [{ page: 0, y0: 0, y1: 1 }],
+        warnings: [],
+    }) as ScoreData;
+
+const corpusHit = (bars = BARS): CorpusHit => ({
+    pdfSha256: 'corpus-pdf',
+    era: '',
+    score: corpusScore(bars),
+    alignmentMap: null,
+    source: { tier: 'symbolic', band: 'accept', reason: 'accept', sourceName: 'Mutopia', origin: 'mutopia' },
+    candidateSha256: 'cand',
+});
+
+describe('trySymbolicJob — corpus layout lookup', () => {
+    it('a unique hit accepts before discover, re-aligned onto this PDF, with corpusHit layout and no candidate', async () => {
+        const discover = vi.fn(async () => [mutopiaMid()]);
+        const corpusLayout = vi.fn(async () => corpusHit());
+        const logs: string[] = [];
+        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
+            client: { discover, fetchBytes: async () => midi() },
+            corpusLayout,
+            log: (line) => logs.push(line),
+        }));
+        expect(corpusLayout).toHaveBeenCalledWith(WORK, BARS, 1);
+        expect(discover).not.toHaveBeenCalled();
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect(result.corpusHit).toBe('layout');
+        expect(result.candidate).toBeNull();
+        expect(result.score).toEqual(corpusScore(BARS));
+        expect(result.source.sourceName).toBe('Mutopia');
+        expect(result.alignmentMap.candidateSha256).toBe('cand');
+        expect(result.alignmentMap.entries.length).toBe(BARS);
+        expect(result.alignmentMap.bySrcIndex[1]?.x0).toBeCloseTo(1 / BARS);
+        expect(result.layout).toEqual({ workKey: WORK, printedBars: BARS, pageCount: 1 });
+        const parsed = JSON.parse(logs[0] ?? '{}') as { band: string; candidate: { source: string } };
+        expect(parsed.band).toBe('accept');
+        expect(parsed.candidate.source).toBe('corpus');
+    });
+
+    it('a miss or collision (null) discovers as before, and the accept carries layout + candidate', async () => {
+        const discover = vi.fn(async () => [mutopiaMid()]);
+        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
+            client: { discover, fetchBytes: async () => midi() },
+            corpusLayout: async () => null,
+        }));
+        expect(discover).toHaveBeenCalledTimes(1);
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect(result.corpusHit).toBeUndefined();
+        expect(result.candidate).toMatchObject({ source: 'mutopia', format: 'mid', url: URL });
+        expect(typeof result.candidate?.sha256).toBe('string');
+        expect(result.layout).toEqual({ workKey: WORK, printedBars: BARS, pageCount: 1 });
+    });
+
+    it('a hit whose score cannot be aligned onto this PDF discovers as before', async () => {
+        const discover = vi.fn(async () => [mutopiaMid()]);
+        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
+            client: { discover, fetchBytes: async () => midi() },
+            corpusLayout: async () => corpusHit(BARS + 3),
+        }));
+        expect(discover).toHaveBeenCalledTimes(1);
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect(result.corpusHit).toBeUndefined();
+    });
+
+    it('without an injected lookup (flag off) nothing changes and a fallthrough still carries the layout key', async () => {
+        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
+            client: {
+                discover: async () => [],
+                fetchBytes: async () => {
+                    throw new Error('unused');
+                },
+            },
+        }));
+        expect(result.kind).toBe('fallthrough');
+        if (result.kind !== 'fallthrough') {
+            return;
+        }
+        expect(result.layout).toEqual({ workKey: WORK, printedBars: BARS, pageCount: 1 });
     });
 });
