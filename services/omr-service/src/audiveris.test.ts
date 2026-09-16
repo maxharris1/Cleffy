@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -304,6 +304,30 @@ describe('runAudiverisTolerant', () => {
             code: ERROR_CODES.noStavesFound,
         });
         expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('creates the recovery output folders before re-running', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'audiveris-recover-'));
+        const seen: string[] = [];
+        const run = vi.fn<AudiverisRunner>(async (_input, outDir) => {
+            seen.push(outDir);
+            // Audiveris writes nothing when it cannot open the folder; the real
+            // failure was discoverOutputs' readdir on a folder nobody created.
+            await readdir(outDir);
+            if (outDir.endsWith('/retry')) {
+                return emptyResult({ mxlPaths: [`${outDir}/a.mxl`], exitCode: 0 });
+            }
+            if (outDir.endsWith('/reexport')) {
+                return emptyResult({ exitCode: 1 });
+            }
+            return emptyResult({ omrPath: `${dir}/book.omr`, invalidSheets: [3], exitCode: 1 });
+        });
+
+        const result = await runAudiverisTolerant('/in.pdf', dir, opts, run);
+
+        expect(result.mxlPaths).toEqual([`${dir}/retry/a.mxl`]);
+        expect(seen).toEqual([dir, `${dir}/reexport`, `${dir}/retry`]);
+        await rm(dir, { recursive: true, force: true });
     });
 
     it('does not treat leftover MusicXML from a non-zero exit as success', async () => {
