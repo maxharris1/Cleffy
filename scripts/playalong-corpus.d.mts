@@ -72,7 +72,14 @@ export type RankedWork = {
 
 export type CatalogWork = { page_title: string; composer: string | null; categories: string[]; touched: string | null };
 
-export type LedgerRow = { work_title?: string; status: string; attempts?: number | string | null };
+export type LedgerRow = {
+    work_title?: string;
+    status: string;
+    attempts?: number | string | null;
+    origin?: string;
+    filename?: string;
+    last_error?: string | null;
+};
 
 export type Plan = { queue: Resolution[]; skips: Resolution[]; origin: Origin | null };
 
