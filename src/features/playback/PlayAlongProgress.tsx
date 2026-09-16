@@ -54,11 +54,7 @@ export const PlayAlongProgress = (props: PlayAlongProgressProps) => {
     const currentIndex = steps.findIndex((step) => step.stage === stage);
     return (
         <div
-            className={[
-                'flex flex-col gap-1',
-                align === 'center' ? 'items-center' : 'items-start',
-                className,
-            ]
+            className={['flex flex-col gap-1', align === 'center' ? 'items-center' : 'items-start', className]
                 .filter(Boolean)
                 .join(' ')}
             data-testid="play-along-progress"
@@ -84,7 +80,10 @@ export const PlayAlongProgress = (props: PlayAlongProgressProps) => {
                                 {step.label}
                             </span>
                             {index < steps.length - 1 ? (
-                                <span aria-hidden="true" className={`h-px w-4 ${done ? 'bg-accent' : 'bg-stone-300'}`} />
+                                <span
+                                    aria-hidden="true"
+                                    className={`h-px w-4 ${done ? 'bg-accent' : 'bg-stone-300'}`}
+                                />
                             ) : null}
                         </li>
                     );
