@@ -387,3 +387,7 @@ export function createImslpBreaker(options?: {
     recordBlock: (code: string, detail?: string) => ImslpBreakerOutcome;
     pauseUntil: (untilMs: number, reason?: string) => void;
 };
+export function seedPokeTarget(env?: {
+    OMR_SEED_SERVICE_URL?: string | undefined;
+    OMR_SERVICE_SECRET?: string | undefined;
+}): { url: string; headers: Record<string, string> } | null;

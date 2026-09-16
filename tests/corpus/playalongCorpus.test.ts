@@ -62,6 +62,7 @@ import {
     RANK_WEIGHTS,
     rankWorks,
     reconcileQueued,
+    seedPokeTarget,
     shouldProcess,
     shouldVisitWork,
     gateReviewError,
@@ -1447,5 +1448,19 @@ describe('planning', () => {
         expect(backoffDelayMs(1)).toBe(1000);
         expect(backoffDelayMs(3)).toBe(4000);
         expect(backoffDelayMs(20)).toBe(60_000);
+    });
+
+    it('pokes the seed-only pool only when both its URL and the shared secret are set', () => {
+        expect(seedPokeTarget({})).toBeNull();
+        expect(seedPokeTarget({ OMR_SEED_SERVICE_URL: 'https://seed.run.app' })).toBeNull();
+        expect(seedPokeTarget({ OMR_SERVICE_SECRET: 's' })).toBeNull();
+        expect(seedPokeTarget({ OMR_SEED_SERVICE_URL: 'ftp://seed', OMR_SERVICE_SECRET: 's' })).toBeNull();
+        expect(seedPokeTarget({ OMR_SEED_SERVICE_URL: 'not a url', OMR_SERVICE_SECRET: 's' })).toBeNull();
+        expect(
+            seedPokeTarget({ OMR_SEED_SERVICE_URL: 'https://seed.run.app/', OMR_SERVICE_SECRET: ' s3cret ' }),
+        ).toEqual({
+            url: 'https://seed.run.app/poke',
+            headers: { 'Content-Type': 'application/json', 'x-omr-secret': 's3cret' },
+        });
     });
 });
