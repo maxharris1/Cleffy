@@ -20,6 +20,22 @@ describe('validateJobRequest', () => {
         expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED }, SUPA)?.pageCount).toBeNull();
     });
 
+    it('carries an optional IMSLP work title and drops anything that is not a short string', () => {
+        const title = 'Nocturnes, Op.9 (Chopin, Frédéric)';
+        expect(
+            validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, pageCount: 3, imslpPageTitle: title }, SUPA),
+        ).toEqual({ documentId: DOC, pdfSignedUrl: SIGNED, pageCount: 3, imslpPageTitle: title });
+        expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, imslpPageTitle: '  ' }, SUPA)).not.toHaveProperty(
+            'imslpPageTitle',
+        );
+        expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, imslpPageTitle: 7 }, SUPA)).not.toHaveProperty(
+            'imslpPageTitle',
+        );
+        expect(
+            validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, imslpPageTitle: 'x'.repeat(600) }, SUPA),
+        ).not.toHaveProperty('imslpPageTitle');
+    });
+
     it('rejects malformed ids and URLs', () => {
         expect(validateJobRequest({ documentId: 'nope', pdfSignedUrl: SIGNED }, SUPA)).toBeNull();
         expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: 'not a url' }, SUPA)).toBeNull();

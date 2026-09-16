@@ -8,6 +8,9 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
 import { runAudiverisTolerant, sheetRangesExcluding, timeoutForPages, type AudiverisResult } from './audiveris.js';
 import { buildScoreData, type BuildScoreDataOptions } from './buildScoreData.js';
+import { corpusOwnerUserId, isCorpusLookupEnabled } from './corpus/flag.js';
+import { corpusLookupByHash, corpusLookupByLayout, corpusPut, type CorpusSource } from './corpus/store.js';
+import { titleForDocument } from './documentTitle.js';
 import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
 import {
@@ -26,6 +29,7 @@ import { expressionSeedAt, parseMxlFiles, type MusicalScore, type ParseSeed } fr
 import { parseOmrGeometry, type OmrGeometry } from './omrGeometry.js';
 import { summarizeStructure, type StructureSummary } from './repeats.js';
 import { isSymbolicFirstEnabled } from './symbolic/flag.js';
+import type { SymbolicAcceptResult, SymbolicLayoutKey } from './symbolic/jobResult.js';
 import { defaultSymbolicDeps, trySymbolicJob, type TrySymbolicDeps } from './symbolic/tryJob.js';
 import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
@@ -141,6 +145,8 @@ export interface JobRequest {
     documentId: string;
     pdfSignedUrl: string;
     pageCount: number | null;
+    /** IMSLP work-page title (documents.title for an IMSLP import); absent for uploads. */
+    imslpPageTitle?: string;
 }
 
 export type KillJvm = () => void;
@@ -164,6 +170,10 @@ export interface PipelineAdapters {
     symbolicEnabled?: boolean;
     imslpPageTitle?: string;
     symbolicDeps?: TrySymbolicDeps;
+    /** Override CLEFFY_CORPUS_LOOKUP. Unset reads the env (off in prod). */
+    corpusEnabled?: boolean;
+    /** omr_jobs.created_by — a corpus-owner document is a seed run whose OMR result may be stored. */
+    createdBy?: string | null;
 }
 
 /**
@@ -190,6 +200,7 @@ export const runJob = async (job: JobRequest, writeback: Writeback): Promise<voi
         },
         onFailed: (code) => writeback.failed(job.documentId, code),
         resolveEra: () => eraForDocument(job.documentId),
+        ...(job.imslpPageTitle !== undefined ? { imslpPageTitle: job.imslpPageTitle } : {}),
     });
 };
 
@@ -231,9 +242,12 @@ export const runClaimedJob = async (
             return { ok: false };
         }
 
+        const imslpPageTitle = await titleForDocument(job.document_id);
         const ok = await runPipeline({
             documentId: job.document_id,
             pageCount: job.page_count,
+            createdBy: job.created_by,
+            ...(imslpPageTitle !== null ? { imslpPageTitle } : {}),
             resolvePdfUrl: async () => {
                 const url = await mintSignedUrl(job.storage_path);
                 if (!url) {
@@ -290,8 +304,85 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         timings.pageCount = Math.max(adapters.pageCount, observedPages ?? 0);
 
         const hash = sha256Hex(pdfBytes);
+        const corpusOn = adapters.corpusEnabled ?? isCorpusLookupEnabled();
+        // The era is part of every key below (corpus and cache), because the
+        // same PDF under a Bach title and a Chopin title must not share pedalling.
+        // Resolved lazily so the flag-off path still reads it where it always did.
+        let resolvedEra: Era | null = null;
+        const resolveEra = async (): Promise<Era> => {
+            resolvedEra ??= adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
+            return resolvedEra;
+        };
+        const corpusTimed = async <T>(fn: () => Promise<T>): Promise<T> => {
+            const t = Date.now();
+            try {
+                return await fn();
+            } finally {
+                timings.corpusLookupMs = (timings.corpusLookupMs ?? 0) + (Date.now() - t);
+            }
+        };
+
+        // Corpus by hash comes before symbolic and the OMR cache: the same PDF
+        // bytes already analysed (Mutopia MIDI + alignment, or a seed OMR run)
+        // cost one RPC and no JVM.
+        if (corpusOn) {
+            const hitEra = await resolveEra();
+            const hit = await corpusTimed(() => corpusLookupByHash(hash, ENGINE_VERSION, hitEra));
+            if (hit) {
+                timings.corpusHit = 'hash';
+                timings.source = hit.source;
+                if (hit.alignmentMap) {
+                    timings.alignmentMap = hit.alignmentMap;
+                }
+                const ok = await adapters.onReady(hit.score, timings);
+                logJob(adapters.documentId, timings, hit.score, ok);
+                return ok;
+            }
+        }
+
+        // OMR rows only join the corpus for public work: an IMSLP import (the
+        // title is the work page) or a corpus-owner seed job. Never a user upload.
+        let omrLayout: SymbolicLayoutKey | undefined;
+        const corpusPutOmr = async (score: ScoreData, omrEra: Era): Promise<void> => {
+            if (!corpusOn) {
+                return;
+            }
+            const owner = corpusOwnerUserId();
+            const seed = owner !== null && adapters.createdBy === owner;
+            if (adapters.imslpPageTitle === undefined && !seed) {
+                return;
+            }
+            const source: CorpusSource = {
+                ...(timings.source ?? { tier: 'omr', band: 'reject', reason: 'no_candidate' }),
+                origin: 'omr',
+                ...(adapters.imslpPageTitle !== undefined ? { imslp_page_title: adapters.imslpPageTitle } : {}),
+            };
+            await corpusPut({
+                pdfSha256: hash,
+                engineVersion: ENGINE_VERSION,
+                era: omrEra,
+                score,
+                source,
+                ...(omrLayout !== undefined
+                    ? { workKey: omrLayout.workKey, printedBars: omrLayout.printedBars }
+                    : {}),
+                ...(timings.pageCount !== undefined ? { pageCount: timings.pageCount } : {}),
+                symbolicSource: 'omr',
+                ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
+            });
+        };
+
         const symbolicOn = adapters.symbolicEnabled ?? isSymbolicFirstEnabled();
         if (symbolicOn) {
+            const baseDeps = adapters.symbolicDeps ?? defaultSymbolicDeps();
+            const deps: TrySymbolicDeps =
+                corpusOn && baseDeps.corpusLayout === undefined
+                    ? {
+                          ...baseDeps,
+                          corpusLayout: (workKey, printedBars, pageCount) =>
+                              corpusTimed(() => corpusLookupByLayout(ENGINE_VERSION, workKey, printedBars, pageCount)),
+                      }
+                    : baseDeps;
             const symbolic = await trySymbolicJob(
                 pdfBytes,
                 {
@@ -299,25 +390,31 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                     pageCount: timings.pageCount,
                     ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
                 },
-                adapters.symbolicDeps ?? defaultSymbolicDeps(),
+                deps,
             );
             timings.source = symbolic.source;
             if (symbolic.kind === 'accept') {
                 timings.alignmentMap = symbolic.alignmentMap;
+                if (symbolic.corpusHit !== undefined) {
+                    timings.corpusHit = symbolic.corpusHit;
+                }
+                if (corpusOn) {
+                    await corpusPutSymbolic(hash, symbolic, adapters.imslpPageTitle);
+                }
                 const ok = await adapters.onReady(symbolic.score, timings);
                 logJob(adapters.documentId, timings, symbolic.score, ok);
                 return ok;
             }
             // Fallthrough keeps band/reason. Do not re-score after OMR.
+            omrLayout = symbolic.layout;
         }
 
-        // Resolved before the lookup: the era is part of the key, because the
-        // same PDF under a Bach title and a Chopin title must not share pedalling.
-        const era = adapters.resolveEra ? await adapters.resolveEra() : DEFAULT_ERA;
+        const era = await resolveEra();
         const cacheKey = cacheKeyFor(ENGINE_VERSION, era);
         const cached = await cacheLookup(hash, cacheKey);
         if (cached) {
             timings.cacheHit = true;
+            await corpusPutOmr(cached.score, era);
             const ok = await adapters.onReady(cached.score, timings);
             logJob(adapters.documentId, timings, cached.score, ok);
             return ok;
@@ -347,6 +444,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         }
 
         await cacheStore(hash, cacheKey, score);
+        await corpusPutOmr(score, era);
         const ok = await adapters.onReady(score, timings);
         logJob(adapters.documentId, timings, score, ok);
         return ok;
@@ -365,6 +463,42 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
 
 /** Exported for job-level symbolic-first tests. */
 export const runOmrPipeline = runPipeline;
+
+/**
+ * Organic corpus growth from a symbolic accept: only a public Mutopia match.
+ * A user-uploaded XML, an IMSLP file, the eval MIDI set, and a corpus layout
+ * hit (already in the corpus) are never written back.
+ */
+const corpusPutSymbolic = async (
+    pdfSha256: string,
+    accept: SymbolicAcceptResult,
+    imslpPageTitle: string | undefined,
+): Promise<void> => {
+    if (accept.candidate === null || accept.candidate.source !== 'mutopia') {
+        return;
+    }
+    const source: CorpusSource = {
+        ...accept.source,
+        origin: 'mutopia',
+        ...(imslpPageTitle !== undefined ? { imslp_page_title: imslpPageTitle } : {}),
+    };
+    await corpusPut({
+        pdfSha256,
+        engineVersion: ENGINE_VERSION,
+        era: '',
+        score: accept.score,
+        alignmentMap: accept.alignmentMap,
+        source,
+        workKey: accept.layout.workKey,
+        printedBars: accept.layout.printedBars,
+        pageCount: accept.layout.pageCount,
+        candidateSha256: accept.candidate.sha256,
+        candidateUrl: accept.candidate.url,
+        symbolicSource: 'mutopia',
+        symbolicFormat: accept.candidate.format,
+        ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}),
+    });
+};
 
 const logJob = (documentId: string, timings: JobTimings, score: ScoreData, ok: boolean): void => {
     if (ok) {

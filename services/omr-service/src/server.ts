@@ -17,6 +17,7 @@ const SELF_URL = (process.env.SELF_URL ?? '').replace(/\/$/, '');
 const POKE_SEND_RACE_MS = 250;
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_TITLE_CHARS = 512;
 
 const secretMatches = (header: string | undefined): boolean => {
     if (!SECRET || !header) {
@@ -69,7 +70,14 @@ export const validateJobRequest = (raw: unknown, supabaseUrl: string | undefined
     if (!url.pathname.startsWith(expectedPath)) {
         return null;
     }
-    return { documentId, pdfSignedUrl, pageCount };
+    // Optional IMSLP work title; anything that is not a short non-empty string is dropped, not rejected.
+    const imslpPageTitle =
+        typeof body.imslpPageTitle === 'string' &&
+        body.imslpPageTitle.trim() !== '' &&
+        body.imslpPageTitle.length <= MAX_TITLE_CHARS
+            ? body.imslpPageTitle.trim()
+            : undefined;
+    return { documentId, pdfSignedUrl, pageCount, ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}) };
 };
 
 const queue = new JobQueue<JobRequest>(MAX_QUEUE_DEPTH, (job) => runJob(job, supabaseWriteback));
