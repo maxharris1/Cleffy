@@ -253,48 +253,6 @@ export const pdProvenance = async (pdfSha256: string): Promise<PdProvenance | nu
     };
 };
 
-/**
- * Printed-bar counts already in the corpus for this movement, from editions
- * other than this PDF. The corpus-promotion gate compares against them: two
- * engravings of one movement disagreeing several-fold means one of them is not
- * the movement. Empty on an unknown WorkKey or any failure — the gate then has
- * nothing to say, which is the same as passing.
- */
-export const corpusSiblingPrintedBars = async (
-    engineVersion: string,
-    workKey: WorkKey,
-    excludePdfSha256: string,
-): Promise<number[]> => {
-    if (workKey.composerId === 'unknown' || workKey.catalogN <= 0) {
-        return [];
-    }
-    const supabase = serviceClient();
-    if (!supabase) {
-        return [];
-    }
-    let query = supabase
-        .from('playalong_corpus')
-        .select('printed_bars')
-        .eq('engine_version', engineVersion)
-        .eq('work_composer_id', workKey.composerId)
-        .eq('work_catalog_type', workKey.catalogType)
-        .eq('work_catalog_n', workKey.catalogN)
-        .neq('pdf_sha256', excludePdfSha256)
-        .gt('printed_bars', 0);
-    query =
-        workKey.movementIndex === undefined
-            ? query.is('work_movement_index', null)
-            : query.eq('work_movement_index', workKey.movementIndex);
-    const { data, error } = await query;
-    if (error) {
-        console.warn('[corpus] sibling printed_bars read failed:', error.message);
-        return [];
-    }
-    return (data ?? [])
-        .map((row) => Number((row as { printed_bars?: unknown }).printed_bars))
-        .filter((bars) => Number.isFinite(bars) && bars > 0);
-};
-
 /** Upsert one corpus row. Resolves false when the RPC declined (OMR over a symbolic row) or failed. */
 export const corpusPut = async (input: CorpusPutInput): Promise<boolean> => {
     const supabase = serviceClient();

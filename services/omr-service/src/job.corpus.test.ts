@@ -20,7 +20,6 @@ const corpusLookupByHash = vi.fn();
 const corpusLookupByLayout = vi.fn();
 const corpusPut = vi.fn();
 const pdProvenance = vi.fn<() => Promise<PdProvenance | null>>(async () => null);
-const corpusSiblingPrintedBars = vi.fn<() => Promise<number[]>>(async () => []);
 
 vi.mock('./jobStore.js', async (importOriginal) => {
     const actual = await importOriginal<typeof jobStore>();
@@ -39,7 +38,6 @@ vi.mock('./corpus/store.js', async (importOriginal) => {
         corpusLookupByLayout: (...args: unknown[]) => corpusLookupByLayout(...args),
         corpusPut: (...args: unknown[]) => corpusPut(...args),
         pdProvenance: () => pdProvenance(),
-        corpusSiblingPrintedBars: () => corpusSiblingPrintedBars(),
     };
 });
 
@@ -201,9 +199,7 @@ beforeEach(() => {
     corpusLookupByLayout.mockReset();
     corpusPut.mockReset();
     pdProvenance.mockReset();
-    corpusSiblingPrintedBars.mockReset();
     pdProvenance.mockResolvedValue(null);
-    corpusSiblingPrintedBars.mockResolvedValue([]);
     cacheLookup.mockResolvedValue({ score: omrScore(), bpmDefault: 90 });
     cacheStore.mockResolvedValue(undefined);
     corpusLookupByHash.mockResolvedValue(null);

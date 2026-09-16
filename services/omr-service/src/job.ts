@@ -15,7 +15,6 @@ import {
     corpusLookupByHash,
     corpusLookupByLayout,
     corpusPut,
-    corpusSiblingPrintedBars,
     pdProvenance,
     type CorpusPutInput,
     type CorpusSource,
@@ -394,11 +393,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             }
             // A bulk mirror can hand us a file that is not the work it is filed
             // under. Withhold those from the corpus; the user still gets the score.
-            const siblingPrintedBars =
-                omrLayout !== undefined
-                    ? await corpusTimed(() => corpusSiblingPrintedBars(ENGINE_VERSION, omrLayout!.workKey, hash))
-                    : [];
-            const gate = corpusGate({ tier: 'omr', score, siblingPrintedBars });
+            const gate = corpusGate({ tier: 'omr', score });
             timings.corpusGate = gate;
             if (!gate.promoted) {
                 console.warn(`[corpus] ${adapters.documentId}: not promoted (${gate.reason})`);

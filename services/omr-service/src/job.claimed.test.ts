@@ -45,7 +45,6 @@ vi.mock('./corpus/store.js', async (importOriginal) => {
         corpusLookupByLayout: async () => null,
         corpusPut: (...args: unknown[]) => corpusPut(...args),
         pdProvenance: async () => null,
-        corpusSiblingPrintedBars: async () => [],
     };
 });
 

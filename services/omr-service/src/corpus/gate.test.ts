@@ -88,33 +88,30 @@ describe('corpusGate', () => {
     });
 
     it('never gates a symbolic accept: the candidate already aligned onto this PDF', () => {
-        expect(corpusGate({ tier: 'symbolic', score: withStaves([4, 4]), siblingPrintedBars: [900] })).toEqual({
-            promoted: true,
-        });
+        expect(corpusGate({ tier: 'symbolic', score: withStaves([4, 4]) })).toEqual({ promoted: true });
     });
 
-    it('holds back a score whose bar count no sibling edition comes close to', () => {
-        // 2 printed bars against a 105-bar edition of the same movement.
-        expect(corpusGate({ tier: 'omr', score: score(), siblingPrintedBars: [105] })).toEqual({
-            promoted: false,
-            reason: 'bars',
-        });
-    });
-
-    it('accepts a sibling within the tolerance, and any sibling agreeing is enough', () => {
-        expect(corpusGate({ tier: 'omr', score: score(), siblingPrintedBars: [4] })).toEqual({ promoted: true });
-        expect(corpusGate({ tier: 'omr', score: score(), siblingPrintedBars: [105, 3] })).toEqual({ promoted: true });
-    });
-
-    it('says nothing when there are no siblings or no printed bars to compare', () => {
-        expect(corpusGate({ tier: 'omr', score: score(), siblingPrintedBars: [] })).toEqual({ promoted: true });
-        expect(corpusGate({ tier: 'omr', score: score({ measures: [] }), siblingPrintedBars: [105] })).toEqual({
-            promoted: true,
-        });
+    it('does not judge bar counts: the three Pathétique movements share one corpus layout key', () => {
+        // 312, 73 and 211 printed bars under beethoven/Op13/mv-null. Any
+        // bar-count comparison between them withholds two good Mutopia editions.
+        for (const bars of [312, 73, 211]) {
+            const measures = Array.from({ length: bars }, (_, i) => ({
+                n: i + 1,
+                tick: i * 480,
+                dTicks: 480,
+                page: 0,
+                sys: 0,
+                x0: 0,
+                x1: 1,
+                srcIndex: i,
+            }));
+            expect(corpusGate({ tier: 'omr', score: score({ measures } as Partial<ScoreData>) })).toEqual({
+                promoted: true,
+            });
+        }
     });
 
     it('names the ledger reason', () => {
         expect(needsReviewError('staves')).toBe('needs_review:staves');
-        expect(needsReviewError('bars')).toBe('needs_review:bars');
     });
 });
