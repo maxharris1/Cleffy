@@ -972,7 +972,7 @@ export const pickIaDoc = (title, docs) => {
 
 /** File names that are a single part or another scoring, not the work's score. */
 export const IA_PART_OR_ARRANGEMENT_RE =
-    /(?:^|[-_ .(])(?:parts?|pf ?4h|4 ?hands|four ?hands|arr|arrangement|transc\w*|duet|vn ?\d|vl ?\d|violin|viola|cello|violoncello|clarinet|trumpet|horn|flute|oboe|bassoon|quartet|kwartet|overture|ouverture)(?:$|[-_ .)])/i;
+    /(?:^|[-_ .(])(?:parts?|pf ?4h|4 ?hands|four ?hands|arr|arrangement|transc\w*|duet|vn ?\d|vl ?\d|violin[oi]?|viola|cello|violoncello|contrabass[oi]?|clarinet[ti]?|clarinetti|oboe|oboi|flute|flauti|flauto|fagott[oi]|bassoon|horn|corni|corno|trumpet|tromba|trombe|trombone|timpani|tuba|bass|continuo|soprano|alto|tenor|quartet|kwartet|overture|ouverture)[a-z]?\d*(?:$|[-_ .)])/i;
 
 /**
  * The original PDF of an IA item (not the `_text.pdf` OCR derivative), skipping

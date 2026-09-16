@@ -532,6 +532,17 @@ describe('Mutopia zips', () => {
             'README.txt',
         ]);
         expect(zipExtract(zip, entries[1]!).toString()).toBe('%PDF-2');
+        // Orchestral/choral part names inside a Mutopia zip (Mass in B minor ships score + every part).
+        const mass = expandZipResolution({ ok: true, origin: 'mutopia', filename: 'mass-let-pdfs.zip', zipUrl: 'z' }, [
+            'score-let.pdf',
+            'bass-let.pdf',
+            'bassoon1-let.pdf',
+            'continuo-let.pdf',
+            'hornF-let.pdf',
+            'soprano1-let.pdf',
+            'violino1-let.pdf',
+        ]);
+        expect(mass.map((r) => r.filename)).toEqual(['score-let.pdf']);
         const zipRes = {
             ok: true,
             origin: 'mutopia',
