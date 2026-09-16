@@ -8,6 +8,7 @@ import {
     formatBytes,
     recommendEdition,
 } from '@/features/imslp/imslpDisplay';
+import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
@@ -225,6 +226,9 @@ export const ImslpWorkPanel = ({
                             </a>
                         ) : null}
                     </div>
+                    {download.kind === 'downloading' ? (
+                        <PlayAlongProgress stage="downloading" fromImslp align="start" className="mt-4" />
+                    ) : null}
                 </>
             )}
 

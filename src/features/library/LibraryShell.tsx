@@ -199,7 +199,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 };
             }
             rememberNewScore(before, result.document);
-            navigate(`/doc/${result.document.id}`);
+            // The viewer's play-along wait shows this download as its first step.
+            navigate(`/doc/${result.document.id}`, { state: { imslpImport: true } });
             return { ok: true as const };
         } catch (err) {
             captureFailure(err, 'Import failed.');
