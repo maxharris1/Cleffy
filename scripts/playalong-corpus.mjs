@@ -310,6 +310,21 @@ const STOP_WORDS = new Set([
     'nr',
     'sharp',
     'flat',
+    'de',
+    'di',
+    'da',
+    'del',
+    // Catalogue tokens are references, not title words.
+    'bwv',
+    'woo',
+    'hob',
+    'hwv',
+    'rv',
+    'twv',
+    'cd',
+    'kv',
+    'anh',
+    'opus',
 ]);
 
 const stem = (word) => word.replace(/s$/, '').replace(/e$/, '');
@@ -319,7 +334,8 @@ export const significantWords = (title) =>
         .replace(/[^a-z0-9 ]/g, ' ')
         .split(' ')
         .filter((w) => w.length > 1 && !/^\d+$/.test(w) && !STOP_WORDS.has(w))
-        .map(stem);
+        .map(stem)
+        .filter((w) => w.length >= 3 || /^\d/.test(w));
 
 /** Word-level match for works without a catalog number (`The Entertainer`, `3 Gymnopédies`). */
 export const titleWordsMatch = (workTitle, candidateText) => {
@@ -1106,7 +1122,23 @@ export const composerArticleName = (title) => {
     return first ? `${first} ${last}` : last;
 };
 
-export const wikiSearchQuery = (title) => `${workTitleOf(title)} ${composerSurnameOf(title) ?? ''}`.trim();
+/** Search text: the title without catalogue numbers (they derail Wikipedia's search) plus the surname. */
+export const wikiSearchQuery = (title) => {
+    let text = workTitleOf(title)
+        .normalize('NFKD')
+        .replace(/[\u2010-\u2015\u2212]/g, '-');
+    for (const { re } of REF_PATTERNS) {
+        re.lastIndex = 0;
+        text = text.replace(re, ' ');
+    }
+    text = text
+        .replace(/\([^()]*\)/g, ' ')
+        .replace(/\b\d+[a-z]\b/g, ' ')
+        .replace(/[,;:/]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return `${text} ${composerSurnameOf(title) ?? ''}`.trim();
+};
 
 export const wikiSearchUrl = (query) => {
     const url = new URL(WIKI_API);
@@ -1138,24 +1170,175 @@ export const monthlyAverageViews = (response) => {
     return Math.round(items.reduce((sum, item) => sum + Number(item.views ?? 0), 0) / items.length);
 };
 
+const wordCovered = (word, have) => {
+    if (have.has(word)) {
+        return true;
+    }
+    for (const h of have) {
+        if (word.length >= 5 && h.length >= 5 && (h.startsWith(word) || word.startsWith(h))) {
+            return true;
+        }
+    }
+    return false;
+};
+
+const numberOf = (text) => {
+    const match = /\bNos?\.?\s*(\d+)/i.exec(text);
+    return match ? Number(match[1]) : null;
+};
+
+/** Parenthetical qualifiers that mark a non-musical namesake. */
+const NON_MUSIC_QUALIFIER_RE =
+    /\b(film|movie|poem|novel|book|band|play|painting|sculpture|series|game|album|single|song|tv|television|video|character|comics|company|ship|horse|disambiguation|\d{4})\b/;
+
+/** Parenthetical qualifiers Wikipedia uses that are not a composer's name. */
+const ARTICLE_QUALIFIERS = new Set([
+    'opera',
+    'ballet',
+    'oratorio',
+    'cantata',
+    'song',
+    'album',
+    'film',
+    'band',
+    'play',
+    'novel',
+    'poem',
+    'hymn',
+    'anthem',
+    'music',
+    'composition',
+    'piece',
+    'disambiguation',
+    'symphony',
+    'suite',
+    'concerto',
+    'sonata',
+    'overture',
+]);
+
+/** Genre words (stemmed like significantWords): a sonata article is not a concerto's. */
+const GENRE_WORDS = new Set(
+    [
+        'sonata',
+        'sonatina',
+        'concerto',
+        'symphony',
+        'quartet',
+        'quintet',
+        'trio',
+        'nocturne',
+        'prelude',
+        'fugue',
+        'etude',
+        'waltz',
+        'mazurka',
+        'polonaise',
+        'ballade',
+        'scherzo',
+        'impromptu',
+        'rhapsody',
+        'variations',
+        'suite',
+        'mass',
+        'requiem',
+        'overture',
+        'fantasia',
+        'fantaisie',
+        'toccata',
+        'partita',
+        'serenade',
+        'cantata',
+        'oratorio',
+        'opera',
+        'lieder',
+        'invention',
+        'bagatelle',
+        'intermezzo',
+        'romance',
+        'march',
+        'minuet',
+        'gigue',
+        'sarabande',
+        'rondo',
+    ].map(stem),
+);
+
+const genresOf = (words) => words.filter((w) => GENRE_WORDS.has(w));
+
 /**
- * Is this search hit the work's article? The folded article title must carry
- * the composer surname, a catalogue reference of the work, or a significant
- * word of its title — otherwise the hit is Wikipedia guessing.
+ * Is this search hit the work's article? Never the composer's own article, a
+ * "List of …" page or a bare genre article ("Fugue"). Then: an exact catalogue
+ * reference wins; a differing `No. N` or a differing genre word loses; an
+ * article naming the composer needs one shared title word (the surname does
+ * not count); an article that does not name the composer must cover every
+ * title word and be mostly about them ("Für Elise", "Goldberg Variations" —
+ * not the anthem behind a variation set, not BWV 565 for another toccata).
  */
 export const wikiArticleMatches = (workTitle, articleTitle) => {
     const article = fold(articleTitle);
+    if (/^list of\b/.test(article)) {
+        return false;
+    }
+    const composer = composerArticleName(workTitle);
+    if (composer && article === fold(composer)) {
+        return false;
+    }
     const surname = fold(composerSurnameOf(workTitle) ?? '');
-    if (surname && article.includes(surname)) {
-        return true;
+    if (surname && article === surname) {
+        return false;
+    }
+    // A bare genre page ("Fugue", "Nocturne") is about the form, not a work.
+    if (GENRE_WORDS.has(stem(article.replace(/[^a-z]/g, '')))) {
+        return false;
+    }
+    const articleWords = significantWords(`${articleTitle} (x)`).filter((w) => w !== stem(surname));
+    // "Clair de lune (poem)" / "The Magic Flute (2022 film)" are not the music.
+    const qualifier = /\(([^()]+)\)\s*$/.exec(articleTitle)?.[1]?.trim() ?? '';
+    if (qualifier && NON_MUSIC_QUALIFIER_RE.test(fold(qualifier))) {
+        return false;
+    }
+    // "Piano Sonata No. 2 (Chopin)" is not Beethoven's Op.2 No.2.
+    if (qualifier && surname && !fold(qualifier).includes(surname)) {
+        const qualifierWords = fold(qualifier).split(' ');
+        const looksLikeName = /^[A-Z\u00C0-\u024F]/.test(qualifier) && qualifierWords.length <= 3;
+        if (looksLikeName && !qualifierWords.some((w) => ARTICLE_QUALIFIERS.has(w) || GENRE_WORDS.has(stem(w)))) {
+            return false;
+        }
     }
     const wantRefs = catalogRefsFromText(workTitleOf(workTitle));
     if (wantRefs.length > 0 && catalogEquals(wantRefs, catalogRefsFromText(articleTitle))) {
         return true;
     }
-    const words = significantWords(workTitle);
-    const have = new Set(significantWords(`${articleTitle} (x)`));
-    return words.some((w) => have.has(w));
+    const wantNo = numberOf(workTitleOf(workTitle));
+    const haveNo = numberOf(articleTitle);
+    if (wantNo !== null && haveNo !== null && wantNo !== haveNo) {
+        return false;
+    }
+    // `(ballet)` / `(suite)` qualifiers in the IMSLP title are not title words.
+    const words = significantWords(`${workTitleOf(workTitle).replace(/\([^()]*\)/g, ' ')} (x)`).filter(
+        (w) => w !== stem(surname),
+    );
+    if (words.length === 0) {
+        return false;
+    }
+    const have = new Set(articleWords);
+    const wantGenres = genresOf(words);
+    const haveGenres = genresOf(articleWords);
+    if (wantGenres.length > 0 && haveGenres.length > 0 && !wantGenres.some((g) => haveGenres.includes(g))) {
+        return false;
+    }
+    // The article must be mostly about this work's words either way ("Cello
+    // Concerto (Elgar)" is not the Concert Allegro).
+    const want = new Set(words);
+    const articleCovered = articleWords.filter((w) => wordCovered(w, want)).length;
+    if (articleWords.length > 0 && articleCovered * 2 <= articleWords.length) {
+        return false;
+    }
+    if (surname && article.includes(surname)) {
+        return words.some((w) => wordCovered(w, have));
+    }
+    return words.every((w) => wordCovered(w, have));
 };
 
 /** Pick the article for a work from a search response, or null. */
@@ -1448,7 +1631,7 @@ export const canonicalComposerOrder = (popular, extraSurnames = CANONICAL_SURNAM
  * Real in-app demand dominates; Wikipedia fame orders everything else; the
  * curated prior breaks ties inside a fame band.
  */
-export const RANK_WEIGHTS = Object.freeze({ download: 1000, use: 100, work: 100, composer: 25, prior: 2 });
+export const RANK_WEIGHTS = Object.freeze({ download: 1000, use: 100, work: 100, composer: 25, prior: 3 });
 
 export const popularityScore = ({ workViews = 0, composerViews = 0 } = {}, weights = RANK_WEIGHTS) =>
     weights.work * Math.log10(1 + Math.max(0, workViews)) +

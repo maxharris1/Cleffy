@@ -778,21 +778,83 @@ describe('Internet Archive', () => {
 
 describe('Wikipedia demand proxy', () => {
     it('builds the search query and accepts only articles that name the work', () => {
-        expect(wikiSearchQuery(MOONLIGHT)).toBe('Piano Sonata No.14, Op.27 No.2 Beethoven');
+        expect(wikiSearchQuery(MOONLIGHT)).toBe('Piano Sonata No.14 Beethoven');
+        expect(wikiSearchQuery('Suite bergamasque, CD 82 (Debussy, Claude)')).toBe('Suite bergamasque Debussy');
         expect(composerArticleName(MOONLIGHT)).toBe('Ludwig van Beethoven');
         expect(composerArticleName('An der schönen blauen Donau, Op.314 (Strauss Jr., Johann)')).toBe(
             'Johann Strauss Jr.',
         );
         expect(wikiArticleMatches(MOONLIGHT, 'Piano Sonata No. 14 (Beethoven)')).toBe(true);
         expect(wikiArticleMatches('Nocturnes, Op.9 (Chopin, Frédéric)', 'Nocturnes, Op. 9 (Chopin)')).toBe(true);
-        expect(wikiArticleMatches('Album für die Jugend, Op.68 (Schumann, Robert)', 'Album for the Young')).toBe(true);
+        expect(wikiArticleMatches('Album für die Jugend, Op.68 (Schumann, Robert)', 'Album for the Young')).toBe(false);
+        expect(
+            wikiArticleMatches('Goldberg-Variationen, BWV 988 (Bach, Johann Sebastian)', 'Goldberg Variations'),
+        ).toBe(true);
+        expect(
+            wikiArticleMatches('Cello Suite No.1 in G major, BWV 1007 (Bach, Johann Sebastian)', 'Cello Suites (Bach)'),
+        ).toBe(true);
+        // A different number, a related anthem, or a namesake are not the work.
+        expect(
+            wikiArticleMatches(
+                'Piano Sonata No.9, Op.14 No.1 (Beethoven, Ludwig van)',
+                'Piano Sonata No. 14 (Beethoven)',
+            ),
+        ).toBe(false);
+        expect(
+            wikiArticleMatches(
+                "7 Variations on 'God Save the King', WoO 78 (Beethoven, Ludwig van)",
+                'God Save the King',
+            ),
+        ).toBe(false);
+        expect(wikiArticleMatches('Notebook for Wolfgang (Mozart, Leopold)', 'Johann Wolfgang von Goethe')).toBe(false);
+        expect(wikiArticleMatches('Fugue in F minor (Ravel, Maurice)', 'Fugue')).toBe(false);
+        expect(
+            wikiArticleMatches(
+                'Piano Sonata No.5, Op.10 No.1 (Beethoven, Ludwig van)',
+                'Piano Concerto No. 5 (Beethoven)',
+            ),
+        ).toBe(false);
+        expect(
+            wikiArticleMatches(
+                'Toccata No.1 in G major (Scarlatti, Alessandro)',
+                'Toccata and Fugue in D minor, BWV 565',
+            ),
+        ).toBe(false);
+        expect(wikiArticleMatches('Symphony No.9, Op.125 (Beethoven, Ludwig van)', 'Symphony No. 9 (Beethoven)')).toBe(
+            true,
+        );
+        expect(wikiArticleMatches('Mass in B minor, BWV 232 (Bach, Johann Sebastian)', 'Mass in B minor')).toBe(true);
         expect(
             wikiArticleMatches('160 Kurze Übungen, Op.821 (Czerny, Carl)', 'Music written in all major or minor keys'),
         ).toBe(false);
+        // Neither the composer's own article nor a list page stands in for the work; later hits are tried.
         const search = {
-            query: { search: [{ title: 'Music written in all major or minor keys' }, { title: 'Carl Czerny' }] },
+            query: {
+                search: [
+                    { title: 'Music written in all major or minor keys' },
+                    { title: 'Carl Czerny' },
+                    { title: 'Czerny exercises, Op. 821' },
+                ],
+            },
         };
-        expect(wikiArticleFor('160 Kurze Übungen, Op.821 (Czerny, Carl)', search)).toBe('Carl Czerny');
+        expect(wikiArticleFor('160 Kurze Übungen, Op.821 (Czerny, Carl)', search)).toBe('Czerny exercises, Op. 821');
+        expect(
+            wikiArticleFor('160 Kurze Übungen, Op.821 (Czerny, Carl)', {
+                query: { search: search.query.search.slice(0, 2) },
+            }),
+        ).toBeNull();
+        expect(wikiArticleMatches('Mozartiana (Mozart, Wolfgang Amadeus)', 'Wolfgang Amadeus Mozart')).toBe(false);
+        expect(
+            wikiArticleMatches(
+                'Die Zauberflöte, K.620 (Mozart, Wolfgang Amadeus)',
+                'List of operas by Wolfgang Amadeus Mozart',
+            ),
+        ).toBe(false);
+        expect(
+            wikiArticleMatches('Piano Sonata No.2, Op.2 No.2 (Beethoven, Ludwig van)', 'Piano Sonata No. 2 (Chopin)'),
+        ).toBe(false);
+        expect(wikiArticleMatches('Concert Allegro, Op.46 (Elgar, Edward)', 'Cello Concerto (Elgar)')).toBe(false);
+        expect(wikiArticleMatches('Swan Lake (ballet), Op.20 (Tchaikovsky, Pyotr)', 'Swan Lake')).toBe(true);
         expect(wikiArticleFor(MOONLIGHT, { query: { search: [] } })).toBeNull();
     });
 
@@ -1023,7 +1085,7 @@ describe('ranking', () => {
             'Ballade No.4, Op.52 (Chopin, Frédéric)',
             'Étude, Op.1 (Scriabin, Aleksandr)',
         ]);
-        expect(ranked[0]).toMatchObject({ tier: 0, prior: 3, score: 6 });
+        expect(ranked[0]).toMatchObject({ tier: 0, prior: 3, score: 9 });
         expect(ranked[3]).toMatchObject({ tier: 1, prior: 0 });
     });
 
@@ -1052,8 +1114,8 @@ describe('ranking', () => {
         expect(ranked.slice(0, 4).map((w) => [w.title, w.score])).toEqual([
             ['Ballade No.4, Op.52 (Chopin, Frédéric)', 2000],
             ['Waltzes, Op.64 (Chopin, Frédéric)', 1000],
-            [FUR_ELISE, 504],
-            [MOONLIGHT, 6],
+            [FUR_ELISE, 506],
+            [MOONLIGHT, 9],
         ]);
         expect(ranked.find((w) => w.title === 'Waltzes, Op.64 (Chopin, Frédéric)')).toMatchObject({ tier: 1 });
     });

@@ -75,6 +75,8 @@ import {
     coverageByOrigin,
     coveredWorkCount,
     composerArticleName,
+    composerNameOf,
+    composerSurnameOf,
     demandFromDocumentTitles,
     editionSignals,
     evalPinPieceDirs,
@@ -1189,20 +1191,30 @@ const articleViews = async (ctx, article) => {
  * Wikipedia demand proxy for every ranked title: the work article (found by
  * search, accepted only when it names the composer / catalogue / a title
  * word) and the composer article. Everything is cached, so a rerun is free.
+ * `titles` is `[imslpTitle, englishLabel | null]` pairs.
  * @returns {Map<string, { workViews: number, composerViews: number, article: string | null }>}
  */
 const loadPopularity = async (ctx, titles) => {
     const out = new Map();
     const composerViews = new Map();
     let done = 0;
-    for (const title of titles) {
+    for (const [title, label] of titles) {
         if (stopReason) {
             break;
         }
         let article = null;
         let workViews = 0;
         try {
-            article = wikiArticleFor(title, await wikiJson(ctx, wikiSearchUrl(wikiSearchQuery(title))));
+            // The curated English label ("Blue Danube", "Clair de lune") is what
+            // Wikipedia titles the piece; the IMSLP title is often German/French.
+            if (label) {
+                const surname = composerSurnameOf(title) ?? '';
+                const probe = `${label} (${composerNameOf(title) ?? surname})`;
+                for (const query of [label, `${label} ${surname}`.trim()]) {
+                    article ??= wikiArticleFor(probe, await wikiJson(ctx, wikiSearchUrl(query)));
+                }
+            }
+            article ??= wikiArticleFor(title, await wikiJson(ctx, wikiSearchUrl(wikiSearchQuery(title))));
             workViews = await articleViews(ctx, article);
         } catch (err) {
             info(`wikipedia lookup failed for ${title}: ${err instanceof Error ? err.message : err}`);
@@ -1433,9 +1445,10 @@ const main = async () => {
     let popularity = new Map();
     if (!args.noWiki) {
         info(`wikipedia: scoring ${candidates.length} titles (cached after the first run)`);
+        const labels = new Map(POPULAR_WORKS.map((w) => [w.title, w.label]));
         popularity = await loadPopularity(
             ctx,
-            candidates.map((w) => w.title),
+            candidates.map((w) => [w.title, labels.get(w.title) ?? null]),
         );
     }
     const rankedAll = rankWorks({ popular: POPULAR_WORKS, pins, catalog: catalogWorks, demand, corpusUse, popularity });
