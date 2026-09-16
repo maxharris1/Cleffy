@@ -4783,3 +4783,13 @@ alter table public.pd_pdf_store
     add constraint pd_pdf_store_origin_check
     check (origin in ('mutopia', 'openscore', 'ia', 'commons', 'library', 'imslp'));
 
+-- ===== supabase/migrations/20260916190000_playalong_corpus_imslp_pause.sql =====
+-- Corpus seed: record why and until when the IMSLP source paused itself.
+-- After three consecutive bot checks / captchas / disclaimer walls the seed
+-- stops using imslp.org for 24h and writes the reason here; the other sources
+-- keep running. Clearing `imslp_paused_until` resumes. Idempotent like the
+-- other corpus migrations (production may already have the columns).
+
+alter table public.playalong_corpus_control
+    add column if not exists imslp_paused_until timestamptz,
+    add column if not exists imslp_pause_reason text;
