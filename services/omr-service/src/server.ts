@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
+import { CLAIM_MAX_PRIORITY_ENV, claimMaxPriority, claimMaxPriorityMisconfigured } from './claimPriority.js';
 import { ENGINE_VERSION, runClaimedJob, runJob, type JobRequest } from './job.js';
 import { claimJob, hasQueuedWork, newWorkerId, reapExpiredLeases } from './jobStore.js';
 import { JobQueue } from './queue.js';
@@ -227,7 +228,18 @@ if (process.argv[1]?.endsWith('server.js')) {
         console.error('OMR_SERVICE_SECRET is required');
         process.exit(1);
     }
-    server.listen(PORT, () => console.log(`omr-service listening on :${PORT}`));
+    // A seed-only instance must never fall back to claiming user jobs because of a typo.
+    if (claimMaxPriorityMisconfigured()) {
+        console.error(`${CLAIM_MAX_PRIORITY_ENV} must be an integer or unset`);
+        process.exit(1);
+    }
+    const maxPriority = claimMaxPriority();
+    server.listen(PORT, () =>
+        console.log(
+            `omr-service listening on :${PORT}` +
+                (maxPriority !== null ? ` (claims only priority <= ${maxPriority})` : ''),
+        ),
+    );
 
     if (DEV_POLL_MS > 0) {
         console.warn(
