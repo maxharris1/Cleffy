@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { scoreDataSchema, type ScoreData } from '../scoreData.js';
 import { serviceClient } from '../supabaseClient.js';
 import type { AlignmentMap } from '../symbolic/align.js';
-import type { AnalysisSource } from '../symbolic/jobResult.js';
+import type { AnalysisLicence, AnalysisSource } from '../symbolic/jobResult.js';
 import type { SymbolicFormat, WorkKey } from '../symbolic/types.js';
 
 /**
@@ -16,7 +16,7 @@ import type { SymbolicFormat, WorkKey } from '../symbolic/types.js';
 
 export type CorpusOrigin = 'mutopia' | 'openscore' | 'ia' | 'commons' | 'library' | 'omr';
 export type CorpusSymbolicSource = 'mutopia' | 'openscore' | 'ia' | 'omr';
-export type CorpusLicenceTag = 'PD' | 'CC0' | 'CC-BY' | 'CC-BY-SA';
+export type CorpusLicenceTag = AnalysisLicence;
 
 /** `playalong_corpus.source`: the AnalysisSource the client badges from, plus provenance. */
 export interface CorpusSource extends AnalysisSource {
@@ -181,6 +181,118 @@ export const corpusLookupByLayout = async (
         return null;
     }
     return asHit(data);
+};
+
+/**
+ * The client badges from `score_analyses.timings.source` and reads camelCase
+ * keys; a corpus row keeps its provenance under the snake_case column names it
+ * was stored from. This is the one place the two shapes meet.
+ */
+export const analysisSourceFromCorpus = (source: CorpusSource): AnalysisSource => ({
+    tier: source.tier,
+    band: source.band,
+    reason: source.reason,
+    ...(source.format !== undefined ? { format: source.format } : {}),
+    ...(source.sourceName !== undefined ? { sourceName: source.sourceName } : {}),
+    ...(source.matchScore !== undefined ? { matchScore: source.matchScore } : {}),
+    ...(source.licence_tag !== undefined ? { licence: source.licence_tag } : {}),
+    ...(source.editor_credit !== undefined ? { editorCredit: source.editor_credit } : {}),
+    ...(source.source_url !== undefined ? { sourceUrl: source.source_url } : {}),
+});
+
+/** Provenance the seed recorded for a PDF it fetched from a public mirror. */
+export interface PdProvenance {
+    licenceTag: CorpusLicenceTag;
+    editorCredit: string | null;
+    sourceUrl: string | null;
+    usPd: boolean;
+}
+
+const LICENCE_TAGS: readonly CorpusLicenceTag[] = ['PD', 'CC0', 'CC-BY', 'CC-BY-SA'];
+
+const pdProvenanceSchema = z.object({
+    licence_tag: z.enum(LICENCE_TAGS),
+    editor_credit: z.string().nullable().optional(),
+    source_url: z.string().nullable().optional(),
+    us_pd: z.boolean(),
+});
+
+/**
+ * Licence / credit / source for a seeded PDF, keyed by its bytes. The seed
+ * writes `pd_pdf_store`; the worker reads it so a corpus row and the player's
+ * attribution carry the same provenance the licence filter decided on. Null for
+ * anything the seed did not fetch (every user upload) and on any failure.
+ */
+export const pdProvenance = async (pdfSha256: string): Promise<PdProvenance | null> => {
+    const supabase = serviceClient();
+    if (!supabase) {
+        return null;
+    }
+    const { data, error } = await supabase
+        .from('pd_pdf_store')
+        .select('licence_tag,editor_credit,source_url,us_pd')
+        .eq('pdf_sha256', pdfSha256)
+        .maybeSingle();
+    if (error) {
+        console.warn('[corpus] pd_pdf_store read failed:', error.message);
+        return null;
+    }
+    if (data === null) {
+        return null;
+    }
+    const parsed = pdProvenanceSchema.safeParse(data);
+    if (!parsed.success) {
+        console.warn('[corpus] pd_pdf_store row schema failed', parsed.error.issues[0]?.message);
+        return null;
+    }
+    return {
+        licenceTag: parsed.data.licence_tag,
+        editorCredit: parsed.data.editor_credit ?? null,
+        sourceUrl: parsed.data.source_url ?? null,
+        usPd: parsed.data.us_pd,
+    };
+};
+
+/**
+ * Printed-bar counts already in the corpus for this movement, from editions
+ * other than this PDF. The corpus-promotion gate compares against them: two
+ * engravings of one movement disagreeing several-fold means one of them is not
+ * the movement. Empty on an unknown WorkKey or any failure — the gate then has
+ * nothing to say, which is the same as passing.
+ */
+export const corpusSiblingPrintedBars = async (
+    engineVersion: string,
+    workKey: WorkKey,
+    excludePdfSha256: string,
+): Promise<number[]> => {
+    if (workKey.composerId === 'unknown' || workKey.catalogN <= 0) {
+        return [];
+    }
+    const supabase = serviceClient();
+    if (!supabase) {
+        return [];
+    }
+    let query = supabase
+        .from('playalong_corpus')
+        .select('printed_bars')
+        .eq('engine_version', engineVersion)
+        .eq('work_composer_id', workKey.composerId)
+        .eq('work_catalog_type', workKey.catalogType)
+        .eq('work_catalog_n', workKey.catalogN)
+        .neq('pdf_sha256', excludePdfSha256)
+        .gt('printed_bars', 0);
+    query =
+        workKey.movementIndex === undefined
+            ? query.is('work_movement_index', null)
+            : query.eq('work_movement_index', workKey.movementIndex);
+    const { data, error } = await query;
+    if (error) {
+        console.warn('[corpus] sibling printed_bars read failed:', error.message);
+        return [];
+    }
+    return (data ?? [])
+        .map((row) => Number((row as { printed_bars?: unknown }).printed_bars))
+        .filter((bars) => Number.isFinite(bars) && bars > 0);
 };
 
 /** Upsert one corpus row. Resolves false when the RPC declined (OMR over a symbolic row) or failed. */
