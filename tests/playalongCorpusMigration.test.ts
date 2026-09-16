@@ -21,7 +21,7 @@ const FUNCTIONS = ['playalong_corpus_get_by_hash', 'playalong_corpus_get_by_layo
 describe('20260916140000_playalong_corpus.sql', () => {
     it('creates every corpus table service_role-only: RLS on, zero policies, grant to service_role', () => {
         for (const table of TABLES) {
-            expect(sql).toContain(`create table public.${table} (`);
+            expect(sql).toContain(`create table if not exists public.${table} (`);
             expect(sql).toContain(`alter table public.${table} enable row level security;`);
             expect(sql).toContain(`grant all on public.${table} to service_role;`);
         }
@@ -49,6 +49,13 @@ describe('20260916140000_playalong_corpus.sql', () => {
         for (const column of ['licence_tag', 'editor_credit', 'source_url', 'imslp_page_title']) {
             expect(sql).toMatch(new RegExp(`^\\s+${column} text`, 'm'));
         }
+    });
+
+    it('guards every create and the control-row insert so a re-apply over prod is a no-op', () => {
+        expect(sql).not.toMatch(/^create (table|index)(?! if not exists)/m);
+        expect(sql).toContain(
+            'insert into public.playalong_corpus_control (paused) values (false) on conflict do nothing;',
+        );
     });
 
     it('does not touch score_cache or drop anything', () => {

@@ -7,8 +7,13 @@
 -- public sources (Mutopia/OpenScore/IA/Commons/library scans or IMSLP-import /
 -- corpus-owner documents) — never from a user upload. See
 -- docs/omr-midi-preload-plan.md.
+--
+-- Every statement here is guarded (`if not exists` / `on conflict do nothing`)
+-- because production received this schema out-of-band ahead of the merge: the
+-- objects already exist there, so an unguarded `create` would fail the deploy.
+-- On a fresh database the guards change nothing.
 
-create table public.playalong_corpus (
+create table if not exists public.playalong_corpus (
     pdf_sha256 text not null,
     -- Bare ENGINE_VERSION (not the score_cache `#era=` key); the era is a column.
     engine_version text not null,
@@ -41,7 +46,7 @@ create table public.playalong_corpus (
 );
 
 -- Layout lookup filters on these before it ever touches `score`.
-create index playalong_corpus_layout_idx on public.playalong_corpus (
+create index if not exists playalong_corpus_layout_idx on public.playalong_corpus (
     engine_version,
     work_composer_id,
     work_catalog_type,
@@ -55,7 +60,7 @@ grant all on public.playalong_corpus to service_role;
 
 -- Seed ledger: one row per (work, origin, file) the offline seed script has
 -- looked at; `status` is the resume checkpoint.
-create table public.playalong_corpus_seed (
+create table if not exists public.playalong_corpus_seed (
     work_title text not null,
     origin text not null,
     filename text not null,
@@ -79,7 +84,7 @@ alter table public.playalong_corpus_seed enable row level security;
 grant all on public.playalong_corpus_seed to service_role;
 
 -- Kill switch for the seed crawl. Single row; `paused` stops the script.
-create table public.playalong_corpus_control (
+create table if not exists public.playalong_corpus_control (
     singleton boolean primary key default true check (singleton),
     paused boolean not null default false,
     updated_at timestamptz not null default now()
@@ -88,7 +93,7 @@ create table public.playalong_corpus_control (
 alter table public.playalong_corpus_control enable row level security;
 grant all on public.playalong_corpus_control to service_role;
 
-insert into public.playalong_corpus_control (paused) values (false);
+insert into public.playalong_corpus_control (paused) values (false) on conflict do nothing;
 
 -- Hash lookup: the same PDF bytes under this engine. Prefer the row for this
 -- era, else the era-independent symbolic row (''). Bumps usage like score_cache_get.
