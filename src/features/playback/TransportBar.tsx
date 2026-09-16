@@ -52,6 +52,7 @@ const ERROR_COPY: Record<string, string> = {
     musicxml_parse_failed: 'The recognized music could not be converted.',
     queue_full: 'The analysis service is busy — try again in a few minutes.',
     backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
+    rate_limited: 'Too many analysis requests in a short time — wait a minute, then try again.',
     service_unreachable: 'The analysis service is not reachable right now.',
     download_failed: 'The PDF could not be fetched for analysis.',
     worker_lost: 'The analysis was interrupted and will retry automatically.',
