@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { AlignmentMap, AnalysisSource } from '@/features/playback/analysisSource';
+import type { AlignmentMap, AnalysisSource, CorpusHit } from '@/features/playback/analysisSource';
 import {
     fetchScoreAnalysisFull,
     fetchScoreAnalysisStatus,
@@ -26,6 +26,8 @@ export type ScoreAnalysisState =
           engineVersion: string | null;
           source?: AnalysisSource;
           alignmentMap?: AlignmentMap;
+          /** Present when the shared corpus answered — nothing was queued or analyzed for this row. */
+          corpusHit?: CorpusHit;
       }
     | { kind: 'failed'; code: string };
 
@@ -37,6 +39,7 @@ const readyFromCache = (cached: CachedScoreAnalysis & { score: ScoreData }): Ext
     engineVersion: cached.engineVersion,
     ...(cached.source ? { source: cached.source } : {}),
     ...(cached.alignmentMap ? { alignmentMap: cached.alignmentMap } : {}),
+    ...(cached.corpusHit ? { corpusHit: cached.corpusHit } : {}),
 });
 
 /** Fallback poll while pending/processing — Realtime is primary. */

@@ -555,7 +555,9 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     <span>{sig.den}</span>
                 </span>
 
-                {props.state.kind === 'ready' && props.state.source ? <SourceBadge source={props.state.source} /> : null}
+                {props.state.kind === 'ready' && props.state.source ? (
+                    <SourceBadge source={props.state.source} corpusHit={props.state.corpusHit} />
+                ) : null}
 
                 <button
                     type="button"
