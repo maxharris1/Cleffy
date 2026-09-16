@@ -165,28 +165,57 @@ describe('LibraryShell', () => {
         expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');
     });
 
-    it('auto-requests analysis after an IMSLP import, waits out the queue on the panel, then opens the score', async () => {
+    it('auto-requests analysis after an IMSLP import and reports queued only when the poll sees a real wait', async () => {
         const user = userEvent.setup();
         readCachedLibraryList.mockResolvedValue(null);
         importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd9', title: 'Nocturnes, Op.9' } });
         requestScoreAnalysis.mockResolvedValue({ ok: true });
         let release: (value: string) => void = () => undefined;
-        waitForAnalysisToLeaveQueue.mockImplementation(() => new Promise<string>((r) => (release = r)));
+        let queued: (() => void) | undefined;
+        waitForAnalysisToLeaveQueue.mockImplementation(
+            (_id: string, options: { onQueued?: () => void }) =>
+                new Promise<string>((r) => {
+                    release = r;
+                    queued = options.onQueued;
+                }),
+        );
         const onStage = vi.fn();
         const onResult = vi.fn();
         renderShell('/search', { onStage, onResult });
 
         await user.click(screen.getByRole('button', { name: 'import from imslp' }));
 
-        // Queued: analysis requested for this document; still on the search route.
+        // Analysis requested; the row has not yet been seen waiting, so no stage is reported.
         await screen.findByRole('progressbar', { name: 'Importing from IMSLP' });
+        await vi.waitFor(() => expect(waitForAnalysisToLeaveQueue).toHaveBeenCalled());
         expect(requestScoreAnalysis).toHaveBeenCalledWith('d9');
-        expect(onStage).toHaveBeenCalledWith('queued');
-        expect(waitForAnalysisToLeaveQueue).toHaveBeenCalledWith('d9');
+        expect(waitForAnalysisToLeaveQueue).toHaveBeenCalledWith('d9', { onQueued: expect.any(Function) });
+        expect(onStage).not.toHaveBeenCalled();
         expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+
+        // The poll observes a genuine wait → the panel hears "queued".
+        queued?.();
+        expect(onStage).toHaveBeenCalledWith('queued');
 
         release('processing');
         expect(await screen.findByText('viewer page')).toBeInTheDocument();
+        expect(onResult).toHaveBeenCalledWith({ ok: true });
+    });
+
+    it('opens the score straight from downloading when the job is claimed at once', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue(null);
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd9', title: 'Nocturnes, Op.9' } });
+        requestScoreAnalysis.mockResolvedValue({ ok: true });
+        waitForAnalysisToLeaveQueue.mockResolvedValue('ready');
+        const onStage = vi.fn();
+        const onResult = vi.fn();
+        renderShell('/search', { onStage, onResult });
+
+        await user.click(screen.getByRole('button', { name: 'import from imslp' }));
+
+        expect(await screen.findByText('viewer page')).toBeInTheDocument();
+        expect(onStage).not.toHaveBeenCalled();
         expect(onResult).toHaveBeenCalledWith({ ok: true });
     });
 

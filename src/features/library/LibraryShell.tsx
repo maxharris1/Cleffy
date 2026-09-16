@@ -30,9 +30,10 @@ const PricingDialog = lazy(() =>
 );
 
 /**
- * Where an IMSLP import is, after the PDF has landed: the analysis was
- * requested and an omr_jobs row is waiting for a worker. (`downloading` is
- * the caller's own initial stage; the shell only reports what comes after.)
+ * Where an IMSLP import is, after the PDF has landed: the omr_jobs row has
+ * been observed waiting for a worker. Only reported for a real wait — a job
+ * claimed or finished straight away is never "queued". (`downloading` is the
+ * caller's own initial stage; the shell only reports what comes after.)
  */
 export type ImslpImportStage = 'queued';
 
@@ -242,8 +243,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 // shows them beside a link to the score, where Generate waits.
                 return { ok: true, analysisFailed: { code: analysis.code ?? 'internal', documentId } };
             }
-            onStage?.('queued');
-            await waitForAnalysisToLeaveQueue(documentId);
+            // "Queued" is only shown once the row has actually sat unclaimed
+            // for a poll interval; a fast claim or a corpus hit goes straight
+            // from downloading to the score.
+            await waitForAnalysisToLeaveQueue(documentId, { onQueued: () => onStage?.('queued') });
             navigate(`/doc/${documentId}`);
             return { ok: true };
         } catch (err) {

@@ -674,26 +674,66 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('checkbox'));
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
 
+<<<<<<< HEAD
+=======
+        // Stage 1: the PDF is coming down. The Queued step is not promised —
+        // most imports never enter it.
+>>>>>>> ae1910c (Show Queued for analysis only when the job has actually been seen waiting)
         const card = await screen.findByTestId('imslp-import-progress');
         expect(card).toHaveTextContent('Preparing Nocturnes, Op.9');
         const steps = () => within(card).getAllByRole('listitem').map((li) => li.textContent?.trim());
-        expect(steps()).toEqual(['Downloading from IMSLP', 'Queued for analysis']);
+        expect(steps()).toEqual(['Downloading from IMSLP']);
         expect(within(card).getByRole('listitem', { current: 'step' })).toHaveTextContent('Downloading from IMSLP');
+        expect(card).not.toHaveTextContent(/queued/i);
         expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
         expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toHaveAttribute('aria-busy', 'true');
 
+<<<<<<< HEAD
+=======
+        // Stage 2: the poll has seen the job genuinely waiting — the step appears now.
+>>>>>>> ae1910c (Show Queued for analysis only when the job has actually been seen waiting)
         stage?.('queued');
         await waitFor(() =>
             expect(within(card).getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued for analysis'),
         );
-        expect(card).toHaveTextContent(/waiting for an analysis slot/i);
-        expect(card).not.toHaveTextContent(/#|\d slot/);
+        expect(steps()).toEqual(['Downloading from IMSLP', 'Queued for analysis']);
+        expect(card).toHaveTextContent(/every worker is busy/i);
+        expect(card).not.toHaveTextContent(/#\d|\d in queue/);
         expect(screen.getByRole('button', { name: 'Queued for analysis…' })).toBeDisabled();
         expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
 
         finish({ ok: true });
         await waitFor(() => expect(screen.queryByTestId('imslp-import-progress')).not.toBeInTheDocument());
         expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled();
+    });
+
+    it('goes from Downloading straight to done when the job never waits (fast claim / corpus hit)', async () => {
+        const { screen, waitFor, within } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('nocturnes.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        let finish: (value: { ok: true }) => void = () => undefined;
+        const onImportImslp = vi.fn(() => new Promise<{ ok: true }>((resolve) => (finish = resolve)));
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+        await userEvent.click(screen.getByRole('checkbox'));
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+
+        const card = await screen.findByTestId('imslp-import-progress');
+        expect(within(card).getAllByRole('listitem').map((li) => li.textContent?.trim())).toEqual([
+            'Downloading from IMSLP',
+        ]);
+        finish({ ok: true });
+        await waitFor(() => expect(screen.queryByTestId('imslp-import-progress')).not.toBeInTheDocument());
+        expect(screen.queryByText(/queued for analysis/i)).not.toBeInTheDocument();
     });
 
     it('explains a rate-limited auto-analysis on the panel and links to the score', async () => {

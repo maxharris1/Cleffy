@@ -333,21 +333,29 @@ export const ImslpWorkPanel = ({
 type ImportStage = 'downloading' | 'queued';
 
 const IMPORT_STEPS: readonly { stage: ImportStage; label: string; detail: string }[] = [
-    { stage: 'downloading', label: 'Downloading from IMSLP', detail: 'Fetching the PDF into your library…' },
+    {
+        stage: 'downloading',
+        label: 'Downloading from IMSLP',
+        detail: 'Fetching the PDF into your library and starting its play-along…',
+    },
     {
         stage: 'queued',
         label: 'Queued for analysis',
-        detail: 'Waiting for an analysis slot — the score opens as soon as a worker picks it up.',
+        detail: 'Every worker is busy — the score opens as soon as one picks this up.',
     },
 ];
 
 /**
- * The visible wait while a score is fetched and its play-along is queued.
- * Deliberately a card, not a button state: the reader may be here for tens
- * of seconds and needs to see that something is happening and what.
+ * The visible wait while a score is fetched and, if a worker is busy, its
+ * play-along waits in the queue. Deliberately a card, not a button state:
+ * the reader may be here for tens of seconds and needs to see that something
+ * is happening and what. The Queued step is only drawn once the job has
+ * actually been seen waiting — most imports go straight to the score, and a
+ * stage that never happens must not be promised.
  */
 const ImportProgress = ({ stage, title }: { stage: ImportStage; title: string }) => {
     const currentIndex = IMPORT_STEPS.findIndex((step) => step.stage === stage);
+    const steps = IMPORT_STEPS.slice(0, currentIndex + 1);
     const current = IMPORT_STEPS[currentIndex];
     return (
         <div
@@ -360,7 +368,7 @@ const ImportProgress = ({ stage, title }: { stage: ImportStage; title: string })
             <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-stone-800">Preparing {title}</p>
                 <ol aria-label="Import progress" className="mt-2 flex flex-wrap items-center gap-1.5">
-                    {IMPORT_STEPS.map((step, index) => {
+                    {steps.map((step, index) => {
                         const done = index < currentIndex;
                         const active = index === currentIndex;
                         return (
@@ -379,7 +387,7 @@ const ImportProgress = ({ stage, title }: { stage: ImportStage; title: string })
                                 <span className={active ? 'text-accent' : done ? 'text-stone-600' : 'text-stone-400'}>
                                     {step.label}
                                 </span>
-                                {index < IMPORT_STEPS.length - 1 ? (
+                                {index < steps.length - 1 ? (
                                     <span
                                         aria-hidden="true"
                                         className={`h-px w-4 ${done ? 'bg-accent' : 'bg-stone-300'}`}
