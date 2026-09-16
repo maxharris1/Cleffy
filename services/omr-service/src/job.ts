@@ -9,7 +9,18 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { runAudiverisTolerant, sheetRangesExcluding, timeoutForPages, type AudiverisResult } from './audiveris.js';
 import { buildScoreData, type BuildScoreDataOptions } from './buildScoreData.js';
 import { corpusOwnerUserId, isCorpusLookupEnabled } from './corpus/flag.js';
-import { corpusLookupByHash, corpusLookupByLayout, corpusPut, type CorpusSource } from './corpus/store.js';
+import { corpusGate } from './corpus/gate.js';
+import {
+    analysisSourceFromCorpus,
+    corpusLookupByHash,
+    corpusLookupByLayout,
+    corpusPut,
+    corpusSiblingPrintedBars,
+    pdProvenance,
+    type CorpusPutInput,
+    type CorpusSource,
+    type PdProvenance,
+} from './corpus/store.js';
 import { titleForDocument } from './documentTitle.js';
 import { DEFAULT_ERA, eraForDocument, type Era } from './era.js';
 import { ERROR_CODES, JobError, type ErrorCode } from './errors.js';
@@ -324,6 +335,38 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             }
         };
 
+        // A corpus candidate is a public edition: an IMSLP import or a seed job.
+        // Only those can be in `pd_pdf_store`, and only those carry a licence we
+        // owe attribution for.
+        const corpusOwner = corpusOwnerUserId();
+        const isSeedJob = corpusOwner !== null && adapters.createdBy === corpusOwner;
+        const isCorpusCandidate = adapters.imslpPageTitle !== undefined || isSeedJob;
+        let provenance: PdProvenance | null | undefined;
+        const resolveProvenance = async (): Promise<PdProvenance | null> => {
+            if (provenance === undefined) {
+                provenance = isCorpusCandidate ? await pdProvenance(hash) : null;
+            }
+            return provenance;
+        };
+        /**
+         * Carry licence / credit / source onto what the player badges from. A
+         * CC-BY / CC-BY-SA edition obliges us to attribute it wherever it is
+         * served, so this happens even on the paths that would otherwise leave
+         * `timings.source` unset (symbolic-first off).
+         */
+        const stampAttribution = async (): Promise<void> => {
+            const pd = await resolveProvenance();
+            if (pd === null) {
+                return;
+            }
+            timings.source = {
+                ...(timings.source ?? { tier: 'omr', band: 'reject', reason: 'no_candidate' }),
+                licence: pd.licenceTag,
+                ...(pd.editorCredit !== null ? { editorCredit: pd.editorCredit } : {}),
+                ...(pd.sourceUrl !== null ? { sourceUrl: pd.sourceUrl } : {}),
+            };
+        };
+
         // Corpus by hash comes before symbolic and the OMR cache: the same PDF
         // bytes already analysed (Mutopia MIDI + alignment, or a seed OMR run)
         // cost one RPC and no JVM.
@@ -332,7 +375,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             const hit = await corpusTimed(() => corpusLookupByHash(hash, ENGINE_VERSION, hitEra));
             if (hit) {
                 timings.corpusHit = 'hash';
-                timings.source = hit.source;
+                timings.source = analysisSourceFromCorpus(hit.source);
                 if (hit.alignmentMap) {
                     timings.alignmentMap = hit.alignmentMap;
                 }
@@ -346,18 +389,27 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         // title is the work page) or a corpus-owner seed job. Never a user upload.
         let omrLayout: SymbolicLayoutKey | undefined;
         const corpusPutOmr = async (score: ScoreData, omrEra: Era): Promise<void> => {
-            if (!corpusOn) {
+            if (!corpusOn || !isCorpusCandidate) {
                 return;
             }
-            const owner = corpusOwnerUserId();
-            const seed = owner !== null && adapters.createdBy === owner;
-            if (adapters.imslpPageTitle === undefined && !seed) {
+            // A bulk mirror can hand us a file that is not the work it is filed
+            // under. Withhold those from the corpus; the user still gets the score.
+            const siblingPrintedBars =
+                omrLayout !== undefined
+                    ? await corpusTimed(() => corpusSiblingPrintedBars(ENGINE_VERSION, omrLayout!.workKey, hash))
+                    : [];
+            const gate = corpusGate({ tier: 'omr', score, siblingPrintedBars });
+            timings.corpusGate = gate;
+            if (!gate.promoted) {
+                console.warn(`[corpus] ${adapters.documentId}: not promoted (${gate.reason})`);
                 return;
             }
+            const pd = await resolveProvenance();
             const source: CorpusSource = {
                 ...(timings.source ?? { tier: 'omr', band: 'reject', reason: 'no_candidate' }),
                 origin: 'omr',
                 ...(adapters.imslpPageTitle !== undefined ? { imslp_page_title: adapters.imslpPageTitle } : {}),
+                ...corpusProvenanceKeys(pd),
             };
             await corpusPut({
                 pdfSha256: hash,
@@ -369,6 +421,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 ...(timings.pageCount !== undefined ? { pageCount: timings.pageCount } : {}),
                 symbolicSource: 'omr',
                 ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
+                ...corpusPutProvenance(pd),
             });
         };
 
@@ -399,8 +452,9 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                     timings.corpusHit = symbolic.corpusHit;
                 }
                 if (corpusOn) {
-                    await corpusPutSymbolic(hash, symbolic, adapters.imslpPageTitle);
+                    await corpusPutSymbolic(hash, symbolic, adapters.imslpPageTitle, await resolveProvenance());
                 }
+                await stampAttribution();
                 const ok = await adapters.onReady(symbolic.score, timings);
                 logJob(adapters.documentId, timings, symbolic.score, ok);
                 return ok;
@@ -415,6 +469,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
         if (cached) {
             timings.cacheHit = true;
             await corpusPutOmr(cached.score, era);
+            await stampAttribution();
             const ok = await adapters.onReady(cached.score, timings);
             logJob(adapters.documentId, timings, cached.score, ok);
             return ok;
@@ -445,6 +500,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
 
         await cacheStore(hash, cacheKey, score);
         await corpusPutOmr(score, era);
+        await stampAttribution();
         const ok = await adapters.onReady(score, timings);
         logJob(adapters.documentId, timings, score, ok);
         return ok;
@@ -464,6 +520,31 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
 /** Exported for job-level symbolic-first tests. */
 export const runOmrPipeline = runPipeline;
 
+/** Provenance keys on the stored `playalong_corpus.source` jsonb. */
+const corpusProvenanceKeys = (
+    pd: PdProvenance | null,
+): Pick<CorpusSource, 'licence_tag' | 'editor_credit' | 'source_url' | 'us_pd'> =>
+    pd === null
+        ? {}
+        : {
+              licence_tag: pd.licenceTag,
+              us_pd: pd.usPd,
+              ...(pd.editorCredit !== null ? { editor_credit: pd.editorCredit } : {}),
+              ...(pd.sourceUrl !== null ? { source_url: pd.sourceUrl } : {}),
+          };
+
+/** Provenance on the corpus row's own columns (not only inside `source`). */
+const corpusPutProvenance = (
+    pd: PdProvenance | null,
+): Partial<Pick<CorpusPutInput, 'licenceTag' | 'editorCredit' | 'sourceUrl'>> =>
+    pd === null
+        ? {}
+        : {
+              licenceTag: pd.licenceTag,
+              ...(pd.editorCredit !== null ? { editorCredit: pd.editorCredit } : {}),
+              ...(pd.sourceUrl !== null ? { sourceUrl: pd.sourceUrl } : {}),
+          };
+
 /**
  * Organic corpus growth from a symbolic accept: only a public Mutopia match.
  * A user-uploaded XML, an IMSLP file, the eval MIDI set, and a corpus layout
@@ -473,6 +554,7 @@ const corpusPutSymbolic = async (
     pdfSha256: string,
     accept: SymbolicAcceptResult,
     imslpPageTitle: string | undefined,
+    pd: PdProvenance | null,
 ): Promise<void> => {
     if (accept.candidate === null || accept.candidate.source !== 'mutopia') {
         return;
@@ -481,6 +563,7 @@ const corpusPutSymbolic = async (
         ...accept.source,
         origin: 'mutopia',
         ...(imslpPageTitle !== undefined ? { imslp_page_title: imslpPageTitle } : {}),
+        ...corpusProvenanceKeys(pd),
     };
     await corpusPut({
         pdfSha256,
@@ -497,6 +580,7 @@ const corpusPutSymbolic = async (
         symbolicSource: 'mutopia',
         symbolicFormat: accept.candidate.format,
         ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}),
+        ...corpusPutProvenance(pd),
     });
 };
 

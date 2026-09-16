@@ -209,10 +209,20 @@ export function shouldProcess(
     row: LedgerRow,
     options?: { retrySkipped?: boolean },
 ): { process: boolean; reason: string };
+export function gateReviewError(
+    timings: { corpusGate?: { promoted?: boolean; reason?: string } | null } | null | undefined,
+): string | null;
 export function reconcileQueued(
     job: { status: string; last_error?: string | null } | null | undefined,
-    analysis: { status: string; error?: string | null } | null | undefined,
-): { status: 'ready' | 'failed'; error: string | null } | null;
+    analysis:
+        | {
+              status: string;
+              error?: string | null;
+              timings?: { corpusGate?: { promoted?: boolean; reason?: string } | null } | null;
+          }
+        | null
+        | undefined,
+): { status: 'ready' | 'failed' | 'skipped'; error: string | null } | null;
 export function sourceEnabled(origin: string, options?: { sources?: readonly string[]; parked?: Set<string> }): boolean;
 export function parseSources(value: string | null | undefined): Origin[];
 export function backoffDelayMs(consecutiveFailures: number, options?: { baseMs?: number; maxMs?: number }): number;

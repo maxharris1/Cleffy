@@ -1,3 +1,4 @@
+import type { CorpusGateVerdict } from './corpus/gate.js';
 import type { AlignmentMap } from './symbolic/align.js';
 import type { AnalysisSource } from './symbolic/jobResult.js';
 
@@ -41,6 +42,13 @@ export interface JobTimings {
     corpusHit?: 'hash' | 'layout';
     /** Time spent in corpus RPCs. Only present when CLEFFY_CORPUS_LOOKUP is on. */
     corpusLookupMs?: number;
+    /**
+     * Outcome of the corpus-promotion gate, present only on a job that was a
+     * corpus candidate (an IMSLP import or a corpus-owner seed). `promoted:
+     * false` means the analysis is served to this user but withheld from the
+     * corpus; the seed reconciles those ledger rows to `needs_review`.
+     */
+    corpusGate?: CorpusGateVerdict;
 }
 
 export const emptyTimings = (): JobTimings => ({});
