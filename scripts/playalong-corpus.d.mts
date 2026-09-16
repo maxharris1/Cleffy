@@ -63,6 +63,10 @@ export type RankedWork = {
     instrument: string | null;
     pin?: boolean;
     score: number;
+    downloads: number;
+    useCount: number;
+    workViews: number;
+    composerViews: number;
 };
 
 export type CatalogWork = { page_title: string; composer: string | null; categories: string[]; touched: string | null };
@@ -152,6 +156,7 @@ export function pickIaDoc<T extends { title?: string; creator?: string | string[
 export const IA_PART_OR_ARRANGEMENT_RE: RegExp;
 export function pickIaPdf<T extends { name?: string; source?: string; size?: string | number }>(
     files: readonly T[] | null | undefined,
+    editions?: readonly ImslpEdition[],
 ): T | null;
 export function iaFileUrl(identifier: string, name: string): string;
 export function iaResolution(
@@ -174,12 +179,17 @@ export function zipEntrySlice(buf: Buffer, entry: ZipEntry): { method: number; d
 export function zipExtract(buf: Buffer, entry: ZipEntry): Buffer;
 
 export function canonicalComposerOrder(popular: readonly Work[], extraSurnames?: readonly string[]): string[];
+export const RANK_WEIGHTS: Readonly<{ download: number; use: number; work: number; composer: number; prior: number }>;
+export type Popularity = { workViews?: number; composerViews?: number; article?: string | null };
+export function popularityScore(popularity?: Popularity, weights?: typeof RANK_WEIGHTS): number;
 export function rankWorks(input: {
     popular: readonly Work[];
     pins?: readonly { title: string }[];
     catalog?: readonly CatalogWork[];
     demand?: Map<string, number>;
     corpusUse?: Map<string, number>;
+    popularity?: Map<string, Popularity>;
+    weights?: typeof RANK_WEIGHTS;
 }): RankedWork[];
 export function demandFromDocumentTitles(titles: readonly unknown[]): Map<string, number>;
 
@@ -229,3 +239,82 @@ export function workEvent(event: {
     reason?: string | null;
 }): string;
 export function coveredWorkCount(rows: Iterable<{ work_title: string; status: string }>): number;
+
+export const WIKI_API: string;
+export const WIKI_PAGEVIEWS_API: string;
+export const WIKI_DELAY_MS: number;
+export function composerArticleName(title: string): string | null;
+export function wikiSearchQuery(title: string): string;
+export function wikiSearchUrl(query: string): string;
+export function pageviewsWindow(now?: Date): { start: string; end: string };
+export function wikiPageviewsUrl(article: string, window?: { start: string; end: string }): string;
+export function monthlyAverageViews(response: { items?: Array<{ views?: number }> } | null | undefined): number;
+export function wikiArticleMatches(workTitle: string, articleTitle: string): boolean;
+export function wikiArticleFor(
+    workTitle: string,
+    searchResponse: { query?: { search?: Array<{ title?: string }> } } | null | undefined,
+): string | null;
+
+export type ImslpFileBlockEntry = {
+    filename: string;
+    description: string;
+    imageType: string | null;
+    editor: string | null;
+    arranger: string | null;
+    publisher: string | null;
+    misc: string | null;
+    copyright: string | null;
+};
+export type ImslpFileStats = {
+    filename: string;
+    fileId: string | null;
+    sizeMb: number | null;
+    pages: number | null;
+    rating: number | null;
+    downloads: number | null;
+    description: string;
+    typesetLine: boolean | null;
+};
+export type ImslpEdition = Partial<ImslpFileBlockEntry> &
+    Partial<ImslpFileStats> & { filename?: string; typeset?: boolean | null; complete?: boolean; score?: number };
+export type EditionSummary = {
+    filename: string;
+    fileId: string | null;
+    imageType: string | null;
+    description: string;
+    editor: string | null;
+    rating: number | null;
+    downloads: number | null;
+    pages: number | null;
+    sizeMb: number | null;
+    score: number;
+};
+export type EditionSignals = {
+    chosen: {
+        origin: string;
+        filename: string;
+        imageType: string;
+        complete: boolean;
+        rating: number | null;
+        downloads: number | null;
+    } | null;
+    matchedImslp: EditionSummary | null;
+    bestImslp: EditionSummary | null;
+    matchesBest: boolean | null;
+    imslpEditions: number;
+};
+export function parseImslpFileBlocks(wikitext: string): ImslpFileBlockEntry[];
+export function parseImslpFileStats(html: string): Map<string, ImslpFileStats>;
+export function editionScore(edition: ImslpEdition): number;
+export function imslpEditions(
+    wikitext: string,
+    html: string,
+): Array<ImslpFileBlockEntry & Partial<ImslpFileStats> & { typeset: boolean | null; complete: boolean; score: number }>;
+export function bestImslpEdition<T extends ImslpEdition>(editions: readonly T[]): T | null;
+export function cleanWikitext(value: unknown): string;
+export function editionSummary(edition: ImslpEdition | null | undefined): EditionSummary | null;
+export function matchImslpEdition<T extends ImslpEdition>(filename: string, editions: readonly T[]): T | null;
+export function editionSignals(
+    res: { origin: string; filename: string } | null,
+    editions: readonly ImslpEdition[] | null | undefined,
+): EditionSignals;

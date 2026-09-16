@@ -985,12 +985,15 @@ export const IA_PART_OR_ARRANGEMENT_RE =
  * The original PDF of an IA item (not the `_text.pdf` OCR derivative), skipping
  * files named as a part or an arrangement. Null when only those remain.
  */
-export const pickIaPdf = (files) => {
+export const pickIaPdf = (files, editions = []) => {
     const pdfs = (files ?? []).filter((f) => /\.pdf$/i.test(f.name ?? '') && !/_text\.pdf$/i.test(f.name));
     const scores = pdfs.filter((f) => !IA_PART_OR_ARRANGEMENT_RE.test(f.name.replace(/\.pdf$/i, '')));
     const originals = scores.filter((f) => f.source === 'original');
     const pool = originals.length > 0 ? originals : scores;
-    pool.sort((a, b) => Number(b.size ?? 0) - Number(a.size ?? 0));
+    // Best IMSLP edition first (typeset > scan, complete, rating, downloads); unmatched
+    // files rank below every matched one; size breaks the remaining ties.
+    const editionScoreOf = (f) => matchImslpEdition(f.name, editions)?.score ?? -1000;
+    pool.sort((a, b) => editionScoreOf(b) - editionScoreOf(a) || Number(b.size ?? 0) - Number(a.size ?? 0));
     return pool[0] ?? null;
 };
 
@@ -1045,7 +1048,7 @@ export const imslpParseUrl = (title) => {
     const url = new URL(IMSLP_API);
     url.searchParams.set('action', 'parse');
     url.searchParams.set('page', title);
-    url.searchParams.set('prop', 'text');
+    url.searchParams.set('prop', 'text|wikitext');
     url.searchParams.set('redirects', '1');
     url.searchParams.set('format', 'json');
     return url.toString();
@@ -1084,6 +1087,314 @@ export const imslpRedirectAliases = (title, response) => {
 };
 
 // ---------------------------------------------------------------------------
+// Wikipedia pageviews (demand proxy) — metadata only, cached by the CLI
+// ---------------------------------------------------------------------------
+
+export const WIKI_API = 'https://en.wikipedia.org/w/api.php';
+export const WIKI_PAGEVIEWS_API =
+    'https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user';
+/** Polite spacing for uncached Wikipedia / Wikimedia calls (the search API throttles at ~10/s). */
+export const WIKI_DELAY_MS = 400;
+
+/** `Beethoven, Ludwig van` → `Ludwig van Beethoven`; `Strauss Jr., Johann` → `Johann Strauss Jr.`. */
+export const composerArticleName = (title) => {
+    const name = composerNameOf(title);
+    if (!name) {
+        return null;
+    }
+    const [last, first] = name.split(',').map((p) => p.trim());
+    return first ? `${first} ${last}` : last;
+};
+
+export const wikiSearchQuery = (title) => `${workTitleOf(title)} ${composerSurnameOf(title) ?? ''}`.trim();
+
+export const wikiSearchUrl = (query) => {
+    const url = new URL(WIKI_API);
+    url.searchParams.set('action', 'query');
+    url.searchParams.set('list', 'search');
+    url.searchParams.set('srsearch', query);
+    url.searchParams.set('srlimit', '3');
+    url.searchParams.set('format', 'json');
+    return url.toString();
+};
+
+/** Last 12 complete months, as the pageviews API wants them (YYYYMMDD00). */
+export const pageviewsWindow = (now = new Date()) => {
+    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 12, 1));
+    const stamp = (d) => `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}0100`;
+    return { start: stamp(start), end: stamp(end) };
+};
+
+export const wikiPageviewsUrl = (article, { start, end } = pageviewsWindow()) =>
+    `${WIKI_PAGEVIEWS_API}/${encodeURIComponent(article.replace(/ /g, '_'))}/monthly/${start}/${end}`;
+
+/** Average monthly views from a pageviews response; 0 when the article has none. */
+export const monthlyAverageViews = (response) => {
+    const items = response?.items ?? [];
+    if (items.length === 0) {
+        return 0;
+    }
+    return Math.round(items.reduce((sum, item) => sum + Number(item.views ?? 0), 0) / items.length);
+};
+
+/**
+ * Is this search hit the work's article? The folded article title must carry
+ * the composer surname, a catalogue reference of the work, or a significant
+ * word of its title — otherwise the hit is Wikipedia guessing.
+ */
+export const wikiArticleMatches = (workTitle, articleTitle) => {
+    const article = fold(articleTitle);
+    const surname = fold(composerSurnameOf(workTitle) ?? '');
+    if (surname && article.includes(surname)) {
+        return true;
+    }
+    const wantRefs = catalogRefsFromText(workTitleOf(workTitle));
+    if (wantRefs.length > 0 && catalogEquals(wantRefs, catalogRefsFromText(articleTitle))) {
+        return true;
+    }
+    const words = significantWords(workTitle);
+    const have = new Set(significantWords(`${articleTitle} (x)`));
+    return words.some((w) => have.has(w));
+};
+
+/** Pick the article for a work from a search response, or null. */
+export const wikiArticleFor = (workTitle, searchResponse) => {
+    for (const hit of searchResponse?.query?.search ?? []) {
+        if (typeof hit?.title === 'string' && wikiArticleMatches(workTitle, hit.title)) {
+            return hit.title;
+        }
+    }
+    return null;
+};
+
+// ---------------------------------------------------------------------------
+// IMSLP edition signals (from one `action=parse&prop=text|wikitext` call)
+// ---------------------------------------------------------------------------
+
+/** @typedef {{ filename: string, description: string, imageType: string | null, editor: string | null, arranger: string | null, publisher: string | null, misc: string | null, copyright: string | null }} ImslpFileBlockEntry */
+
+const wikitextField = (block, name) => {
+    const match = new RegExp(`\\|\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=([^\\n]*)`, 'i').exec(block);
+    return match ? match[1].trim() : null;
+};
+
+/** Every PDF named in the page's `#fte:imslpfile` blocks, with the block's edition fields. */
+export const parseImslpFileBlocks = (wikitext) => {
+    const out = [];
+    const blocks = String(wikitext ?? '').split('{{#fte:imslpfile');
+    for (const block of blocks.slice(1)) {
+        const body = block.split('\n}}')[0] ?? block;
+        const imageType = wikitextField(body, 'Image Type');
+        const editor = wikitextField(body, 'Editor');
+        const arranger = wikitextField(body, 'Arranger');
+        const publisher = wikitextField(body, 'Publisher Information');
+        const misc = wikitextField(body, 'Misc. Notes');
+        const copyright = wikitextField(body, 'Copyright');
+        for (const match of body.matchAll(/\|\s*File\s*Name\s*(\d+)\s*=\s*([^\n|]+)/gi)) {
+            const filename = (match[2] ?? '').trim();
+            if (!/\.pdf$/i.test(filename)) {
+                continue;
+            }
+            const description = wikitextField(body, `File Description ${match[1]}`) ?? '';
+            out.push({ filename, description, imageType, editor, arranger, publisher, misc, copyright });
+        }
+    }
+    return out;
+};
+
+/** @typedef {{ filename: string, fileId: string | null, sizeMb: number | null, pages: number | null, rating: number | null, downloads: number | null, description: string, typesetLine: boolean | null }} ImslpFileStats */
+
+/** Per-file stats from the rendered page: id, size, pages, rating, downloads, "typeset by" / "scanned by". */
+export const parseImslpFileStats = (html) => {
+    const out = new Map();
+    const chunks = String(html ?? '').split('we_file_dlarrwrap');
+    for (const chunk of chunks.slice(1)) {
+        const file = /title="File:([^"]+)">#(\d+)<\/a>(?:\s*-\s*([\d.]+)\s*MB)?(?:,\s*(\d+)\s*pp)?/.exec(chunk);
+        if (!file) {
+            continue;
+        }
+        const filename = file[1]
+            .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"')
+            .replace(/&#039;/g, "'");
+        const description =
+            /we_file_dlarrow">&#160;<\/span><\/span>([^<]*)<\/span><\/a>/.exec(chunk)?.[1]?.trim() ?? '';
+        const rating = /current-rating-\d+'[^>]*>([\d.]+)\/10/.exec(chunk)?.[1];
+        const downloads = /Total number of downloads:\s*([\d,]+)/.exec(chunk)?.[1];
+        const typesetLine = /PDF typeset by/i.test(chunk) ? true : /PDF scanned by/i.test(chunk) ? false : null;
+        out.set(filename, {
+            filename,
+            fileId: file[2] ?? null,
+            sizeMb: file[3] ? Number(file[3]) : null,
+            pages: file[4] ? Number(file[4]) : null,
+            rating: rating ? Number(rating) : null,
+            downloads: downloads ? Number(downloads.replace(/,/g, '')) : null,
+            description,
+            typesetLine,
+        });
+    }
+    return out;
+};
+
+const COMPLETE_SCORE_RE = /complete score|full score|score \(complete\)|^score$/i;
+const PARTIAL_SCORE_RE =
+    /\bparts?\b|selections?|excerpt|extract|arrang|transcri|piano reduction|vocal score|movement|no\.\s*\d|nos?\.\s*\d/i;
+
+/** @typedef {ImslpFileBlockEntry & Partial<ImslpFileStats> & { typeset: boolean | null, complete: boolean, score: number }} ImslpEdition */
+
+/**
+ * Edition quality, higher is better: typeset ≫ normal scan ≫ manuscript;
+ * complete score required (parts / arrangements are pushed to the bottom);
+ * then community rating, then log downloads, then a size tie-break (smaller
+ * scans OMR faster). Matches the order in the research note.
+ */
+export const editionScore = (edition) => {
+    let score = 0;
+    if (edition.typeset === true) {
+        score += 100;
+    } else if (edition.imageType && /manuscript/i.test(edition.imageType)) {
+        score += 0;
+    } else {
+        score += 30;
+    }
+    score += edition.complete ? 50 : -500;
+    if (edition.arranger) {
+        score -= 500;
+    }
+    if (edition.rating) {
+        score += edition.rating * 10;
+    }
+    if (edition.downloads) {
+        score += 10 * Math.log10(1 + edition.downloads);
+    }
+    if (edition.sizeMb) {
+        score -= Math.min(10, edition.sizeMb / 5);
+    }
+    return Math.round(score * 10) / 10;
+};
+
+/** Merge wikitext blocks and rendered stats into scored editions (PDFs only). */
+export const imslpEditions = (wikitext, html) => {
+    const stats = parseImslpFileStats(html);
+    const seen = new Set();
+    const out = [];
+    for (const entry of parseImslpFileBlocks(wikitext)) {
+        const canonical = entry.filename.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+        if (seen.has(canonical)) {
+            continue;
+        }
+        seen.add(canonical);
+        const stat = stats.get(canonical) ?? stats.get(entry.filename) ?? null;
+        const description = entry.description || stat?.description || '';
+        const typeset = entry.imageType ? /typeset/i.test(entry.imageType) : (stat?.typesetLine ?? null);
+        const complete = COMPLETE_SCORE_RE.test(description) && !PARTIAL_SCORE_RE.test(description);
+        const edition = { ...entry, ...(stat ?? {}), filename: canonical, description, typeset, complete };
+        out.push({ ...edition, score: editionScore(edition) });
+    }
+    return out.sort((a, b) => b.score - a.score);
+};
+
+/** The edition Max would pick by hand: best complete, non-arrangement score. */
+export const bestImslpEdition = (editions) => editions.find((e) => e.complete && !e.arranger) ?? null;
+
+/** `{{LinkEd|Carl|Mikuli|1819|1897}}<br>{{FE}} (German)` → `Carl Mikuli; First edition (German)`. */
+export const cleanWikitext = (value) => {
+    let text = String(value ?? '');
+    // Innermost templates first so nested `{{P|…|{{HMB|…}}|…}}` collapses cleanly.
+    for (let pass = 0; pass < 4 && /\{\{/.test(text); pass++) {
+        text = text.replace(/\{\{([^{}]*)\}\}/g, (_, inner) => {
+            const parts = inner.split('|').map((p) => p.trim());
+            switch (parts[0]) {
+                case 'LinkEd':
+                    return `${parts[1] ?? ''} ${parts[2] ?? ''}`.trim();
+                case 'FE':
+                    return 'First edition';
+                case 'P':
+                    return parts[1] ?? '';
+                default:
+                    return '';
+            }
+        });
+    }
+    return text
+        .replace(/<br\s*\/?>/gi, '; ')
+        .replace(/\[\[[^\]|]*\|([^\]]*)\]\]/g, '$1')
+        .replace(/\[\[([^\]]*)\]\]/g, '$1')
+        .replace(/\s+/g, ' ')
+        .replace(/\s*;\s*$/, '')
+        .trim();
+};
+
+/** Compact, storable view of an IMSLP edition. */
+export const editionSummary = (edition) =>
+    edition
+        ? {
+              filename: edition.filename,
+              fileId: edition.fileId ?? null,
+              imageType:
+                  edition.imageType ??
+                  (edition.typeset === true ? 'Typeset' : edition.typeset === false ? 'Normal Scan' : null),
+              description: edition.description,
+              editor: edition.editor ? cleanWikitext(edition.editor) || null : null,
+              rating: edition.rating ?? null,
+              downloads: edition.downloads ?? null,
+              pages: edition.pages ?? null,
+              sizeMb: edition.sizeMb ?? null,
+              score: edition.score,
+          }
+        : null;
+
+/** The IMSLP edition a source file is a copy of (loose name match), or null. */
+export const matchImslpEdition = (filename, editions) => {
+    const key = looseFilenameKey(filename);
+    if (key === '') {
+        return null;
+    }
+    return editions.find((e) => looseFilenameKey(e.filename) === key) ?? null;
+};
+
+/**
+ * What goes on the ledger / store row: the chosen file's own signals, the
+ * IMSLP edition it corresponds to (if any), the best IMSLP edition, and
+ * whether they agree. `matchesBest === false` flags a work for a manual
+ * `--from-dir` later.
+ */
+export const editionSignals = (res, editions) => {
+    const best = bestImslpEdition(editions ?? []);
+    const matched = res ? matchImslpEdition(res.filename, editions ?? []) : null;
+    const chosen = res
+        ? {
+              origin: res.origin,
+              filename: res.filename,
+              imageType: res.origin === 'ia' ? (matched?.imageType ?? 'Normal Scan') : 'Typeset',
+              complete:
+                  res.origin === 'ia'
+                      ? (matched?.complete ?? true)
+                      : !IA_PART_OR_ARRANGEMENT_RE.test(res.filename.replace(/\.pdf$/i, '')),
+              rating: matched?.rating ?? null,
+              downloads: matched?.downloads ?? null,
+          }
+        : null;
+    // A Mutopia / OpenScore typeset is at least as good as any IMSLP scan; only
+    // an IMSLP *typeset* best edition can beat it.
+    const matchesBest =
+        best === null
+            ? null
+            : matched
+              ? matched.filename === best.filename
+              : chosen !== null && chosen.imageType === 'Typeset' && best.typeset !== true;
+    return {
+        chosen,
+        matchedImslp: editionSummary(matched),
+        bestImslp: editionSummary(best),
+        matchesBest,
+        imslpEditions: (editions ?? []).length,
+    };
+};
+
+// ---------------------------------------------------------------------------
 // Ranking
 // ---------------------------------------------------------------------------
 
@@ -1117,8 +1428,9 @@ export const canonicalComposerOrder = (popular, extraSurnames = CANONICAL_SURNAM
  *
  * Tier 0: POPULAR_WORKS in list order (prior N..1) then eval pins. Tier 1:
  * catalog works `For piano` by a canonical composer, POPULAR composer order,
- * then `touched desc`. Score = 1000·downloads + 100·corpus use + prior; a
- * title with downloads that is in neither set is inserted (tier 1).
+ * then `touched desc`. Score: see RANK_WEIGHTS; a title with downloads that is
+ * in neither set is inserted (tier 1). `popularity` maps title →
+ * { workViews, composerViews } (Wikipedia monthly averages).
  *
  * @param {{ popular: Array<{ title: string, composer?: string, instrument?: string }>,
  *           pins?: Array<{ title: string }>,
@@ -1126,7 +1438,31 @@ export const canonicalComposerOrder = (popular, extraSurnames = CANONICAL_SURNAM
  *           demand?: Map<string, number>, corpusUse?: Map<string, number> }} input
  * @returns {RankedWork[]}
  */
-export const rankWorks = ({ popular, pins = [], catalog = [], demand = new Map(), corpusUse = new Map() }) => {
+/**
+ * Ranking weights. Score =
+ *   RANK_WEIGHTS.download · in-app IMSLP imports of the title
+ * + RANK_WEIGHTS.use      · playalong_corpus.use_count
+ * + RANK_WEIGHTS.work     · log10(1 + monthly Wikipedia views of the work article)
+ * + RANK_WEIGHTS.composer · log10(1 + monthly Wikipedia views of the composer article)
+ * + RANK_WEIGHTS.prior    · POPULAR_WORKS prior (131..1 for the curated list, else 0)
+ * Real in-app demand dominates; Wikipedia fame orders everything else; the
+ * curated prior breaks ties inside a fame band.
+ */
+export const RANK_WEIGHTS = Object.freeze({ download: 1000, use: 100, work: 100, composer: 25, prior: 2 });
+
+export const popularityScore = ({ workViews = 0, composerViews = 0 } = {}, weights = RANK_WEIGHTS) =>
+    weights.work * Math.log10(1 + Math.max(0, workViews)) +
+    weights.composer * Math.log10(1 + Math.max(0, composerViews));
+
+export const rankWorks = ({
+    popular,
+    pins = [],
+    catalog = [],
+    demand = new Map(),
+    corpusUse = new Map(),
+    popularity = new Map(),
+    weights = RANK_WEIGHTS,
+}) => {
     const byTitle = new Map();
     const n = popular.length;
     popular.forEach((work, index) => {
@@ -1186,9 +1522,20 @@ export const rankWorks = ({ popular, pins = [], catalog = [], demand = new Map()
 
     const ordered = [...byTitle.values()];
     const position = new Map(ordered.map((w, i) => [w.title, i]));
-    const scoreOf = (w) => 1000 * (demand.get(w.title) ?? 0) + 100 * (corpusUse.get(w.title) ?? 0) + w.prior;
+    const scoreOf = (w) =>
+        weights.download * (demand.get(w.title) ?? 0) +
+        weights.use * (corpusUse.get(w.title) ?? 0) +
+        popularityScore(popularity.get(w.title), weights) +
+        weights.prior * w.prior;
     ordered.sort((a, b) => scoreOf(b) - scoreOf(a) || position.get(a.title) - position.get(b.title));
-    return ordered.map((w) => ({ ...w, score: scoreOf(w) }));
+    return ordered.map((w) => ({
+        ...w,
+        score: Math.round(scoreOf(w) * 10) / 10,
+        downloads: demand.get(w.title) ?? 0,
+        useCount: corpusUse.get(w.title) ?? 0,
+        workViews: popularity.get(w.title)?.workViews ?? 0,
+        composerViews: popularity.get(w.title)?.composerViews ?? 0,
+    }));
 };
 
 /**

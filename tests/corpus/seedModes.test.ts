@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 import pdfLib from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { MUTOPIA_TREE_URL, OPENSCORE_REPOS } from '../../scripts/playalong-corpus.mjs';
+import { MUTOPIA_TREE_URL, OPENSCORE_REPOS, imslpParseUrl } from '../../scripts/playalong-corpus.mjs';
 
 /**
  * The two runnable modes against a fake Supabase (PostgREST + Storage) and a
@@ -273,6 +273,22 @@ describe('seed modes against a fake backend', () => {
             ...Object.fromEntries(
                 OPENSCORE_REPOS.map((repo) => [repo.treeUrl, JSON.stringify({ truncated: false, tree: [] })]),
             ),
+            // IMSLP work page (licences + editions) served from the cache, never the network.
+            [imslpParseUrl(MOONLIGHT)]: JSON.stringify({
+                parse: {
+                    text: {
+                        '*':
+                            '<div>we_file_dlarrwrap"><span class="we_file_dlarrow">&#160;</span></span>Complete Score</span></a></b>' +
+                            '<span class="we_file_info2"><a href="/wiki/File:X" title="File:PMLP01458-Beethoven Sonata 14.pdf">#51037</a> - 3.10MB, 14 pp.' +
+                            "<span class='current-rating' id='current-rating-51037'>8.5/10</span>" +
+                            '<span title="Total number of downloads: 132671"><a>132671</a>×</span></span>' +
+                            '<div class="we_file_info"><p>PDF scanned by Unknown</p></div></div>',
+                    },
+                    wikitext: {
+                        '*': '{{#fte:imslpfile\n|File Name 1=PMLP01458-Beethoven_Sonata_14.pdf\n|File Description 1=Complete Score\n|Image Type=Normal Scan\n|Editor={{LinkEd|Hans|von Bülow|1830|1894}}\n|Copyright=Public Domain\n}}',
+                    },
+                },
+            }),
         });
         commonArgs = [
             '--limit',
@@ -287,6 +303,7 @@ describe('seed modes against a fake backend', () => {
             evalDir,
             '--catalog',
             join(root, 'missing.jsonl'),
+            '--no-wiki',
         ];
         env = { SUPABASE_URL: backend.url, SUPABASE_SERVICE_ROLE_KEY: 'test-key', CORPUS_MUTOPIA_ORIGIN: backend.url };
     });
@@ -315,6 +332,26 @@ describe('seed modes against a fake backend', () => {
             attempts: 1,
         });
         expect(ledger[0]!.document_id).toBeUndefined();
+        expect(ledger[0]!.edition).toMatchObject({
+            chosen: { origin: 'mutopia', filename: 'moonlight-let.pdf', imageType: 'Typeset', complete: true },
+            matchedImslp: null,
+            bestImslp: {
+                filename: 'PMLP01458-Beethoven Sonata 14.pdf',
+                fileId: '51037',
+                imageType: 'Normal Scan',
+                editor: 'Hans von Bülow',
+                rating: 8.5,
+                downloads: 132671,
+                pages: 14,
+            },
+            // A Mutopia typeset beats the best IMSLP scan, so no manual --from-dir is needed.
+            matchesBest: true,
+            imslpEditions: 1,
+        });
+        expect(
+            (backend.tables.pd_pdf_store![0] as { edition: { bestImslp: { fileId: string } } }).edition.bestImslp
+                .fileId,
+        ).toBe('51037');
         expect(backend.tables.pd_pdf_store).toEqual([
             expect.objectContaining({
                 pdf_sha256: pdfSha,

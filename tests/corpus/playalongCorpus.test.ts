@@ -10,6 +10,11 @@ import {
     MAX_ATTEMPTS,
     MAX_FILES_PER_WORK,
     backoffDelayMs,
+    bestImslpEdition,
+    cleanWikitext,
+    composerArticleName,
+    editionScore,
+    editionSignals,
     canTransition,
     catalogEquals,
     catalogMatches,
@@ -25,6 +30,7 @@ import {
     iaExactQuery,
     iaFallbackQueries,
     iaResolution,
+    imslpEditions,
     imslpFileLicenceFor,
     imslpRedirectAliases,
     licenceTagOf,
@@ -33,20 +39,30 @@ import {
     mutopiaPieceMatches,
     mutopiaPiecesFromTree,
     mutopiaResolution,
+    monthlyAverageViews,
     openscoreResolution,
     openscoreWorkMatches,
     openscoreWorksFromTree,
+    pageviewsWindow,
+    parseImslpFileBlocks,
+    parseImslpFileStats,
+    popularityScore,
     parseMutopiaRdf,
     parseSources,
     pickIaDoc,
     pickIaPdf,
     planWork,
     progressEvent,
+    RANK_WEIGHTS,
     rankWorks,
     reconcileQueued,
     shouldProcess,
     titleForMutopiaPiece,
     titleWordsMatch,
+    wikiArticleFor,
+    wikiArticleMatches,
+    wikiPageviewsUrl,
+    wikiSearchQuery,
     workLevelLicence,
     zipEntries,
     zipExtract,
@@ -760,6 +776,191 @@ describe('Internet Archive', () => {
     });
 });
 
+describe('Wikipedia demand proxy', () => {
+    it('builds the search query and accepts only articles that name the work', () => {
+        expect(wikiSearchQuery(MOONLIGHT)).toBe('Piano Sonata No.14, Op.27 No.2 Beethoven');
+        expect(composerArticleName(MOONLIGHT)).toBe('Ludwig van Beethoven');
+        expect(composerArticleName('An der schönen blauen Donau, Op.314 (Strauss Jr., Johann)')).toBe(
+            'Johann Strauss Jr.',
+        );
+        expect(wikiArticleMatches(MOONLIGHT, 'Piano Sonata No. 14 (Beethoven)')).toBe(true);
+        expect(wikiArticleMatches('Nocturnes, Op.9 (Chopin, Frédéric)', 'Nocturnes, Op. 9 (Chopin)')).toBe(true);
+        expect(wikiArticleMatches('Album für die Jugend, Op.68 (Schumann, Robert)', 'Album for the Young')).toBe(true);
+        expect(
+            wikiArticleMatches('160 Kurze Übungen, Op.821 (Czerny, Carl)', 'Music written in all major or minor keys'),
+        ).toBe(false);
+        const search = {
+            query: { search: [{ title: 'Music written in all major or minor keys' }, { title: 'Carl Czerny' }] },
+        };
+        expect(wikiArticleFor('160 Kurze Übungen, Op.821 (Czerny, Carl)', search)).toBe('Carl Czerny');
+        expect(wikiArticleFor(MOONLIGHT, { query: { search: [] } })).toBeNull();
+    });
+
+    it('averages monthly views over the last twelve complete months', () => {
+        const { start, end } = pageviewsWindow(new Date(Date.UTC(2026, 8, 16)));
+        expect(start).toBe('2025090100');
+        expect(end).toBe('2026090100');
+        expect(wikiPageviewsUrl('Für Elise', { start, end })).toBe(
+            'https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/F%C3%BCr_Elise/monthly/2025090100/2026090100',
+        );
+        expect(monthlyAverageViews({ items: [{ views: 100 }, { views: 300 }] })).toBe(200);
+        expect(monthlyAverageViews({ items: [] })).toBe(0);
+        expect(monthlyAverageViews(null)).toBe(0);
+    });
+
+    it('scores fame on a log scale so a famous piece beats a famous composer alone', () => {
+        expect(popularityScore({ workViews: 0, composerViews: 0 })).toBe(0);
+        const elise = popularityScore({ workViews: 19107, composerViews: 115540 });
+        const obscureBeethoven = popularityScore({ workViews: 0, composerViews: 115540 });
+        const czerny = popularityScore({ workViews: 0, composerViews: 3955 });
+        expect(elise).toBeGreaterThan(obscureBeethoven);
+        expect(obscureBeethoven).toBeGreaterThan(czerny);
+        expect(elise).toBeCloseTo(
+            RANK_WEIGHTS.work * Math.log10(19108) + RANK_WEIGHTS.composer * Math.log10(115541),
+            6,
+        );
+    });
+});
+
+describe('IMSLP edition signals', () => {
+    const wikitext = [
+        '{{#fte:imslpfile',
+        '|File Name 1=PMLP02312-Chopin_Nocturnes_Op_9_Kistner_995_First_Edition_1832.pdf',
+        '|File Description 1=Complete Score',
+        '|Editor={{FE}} (German)',
+        '|Image Type=Normal Scan',
+        '|Publisher Information={{P|Kistner|Fr. Kistner|Leipzig|{{HMB|1833|7}}|1832||995}}',
+        '|Copyright=Public Domain',
+        '|Misc. Notes=',
+        '}}',
+        '{{#fte:imslpfile',
+        '|File Name 1=PMLP02312-Chopin-Op09n2rje.pdf',
+        '|File Description 1=Complete Score',
+        '|File Name 2=PMLP02312-Chopin-Op09n2rje.mxl',
+        '|File Description 2=MusicXML',
+        '|Editor={{LinkEd|Carl|Mikuli|1819|1897}}',
+        '|Image Type=Typeset',
+        '|Copyright=Creative Commons Attribution 4.0',
+        '}}',
+        '{{#fte:imslpfile',
+        '|File Name 1=PMLP02312-nocturne-op9-2-violin.pdf',
+        '|File Description 1=Violin Part',
+        '|Arranger=Somebody',
+        '|Image Type=Typeset',
+        '}}',
+    ].join('\n');
+    const chunk = (
+        name: string,
+        id: string,
+        size: string,
+        pages: string,
+        rating: string,
+        downloads: string,
+        how: string,
+    ) =>
+        `we_file_dlarrwrap"><span class="we_file_dlarrow">&#160;</span></span>Complete Score</span></a></b><span class="we_file_info2"><a href="x" title="File:${name}">#${id}</a> - ${size}MB, ${pages} pp. <span class='current-rating' id='current-rating-${id}'>${rating}/10</span> <span title="Total number of downloads: ${downloads}"><a>${downloads}</a>×</span></span><div class="we_file_info"><p>PDF ${how} by X</p></div>`;
+    const html =
+        chunk(
+            'PMLP02312-Chopin Nocturnes Op 9 Kistner 995 First Edition 1832.pdf',
+            '86550',
+            '1.87',
+            '13',
+            '0.0',
+            '142062',
+            'scanned',
+        ) +
+        chunk('PMLP02312-Chopin-Op09n2rje.pdf', '61906', '1.24', '4', '0.0', '91509', 'typeset') +
+        chunk('PMLP02312-nocturne-op9-2-violin.pdf', '99', '0.2', '2', '9.0', '5', 'typeset');
+
+    it('reads file blocks out of the wikitext and stats out of the rendered page', () => {
+        const blocks = parseImslpFileBlocks(wikitext);
+        expect(blocks.map((b) => [b.filename, b.description, b.imageType, b.arranger])).toEqual([
+            [
+                'PMLP02312-Chopin_Nocturnes_Op_9_Kistner_995_First_Edition_1832.pdf',
+                'Complete Score',
+                'Normal Scan',
+                null,
+            ],
+            ['PMLP02312-Chopin-Op09n2rje.pdf', 'Complete Score', 'Typeset', null],
+            ['PMLP02312-nocturne-op9-2-violin.pdf', 'Violin Part', 'Typeset', 'Somebody'],
+        ]);
+        const stats = parseImslpFileStats(html);
+        expect(stats.get('PMLP02312-Chopin-Op09n2rje.pdf')).toEqual({
+            filename: 'PMLP02312-Chopin-Op09n2rje.pdf',
+            fileId: '61906',
+            sizeMb: 1.24,
+            pages: 4,
+            rating: 0,
+            downloads: 91509,
+            description: 'Complete Score',
+            typesetLine: true,
+        });
+        expect(cleanWikitext('{{LinkEd|Carl|Mikuli|1819|1897}}<br>{{FE}} (German)')).toBe(
+            'Carl Mikuli; First edition (German)',
+        );
+    });
+
+    it('ranks typeset complete scores first, then scans by rating and downloads, and drops parts', () => {
+        const editions = imslpEditions(wikitext, html);
+        expect(editions.map((e) => e.filename)).toEqual([
+            'PMLP02312-Chopin-Op09n2rje.pdf',
+            'PMLP02312-Chopin Nocturnes Op 9 Kistner 995 First Edition 1832.pdf',
+            'PMLP02312-nocturne-op9-2-violin.pdf',
+        ]);
+        expect(editions[0]).toMatchObject({ typeset: true, complete: true, fileId: '61906', downloads: 91509 });
+        expect(editions[1]).toMatchObject({ typeset: false, complete: true, imageType: 'Normal Scan' });
+        expect(editions[2]).toMatchObject({ complete: false, arranger: 'Somebody' });
+        expect(editions[2]!.score).toBeLessThan(0);
+        expect(bestImslpEdition(editions)?.filename).toBe('PMLP02312-Chopin-Op09n2rje.pdf');
+        expect(editionScore({ typeset: true, complete: true, rating: 8, downloads: 999 })).toBeGreaterThan(
+            editionScore({ typeset: false, complete: true, rating: 8, downloads: 999999 }),
+        );
+        expect(editionScore({ typeset: false, complete: true, imageType: 'Manuscript Scan' })).toBeLessThan(
+            editionScore({ typeset: false, complete: true, imageType: 'Normal Scan' }),
+        );
+    });
+
+    it('prefers the IA file that is the best IMSLP edition and records the signals', () => {
+        const editions = imslpEditions(wikitext, html);
+        const files = [
+            {
+                name: 'PMLP02312-Chopin_Nocturnes_Op_9_Kistner_995_First_Edition_1832.pdf',
+                source: 'original',
+                size: '1960000',
+            },
+            { name: 'PMLP02312-Chopin-Op09n2rje.pdf', source: 'original', size: '1300000' },
+            { name: 'PMLP02312-Chopin-Op09n2rje_text.pdf', source: 'derivative', size: '9' },
+        ];
+        expect(pickIaPdf(files, editions)?.name).toBe('PMLP02312-Chopin-Op09n2rje.pdf');
+        expect(pickIaPdf(files)?.name).toBe('PMLP02312-Chopin_Nocturnes_Op_9_Kistner_995_First_Edition_1832.pdf');
+
+        const iaScan = { origin: 'ia', filename: 'PMLP02312-Chopin_Nocturnes_Op_9_Kistner_995_First_Edition_1832.pdf' };
+        const scanSignals = editionSignals(iaScan, editions);
+        expect(scanSignals).toMatchObject({
+            chosen: { origin: 'ia', imageType: 'Normal Scan', complete: true, downloads: 142062 },
+            matchedImslp: { fileId: '86550', editor: 'First edition (German)' },
+            bestImslp: { fileId: '61906', imageType: 'Typeset', editor: 'Carl Mikuli' },
+            matchesBest: false,
+            imslpEditions: 3,
+        });
+        const mutopia = { origin: 'mutopia', filename: 'Chop-9-2-let.pdf' };
+        expect(editionSignals(mutopia, editions)).toMatchObject({
+            chosen: { origin: 'mutopia', imageType: 'Typeset', complete: true },
+            matchedImslp: null,
+            // The best IMSLP edition is itself a typeset, so a Mutopia typeset is not automatically as good.
+            matchesBest: false,
+        });
+        expect(editionSignals(mutopia, [editions[1]!])).toMatchObject({ matchesBest: true });
+        // Nothing fetched but IMSLP has a best edition: flagged for a manual --from-dir.
+        expect(editionSignals(null, editions)).toMatchObject({
+            chosen: null,
+            bestImslp: { fileId: '61906' },
+            matchesBest: false,
+        });
+        expect(editionSignals(mutopia, [])).toMatchObject({ bestImslp: null, matchesBest: null, imslpEditions: 0 });
+    });
+});
+
 describe('ranking', () => {
     const popular = [
         { title: MOONLIGHT, composer: 'Beethoven', instrument: 'piano' },
@@ -822,7 +1023,7 @@ describe('ranking', () => {
             'Ballade No.4, Op.52 (Chopin, Frédéric)',
             'Étude, Op.1 (Scriabin, Aleksandr)',
         ]);
-        expect(ranked[0]).toMatchObject({ tier: 0, prior: 3 });
+        expect(ranked[0]).toMatchObject({ tier: 0, prior: 3, score: 6 });
         expect(ranked[3]).toMatchObject({ tier: 1, prior: 0 });
     });
 
@@ -851,10 +1052,46 @@ describe('ranking', () => {
         expect(ranked.slice(0, 4).map((w) => [w.title, w.score])).toEqual([
             ['Ballade No.4, Op.52 (Chopin, Frédéric)', 2000],
             ['Waltzes, Op.64 (Chopin, Frédéric)', 1000],
-            [FUR_ELISE, 502],
-            [MOONLIGHT, 3],
+            [FUR_ELISE, 504],
+            [MOONLIGHT, 6],
         ]);
         expect(ranked.find((w) => w.title === 'Waltzes, Op.64 (Chopin, Frédéric)')).toMatchObject({ tier: 1 });
+    });
+
+    it('blends Wikipedia fame into the order and reports the components', () => {
+        const popularity = new Map([
+            ['Ballade No.4, Op.52 (Chopin, Frédéric)', { workViews: 9000, composerViews: 80000 }],
+            [MOONLIGHT, { workViews: 13016, composerViews: 115540 }],
+            [FUR_ELISE, { workViews: 19107, composerViews: 115540 }],
+            ['Nocturnes, Op.9 (Chopin, Frédéric)', { workViews: 5187, composerViews: 80000 }],
+        ]);
+        const ranked = rankWorks({ popular, catalog, popularity });
+        // Für Elise (more views) now leads Moonlight; the well-read Ballade climbs above the composer-only fill.
+        expect(ranked.slice(0, 4).map((w) => w.title)).toEqual([
+            FUR_ELISE,
+            MOONLIGHT,
+            'Ballade No.4, Op.52 (Chopin, Frédéric)',
+            'Nocturnes, Op.9 (Chopin, Frédéric)',
+        ]);
+        expect(ranked[0]).toMatchObject({
+            workViews: 19107,
+            composerViews: 115540,
+            downloads: 0,
+            useCount: 0,
+            prior: 2,
+        });
+        expect(ranked[0]!.score).toBeCloseTo(
+            popularityScore({ workViews: 19107, composerViews: 115540 }) + RANK_WEIGHTS.prior * 2,
+            0,
+        );
+        // Real in-app demand still dominates fame.
+        const demanded = rankWorks({
+            popular,
+            catalog,
+            popularity,
+            demand: new Map([['Étude, Op.1 (Scriabin, Aleksandr)', 1]]),
+        });
+        expect(demanded[0]!.title).toBe('Étude, Op.1 (Scriabin, Aleksandr)');
     });
 
     it('counts IMSLP-import titles only (uploads carry a file name, not a composer suffix)', () => {

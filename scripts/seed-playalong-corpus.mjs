@@ -21,10 +21,13 @@
  *                        no documents / score_analyses / omr_jobs; CORPUS_OWNER_USER_ID not needed
  *   --enqueue-fetched    for ledger rows in `fetched`: corpus-owner document, copy to scores/{id}/original.pdf,
  *                        pending score_analyses + omr_jobs (priority -10), ledger `queued`; needs the owner
+ *   --rank-only          print the ranked list (JSON lines, `corpus_rank`) and exit — eyeball before a long run
  *   (neither)            fetch and enqueue in one pass
  *
  * Flags:
  *   --limit N            hard cap on ranked works and floor on covered works (5000)
+ *   --no-wiki            skip the Wikipedia pageviews demand proxy (cold-start order only)
+ *   --no-editions        skip the IMSLP edition lookup (no per-work api.php call)
  *   --max-runtime M      stop cleanly after M minutes (finishes the current file)
  *   --batch N            works per batch before a progress line + pause check (40)
  *   --sleep S            seconds between works (2)
@@ -59,6 +62,7 @@ import { POPULAR_WORKS } from '../supabase/functions/_shared/popularWorks.ts';
 import { CATALOG_JSONL_PATH, SYNC_JSON_PATH, readCatalog } from './imslp-catalog.mjs';
 import {
     IMSLP_CRAWL_DELAY_MS,
+    WIKI_DELAY_MS,
     MAX_PAGES,
     MAX_PDF_BYTES,
     MUTOPIA_ORIGIN,
@@ -70,18 +74,22 @@ import {
     backoffDelayMs,
     coverageByOrigin,
     coveredWorkCount,
+    composerArticleName,
     demandFromDocumentTitles,
+    editionSignals,
     evalPinPieceDirs,
     expandZipResolution,
     iaExactQuery,
     iaFallbackQueries,
     iaResolution,
     iaSearchUrl,
+    imslpEditions,
     imslpParseUrl,
     imslpRedirectAliases,
     imslpRedirectsUrl,
     mutopiaPieceCandidate,
     mutopiaPieceMatches,
+    monthlyAverageViews,
     mutopiaPiecesFromTree,
     mutopiaResolution,
     openscoreResolution,
@@ -98,6 +106,10 @@ import {
     shouldProcess,
     sourceEnabled,
     titleForMutopiaPiece,
+    wikiArticleFor,
+    wikiPageviewsUrl,
+    wikiSearchQuery,
+    wikiSearchUrl,
     workEvent,
     zipEntries,
     zipExtract,
@@ -144,6 +156,9 @@ const parseArgs = (argv) => {
         dryRun: false,
         fetchOnly: false,
         enqueueFetched: false,
+        rankOnly: false,
+        noWiki: false,
+        noEditions: false,
         maxRuntimeMs: null,
         ensureOwnerPlan: false,
         cacheDir: DEFAULT_CACHE_DIR,
@@ -186,6 +201,15 @@ const parseArgs = (argv) => {
                 break;
             case '--fetch-only':
                 out.fetchOnly = true;
+                break;
+            case '--rank-only':
+                out.rankOnly = true;
+                break;
+            case '--no-wiki':
+                out.noWiki = true;
+                break;
+            case '--no-editions':
+                out.noEditions = true;
                 break;
             case '--enqueue-fetched':
                 out.enqueueFetched = true;
@@ -623,16 +647,39 @@ const imslpJson = async (ctx, url) => {
 };
 
 /** Per-file IMSLP licence tags for a work page (metadata only). */
-const imslpLicences = async (ctx, title) => {
-    const url = imslpParseUrl(title);
-    const json = await imslpJson(ctx, url);
-    const html = json?.parse?.text?.['*'];
-    if (typeof html !== 'string') {
-        // Missing page / API error: do not pin that answer in the cache.
-        ctx.cache.delete(url);
-        return new Map();
+const EMPTY_PAGE = Object.freeze({ licences: new Map(), editions: [] });
+
+/**
+ * One `action=parse&prop=text|wikitext` call per work: per-file licence tags
+ * (rendered page) and edition signals (wikitext blocks + rendered stats).
+ * Memoised per run; the disk cache makes reruns free.
+ */
+const imslpWorkPage = async (ctx, title) => {
+    if (ctx.noEditions) {
+        return EMPTY_PAGE;
     }
-    return parseWorkPageLicenses(html);
+    if (ctx.pages.has(title)) {
+        return ctx.pages.get(title);
+    }
+    const url = imslpParseUrl(title);
+    let page = EMPTY_PAGE;
+    try {
+        const json = await imslpJson(ctx, url);
+        const html = json?.parse?.text?.['*'];
+        if (typeof html !== 'string') {
+            // Missing page / API error: do not pin that answer in the cache.
+            ctx.cache.delete(url);
+        } else {
+            page = {
+                licences: parseWorkPageLicenses(html),
+                editions: imslpEditions(json?.parse?.wikitext?.['*'] ?? '', html),
+            };
+        }
+    } catch (err) {
+        info(`imslp page lookup failed for ${title}: ${err instanceof Error ? err.message : err}`);
+    }
+    ctx.pages.set(title, page);
+    return page;
 };
 
 /** Former IMSLP titles of a work (redirects into it), for IA record-id lookups. */
@@ -675,7 +722,8 @@ const resolveIa = async (ctx, work) => {
     if (!item?.metadata?.identifier) {
         return [];
     }
-    const file = pickIaPdf(item.files);
+    const page = await imslpWorkPage(ctx, work.title);
+    const file = pickIaPdf(item.files, page.editions);
     if (!file) {
         const anyPdf = (item.files ?? []).some((f) => /\.pdf$/i.test(f.name ?? ''));
         return [
@@ -687,13 +735,7 @@ const resolveIa = async (ctx, work) => {
             },
         ];
     }
-    let licences = new Map();
-    try {
-        licences = await imslpLicences(ctx, work.title);
-    } catch (err) {
-        info(`imslp licence lookup failed for ${work.title}: ${err instanceof Error ? err.message : err}`);
-    }
-    return [iaResolution(work, item, file, licences)];
+    return [iaResolution(work, item, file, page.licences)];
 };
 
 const RESOLVERS = { mutopia: resolveMutopia, openscore: resolveOpenscore, ia: resolveIa };
@@ -729,7 +771,15 @@ const resolveWork = async (ctx, work) => {
             }
         }
     }
-    return planWork(resolutions, { sources: ctx.sources });
+    const plan = planWork(resolutions, { sources: ctx.sources });
+    // Edition signals for every chosen file (and for the work itself when
+    // nothing was chosen, so the best IMSLP edition is on record for --from-dir).
+    const { editions } = await imslpWorkPage(ctx, work.title);
+    for (const res of plan.queue) {
+        res.edition = editionSignals(res, editions);
+    }
+    plan.edition = plan.queue.length === 0 ? editionSignals(null, editions) : plan.queue[0].edition;
+    return plan;
 };
 
 // ---------------------------------------------------------------------------
@@ -782,6 +832,7 @@ const fetchFile = async (ctx, work, res, batchId) => {
         editor_credit: res.editorCredit,
         us_pd: res.usPd,
         candidate_url: res.candidateUrl,
+        edition: res.edition ?? null,
         last_error: null,
     });
 
@@ -828,6 +879,7 @@ const fetchFile = async (ctx, work, res, batchId) => {
                     us_pd: res.usPd,
                     byte_length: bytes.length,
                     page_count: pageCount,
+                    edition: res.edition ?? null,
                 },
             ],
             { onConflict: 'pdf_sha256', merge: true },
@@ -965,7 +1017,7 @@ const ingestFile = async (ctx, work, res, batchId) => {
     return enqueueRow(ctx, row, fetched.bytes);
 };
 
-const recordSkip = async (ctx, work, skip, batchId) => {
+const recordSkip = async (ctx, work, skip, batchId, edition = null) => {
     const key = { work_title: work.title, origin: skip.origin, filename: skip.filename };
     const existing = ctx.ledger.get(ledgerKey(key));
     if (existing && !['pending', 'skipped', 'failed', 'paused'].includes(existing.status)) {
@@ -978,6 +1030,7 @@ const recordSkip = async (ctx, work, skip, batchId) => {
         batch_id: batchId,
         last_error: skip.reason,
         attempts: Number(existing?.attempts ?? 0) + 1,
+        edition,
     });
     console.log(
         workEvent({
@@ -1082,6 +1135,96 @@ const pinWorks = async (ctx, pins, catalogWorks) => {
     return works;
 };
 
+let lastWikiCallAt = 0;
+let wikiDelayMs = WIKI_DELAY_MS;
+
+/**
+ * Cached Wikipedia / Wikimedia JSON. Uncached calls are spaced by an adaptive
+ * delay: a 429 doubles it (capped) and is retried after Retry-After / backoff;
+ * a clean streak eases it back toward WIKI_DELAY_MS.
+ */
+const wikiJson = async (ctx, url) => {
+    const hit = ctx.cache.get(url);
+    if (hit !== null) {
+        return JSON.parse(hit);
+    }
+    for (let attempt = 1; ; attempt++) {
+        const wait = lastWikiCallAt + wikiDelayMs - Date.now();
+        if (wait > 0) {
+            await sleep(wait);
+        }
+        lastWikiCallAt = Date.now();
+        try {
+            const json = JSON.parse(await cachedText(ctx.cache, url, { Accept: 'application/json' }));
+            wikiDelayMs = Math.max(WIKI_DELAY_MS, Math.round(wikiDelayMs * 0.9));
+            return json;
+        } catch (err) {
+            const throttled = err instanceof HttpError && err.status === 429;
+            if (!(throttled || isTransient(err)) || attempt >= 5) {
+                throw err;
+            }
+            wikiDelayMs = Math.min(5000, wikiDelayMs * 2);
+            await sleep(backoffDelayMs(attempt, { baseMs: 2000, maxMs: 30_000 }));
+        }
+    }
+};
+
+/** Monthly average views of one article; 0 when the article or its stats are missing. */
+const articleViews = async (ctx, article) => {
+    if (!article) {
+        return 0;
+    }
+    try {
+        return monthlyAverageViews(await wikiJson(ctx, wikiPageviewsUrl(article)));
+    } catch (err) {
+        if (err instanceof HttpError && err.status === 404) {
+            ctx.cache.set(wikiPageviewsUrl(article), JSON.stringify({ items: [] }));
+            return 0;
+        }
+        throw err;
+    }
+};
+
+/**
+ * Wikipedia demand proxy for every ranked title: the work article (found by
+ * search, accepted only when it names the composer / catalogue / a title
+ * word) and the composer article. Everything is cached, so a rerun is free.
+ * @returns {Map<string, { workViews: number, composerViews: number, article: string | null }>}
+ */
+const loadPopularity = async (ctx, titles) => {
+    const out = new Map();
+    const composerViews = new Map();
+    let done = 0;
+    for (const title of titles) {
+        if (stopReason) {
+            break;
+        }
+        let article = null;
+        let workViews = 0;
+        try {
+            article = wikiArticleFor(title, await wikiJson(ctx, wikiSearchUrl(wikiSearchQuery(title))));
+            workViews = await articleViews(ctx, article);
+        } catch (err) {
+            info(`wikipedia lookup failed for ${title}: ${err instanceof Error ? err.message : err}`);
+        }
+        const composer = composerArticleName(title);
+        if (composer && !composerViews.has(composer)) {
+            try {
+                composerViews.set(composer, await articleViews(ctx, composer));
+            } catch (err) {
+                info(`wikipedia lookup failed for ${composer}: ${err instanceof Error ? err.message : err}`);
+                composerViews.set(composer, 0);
+            }
+        }
+        out.set(title, { workViews, composerViews: composer ? (composerViews.get(composer) ?? 0) : 0, article });
+        done += 1;
+        if (done % 250 === 0) {
+            info(`wikipedia: ${done}/${titles.length} titles`);
+        }
+    }
+    return out;
+};
+
 const loadDemand = async (db, owner) => {
     const docs = await db.selectAll(`/documents?select=title&owner_id=neq.${owner}`);
     const demand = demandFromDocumentTitles(docs.map((d) => d.title));
@@ -1175,7 +1318,15 @@ const enqueueFetched = async (ctx, args, startedAt, deadlineMs) => {
 
 const main = async () => {
     const args = parseArgs(process.argv.slice(2));
-    const mode = args.enqueueFetched ? 'enqueue' : args.fetchOnly ? 'fetch' : args.dryRun ? 'dry-run' : 'seed';
+    const mode = args.rankOnly
+        ? 'rank'
+        : args.enqueueFetched
+          ? 'enqueue'
+          : args.fetchOnly
+            ? 'fetch'
+            : args.dryRun
+              ? 'dry-run'
+              : 'seed';
     const needsOwner = mode === 'enqueue' || mode === 'seed';
     const owner = process.env.CORPUS_OWNER_USER_ID ?? null;
     if (needsOwner && !owner) {
@@ -1196,7 +1347,7 @@ const main = async () => {
     try {
         ledger = await loadLedger(db);
     } catch (err) {
-        if (mode !== 'dry-run') {
+        if (mode !== 'dry-run' && mode !== 'rank') {
             throw err;
         }
         dbReachable = false;
@@ -1230,6 +1381,9 @@ const main = async () => {
         mutopia: [],
         openscore: [],
         zips: new Map(),
+        pages: new Map(),
+        noEditions: args.noEditions,
+        noWiki: args.noWiki,
     };
 
     if (mode === 'enqueue') {
@@ -1275,12 +1429,41 @@ const main = async () => {
     }
     // Hard cap: the ranking is cut at --limit (default 5000); nothing past it is looked at.
     const target = args.limit ?? DEFAULT_LIMIT;
-    const rankedAll = rankWorks({ popular: POPULAR_WORKS, pins, catalog: catalogWorks, demand, corpusUse });
+    const candidates = rankWorks({ popular: POPULAR_WORKS, pins, catalog: catalogWorks, demand, corpusUse });
+    let popularity = new Map();
+    if (!args.noWiki) {
+        info(`wikipedia: scoring ${candidates.length} titles (cached after the first run)`);
+        popularity = await loadPopularity(
+            ctx,
+            candidates.map((w) => w.title),
+        );
+    }
+    const rankedAll = rankWorks({ popular: POPULAR_WORKS, pins, catalog: catalogWorks, demand, corpusUse, popularity });
     const ranked = rankedAll.slice(0, target);
     info(
         `ranked ${rankedAll.length} works (${rankedAll.filter((w) => w.tier === 0).length} tier 0); ` +
             `cap ${target}; ${coveredWorkCount(ledger.values())} already covered`,
     );
+    if (mode === 'rank') {
+        ranked.forEach((w, index) => {
+            console.log(
+                JSON.stringify({
+                    event: 'corpus_rank',
+                    rank: index + 1,
+                    title: w.title,
+                    tier: w.tier,
+                    score: w.score,
+                    workViews: w.workViews,
+                    composerViews: w.composerViews,
+                    downloads: w.downloads,
+                    useCount: w.useCount,
+                    prior: w.prior,
+                    article: popularity.get(w.title)?.article ?? null,
+                }),
+            );
+        });
+        return;
+    }
 
     const rowsFor = (title) => [...ledger.values()].filter((row) => row.work_title === title);
     // In fetch mode a `fetched` row is finished; only the default pass takes it further.
@@ -1345,10 +1528,16 @@ const main = async () => {
             }
         } else {
             for (const skip of plan.skips) {
-                await recordSkip(ctx, work, skip, batchId);
+                await recordSkip(ctx, work, skip, batchId, plan.queue.length === 0 ? plan.edition : null);
             }
             if (plan.queue.length === 0 && plan.skips.length === 0) {
-                await recordSkip(ctx, work, { origin: 'none', filename: '-', reason: 'no_source' }, batchId);
+                await recordSkip(
+                    ctx,
+                    work,
+                    { origin: 'none', filename: '-', reason: 'no_source' },
+                    batchId,
+                    plan.edition,
+                );
             }
             for (const res of plan.queue) {
                 if (shouldStop(deadlineMs)) {

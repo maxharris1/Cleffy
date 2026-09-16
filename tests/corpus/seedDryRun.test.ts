@@ -120,6 +120,8 @@ describe('seed-playalong-corpus --dry-run (mocked network)', () => {
                 evalDir,
                 '--catalog',
                 join(root, 'missing-catalog.jsonl'),
+                '--no-wiki',
+                '--no-editions',
             ],
             {},
         );
