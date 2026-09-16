@@ -133,6 +133,17 @@ export const fetchScoreAnalysisStatus = async (docId: string): Promise<ScoreAnal
 export const QUEUE_WAIT_CAP_MS = 20_000;
 const QUEUE_POLL_MS = 2_000;
 
+export interface QueueWaitOptions {
+    capMs?: number;
+    intervalMs?: number;
+    /**
+     * Fired once, the first time a poll taken at least one interval in still
+     * finds the row `pending` — i.e. the job is genuinely waiting for a worker.
+     * A job claimed (or finished, e.g. a corpus hit) before then never fires it.
+     */
+    onQueued?: () => void;
+}
+
 /**
  * Resolve once the analysis row is no longer `pending` (a worker claimed it,
  * it finished, or it failed), or after `capMs` so nobody is parked on the
@@ -141,13 +152,19 @@ const QUEUE_POLL_MS = 2_000;
  */
 export const waitForAnalysisToLeaveQueue = async (
     docId: string,
-    { capMs = QUEUE_WAIT_CAP_MS, intervalMs = QUEUE_POLL_MS }: { capMs?: number; intervalMs?: number } = {},
+    { capMs = QUEUE_WAIT_CAP_MS, intervalMs = QUEUE_POLL_MS, onQueued }: QueueWaitOptions = {},
 ): Promise<ScoreAnalysisStatus | null> => {
-    const deadline = Date.now() + capMs;
+    const started = Date.now();
+    const deadline = started + capMs;
+    let queuedReported = false;
     for (;;) {
         const status = await fetchScoreAnalysisStatus(docId).catch(() => null);
         if (status && status.status !== 'pending') {
             return status.status;
+        }
+        if (status?.status === 'pending' && !queuedReported && Date.now() - started >= intervalMs) {
+            queuedReported = true;
+            onQueued?.();
         }
         if (Date.now() >= deadline) {
             return status?.status ?? null;
