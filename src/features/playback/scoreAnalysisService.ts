@@ -155,6 +155,7 @@ export const fetchScoreAnalysisFull = async (docId: string): Promise<CachedScore
         ...(previous?.bpmOverride !== undefined ? { bpmOverride: previous.bpmOverride } : {}),
         ...(extras.source ? { source: extras.source } : {}),
         ...(extras.alignmentMap ? { alignmentMap: extras.alignmentMap } : {}),
+        ...(extras.corpusHit ? { corpusHit: extras.corpusHit } : {}),
     };
     await getDb().scoreCache.put(cached);
     return cached;
@@ -193,6 +194,11 @@ export const requestScoreAnalysis = async (docId: string): Promise<RequestAnalys
                 }
             } catch {
                 // fall through
+            }
+            // The per-user limiter answers 429 with `retryAfterSec` and no
+            // machine code — it is not the service being down.
+            if (context.status === 429) {
+                return { ok: false, code: 'rate_limited' };
             }
         }
         return { ok: false, code: 'service_unreachable' };

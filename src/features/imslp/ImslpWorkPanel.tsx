@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router';
 
 import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import {
@@ -8,8 +9,10 @@ import {
     formatBytes,
     recommendEdition,
 } from '@/features/imslp/imslpDisplay';
+import { analysisErrorText } from '@/features/playback/analysisErrorCopy';
 import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { Spinner } from '@/ui/Loading';
 
 const DISCLAIMER =
     'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
@@ -17,8 +20,19 @@ const DISCLAIMER =
 /** Show a short list first; expand when the user wants the full IMSLP dump. */
 const EDITION_PREVIEW = 6;
 
+/**
+ * The PDF coming down from IMSLP, as seen from the panel. `downloadQueued`
+ * only ever follows a real refusal from the deployment-wide IMSLP pacing;
+ * `downloading` with `queued: true` is the retry going out after that wait.
+ * `analysisFailed` is the score being in the library with no analysis
+ * running (rate limit, too long, service down).
+ */
 export type DownloadStatus =
-    { kind: 'idle' } | { kind: 'downloading' } | { kind: 'fallback'; openUrl: string; message: string };
+    | { kind: 'idle' }
+    | { kind: 'downloading'; queued?: boolean }
+    | { kind: 'downloadQueued' }
+    | { kind: 'analysisFailed'; code: string; documentId: string }
+    | { kind: 'fallback'; openUrl: string; message: string };
 
 interface ImslpWorkPanelProps {
     work: ImslpWorkDetail;
@@ -72,8 +86,15 @@ export const ImslpWorkPanel = ({
 
     const hiddenCount = Math.max(0, orderedEditions.length - visibleEditions.length);
 
+    const inProgress = download.kind === 'downloading' || download.kind === 'downloadQueued';
     const buttonLabel =
-        download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
+        download.kind === 'downloading'
+            ? 'Downloading from IMSLP…'
+            : download.kind === 'downloadQueued'
+              ? 'Queued for download…'
+              : busy
+                ? 'Adding to library…'
+                : 'Add to my library';
 
     const countLine = (() => {
         const total = work.editions.length;
@@ -215,8 +236,10 @@ export const ImslpWorkPanel = ({
                             type="button"
                             onClick={() => onImportSelected(acceptedDisclaimer)}
                             disabled={!selected || importing || work.editions.length === 0 || !acceptedDisclaimer}
+                            aria-busy={inProgress || undefined}
                             className={buttonClassName('primary', 'sm')}
                         >
+                            {inProgress ? <Spinner className="h-3.5 w-3.5" /> : null}
                             {buttonLabel}
                         </button>
                         {selected ? (
@@ -225,6 +248,27 @@ export const ImslpWorkPanel = ({
                             </a>
                         ) : null}
                     </div>
+                    {download.kind === 'downloading' || download.kind === 'downloadQueued' ? (
+                        <ImportProgress
+                            stage={download.kind}
+                            queued={download.kind === 'downloadQueued' || download.queued === true}
+                            title={parsed.work}
+                        />
+                    ) : null}
+                    {download.kind === 'analysisFailed' ? (
+                        <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3" role="status">
+                            <p className="text-sm text-amber-950">
+                                {parsed.work} is in your library, but the play-along could not start.
+                            </p>
+                            <p className="mt-1 text-xs text-amber-900/80">{analysisErrorText(download.code)}</p>
+                            <div className="mt-3 flex flex-wrap items-center gap-3">
+                                <Link to={`/doc/${download.documentId}`} className={buttonClassName('primary', 'sm')}>
+                                    Open score
+                                </Link>
+                                <span className="text-xs text-stone-500">Generate is available on the score page.</span>
+                            </div>
+                        </div>
+                    ) : null}
                 </>
             )}
 
@@ -247,6 +291,79 @@ export const ImslpWorkPanel = ({
                     </div>
                 </div>
             ) : null}
+        </div>
+    );
+};
+
+type ImportStage = 'downloadQueued' | 'downloading';
+
+const IMPORT_STEPS: readonly { stage: ImportStage; label: string; detail: string }[] = [
+    {
+        stage: 'downloadQueued',
+        label: 'Queued for download',
+        detail: 'IMSLP downloads are paced for everyone — yours goes out at the next slot.',
+    },
+    {
+        stage: 'downloading',
+        label: 'Downloading from IMSLP',
+        detail: 'Fetching the PDF into your library and starting its play-along…',
+    },
+];
+
+/**
+ * The visible wait while a score is fetched. Deliberately a card, not a
+ * button state: the reader may be here for tens of seconds and needs to see
+ * that something is happening and what. The Queued step is only drawn once
+ * the server has actually turned a request away and the wait is real — most
+ * imports go straight through, and a stage that never happens must not be
+ * promised. Strip reads Queued for download → Downloading from IMSLP.
+ */
+const ImportProgress = ({ stage, queued, title }: { stage: ImportStage; queued: boolean; title: string }) => {
+    const steps = IMPORT_STEPS.filter((step) => step.stage !== 'downloadQueued' || queued);
+    const currentIndex = steps.findIndex((step) => step.stage === stage);
+    const current = steps[currentIndex];
+    return (
+        <div
+            className="mt-4 flex items-start gap-3 rounded-lg border border-accent/30 bg-accent-soft/50 p-3"
+            role="status"
+            aria-live="polite"
+            data-testid="imslp-import-progress"
+        >
+            <Spinner className="mt-0.5 h-5 w-5 shrink-0 text-accent" />
+            <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-stone-800">Preparing {title}</p>
+                <ol aria-label="Import progress" className="mt-2 flex flex-wrap items-center gap-1.5">
+                    {steps.map((step, index) => {
+                        const done = index < currentIndex;
+                        const active = index === currentIndex;
+                        return (
+                            <li
+                                key={step.stage}
+                                aria-current={active ? 'step' : undefined}
+                                className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide"
+                            >
+                                <span
+                                    aria-hidden="true"
+                                    className={[
+                                        'h-2 w-2 rounded-full',
+                                        done ? 'bg-accent' : active ? 'animate-pulse bg-accent' : 'bg-stone-300',
+                                    ].join(' ')}
+                                />
+                                <span className={active ? 'text-accent' : done ? 'text-stone-600' : 'text-stone-400'}>
+                                    {step.label}
+                                </span>
+                                {index < steps.length - 1 ? (
+                                    <span
+                                        aria-hidden="true"
+                                        className={`h-px w-4 ${done ? 'bg-accent' : 'bg-stone-300'}`}
+                                    />
+                                ) : null}
+                            </li>
+                        );
+                    })}
+                </ol>
+                {current ? <p className="mt-1.5 text-xs text-stone-600">{current.detail}</p> : null}
+            </div>
         </div>
     );
 };

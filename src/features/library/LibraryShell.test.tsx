@@ -1,9 +1,9 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
+import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { LibraryShell } from '@/features/library/LibraryShell';
+import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { Entitlements } from '@/types/database';
 
 // The shell is chrome around an Outlet: everything it reaches for at import
@@ -40,10 +40,16 @@ vi.mock('@/features/billing/entitlementsService', () => ({
 }));
 
 const uploadDocument = vi.fn();
+const importDocumentFromImslp = vi.fn();
 vi.mock('@/features/library/documentsService', () => ({
-    importDocumentFromImslp: vi.fn(),
+    importDocumentFromImslp: (...args: unknown[]) => importDocumentFromImslp(...args),
     loadDocumentBytes: vi.fn(),
     uploadDocument: (...args: unknown[]) => uploadDocument(...args),
+}));
+
+const requestScoreAnalysis = vi.fn();
+vi.mock('@/features/playback/scoreAnalysisService', () => ({
+    requestScoreAnalysis: (...args: unknown[]) => requestScoreAnalysis(...args),
 }));
 
 const readCachedLibraryList = vi.fn();
@@ -75,13 +81,30 @@ const Page = ({ name }: { name: string }) => {
     );
 };
 
-const renderShell = () =>
+/** Stands in for the search page: one button that runs the shell's IMSLP import and reports back. */
+const ImportStub = ({ onStage, onResult }: { onStage: (s: string) => void; onResult: (r: unknown) => void }) => {
+    const { onImportImslp } = useOutletContext<LibraryOutletContext>();
+    return (
+        <button
+            type="button"
+            onClick={() => void onImportImslp('nocturnes.pdf', 'Nocturnes, Op.9', true, onStage).then(onResult)}
+        >
+            import from imslp
+        </button>
+    );
+};
+
+const renderShell = (
+    initialEntry = '/library',
+    stub: { onStage: (s: string) => void; onResult: (r: unknown) => void } = { onStage: vi.fn(), onResult: vi.fn() },
+) =>
     render(
-        <MemoryRouter initialEntries={['/library']}>
+        <MemoryRouter initialEntries={[initialEntry]}>
             <Routes>
                 <Route element={<LibraryShell />}>
                     <Route path="/library" element={<Page name="library page" />} />
                     <Route path="/students" element={<Page name="students page" />} />
+                    <Route path="/search" element={<ImportStub {...stub} />} />
                 </Route>
                 <Route path="/doc/:id" element={<Page name="viewer page" />} />
             </Routes>
@@ -138,5 +161,59 @@ describe('LibraryShell', () => {
     it('pads the chrome for the iPhone status bar', () => {
         renderShell();
         expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');
+    });
+
+    it('auto-requests analysis after an IMSLP import and opens the score at once, relaying download stages', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue(null);
+        let resolveImport: (value: unknown) => void = () => undefined;
+        importDocumentFromImslp.mockImplementation(
+            (_f: string, _t: string, _o: string, _a: boolean, onStage?: (s: string) => void) =>
+                new Promise((resolve) => {
+                    // The download layer reports a real pacing wait, then its retry.
+                    onStage?.('downloadQueued');
+                    onStage?.('downloading');
+                    resolveImport = resolve;
+                }),
+        );
+        requestScoreAnalysis.mockResolvedValue({ ok: true });
+        const onStage = vi.fn();
+        const onResult = vi.fn();
+        renderShell('/search', { onStage, onResult });
+
+        await user.click(screen.getByRole('button', { name: 'import from imslp' }));
+
+        await screen.findByRole('progressbar', { name: 'Importing from IMSLP' });
+        expect(onStage.mock.calls.map((c) => c[0])).toEqual(['downloadQueued', 'downloading']);
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+
+        resolveImport({ ok: true, document: { id: 'd9', title: 'Nocturnes, Op.9' } });
+        // Navigation follows the analysis request directly — no panel-side queue wait.
+        expect(await screen.findByText('viewer page')).toBeInTheDocument();
+        expect(requestScoreAnalysis).toHaveBeenCalledWith('d9');
+        expect(onResult).toHaveBeenCalledWith({ ok: true });
+        expect(onStage).not.toHaveBeenCalledWith(expect.stringMatching(/queued$/));
+    });
+
+    it('reports a rate-limited auto-analysis to the panel instead of navigating', async () => {
+        const user = userEvent.setup();
+        readCachedLibraryList.mockResolvedValue(null);
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd9', title: 'Nocturnes, Op.9' } });
+        requestScoreAnalysis.mockResolvedValue({ ok: false, code: 'rate_limited' });
+        const onStage = vi.fn();
+        const onResult = vi.fn();
+        renderShell('/search', { onStage, onResult });
+
+        await user.click(screen.getByRole('button', { name: 'import from imslp' }));
+
+        await vi.waitFor(() =>
+            expect(onResult).toHaveBeenCalledWith({
+                ok: true,
+                analysisFailed: { code: 'rate_limited', documentId: 'd9' },
+            }),
+        );
+        expect(onStage).not.toHaveBeenCalled();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'import from imslp' })).toBeInTheDocument();
     });
 });

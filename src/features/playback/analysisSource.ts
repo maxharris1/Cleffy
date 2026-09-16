@@ -139,18 +139,29 @@ export const parseAlignmentMap = (raw: unknown): AlignmentMap | undefined => {
     };
 };
 
+/**
+ * How the shared play-along corpus answered this PDF: by exact bytes or by
+ * matching the printed layout. Absent on every row the worker computed itself.
+ */
+export type CorpusHit = 'hash' | 'layout';
+
+export const parseCorpusHit = (raw: unknown): CorpusHit | undefined =>
+    raw === 'hash' || raw === 'layout' ? raw : undefined;
+
 export const parseTimingsExtras = (
     timings: unknown,
-): { source?: AnalysisSource; alignmentMap?: AlignmentMap } => {
+): { source?: AnalysisSource; alignmentMap?: AlignmentMap; corpusHit?: CorpusHit } => {
     if (typeof timings !== 'object' || timings === null) {
         return {};
     }
     const o = timings as Record<string, unknown>;
     const source = parseAnalysisSource(o.source);
     const alignmentMap = parseAlignmentMap(o.alignmentMap);
+    const corpusHit = parseCorpusHit(o.corpusHit);
     return {
         ...(source ? { source } : {}),
         ...(alignmentMap ? { alignmentMap } : {}),
+        ...(corpusHit ? { corpusHit } : {}),
     };
 };
 
@@ -172,19 +183,22 @@ export const sourceBadgeText = (source: AnalysisSource): string => {
     }
 };
 
-export const sourceBadgeTitle = (source: AnalysisSource): string => {
-    switch (source.band) {
-        case 'accept':
-            return source.sourceName
-                ? `Playing from ${source.sourceName} (match ${source.matchScore ?? ''})`.trim()
-                : 'Playing from a matching MusicXML or MIDI';
-        case 'ambiguous':
-            return 'More than one edition matched — pick one, or use OMR';
-        case 'reject':
-            return 'No matching MusicXML';
-        default: {
-            const exhaustive: never = source.band;
-            throw new Error(`unhandled band ${exhaustive}`);
+export const sourceBadgeTitle = (source: AnalysisSource, corpusHit?: CorpusHit): string => {
+    const base = (() => {
+        switch (source.band) {
+            case 'accept':
+                return source.sourceName
+                    ? `Playing from ${source.sourceName} (match ${source.matchScore ?? ''})`.trim()
+                    : 'Playing from a matching MusicXML or MIDI';
+            case 'ambiguous':
+                return 'More than one edition matched — pick one, or use OMR';
+            case 'reject':
+                return 'No matching MusicXML';
+            default: {
+                const exhaustive: never = source.band;
+                throw new Error(`unhandled band ${exhaustive}`);
+            }
         }
-    }
+    })();
+    return corpusHit ? `${base} · From library (precomputed)` : base;
 };

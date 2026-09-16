@@ -5,6 +5,7 @@ import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/featu
 import { recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
+import type { ImslpImportResult, ImslpImportStage } from '@/features/library/LibraryShell';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { buttonClassName } from '@/ui/classNames';
@@ -22,7 +23,8 @@ export interface ImslpBrowserProps {
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
-    ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
+        onStage?: (stage: ImslpImportStage) => void,
+    ) => Promise<ImslpImportResult>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
     /** When false, omit the panel title (e.g. page already has a heading). */
@@ -140,9 +142,16 @@ export const ImslpBrowser = ({
         }
         const { work, selected } = flow;
         setError(null);
-        dispatch({ type: 'download', download: { kind: 'downloading' } });
+        dispatch({ type: 'download', download: { kind: 'downloading', queued: false } });
         try {
-            const result = await onImportImslp(selected.filename, work.title, acceptedDisclaimer);
+            const result = await onImportImslp(selected.filename, work.title, acceptedDisclaimer, (stage) =>
+                dispatch({
+                    type: 'download',
+                    // A retry after a queued wait is still a download — the step
+                    // strip keeps the Queued step it drew.
+                    download: stage === 'downloadQueued' ? { kind: 'downloadQueued' } : { kind: 'downloading', queued: true },
+                }),
+            );
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -150,6 +159,11 @@ export const ImslpBrowser = ({
                 });
                 return;
             }
+            if (result.analysisFailed) {
+                dispatch({ type: 'download', download: { kind: 'analysisFailed', ...result.analysisFailed } });
+                return;
+            }
+            // The shell has navigated to the score; nothing left to show here.
             dispatch({ type: 'download', download: { kind: 'idle' } });
         } catch {
             // Recorded by the shell as uploadError/uploadLimit — reporting it
@@ -173,7 +187,9 @@ export const ImslpBrowser = ({
     };
 
     const blocked =
-        busy || flow.phase === 'loadingWork' || (flow.phase === 'work' && flow.download.kind === 'downloading');
+        busy ||
+        flow.phase === 'loadingWork' ||
+        (flow.phase === 'work' && (flow.download.kind === 'downloading' || flow.download.kind === 'downloadQueued'));
 
     return (
         <section className={className}>

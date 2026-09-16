@@ -154,6 +154,19 @@ describe('fetchScoreAnalysisFull', () => {
         expect(cached?.status).toBe('ready');
         expect(cached?.score).toBeNull();
     });
+
+    it('caches timings.corpusHit when present and leaves it off otherwise', async () => {
+        fake.row = { ...readyRow, timings: { corpusHit: 'hash' } };
+        const hit = await fetchScoreAnalysisFull(DOC);
+        expect(hit?.corpusHit).toBe('hash');
+        expect((await getDb().scoreCache.get(DOC))?.corpusHit).toBe('hash');
+
+        fake.row = { ...readyRow, timings: { corpusHit: 'nonsense' } };
+        expect((await fetchScoreAnalysisFull(DOC))?.corpusHit).toBeUndefined();
+
+        fake.row = readyRow;
+        expect((await fetchScoreAnalysisFull(DOC))?.corpusHit).toBeUndefined();
+    });
 });
 
 describe('requestScoreAnalysis', () => {
@@ -176,6 +189,30 @@ describe('requestScoreAnalysis', () => {
     it('falls back to service_unreachable without a parseable body', async () => {
         fake.invokeResult = { data: null, error: { message: 'network down' } };
         expect(await requestScoreAnalysis(DOC)).toEqual({ ok: false, code: 'service_unreachable' });
+    });
+
+    it('reads the code-less 429 from the per-user limiter as rate_limited', async () => {
+        fake.invokeResult = {
+            data: null,
+            error: {
+                message: 'Edge returned 429',
+                context: new Response(JSON.stringify({ error: 'Too many requests', retryAfterSec: 42 }), {
+                    status: 429,
+                }),
+            },
+        };
+        expect(await requestScoreAnalysis(DOC)).toEqual({ ok: false, code: 'rate_limited' });
+    });
+
+    it('keeps the machine code when a 429 carries one', async () => {
+        fake.invokeResult = {
+            data: null,
+            error: {
+                message: 'Edge returned 429',
+                context: new Response(JSON.stringify({ ok: false, code: 'backlog_full' }), { status: 429 }),
+            },
+        };
+        expect(await requestScoreAnalysis(DOC)).toEqual({ ok: false, code: 'backlog_full' });
     });
 });
 

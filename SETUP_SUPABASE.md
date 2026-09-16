@@ -443,6 +443,15 @@ supabase functions deploy score-analyze analyze-annotations analyze-notes
 supabase functions deploy imslp-download   # now meters smart imports
 ```
 
+`imslp-download` also paces live IMSLP fetches for the whole deployment on one
+`edge_rate_buckets` key (`imslp:download:global`): at most
+`IMSLP_DOWNLOAD_GLOBAL_MAX` fetches per `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
+(defaults `1` and `15000` — one fetch every 15 s). A caller that finds the
+window full gets `429 { code: 'download_queued', retryAfterSec }` and the
+client retries after that delay (up to 90 s), showing "Queued for download".
+The per-caller limiter (10/min) is unchanged. Tune with
+`npx supabase secrets set IMSLP_DOWNLOAD_GLOBAL_MAX=2 IMSLP_DOWNLOAD_GLOBAL_SPACING_MS=15000`.
+
 **Deploy the three student functions together**, after applying
 `20260827150000_student_credentials.sql`. They are one change: `student-claim` is
 new, `student-login` now takes a username and password instead of a code, and

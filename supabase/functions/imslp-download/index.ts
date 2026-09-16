@@ -9,6 +9,7 @@ import {
     serviceClient,
     tryDownloadPdf,
 } from '../_shared/imslp.ts';
+import { gateGlobalImslpDownload, readGlobalDownloadGateConfig } from '../_shared/imslpDownloadGate.ts';
 import {
     LICENSE_TTL_MS,
     canonicalImslpFilename,
@@ -175,6 +176,14 @@ Deno.serve(async (req) => {
         if (!isDownloadable(license)) {
             return licenseConflict('non_pd', license.restriction);
         }
+    }
+
+    // Deployment-wide pacing of live IMSLP fetches, checked before the quota
+    // so a queued caller is neither charged nor holds the invocation open: the
+    // client retries after retryAfterSec. Per-caller limiting above is unchanged.
+    const pacing = await gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get));
+    if (!pacing.ok) {
+        return jsonResponse(pacing.body, pacing.status);
     }
 
     // Metered as smart_imports, and gated BEFORE the IMSLP fetch — the expensive

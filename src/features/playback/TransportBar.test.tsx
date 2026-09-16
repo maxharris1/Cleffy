@@ -90,6 +90,52 @@ describe('TransportBar states', () => {
         expect(screen.getByRole('status')).toHaveTextContent('Analyzing score… 2 / 2 pages');
     });
 
+    it('shows an unproven pending as a starting line, not a stage', () => {
+        renderBar({ state: { kind: 'pending' } });
+        expect(screen.getByRole('status')).toHaveTextContent('Starting analysis…');
+        expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
+        expect(screen.queryByRole('listitem')).not.toBeInTheDocument();
+    });
+
+    it('draws Queued for analysis once the hook has seen the job actually waiting', () => {
+        renderBar({ state: { kind: 'pending', queued: true } });
+        const steps = screen.getAllByRole('listitem').map((item) => item.textContent?.trim());
+        expect(steps).toEqual(['Queued for analysis', 'Analyzing', 'Ready']);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued for analysis');
+    });
+
+    it('steps a never-queued analysis from Analyzing to Ready, and keeps the queue step it had earned', () => {
+        const { unmount } = renderBar({ state: { kind: 'processing', progress: null } });
+        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
+        expect(screen.getAllByRole('listitem').map((item) => item.textContent?.trim())).toEqual(['Analyzing', 'Ready']);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
+        unmount();
+
+        renderBar({ state: { kind: 'processing', progress: 1, queued: true } });
+        expect(screen.getAllByRole('listitem').map((item) => item.textContent?.trim())).toEqual([
+            'Queued for analysis',
+            'Analyzing',
+            'Ready',
+        ]);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
+    });
+
+    it('shows no progress indicator once the analysis is ready', () => {
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: tinyScore,
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+                source: { tier: 'symbolic', band: 'accept', reason: 'accept', sourceName: 'Mutopia', matchScore: 100 },
+                corpusHit: 'hash',
+            },
+        });
+        expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
+        expect(screen.getByTestId('source-badge')).toHaveAttribute('title', expect.stringMatching(/from library/i));
+    });
+
     it('maps failure codes to friendly copy with Retry for editors only', () => {
         renderBar({ state: { kind: 'failed', code: 'no_staves_found' }, role: 'editor' });
         expect(screen.getByText(/couldn't find readable music/i)).toBeInTheDocument();
@@ -98,6 +144,12 @@ describe('TransportBar states', () => {
         renderBar({ state: { kind: 'failed', code: 'queue_full' }, role: 'viewer' });
         expect(screen.getByText(/busy/i)).toBeInTheDocument();
         expect(screen.queryAllByRole('button', { name: /retry/i })).toHaveLength(1);
+    });
+
+    it('explains a rate-limited request as something to wait out, with Retry', () => {
+        renderBar({ state: { kind: 'failed', code: 'rate_limited' }, role: 'owner' });
+        expect(screen.getByText(/too many analysis requests/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
     });
 });
 

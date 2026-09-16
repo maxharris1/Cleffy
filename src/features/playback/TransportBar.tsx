@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { Era } from '@/features/playback/era';
+import { analysisErrorText } from '@/features/playback/analysisErrorCopy';
+import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
 import { SourceBadge } from '@/features/playback/SourceBadge';
@@ -41,22 +43,6 @@ export interface TransportBarProps {
     /** Live document title, so an era-stamped analysis can go stale on rename. */
     documentTitle?: string | null;
 }
-
-const ERROR_COPY: Record<string, string> = {
-    too_large: 'This score is too long to analyze (60-page limit).',
-    page_count_unknown: 'Page count is missing — reopen the score so we can measure it, then try Generate again.',
-    no_staves_found: "Couldn't find readable music in this PDF.",
-    omr_timeout: 'Analysis took too long and was stopped.',
-    omr_crash: 'The music-recognition engine crashed on this score.',
-    musicxml_parse_failed: 'The recognized music could not be converted.',
-    queue_full: 'The analysis service is busy — try again in a few minutes.',
-    backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
-    service_unreachable: 'The analysis service is not reachable right now.',
-    download_failed: 'The PDF could not be fetched for analysis.',
-    worker_lost: 'The analysis was interrupted and will retry automatically.',
-    stale: 'The analysis was interrupted.',
-    internal: 'Something went wrong during analysis.',
-};
 
 /** Pass markers for a bar performed more than once (a repeat). */
 const ORDINAL: Record<number, string> = { 1: ' (1st)', 2: ' (2nd)', 3: ' (3rd)', 4: ' (4th)' };
@@ -273,23 +259,34 @@ const StatusRow = ({ state, role, onGenerate, pageCount }: TransportBarProps) =>
             </div>
         );
     }
-    if (state.kind === 'pending' || state.kind === 'processing') {
-        const progress = state.kind === 'processing' ? state.progress : null;
+    if (state.kind === 'pending' && state.queued !== true) {
+        // Freshly requested: a worker usually claims within a couple of
+        // seconds (and a corpus hit is ready in about that), so this is a
+        // line, not a stage. The hook promotes it to `queued` only once the
+        // row has been re-read and found still waiting.
         return (
             <div className="flex min-h-9 items-center justify-center gap-2 text-sm text-stone-500">
                 <span className="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
-                <span role="status">
-                    Analyzing score…
-                    {progress !== null && progress > 0 ? ` ${progress}${pageCount ? ` / ${pageCount}` : ''} pages` : ''}
-                </span>
+                <span role="status">Starting analysis…</span>
             </div>
+        );
+    }
+    if (state.kind === 'pending' || state.kind === 'processing') {
+        return (
+            <PlayAlongProgress
+                stage={state.kind === 'processing' ? 'analyzing' : 'queued'}
+                queued={state.queued === true}
+                progress={state.kind === 'processing' ? state.progress : null}
+                pageCount={pageCount}
+                className="min-h-9 justify-center py-1"
+            />
         );
     }
     // failed
     const code = state.kind === 'failed' ? state.code : 'internal';
     return (
         <div className="flex min-h-9 flex-wrap items-center justify-center gap-3 text-sm">
-            <span className="text-stone-600">{ERROR_COPY[code] ?? ERROR_COPY['internal']}</span>
+            <span className="text-stone-600">{analysisErrorText(code)}</span>
             {canManage ? (
                 <button type="button" onClick={onGenerate} className={pillButton(false)}>
                     <RetryIcon size={14} />
@@ -555,7 +552,9 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     <span>{sig.den}</span>
                 </span>
 
-                {props.state.kind === 'ready' && props.state.source ? <SourceBadge source={props.state.source} /> : null}
+                {props.state.kind === 'ready' && props.state.source ? (
+                    <SourceBadge source={props.state.source} corpusHit={props.state.corpusHit} />
+                ) : null}
 
                 <button
                     type="button"

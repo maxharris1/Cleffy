@@ -52,4 +52,24 @@ describe('SourceBadge', () => {
         );
         expect(screen.getByTestId('source-badge')).toHaveTextContent('OMR');
     });
+
+    it('credits the library in the tooltip on a corpus hit, without a new badge state', () => {
+        const source = base({
+            tier: 'symbolic',
+            band: 'accept',
+            reason: 'accept',
+            sourceName: 'Mutopia',
+            matchScore: 100,
+        });
+        const { unmount } = render(<SourceBadge source={source} corpusHit="hash" />);
+        expect(screen.getByTestId('source-badge')).toHaveTextContent('Symbolic · Mutopia 100');
+        expect(screen.getByTestId('source-badge')).toHaveAttribute(
+            'title',
+            'Playing from Mutopia (match 100) · From library (precomputed)',
+        );
+        unmount();
+
+        render(<SourceBadge source={source} />);
+        expect(screen.getByTestId('source-badge')).toHaveAttribute('title', 'Playing from Mutopia (match 100)');
+    });
 });
