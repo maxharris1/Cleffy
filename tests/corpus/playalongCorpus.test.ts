@@ -374,6 +374,13 @@ describe('Mutopia', () => {
             ok: false,
             reason: 'non_commercial',
         });
+        const guitar = parseMutopiaRdf(
+            rdfXml({ licence: 'Public Domain', for: 'Guitar', pdfFileLet: 'anna-magdalena-04-guitar-let.pdf' }),
+        );
+        expect(mutopiaResolution({ title: FUR_ELISE }, furElisePiece, guitar)).toMatchObject({
+            ok: false,
+            reason: 'arrangement_only',
+        });
         const none = parseMutopiaRdf(rdfXml({ licence: 'Public Domain' }));
         expect(mutopiaResolution({ title: FUR_ELISE }, furElisePiece, none)).toMatchObject({
             ok: false,

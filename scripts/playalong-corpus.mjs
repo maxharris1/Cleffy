@@ -658,6 +658,12 @@ export const mutopiaResolution = (work, piece, rdf) => {
     if (!filename) {
         return { ok: false, reason: 'no_source', origin: 'mutopia', filename: `${piece.piece}.pdf` };
     }
+    // Guitar / tab transcriptions of keyboard works carry no `arranger` in the RDF
+    // but name the instrument in the file (`…-guitar-let.pdf`). The instrument
+    // field alone is not a signal: BWV 999 is a lute piece and stays.
+    if (/guitar|[-_]tab[-_.]|ukulele/i.test(filename)) {
+        return { ok: false, reason: 'arrangement_only', origin: 'mutopia', filename };
+    }
     if (!verdict.accept) {
         return { ok: false, reason: verdict.reason, origin: 'mutopia', filename };
     }
