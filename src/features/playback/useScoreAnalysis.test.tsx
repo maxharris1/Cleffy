@@ -1,8 +1,8 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
-import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
+import { QUEUED_AFTER_MS, useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { getDb } from '@/sync/db';
 
 interface FakeState {
@@ -109,6 +109,62 @@ describe('useScoreAnalysis', () => {
         const third = renderHook(() => useScoreAnalysis(DOC, true));
         await waitFor(() => expect(third.result.current.state.kind).toBe('ready'));
         expect(third.result.current.state).not.toHaveProperty('corpusHit');
+    });
+
+    it('calls a pending row queued only after re-reading it still pending a poll interval later', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            fake.row = { status: 'pending', error: null, progress: null, updated_at: now() };
+            const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+            await waitFor(() => expect(result.current.state).toEqual({ kind: 'pending' }));
+
+            await vi.advanceTimersByTimeAsync(QUEUED_AFTER_MS - 50);
+            expect(result.current.state).toEqual({ kind: 'pending' });
+
+            await vi.advanceTimersByTimeAsync(100);
+            await waitFor(() => expect(result.current.state).toEqual({ kind: 'pending', queued: true }));
+
+            // The earned queue survives into processing so the strip keeps its step.
+            act(() =>
+                result.current.applyBroadcast({
+                    table: 'score_analyses',
+                    document_id: DOC,
+                    status: 'processing',
+                    progress: 1,
+                    updated_at: now(),
+                }),
+            );
+            expect(result.current.state).toEqual({ kind: 'processing', progress: 1, queued: true });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('never calls it queued when a worker claims (or a corpus hit finishes) inside the interval', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            fake.row = { status: 'pending', error: null, progress: null, updated_at: now() };
+            const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+            await waitFor(() => expect(result.current.state).toEqual({ kind: 'pending' }));
+
+            // Claimed before the re-read: the re-read sees processing, so no queue is named.
+            fake.row = { status: 'processing', error: null, progress: 1, updated_at: now() };
+            await vi.advanceTimersByTimeAsync(QUEUED_AFTER_MS + 100);
+            expect(result.current.state).toEqual({ kind: 'pending' });
+
+            act(() =>
+                result.current.applyBroadcast({
+                    table: 'score_analyses',
+                    document_id: DOC,
+                    status: 'processing',
+                    progress: 1,
+                    updated_at: now(),
+                }),
+            );
+            expect(result.current.state).toEqual({ kind: 'processing', progress: 1 });
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it('surfaces processing progress and stale jobs', async () => {

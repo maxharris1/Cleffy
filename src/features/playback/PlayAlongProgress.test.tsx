@@ -17,11 +17,24 @@ const currentStep = () =>
         ?.textContent?.trim();
 
 describe('PlayAlongProgress', () => {
-    it('covers the running analysis only: analyzing, then ready — no queue step', () => {
+    it('draws no queue step for an analysis that was never seen waiting', () => {
         render(<PlayAlongProgress stage="analyzing" />);
         expect(stepLabels()).toEqual(['Analyzing', 'Ready']);
         expect(currentStep()).toBe('Analyzing');
         expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
+    });
+
+    it('draws Queued for analysis only when the job is (or was) actually waiting', () => {
+        const { unmount } = render(<PlayAlongProgress stage="queued" />);
+        expect(stepLabels()).toEqual(['Queued for analysis', 'Analyzing', 'Ready']);
+        expect(currentStep()).toBe('Queued for analysis');
+        expect(screen.getByRole('status')).toHaveTextContent(/every worker is busy/i);
+        expect(screen.getByRole('status')).not.toHaveTextContent(/#|\d/);
+        unmount();
+
+        render(<PlayAlongProgress stage="analyzing" queued progress={2} pageCount={4} />);
+        expect(stepLabels()).toEqual(['Queued for analysis', 'Analyzing', 'Ready']);
+        expect(currentStep()).toBe('Analyzing');
     });
 
     it('reports page progress while analyzing, only once there is some', () => {

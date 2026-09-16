@@ -380,7 +380,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                 aria-hidden="true"
                                 title={
                                     analysisState.kind === 'pending'
-                                        ? 'Waiting for an analysis slot…'
+                                        ? analysisState.queued
+                                            ? 'Queued for analysis…'
+                                            : 'Starting analysis…'
                                         : 'Analyzing score…'
                                 }
                                 className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-accent"

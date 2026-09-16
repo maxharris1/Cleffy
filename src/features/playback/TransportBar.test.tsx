@@ -90,18 +90,33 @@ describe('TransportBar states', () => {
         expect(screen.getByRole('status')).toHaveTextContent('Analyzing score… 2 / 2 pages');
     });
 
-    it('shows a still-pending job as a waiting line, not a stage', () => {
+    it('shows an unproven pending as a starting line, not a stage', () => {
         renderBar({ state: { kind: 'pending' } });
-        expect(screen.getByRole('status')).toHaveTextContent('Waiting for an analysis slot…');
+        expect(screen.getByRole('status')).toHaveTextContent('Starting analysis…');
         expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
         expect(screen.queryByRole('listitem')).not.toBeInTheDocument();
     });
 
-    it('steps the running analysis from Analyzing to Ready — no download or queue step', () => {
-        renderBar({ state: { kind: 'processing', progress: null } });
-        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
+    it('draws Queued for analysis once the hook has seen the job actually waiting', () => {
+        renderBar({ state: { kind: 'pending', queued: true } });
         const steps = screen.getAllByRole('listitem').map((item) => item.textContent?.trim());
-        expect(steps).toEqual(['Analyzing', 'Ready']);
+        expect(steps).toEqual(['Queued for analysis', 'Analyzing', 'Ready']);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued for analysis');
+    });
+
+    it('steps a never-queued analysis from Analyzing to Ready, and keeps the queue step it had earned', () => {
+        const { unmount } = renderBar({ state: { kind: 'processing', progress: null } });
+        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
+        expect(screen.getAllByRole('listitem').map((item) => item.textContent?.trim())).toEqual(['Analyzing', 'Ready']);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
+        unmount();
+
+        renderBar({ state: { kind: 'processing', progress: 1, queued: true } });
+        expect(screen.getAllByRole('listitem').map((item) => item.textContent?.trim())).toEqual([
+            'Queued for analysis',
+            'Analyzing',
+            'Ready',
+        ]);
         expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
     });
 

@@ -142,10 +142,15 @@ export const ImslpBrowser = ({
         }
         const { work, selected } = flow;
         setError(null);
-        dispatch({ type: 'download', download: { kind: 'downloading' } });
+        dispatch({ type: 'download', download: { kind: 'downloading', queued: false } });
         try {
             const result = await onImportImslp(selected.filename, work.title, acceptedDisclaimer, (stage) =>
-                dispatch({ type: 'download', download: { kind: stage } }),
+                dispatch({
+                    type: 'download',
+                    // A retry after a queued wait is still a download — the step
+                    // strip keeps the Queued step it drew.
+                    download: stage === 'downloadQueued' ? { kind: 'downloadQueued' } : { kind: 'downloading', queued: true },
+                }),
             );
             if (!result.ok) {
                 dispatch({
@@ -184,7 +189,7 @@ export const ImslpBrowser = ({
     const blocked =
         busy ||
         flow.phase === 'loadingWork' ||
-        (flow.phase === 'work' && (flow.download.kind === 'downloading' || flow.download.kind === 'queued'));
+        (flow.phase === 'work' && (flow.download.kind === 'downloading' || flow.download.kind === 'downloadQueued'));
 
     return (
         <section className={className}>
