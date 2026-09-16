@@ -26,6 +26,50 @@ const COMPOSER_ALIASES: ReadonlyArray<readonly [RegExp, string]> = [
     [/\berik\s+satie\b/i, 'satie'],
     [/\bsatie\b/i, 'satie'],
     [/\bpetzold\b/i, 'petzold'],
+    [/\bpezold\b/i, 'petzold'],
+    // Composers Mutopia actually holds (ftp/<Composer>/ dirs), so a seeded PDF
+    // finds its MIDI instead of falling through to OMR.
+    [/\bschubertf\b/i, 'schubert'],
+    [/\bschubert\b/i, 'schubert'],
+    [/\blisztf\b/i, 'liszt'],
+    [/\bliszt\b/i, 'liszt'],
+    [/\bjoplins\b/i, 'joplin'],
+    [/\bjoplin\b/i, 'joplin'],
+    [/\bdebussyc\b/i, 'debussy'],
+    [/\bdebussy\b/i, 'debussy'],
+    [/\bgriege\b/i, 'grieg'],
+    [/\bgrieg\b/i, 'grieg'],
+    [/\btchaikovskypi\b/i, 'tchaikovsky'],
+    [/\btcha[iï]kovsky\b/i, 'tchaikovsky'],
+    [/\bmendelssohn(?:-bartholdy)?f?\b/i, 'mendelssohn'],
+    [/\bbrahmsj\b/i, 'brahms'],
+    [/\bbrahms\b/i, 'brahms'],
+    [/\bscarlattid\b/i, 'scarlatti'],
+    [/\bscarlatti\b/i, 'scarlatti'],
+    [/\bhandelgf\b/i, 'handel'],
+    [/\bh[aä]ndel\b/i, 'handel'],
+    [/\bhaydnfj\b/i, 'haydn'],
+    [/\bhaydn\b/i, 'haydn'],
+    [/\bclementim\b/i, 'clementi'],
+    [/\bclementi\b/i, 'clementi'],
+    [/\brachmaninoffs\b/i, 'rachmaninoff'],
+    [/\brachmanin(?:off|ov)\b/i, 'rachmaninoff'],
+    [/\bvivaldia\b/i, 'vivaldi'],
+    [/\bvivaldi\b/i, 'vivaldi'],
+    [/\btelemanngp\b/i, 'telemann'],
+    [/\btelemann\b/i, 'telemann'],
+    [/\bdvoraka\b/i, 'dvorak'],
+    [/\bdvorak\b/i, 'dvorak'],
+    [/\bdiabellia\b/i, 'diabelli'],
+    [/\bdiabelli\b/i, 'diabelli'],
+    [/\bkuhlauf\b/i, 'kuhlau'],
+    [/\bkuhlau\b/i, 'kuhlau'],
+    [/\bdussekjl\b/i, 'dussek'],
+    [/\bdussek\b/i, 'dussek'],
+    [/\bfaureg\b/i, 'faure'],
+    [/\bfaure\b/i, 'faure'],
+    [/\bscriabina\b/i, 'scriabin'],
+    [/\bscriabin\b/i, 'scriabin'],
 ];
 
 const MUTOPIA_COMPOSER: Record<string, string> = {
@@ -37,10 +81,30 @@ const MUTOPIA_COMPOSER: Record<string, string> = {
     CzernyC: 'czerny',
     BurgmullerJFF: 'burgmuller',
     SatieE: 'satie',
+    SchubertF: 'schubert',
+    LisztF: 'liszt',
+    JoplinS: 'joplin',
+    DebussyC: 'debussy',
+    GriegE: 'grieg',
+    TchaikovskyPI: 'tchaikovsky',
+    'Mendelssohn-BartholdyF': 'mendelssohn',
+    BrahmsJ: 'brahms',
+    ScarlattiD: 'scarlatti',
+    HandelGF: 'handel',
+    HaydnFJ: 'haydn',
+    ClementiM: 'clementi',
+    RachmaninoffS: 'rachmaninoff',
+    VivaldiA: 'vivaldi',
+    TelemannGP: 'telemann',
+    DvorakA: 'dvorak',
+    DiabelliA: 'diabelli',
+    KuhlauF: 'kuhlau',
+    DussekJL: 'dussek',
+    FaureG: 'faure',
+    ScriabinA: 'scriabin',
 };
 
-const fold = (text: string): string =>
-    text.normalize('NFKD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').trim();
+const fold = (text: string): string => text.normalize('NFKD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').trim();
 
 export const composerIdFromText = (text: string): string | undefined => {
     const folded = fold(text);
@@ -94,6 +158,30 @@ const catalogFromText = (text: string): CatalogHit | undefined => {
         return { catalogType: 'WoO', catalogN: Number(woo[1]) };
     }
 
+    // Thematic catalogues with an unambiguous letter prefix (Handel, Vivaldi,
+    // Telemann, Debussy). Hoboken only for group XVI (keyboard sonatas): other
+    // groups share numbers and Mutopia files the quartets by opus anyway.
+    const hwv = folded.match(/\bHWV\s*(\d+)\b/i);
+    if (hwv?.[1]) {
+        return { catalogType: 'HWV', catalogN: Number(hwv[1]) };
+    }
+    const rv = folded.match(/\bRV\s*(\d+)\b/);
+    if (rv?.[1]) {
+        return { catalogType: 'RV', catalogN: Number(rv[1]) };
+    }
+    const twv = folded.match(/\bTWV\s*(\d+)\b/i);
+    if (twv?.[1]) {
+        return { catalogType: 'TWV', catalogN: Number(twv[1]) };
+    }
+    const cd = folded.match(/\bCD\s*(\d+)\b/);
+    if (cd?.[1]) {
+        return { catalogType: 'CD', catalogN: Number(cd[1]) };
+    }
+    const hob = folded.match(/\bHob\.?\s*XVI\s*[:.]\s*(\d+)\b/i);
+    if (hob?.[1]) {
+        return { catalogType: 'Hob', catalogN: Number(hob[1]) };
+    }
+
     const kay = folded.match(/\bK(?:\.?\s*V\.?|\.)?\s*(\d+)\b/i);
     if (kay?.[1] && !/\bOp\b/i.test(kay[0] ?? '')) {
         const movement = folded.match(/\b(?:mvt|movement)\s*(\d+)\b/i);
@@ -113,6 +201,21 @@ const catalogFromText = (text: string): CatalogHit | undefined => {
             hit.movementIndex = Number(no[1]);
         }
         return hit;
+    }
+
+    // Deutsch (Schubert), Searle (Liszt) and Lesure (Debussy) need their dot:
+    // a bare `D 3` or `S 2` in PDF text is a key or a page, not a catalogue.
+    const deutsch = folded.match(/\bD\.\s?(\d+)\b/);
+    if (deutsch?.[1]) {
+        return { catalogType: 'D', catalogN: Number(deutsch[1]) };
+    }
+    const searle = folded.match(/\bS\.\s?(\d+)\b/);
+    if (searle?.[1]) {
+        return { catalogType: 'S', catalogN: Number(searle[1]) };
+    }
+    const lesure = folded.match(/\bL\.\s?(\d+)\b/);
+    if (lesure?.[1]) {
+        return { catalogType: 'L', catalogN: Number(lesure[1]) };
     }
 
     const numbered = folded.match(/\b(?:gymnop[eé]die|gnossienne)[_-\s]*(?:No\.?\s*)?(\d+)\b/i);
@@ -153,11 +256,22 @@ const composerFromCatalog = (hit: CatalogHit): string | undefined => {
         case 'No':
             return undefined;
         case 'Hob':
-            return undefined;
+            return 'haydn';
         case 'D':
-            return undefined;
+            return 'schubert';
         case 'H':
             return undefined;
+        case 'S':
+            return 'liszt';
+        case 'HWV':
+            return 'handel';
+        case 'RV':
+            return 'vivaldi';
+        case 'TWV':
+            return 'telemann';
+        case 'CD':
+        case 'L':
+            return 'debussy';
         default: {
             const exhaustive: never = hit.catalogType;
             throw new Error(`unhandled catalog type ${exhaustive}`);
@@ -242,6 +356,15 @@ const catalogFromMutopiaFolder = (folder: string): CatalogHit | undefined => {
     if (op?.[1]) {
         return { catalogType: 'Op', catalogN: Number(op[1]) };
     }
+    const lettered = folder.match(/^(HWV|RV|TWV|D|S|L|K)\.?(\d+)$/i);
+    if (lettered?.[1] && lettered[2]) {
+        const type = lettered[1].toUpperCase() as 'HWV' | 'RV' | 'TWV' | 'D' | 'S' | 'L' | 'K';
+        return { catalogType: type, catalogN: Number(lettered[2]) };
+    }
+    const hob = folder.match(/^HOB-XVI-(\d+)$/i);
+    if (hob?.[1]) {
+        return { catalogType: 'Hob', catalogN: Number(hob[1]) };
+    }
     return undefined;
 };
 
@@ -283,5 +406,4 @@ export const workKeyFromMutopiaPath = (urlOrPath: string): WorkKey | null => {
     return key;
 };
 
-export const workKeyFromTokens = (tokens: readonly string[]): WorkKey | null =>
-    workKeyFromText(tokens.join(' '));
+export const workKeyFromTokens = (tokens: readonly string[]): WorkKey | null => workKeyFromText(tokens.join(' '));

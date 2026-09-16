@@ -78,7 +78,10 @@ const collectFtpUrls = (html: string): string[] => {
 
 const instrumentFromRow = (row: string): string => {
     const cells = [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
-        (m[1] ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+        (m[1] ?? '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim(),
     );
     for (const cell of cells) {
         if (/^piano$/i.test(cell) || /^guitar$/i.test(cell) || /^violin$/i.test(cell) || /^voice$/i.test(cell)) {
@@ -96,16 +99,15 @@ const instrumentFromRow = (row: string): string => {
 
 const titleFromRow = (row: string): string => {
     const cells = [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
-        (m[1] ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+        (m[1] ?? '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim(),
     );
     return cells[1] ?? cells[0] ?? '';
 };
 
-const pieceFromUrls = (
-    urls: readonly string[],
-    instrument: string,
-    title: string,
-): MutopiaPiece | null => {
+const pieceFromUrls = (urls: readonly string[], instrument: string, title: string): MutopiaPiece | null => {
     const midLyPdf = urls.filter((u) => /\.(mid|midi|ly|mxl|xml|pdf)(?:\b|$)/i.test(u));
     const files: MutopiaFile[] = (midLyPdf.length > 0 ? midLyPdf : [...urls]).map((url) => ({
         url,
@@ -253,10 +255,7 @@ export const lookupMutopia = (index: readonly MutopiaPiece[], workKey: WorkKey):
             if (format === null) {
                 continue;
             }
-            const key =
-                workKeyFromMutopiaPath(file.url) ??
-                piece.workKey ??
-                workKeyFromMutopiaPath(piece.ftpDir);
+            const key = workKeyFromMutopiaPath(file.url) ?? piece.workKey ?? workKeyFromMutopiaPath(piece.ftpDir);
             if (!key) {
                 continue;
             }
@@ -305,9 +304,63 @@ export const mutopiaFtpComposerDir = (composerId: string): string | undefined =>
             return 'SatieE';
         case 'petzold':
             return 'Petzold';
+        case 'schubert':
+            return 'SchubertF';
+        case 'liszt':
+            return 'LisztF';
+        case 'joplin':
+            return 'JoplinS';
+        case 'debussy':
+            return 'DebussyC';
+        case 'grieg':
+            return 'GriegE';
+        case 'tchaikovsky':
+            return 'TchaikovskyPI';
+        case 'mendelssohn':
+            return 'Mendelssohn-BartholdyF';
+        case 'brahms':
+            return 'BrahmsJ';
+        case 'scarlatti':
+            return 'ScarlattiD';
+        case 'handel':
+            return 'HandelGF';
+        case 'haydn':
+            return 'HaydnFJ';
+        case 'clementi':
+            return 'ClementiM';
+        case 'rachmaninoff':
+            return 'RachmaninoffS';
+        case 'vivaldi':
+            return 'VivaldiA';
+        case 'telemann':
+            return 'TelemannGP';
+        case 'dvorak':
+            return 'DvorakA';
+        case 'diabelli':
+            return 'DiabelliA';
+        case 'kuhlau':
+            return 'KuhlauF';
+        case 'dussek':
+            return 'DussekJL';
+        case 'faure':
+            return 'FaureG';
+        case 'scriabin':
+            return 'ScriabinA';
         default:
             return undefined;
     }
+};
+
+/**
+ * IMSLP titles Debussy by the Catalogue Debussy (`CD 82`); Mutopia files him by
+ * Lesure (`L75`). The popular piano works, both ways.
+ */
+const DEBUSSY_CD_TO_LESURE: Record<number, number> = {
+    74: 66, // 2 Arabesques
+    76: 68, // Rêverie
+    82: 75, // Suite bergamasque
+    119: 113, // Children's Corner
+    125: 117, // Préludes, Livre 1
 };
 
 export const mutopiaFtpCatalogDirs = (workKey: WorkKey): string[] => {
@@ -322,9 +375,25 @@ export const mutopiaFtpCatalogDirs = (workKey: WorkKey): string[] => {
             return [`Op_${workKey.catalogN}`, `Op${workKey.catalogN}`, `O${workKey.catalogN}`];
         case 'K':
             return [`K${workKey.catalogN}`];
-        case 'No':
-        case 'Hob':
         case 'D':
+            return [`D${workKey.catalogN}`];
+        case 'S':
+            return [`S.${workKey.catalogN}`, `S${workKey.catalogN}`];
+        case 'HWV':
+            return [`HWV${workKey.catalogN}`];
+        case 'RV':
+            return [`rv${workKey.catalogN}`, `RV${workKey.catalogN}`];
+        case 'TWV':
+            return [`TWV${workKey.catalogN}`];
+        case 'L':
+            return [`L${workKey.catalogN}`];
+        case 'CD': {
+            const lesure = DEBUSSY_CD_TO_LESURE[workKey.catalogN];
+            return lesure === undefined ? [] : [`L${lesure}`];
+        }
+        case 'Hob':
+            return [`HOB-XVI-${workKey.catalogN}`];
+        case 'No':
         case 'H':
             return [];
         default: {

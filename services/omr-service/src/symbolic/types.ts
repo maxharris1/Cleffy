@@ -2,7 +2,14 @@ export type SymbolicSource = 'mutopia' | 'imslp' | 'user' | 'asap_eval';
 
 export type SymbolicFormat = 'mxl' | 'xml' | 'ly' | 'mid' | 'mscz' | 'user-xml';
 
-export type CatalogType = 'BWV' | 'WoO' | 'Op' | 'K' | 'Anh' | 'Hob' | 'D' | 'H' | 'No';
+/**
+ * Catalogue families a WorkKey can carry. `K` is Köchel (Mozart) or Kirkpatrick
+ * (Scarlatti) — the composer disambiguates; `Hob` is Hoboken XVI only (keyboard
+ * sonatas), `S` Searle (Liszt), `D` Deutsch (Schubert), `CD` the Debussy
+ * catalogue used by IMSLP titles and `L` Lesure as Mutopia files Debussy.
+ */
+export type CatalogType =
+    'BWV' | 'WoO' | 'Op' | 'K' | 'Anh' | 'Hob' | 'D' | 'H' | 'No' | 'S' | 'HWV' | 'RV' | 'TWV' | 'CD' | 'L';
 
 export interface WorkKey {
     composerId: string;
@@ -41,7 +48,11 @@ export const catalogAgrees = (pdf: WorkKey, candidate: WorkKey): boolean => {
     if (pdf.composerId === 'unknown' || candidate.composerId === 'unknown') {
         return false;
     }
-    if (pdf.composerId !== candidate.composerId || pdf.catalogType !== candidate.catalogType || pdf.catalogN !== candidate.catalogN) {
+    if (
+        pdf.composerId !== candidate.composerId ||
+        pdf.catalogType !== candidate.catalogType ||
+        pdf.catalogN !== candidate.catalogN
+    ) {
         return false;
     }
     if (pdf.movementIndex === undefined || candidate.movementIndex === undefined) {

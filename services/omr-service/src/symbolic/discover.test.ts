@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { loadCorpusEntry } from '../eval/manifest.js';
 import { discoverCandidates } from './discover.js';
 import { harvestImslpWikitext } from './imslp.js';
-import { lookupMutopia, parseMutopiaHtml } from './mutopia.js';
+import {
+    harvestMutopiaFtp,
+    lookupMutopia,
+    mutopiaFtpCatalogDirs,
+    mutopiaFtpComposerDir,
+    parseMutopiaHtml,
+} from './mutopia.js';
 import { workKeyFromMutopiaPath, workKeyFromText } from './workKey.js';
 
 /**
@@ -40,9 +46,7 @@ const pinUrls = (slug: (typeof PIN_SLUGS)[number]): string[] => {
 
 /** Compact CGI-table fixture covering the 16 bench pins plus a guitar decoy. */
 const mutopiaFixtureHtml = (): string => {
-    const rows: string[] = [
-        '<table><tr><th>Composer</th><th>Title</th><th>Instrument</th><th>Files</th></tr>',
-    ];
+    const rows: string[] = ['<table><tr><th>Composer</th><th>Title</th><th>Instrument</th><th>Files</th></tr>'];
     for (const slug of PIN_SLUGS) {
         const entry = loadCorpusEntry(slug);
         const midi = entry.reference.source === 'mutopia' ? entry.reference.url : '';
@@ -114,9 +118,18 @@ describe('Mutopia index + lookup', () => {
             }
             const found = lookupMutopia(index, key);
             const midi = entry.reference.source === 'mutopia' ? entry.reference.url : '';
-            expect(found.some((c) => c.url === midi), `${slug} midi lookup`).toBe(true);
-            expect(found.some((c) => c.format === 'ly'), `${slug} has .ly`).toBe(true);
-            expect(found.some((c) => c.url.endsWith('.pdf')), `${slug} pdf not a candidate`).toBe(false);
+            expect(
+                found.some((c) => c.url === midi),
+                `${slug} midi lookup`,
+            ).toBe(true);
+            expect(
+                found.some((c) => c.format === 'ly'),
+                `${slug} has .ly`,
+            ).toBe(true);
+            expect(
+                found.some((c) => c.url.endsWith('.pdf')),
+                `${slug} pdf not a candidate`,
+            ).toBe(false);
         }
         expect(missing, missing.join('\n')).toEqual([]);
     });
@@ -137,6 +150,63 @@ describe('Mutopia index + lookup', () => {
     it('drops non-piano Mutopia rows (guitar decoy)', () => {
         const index = parseMutopiaHtml(mutopiaFixtureHtml());
         expect(index.some((p) => p.files.some((f) => f.url.includes('k265-guitar')))).toBe(false);
+    });
+
+    it('walks the FTP tree for the composers the corpus seed brings in (Schubert D., Debussy CD→L)', async () => {
+        const listing = (base: string, names: string[]): string =>
+            names.map((n) => `<a href="${base}${n}">${n}</a>`).join('\n');
+        const pages: Record<string, string> = {
+            'https://www.mutopiaproject.org/ftp/SchubertF/D899/': listing(
+                'https://www.mutopiaproject.org/ftp/SchubertF/D899/',
+                ['impromptu-3/'],
+            ),
+            'https://www.mutopiaproject.org/ftp/SchubertF/D899/impromptu-3/': listing(
+                'https://www.mutopiaproject.org/ftp/SchubertF/D899/impromptu-3/',
+                ['impromptu-3.ly', 'impromptu-3.mid', 'impromptu-3-let.pdf'],
+            ),
+            'https://www.mutopiaproject.org/ftp/DebussyC/L75/': listing(
+                'https://www.mutopiaproject.org/ftp/DebussyC/L75/',
+                ['clair-de-lune/'],
+            ),
+            'https://www.mutopiaproject.org/ftp/DebussyC/L75/clair-de-lune/': listing(
+                'https://www.mutopiaproject.org/ftp/DebussyC/L75/clair-de-lune/',
+                ['clair-de-lune.ly', 'clair-de-lune.mid'],
+            ),
+        };
+        const fetched: string[] = [];
+        const fetchText = async (url: string): Promise<string> => {
+            fetched.push(url);
+            const html = pages[url];
+            if (html === undefined) {
+                throw new Error(`404 ${url}`);
+            }
+            return html;
+        };
+
+        const schubert = workKeyFromText('4 Impromptus, D.899 (Schubert, Franz)');
+        expect(schubert).toEqual({ composerId: 'schubert', catalogType: 'D', catalogN: 899 });
+        const pieces = await harvestMutopiaFtp(fetchText, schubert!);
+        expect(pieces).toHaveLength(1);
+        expect(lookupMutopia(pieces, schubert!).map((c) => c.url)).toEqual([
+            'https://www.mutopiaproject.org/ftp/SchubertF/D899/impromptu-3/impromptu-3.ly',
+            'https://www.mutopiaproject.org/ftp/SchubertF/D899/impromptu-3/impromptu-3.mid',
+        ]);
+
+        const debussy = workKeyFromText('Suite bergamasque, CD 82 (Debussy, Claude)');
+        expect(debussy).toEqual({ composerId: 'debussy', catalogType: 'CD', catalogN: 82 });
+        expect(mutopiaFtpCatalogDirs(debussy!)).toEqual(['L75']);
+        const clair = await harvestMutopiaFtp(fetchText, debussy!);
+        expect(clair.flatMap((p) => p.files.map((f) => f.filename))).toEqual(['clair-de-lune.ly', 'clair-de-lune.mid']);
+
+        expect(mutopiaFtpComposerDir('joplin')).toBe('JoplinS');
+        expect(mutopiaFtpCatalogDirs({ composerId: 'liszt', catalogType: 'S', catalogN: 172 })).toEqual([
+            'S.172',
+            'S172',
+        ]);
+        expect(mutopiaFtpCatalogDirs({ composerId: 'haydn', catalogType: 'Hob', catalogN: 27 })).toEqual([
+            'HOB-XVI-27',
+        ]);
+        expect(fetched.every((url) => url.startsWith('https://www.mutopiaproject.org/ftp/'))).toBe(true);
     });
 });
 
