@@ -1,6 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { composerSurnameOf } from '../_shared/era.ts';
 import { engineGenerationOf, regenerateWouldBeNoop } from '../_shared/noopRegenerate.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
@@ -124,11 +125,23 @@ Deno.serve(async (req) => {
         }
     };
 
+    // Pull mode: the worker reads documents.title itself (titleForDocument).
+    // Push mode carries it on the job body, so the same discriminator applies:
+    // only an IMSLP work title ("… (Last, First)") travels; an upload's file name does not.
+    const imslpPageTitle =
+        typeof doc.title === 'string' && composerSurnameOf(doc.title) !== null ? doc.title : undefined;
     const queueMode = (Deno.env.get('OMR_QUEUE_MODE') ?? 'push').toLowerCase();
     const response =
         queueMode === 'pull'
             ? await handlePull(userId, documentId, doc.storage_path, doc.page_count as number)
-            : await handlePush(userClient, userId, documentId, doc.storage_path, doc.page_count as number);
+            : await handlePush(
+                  userClient,
+                  userId,
+                  documentId,
+                  doc.storage_path,
+                  doc.page_count as number,
+                  imslpPageTitle,
+              );
 
     // A run that never queued must not cost a credit (already_running included —
     // that run was paid for when IT was queued).
@@ -221,6 +234,7 @@ const handlePush = async (
     documentId: string,
     storagePath: string,
     pageCount: number,
+    imslpPageTitle: string | undefined,
 ): Promise<Response> => {
     const { data: existing } = await userClient
         .from('score_analyses')
@@ -257,7 +271,12 @@ const handlePush = async (
         const res = await fetch(`${serviceUrl.replace(/\/$/, '')}/jobs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-omr-secret': serviceSecret },
-            body: JSON.stringify({ documentId, pdfSignedUrl: signed.signedUrl, pageCount }),
+            body: JSON.stringify({
+                documentId,
+                pdfSignedUrl: signed.signedUrl,
+                pageCount,
+                ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}),
+            }),
             signal: AbortSignal.timeout(10_000),
         });
         if (res.status === 429) {

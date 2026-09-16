@@ -1,6 +1,7 @@
 import type { MatchBand, MatchReason } from './match.js';
-import type { SymbolicFormat, SymbolicSource } from './types.js';
+import type { SymbolicFormat, SymbolicSource, WorkKey } from './types.js';
 import type { AlignmentMap } from './align.js';
+import type { ScoreData } from '../scoreData.js';
 
 export type AnalysisSourceName = 'Mutopia' | 'IMSLP XML' | 'MIDI' | 'You uploaded';
 
@@ -67,18 +68,32 @@ export const analysisSourceFromDecision = (
     return out;
 };
 
+/** This PDF's identity and layout — the corpus keys a row by them as well as by hash. */
+export interface SymbolicLayoutKey {
+    workKey: WorkKey;
+    printedBars: number;
+    pageCount: number;
+}
+
 export interface SymbolicAcceptResult {
     kind: 'accept';
-    score: import('../scoreData.js').ScoreData;
+    score: ScoreData;
     alignmentMap: AlignmentMap;
     source: AnalysisSource;
     logLine: string;
+    layout: SymbolicLayoutKey;
+    /** The matched candidate; null when the score came from the corpus layout lookup. */
+    candidate: { source: SymbolicSource; format: SymbolicFormat; url: string; sha256: string } | null;
+    /** Set when the corpus served this accept instead of discover. */
+    corpusHit?: 'layout';
 }
 
 export interface SymbolicFallthroughResult {
     kind: 'fallthrough';
     source: AnalysisSource;
     logLine: string;
+    /** Absent when the PDF could not be read at all. */
+    layout?: SymbolicLayoutKey;
 }
 
 export type SymbolicJobResult = SymbolicAcceptResult | SymbolicFallthroughResult;

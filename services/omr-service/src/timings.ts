@@ -33,6 +33,14 @@ export interface JobTimings {
     source?: AnalysisSource;
     /** Printed-bar cursor. Only stamped on a symbolic accept. */
     alignmentMap?: AlignmentMap;
+    /**
+     * Served from playalong_corpus: by this PDF's sha256, or by WorkKey +
+     * printed bars + page count (another edition). Absent when
+     * CLEFFY_CORPUS_LOOKUP is off or the corpus missed.
+     */
+    corpusHit?: 'hash' | 'layout';
+    /** Time spent in corpus RPCs. Only present when CLEFFY_CORPUS_LOOKUP is on. */
+    corpusLookupMs?: number;
 }
 
 export const emptyTimings = (): JobTimings => ({});
