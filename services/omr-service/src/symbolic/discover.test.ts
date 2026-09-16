@@ -10,6 +10,7 @@ import {
     mutopiaFtpComposerDir,
     parseMutopiaHtml,
 } from './mutopia.js';
+import type { WorkKey } from './types.js';
 import { workKeyFromMutopiaPath, workKeyFromText } from './workKey.js';
 
 /**
@@ -207,6 +208,35 @@ describe('Mutopia index + lookup', () => {
             'HOB-XVI-27',
         ]);
         expect(fetched.every((url) => url.startsWith('https://www.mutopiaproject.org/ftp/'))).toBe(true);
+    });
+
+    it('leaves guitar and tab transcriptions out of the candidate list', async () => {
+        const dir = 'https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/';
+        const pages: Record<string, string> = {
+            [dir]: ['fur_Elise_WoO59/', 'fur-elise-guitar-duo/'].map((n) => `<a href="${dir}${n}">${n}</a>`).join('\n'),
+            [`${dir}fur_Elise_WoO59/`]: ['fur_Elise_WoO59.ly', 'fur_Elise_WoO59.mid']
+                .map((n) => `<a href="${dir}fur_Elise_WoO59/${n}">${n}</a>`)
+                .join('\n'),
+            [`${dir}fur-elise-guitar-duo/`]: ['fur-elise-guitar-duo.ly', 'fur-elise-guitar-duo.mid']
+                .map((n) => `<a href="${dir}fur-elise-guitar-duo/${n}">${n}</a>`)
+                .join('\n'),
+        };
+        const fetchText = async (url: string): Promise<string> => {
+            const html = pages[url];
+            if (html === undefined) {
+                throw new Error(`404 ${url}`);
+            }
+            return html;
+        };
+
+        const key: WorkKey = { composerId: 'beethoven', catalogType: 'WoO', catalogN: 59 };
+        const pieces = await harvestMutopiaFtp(fetchText, key);
+
+        expect(pieces).toHaveLength(2);
+        expect(lookupMutopia(pieces, key).map((c) => c.url)).toEqual([
+            `${dir}fur_Elise_WoO59/fur_Elise_WoO59.ly`,
+            `${dir}fur_Elise_WoO59/fur_Elise_WoO59.mid`,
+        ]);
     });
 });
 

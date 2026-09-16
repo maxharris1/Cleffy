@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { ERROR_CODES, JobError } from './errors.js';
@@ -65,13 +65,22 @@ export const PLAY_ALONG_AUDIVERIS_OPTIONS = [
     `${SWITCH}.fingerings=true`,
 ] as const;
 
-const STEP_RE = /\b(LOAD|BINARY|GRID|HEADERS|STEMS|BEAMS|LEDGERS|HEADS|TEXTS|SYMBOLS|SLURS|CURVES|PAGES|REDUCTION|SHEET)\b/gi;
+const STEP_RE =
+    /\b(LOAD|BINARY|GRID|HEADERS|STEMS|BEAMS|LEDGERS|HEADS|TEXTS|SYMBOLS|SLURS|CURVES|PAGES|REDUCTION|SHEET)\b/gi;
 const SHEET_RE = /sheet#(\d+)/gi;
 /** `Sheet original#1`, `Sheet #1`, or `Sheet Moonlight Sonata#1`. */
 const INVALID_SHEET_RE = /Sheet\s+(?:[^#\n]*#)?(\d+)\s+flagged as invalid/gi;
-/** SCALE/GRID said there were no staff lines — skippable covers/blanks. */
+/**
+ * SCALE/GRID said there were no staff lines — skippable covers/blanks.
+ *
+ * `Too few black pixels … almost blank` is the raster wording: a scanned verso
+ * or back cover carrying a speck of dust, a stamp or a page number reaches SCALE
+ * with ink but no lines, so it never produces the vector-page phrasings above.
+ * Without it a single near-blank sheet fails the whole book export (`omr_crash`)
+ * instead of being dropped, which is the common shape of an Internet Archive scan.
+ */
 const STAFFLESS_RE =
-    /does not seem to contain staff lines|Interline value is zero|No regularly spaced lines found|No significant black lines found/i;
+    /does not seem to contain staff lines|Interline value is zero|No regularly spaced lines found|No significant black lines found|This sheet is almost blank/i;
 /** Same `flagged as invalid` line is also used for muddy music (Audiveris#272). Fail closed. */
 const LOW_DPI_RE = /picture resolution is too low/i;
 const EXPORT_REFUSED_RE = /Could not export since transcription did not complete successfully/i;
@@ -139,10 +148,7 @@ export const formatSheetRange = (range: SheetRange): string =>
  * Drop excluded 1-based sheet numbers from one or more inclusive ranges,
  * splitting around holes (`1-8` minus `[1,5]` → `[{2,4},{6,8}]`).
  */
-export const sheetRangesExcluding = (
-    range: SheetRange | SheetRange[],
-    exclude: readonly number[],
-): SheetRange[] => {
+export const sheetRangesExcluding = (range: SheetRange | SheetRange[], exclude: readonly number[]): SheetRange[] => {
     const skip = new Set(exclude.filter((n) => Number.isInteger(n) && n >= 1));
     const out: SheetRange[] = [];
     for (const { from, to } of normalizeSheetRanges(range)) {
@@ -538,9 +544,17 @@ const recoverWithoutInvalidSheets = async (
     run: AudiverisRunner,
 ): Promise<AudiverisResult> => {
     const retryOptions: AudiverisOptions = { ...options, sheets: validRanges };
+    // Audiveris does not create a nested -output folder, and discoverOutputs
+    // readdir()s it: without these the recovery dies with ENOENT (not a JobError,
+    // so it is rethrown) instead of skipping the invalid sheets. Best effort —
+    // a refused mkdir leaves exactly the behaviour this line replaces.
+    const reexportDir = join(outDir, 'reexport');
+    const retryDir = join(outDir, 'retry');
+    await mkdir(reexportDir, { recursive: true }).catch(() => undefined);
+    await mkdir(retryDir, { recursive: true }).catch(() => undefined);
     if (first.omrPath) {
         try {
-            const reexport = await run(first.omrPath, join(outDir, 'reexport'), retryOptions);
+            const reexport = await run(first.omrPath, reexportDir, retryOptions);
             if (reexport.exitCode === 0 && reexport.mxlPaths.length > 0) {
                 return reexport;
             }
@@ -551,7 +565,7 @@ const recoverWithoutInvalidSheets = async (
         }
     }
 
-    const retry = await run(pdfPath, join(outDir, 'retry'), retryOptions);
+    const retry = await run(pdfPath, retryDir, retryOptions);
     if (retry.mxlPaths.length === 0) {
         throw new JobError(ERROR_CODES.noStavesFound, 'Audiveris produced no MusicXML after skipping invalid sheets');
     }
@@ -562,9 +576,7 @@ const recoverWithoutInvalidSheets = async (
 };
 
 /** Find produced artifacts wherever Audiveris put them (layout differs across versions). */
-export const discoverOutputs = async (
-    outDir: string,
-): Promise<{ mxlPaths: string[]; omrPath: string | null }> => {
+export const discoverOutputs = async (outDir: string): Promise<{ mxlPaths: string[]; omrPath: string | null }> => {
     const mxlPaths: string[] = [];
     let omrPath: string | null = null;
 

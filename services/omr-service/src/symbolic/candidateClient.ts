@@ -1,7 +1,7 @@
-import { assertFetchAllowed, imslpWikitextUrl, MUTOPIA_PIECE_LIST_URL, type TextFetcher } from './http.js';
+import { assertFetchAllowed, imslpWikitextUrl, type TextFetcher } from './http.js';
 import { harvestImslpWikitext } from './imslp.js';
 import { discoverCandidates } from './discover.js';
-import { parseMutopiaHtml } from './mutopia.js';
+import { harvestMutopiaFtp } from './mutopia.js';
 import type { RankedCandidate, WorkKey } from './types.js';
 
 export const DEFAULT_SYMBOLIC_TIMEOUT_MS = 20_000;
@@ -48,6 +48,10 @@ const parseImslpWikitextPayload = (raw: string): string => {
 /**
  * Mutopia index + optional IMSLP harvest, then byte fetch. All network
  * calls share `timeoutMs` via AbortSignal.
+ *
+ * The index comes from the FTP directory listing for this work's composer and
+ * catalogue, not from piece-list.html: that page stopped embedding ftp:// links,
+ * so parsing it yields zero candidates and every job falls through to OMR.
  */
 export const createNetworkSymbolicClient = (
     text: TextFetcher,
@@ -56,18 +60,22 @@ export const createNetworkSymbolicClient = (
 ): SymbolicJobClient => ({
     discover: async (workKey, meta) => {
         const signal = AbortSignal.timeout(timeoutMs);
-        const html = await Promise.race([
-            text.fetchText(MUTOPIA_PIECE_LIST_URL),
+        const index = await Promise.race([
+            harvestMutopiaFtp((url) => text.fetchText(url), workKey),
             abortError(signal, 'mutopia index'),
         ]);
-        const index = parseMutopiaHtml(html);
         let imslpFiles: ReturnType<typeof harvestImslpWikitext> = [];
         if (meta.imslpPageTitle) {
-            const raw = await Promise.race([
-                text.fetchText(imslpWikitextUrl(meta.imslpPageTitle)),
-                abortError(signal, 'imslp wikitext'),
-            ]);
-            imslpFiles = harvestImslpWikitext(parseImslpWikitextPayload(raw));
+            try {
+                const raw = await Promise.race([
+                    text.fetchText(imslpWikitextUrl(meta.imslpPageTitle)),
+                    abortError(signal, 'imslp wikitext'),
+                ]);
+                imslpFiles = harvestImslpWikitext(parseImslpWikitextPayload(raw));
+            } catch {
+                // imslp.org/api.php answers 500 often enough that failing the whole
+                // discovery here would drop the Mutopia candidates already in hand.
+            }
         }
         return discoverCandidates({
             workKey,

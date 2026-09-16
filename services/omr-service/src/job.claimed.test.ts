@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as corpusStore from './corpus/store.js';
 import type * as era from './era.js';
 import { ENGINE_VERSION, runClaimedJob, runJob } from './job.js';
 import type * as jobStore from './jobStore.js';
@@ -36,11 +37,16 @@ vi.mock('./era.js', async (importOriginal) => {
     return { ...actual, eraForDocument: async () => 'baroque' };
 });
 
-vi.mock('./corpus/store.js', () => ({
-    corpusLookupByHash: (...args: unknown[]) => corpusLookupByHash(...args),
-    corpusLookupByLayout: async () => null,
-    corpusPut: (...args: unknown[]) => corpusPut(...args),
-}));
+vi.mock('./corpus/store.js', async (importOriginal) => {
+    const actual = await importOriginal<typeof corpusStore>();
+    return {
+        ...actual,
+        corpusLookupByHash: (...args: unknown[]) => corpusLookupByHash(...args),
+        corpusLookupByLayout: async () => null,
+        corpusPut: (...args: unknown[]) => corpusPut(...args),
+        pdProvenance: async () => null,
+    };
+});
 
 const MINIMAL_PDF = Buffer.from(
     '%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 3 3]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n',
@@ -109,7 +115,11 @@ describe('runClaimedJob — corpus adapters', () => {
         expect(titleForDocument).toHaveBeenCalledWith(DOC);
         expect(corpusLookupByHash).toHaveBeenCalledWith(expect.any(String), ENGINE_VERSION, 'baroque');
         expect(corpusPut).toHaveBeenCalledTimes(1);
-        expect(corpusPut.mock.calls[0]![0]).toMatchObject({ imslpPageTitle: TITLE, era: 'baroque', symbolicSource: 'omr' });
+        expect(corpusPut.mock.calls[0]![0]).toMatchObject({
+            imslpPageTitle: TITLE,
+            era: 'baroque',
+            symbolicSource: 'omr',
+        });
         const timings = completeJob.mock.calls[0]![4] as JobTimings;
         expect(timings.cacheHit).toBe(true);
         expect(timings.corpusHit).toBeUndefined();
@@ -140,7 +150,13 @@ describe('runClaimedJob — corpus adapters', () => {
         expect(ok).toBe(true);
         expect(cacheLookup).not.toHaveBeenCalled();
         expect(corpusPut).not.toHaveBeenCalled();
-        expect(completeJob).toHaveBeenCalledWith(7, 'worker', omrScore(), ENGINE_VERSION, expect.objectContaining({ corpusHit: 'hash' }));
+        expect(completeJob).toHaveBeenCalledWith(
+            7,
+            'worker',
+            omrScore(),
+            ENGINE_VERSION,
+            expect.objectContaining({ corpusHit: 'hash' }),
+        );
     });
 });
 

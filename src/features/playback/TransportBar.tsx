@@ -4,6 +4,7 @@ import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { Era } from '@/features/playback/era';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
+import { SourceAttribution } from '@/features/playback/SourceAttribution';
 import { SourceBadge } from '@/features/playback/SourceBadge';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import { BPM_MAX, BPM_MIN, useViewerStore } from '@/state/store';
@@ -188,10 +189,7 @@ const StaleAnalysisNotice = (props: {
     canManage: boolean;
     onGenerate: () => void;
 }) => {
-    if (
-        !props.canManage ||
-        !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })
-    ) {
+    if (!props.canManage || !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })) {
         return null;
     }
     return (
@@ -450,6 +448,9 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 onGenerate={props.onGenerate}
             />
             <ScoreWarnings warnings={score.warnings} />
+            {props.state.kind === 'ready' && props.state.source ? (
+                <SourceAttribution source={props.state.source} />
+            ) : null}
 
             {loopRange ? (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/30 bg-accent-soft/50 px-2 py-1">
@@ -555,7 +556,9 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                     <span>{sig.den}</span>
                 </span>
 
-                {props.state.kind === 'ready' && props.state.source ? <SourceBadge source={props.state.source} /> : null}
+                {props.state.kind === 'ready' && props.state.source ? (
+                    <SourceBadge source={props.state.source} />
+                ) : null}
 
                 <button
                     type="button"

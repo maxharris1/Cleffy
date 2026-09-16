@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -153,7 +153,8 @@ describe('parseInvalidSheets', () => {
     });
 
     it('collects several pages in order', () => {
-        const log = 'Sheet book#3 flagged as invalid.\nSheet book#1 flagged as invalid.\nSheet book#3 flagged as invalid.';
+        const log =
+            'Sheet book#3 flagged as invalid.\nSheet book#1 flagged as invalid.\nSheet book#3 flagged as invalid.';
         expect(parseInvalidSheets(log)).toEqual([1, 3]);
     });
 
@@ -170,6 +171,17 @@ describe('parseSkippableInvalidSheets', () => {
             'INFO  [original#1] SheetStub | Sheet original#1 flagged as invalid.\n' +
             'INFO  [] Book | Could not export since transcription did not complete successfully\n';
         expect(parseSkippableInvalidSheets(log)).toEqual([1]);
+        expect(isRecoverableInvalidSheetFailure(log, 1)).toBe(true);
+    });
+
+    it('skips a near-blank scanned page (raster wording, no vector staff-line message)', () => {
+        // Verbatim from a 10-page Internet Archive scan whose last leaf is a back
+        // cover: SCALE sees ink but no lines, so none of the vector phrasings appear.
+        const log =
+            'WARN  [original#10] SheetStub 411  | original#10  Too few black pixels: 0.01% of whole image. This sheet is almost blank. \n' +
+            'INFO  [original#10] SheetStub 1194 | Sheet original#10 flagged as invalid.\n' +
+            'INFO  [] Book 596  | Could not export since transcription did not complete successfully\n';
+        expect(parseSkippableInvalidSheets(log)).toEqual([10]);
         expect(isRecoverableInvalidSheetFailure(log, 1)).toBe(true);
     });
 
@@ -223,7 +235,12 @@ describe('runAudiverisTolerant', () => {
         const run = vi.fn<AudiverisRunner>(async (input, outDir) => {
             if (input.endsWith('.omr')) {
                 expect(outDir).toBe('/out/reexport');
-                return emptyResult({ mxlPaths: ['/out/reexport/a.mxl'], omrPath: input, exitCode: 0, audiverisTotalMs: 3 });
+                return emptyResult({
+                    mxlPaths: ['/out/reexport/a.mxl'],
+                    omrPath: input,
+                    exitCode: 0,
+                    audiverisTotalMs: 3,
+                });
             }
             return emptyResult({ omrPath: '/out/book.omr', invalidSheets: [1], exitCode: 1, audiverisTotalMs: 20 });
         });
@@ -280,13 +297,37 @@ describe('runAudiverisTolerant', () => {
     });
 
     it('throws no_staves_found when every requested sheet is invalid', async () => {
-        const run = vi.fn<AudiverisRunner>(async () =>
-            emptyResult({ invalidSheets: [1, 2, 3], exitCode: 1 }),
-        );
-        await expect(runAudiverisTolerant('/in.pdf', '/out', { timeoutMs: 1, pageCount: 3 }, run)).rejects.toMatchObject({
+        const run = vi.fn<AudiverisRunner>(async () => emptyResult({ invalidSheets: [1, 2, 3], exitCode: 1 }));
+        await expect(
+            runAudiverisTolerant('/in.pdf', '/out', { timeoutMs: 1, pageCount: 3 }, run),
+        ).rejects.toMatchObject({
             code: ERROR_CODES.noStavesFound,
         });
         expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('creates the recovery output folders before re-running', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'audiveris-recover-'));
+        const seen: string[] = [];
+        const run = vi.fn<AudiverisRunner>(async (_input, outDir) => {
+            seen.push(outDir);
+            // Audiveris writes nothing when it cannot open the folder; the real
+            // failure was discoverOutputs' readdir on a folder nobody created.
+            await readdir(outDir);
+            if (outDir.endsWith('/retry')) {
+                return emptyResult({ mxlPaths: [`${outDir}/a.mxl`], exitCode: 0 });
+            }
+            if (outDir.endsWith('/reexport')) {
+                return emptyResult({ exitCode: 1 });
+            }
+            return emptyResult({ omrPath: `${dir}/book.omr`, invalidSheets: [3], exitCode: 1 });
+        });
+
+        const result = await runAudiverisTolerant('/in.pdf', dir, opts, run);
+
+        expect(result.mxlPaths).toEqual([`${dir}/retry/a.mxl`]);
+        expect(seen).toEqual([dir, `${dir}/reexport`, `${dir}/retry`]);
+        await rm(dir, { recursive: true, force: true });
     });
 
     it('does not treat leftover MusicXML from a non-zero exit as success', async () => {

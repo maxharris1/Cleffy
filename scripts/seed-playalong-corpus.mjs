@@ -477,7 +477,7 @@ const ledgerKey = (row) => `${row.work_title}\u0000${row.origin}\u0000${row.file
 
 const loadLedger = async (db) => {
     const rows = await db.selectAll(
-        '/playalong_corpus_seed?select=work_title,origin,filename,document_id,tier,status,last_error,pdf_sha256,page_count,batch_id,attempts&order=work_title,origin,filename',
+        '/playalong_corpus_seed?select=work_title,origin,filename,document_id,tier,status,last_error,pdf_sha256,page_count,batch_id,attempts,source_url&order=work_title,origin,filename',
     );
     return new Map(rows.map((row) => [ledgerKey(row), row]));
 };
@@ -491,7 +491,7 @@ const upsertLedger = async (db, ledger, row) => {
     ledger.set(key, { ...(ledger.get(key) ?? {}), ...row });
 };
 
-/** Move `queued` rows to `ready` / `failed` from the worker's outcome. */
+/** Move `queued` rows to `ready` / `failed` / `needs_review` from the worker's outcome. */
 const reconcileLedger = async (db, ledger) => {
     const queued = [...ledger.values()].filter((row) => row.status === 'queued' && row.document_id);
     let changed = 0;
@@ -501,7 +501,10 @@ const reconcileLedger = async (db, ledger) => {
         const jobs = await db.request(
             `/omr_jobs?select=document_id,status,last_error,id&document_id=in.(${ids})&order=id.desc`,
         );
-        const analyses = await db.request(`/score_analyses?select=document_id,status,error&document_id=in.(${ids})`);
+        // `timings` carries the worker's corpus-promotion verdict.
+        const analyses = await db.request(
+            `/score_analyses?select=document_id,status,error,timings&document_id=in.(${ids})`,
+        );
         const latestJob = new Map();
         for (const job of jobs ?? []) {
             if (!latestJob.has(job.document_id)) {
@@ -525,6 +528,36 @@ const reconcileLedger = async (db, ledger) => {
         }
     }
     return changed;
+};
+
+/**
+ * Files the corpus-promotion gate held back, newest batch first. These played
+ * fine for whoever asked for them but are probably not the work they are filed
+ * under, so they are worth a human glance before anyone widens the filters.
+ */
+const reportNeedsReview = (ledger) => {
+    const rows = [...ledger.values()].filter(
+        (row) => row.status === 'skipped' && String(row.last_error ?? '').startsWith('needs_review'),
+    );
+    if (rows.length === 0) {
+        return;
+    }
+    console.log(
+        JSON.stringify({
+            event: 'corpus_seed_needs_review',
+            count: rows.length,
+            files: rows
+                .sort((a, b) => Number(b.batch_id ?? 0) - Number(a.batch_id ?? 0))
+                .map((row) => ({
+                    workTitle: row.work_title,
+                    origin: row.origin,
+                    filename: row.filename,
+                    reason: row.last_error,
+                    pageCount: row.page_count ?? null,
+                    sourceUrl: row.source_url ?? null,
+                })),
+        }),
+    );
 };
 
 const ledgerCounts = (ledger) => {
@@ -1323,6 +1356,7 @@ const enqueueFetched = async (ctx, args, startedAt, deadlineMs) => {
         done += 1;
     }
     console.log(heartbeat(ctx.ledger, { target: rows.length, batchId, mode: 'enqueue', attempted: done, startedAt }));
+    reportNeedsReview(ctx.ledger);
     if (stopReason) {
         info(`stopped (${stopReason}) after ${done}/${rows.length} rows; rerun to continue`);
     }
@@ -1578,6 +1612,7 @@ const main = async () => {
     }
 
     console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
+    reportNeedsReview(ledger);
     if (stopReason) {
         info(`stopped (${stopReason}) after ${attempted} works this run; ledger is consistent — rerun to resume`);
     }

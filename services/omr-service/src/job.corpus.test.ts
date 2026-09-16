@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as audiveris from './audiveris.js';
-import type { CorpusHit } from './corpus/store.js';
+import type * as corpusStore from './corpus/store.js';
+import type { CorpusHit, PdProvenance } from './corpus/store.js';
 import { ENGINE_VERSION, runOmrPipeline } from './job.js';
 import type * as jobStore from './jobStore.js';
 import { sha256Hex } from './jobStore.js';
@@ -18,6 +19,7 @@ const runAudiverisTolerant = vi.fn();
 const corpusLookupByHash = vi.fn();
 const corpusLookupByLayout = vi.fn();
 const corpusPut = vi.fn();
+const pdProvenance = vi.fn<() => Promise<PdProvenance | null>>(async () => null);
 
 vi.mock('./jobStore.js', async (importOriginal) => {
     const actual = await importOriginal<typeof jobStore>();
@@ -28,11 +30,16 @@ vi.mock('./jobStore.js', async (importOriginal) => {
     };
 });
 
-vi.mock('./corpus/store.js', () => ({
-    corpusLookupByHash: (...args: unknown[]) => corpusLookupByHash(...args),
-    corpusLookupByLayout: (...args: unknown[]) => corpusLookupByLayout(...args),
-    corpusPut: (...args: unknown[]) => corpusPut(...args),
-}));
+vi.mock('./corpus/store.js', async (importOriginal) => {
+    const actual = await importOriginal<typeof corpusStore>();
+    return {
+        ...actual,
+        corpusLookupByHash: (...args: unknown[]) => corpusLookupByHash(...args),
+        corpusLookupByLayout: (...args: unknown[]) => corpusLookupByLayout(...args),
+        corpusPut: (...args: unknown[]) => corpusPut(...args),
+        pdProvenance: () => pdProvenance(),
+    };
+});
 
 vi.mock('./audiveris.js', async (importOriginal) => {
     const actual = await importOriginal<typeof audiveris>();
@@ -191,6 +198,8 @@ beforeEach(() => {
     corpusLookupByHash.mockReset();
     corpusLookupByLayout.mockReset();
     corpusPut.mockReset();
+    pdProvenance.mockReset();
+    pdProvenance.mockResolvedValue(null);
     cacheLookup.mockResolvedValue({ score: omrScore(), bpmDefault: 90 });
     cacheStore.mockResolvedValue(undefined);
     corpusLookupByHash.mockResolvedValue(null);
@@ -365,6 +374,93 @@ describe('runOmrPipeline — play-along corpus', () => {
             source: { tier: 'omr', band: 'reject', reason: 'arrangement', origin: 'omr' },
         });
         expect(corpusPut.mock.calls[0]![0]).not.toHaveProperty('imslpPageTitle');
+    });
+
+    it('carries the seed’s licence and credit onto the corpus row and onto what the player badges from', async () => {
+        pdProvenance.mockResolvedValueOnce({
+            licenceTag: 'CC-BY-SA',
+            editorCredit: 'Chris Sawer, after Breitkopf & Härtel (Mutopia)',
+            sourceUrl: 'https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=44',
+            usPd: true,
+        });
+        const result = await run({ symbolicEnabled: false, corpusEnabled: true, imslpPageTitle: TITLE });
+
+        expect(result.ready[0]?.timings.source).toMatchObject({
+            licence: 'CC-BY-SA',
+            editorCredit: 'Chris Sawer, after Breitkopf & Härtel (Mutopia)',
+            sourceUrl: 'https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=44',
+        });
+        expect(corpusPut.mock.calls[0]![0]).toMatchObject({
+            licenceTag: 'CC-BY-SA',
+            editorCredit: 'Chris Sawer, after Breitkopf & Härtel (Mutopia)',
+            sourceUrl: 'https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=44',
+            source: {
+                licence_tag: 'CC-BY-SA',
+                editor_credit: 'Chris Sawer, after Breitkopf & Härtel (Mutopia)',
+                source_url: 'https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=44',
+                us_pd: true,
+            },
+        });
+    });
+
+    it('serves a hash hit’s stored provenance to the client in the camelCase keys it parses', async () => {
+        corpusLookupByHash.mockResolvedValueOnce(
+            corpusHit({
+                source: {
+                    tier: 'omr',
+                    band: 'reject',
+                    reason: 'no_candidate',
+                    origin: 'ia',
+                    licence_tag: 'CC-BY',
+                    editor_credit: 'Some editor (IMSLP)',
+                    source_url: 'https://archive.org/details/imslp-x',
+                },
+            }),
+        );
+        const result = await run({ symbolicEnabled: false, corpusEnabled: true });
+        expect(result.ready[0]?.timings.source).toMatchObject({
+            tier: 'omr',
+            licence: 'CC-BY',
+            editorCredit: 'Some editor (IMSLP)',
+            sourceUrl: 'https://archive.org/details/imslp-x',
+        });
+    });
+
+    it('does not read pd_pdf_store for a user’s own upload', async () => {
+        await run({ symbolicEnabled: false, corpusEnabled: true, createdBy: 'someone-else' });
+        expect(pdProvenance).not.toHaveBeenCalled();
+    });
+
+    it('withholds a non-keyboard transcription from the corpus but still serves it', async () => {
+        cacheLookup.mockReset();
+        cacheLookup.mockResolvedValue({
+            score: {
+                ...omrScore(),
+                systems: [
+                    {
+                        page: 0,
+                        y0: 0,
+                        y1: 1,
+                        staves: [
+                            { y0: 0, y1: 0.3 },
+                            { y0: 0.35, y1: 0.65 },
+                            { y0: 0.7, y1: 1 },
+                        ],
+                    },
+                ],
+            },
+        });
+        const result = await run({ symbolicEnabled: false, corpusEnabled: true, imslpPageTitle: TITLE });
+
+        expect(corpusPut).not.toHaveBeenCalled();
+        expect(result.ready).toHaveLength(1);
+        expect(result.ready[0]?.timings.corpusGate).toEqual({ promoted: false, reason: 'staves' });
+    });
+
+    it('records a promoted gate verdict on a score that passes', async () => {
+        const result = await run({ symbolicEnabled: false, corpusEnabled: true, imslpPageTitle: TITLE });
+        expect(result.ready[0]?.timings.corpusGate).toEqual({ promoted: true });
+        expect(corpusPut).toHaveBeenCalledTimes(1);
     });
 
     it('corpus on but every RPC misses: today’s path, with only corpusLookupMs added to timings', async () => {
