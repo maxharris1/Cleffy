@@ -12,11 +12,20 @@
  *
  * Usage:
  *   npm run corpus:seed -- --dry-run
- *   npm run corpus:seed -- --limit 131 --batch 40
- *   npm run corpus:seed -- --limit 2000 --batch 40 --re-rank
+ *   npm run corpus:seed -- --fetch-only --limit 5000 --batch 40        # PDFs into pd-pdfs, no owner needed
+ *   npm run corpus:seed -- --enqueue-fetched                           # fetched rows → documents + jobs
+ *   npm run corpus:seed -- --limit 2000 --batch 40 --re-rank           # both in one pass
+ *
+ * Modes:
+ *   --fetch-only         rank, resolve, licence-filter, download, pd-pdfs + pd_pdf_store, ledger `fetched`;
+ *                        no documents / score_analyses / omr_jobs; CORPUS_OWNER_USER_ID not needed
+ *   --enqueue-fetched    for ledger rows in `fetched`: corpus-owner document, copy to scores/{id}/original.pdf,
+ *                        pending score_analyses + omr_jobs (priority -10), ledger `queued`; needs the owner
+ *   (neither)            fetch and enqueue in one pass
  *
  * Flags:
- *   --limit N            floor on covered works (default: popular + eval pins)
+ *   --limit N            hard cap on ranked works and floor on covered works (5000)
+ *   --max-runtime M      stop cleanly after M minutes (finishes the current file)
  *   --batch N            works per batch before a progress line + pause check (40)
  *   --sleep S            seconds between works (2)
  *   --source X           mutopia|openscore|ia|all, comma list allowed (all)
@@ -133,6 +142,9 @@ const parseArgs = (argv) => {
         retrySkipped: false,
         reRank: false,
         dryRun: false,
+        fetchOnly: false,
+        enqueueFetched: false,
+        maxRuntimeMs: null,
         ensureOwnerPlan: false,
         cacheDir: DEFAULT_CACHE_DIR,
         musescore: null,
@@ -172,6 +184,20 @@ const parseArgs = (argv) => {
             case '--retry-skipped':
                 out.retrySkipped = true;
                 break;
+            case '--fetch-only':
+                out.fetchOnly = true;
+                break;
+            case '--enqueue-fetched':
+                out.enqueueFetched = true;
+                break;
+            case '--max-runtime': {
+                const minutes = Number(argv[++i]);
+                if (!Number.isFinite(minutes) || minutes <= 0) {
+                    die('--max-runtime needs minutes');
+                }
+                out.maxRuntimeMs = Math.round(minutes * 60_000);
+                break;
+            }
             case '--re-rank':
                 out.reRank = true;
                 break;
@@ -384,6 +410,36 @@ const makeDb = ({ url, key }) => {
                 throw new Error(`Storage upload ${bucket}/${path} → ${res.status} ${body.slice(0, 300)}`);
             }
         },
+        /** Server-side copy between buckets; false when this Storage build cannot. */
+        copy: async (fromBucket, fromPath, toBucket, toPath) => {
+            const res = await fetch(`${url}/storage/v1/object/copy`, {
+                method: 'POST',
+                headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    bucketId: fromBucket,
+                    sourceKey: fromPath,
+                    destinationBucket: toBucket,
+                    destinationKey: toPath,
+                }),
+                signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+            });
+            if (res.ok) {
+                return true;
+            }
+            // 400 = destination exists / copy unsupported; caller falls back to download + upload.
+            await res.text().catch(() => '');
+            return false;
+        },
+        download: async (bucket, path) => {
+            const res = await fetch(`${url}/storage/v1/object/${bucket}/${path}`, {
+                headers: { apikey: key, Authorization: `Bearer ${key}` },
+                signal: AbortSignal.timeout(HTTP_TIMEOUT_MS * 3),
+            });
+            if (!res.ok) {
+                throw new Error(`Storage download ${bucket}/${path} → ${res.status}`);
+            }
+            return Buffer.from(await res.arrayBuffer());
+        },
     };
 };
 
@@ -446,7 +502,7 @@ const reconcileLedger = async (db, ledger) => {
 };
 
 const ledgerCounts = (ledger) => {
-    const counts = { ready: 0, queued: 0, skipped: 0, failed: 0 };
+    const counts = { ready: 0, queued: 0, fetched: 0, skipped: 0, failed: 0 };
     for (const row of ledger.values()) {
         if (row.status in counts) {
             counts[row.status] += 1;
@@ -702,16 +758,22 @@ const renderWithMusescore = async (ctx, url) => {
     return readFileSync(output);
 };
 
-const ingestFile = async (ctx, work, res, batchId) => {
-    const { db, ledger, owner } = ctx;
+const pdObjectPath = (sha, filename) => `${sha}/${safeObjectName(filename)}`;
+
+/**
+ * Fetch one resolved file into the shared PD store: download, hash, page
+ * count, `pd-pdfs/{sha}/{filename}` + `pd_pdf_store`, ledger `fetched`. No
+ * documents, analyses or jobs — that is `enqueueRow`, which needs the owner.
+ */
+const fetchFile = async (ctx, work, res, batchId) => {
+    const { db, ledger } = ctx;
     const key = { work_title: res.workTitle, origin: res.origin, filename: res.filename };
     const existing = ledger.get(ledgerKey(key));
     const attempts = Number(existing?.attempts ?? 0) + 1;
-    const docId = existing?.document_id ?? randomUUID();
 
     await upsertLedger(db, ledger, {
         ...key,
-        status: existing?.status === 'fetched' ? 'fetched' : 'pending',
+        status: 'pending',
         tier: work.tier,
         batch_id: batchId,
         attempts,
@@ -748,26 +810,10 @@ const ingestFile = async (ctx, work, res, batchId) => {
                     reason: 'too_large',
                 }),
             );
-            return 'skipped';
+            return { status: 'skipped' };
         }
 
-        await upsertLedger(db, ledger, {
-            ...key,
-            status: 'fetched',
-            pdf_sha256: sha,
-            page_count: pageCount,
-            document_id: docId,
-        });
-
-        const storagePath = `${docId}/original.pdf`;
-        const existingDoc = await db.request(`/documents?select=id&id=eq.${docId}`);
-        if (!existingDoc || existingDoc.length === 0) {
-            await db.insert('documents', [
-                { id: docId, owner_id: owner, title: res.workTitle, storage_path: storagePath, page_count: pageCount },
-            ]);
-        }
-
-        await db.upload(PD_BUCKET, `${sha}/${safeObjectName(res.filename)}`, bytes);
+        await db.upload(PD_BUCKET, pdObjectPath(sha, res.filename), bytes);
         await db.insert(
             'pd_pdf_store',
             [
@@ -786,7 +832,77 @@ const ingestFile = async (ctx, work, res, batchId) => {
             ],
             { onConflict: 'pdf_sha256', merge: true },
         );
-        await db.upload(SCORES_BUCKET, storagePath, bytes);
+        await upsertLedger(db, ledger, {
+            ...key,
+            status: 'fetched',
+            pdf_sha256: sha,
+            page_count: pageCount,
+            last_error: null,
+        });
+        console.log(
+            workEvent({
+                workTitle: res.workTitle,
+                status: 'fetched',
+                origin: res.origin,
+                filename: res.filename,
+                pdfSha256: sha,
+            }),
+        );
+        return { status: 'fetched', bytes };
+    } catch (err) {
+        const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+        const status = message === 'too_large' || message === 'not_pdf' ? 'skipped' : 'failed';
+        await upsertLedger(db, ledger, { ...key, status, last_error: message });
+        console.log(
+            workEvent({
+                workTitle: res.workTitle,
+                status,
+                origin: res.origin,
+                filename: res.filename,
+                reason: message,
+            }),
+        );
+        return { status };
+    }
+};
+
+/**
+ * Turn a `fetched` ledger row into work for the OMR worker: corpus-owner
+ * document, PDF copied from `pd-pdfs` to `scores/{docId}/original.pdf`,
+ * pending `score_analyses`, `omr_jobs` at seed priority, ledger `queued`.
+ * Idempotent: reuses `document_id`, tolerates an existing document / job.
+ * `bytes` skips the Storage copy when the caller still holds the PDF.
+ */
+const enqueueRow = async (ctx, row, bytes = null) => {
+    const { db, ledger, owner } = ctx;
+    const key = { work_title: row.work_title, origin: row.origin, filename: row.filename };
+    if (!row.pdf_sha256 || !row.page_count) {
+        await upsertLedger(db, ledger, { ...key, status: 'failed', last_error: 'fetched_row_incomplete' });
+        return 'failed';
+    }
+    const docId = row.document_id ?? randomUUID();
+    const storagePath = `${docId}/original.pdf`;
+    try {
+        await upsertLedger(db, ledger, { ...key, document_id: docId });
+        const existingDoc = await db.request(`/documents?select=id&id=eq.${docId}`);
+        if (!existingDoc || existingDoc.length === 0) {
+            await db.insert('documents', [
+                {
+                    id: docId,
+                    owner_id: owner,
+                    title: row.work_title,
+                    storage_path: storagePath,
+                    page_count: row.page_count,
+                },
+            ]);
+        }
+
+        const source = pdObjectPath(row.pdf_sha256, row.filename);
+        if (bytes) {
+            await db.upload(SCORES_BUCKET, storagePath, bytes);
+        } else if (!(await db.copy(PD_BUCKET, source, SCORES_BUCKET, storagePath))) {
+            await db.upload(SCORES_BUCKET, storagePath, await db.download(PD_BUCKET, source));
+        }
 
         await db.insert(
             'score_analyses',
@@ -799,7 +915,7 @@ const ingestFile = async (ctx, work, res, batchId) => {
                     document_id: docId,
                     status: 'queued',
                     storage_path: storagePath,
-                    page_count: pageCount,
+                    page_count: row.page_count,
                     created_by: owner,
                     priority: SEED_JOB_PRIORITY,
                 },
@@ -814,29 +930,39 @@ const ingestFile = async (ctx, work, res, batchId) => {
         await upsertLedger(db, ledger, { ...key, status: 'queued', last_error: null });
         console.log(
             workEvent({
-                workTitle: res.workTitle,
+                workTitle: row.work_title,
                 status: 'queued',
-                origin: res.origin,
-                filename: res.filename,
-                pdfSha256: sha,
+                origin: row.origin,
+                filename: row.filename,
+                pdfSha256: row.pdf_sha256,
             }),
         );
         return 'queued';
     } catch (err) {
         const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
-        const status = message === 'too_large' || message === 'not_pdf' ? 'skipped' : 'failed';
-        await upsertLedger(db, ledger, { ...key, status, last_error: message });
+        // The PDF is in the store; only the enqueue failed. Stay `fetched` so a rerun retries it.
+        await upsertLedger(db, ledger, { ...key, status: 'fetched', last_error: message });
         console.log(
             workEvent({
-                workTitle: res.workTitle,
-                status,
-                origin: res.origin,
-                filename: res.filename,
+                workTitle: row.work_title,
+                status: 'fetched',
+                origin: row.origin,
+                filename: row.filename,
                 reason: message,
             }),
         );
-        return status;
+        return 'failed';
     }
+};
+
+/** Default mode: fetch, then enqueue in the same pass. */
+const ingestFile = async (ctx, work, res, batchId) => {
+    const fetched = await fetchFile(ctx, work, res, batchId);
+    if (fetched.status !== 'fetched') {
+        return fetched.status;
+    }
+    const row = ctx.ledger.get(ledgerKey({ work_title: res.workTitle, origin: res.origin, filename: res.filename }));
+    return enqueueRow(ctx, row, fetched.bytes);
 };
 
 const recordSkip = async (ctx, work, skip, batchId) => {
@@ -973,26 +1099,104 @@ const loadDemand = async (db, owner) => {
 // Main
 // ---------------------------------------------------------------------------
 
+const DEFAULT_LIMIT = 5000;
+
+/** Set by SIGINT / --max-runtime; the loops finish the current file, then stop. */
+let stopReason = null;
+
+const installSignalHandlers = () => {
+    process.on('SIGINT', () => {
+        if (stopReason) {
+            info('second SIGINT — exiting now');
+            process.exit(130);
+        }
+        stopReason = 'sigint';
+        info('SIGINT — finishing the current file, then stopping (press again to abort)');
+    });
+    process.on('SIGTERM', () => {
+        stopReason = stopReason ?? 'sigterm';
+    });
+};
+
+const shouldStop = (deadlineMs) => {
+    if (!stopReason && deadlineMs && Date.now() >= deadlineMs) {
+        stopReason = 'max_runtime';
+    }
+    return stopReason;
+};
+
+/** Heartbeat: ledger counts plus this run's pace and an ETA to the floor. */
+const heartbeat = (ledger, { target, batchId, mode, attempted, startedAt }) => {
+    const counts = ledgerCounts(ledger);
+    const covered = coveredWorkCount(ledger.values());
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const remaining = Math.max(0, target - covered);
+    const perWork = attempted > 0 ? elapsed / attempted : null;
+    return progressEvent({
+        ...counts,
+        target,
+        batchId,
+        mode,
+        covered,
+        attempted,
+        elapsed_s: Math.round(elapsed),
+        eta_s: perWork === null ? null : Math.round(remaining * perWork),
+    });
+};
+
+/** `--enqueue-fetched`: every `fetched` ledger row → document + job. */
+const enqueueFetched = async (ctx, args, startedAt, deadlineMs) => {
+    const rows = [...ctx.ledger.values()].filter((row) => row.status === 'fetched');
+    info(`enqueue: ${rows.length} fetched ledger rows`);
+    let batchId = Math.max(0, ...[...ctx.ledger.values()].map((r) => Number(r.batch_id ?? 0))) + 1;
+    let done = 0;
+    for (const row of rows) {
+        if (shouldStop(deadlineMs)) {
+            break;
+        }
+        if (done > 0 && done % args.batch === 0) {
+            console.log(
+                heartbeat(ctx.ledger, { target: rows.length, batchId, mode: 'enqueue', attempted: done, startedAt }),
+            );
+            batchId += 1;
+            if (await isPaused(ctx.db)) {
+                info('paused between batches — stopping');
+                break;
+            }
+        }
+        await enqueueRow(ctx, row);
+        done += 1;
+    }
+    console.log(heartbeat(ctx.ledger, { target: rows.length, batchId, mode: 'enqueue', attempted: done, startedAt }));
+    if (stopReason) {
+        info(`stopped (${stopReason}) after ${done}/${rows.length} rows; rerun to continue`);
+    }
+};
+
 const main = async () => {
     const args = parseArgs(process.argv.slice(2));
+    const mode = args.enqueueFetched ? 'enqueue' : args.fetchOnly ? 'fetch' : args.dryRun ? 'dry-run' : 'seed';
+    const needsOwner = mode === 'enqueue' || mode === 'seed';
     const owner = process.env.CORPUS_OWNER_USER_ID ?? null;
-    if (!args.dryRun && !owner) {
-        die('CORPUS_OWNER_USER_ID is required (auth.users id of the corpus owner)');
+    if (needsOwner && !owner) {
+        die('CORPUS_OWNER_USER_ID is required (auth.users id of the corpus owner) — or use --fetch-only');
     }
+
+    const startedAt = Date.now();
+    const deadlineMs = args.maxRuntimeMs ? startedAt + args.maxRuntimeMs : null;
+    installSignalHandlers();
 
     const supabase = resolveTarget();
     const db = makeDb(supabase);
     const cache = makeCache(args.cacheDir);
-    info(
-        `target ${supabase.label}${args.dryRun ? ' — dry run (no downloads, no writes)' : ''}; sources ${args.sources.join(',')}`,
-    );
+    info(`mode ${mode}; target ${supabase.label}; sources ${args.sources.join(',')}`);
 
     let ledger = new Map();
     let dbReachable = true;
     try {
         ledger = await loadLedger(db);
     } catch (err) {
-        if (!args.dryRun) {
+        if (mode !== 'dry-run') {
             throw err;
         }
         dbReachable = false;
@@ -1002,14 +1206,14 @@ const main = async () => {
     if (dbReachable) {
         if (await isPaused(db)) {
             info('playalong_corpus_control.paused is true — nothing to do');
-            console.log(progressEvent({ ...ledgerCounts(ledger), target: args.limit ?? 0 }));
+            console.log(progressEvent({ ...ledgerCounts(ledger), target: args.limit ?? DEFAULT_LIMIT, mode }));
             return;
         }
         const reconciled = await reconcileLedger(db, ledger);
         if (reconciled > 0) {
             info(`reconciled ${reconciled} queued ledger rows`);
         }
-        if (!args.dryRun) {
+        if (needsOwner) {
             await ensureOwnerPlan(db, owner, { ensure: args.ensureOwnerPlan });
         }
     }
@@ -1027,6 +1231,12 @@ const main = async () => {
         openscore: [],
         zips: new Map(),
     };
+
+    if (mode === 'enqueue') {
+        await enqueueFetched(ctx, args, startedAt, deadlineMs);
+        return;
+    }
+
     if (ctx.sources.includes('mutopia')) {
         ctx.mutopia = await loadMutopiaIndex(cache);
         info(`mutopia index: ${ctx.mutopia.length} pieces`);
@@ -1063,11 +1273,20 @@ const main = async () => {
         ({ demand, corpusUse } = await loadDemand(db, owner));
         info(`demand: ${demand.size} imported titles, ${corpusUse.size} corpus titles`);
     }
-    const ranked = rankWorks({ popular: POPULAR_WORKS, pins, catalog: catalogWorks, demand, corpusUse });
-    const target = args.limit ?? ranked.filter((w) => w.tier === 0).length;
-    info(`ranked ${ranked.length} works (${ranked.filter((w) => w.tier === 0).length} tier 0); target ${target}`);
+    // Hard cap: the ranking is cut at --limit (default 5000); nothing past it is looked at.
+    const target = args.limit ?? DEFAULT_LIMIT;
+    const rankedAll = rankWorks({ popular: POPULAR_WORKS, pins, catalog: catalogWorks, demand, corpusUse });
+    const ranked = rankedAll.slice(0, target);
+    info(
+        `ranked ${rankedAll.length} works (${rankedAll.filter((w) => w.tier === 0).length} tier 0); ` +
+            `cap ${target}; ${coveredWorkCount(ledger.values())} already covered`,
+    );
 
     const rowsFor = (title) => [...ledger.values()].filter((row) => row.work_title === title);
+    // In fetch mode a `fetched` row is finished; only the default pass takes it further.
+    const rowIsOpen = (row) =>
+        shouldProcess(row, { retrySkipped: args.retrySkipped }).process &&
+        !(mode === 'fetch' && row.status === 'fetched');
     const plans = new Map();
     const maxBatch = Math.max(0, ...[...ledger.values()].map((r) => Number(r.batch_id ?? 0)));
     let batchId = maxBatch + 1;
@@ -1075,13 +1294,16 @@ const main = async () => {
     let attempted = 0;
 
     for (const work of ranked) {
+        if (shouldStop(deadlineMs)) {
+            break;
+        }
         // Dry runs write nothing, so the floor is "works planned" instead.
-        if (args.dryRun ? attempted >= target : coveredWorkCount(ledger.values()) >= target) {
+        if (mode === 'dry-run' ? attempted >= target : coveredWorkCount(ledger.values()) >= target) {
             break;
         }
         const rows = rowsFor(work.title);
         const covered = rows.some((row) => ['queued', 'ready', 'fetched'].includes(row.status));
-        const retryable = rows.filter((row) => shouldProcess(row, { retrySkipped: args.retrySkipped }).process);
+        const retryable = rows.filter(rowIsOpen);
         if (covered && retryable.length === 0) {
             continue;
         }
@@ -1091,7 +1313,7 @@ const main = async () => {
         }
 
         if (processedInBatch >= args.batch) {
-            console.log(progressEvent({ ...ledgerCounts(ledger), target, batchId }));
+            console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
             batchId += 1;
             processedInBatch = 0;
             if (dbReachable && (await isPaused(db))) {
@@ -1105,7 +1327,7 @@ const main = async () => {
         const plan = await resolveWork(ctx, work);
         plans.set(work.title, plan);
 
-        if (args.dryRun) {
+        if (mode === 'dry-run') {
             for (const res of plan.queue) {
                 console.log(
                     workEvent({
@@ -1129,22 +1351,35 @@ const main = async () => {
                 await recordSkip(ctx, work, { origin: 'none', filename: '-', reason: 'no_source' }, batchId);
             }
             for (const res of plan.queue) {
+                if (shouldStop(deadlineMs)) {
+                    break;
+                }
                 const existing = ledger.get(
                     ledgerKey({ work_title: res.workTitle, origin: res.origin, filename: res.filename }),
                 );
-                if (existing && !shouldProcess(existing, { retrySkipped: args.retrySkipped }).process) {
+                if (existing && !rowIsOpen(existing)) {
                     continue;
                 }
-                await ingestFile(ctx, work, res, batchId);
+                if (mode === 'fetch') {
+                    await fetchFile(ctx, work, res, batchId);
+                } else if (existing?.status === 'fetched') {
+                    // Already in the store from a --fetch-only pass: no second download.
+                    await enqueueRow(ctx, existing);
+                } else {
+                    await ingestFile(ctx, work, res, batchId);
+                }
             }
         }
-        if (args.sleepMs > 0) {
+        if (args.sleepMs > 0 && !stopReason) {
             await sleep(args.sleepMs);
         }
     }
 
-    console.log(progressEvent({ ...ledgerCounts(ledger), target, batchId }));
-    if (args.dryRun) {
+    console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
+    if (stopReason) {
+        info(`stopped (${stopReason}) after ${attempted} works this run; ledger is consistent — rerun to resume`);
+    }
+    if (mode === 'dry-run') {
         const popularTitles = [...new Set(POPULAR_WORKS.map((w) => w.title))];
         const pinTitles = [...new Set(pins.map((p) => p.title))];
         console.log(

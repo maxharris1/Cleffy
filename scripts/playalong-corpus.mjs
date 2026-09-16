@@ -35,7 +35,8 @@ export const MAX_ATTEMPTS = 3;
 /** Per-work file cap (WTC I is 48 Mutopia pieces; Op.28 is 24). */
 export const MAX_FILES_PER_WORK = 48;
 
-export const MUTOPIA_ORIGIN = 'https://www.mutopiaproject.org';
+/** Overridable so the mode tests can serve RDF + PDF fixtures from a local server. */
+export const MUTOPIA_ORIGIN = process.env.CORPUS_MUTOPIA_ORIGIN ?? 'https://www.mutopiaproject.org';
 export const MUTOPIA_TREE_URL =
     'https://api.github.com/repos/MutopiaProject/MutopiaProject/git/trees/master?recursive=1';
 export const OPENSCORE_REPOS = Object.freeze([
@@ -1434,8 +1435,27 @@ export const coverageByOrigin = (plans, titles) => {
     return out;
 };
 
-export const progressEvent = ({ ready = 0, queued = 0, skipped = 0, failed = 0, target = 0, batchId = null }) =>
-    JSON.stringify({ event: 'corpus_seed', ready, queued, skipped, failed, target, batch_id: batchId });
+export const progressEvent = ({
+    ready = 0,
+    queued = 0,
+    fetched = 0,
+    skipped = 0,
+    failed = 0,
+    target = 0,
+    batchId = null,
+    ...extra
+}) =>
+    JSON.stringify({
+        event: 'corpus_seed',
+        ready,
+        queued,
+        fetched,
+        skipped,
+        failed,
+        target,
+        batch_id: batchId,
+        ...extra,
+    });
 
 export const workEvent = ({ workTitle, status, origin = null, filename = null, pdfSha256 = null, reason = null }) =>
     JSON.stringify({ event: 'corpus_seed', workTitle, status, origin, filename, pdfSha256, reason });
