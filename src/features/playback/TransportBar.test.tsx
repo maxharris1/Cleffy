@@ -90,22 +90,19 @@ describe('TransportBar states', () => {
         expect(screen.getByRole('status')).toHaveTextContent('Analyzing score… 2 / 2 pages');
     });
 
-    it('tells a queued job apart from one being analyzed', () => {
-        const { unmount } = renderBar({ state: { kind: 'pending' } });
-        expect(screen.getByRole('status')).toHaveTextContent(/in queue/i);
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued');
-        unmount();
-
-        renderBar({ state: { kind: 'processing', progress: null } });
-        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
+    it('shows a still-pending job as a waiting line, not a stage', () => {
+        renderBar({ state: { kind: 'pending' } });
+        expect(screen.getByRole('status')).toHaveTextContent('Waiting for an analysis slot…');
+        expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
+        expect(screen.queryByRole('listitem')).not.toBeInTheDocument();
     });
 
-    it('starts the wait at the IMSLP download for a score that was just imported', () => {
-        renderBar({ state: { kind: 'pending' }, fromImslp: true });
+    it('steps the running analysis from Analyzing to Ready — no download or queue step', () => {
+        renderBar({ state: { kind: 'processing', progress: null } });
+        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
         const steps = screen.getAllByRole('listitem').map((item) => item.textContent?.trim());
-        expect(steps).toEqual(['Download', 'Queued', 'Analyzing', 'Ready']);
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued');
+        expect(steps).toEqual(['Analyzing', 'Ready']);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
     });
 
     it('shows no progress indicator once the analysis is ready', () => {

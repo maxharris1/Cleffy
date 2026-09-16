@@ -6,40 +6,26 @@ import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 afterEach(cleanup);
 
 const stepLabels = () =>
-    within(screen.getByRole('list', { name: /preparing your score/i }))
+    within(screen.getByRole('list', { name: /preparing your play-along/i }))
         .getAllByRole('listitem')
         .map((item) => item.textContent?.trim());
 
 const currentStep = () =>
-    within(screen.getByRole('list', { name: /preparing your score/i }))
+    within(screen.getByRole('list', { name: /preparing your play-along/i }))
         .getAllByRole('listitem')
         .find((item) => item.getAttribute('aria-current') === 'step')
         ?.textContent?.trim();
 
 describe('PlayAlongProgress', () => {
-    it('starts at the queue for scores that did not come from IMSLP', () => {
-        render(<PlayAlongProgress stage="queued" />);
-        expect(stepLabels()).toEqual(['Queued', 'Analyzing', 'Ready']);
-        expect(currentStep()).toBe('Queued');
-        expect(screen.getByRole('status')).toHaveTextContent('In queue — waiting for an analysis slot.');
-    });
-
-    it('adds the IMSLP download as the first step for imported scores', () => {
-        render(<PlayAlongProgress stage="downloading" fromImslp />);
-        expect(stepLabels()).toEqual(['Download', 'Queued', 'Analyzing', 'Ready']);
-        expect(currentStep()).toBe('Download');
-        expect(screen.getByRole('status')).toHaveTextContent('Downloading from IMSLP…');
-    });
-
-    it('says queued without inventing a position', () => {
-        render(<PlayAlongProgress stage="queued" fromImslp />);
-        expect(screen.getByRole('status')).toHaveTextContent(/in queue/i);
-        expect(screen.getByRole('status')).not.toHaveTextContent(/#|\d/);
+    it('covers the running analysis only: analyzing, then ready — no queue step', () => {
+        render(<PlayAlongProgress stage="analyzing" />);
+        expect(stepLabels()).toEqual(['Analyzing', 'Ready']);
+        expect(currentStep()).toBe('Analyzing');
+        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
     });
 
     it('reports page progress while analyzing, only once there is some', () => {
         const { unmount } = render(<PlayAlongProgress stage="analyzing" progress={3} pageCount={12} />);
-        expect(currentStep()).toBe('Analyzing');
         expect(screen.getByRole('status')).toHaveTextContent('Analyzing score… 3 / 12 pages');
         unmount();
 

@@ -1,36 +1,25 @@
 /**
- * Where a score is on its way to a play-along. The IMSLP download step is
- * only shown for scores that came through Find on IMSLP; everything else
- * starts at the queue. Queue position is not exposed to the client, so the
- * queued stage says so in words rather than inventing a number.
+ * The score page's view of a running analysis: analyzing → ready. Getting
+ * the score and waiting in the queue happen before the score opens (the
+ * IMSLP panel shows those), so neither is a stage here.
  */
-export type PlayAlongStage = 'downloading' | 'queued' | 'analyzing' | 'ready';
+export type PlayAlongStage = 'analyzing' | 'ready';
 
 export interface PlayAlongProgressProps {
     stage: PlayAlongStage;
-    /** Include the IMSLP download step (scores added via Find on IMSLP). */
-    fromImslp?: boolean;
     /** Pages processed so far, while analyzing. */
     progress?: number | null;
     pageCount?: number | null;
-    /** Centered in the transport; left-aligned under a form. */
-    align?: 'center' | 'start';
     className?: string;
 }
 
 const STEPS: readonly { stage: PlayAlongStage; label: string }[] = [
-    { stage: 'downloading', label: 'Download' },
-    { stage: 'queued', label: 'Queued' },
     { stage: 'analyzing', label: 'Analyzing' },
     { stage: 'ready', label: 'Ready' },
 ];
 
 const statusText = (props: PlayAlongProgressProps): string => {
     switch (props.stage) {
-        case 'downloading':
-            return 'Downloading from IMSLP…';
-        case 'queued':
-            return 'In queue — waiting for an analysis slot.';
         case 'analyzing': {
             const progress = props.progress ?? null;
             const pages =
@@ -49,18 +38,15 @@ const statusText = (props: PlayAlongProgressProps): string => {
 };
 
 export const PlayAlongProgress = (props: PlayAlongProgressProps) => {
-    const { stage, fromImslp = false, align = 'center', className = '' } = props;
-    const steps = STEPS.filter((step) => fromImslp || step.stage !== 'downloading');
-    const currentIndex = steps.findIndex((step) => step.stage === stage);
+    const { stage, className = '' } = props;
+    const currentIndex = STEPS.findIndex((step) => step.stage === stage);
     return (
         <div
-            className={['flex flex-col gap-1', align === 'center' ? 'items-center' : 'items-start', className]
-                .filter(Boolean)
-                .join(' ')}
+            className={`flex flex-col items-center gap-1${className ? ` ${className}` : ''}`}
             data-testid="play-along-progress"
         >
-            <ol aria-label="Preparing your score" className="flex items-center gap-1.5">
-                {steps.map((step, index) => {
+            <ol aria-label="Preparing your play-along" className="flex items-center gap-1.5">
+                {STEPS.map((step, index) => {
                     const done = index < currentIndex;
                     const current = index === currentIndex;
                     return (
@@ -79,7 +65,7 @@ export const PlayAlongProgress = (props: PlayAlongProgressProps) => {
                             <span className={current ? 'text-accent' : done ? 'text-stone-600' : 'text-stone-400'}>
                                 {step.label}
                             </span>
-                            {index < steps.length - 1 ? (
+                            {index < STEPS.length - 1 ? (
                                 <span
                                     aria-hidden="true"
                                     className={`h-px w-4 ${done ? 'bg-accent' : 'bg-stone-300'}`}

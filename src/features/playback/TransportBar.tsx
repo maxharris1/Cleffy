@@ -2,10 +2,10 @@ import { useMemo, useState } from 'react';
 
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { Era } from '@/features/playback/era';
+import { analysisErrorText } from '@/features/playback/analysisErrorCopy';
 import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
 import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
-import { SourceAttribution } from '@/features/playback/SourceAttribution';
 import { SourceBadge } from '@/features/playback/SourceBadge';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import { BPM_MAX, BPM_MIN, useViewerStore } from '@/state/store';
@@ -42,26 +42,7 @@ export interface TransportBarProps {
     onDismissWarning: () => void;
     /** Live document title, so an era-stamped analysis can go stale on rename. */
     documentTitle?: string | null;
-    /** The score was just added via Find on IMSLP, so the wait started with that download. */
-    fromImslp?: boolean;
 }
-
-const ERROR_COPY: Record<string, string> = {
-    too_large: 'This score is too long to analyze (60-page limit).',
-    page_count_unknown: 'Page count is missing — reopen the score so we can measure it, then try Generate again.',
-    no_staves_found: "Couldn't find readable music in this PDF.",
-    omr_timeout: 'Analysis took too long and was stopped.',
-    omr_crash: 'The music-recognition engine crashed on this score.',
-    musicxml_parse_failed: 'The recognized music could not be converted.',
-    queue_full: 'The analysis service is busy — try again in a few minutes.',
-    backlog_full: 'You already have several scores analyzing — try Generate again shortly.',
-    rate_limited: 'Too many analysis requests in a short time — wait a minute, then try again.',
-    service_unreachable: 'The analysis service is not reachable right now.',
-    download_failed: 'The PDF could not be fetched for analysis.',
-    worker_lost: 'The analysis was interrupted and will retry automatically.',
-    stale: 'The analysis was interrupted.',
-    internal: 'Something went wrong during analysis.',
-};
 
 /** Pass markers for a bar performed more than once (a repeat). */
 const ORDINAL: Record<number, string> = { 1: ' (1st)', 2: ' (2nd)', 3: ' (3rd)', 4: ' (4th)' };
@@ -193,7 +174,10 @@ const StaleAnalysisNotice = (props: {
     canManage: boolean;
     onGenerate: () => void;
 }) => {
-    if (!props.canManage || !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })) {
+    if (
+        !props.canManage ||
+        !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })
+    ) {
         return null;
     }
     return (
@@ -259,7 +243,7 @@ export const TransportBar = (props: TransportBarProps) => {
     );
 };
 
-const StatusRow = ({ state, role, onGenerate, pageCount, fromImslp = false }: TransportBarProps) => {
+const StatusRow = ({ state, role, onGenerate, pageCount }: TransportBarProps) => {
     const canManage = role === 'owner' || role === 'editor';
     if (state.kind === 'none') {
         return (
@@ -275,15 +259,22 @@ const StatusRow = ({ state, role, onGenerate, pageCount, fromImslp = false }: Tr
             </div>
         );
     }
-    if (state.kind === 'pending' || state.kind === 'processing') {
-        // pending = an omr_jobs row is waiting for a worker; processing = one
-        // has claimed it. The reader sees "queued" vs "analyzing" so a busy
-        // queue never reads as a hung analysis.
+    if (state.kind === 'pending') {
+        // The queue is normally waited out on the IMSLP panel before the
+        // score opens; this is only seen on a reload or direct link while an
+        // omr_jobs row is still unclaimed, so it is a line, not a stage.
+        return (
+            <div className="flex min-h-9 items-center justify-center gap-2 text-sm text-stone-500">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+                <span role="status">Waiting for an analysis slot…</span>
+            </div>
+        );
+    }
+    if (state.kind === 'processing') {
         return (
             <PlayAlongProgress
-                stage={state.kind === 'processing' ? 'analyzing' : 'queued'}
-                fromImslp={fromImslp}
-                progress={state.kind === 'processing' ? state.progress : null}
+                stage="analyzing"
+                progress={state.progress}
                 pageCount={pageCount}
                 className="min-h-9 justify-center py-1"
             />
@@ -293,7 +284,7 @@ const StatusRow = ({ state, role, onGenerate, pageCount, fromImslp = false }: Tr
     const code = state.kind === 'failed' ? state.code : 'internal';
     return (
         <div className="flex min-h-9 flex-wrap items-center justify-center gap-3 text-sm">
-            <span className="text-stone-600">{ERROR_COPY[code] ?? ERROR_COPY['internal']}</span>
+            <span className="text-stone-600">{analysisErrorText(code)}</span>
             {canManage ? (
                 <button type="button" onClick={onGenerate} className={pillButton(false)}>
                     <RetryIcon size={14} />
@@ -454,9 +445,6 @@ const ReadyTransport = (props: TransportBarProps & { score: ScoreData }) => {
                 onGenerate={props.onGenerate}
             />
             <ScoreWarnings warnings={score.warnings} />
-            {props.state.kind === 'ready' && props.state.source ? (
-                <SourceAttribution source={props.state.source} />
-            ) : null}
 
             {loopRange ? (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/30 bg-accent-soft/50 px-2 py-1">
