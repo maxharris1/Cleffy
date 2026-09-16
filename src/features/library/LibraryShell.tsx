@@ -12,6 +12,7 @@ import {
     readCachedLibraryList,
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
+import { requestScoreAnalysis, waitForAnalysisToLeaveQueue } from '@/features/playback/scoreAnalysisService';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -28,6 +29,21 @@ const PricingDialog = lazy(() =>
     import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
 );
 
+/**
+ * Where an IMSLP import is, after the PDF has landed: the analysis was
+ * requested and an omr_jobs row is waiting for a worker. (`downloading` is
+ * the caller's own initial stage; the shell only reports what comes after.)
+ */
+export type ImslpImportStage = 'queued';
+
+export type ImslpImportResult =
+    | {
+          ok: true;
+          /** The score was added but analysis could not start; the shell did not navigate. */
+          analysisFailed?: { code: string; documentId: string };
+      }
+    | { ok: false; openUrl: string; message: string };
+
 export type LibraryOutletContext = {
     userId: string;
     uploadPct: number | null;
@@ -37,7 +53,8 @@ export type LibraryOutletContext = {
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
-    ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
+        onStage?: (stage: ImslpImportStage) => void,
+    ) => Promise<ImslpImportResult>;
     uploadError: string | null;
     clearUploadError: () => void;
     /** Set when the server refused for quota reasons rather than a real failure. */
@@ -183,7 +200,18 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
-    const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
+    /**
+     * IMSLP import is the one path that analyzes without a Generate click:
+     * the reader asked for this score to play along with, so the queue is
+     * waited out here, on the panel, and the score opens once a worker has
+     * it (or after a short cap). Uploads are unchanged — Generate only.
+     */
+    const onImportImslp = async (
+        filename: string,
+        workTitle: string,
+        acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpImportStage) => void,
+    ): Promise<ImslpImportResult> => {
         clearErrors();
         // The Edge function fetches server-side, so there is no byte progress
         // to report — show the indeterminate bar instead of a stuck 0%.
@@ -193,14 +221,23 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer);
             if (!result.ok) {
                 return {
-                    ok: false as const,
+                    ok: false,
                     openUrl: result.fallback.openUrl,
                     message: result.fallback.message,
                 };
             }
             rememberNewScore(before, result.document);
-            navigate(`/doc/${result.document.id}`);
-            return { ok: true as const };
+            const documentId = result.document.id;
+            const analysis = await requestScoreAnalysis(documentId);
+            if (!analysis.ok) {
+                // Same codes and copy as Retry on the score page; the panel
+                // shows them beside a link to the score, where Generate waits.
+                return { ok: true, analysisFailed: { code: analysis.code ?? 'internal', documentId } };
+            }
+            onStage?.('queued');
+            await waitForAnalysisToLeaveQueue(documentId);
+            navigate(`/doc/${documentId}`);
+            return { ok: true };
         } catch (err) {
             captureFailure(err, 'Import failed.');
             throw err;

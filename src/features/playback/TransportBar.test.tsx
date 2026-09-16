@@ -90,21 +90,19 @@ describe('TransportBar states', () => {
         expect(screen.getByRole('status')).toHaveTextContent('Analyzing score… 2 / 2 pages');
     });
 
-    it('tells a queued job apart from one being analyzed', () => {
-        const { unmount } = renderBar({ state: { kind: 'pending' } });
-        expect(screen.getByRole('status')).toHaveTextContent(/in queue/i);
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued');
-        unmount();
-
-        renderBar({ state: { kind: 'processing', progress: null } });
-        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
-        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
+    it('shows a still-pending job as a waiting line, not a stage', () => {
+        renderBar({ state: { kind: 'pending' } });
+        expect(screen.getByRole('status')).toHaveTextContent('Waiting for an analysis slot…');
+        expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
+        expect(screen.queryByRole('listitem')).not.toBeInTheDocument();
     });
 
-    it('tracks the analysis only — no IMSLP download step on the score page', () => {
-        renderBar({ state: { kind: 'pending' } });
+    it('steps the running analysis from Analyzing to Ready — no download or queue step', () => {
+        renderBar({ state: { kind: 'processing', progress: null } });
+        expect(screen.getByRole('status')).toHaveTextContent('Analyzing score…');
         const steps = screen.getAllByRole('listitem').map((item) => item.textContent?.trim());
-        expect(steps).toEqual(['Queued', 'Analyzing', 'Ready']);
+        expect(steps).toEqual(['Analyzing', 'Ready']);
+        expect(screen.getByRole('listitem', { current: 'step' })).toHaveTextContent('Analyzing');
     });
 
     it('shows no progress indicator once the analysis is ready', () => {

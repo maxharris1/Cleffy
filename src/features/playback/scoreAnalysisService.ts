@@ -129,6 +129,33 @@ export const fetchScoreAnalysisStatus = async (docId: string): Promise<ScoreAnal
     return { status: data.status, error: data.error, progress: data.progress, updatedAt: data.updated_at };
 };
 
+/** How long an IMSLP import waits on its panel for a worker before opening the score anyway. */
+export const QUEUE_WAIT_CAP_MS = 20_000;
+const QUEUE_POLL_MS = 2_000;
+
+/**
+ * Resolve once the analysis row is no longer `pending` (a worker claimed it,
+ * it finished, or it failed), or after `capMs` so nobody is parked on the
+ * panel behind a slow queue. Status reads are lifecycle columns only; a
+ * transient read error just waits for the next tick.
+ */
+export const waitForAnalysisToLeaveQueue = async (
+    docId: string,
+    { capMs = QUEUE_WAIT_CAP_MS, intervalMs = QUEUE_POLL_MS }: { capMs?: number; intervalMs?: number } = {},
+): Promise<ScoreAnalysisStatus | null> => {
+    const deadline = Date.now() + capMs;
+    for (;;) {
+        const status = await fetchScoreAnalysisStatus(docId).catch(() => null);
+        if (status && status.status !== 'pending') {
+            return status.status;
+        }
+        if (Date.now() >= deadline) {
+            return status?.status ?? null;
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, deadline - Date.now())));
+    }
+};
+
 /** Full row (including ScoreData), validated and mirrored into the Dexie cache. */
 export const fetchScoreAnalysisFull = async (docId: string): Promise<CachedScoreAnalysis | null> => {
     const { data, error } = await getSupabase()

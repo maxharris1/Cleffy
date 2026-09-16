@@ -378,7 +378,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         {analysisInFlight ? (
                             <span
                                 aria-hidden="true"
-                                title={analysisState.kind === 'pending' ? 'Queued for analysis…' : 'Analyzing score…'}
+                                title={
+                                    analysisState.kind === 'pending'
+                                        ? 'Waiting for an analysis slot…'
+                                        : 'Analyzing score…'
+                                }
                                 className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-accent"
                             />
                         ) : null}

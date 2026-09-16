@@ -1,10 +1,9 @@
 /**
- * Where a requested play-along is on its way: queued → analyzing → ready.
- * Analysis only — the IMSLP download has its own affordance on the work
- * panel. Queue position is not exposed to the client, so the queued stage
- * says so in words rather than inventing a number.
+ * The score page's view of a running analysis: analyzing → ready. Getting
+ * the score and waiting in the queue happen before the score opens (the
+ * IMSLP panel shows those), so neither is a stage here.
  */
-export type PlayAlongStage = 'queued' | 'analyzing' | 'ready';
+export type PlayAlongStage = 'analyzing' | 'ready';
 
 export interface PlayAlongProgressProps {
     stage: PlayAlongStage;
@@ -15,15 +14,12 @@ export interface PlayAlongProgressProps {
 }
 
 const STEPS: readonly { stage: PlayAlongStage; label: string }[] = [
-    { stage: 'queued', label: 'Queued' },
     { stage: 'analyzing', label: 'Analyzing' },
     { stage: 'ready', label: 'Ready' },
 ];
 
 const statusText = (props: PlayAlongProgressProps): string => {
     switch (props.stage) {
-        case 'queued':
-            return 'In queue — waiting for an analysis slot.';
         case 'analyzing': {
             const progress = props.progress ?? null;
             const pages =

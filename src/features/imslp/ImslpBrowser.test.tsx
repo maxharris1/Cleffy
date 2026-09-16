@@ -470,12 +470,12 @@ describe('ImslpBrowser', () => {
         expect(importButton).toBeEnabled();
         await userEvent.click(importButton);
         await waitFor(() => {
-            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true);
+            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true, expect.any(Function));
         });
     });
 
-    it('shows a compact downloading spinner on the import button while IMSLP is fetched', async () => {
-        const { screen, waitFor } = await import('@testing-library/react');
+    it('shows the wait on the panel: Downloading from IMSLP, then Queued for analysis, then gone', async () => {
+        const { screen, waitFor, within } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
@@ -486,33 +486,73 @@ describe('ImslpBrowser', () => {
             editions: [edition('nocturnes.pdf')],
         };
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        let stage: ((s: 'queued') => void) | undefined;
         let finish: (value: { ok: true }) => void = () => undefined;
         const onImportImslp = vi.fn(
-            () =>
+            (_f: string, _t: string, _a: boolean, onStage?: (s: 'queued') => void) =>
                 new Promise<{ ok: true }>((resolve) => {
+                    stage = onStage;
                     finish = resolve;
                 }),
         );
 
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
         await screen.findByText('Choose a PDF edition');
-        const importButton = screen.getByRole('button', { name: 'Add to my library' });
-        expect(importButton.querySelector('svg')).toBeNull();
-        expect(importButton).not.toHaveAttribute('aria-busy');
+        expect(screen.queryByTestId('imslp-import-progress')).not.toBeInTheDocument();
 
         await userEvent.click(screen.getByRole('checkbox'));
-        await userEvent.click(importButton);
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
 
-        const downloading = await screen.findByRole('button', { name: 'Downloading from IMSLP…' });
-        expect(downloading).toBeDisabled();
-        expect(downloading).toHaveAttribute('aria-busy', 'true');
-        expect(downloading.querySelector('svg')).not.toBeNull();
-        // The analysis stepper belongs to the score page, never to the search.
+        // Stage 1: the PDF is coming down.
+        const card = await screen.findByTestId('imslp-import-progress');
+        expect(card).toHaveTextContent('Preparing Nocturnes, Op.9');
+        const steps = () => within(card).getAllByRole('listitem').map((li) => li.textContent?.trim());
+        expect(steps()).toEqual(['Downloading from IMSLP', 'Queued for analysis']);
+        expect(within(card).getByRole('listitem', { current: 'step' })).toHaveTextContent('Downloading from IMSLP');
+        expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Downloading from IMSLP…' })).toHaveAttribute('aria-busy', 'true');
+
+        // Stage 2: analysis requested, waiting for a worker — still on this panel.
+        stage?.('queued');
+        await waitFor(() =>
+            expect(within(card).getByRole('listitem', { current: 'step' })).toHaveTextContent('Queued for analysis'),
+        );
+        expect(card).toHaveTextContent(/waiting for an analysis slot/i);
+        expect(card).not.toHaveTextContent(/#|\d slot/);
+        expect(screen.getByRole('button', { name: 'Queued for analysis…' })).toBeDisabled();
+        // The score page's analysis indicator never appears on the search surface.
         expect(screen.queryByTestId('play-along-progress')).not.toBeInTheDocument();
 
         finish({ ok: true });
-        await waitFor(() => expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled());
-        expect(screen.getByRole('button', { name: 'Add to my library' }).querySelector('svg')).toBeNull();
+        await waitFor(() => expect(screen.queryByTestId('imslp-import-progress')).not.toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled();
+    });
+
+    it('explains a rate-limited auto-analysis on the panel and links to the score', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('nocturnes.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi
+            .fn()
+            .mockResolvedValue({ ok: true, analysisFailed: { code: 'rate_limited', documentId: 'doc-42' } });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+        await userEvent.click(screen.getByRole('checkbox'));
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+
+        const notice = await screen.findByText(/is in your library, but the play-along could not start/i);
+        expect(notice.parentElement).toHaveTextContent(/too many analysis requests in a short time/i);
+        expect(screen.getByRole('link', { name: 'Open score' })).toHaveAttribute('href', '/doc/doc-42');
+        expect(screen.queryByTestId('imslp-import-progress')).not.toBeInTheDocument();
     });
 
     it('shows the guidance state when every edition is restricted', async () => {

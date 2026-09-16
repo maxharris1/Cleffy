@@ -12,6 +12,7 @@ import {
     isProcessingStale,
     requestScoreAnalysis,
     saveBpmOverride,
+    waitForAnalysisToLeaveQueue,
 } from '@/features/playback/scoreAnalysisService';
 import { getDb } from '@/sync/db';
 
@@ -166,6 +167,29 @@ describe('fetchScoreAnalysisFull', () => {
 
         fake.row = readyRow;
         expect((await fetchScoreAnalysisFull(DOC))?.corpusHit).toBeUndefined();
+    });
+});
+
+describe('waitForAnalysisToLeaveQueue', () => {
+    it('returns as soon as the row is no longer pending', async () => {
+        fake.row = { status: 'pending', error: null, progress: null, updated_at: 'now' };
+        setTimeout(() => {
+            fake.row = { status: 'processing', error: null, progress: 1, updated_at: 'now' };
+        }, 15);
+        const start = Date.now();
+        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 5, capMs: 5_000 })).toBe('processing');
+        expect(Date.now() - start).toBeLessThan(1_000);
+    });
+
+    it('gives up at the cap while still pending, and shrugs off read errors', async () => {
+        fake.row = { status: 'pending', error: null, progress: null, updated_at: 'now' };
+        const start = Date.now();
+        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 5, capMs: 40 })).toBe('pending');
+        expect(Date.now() - start).toBeGreaterThanOrEqual(35);
+
+        fake.row = null;
+        fake.selectError = { message: 'offline' };
+        expect(await waitForAnalysisToLeaveQueue(DOC, { intervalMs: 5, capMs: 20 })).toBeNull();
     });
 });
 
