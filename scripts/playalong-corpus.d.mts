@@ -186,8 +186,11 @@ export function imslpResolution(
 export type ImslpDownloadStep =
     | { action: 'accept' }
     | { action: 'cdn'; url: string }
-    | { action: 'circuit'; code: 'bot_check' }
+    | { action: 'circuit'; code: 'bot_check' | 'ripping_ban' }
     | { action: 'fail'; code: string };
+export const IMSLP_RIPPING_BAN_MARKERS: readonly string[];
+export function isImslpRippingBan(input?: { status?: number | null; body?: string | Uint8Array | null }): boolean;
+export function classifyImslpResponse(status: number | null | undefined, bytes: Uint8Array): ImslpDownloadStep;
 export function nextImslpDownloadStep(bytes: Uint8Array): ImslpDownloadStep;
 export function retryAfterMs(
     header: string | null | undefined,

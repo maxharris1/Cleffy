@@ -10,7 +10,10 @@
  * api.php, crawl-delay 2s). `--source imslp` is opt-in and last: one file at
  * a time, wait-page → CDN parse (same as live `tryDownloadPdf`), no 15s sleep
  * unless `--imslp-wait`. Bot-check / MTCaptcha / Retry-After trip a circuit
- * breaker that auto-pauses `playalong_corpus_control`.
+ * breaker that auto-pauses the IMSLP source (`imslp_paused_until`). A ripping-ban
+ * 403 pauses that source for 24h on the first hit and stops ImagefromIndex
+ * requests; Mutopia / OpenScore / IA keep running. Live `tryDownloadPdf` is
+ * unchanged.
  *
  * Usage:
  *   npm run corpus:seed -- --dry-run
@@ -106,7 +109,8 @@ import {
     monthlyAverageViews,
     mutopiaPiecesFromTree,
     mutopiaResolution,
-    nextImslpDownloadStep,
+    classifyImslpResponse,
+    isImslpRippingBan,
     openscoreResolution,
     openscoreWorkMatches,
     openscoreWorksFromTree,
@@ -407,13 +411,17 @@ const imslpFetchBytes = async (url, accept) => {
         },
         signal: AbortSignal.timeout(HTTP_TIMEOUT_MS * 3),
     });
-    if (!res.ok) {
+    const bytes = Buffer.from(await res.arrayBuffer());
+    // 403 must reach the ripping-ban classifier. Throwing here used to record
+    // a per-file fail and keep walking ImagefromIndex (which refreshes the ban).
+    if (!res.ok && res.status !== 403) {
         throw new HttpError(res.status, url, res.headers.get('Retry-After'));
     }
     return {
-        bytes: Buffer.from(await res.arrayBuffer()),
+        bytes,
         contentType: res.headers.get('content-type'),
         finalUrl: res.url,
+        status: res.status,
     };
 };
 
@@ -422,7 +430,9 @@ const imslpFetchBytes = async (url, accept) => {
  * no 15s sleep unless `--imslp-wait`. A 429 is retried once after its full
  * Retry-After; a second 429, a bot check, MTCaptcha or a disclaimer wall hands
  * the outcome to the breaker (15 min → 1 h → 6 h, then a 24 h source pause).
- * Never a tight loop: a wall ends this download at once.
+ * A ripping-ban 403 pauses the IMSLP source for 24h on the first hit and does
+ * not request ImagefromIndex again. Never a tight loop: a wall ends this
+ * download at once.
  */
 const downloadImslpPdf = async (ctx, filename) => {
     const wall = (code, detail) => new ImslpCircuitOpen(code, filename, ctx.imslpBreaker.recordBlock(code, detail));
@@ -449,7 +459,7 @@ const downloadImslpPdf = async (ctx, filename) => {
 
     const openUrl = imslpImagefromIndexUrl(filename);
     const page = await get(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*');
-    const step = nextImslpDownloadStep(page.bytes);
+    const step = classifyImslpResponse(page.status, page.bytes);
     switch (step.action) {
         case 'accept':
             ctx.imslpBreaker.recordSuccess();
@@ -461,6 +471,9 @@ const downloadImslpPdf = async (ctx, filename) => {
                 await sleep(ctx.imslpWaitMs);
             }
             const pdf = await get(step.url, 'application/pdf,*/*');
+            if (isImslpRippingBan({ status: pdf.status, body: pdf.bytes })) {
+                throw wall('ripping_ban', `${pdf.finalUrl}`);
+            }
             const classified = classifyDownloadBody(pdf.bytes, pdf.contentType);
             if (classified.ok) {
                 ctx.imslpBreaker.recordSuccess();

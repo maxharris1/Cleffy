@@ -3,8 +3,12 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { nextImslpDownloadStep, retryAfterMs } from '../../scripts/playalong-corpus.mjs';
-import { extractCdnUrlFromWaitPage, looksLikePdf } from '../../supabase/functions/_shared/imslpWaitPage';
+import { classifyImslpResponse, nextImslpDownloadStep, retryAfterMs } from '../../scripts/playalong-corpus.mjs';
+import {
+    classifyDownloadBody,
+    extractCdnUrlFromWaitPage,
+    looksLikePdf,
+} from '../../supabase/functions/_shared/imslpWaitPage';
 
 /**
  * Wait-page → CDN parse used by live `tryDownloadPdf` and the corpus seed.
@@ -51,9 +55,9 @@ describe('nextImslpDownloadStep', () => {
         const cdn = 'https://cdn.imslp.org/files/imglnks/usimg/1/11/score.pdf';
         expect(nextImslpDownloadStep(bytesOf(waitPage(cdn)))).toEqual({ action: 'cdn', url: cdn });
 
-        expect(
-            nextImslpDownloadStep(bytesOf('<html><title>IMSLP - Bot Check</title><p>mtcaptcha</p></html>')),
-        ).toEqual({ action: 'circuit', code: 'bot_check' });
+        expect(nextImslpDownloadStep(bytesOf('<html><title>IMSLP - Bot Check</title><p>mtcaptcha</p></html>'))).toEqual(
+            { action: 'circuit', code: 'bot_check' },
+        );
         expect(nextImslpDownloadStep(bytesOf('<html>friendlytest bot wall</html>'))).toEqual({
             action: 'circuit',
             code: 'bot_check',
@@ -65,6 +69,21 @@ describe('nextImslpDownloadStep', () => {
         expect(nextImslpDownloadStep(bytesOf('<html>no pdf here</html>'))).toEqual({
             action: 'fail',
             code: 'not_pdf',
+        });
+        const rippingBan =
+            '<html>You have reached this message because the site ripping ban script has been triggered. Site ripping is forbidden. Please do not reload this page often, because every reload refreshes the ban length.</html>';
+        expect(nextImslpDownloadStep(bytesOf(rippingBan))).toEqual({
+            action: 'circuit',
+            code: 'ripping_ban',
+        });
+        expect(classifyImslpResponse(403, bytesOf(rippingBan))).toEqual({
+            action: 'circuit',
+            code: 'ripping_ban',
+        });
+        // Live classifyDownloadBody is unchanged: ripping-ban HTML is still a bot wall there.
+        expect(classifyDownloadBody(bytesOf(rippingBan), 'text/html; charset=UTF-8')).toEqual({
+            ok: false,
+            code: 'bot_check',
         });
     });
 

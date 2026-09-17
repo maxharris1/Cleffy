@@ -1126,14 +1126,68 @@ export const imslpResolution = (work, editions, licences) => {
 };
 
 /**
+ * IMSLP's own nginx "site ripping ban script" (HTTP 403 HTML on ImagefromIndex).
+ * Distinct from the wait page, a PDF, and the MTCaptcha / friendlytest wall.
+ * Seed-only: live `tryDownloadPdf` / `classifyDownloadBody` do not use this.
+ */
+export const IMSLP_RIPPING_BAN_MARKERS = Object.freeze([
+    'site ripping ban',
+    'ripping ban script',
+    'site ripping is forbidden',
+    'every reload refreshes the ban',
+]);
+
+const utf8Body = (body) => {
+    if (body == null) {
+        return '';
+    }
+    if (typeof body === 'string') {
+        return body;
+    }
+    return Buffer.from(body).toString('utf8');
+};
+
+/**
+ * True for an ImagefromIndex (or CDN) response that is IMSLP's ripping ban.
+ * HTTP 403 is enough — further GETs refresh the ban length. The known ban
+ * HTML is also enough, even on 200, so a status-blind body still trips.
+ *
+ * @param {{ status?: number | null, body?: string | Uint8Array | null }} [input]
+ */
+export const isImslpRippingBan = ({ status = null, body = '' } = {}) => {
+    if (status === 403) {
+        return true;
+    }
+    const lower = utf8Body(body).toLowerCase();
+    return IMSLP_RIPPING_BAN_MARKERS.some((marker) => lower.includes(marker));
+};
+
+/**
+ * Seed-only classifier for one IMSLP file GET. 403 / ripping-ban HTML is a
+ * circuit-break (`ripping_ban`); otherwise the same wait-page → CDN step as
+ * live `tryDownloadPdf`. Not used by the Edge download.
+ *
+ * @param {number | null | undefined} status
+ * @param {Uint8Array} bytes
+ * @returns {{ action: 'accept' } | { action: 'cdn', url: string } | { action: 'circuit', code: 'bot_check' | 'ripping_ban' } | { action: 'fail', code: string }}
+ */
+export const classifyImslpResponse = (status, bytes) => {
+    if (isImslpRippingBan({ status, body: bytes })) {
+        return { action: 'circuit', code: 'ripping_ban' };
+    }
+    return nextImslpDownloadStep(bytes);
+};
+
+/**
  * Decide what to do with an ImagefromIndex response. Same order as live
- * `tryDownloadPdf`: accept a PDF immediately; treat bot-check / MTCaptcha as
- * a circuit-breaker; otherwise parse `#sm_dl_wait[data-id]` for the CDN URL.
- * Wait-page HTML is not classified as `bot_check` (that helper treats all HTML
- * as a bot wall, which would skip the CDN parse).
+ * `tryDownloadPdf`: accept a PDF immediately; treat ripping-ban HTML and
+ * bot-check / MTCaptcha as a circuit-breaker; otherwise parse
+ * `#sm_dl_wait[data-id]` for the CDN URL. Wait-page HTML is not classified
+ * as `bot_check` (that helper treats all HTML as a bot wall, which would
+ * skip the CDN parse). HTTP 403 is handled by `classifyImslpResponse`.
  *
  * @param {Uint8Array} bytes
- * @returns {{ action: 'accept' } | { action: 'cdn', url: string } | { action: 'circuit', code: 'bot_check' } | { action: 'fail', code: string }}
+ * @returns {{ action: 'accept' } | { action: 'cdn', url: string } | { action: 'circuit', code: 'bot_check' | 'ripping_ban' } | { action: 'fail', code: string }}
  */
 export const nextImslpDownloadStep = (bytes) => {
     if (bytes.length > MAX_PDF_BYTES) {
@@ -1144,6 +1198,9 @@ export const nextImslpDownloadStep = (bytes) => {
     }
     const html = Buffer.from(bytes).toString('utf8');
     const lower = html.toLowerCase();
+    if (isImslpRippingBan({ body: lower })) {
+        return { action: 'circuit', code: 'ripping_ban' };
+    }
     // A friendlyredirect / MTCaptcha wall never carries the wait span; check that first so a
     // genuine wait page (~19 kB of chrome before `sm_dl_wait`) is never mistaken for a wall.
     if (
@@ -1189,8 +1246,11 @@ export const IMSLP_AUTO_PAUSE_MS = 24 * 60 * 60_000;
  * schedule can be tested without a clock. A block backs the source off for
  * IMSLP_BACKOFF_MS[n-1]; the IMSLP_PAUSE_AFTER-th consecutive block pauses it
  * for IMSLP_AUTO_PAUSE_MS (the CLI writes that to playalong_corpus_control).
- * Any successful download resets the streak. Never a tight loop: while parked,
- * `available()` is false and the caller must not hit the network.
+ * `ripping_ban` skips the ladder and pauses for 24h on the first hit — further
+ * ImagefromIndex GETs refresh IMSLP's ban. Any successful download resets the
+ * streak. Never a tight loop: while parked, `available()` is false and the
+ * caller must not hit the network. Mutopia / OpenScore / IA are not this
+ * breaker; they keep running.
  */
 export const createImslpBreaker = ({
     now = Date.now,
@@ -1210,9 +1270,12 @@ export const createImslpBreaker = ({
         recordBlock: (code, detail = '') => {
             state.consecutiveBlocks += 1;
             const n = state.consecutiveBlocks;
-            if (n >= pauseAfter) {
+            const immediatePause = code === 'ripping_ban';
+            if (immediatePause || n >= pauseAfter) {
                 state.paused = true;
-                state.pauseReason = `${code} x${n}${detail ? `: ${detail}` : ''}`;
+                state.pauseReason = immediatePause
+                    ? `${code}${detail ? `: ${detail}` : ''}`
+                    : `${code} x${n}${detail ? `: ${detail}` : ''}`;
                 state.parkedUntil = now() + pauseMs;
                 return { paused: true, parkedUntil: state.parkedUntil, delayMs: pauseMs, reason: state.pauseReason };
             }
