@@ -144,7 +144,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Violin Concerto',
-        title: 'Violin Concerto, Op.61 (Beethoven, Ludwig van)',
+        title: 'Violin Concerto in D major, Op.61 (Beethoven, Ludwig van)',
         composer: 'Beethoven',
         composerCategory: 'Beethoven, Ludwig van',
         instrument: 'violin',
@@ -174,7 +174,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     // ——— Bach (~12) ———
     w({
         label: 'Prelude in C major (WTC I)',
-        title: 'The Well-Tempered Clavier I, BWV 846–869 (Bach, Johann Sebastian)',
+        title: 'Das wohltemperierte Klavier I, BWV 846-869 (Bach, Johann Sebastian)',
         composer: 'Bach',
         composerCategory: 'Bach, Johann Sebastian',
         instrument: 'piano',
@@ -257,7 +257,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Goldberg Variations',
-        title: 'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)',
+        title: 'Goldberg-Variationen, BWV 988 (Bach, Johann Sebastian)',
         composer: 'Bach',
         composerCategory: 'Bach, Johann Sebastian',
         instrument: 'piano',
@@ -266,7 +266,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Invention No.1',
-        title: '15 Inventions, BWV 772–786 (Bach, Johann Sebastian)',
+        title: '15 Inventions, BWV 772-786 (Bach, Johann Sebastian)',
         composer: 'Bach',
         composerCategory: 'Bach, Johann Sebastian',
         instrument: 'piano',
@@ -296,7 +296,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     // ——— Mozart (~10) ———
     w({
         label: 'Rondo Alla Turca',
-        title: 'Piano Sonata No.11, K.331/300i (Mozart, Wolfgang Amadeus)',
+        title: 'Piano Sonata No.11 in A major, K.331/300i (Mozart, Wolfgang Amadeus)',
         composer: 'Mozart',
         composerCategory: 'Mozart, Wolfgang Amadeus',
         instrument: 'piano',
@@ -306,7 +306,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Eine kleine Nachtmusik',
-        title: 'Serenade in G major, K.525 (Mozart, Wolfgang Amadeus)',
+        title: 'Eine kleine Nachtmusik, K.525 (Mozart, Wolfgang Amadeus)',
         composer: 'Mozart',
         composerCategory: 'Mozart, Wolfgang Amadeus',
         era: 'classical',
@@ -518,7 +518,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     // ——— Schubert (~8) ———
     w({
         label: 'Ave Maria',
-        title: 'Ellens Gesang III, D.839 (Schubert, Franz)',
+        title: 'Ave Maria, D.839 (Schubert, Franz)',
         composer: 'Schubert',
         composerCategory: 'Schubert, Franz',
         instrument: 'voice',
@@ -536,7 +536,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Impromptu Op.90 No.3',
-        title: '4 Impromptus, D.899 (Op.90) (Schubert, Franz)',
+        title: '4 Impromptus, D.899 (Schubert, Franz)',
         composer: 'Schubert',
         composerCategory: 'Schubert, Franz',
         instrument: 'piano',
@@ -545,7 +545,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Moment Musical No.3',
-        title: '6 Moments musicaux, D.780 (Op.94) (Schubert, Franz)',
+        title: 'Moments musicaux, D.780 (Schubert, Franz)',
         composer: 'Schubert',
         composerCategory: 'Schubert, Franz',
         instrument: 'piano',
@@ -574,7 +574,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Unfinished Symphony',
-        title: 'Symphony No.8 in B minor, D.759 (Schubert, Franz)',
+        title: 'Symphony No.8, D.759 (Schubert, Franz)',
         composer: 'Schubert',
         composerCategory: 'Schubert, Franz',
         instrument: 'orchestra',
@@ -595,7 +595,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     // ——— Tchaikovsky (~8) ———
     w({
         label: 'Swan Lake',
-        title: 'Swan Lake, Op.20 (Tchaikovsky, Pyotr)',
+        title: 'Swan Lake (ballet), Op.20 (Tchaikovsky, Pyotr)',
         composer: 'Tchaikovsky',
         composerCategory: 'Tchaikovsky, Pyotr',
         form: 'ballet',
@@ -605,7 +605,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'The Nutcracker',
-        title: 'The Nutcracker, Op.71 (Tchaikovsky, Pyotr)',
+        title: 'The Nutcracker (ballet), Op.71 (Tchaikovsky, Pyotr)',
         composer: 'Tchaikovsky',
         composerCategory: 'Tchaikovsky, Pyotr',
         form: 'ballet',
@@ -615,7 +615,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Sleeping Beauty',
-        title: 'The Sleeping Beauty, Op.66 (Tchaikovsky, Pyotr)',
+        title: 'The Sleeping Beauty (ballet), Op.66 (Tchaikovsky, Pyotr)',
         composer: 'Tchaikovsky',
         composerCategory: 'Tchaikovsky, Pyotr',
         form: 'ballet',
@@ -665,7 +665,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: '1812 Overture',
-        title: 'The Year 1812, Op.49 (Tchaikovsky, Pyotr)',
+        title: '1812 Overture, Op.49 (Tchaikovsky, Pyotr)',
         composer: 'Tchaikovsky',
         composerCategory: 'Tchaikovsky, Pyotr',
         instrument: 'orchestra',
@@ -694,7 +694,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'La fille aux cheveux de lin',
-        title: 'Préludes (Book 1), CD 125 (Debussy, Claude)',
+        title: 'Préludes, Livre 1, CD 125 (Debussy, Claude)',
         composer: 'Debussy',
         composerCategory: 'Debussy, Claude',
         instrument: 'piano',
@@ -752,7 +752,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     // ——— Brahms (~8) ———
     w({
         label: 'Brahms Lullaby',
-        title: 'Wiegenlied, Op.49 No.4 (Brahms, Johannes)',
+        title: '5 Lieder, Op.49 (Brahms, Johannes)',
         composer: 'Brahms',
         composerCategory: 'Brahms, Johannes',
         instrument: 'voice',
@@ -761,7 +761,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Hungarian Dance No.5',
-        title: '21 Hungarian Dances, WoO 1 (Brahms, Johannes)',
+        title: '21 Hungarian Dances (Piano), WoO 1 (Brahms, Johannes)',
         composer: 'Brahms',
         composerCategory: 'Brahms, Johannes',
         instrument: 'piano',
@@ -996,14 +996,14 @@ export const POPULAR_WORKS: PopularWork[] = [
         note: 'Mandolin · RV 425',
     }),
     w({
-        label: 'Cello Concerto RV 40',
-        title: 'Cello Concerto in A minor, RV 40 (Vivaldi, Antonio)',
+        label: 'Cello Sonata RV 40',
+        title: 'Cello Sonata in E minor, RV 40 (Vivaldi, Antonio)',
         composer: 'Vivaldi',
         composerCategory: 'Vivaldi, Antonio',
         instrument: 'cello',
-        form: 'concerto',
+        form: 'sonata',
         era: 'baroque',
-        key: 'a-minor',
+        key: 'e-minor',
         note: 'Cello · RV 40',
     }),
 
@@ -1037,7 +1037,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Lascia ch’io pianga',
-        title: 'Rinaldo, HWV 7 (Handel, George Frideric)',
+        title: 'Rinaldo, HWV 7a (Handel, George Frideric)',
         composer: 'Handel',
         composerCategory: 'Handel, George Frideric',
         form: 'opera',
@@ -1058,7 +1058,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     // ——— Haydn (~5) ———
     w({
         label: 'Surprise Symphony',
-        title: 'Symphony No.94 in G major (Haydn, Joseph)',
+        title: 'Symphony No.94 in G major, Hob.I:94 (Haydn, Joseph)',
         composer: 'Haydn',
         composerCategory: 'Haydn, Joseph',
         instrument: 'orchestra',
@@ -1069,7 +1069,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Clock Symphony',
-        title: 'Symphony No.101 in D major (Haydn, Joseph)',
+        title: 'Symphony No.101 in D major, Hob.I:101 (Haydn, Joseph)',
         composer: 'Haydn',
         composerCategory: 'Haydn, Joseph',
         instrument: 'orchestra',
@@ -1089,7 +1089,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'String Quartet Op.76 No.3 Emperor',
-        title: 'String Quartet in C major, Op.76 No.3 (Haydn, Joseph)',
+        title: 'String Quartet in C major, Hob.III:77 (Haydn, Joseph)',
         composer: 'Haydn',
         composerCategory: 'Haydn, Joseph',
         era: 'classical',
@@ -1215,7 +1215,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Gnossienne No.1',
-        title: '3 Gnossiennes (Satie, Erik)',
+        title: 'Gnossiennes (Satie, Erik)',
         composer: 'Satie',
         composerCategory: 'Satie, Erik',
         instrument: 'piano',
@@ -1224,7 +1224,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Minuet in G',
-        title: 'Minuet in G major, BWV Anh.114 (Petzold, Christian)',
+        title: 'Minuet in G major, BWV Anh.114 (Pezold, Christian)',
         composer: 'Petzold / Bach',
         instrument: 'piano',
         era: 'baroque',
@@ -1250,7 +1250,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Flight of the Bumblebee',
-        title: 'The Tale of Tsar Saltan (Rimsky-Korsakov, Nikolay)',
+        title: 'The Tale of Tsar Saltan (opera) (Rimsky-Korsakov, Nikolay)',
         composer: 'Rimsky-Korsakov',
         form: 'opera',
         era: 'romantic',
@@ -1258,7 +1258,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Prelude in C-sharp minor',
-        title: 'Prelude in C-sharp minor, Op.3 No.2 (Rachmaninoff, Sergei)',
+        title: 'Morceaux de fantaisie, Op.3 (Rachmaninoff, Sergei)',
         composer: 'Rachmaninoff',
         composerCategory: 'Rachmaninoff, Sergei',
         instrument: 'piano',
@@ -1289,7 +1289,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Wedding March',
-        title: "A Midsummer Night's Dream, Op.61 (Mendelssohn, Felix)",
+        title: "A Midsummer Night's Dream, incidental music, Op.61 (Mendelssohn, Felix)",
         composer: 'Mendelssohn',
         composerCategory: 'Mendelssohn, Felix',
         instrument: 'orchestra',
@@ -1307,7 +1307,7 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
     w({
         label: 'Violin Concerto Op.64',
-        title: 'Violin Concerto in E minor, Op.64 (Mendelssohn, Felix)',
+        title: 'Violin Concerto, Op.64 (Mendelssohn, Felix)',
         composer: 'Mendelssohn',
         composerCategory: 'Mendelssohn, Felix',
         instrument: 'violin',
@@ -1344,22 +1344,22 @@ export const WORK_ALIASES: WorkAlias[] = [
     { keys: ['emperor concerto'], title: 'Piano Concerto No.5, Op.73 (Beethoven, Ludwig van)' },
     {
         keys: ['well tempered clavier', 'well-tempered clavier', 'wtc'],
-        title: 'The Well-Tempered Clavier I, BWV 846–869 (Bach, Johann Sebastian)',
+        title: 'Das wohltemperierte Klavier I, BWV 846-869 (Bach, Johann Sebastian)',
     },
     { keys: ['jesu joy'], title: 'Herz und Mund und Tat und Leben, BWV 147 (Bach, Johann Sebastian)' },
     { keys: ['toccata and fugue'], title: 'Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)' },
-    { keys: ['goldberg'], title: 'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)' },
+    { keys: ['goldberg'], title: 'Goldberg-Variationen, BWV 988 (Bach, Johann Sebastian)' },
     {
         keys: ['air on the g string', 'air on g string'],
         title: 'Orchestral Suite No.3 in D major, BWV 1068 (Bach, Johann Sebastian)',
     },
     {
         keys: ['alla turca', 'turkish march'],
-        title: 'Piano Sonata No.11, K.331/300i (Mozart, Wolfgang Amadeus)',
+        title: 'Piano Sonata No.11 in A major, K.331/300i (Mozart, Wolfgang Amadeus)',
     },
     {
         keys: ['eine kleine', 'nachtmusik'],
-        title: 'Serenade in G major, K.525 (Mozart, Wolfgang Amadeus)',
+        title: 'Eine kleine Nachtmusik, K.525 (Mozart, Wolfgang Amadeus)',
     },
     { keys: ['jupiter symphony'], title: 'Symphony No.41 in C major, K.551 (Mozart, Wolfgang Amadeus)' },
     { keys: ['elvira madigan'], title: 'Piano Concerto No.21 in C major, K.467 (Mozart, Wolfgang Amadeus)' },
@@ -1373,37 +1373,37 @@ export const WORK_ALIASES: WorkAlias[] = [
     { keys: ['minute waltz'], title: 'Waltzes, Op.64 (Chopin, Frédéric)' },
     { keys: ['heroic polonaise'], title: 'Polonaise in A-flat major, Op.53 (Chopin, Frédéric)' },
     { keys: ['funeral march'], title: 'Piano Sonata No.2, Op.35 (Chopin, Frédéric)' },
-    { keys: ['ave maria schubert', 'ellens gesang'], title: 'Ellens Gesang III, D.839 (Schubert, Franz)' },
+    { keys: ['ave maria schubert', 'ellens gesang'], title: 'Ave Maria, D.839 (Schubert, Franz)' },
     { keys: ['trout quintet', 'trout'], title: 'Piano Quintet in A major, D.667 (Schubert, Franz)' },
-    { keys: ['unfinished symphony'], title: 'Symphony No.8 in B minor, D.759 (Schubert, Franz)' },
+    { keys: ['unfinished symphony'], title: 'Symphony No.8, D.759 (Schubert, Franz)' },
     { keys: ['erlkonig', 'erlking'], title: 'Erlkönig, D.328 (Schubert, Franz)' },
-    { keys: ['swan lake'], title: 'Swan Lake, Op.20 (Tchaikovsky, Pyotr)' },
-    { keys: ['nutcracker'], title: 'The Nutcracker, Op.71 (Tchaikovsky, Pyotr)' },
-    { keys: ['sleeping beauty'], title: 'The Sleeping Beauty, Op.66 (Tchaikovsky, Pyotr)' },
-    { keys: ['1812'], title: 'The Year 1812, Op.49 (Tchaikovsky, Pyotr)' },
+    { keys: ['swan lake'], title: 'Swan Lake (ballet), Op.20 (Tchaikovsky, Pyotr)' },
+    { keys: ['nutcracker'], title: 'The Nutcracker (ballet), Op.71 (Tchaikovsky, Pyotr)' },
+    { keys: ['sleeping beauty'], title: 'The Sleeping Beauty (ballet), Op.66 (Tchaikovsky, Pyotr)' },
+    { keys: ['1812'], title: '1812 Overture, Op.49 (Tchaikovsky, Pyotr)' },
     { keys: ['clair de lune', 'clairdelune'], title: 'Suite bergamasque, CD 82 (Debussy, Claude)' },
-    { keys: ['lullaby', 'wiegenlied'], title: 'Wiegenlied, Op.49 No.4 (Brahms, Johannes)' },
+    { keys: ['lullaby', 'wiegenlied'], title: '5 Lieder, Op.49 (Brahms, Johannes)' },
     { keys: ['liebestraum'], title: 'Liebesträume, S.541 (Liszt, Franz)' },
     { keys: ['hungarian rhapsody'], title: 'Hungarian Rhapsody No.2, S.244/2 (Liszt, Franz)' },
     { keys: ['la campanella', 'campanella'], title: 'Grandes études de Paganini, S.141 (Liszt, Franz)' },
     { keys: ['traumerei', 'dreaming'], title: 'Kinderszenen, Op.15 (Schumann, Robert)' },
     { keys: ['four seasons', 'quattro stagioni', 'vivaldi spring'], title: 'Le quattro stagioni (Vivaldi, Antonio)' },
     { keys: ['hallelujah'], title: 'Messiah, HWV 56 (Handel, George Frideric)' },
-    { keys: ['surprise symphony'], title: 'Symphony No.94 in G major (Haydn, Joseph)' },
+    { keys: ['surprise symphony'], title: 'Symphony No.94 in G major, Hob.I:94 (Haydn, Joseph)' },
     { keys: ['bolero'], title: 'Boléro, M.81 (Ravel, Maurice)' },
     { keys: ['entertainer'], title: 'The Entertainer (Joplin, Scott)' },
     { keys: ['maple leaf'], title: 'Maple Leaf Rag (Joplin, Scott)' },
     { keys: ['canon in d', 'pachelbel canon'], title: 'Canon and Gigue in D major, P.37 (Pachelbel, Johann)' },
     { keys: ['gymnopedie'], title: '3 Gymnopédies (Satie, Erik)' },
-    { keys: ['gnossienne'], title: '3 Gnossiennes (Satie, Erik)' },
+    { keys: ['gnossienne'], title: 'Gnossiennes (Satie, Erik)' },
     { keys: ['nimrod', 'enigma'], title: "Variations on an Original Theme 'Enigma', Op.36 (Elgar, Edward)" },
     { keys: ['blue danube', 'donau'], title: 'An der schönen blauen Donau, Op.314 (Strauss Jr., Johann)' },
-    { keys: ['bumblebee'], title: 'The Tale of Tsar Saltan (Rimsky-Korsakov, Nikolay)' },
+    { keys: ['bumblebee'], title: 'The Tale of Tsar Saltan (opera) (Rimsky-Korsakov, Nikolay)' },
     {
         keys: ['prelude in c sharp minor', 'prelude in c-sharp minor'],
-        title: 'Prelude in C-sharp minor, Op.3 No.2 (Rachmaninoff, Sergei)',
+        title: 'Morceaux de fantaisie, Op.3 (Rachmaninoff, Sergei)',
     },
     { keys: ['rach 2', 'rach2'], title: 'Piano Concerto No.2, Op.18 (Rachmaninoff, Sergei)' },
     { keys: ['rach 3', 'rach3'], title: 'Piano Concerto No.3, Op.30 (Rachmaninoff, Sergei)' },
-    { keys: ['wedding march'], title: "A Midsummer Night's Dream, Op.61 (Mendelssohn, Felix)" },
+    { keys: ['wedding march'], title: "A Midsummer Night's Dream, incidental music, Op.61 (Mendelssohn, Felix)" },
 ];
