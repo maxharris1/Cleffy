@@ -11,6 +11,7 @@ import {
     stripFilePrefix,
     workPageUrl,
 } from '../_shared/imslp.ts';
+import { fileBlockKey, parseImslpFileBlocks, type ImslpFileMeta } from '../_shared/imslpFileBlocks.ts';
 import {
     LICENSE_TTL_MS,
     classifyLicense,
@@ -20,7 +21,7 @@ import {
     type ImslpLicenseClass,
 } from '../_shared/imslpLicense.ts';
 
-interface Edition {
+interface Edition extends ImslpFileMeta {
     filename: string;
     size: number | null;
     mime: string | null;
@@ -30,6 +31,8 @@ interface Edition {
     restriction: string | null;
     downloadable: boolean;
 }
+
+const NO_FILE_META: ImslpFileMeta = { publisher: null, year: null, plate: null, urtext: false, description: null };
 
 interface LicenseRow {
     filename: string;
@@ -147,15 +150,27 @@ Deno.serve(async (req) => {
     }
 
     try {
+        // The wikitext rides along with the image list: its #fte:imslpfile
+        // blocks are the only place IMSLP states each PDF's publisher and
+        // {{Urtext}} tag.
         const imagesData = (await mwFetch({
             action: 'query',
             titles: title,
-            prop: 'images',
+            prop: 'images|revisions',
             imlimit: '500',
+            rvprop: 'content',
             redirects: '1',
         })) as {
             query?: {
-                pages?: Record<string, { missing?: boolean; title?: string; images?: Array<{ title: string }> }>;
+                pages?: Record<
+                    string,
+                    {
+                        missing?: boolean;
+                        title?: string;
+                        images?: Array<{ title: string }>;
+                        revisions?: Array<{ '*'?: string }>;
+                    }
+                >;
             };
         };
 
@@ -168,6 +183,9 @@ Deno.serve(async (req) => {
             .map((img) => img.title)
             .filter(isPdfFileTitle)
             .map(stripFilePrefix);
+
+        const fileMeta = parseImslpFileBlocks(page.revisions?.[0]?.['*'] ?? '');
+        const metaFields = (filename: string): ImslpFileMeta => fileMeta.get(fileBlockKey(filename)) ?? NO_FILE_META;
 
         const { licenses, source: licenseSource } = await resolveLicenses(page.title ?? title, pdfTitles);
         const licenseFields = (filename: string): Pick<Edition, 'license' | 'licenseLabel' | 'restriction' | 'downloadable'> => {
@@ -231,6 +249,7 @@ Deno.serve(async (req) => {
                     mime: info?.mime ?? null,
                     openUrl: imagefromIndexUrl(filename),
                     ...licenseFields(filename),
+                    ...metaFields(filename),
                 });
             }
         }
