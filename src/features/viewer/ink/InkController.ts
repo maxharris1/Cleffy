@@ -14,6 +14,7 @@ import {
 } from '@/features/viewer/ink/strokeRenderer';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import type { InkDelegate } from '@/features/viewer/ink/GestureController';
+import { onMusicFontReady } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
@@ -107,6 +108,12 @@ export class InkController {
         this.unsubscribes = [
             opts.store.subscribe((pageIndex) => this.repaintPage(pageIndex)),
             opts.registry.onRegister((pageIndex) => this.repaintPage(pageIndex)),
+            // Converted symbols were drawn as fallback text until the music face arrived.
+            onMusicFontReady(() => {
+                for (const pageIndex of opts.registry.pageIndices()) {
+                    this.repaintPage(pageIndex);
+                }
+            }),
         ];
     }
 

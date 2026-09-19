@@ -4,6 +4,18 @@
 @import '@fontsource-variable/instrument-sans/wght.css';
 @import 'tailwindcss';
 
+/*
+ * SMuFL music-text face for converted handwriting (dynamics, accents,
+ * fermatas). Steinberg's unmodified Bravura Text (SIL OFL 1.1 — see
+ * public/fonts/BravuraText-LICENSE.txt). Not precached: it is only fetched
+ * once a converted symbol needs drawing, then kept by the service worker.
+ */
+@font-face {
+    font-family: 'Bravura Text';
+    src: url('/fonts/BravuraText.woff2') format('woff2');
+    font-display: block;
+}
+
 @theme {
     --font-display: 'Bodoni Moda Variable', ui-serif, Georgia, 'Times New Roman', serif;
     --font-sans: 'Instrument Sans Variable', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;

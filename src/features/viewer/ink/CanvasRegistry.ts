@@ -27,6 +27,11 @@ export class CanvasRegistry {
         return this.pages.get(pageIndex);
     }
 
+    /** Pages currently mounted with canvases (whole-document repaints). */
+    pageIndices(): number[] {
+        return [...this.pages.keys()];
+    }
+
     /** Notified after a page's canvases (re)register — repaint hook. */
     onRegister(listener: (pageIndex: number) => void): () => void {
         this.listeners.add(listener);

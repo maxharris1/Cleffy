@@ -1,4 +1,4 @@
-import { measureInkText, SYSTEM_FONT_FAMILY, textPayloadForInk, type FontSpec } from '@/features/import/textFit';
+import { measureInkText, textPayloadForInk, type FontSpec } from '@/features/import/textFit';
 import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
 import {
     groupBboxNormalized,
@@ -9,6 +9,7 @@ import {
 } from '@/features/viewer/ink/handwriting/grouper';
 import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
+import { ensureMusicFontLoaded, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { isTextPayload, type Annotation } from '@/types/models';
 
@@ -31,9 +32,23 @@ export interface HandwritingControllerOptions {
     cancel?: GrouperOptions['cancel'];
 }
 
-/** Font the print is measured and drawn in, by what was recognized. */
-export const fontForRecognition = (recognition: Recognition): FontSpec =>
-    recognition.kind === 'symbol' ? { family: SYSTEM_FONT_FAMILY, style: 'italic' } : { family: SYSTEM_FONT_FAMILY };
+/**
+ * Font the print is measured in — the same choice the renderer makes for an
+ * `hw` payload, so the sized text lands where the ink was. Music-font
+ * symbols wait for the face so their real metrics (not a fallback's) are
+ * measured.
+ */
+export const fontForRecognition = async (recognition: Recognition): Promise<{ font: FontSpec; text: string }> => {
+    const spec = textDrawSpec(recognition.text, true);
+    if (spec.music) {
+        const loaded = await ensureMusicFontLoaded();
+        if (loaded) {
+            return { font: { family: spec.family, style: spec.style }, text: spec.glyphs };
+        }
+        return { font: { family: spec.family, style: 'italic' }, text: recognition.text };
+    }
+    return { font: { family: spec.family, style: spec.style }, text: spec.glyphs };
+};
 
 /**
  * Writer-side handwriting → print pipeline: feeds the local InkController's
@@ -149,7 +164,8 @@ export class HandwritingController {
             }
         }
         const text = recognition.text.trim();
-        const metrics = measureInkText(text, fontForRecognition(recognition));
+        const measured = await fontForRecognition({ ...recognition, text });
+        const metrics = measureInkText(measured.text, measured.font);
         const payload = textPayloadForInk(groupBboxNormalized(group), text, group.aspect, metrics, {
             fitWidth: group.kind === 'line',
             hw: 1,

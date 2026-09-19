@@ -2,7 +2,8 @@
 // Flattens annotations into the PDF off the main thread — pdf-lib chewing a
 // 100 MB scan would freeze the UI (plan §export).
 
-import { BlendMode, degrees, PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+import { BlendMode, degrees, PDFDocument, rgb, StandardFonts, type PDFFont } from 'pdf-lib';
 import { getStroke } from 'perfect-freehand';
 
 import {
@@ -13,6 +14,7 @@ import {
     sanitizeWinAnsi,
     viewportToPdfPoint,
 } from '@/features/export/pdfMapping';
+import { annotationNeedsMusicFont, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import { FREEHAND_OPTIONS, getSvgPathFromStroke, HIGHLIGHT_ALPHA } from '@/features/viewer/ink/strokeRenderer';
 import { isTextPayload, type Annotation } from '@/types/models';
 
@@ -21,11 +23,20 @@ export interface ExportRequest {
     annotations: Annotation[];
     /** When set, keep only this 0-based page in the output PDF. */
     pageIndex?: number;
+    /**
+     * The SMuFL music-text face (WOFF2/OTF bytes), present when a converted
+     * dynamic/mark is among the annotations — embedded (subset) so exported
+     * `mf` matches the screen. Without it such symbols fall back to Helvetica.
+     */
+    musicFont?: ArrayBuffer;
 }
 
 export type ExportResponse = { ok: true; bytes: Uint8Array } | { ok: false; error: string };
 
-const flatten = async ({ bytes, annotations, pageIndex }: ExportRequest): Promise<Uint8Array> => {
+/** Baseline drop (fraction of font size) below the 'top' anchor for the standard faces. */
+const STANDARD_ASCENT = 0.9;
+
+export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: ExportRequest): Promise<Uint8Array> => {
     // Some IMSLP scans are owner-password encrypted; loading still works.
     const source = await PDFDocument.load(bytes, { ignoreEncryption: true });
     const doc =
@@ -41,6 +52,17 @@ const flatten = async ({ bytes, annotations, pageIndex }: ExportRequest): Promis
                   return single;
               })();
     const font = await doc.embedFont(StandardFonts.Helvetica);
+    const italic = await doc.embedFont(StandardFonts.HelveticaOblique);
+    let music: { font: PDFFont; ascent: number } | null = null;
+    if (musicFont && annotations.some(annotationNeedsMusicFont)) {
+        doc.registerFontkit(fontkit);
+        const bytes = new Uint8Array(musicFont);
+        const parsed = fontkit.create(bytes);
+        music = {
+            font: await doc.embedFont(bytes, { subset: true }),
+            ascent: parsed.ascent / parsed.unitsPerEm,
+        };
+    }
     const pages = doc.getPages();
 
     // When exporting a single page, annotation.page still refers to the source
@@ -67,20 +89,27 @@ const flatten = async ({ bytes, annotations, pageIndex }: ExportRequest): Promis
         const color = rgb(r, g, b);
 
         if (isTextPayload(annotation.payload)) {
-            const { x, y, text, size } = annotation.payload;
+            const { x, y, text, size, hw } = annotation.payload;
             const fontPx = size * vw;
-            const lines = sanitizeWinAnsi(text).split('\n');
+            const spec = textDrawSpec(text, hw === 1);
+            // Same face as the screen: music glyphs when the font is embedded,
+            // oblique for italic teaching words, else Helvetica. The baseline
+            // drop follows the chosen face's ascent so tops line up.
+            const useMusic = spec.music && music !== null;
+            const drawFont = useMusic ? music!.font : spec.style === 'italic' ? italic : font;
+            const ascent = useMusic ? music!.ascent : STANDARD_ASCENT;
+            const lines = (useMusic ? spec.glyphs : sanitizeWinAnsi(spec.glyphs)).split('\n');
             lines.forEach((line, i) => {
                 // Anchor each line in DISPLAY space (top-left + baseline drop),
                 // then map — handles every page rotation uniformly.
-                const lineNy = y + ((i * 1.25 + 0.9) * fontPx) / vh;
+                const lineNy = y + ((i * 1.25 + ascent) * fontPx) / vh;
                 const [px, py] = normToPdfPoint(rot, pw, ph, x, lineNy);
                 try {
                     page.drawText(line, {
                         x: px,
                         y: py,
                         size: fontPx,
-                        font,
+                        font: drawFont,
                         color,
                         rotate: degrees(rot),
                     });
