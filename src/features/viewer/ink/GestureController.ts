@@ -36,6 +36,13 @@ export interface InkDelegate {
     onInkMove: (e: PointerEvent) => void;
     onInkUp: (e: PointerEvent) => void;
     onInkCancel: (e: PointerEvent) => void;
+    /**
+     * A two-finger pinch step (distance ratio). Return true to claim it — the
+     * pinch then scales what the ink layer has selected instead of zooming
+     * the page, until `onPinchEnd`.
+     */
+    onPinch?: (factor: number) => boolean;
+    onPinchEnd?: () => void;
 }
 
 interface TrackedPointer {
@@ -81,6 +88,8 @@ export class GestureController {
     /** The active Safari gesture is an iOS touch pinch (pointer path owns it). */
     private touchPinch = false;
     private navigating = false;
+    /** The ink delegate claimed the current two-finger pinch (scaling a selection). */
+    private inkPinch = false;
 
     constructor(el: HTMLElement, callbacks: GestureCallbacks) {
         this.el = el;
@@ -202,9 +211,18 @@ export class GestureController {
                 const prevCenterX = (tracked.x + other.x) / 2;
                 const prevCenterY = (tracked.y + other.y) / 2;
                 if (prevDist > 0 && nextDist > 0) {
-                    this.callbacks.onZoomBy(nextDist / prevDist, centerX, centerY);
+                    const factor = nextDist / prevDist;
+                    // The ink layer may claim the pinch (scaling a selected
+                    // note); once claimed it keeps the whole gesture.
+                    if (this.inkDelegate?.onPinch?.(factor)) {
+                        this.inkPinch = true;
+                    } else if (!this.inkPinch) {
+                        this.callbacks.onZoomBy(factor, centerX, centerY);
+                    }
                 }
-                this.callbacks.onPan(centerX - prevCenterX, centerY - prevCenterY);
+                if (!this.inkPinch) {
+                    this.callbacks.onPan(centerX - prevCenterX, centerY - prevCenterY);
+                }
             }
         } else if (this.pointers.size === 1) {
             // Mouse pans only while a button is held.
@@ -227,6 +245,7 @@ export class GestureController {
         }
         const tracked = this.pointers.get(e.pointerId);
         this.pointers.delete(e.pointerId);
+        this.endInkPinchIfDone();
         if (
             tracked &&
             !tracked.multi &&
@@ -250,11 +269,20 @@ export class GestureController {
             return;
         }
         this.pointers.delete(e.pointerId);
+        this.endInkPinchIfDone();
         if (this.pointers.size === 0 && this.navigating) {
             this.navigating = false;
             this.callbacks.onGestureEnd();
         }
     };
+
+    /** A claimed pinch ends as soon as fewer than two fingers remain. */
+    private endInkPinchIfDone(): void {
+        if (this.inkPinch && this.pointers.size < 2) {
+            this.inkPinch = false;
+            this.inkDelegate?.onPinchEnd?.();
+        }
+    }
 
     private onWheel = (e: WheelEvent): void => {
         e.preventDefault();

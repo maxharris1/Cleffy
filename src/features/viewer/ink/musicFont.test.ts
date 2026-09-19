@@ -44,7 +44,11 @@ describe('textDrawSpec', () => {
     });
 
     it('passes stored SMuFL codepoints (accent, fermata) straight through', () => {
-        expect(textDrawSpec('\uE4A0', true)).toMatchObject({ family: MUSIC_FONT_FAMILY, glyphs: '\uE4A0', music: true });
+        expect(textDrawSpec('\uE4A0', true)).toMatchObject({
+            family: MUSIC_FONT_FAMILY,
+            glyphs: '\uE4A0',
+            music: true,
+        });
     });
 
     it('sets converted teaching words in italics and everything else upright system-ui', () => {

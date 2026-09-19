@@ -1,6 +1,13 @@
 import type { FontSpec } from '@/features/import/textFit';
-import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
-import { isTextPayload, type Annotation } from '@/types/models';
+import {
+    MAX_MUSIC_TEXT_SIZE,
+    MAX_TEXT_SIZE,
+    measureInkText,
+    resetInkTextMetricsCache,
+    SYSTEM_FONT_FAMILY,
+} from '@/features/import/textFit';
+import type { Bbox } from '@/features/viewer/geometry';
+import { isTextPayload, type Annotation, type TextPayload } from '@/types/models';
 
 /**
  * The music-text face for converted handwriting. Typed notes are untouched:
@@ -68,6 +75,41 @@ export const textDrawSpec = (text: string, hw: boolean): TextDrawSpec => {
 export const annotationNeedsMusicFont = (annotation: Annotation): boolean =>
     isTextPayload(annotation.payload) && textDrawSpec(annotation.payload.text, annotation.payload.hw === 1).music;
 
+/** Largest `size` a text may be scaled to: music glyphs fill a fraction of their em, so they get more room. */
+export const maxTextSizeFor = (payload: TextPayload): number =>
+    textDrawSpec(payload.text, payload.hw === 1).music ? MAX_MUSIC_TEXT_SIZE : MAX_TEXT_SIZE;
+
+/** Line pitch as a multiple of the font size (shared by renderer, hit test and export). */
+export const TEXT_LINE_HEIGHT = 1.25;
+
+/**
+ * Visual bounds of a text payload as drawn — measured glyph box, not an
+ * em-per-character guess — in normalized page coords (`aspect` = page height
+ * / width). A converted accent gets an accent-sized box; a typed word gets
+ * the box of its letters.
+ */
+export const textBoundsNorm = (payload: TextPayload, aspect: number): Bbox => {
+    const { x, y, text, size, hw } = payload;
+    const spec = textDrawSpec(text, hw === 1);
+    const lines = spec.glyphs.split('\n');
+    let width = 0;
+    let top = Infinity;
+    let bottom = -Infinity;
+    lines.forEach((line, i) => {
+        const m = measureInkText(line === '' ? ' ' : line, { family: spec.family, style: spec.style });
+        width = Math.max(width, m.widthRatio);
+        const lineTop = i * TEXT_LINE_HEIGHT + m.topInset;
+        top = Math.min(top, lineTop);
+        bottom = Math.max(bottom, lineTop + m.heightRatio);
+    });
+    if (!Number.isFinite(top)) {
+        top = 0;
+        bottom = 1;
+    }
+    // Everything above is in em; scale to page width, then y into page height.
+    return [x, y + (top * size) / aspect, x + width * size, y + (bottom * size) / aspect];
+};
+
 // ---- loading ---------------------------------------------------------------
 
 type FontStatus = 'idle' | 'loading' | 'ready' | 'failed';
@@ -111,6 +153,8 @@ export const ensureMusicFontLoaded = (): Promise<boolean> => {
                 return false;
             }
             status = 'ready';
+            // Measurements taken before the face arrived came from a fallback font.
+            resetInkTextMetricsCache(MUSIC_FONT_FAMILY);
             for (const listener of [...readyListeners]) {
                 listener();
             }

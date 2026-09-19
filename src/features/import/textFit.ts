@@ -152,23 +152,26 @@ export const measureInkText = (text: string, font: FontSpec = { family: SYSTEM_F
         if (ctx) {
             const probePx = 100;
             ctx.font = `${font.style ?? 'normal'} ${probePx}px ${font.family}`;
-            ctx.textBaseline = 'alphabetic';
+            // Measure against the SAME baseline the renderer draws with: the
+            // glyph box then comes back relative to the 'top' anchor itself
+            // (ascent is negative when the ink starts below it), with no
+            // assumption about how the browser derives 'top' from the font's
+            // ascent — Bravura's 1.13 em ascent would otherwise mislead.
+            ctx.textBaseline = 'top';
             const m = ctx.measureText(text);
             const ascent = m.actualBoundingBoxAscent;
             const descent = m.actualBoundingBoxDescent;
-            const emTop = m.fontBoundingBoxAscent;
             const width = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
             if (
                 Number.isFinite(ascent) &&
                 Number.isFinite(descent) &&
-                Number.isFinite(emTop) &&
                 Number.isFinite(width) &&
                 ascent + descent > 0 &&
                 width > 0
             ) {
                 metrics = {
                     heightRatio: (ascent + descent) / probePx,
-                    topInset: (emTop - ascent) / probePx,
+                    topInset: -ascent / probePx,
                     widthRatio: width / probePx,
                 };
             }
@@ -185,9 +188,17 @@ export const measureInkText = (text: string, font: FontSpec = { family: SYSTEM_F
     return metrics;
 };
 
-/** Test hook. */
-export const resetInkTextMetricsCache = (): void => {
-    metricsCache.clear();
+/** Drop cached measurements — all of them, or only those taken in one font family (e.g. once it has loaded). */
+export const resetInkTextMetricsCache = (family?: string): void => {
+    if (family === undefined) {
+        metricsCache.clear();
+        return;
+    }
+    for (const key of [...metricsCache.keys()]) {
+        if (key.split('|')[1] === family) {
+            metricsCache.delete(key);
+        }
+    }
 };
 
 /**

@@ -1,8 +1,10 @@
 import { MIN_SELECTION_CSS, rectFromPoints } from '@/features/fingering/selection';
+import { MIN_TEXT_SIZE } from '@/features/import/textFit';
 import {
     decimateStroke,
     viewportToPageClamped,
     viewportToPagePoint,
+    type Bbox,
     type DocumentLayout,
 } from '@/features/viewer/geometry';
 import { hitTestPage } from '@/features/viewer/ink/hitTest';
@@ -14,7 +16,7 @@ import {
 } from '@/features/viewer/ink/strokeRenderer';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import type { InkDelegate } from '@/features/viewer/ink/GestureController';
-import { onMusicFontReady } from '@/features/viewer/ink/musicFont';
+import { maxTextSizeFor, onMusicFontReady, textBoundsNorm } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
@@ -56,6 +58,13 @@ const DECIMATE_CSS = 0.75;
 /** While dragging a text note, commit (and so live-sync) its position at most this often. */
 export const TEXT_DRAG_SYNC_MS = 80;
 
+/** Pick radius (CSS px) around the selection's resize handle. */
+export const RESIZE_HANDLE_HIT_CSS = 14;
+/** Drawn size of the resize handle (CSS px). */
+const RESIZE_HANDLE_CSS = 10;
+/** Selection box padding (CSS px). */
+const SELECTION_PAD_CSS = 4;
+
 /** Text tool: a press on a text note that may become a drag (tap = edit). */
 interface TextDrag {
     annotation: Annotation;
@@ -70,6 +79,37 @@ interface TextDrag {
 }
 
 /**
+ * Text tool: scaling the selected note — by its corner handle or a pinch.
+ * `payload.size` changes; x/y (the top-left anchor) stay put so the note
+ * grows away from its anchor instead of jumping.
+ */
+interface TextScale {
+    annotation: Annotation;
+    payload: TextPayload;
+    pageIndex: number;
+    /** Size when the gesture began; pinch factors accumulate against it. */
+    startSize: number;
+    /** Handle drag only: anchor and initial handle, page-WIDTH units (y × aspect). */
+    anchor: { x: number; y: number } | null;
+    handleDist: number;
+    /** Running pinch factor. */
+    factor: number;
+    /** Last size committed (null until the first change). */
+    committed: number | null;
+    lastCommitAt: number;
+}
+
+/** The selected text note, for drawing and for tests. */
+export interface TextSelection {
+    id: string;
+    pageIndex: number;
+    /** Glyph bounds, normalized page coords. */
+    bounds: Bbox;
+    /** Resize handle (bottom-right corner), normalized page coords. */
+    handle: { nx: number; ny: number };
+}
+
+/**
  * Orchestrates ink: implements the GestureController's InkDelegate, renders
  * the in-flight stroke on per-page live canvases, repaints committed canvases
  * from the AnnotationStore, and turns completed gestures into store commits.
@@ -80,6 +120,9 @@ export class InkController {
     /** In-flight fingering marquee (page-anchored drag corners, normalized). */
     private fingeringSel: { pageIndex: number; x0: number; y0: number; x1: number; y1: number } | null = null;
     private textDrag: TextDrag | null = null;
+    private textScale: TextScale | null = null;
+    /** Text tool: the note last pressed — shows a box + resize handle until deselected. */
+    private selectedText: { id: string; pageIndex: number } | null = null;
     private downX = 0;
     private downY = 0;
     private moved = false;
@@ -106,8 +149,25 @@ export class InkController {
         },
     ) {
         this.unsubscribes = [
-            opts.store.subscribe((pageIndex) => this.repaintPage(pageIndex)),
+            opts.store.subscribe((pageIndex) => {
+                this.repaintPage(pageIndex);
+                const selected = this.selectedText;
+                if (selected && selected.pageIndex === pageIndex) {
+                    // The note moved, resized, or vanished (eraser, undo, peer).
+                    const live = opts.store.get(selected.id);
+                    if (!live || live.deletedAt || !isTextPayload(live.payload)) {
+                        this.selectedText = null;
+                    }
+                    this.renderPageLive(pageIndex);
+                }
+            }),
             opts.registry.onRegister((pageIndex) => this.repaintPage(pageIndex)),
+            // Selection belongs to the text tool; switching tools drops it.
+            useViewerStore.subscribe((state, prev) => {
+                if (state.tool !== prev.tool && state.tool !== 'text') {
+                    this.clearTextSelection();
+                }
+            }),
             // Converted symbols were drawn as fallback text until the music face arrived.
             onMusicFontReady(() => {
                 for (const pageIndex of opts.registry.pageIndices()) {
@@ -193,7 +253,33 @@ export class InkController {
         onInkMove: (e) => this.onMove(e),
         onInkUp: (e) => this.onUp(e),
         onInkCancel: () => this.onCancel(),
+        onPinch: (factor) => this.onPinch(factor),
+        onPinchEnd: () => this.onPinchEnd(),
     };
+
+    /** The text note currently selected with the text tool, or null. */
+    getTextSelection(): TextSelection | null {
+        const selected = this.selectedText;
+        if (!selected) {
+            return null;
+        }
+        const live = this.opts.store.get(selected.id);
+        const layout = this.opts.getLayout().layouts[selected.pageIndex];
+        if (!live || live.deletedAt || !isTextPayload(live.payload) || !layout) {
+            return null;
+        }
+        const bounds = textBoundsNorm(live.payload, layout.height / layout.width);
+        return { id: live.id, pageIndex: selected.pageIndex, bounds, handle: { nx: bounds[2], ny: bounds[3] } };
+    }
+
+    clearTextSelection(): void {
+        const selected = this.selectedText;
+        if (!selected) {
+            return;
+        }
+        this.selectedText = null;
+        this.renderPageLive(selected.pageIndex);
+    }
 
     private shouldInk(e: PointerEvent): boolean {
         const { tool, fingerDraws } = useViewerStore.getState();
@@ -243,7 +329,14 @@ export class InkController {
             return;
         }
         if (tool === 'text') {
-            // Resolved on pointer-up: a tap edits, a drag on an existing note moves it.
+            // The selected note's corner handle wins over anything under it.
+            const scale = this.beginHandleScale(x, y);
+            if (scale) {
+                this.textScale = scale;
+                return;
+            }
+            // Otherwise resolved on pointer-up: a tap edits, a drag on an
+            // existing note moves it; either way the note becomes selected.
             const existing = this.findTextAt(point.pageIndex, point.nx, point.ny);
             if (existing && isTextPayload(existing.payload)) {
                 this.textDrag = {
@@ -255,6 +348,9 @@ export class InkController {
                     committed: null,
                     lastCommitAt: 0,
                 };
+                this.selectText(existing.id, point.pageIndex);
+            } else {
+                this.clearTextSelection();
             }
             return;
         }
@@ -311,7 +407,9 @@ export class InkController {
             return;
         }
         if (tool === 'text') {
-            if (this.textDrag && this.moved) {
+            if (this.textScale && this.moved) {
+                this.scaleTextToHandle(this.textScale, x, y, false);
+            } else if (this.textDrag && this.moved) {
                 this.moveTextTo(this.textDrag, x, y, false);
             }
             return;
@@ -388,6 +486,15 @@ export class InkController {
             const drag = this.textDrag;
             this.textDrag = null;
             const { x, y } = this.opts.toLocal(e);
+            const scale = this.textScale;
+            if (scale) {
+                this.textScale = null;
+                if (this.moved) {
+                    this.scaleTextToHandle(scale, x, y, true);
+                }
+                this.endTextScale(scale);
+                return;
+            }
             if (drag && this.moved) {
                 // Final position, then close the single undo step.
                 this.moveTextTo(drag, x, y, true);
@@ -473,9 +580,153 @@ export class InkController {
             }
             this.textDrag = null;
         }
+        if (this.textScale) {
+            const scale = this.textScale;
+            this.textScale = null;
+            this.endTextScale(scale);
+        }
         if (useViewerStore.getState().tool === 'eraser') {
             this.opts.store.endBatch();
         }
+    }
+
+    // ---- text selection: scale by handle or pinch -------------------------
+
+    private selectText(id: string, pageIndex: number): void {
+        const prev = this.selectedText;
+        this.selectedText = { id, pageIndex };
+        if (prev && prev.pageIndex !== pageIndex) {
+            this.renderPageLive(prev.pageIndex);
+        }
+        this.renderPageLive(pageIndex);
+    }
+
+    /** Selection handle in viewport CSS coords, or null when nothing is selected/visible. */
+    private handleCss(selection: TextSelection): { x: number; y: number } | null {
+        const layout = this.opts.getLayout().layouts[selection.pageIndex];
+        if (!layout) {
+            return null;
+        }
+        const view = this.opts.getView();
+        return {
+            x: (layout.left + selection.handle.nx * layout.width) * view.scale - view.scrollX,
+            y: (layout.top + selection.handle.ny * layout.height) * view.scale - view.scrollY,
+        };
+    }
+
+    /** Pointer-down at viewport (x, y): a scale gesture if it lands on the selected note's handle. */
+    private beginHandleScale(x: number, y: number): TextScale | null {
+        const selection = this.getTextSelection();
+        if (!selection) {
+            return null;
+        }
+        const handle = this.handleCss(selection);
+        if (!handle || Math.hypot(x - handle.x, y - handle.y) > RESIZE_HANDLE_HIT_CSS) {
+            return null;
+        }
+        const live = this.opts.store.get(selection.id);
+        const layout = this.opts.getLayout().layouts[selection.pageIndex];
+        if (!live || !isTextPayload(live.payload) || !layout) {
+            return null;
+        }
+        const aspect = layout.height / layout.width;
+        const [minX, minY, maxX, maxY] = selection.bounds;
+        const anchor = { x: minX, y: minY * aspect };
+        return {
+            annotation: live,
+            payload: live.payload,
+            pageIndex: selection.pageIndex,
+            startSize: live.payload.size,
+            anchor,
+            handleDist: Math.max(1e-6, Math.hypot(maxX - anchor.x, maxY * aspect - anchor.y)),
+            factor: 1,
+            committed: null,
+            lastCommitAt: 0,
+        };
+    }
+
+    /** Handle drag: the note scales so its far corner follows the pointer, anchored at its top-left. */
+    private scaleTextToHandle(scale: TextScale, x: number, y: number, final: boolean): void {
+        const layout = this.opts.getLayout().layouts[scale.pageIndex];
+        if (!layout || !scale.anchor) {
+            return;
+        }
+        const point = viewportToPageClamped(this.opts.getView(), layout, x, y);
+        if (!point) {
+            return;
+        }
+        const aspect = layout.height / layout.width;
+        const dist = Math.hypot(point.nx - scale.anchor.x, point.ny * aspect - scale.anchor.y);
+        this.commitTextSize(scale, scale.startSize * (dist / scale.handleDist), final);
+    }
+
+    /**
+     * Commit a new size — clamped to the note's range — as one store update.
+     * Every update inside the gesture live-syncs; all sit in ONE undo batch.
+     * Throttled unless `final`.
+     */
+    private commitTextSize(scale: TextScale, rawSize: number, final: boolean): void {
+        const now = Date.now();
+        if (!final && now - scale.lastCommitAt < TEXT_DRAG_SYNC_MS) {
+            return;
+        }
+        const size = Math.min(maxTextSizeFor(scale.payload), Math.max(MIN_TEXT_SIZE, rawSize));
+        if (scale.committed === size || (scale.committed === null && size === scale.payload.size)) {
+            return;
+        }
+        if (scale.committed === null) {
+            this.opts.store.beginBatch();
+        }
+        scale.committed = size;
+        scale.lastCommitAt = now;
+        void this.opts.store.update(scale.annotation.id, { payload: { ...scale.payload, size } });
+    }
+
+    private endTextScale(scale: TextScale): void {
+        if (scale.committed !== null) {
+            this.opts.store.endBatch();
+        }
+    }
+
+    /** Two-finger pinch: claimed (returns true) while a text note is selected with the text tool. */
+    private onPinch(factor: number): boolean {
+        if (useViewerStore.getState().tool !== 'text' || this.opts.isReadOnly()) {
+            return false;
+        }
+        let scale = this.textScale;
+        if (!scale) {
+            const selection = this.getTextSelection();
+            const live = selection ? this.opts.store.get(selection.id) : undefined;
+            if (!selection || !live || !isTextPayload(live.payload)) {
+                return false;
+            }
+            scale = {
+                annotation: live,
+                payload: live.payload,
+                pageIndex: selection.pageIndex,
+                startSize: live.payload.size,
+                anchor: null,
+                handleDist: 1,
+                factor: 1,
+                committed: null,
+                lastCommitAt: 0,
+            };
+            this.textScale = scale;
+        }
+        scale.factor *= factor;
+        this.commitTextSize(scale, scale.startSize * scale.factor, false);
+        return true;
+    }
+
+    private onPinchEnd(): void {
+        const scale = this.textScale;
+        if (!scale) {
+            return;
+        }
+        this.textScale = null;
+        // Flush the throttled tail so the note lands exactly where the fingers left it.
+        this.commitTextSize(scale, scale.startSize * scale.factor, true);
+        this.endTextScale(scale);
     }
 
     /**
@@ -621,6 +872,30 @@ export class InkController {
         if (live && live.pageIndex === pageIndex) {
             const pts = live.predicted.length > 0 ? [...live.pts, ...live.predicted] : live.pts;
             drawInk(pts, live.w, live.color, live.kind, live.simulatePressure);
+        }
+
+        const selection = this.getTextSelection();
+        if (selection && selection.pageIndex === pageIndex) {
+            const layout = this.opts.getLayout().layouts[pageIndex];
+            // Bitmap px per CSS px, so the chrome keeps its size at any zoom.
+            const pxPerCss = layout ? width / (layout.width * this.opts.getView().scale) : 1;
+            const pad = SELECTION_PAD_CSS * pxPerCss;
+            const [minX, minY, maxX, maxY] = selection.bounds;
+            const x = minX * width - pad;
+            const y = minY * height - pad;
+            const w = (maxX - minX) * width + 2 * pad;
+            const h = (maxY - minY) * height + 2 * pad;
+            ctx.save();
+            ctx.strokeStyle = '#4338ca';
+            ctx.lineWidth = Math.max(1, pxPerCss);
+            ctx.setLineDash([4 * pxPerCss, 3 * pxPerCss]);
+            ctx.strokeRect(x, y, w, h);
+            ctx.setLineDash([]);
+            const handle = RESIZE_HANDLE_CSS * pxPerCss;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(x + w - handle / 2, y + h - handle / 2, handle, handle);
+            ctx.strokeRect(x + w - handle / 2, y + h - handle / 2, handle, handle);
+            ctx.restore();
         }
 
         const sel = this.fingeringSel;

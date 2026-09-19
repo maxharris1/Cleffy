@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MAX_MUSIC_TEXT_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE } from '@/features/import/textFit';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
-import { InkController, TEXT_DRAG_SYNC_MS, type TextIntent } from '@/features/viewer/ink/InkController';
+import {
+    InkController,
+    RESIZE_HANDLE_HIT_CSS,
+    TEXT_DRAG_SYNC_MS,
+    type TextIntent,
+} from '@/features/viewer/ink/InkController';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
@@ -154,6 +160,158 @@ describe('InkController text tool: tap edits, drag moves', () => {
         expect(store.canUndo).toBe(true); // only the create
         await store.undoLast();
         expect(store.getPage(0).size).toBe(0);
+    });
+
+    it('pressing a note selects it and exposes a corner handle at its glyph bounds', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf', { hw: 1 }));
+        expect(ink.getTextSelection()).toBeNull();
+        ink.delegate.onInkDown(pointer(305, 655));
+        ink.delegate.onInkUp(pointer(305, 655));
+        const selection = ink.getTextSelection();
+        expect(selection?.id).toBe('note');
+        const [minX, minY, maxX, maxY] = selection!.bounds;
+        expect(minX).toBe(0.3);
+        expect(minY).toBeGreaterThanOrEqual(0.5);
+        expect(selection!.handle).toEqual({ nx: maxX, ny: maxY });
+        // Pressing empty paper deselects; switching tools deselects too.
+        ink.delegate.onInkDown(pointer(800, 200));
+        ink.delegate.onInkUp(pointer(800, 200));
+        expect(ink.getTextSelection()).toBeNull();
+        ink.delegate.onInkDown(pointer(305, 655));
+        ink.delegate.onInkUp(pointer(305, 655));
+        expect(ink.getTextSelection()).not.toBeNull();
+        useViewerStore.getState().setTool('pen');
+        expect(ink.getTextSelection()).toBeNull();
+    });
+});
+
+describe('InkController text tool: resize', () => {
+    /** Select a note and return its handle in viewport px (scale 1, no scroll). */
+    const select = async (id: string, px: number, py: number) => {
+        ink.delegate.onInkDown(pointer(px, py));
+        ink.delegate.onInkUp(pointer(px, py));
+        await settle();
+        const selection = ink.getTextSelection();
+        expect(selection?.id).toBe(id);
+        // The selecting tap opened the editor; the gestures under test must not.
+        intents.length = 0;
+        const [minX, minY] = selection!.bounds;
+        return {
+            handle: { x: selection!.handle.nx * PAGE_W, y: selection!.handle.ny * PAGE_H },
+            anchor: { x: minX * PAGE_W, y: minY * PAGE_H },
+        };
+    };
+
+    /** Drag the handle so its distance from the anchor is multiplied by `factor`. */
+    const dragHandleBy = async (
+        handle: { x: number; y: number },
+        anchor: { x: number; y: number },
+        factor: number,
+        steps = 3,
+    ) => {
+        ink.delegate.onInkDown(pointer(handle.x, handle.y));
+        for (let i = 1; i <= steps; i++) {
+            const f = 1 + ((factor - 1) * i) / steps;
+            vi.setSystemTime(Date.now() + TEXT_DRAG_SYNC_MS + 1);
+            ink.delegate.onInkMove(pointer(anchor.x + (handle.x - anchor.x) * f, anchor.y + (handle.y - anchor.y) * f));
+        }
+        ink.delegate.onInkUp(
+            pointer(anchor.x + (handle.x - anchor.x) * factor, anchor.y + (handle.y - anchor.y) * factor),
+        );
+        await settle();
+    };
+
+    it('dragging the handle scales size proportionally and keeps x/y anchored', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'use wrist', { hw: 1 }));
+        const { handle, anchor } = await select('note', 310, 655);
+        await dragHandleBy(handle, anchor, 1.5);
+        const scaled = payloadOf('note');
+        expect(scaled.size).toBeCloseTo(0.03, 5);
+        expect(scaled.x).toBe(0.3);
+        expect(scaled.y).toBe(0.5);
+        expect(scaled.text).toBe('use wrist');
+        expect(scaled.hw).toBe(1);
+        // The handle followed the pointer: the box grew from its top-left corner.
+        const after = ink.getTextSelection()!;
+        expect(after.handle.nx * PAGE_W).toBeCloseTo(anchor.x + (handle.x - anchor.x) * 1.5, 3);
+        expect(intents).toHaveLength(0);
+    });
+
+    it('shrinks too, and is ONE undo step across the live-synced commits', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf'));
+        const { handle, anchor } = await select('note', 305, 655);
+        const update = vi.spyOn(store, 'update');
+        await dragHandleBy(handle, anchor, 0.5, 4);
+        expect(payloadOf('note').size).toBeCloseTo(0.01, 5);
+        expect(update.mock.calls.length).toBeGreaterThan(1);
+        await store.undoLast();
+        expect(payloadOf('note').size).toBe(0.02);
+        await store.redoLast();
+        expect(payloadOf('note').size).toBeCloseTo(0.01, 5);
+    });
+
+    it('clamps: typed text tops out at MAX_TEXT_SIZE, a music glyph at MAX_MUSIC_TEXT_SIZE, both floor at MIN', async () => {
+        await store.create(textNote('typed', 0.1, 0.1, 'mf'));
+        await store.create(textNote('music', 0.1, 0.6, 'mf', { hw: 1 }));
+
+        let sel = await select('typed', 103, 133);
+        await dragHandleBy(sel.handle, sel.anchor, 40);
+        expect(payloadOf('typed').size).toBe(MAX_TEXT_SIZE);
+
+        sel = await select('music', 103, 790);
+        await dragHandleBy(sel.handle, sel.anchor, 40);
+        expect(payloadOf('music').size).toBe(MAX_MUSIC_TEXT_SIZE);
+
+        sel = await select('typed', 103 + 20, 133 + 20);
+        await dragHandleBy(sel.handle, sel.anchor, 0.001);
+        expect(payloadOf('typed').size).toBe(MIN_TEXT_SIZE);
+    });
+
+    it('the handle press wins over the note under it, and a tap on the handle changes nothing', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf'));
+        const { handle } = await select('note', 305, 655);
+        ink.delegate.onInkDown(pointer(handle.x + RESIZE_HANDLE_HIT_CSS / 2, handle.y));
+        ink.delegate.onInkUp(pointer(handle.x + RESIZE_HANDLE_HIT_CSS / 2, handle.y));
+        await settle();
+        expect(payloadOf('note').size).toBe(0.02);
+        expect(intents).toHaveLength(0);
+        // Only the create is on the undo stack.
+        await store.undoLast();
+        expect(store.getPage(0).size).toBe(0);
+    });
+
+    it('a pinch on a selected note scales it (cumulative), as one undo step; unselected pinches are not claimed', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf', { hw: 1 }));
+        expect(ink.delegate.onPinch!(1.2)).toBe(false);
+
+        await select('note', 305, 655);
+        expect(ink.delegate.onPinch!(1.25)).toBe(true);
+        vi.setSystemTime(Date.now() + TEXT_DRAG_SYNC_MS + 1);
+        expect(ink.delegate.onPinch!(1.6)).toBe(true);
+        ink.delegate.onPinchEnd!();
+        await settle();
+        expect(payloadOf('note').size).toBeCloseTo(0.02 * 1.25 * 1.6, 6);
+        expect(payloadOf('note')).toMatchObject({ x: 0.3, y: 0.5 });
+
+        await store.undoLast();
+        expect(payloadOf('note').size).toBe(0.02);
+    });
+
+    it('a pinch is not claimed for other tools or read-only viewers', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf'));
+        await select('note', 305, 655);
+        useViewerStore.getState().setTool('pan');
+        expect(ink.delegate.onPinch!(1.2)).toBe(false);
+    });
+
+    it('tap without movement still opens the editor on a selected note', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf'));
+        await select('note', 305, 655);
+        ink.delegate.onInkDown(pointer(306, 656));
+        ink.delegate.onInkUp(pointer(306, 656));
+        expect(intents).toHaveLength(1);
+        expect(intents[0]!.existing?.id).toBe('note');
+        expect(payloadOf('note').size).toBe(0.02);
     });
 
     it('a tap on empty paper opens a new-note editor; dragging empty paper does nothing', async () => {
