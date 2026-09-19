@@ -84,6 +84,8 @@ export class InkController {
             toLocal: (e: { clientX: number; clientY: number }) => { x: number; y: number };
             onTextIntent: (intent: TextIntent) => void;
             onFingeringSelect: (selection: FingeringSelection) => void;
+            /** A pen/highlighter stroke of THIS writer has been committed to the store. */
+            onStrokeCommitted?: (annotation: Annotation) => void;
         },
     ) {
         this.unsubscribes = [
@@ -384,7 +386,7 @@ export class InkController {
         }
         // The live strokeId becomes the annotation id, so collaborators can
         // atomically swap the streamed preview for the committed stroke.
-        void this.opts.store.create({
+        const annotation: Annotation = {
             id: live.strokeId,
             docId: this.opts.store.docId,
             page: live.pageIndex,
@@ -396,7 +398,9 @@ export class InkController {
             updatedAt: now,
             deletedAt: null,
             seq: 0,
-        });
+        };
+        // Commit first; only then may print conversion consider the stroke.
+        void this.opts.store.create(annotation).then(() => this.opts.onStrokeCommitted?.(annotation));
     }
 
     private onCancel(): void {

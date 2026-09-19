@@ -3,7 +3,7 @@ import { useSyncExternalStore, type ReactNode } from 'react';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
 import type { StrokeWidthKey, Tool } from '@/types/models';
-import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
+import { PointerIcon, PrintHandwritingIcon, RedoIcon, UndoIcon } from '@/ui/icons';
 
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
     { tool: 'pan', label: 'Pan', short: 'Pan', icon: <PanIcon /> },
@@ -33,7 +33,8 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const color = useViewerStore((s) => s.color);
     const widthKey = useViewerStore((s) => s.widthKey);
     const fingerDraws = useViewerStore((s) => s.fingerDraws);
-    const { setTool, setColor, setWidthKey, setFingerDraws } = useViewerStore.getState();
+    const printHandwriting = useViewerStore((s) => s.printHandwriting);
+    const { setTool, setColor, setWidthKey, setFingerDraws, setPrintHandwriting } = useViewerStore.getState();
 
     const undoState = useSyncExternalStore(
         (cb) => store.subscribeMeta(cb),
@@ -164,6 +165,25 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                         <PointerIcon size={20} />
                     </span>
                     <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
+                </button>
+                <button
+                    type="button"
+                    title={
+                        printHandwriting
+                            ? 'Print handwriting on — your pen digits, dynamics and notes become print'
+                            : 'Print handwriting off — your pen stays ink'
+                    }
+                    aria-label="Print handwriting"
+                    aria-pressed={printHandwriting}
+                    onClick={() => setPrintHandwriting(!printHandwriting)}
+                    className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
+                        printHandwriting ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
+                    }`}
+                >
+                    <span className="flex h-5 w-5 items-center justify-center">
+                        <PrintHandwritingIcon size={20} />
+                    </span>
+                    <span className="hidden text-[10px] font-medium leading-none sm:block">Print</span>
                 </button>
             </div>
         </div>

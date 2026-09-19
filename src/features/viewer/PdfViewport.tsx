@@ -23,6 +23,8 @@ import {
 } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
+import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { abstainRecognizer } from '@/features/viewer/ink/handwriting/types';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
@@ -325,6 +327,16 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             const rect = el.getBoundingClientRect();
             return { x: e.clientX - rect.left, y: e.clientY - rect.top };
         };
+        // Opt-in print conversion of THIS writer's committed pen strokes.
+        const handwriting = new HandwritingController({
+            store: annotationStore,
+            recognizer: abstainRecognizer,
+            isEnabled: () => useViewerStore.getState().printHandwriting && !readOnlyRef.current,
+            getAspect: (pageIndex) => {
+                const pageLayout = layoutRef.current.layouts[pageIndex];
+                return pageLayout ? pageLayout.height / pageLayout.width : null;
+            },
+        });
         const ink = new InkController({
             store: annotationStore,
             registry,
@@ -337,6 +349,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 setTextIntent(intent);
             },
             onFingeringSelect: (selection) => setFingeringSel(selection),
+            onStrokeCommitted: (annotation) => handwriting.onStrokeCommitted(annotation),
         });
 
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
@@ -454,6 +467,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             engine?.stop();
             controller.destroy();
             ink.destroy();
+            handwriting.dispose();
         };
     }, [
         annotationStore,

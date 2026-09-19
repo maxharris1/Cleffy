@@ -61,3 +61,28 @@ export const writeSpreadCover = (coverPage: boolean): void => {
         // Storage disabled or full: the layout still switched for this session.
     }
 };
+
+/** Storage key for the opt-in handwriting → print conversion. */
+const PRINT_HANDWRITING_STORAGE_KEY = 'cleffy:print-handwriting';
+
+/** Raw ink is the default; conversion is a per-user, per-device opt-in. */
+const DEFAULT_PRINT_HANDWRITING = false;
+
+/** Reads whether committed pen strokes should be converted to print. Same guarded access. */
+export const readPrintHandwriting = (): boolean => {
+    try {
+        const stored = window.localStorage.getItem(PRINT_HANDWRITING_STORAGE_KEY);
+        return stored === '1' ? true : stored === '0' ? false : DEFAULT_PRINT_HANDWRITING;
+    } catch {
+        return DEFAULT_PRINT_HANDWRITING;
+    }
+};
+
+/** Persists the print-handwriting choice, best-effort. */
+export const writePrintHandwriting = (enabled: boolean): void => {
+    try {
+        window.localStorage.setItem(PRINT_HANDWRITING_STORAGE_KEY, enabled ? '1' : '0');
+    } catch {
+        // Storage disabled or full: the setting still applies for this session.
+    }
+};

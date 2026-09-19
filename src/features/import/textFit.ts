@@ -87,3 +87,134 @@ export const textPayloadFromBbox = (
         size,
     };
 };
+
+// ---------------------------------------------------------------------------
+// Word metrics (handwriting → print). The digit calibration above measures a
+// cap height and nothing else; a converted word ("use wrist", "cresc.") has
+// ascenders, descenders and a width that must land on the handwriting's
+// footprint, and a music-font dynamic (mf) has metrics of its own. These
+// measure the ACTUAL string in the ACTUAL font.
+
+/** CSS font shorthand minus the size, e.g. `italic system-ui` or `"Bravura Text"`. */
+export type FontSpec = { family: string; style?: 'normal' | 'italic' };
+
+export const SYSTEM_FONT_FAMILY = 'system-ui, -apple-system, sans-serif';
+
+export interface InkTextMetrics {
+    /** Visual (inked) height of the string / font size. */
+    heightRatio: number;
+    /** Gap from the 'top'-baseline anchor down to the string's visual top / font size. */
+    topInset: number;
+    /** Visual width of the string / font size. */
+    widthRatio: number;
+}
+
+/** Deterministic fallbacks for environments without TextMetrics box fields (jsdom). */
+const FALLBACK_X_HEIGHT = 0.5;
+const FALLBACK_ASCENDER = CAP_RATIO_FALLBACK;
+const FALLBACK_DESCENDER = 0.2;
+const FALLBACK_ADVANCE = 0.55;
+
+const hasTall = (text: string): boolean => /[A-Z0-9bdfhklt!?()[\]{}|/\\]/.test(text);
+const hasDescender = (text: string): boolean => /[gjpqyQ,;()[\]{}|/\\]/.test(text);
+
+/** Font-agnostic guess used when the canvas cannot report glyph boxes. */
+export const fallbackInkTextMetrics = (text: string): InkTextMetrics => {
+    const top = hasTall(text) ? TOP_INSET_FALLBACK : TOP_INSET_FALLBACK + (FALLBACK_ASCENDER - FALLBACK_X_HEIGHT);
+    const bottom = TOP_INSET_FALLBACK + FALLBACK_ASCENDER + (hasDescender(text) ? FALLBACK_DESCENDER : 0);
+    return {
+        heightRatio: bottom - top,
+        topInset: top,
+        widthRatio: Math.max(1, text.length) * FALLBACK_ADVANCE,
+    };
+};
+
+const metricsCache = new Map<string, InkTextMetrics>();
+
+/** Measure one string in one font (probe canvas, cached; deterministic fallback). */
+export const measureInkText = (text: string, font: FontSpec = { family: SYSTEM_FONT_FAMILY }): InkTextMetrics => {
+    const key = `${font.style ?? 'normal'}|${font.family}|${text}`;
+    const hit = metricsCache.get(key);
+    if (hit) {
+        return hit;
+    }
+    let metrics = fallbackInkTextMetrics(text);
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1;
+        canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            const probePx = 100;
+            ctx.font = `${font.style ?? 'normal'} ${probePx}px ${font.family}`;
+            ctx.textBaseline = 'alphabetic';
+            const m = ctx.measureText(text);
+            const ascent = m.actualBoundingBoxAscent;
+            const descent = m.actualBoundingBoxDescent;
+            const emTop = m.fontBoundingBoxAscent;
+            const width = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
+            if (
+                Number.isFinite(ascent) &&
+                Number.isFinite(descent) &&
+                Number.isFinite(emTop) &&
+                Number.isFinite(width) &&
+                ascent + descent > 0 &&
+                width > 0
+            ) {
+                metrics = {
+                    heightRatio: (ascent + descent) / probePx,
+                    topInset: (emTop - ascent) / probePx,
+                    widthRatio: width / probePx,
+                };
+            }
+        }
+        canvas.width = 0;
+        canvas.height = 0;
+    } catch {
+        // Keep fallbacks.
+    }
+    if (metricsCache.size > 500) {
+        metricsCache.clear();
+    }
+    metricsCache.set(key, metrics);
+    return metrics;
+};
+
+/** Test hook. */
+export const resetInkTextMetricsCache = (): void => {
+    metricsCache.clear();
+};
+
+/**
+ * Build a TextPayload that sits on a handwriting bbox given in NORMALIZED page
+ * coords (x, w against page width; y, h against page height — `aspect` is
+ * pageHeight / pageWidth). The print's visual top lands on the ink's top edge
+ * and its visual height matches the ink height; with `fitWidth` (multi-glyph
+ * lines) the size is also capped so the print never runs past the ink's right
+ * edge — a single `1` must NOT be width-fitted or it would shrink to a speck.
+ */
+export const textPayloadForInk = (
+    bbox: { x: number; y: number; w: number; h: number },
+    text: string,
+    aspect: number,
+    metrics: InkTextMetrics,
+    options: { fitWidth?: boolean; hw?: 1 } = {},
+): TextPayload => {
+    const inkHeightW = bbox.h * aspect;
+    let size = inkHeightW / Math.max(metrics.heightRatio, 0.1);
+    if (options.fitWidth && metrics.widthRatio > 0) {
+        size = Math.min(size, bbox.w / metrics.widthRatio);
+    }
+    size = Math.min(MAX_TEXT_SIZE, Math.max(MIN_TEXT_SIZE, size));
+    const anchorY = bbox.y - (metrics.topInset * size) / aspect;
+    const payload: TextPayload = {
+        x: Math.min(1, Math.max(0, bbox.x)),
+        y: Math.min(1, Math.max(0, anchorY)),
+        text,
+        size,
+    };
+    if (options.hw === 1) {
+        payload.hw = 1;
+    }
+    return payload;
+};
