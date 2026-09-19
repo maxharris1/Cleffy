@@ -170,7 +170,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     type="button"
                     title={
                         printHandwriting
-                            ? 'Print handwriting on — your pen digits, dynamics and notes become print'
+                            ? 'Print handwriting on — digits and dynamics convert on this device; text notes use a metered vision read'
                             : 'Print handwriting off — your pen stays ink'
                     }
                     aria-label="Print handwriting"

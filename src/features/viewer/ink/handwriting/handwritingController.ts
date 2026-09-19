@@ -7,13 +7,21 @@ import {
     type GrouperOptions,
     type StrokeGroup,
 } from '@/features/viewer/ink/handwriting/grouper';
+import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { isTextPayload, type Annotation } from '@/types/models';
 
 export interface HandwritingControllerOptions {
     store: AnnotationStore;
+    /** On-device closed-set reader (digits, dynamics, marks). */
     recognizer: Recognizer;
+    /**
+     * Metered text-note transcription, tried ONLY for a writing line the
+     * on-device reader refused — never for a lone digit or symbol. Absent for
+     * local documents; resolves null offline.
+     */
+    transcribe?: TranscribeInkFn;
     /** The writer's opt-in (read at commit AND at convert time). */
     isEnabled: () => boolean;
     /** Page height / page width for a page index (null when unknown). */
@@ -119,6 +127,10 @@ export class HandwritingController {
         let recognition: Recognition | null;
         try {
             recognition = await this.opts.recognizer(group);
+            if (!recognition && group.kind === 'line' && this.opts.transcribe && this.opts.isEnabled()) {
+                const text = await this.opts.transcribe(group);
+                recognition = text ? { text, kind: 'text' } : null;
+            }
         } catch (err) {
             console.warn('Handwriting recognition failed; ink stays', err);
             return;

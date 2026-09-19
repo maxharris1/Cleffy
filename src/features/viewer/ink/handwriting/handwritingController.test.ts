@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ASPECT, boxStroke, FakeTimers } from '@/features/viewer/ink/handwriting/testStrokes';
 import { AnnotationStore } from '@/sync/annotationStore';
@@ -33,10 +34,11 @@ let store: AnnotationStore;
 let timers: FakeTimers;
 let enabled: boolean;
 
-const make = (recognizer: Recognizer) =>
+const make = (recognizer: Recognizer, transcribe?: TranscribeInkFn) =>
     new HandwritingController({
         store,
         recognizer,
+        transcribe,
         isEnabled: () => enabled,
         getAspect: () => ASPECT,
         schedule: timers.schedule,
@@ -155,6 +157,58 @@ describe('HandwritingController', () => {
         await controller.settle();
         expect(recognizer).not.toHaveBeenCalled();
         expect(store.getPage(0).get('hl')?.kind).toBe('highlight');
+    });
+
+    describe('text-note transcription (metered path)', () => {
+        it('is tried only for a writing line the on-device reader refused, and converts its text', async () => {
+            const transcribe = vi.fn<TranscribeInkFn>(async () => 'use wrist');
+            const controller = make(() => null, transcribe);
+            await write(controller, strokeAnnotation('u', 0.3));
+            await write(controller, strokeAnnotation('s', 0.3 + H));
+            timers.fire();
+            await controller.settle();
+            expect(transcribe).toHaveBeenCalledTimes(1);
+            expect(transcribe.mock.calls[0]![0]!.kind).toBe('line');
+            const created = texts();
+            expect(created).toHaveLength(1);
+            expect((created[0]!.payload as TextPayload).text).toBe('use wrist');
+            expect((created[0]!.payload as TextPayload).hw).toBe(1);
+            expect(strokes()).toHaveLength(0);
+        });
+
+        it('is never called for a lone digit/symbol glyph, even when on-device abstains', async () => {
+            const transcribe = vi.fn<TranscribeInkFn>(async () => '3');
+            const controller = make(() => null, transcribe);
+            await write(controller, strokeAnnotation('lone', 0.3));
+            timers.fire();
+            await controller.settle();
+            expect(transcribe).not.toHaveBeenCalled();
+            expect(strokes()).toHaveLength(1);
+        });
+
+        it('is skipped when the on-device reader already read the line', async () => {
+            const transcribe = vi.fn<TranscribeInkFn>(async () => 'wrong');
+            const controller = make(() => ({ text: 'mf', kind: 'symbol' }), transcribe);
+            await write(controller, strokeAnnotation('m', 0.3));
+            await write(controller, strokeAnnotation('f', 0.3 + H));
+            timers.fire();
+            await controller.settle();
+            expect(transcribe).not.toHaveBeenCalled();
+            expect((texts()[0]!.payload as TextPayload).text).toBe('mf');
+        });
+
+        it('leaves the ink when transcription resolves null (offline, abstained, unavailable)', async () => {
+            const controller = make(
+                () => null,
+                async () => null,
+            );
+            await write(controller, strokeAnnotation('u', 0.3));
+            await write(controller, strokeAnnotation('s', 0.3 + H));
+            timers.fire();
+            await controller.settle();
+            expect(strokes()).toHaveLength(2);
+            expect(texts()).toHaveLength(0);
+        });
     });
 
     it('produces a payload whose hw flag survives the realtime wire schema', async () => {
