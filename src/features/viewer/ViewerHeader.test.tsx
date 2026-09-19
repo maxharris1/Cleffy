@@ -35,6 +35,8 @@ describe('ViewerHeader', () => {
         expect(nav).toHaveClass('flex-wrap');
         expect(nav).toHaveClass('min-w-0');
         expect(nav).toHaveClass('flex-[1_1_100%]');
+        expect(nav).toHaveClass('justify-start');
         expect(nav.className).toMatch(/md:flex-\[0_1_auto\]/);
+        expect(nav.className).toMatch(/md:justify-end/);
     });
 });
