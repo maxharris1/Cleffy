@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
     CAP_RATIO_FALLBACK,
     fallbackInkTextMetrics,
+    MAX_MUSIC_TEXT_SIZE,
     MAX_TEXT_SIZE,
     measureInkText,
     MIN_TEXT_SIZE,
@@ -83,6 +84,14 @@ describe('textPayloadForInk (word metrics)', () => {
         expect(huge.size).toBe(MAX_TEXT_SIZE);
         const tiny = textPayloadForInk({ x: 0, y: 0, w: 0.001, h: 0.0005 }, '.', ASPECT, WORD);
         expect(tiny.size).toBe(MIN_TEXT_SIZE);
+    });
+
+    it('lets a music glyph that fills only a fifth of its em grow past the text clamp', () => {
+        const ACCENT = { heightRatio: 0.195, topInset: 0.53, widthRatio: 0.27 };
+        const bbox = { x: 0.3, y: 0.5, w: 0.03, h: 0.024 / ASPECT };
+        expect(textPayloadForInk(bbox, '\uE4A0', ASPECT, ACCENT).size).toBe(MAX_TEXT_SIZE);
+        const music = textPayloadForInk(bbox, '\uE4A0', ASPECT, ACCENT, { maxSize: MAX_MUSIC_TEXT_SIZE });
+        expect(music.size).toBeCloseTo(0.024 / 0.195, 5);
     });
 
     it('falls back to deterministic word metrics where the canvas has no glyph boxes (jsdom)', () => {

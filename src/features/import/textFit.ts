@@ -13,6 +13,11 @@ import type { TextPayload } from '@/types/models';
 /** Clamps around the UI default text size 0.018 (PdfViewport.DEFAULT_TEXT_SIZE). */
 export const MIN_TEXT_SIZE = 0.008;
 export const MAX_TEXT_SIZE = 0.06;
+/**
+ * Music-text glyphs such as an accent occupy only ~0.2 em, so matching a
+ * letter-sized mark needs a font size well past the text clamp.
+ */
+export const MAX_MUSIC_TEXT_SIZE = 0.16;
 
 /** Deterministic fallbacks for environments without TextMetrics box fields (jsdom). */
 export const CAP_RATIO_FALLBACK = 0.7;
@@ -198,14 +203,14 @@ export const textPayloadForInk = (
     text: string,
     aspect: number,
     metrics: InkTextMetrics,
-    options: { fitWidth?: boolean; hw?: 1 } = {},
+    options: { fitWidth?: boolean; hw?: 1; maxSize?: number } = {},
 ): TextPayload => {
     const inkHeightW = bbox.h * aspect;
     let size = inkHeightW / Math.max(metrics.heightRatio, 0.1);
     if (options.fitWidth && metrics.widthRatio > 0) {
         size = Math.min(size, bbox.w / metrics.widthRatio);
     }
-    size = Math.min(MAX_TEXT_SIZE, Math.max(MIN_TEXT_SIZE, size));
+    size = Math.min(options.maxSize ?? MAX_TEXT_SIZE, Math.max(MIN_TEXT_SIZE, size));
     const anchorY = bbox.y - (metrics.topInset * size) / aspect;
     const payload: TextPayload = {
         x: Math.min(1, Math.max(0, bbox.x)),

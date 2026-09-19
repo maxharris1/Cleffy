@@ -1,4 +1,4 @@
-import { measureInkText, textPayloadForInk, type FontSpec } from '@/features/import/textFit';
+import { MAX_MUSIC_TEXT_SIZE, measureInkText, textPayloadForInk, type FontSpec } from '@/features/import/textFit';
 import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
 import {
     groupBboxNormalized,
@@ -38,16 +38,18 @@ export interface HandwritingControllerOptions {
  * symbols wait for the face so their real metrics (not a fallback's) are
  * measured.
  */
-export const fontForRecognition = async (recognition: Recognition): Promise<{ font: FontSpec; text: string }> => {
+export const fontForRecognition = async (
+    recognition: Recognition,
+): Promise<{ font: FontSpec; text: string; music: boolean }> => {
     const spec = textDrawSpec(recognition.text, true);
     if (spec.music) {
         const loaded = await ensureMusicFontLoaded();
         if (loaded) {
-            return { font: { family: spec.family, style: spec.style }, text: spec.glyphs };
+            return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: true };
         }
-        return { font: { family: spec.family, style: 'italic' }, text: recognition.text };
+        return { font: { family: spec.family, style: 'italic' }, text: recognition.text, music: false };
     }
-    return { font: { family: spec.family, style: spec.style }, text: spec.glyphs };
+    return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: false };
 };
 
 /**
@@ -169,6 +171,7 @@ export class HandwritingController {
         const payload = textPayloadForInk(groupBboxNormalized(group), text, group.aspect, metrics, {
             fitWidth: group.kind === 'line',
             hw: 1,
+            maxSize: measured.music ? MAX_MUSIC_TEXT_SIZE : undefined,
         });
         await convertGroupToText(this.opts.store, group, payload);
     }
