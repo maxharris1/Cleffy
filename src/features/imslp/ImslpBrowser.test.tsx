@@ -172,6 +172,19 @@ describe('imslp display helpers', () => {
         expect(recommendedBadge(ranked[0]!)).toBe('Recommended');
     });
 
+    it('demotes a file whose IMSLP block names an arranger even when it is a "Complete Score"', () => {
+        const ranked = rankEditions([
+            edition('lopez-villanueva-trio.pdf', { description: 'Complete Score', arrangement: true, size: 2_000_000 }),
+            edition('huge-original-dump.pdf', { description: 'Complete Score', size: 40_000_000 }),
+            edition('original-scan.pdf', { description: 'Complete Score', size: 3_000_000 }),
+        ]);
+        expect(ranked.map((e) => e.filename)).toEqual([
+            'original-scan.pdf',
+            'lopez-villanueva-trio.pdf',
+            'huge-original-dump.pdf',
+        ]);
+    });
+
     it('sorts restricted rows last and license-unknown rows after cleared ones', () => {
         const ranked = rankEditions([
             edition('restricted-henle.pdf', {

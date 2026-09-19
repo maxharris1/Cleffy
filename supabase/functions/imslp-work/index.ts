@@ -32,7 +32,14 @@ interface Edition extends ImslpFileMeta {
     downloadable: boolean;
 }
 
-const NO_FILE_META: ImslpFileMeta = { publisher: null, year: null, plate: null, urtext: false, description: null };
+const NO_FILE_META: ImslpFileMeta = {
+    publisher: null,
+    year: null,
+    plate: null,
+    urtext: false,
+    arrangement: false,
+    description: null,
+};
 
 interface LicenseRow {
     filename: string;

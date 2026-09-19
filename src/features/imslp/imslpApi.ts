@@ -60,6 +60,8 @@ export interface ImslpEdition {
     plate?: string | null;
     /** IMSLP tagged this file's publisher line with `{{Urtext}}`. */
     urtext?: boolean;
+    /** The IMSLP file block names an arranger. */
+    arrangement?: boolean;
     /** IMSLP file description, e.g. "Complete Score". */
     description?: string | null;
 }

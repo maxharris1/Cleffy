@@ -19,6 +19,8 @@ export interface ImslpFileMeta {
     plate: string | null;
     /** `{{Urtext}}` sits on this file's publisher line. */
     urtext: boolean;
+    /** The block names an `Arranger` — the file is an arrangement, whatever the description says. */
+    arrangement: boolean;
     /** `File Description N`, e.g. "Complete Score". */
     description: string | null;
 }
@@ -169,6 +171,7 @@ export const parseImslpFileBlocks = (wikitext: string): Map<string, ImslpFileMet
     for (const block of extractBlocks(wikitext)) {
         const fields = parseFields(block);
         const shared = parsePublisherInfo(fields.get('Publisher Information') ?? '');
+        const arrangement = (fields.get('Arranger') ?? '').trim().length > 0;
         for (const [key, filename] of fields) {
             const nameMatch = key.match(/^File Name (\d+)$/);
             if (!nameMatch || !filename) {
@@ -183,6 +186,7 @@ export const parseImslpFileBlocks = (wikitext: string): Map<string, ImslpFileMet
                 year: info.year,
                 plate: info.plate,
                 urtext: info.urtext,
+                arrangement,
                 description: description || null,
             });
         }

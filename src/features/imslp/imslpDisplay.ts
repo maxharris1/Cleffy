@@ -83,6 +83,7 @@ interface EditionRankFields extends EditionLicenseFields {
     year?: number | null;
     plate?: string | null;
     urtext?: boolean;
+    arrangement?: boolean;
     description?: string | null;
 }
 
@@ -137,8 +138,10 @@ const scoreEdition = (edition: EditionRankFields, index: number): number => {
     if (description === 'complete score') {
         score += 10;
     }
-    if (ARRANGEMENT_HINT.test(`${description} ${edition.filename}`)) {
-        score -= 20;
+    // Below every mid-size original, above tiny stubs; IMSLP's Arranger field
+    // catches arrangements whose description just says "Complete Score".
+    if (edition.arrangement || ARRANGEMENT_HINT.test(`${description} ${edition.filename}`)) {
+        score -= 50;
     }
     if (/complete|vollst|band|vol\.?\s*\d/i.test(edition.filename)) {
         score -= 5;

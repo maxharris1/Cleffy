@@ -27,6 +27,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1976,
             plate: null,
             urtext: true,
+            arrangement: false,
             description: 'Complete Score',
         });
 
@@ -38,6 +39,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1976,
             plate: null,
             urtext: true,
+            arrangement: false,
             description: 'Complete Score',
         });
     });
@@ -49,6 +51,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1959,
             plate: 'Z. 2347',
             urtext: false,
+            arrangement: false,
             description: 'Complete Score',
         });
     });
@@ -59,6 +62,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1802,
             plate: '879',
             urtext: false,
+            arrangement: false,
             description: 'Complete Score',
         });
         const schirmer = meta.get('PMLP1458-Sonata No. 14.pdf');
@@ -70,6 +74,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1910,
             plate: '9452',
             urtext: false,
+            arrangement: false,
             description: 'Complete Score',
         });
     });
@@ -83,14 +88,21 @@ describe('parseImslpFileBlocks', () => {
             year: null,
             plate: null,
             urtext: false,
+            arrangement: false,
             description: 'Complete Score',
         });
         expect(
             meta.get("PMLP1458-Beethoven, L. van - 14. Sonata for Piano in C- minor, Op. 27.2 'Moonlight'.pdf"),
         ).toEqual(gesamt);
 
-        expect(meta.get('PMLP1458-moonlight-guitar-duo.pdf')?.description).toBe('Complete Score');
-        expect(meta.get('PMLP1458-moonlight-guitar-duo-a4.pdf')?.description).toBe('Complete Score (a4)');
+        // Both guitar files say "Complete Score" — only the Arranger field reveals the arrangement.
+        const guitar = meta.get('PMLP1458-moonlight-guitar-duo.pdf');
+        expect(guitar?.description).toBe('Complete Score');
+        expect(guitar?.arrangement).toBe(true);
+        expect(meta.get('PMLP1458-moonlight-guitar-duo-a4.pdf')).toEqual({
+            ...guitar,
+            description: 'Complete Score (a4)',
+        });
     });
 
     it('leaves plain-text publisher lines without a {{P}} template unpublished', () => {
@@ -99,6 +111,7 @@ describe('parseImslpFileBlocks', () => {
             year: null,
             plate: null,
             urtext: false,
+            arrangement: false,
             description: 'Complete Score',
         });
     });
@@ -129,6 +142,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1980,
             plate: 'BA 4001',
             urtext: true,
+            arrangement: false,
             description: 'Complete Score',
         });
         expect(parsed.get('B.pdf')).toEqual({
@@ -136,6 +150,7 @@ describe('parseImslpFileBlocks', () => {
             year: 1920,
             plate: null,
             urtext: false,
+            arrangement: false,
             description: 'Parts',
         });
     });
