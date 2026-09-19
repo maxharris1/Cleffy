@@ -24,7 +24,7 @@ import {
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
-import { abstainRecognizer } from '@/features/viewer/ink/handwriting/types';
+import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
@@ -330,7 +330,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         // Opt-in print conversion of THIS writer's committed pen strokes.
         const handwriting = new HandwritingController({
             store: annotationStore,
-            recognizer: abstainRecognizer,
+            recognizer: recognizeOnDevice,
             isEnabled: () => useViewerStore.getState().printHandwriting && !readOnlyRef.current,
             getAspect: (pageIndex) => {
                 const pageLayout = layoutRef.current.layouts[pageIndex];

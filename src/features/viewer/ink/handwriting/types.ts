@@ -15,6 +15,3 @@ export interface Recognition {
  * page mid-lesson is worse than ugly ink.
  */
 export type Recognizer = (group: StrokeGroup) => Promise<Recognition | null> | Recognition | null;
-
-/** Reads nothing — every group stays ink. */
-export const abstainRecognizer: Recognizer = () => null;
