@@ -19,7 +19,7 @@ import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
 import type { InkProgressMsg } from '@/sync/wire';
 import { ERASER_RADIUS_CSS, HIGHLIGHT_WIDTH_FACTOR, STROKE_WIDTHS, useViewerStore } from '@/state/store';
-import type { Annotation, StrokePayload, ViewState } from '@/types/models';
+import { isTextPayload, type Annotation, type StrokePayload, type TextPayload, type ViewState } from '@/types/models';
 
 export interface TextIntent {
     pageIndex: number;
@@ -52,6 +52,21 @@ interface LiveStroke {
 const TAP_SLOP_CSS = 6;
 /** Decimation threshold in CSS px. */
 const DECIMATE_CSS = 0.75;
+/** While dragging a text note, commit (and so live-sync) its position at most this often. */
+export const TEXT_DRAG_SYNC_MS = 80;
+
+/** Text tool: a press on a text note that may become a drag (tap = edit). */
+interface TextDrag {
+    annotation: Annotation;
+    payload: TextPayload;
+    pageIndex: number;
+    /** Pointer-down in normalized page coords. */
+    startNx: number;
+    startNy: number;
+    /** Last position committed to the store (null until the first move). */
+    committed: { x: number; y: number } | null;
+    lastCommitAt: number;
+}
 
 /**
  * Orchestrates ink: implements the GestureController's InkDelegate, renders
@@ -63,6 +78,7 @@ export class InkController {
     private live: LiveStroke | null = null;
     /** In-flight fingering marquee (page-anchored drag corners, normalized). */
     private fingeringSel: { pageIndex: number; x0: number; y0: number; x1: number; y1: number } | null = null;
+    private textDrag: TextDrag | null = null;
     private downX = 0;
     private downY = 0;
     private moved = false;
@@ -220,7 +236,19 @@ export class InkController {
             return;
         }
         if (tool === 'text') {
-            // Resolved on pointer-up (tap vs drag).
+            // Resolved on pointer-up: a tap edits, a drag on an existing note moves it.
+            const existing = this.findTextAt(point.pageIndex, point.nx, point.ny);
+            if (existing && isTextPayload(existing.payload)) {
+                this.textDrag = {
+                    annotation: existing,
+                    payload: existing.payload,
+                    pageIndex: point.pageIndex,
+                    startNx: point.nx,
+                    startNy: point.ny,
+                    committed: null,
+                    lastCommitAt: 0,
+                };
+            }
             return;
         }
 
@@ -272,6 +300,12 @@ export class InkController {
             const point = viewportToPagePoint(this.opts.getView(), this.opts.getLayout().layouts, x, y);
             if (point) {
                 this.eraseAt(point.pageIndex, point.nx, point.ny);
+            }
+            return;
+        }
+        if (tool === 'text') {
+            if (this.textDrag && this.moved) {
+                this.moveTextTo(this.textDrag, x, y, false);
             }
             return;
         }
@@ -344,15 +378,25 @@ export class InkController {
             return;
         }
         if (tool === 'text') {
+            const drag = this.textDrag;
+            this.textDrag = null;
+            const { x, y } = this.opts.toLocal(e);
+            if (drag && this.moved) {
+                // Final position, then close the single undo step.
+                this.moveTextTo(drag, x, y, true);
+                if (drag.committed) {
+                    this.opts.store.endBatch();
+                }
+                return;
+            }
             if (!this.moved) {
-                const { x, y } = this.opts.toLocal(e);
                 const point = viewportToPagePoint(this.opts.getView(), this.opts.getLayout().layouts, x, y);
                 if (point) {
                     this.opts.onTextIntent({
                         pageIndex: point.pageIndex,
                         nx: point.nx,
                         ny: point.ny,
-                        existing: this.findTextAt(point.pageIndex, point.nx, point.ny),
+                        existing: drag?.annotation ?? this.findTextAt(point.pageIndex, point.nx, point.ny),
                     });
                 }
             }
@@ -415,9 +459,50 @@ export class InkController {
             this.fingeringSel = null;
             this.renderPageLive(page);
         }
+        if (this.textDrag) {
+            // The note stays where it was last committed; just close the step.
+            if (this.textDrag.committed) {
+                this.opts.store.endBatch();
+            }
+            this.textDrag = null;
+        }
         if (useViewerStore.getState().tool === 'eraser') {
             this.opts.store.endBatch();
         }
+    }
+
+    /**
+     * Drag a text note: patch x/y (text and size untouched) from the pointer
+     * delta since press. Every commit inside the drag is one store update, so
+     * peers see the note move live; they all sit in ONE undo batch, so Cmd+Z
+     * puts the note straight back. Commits are throttled unless `final`.
+     */
+    private moveTextTo(drag: TextDrag, x: number, y: number, final: boolean): void {
+        const layout = this.opts.getLayout().layouts[drag.pageIndex];
+        if (!layout) {
+            return;
+        }
+        const point = viewportToPageClamped(this.opts.getView(), layout, x, y);
+        if (!point) {
+            return;
+        }
+        const now = Date.now();
+        if (!final && now - drag.lastCommitAt < TEXT_DRAG_SYNC_MS) {
+            return;
+        }
+        const next = {
+            x: Math.min(1, Math.max(0, drag.payload.x + (point.nx - drag.startNx))),
+            y: Math.min(1, Math.max(0, drag.payload.y + (point.ny - drag.startNy))),
+        };
+        if (drag.committed && drag.committed.x === next.x && drag.committed.y === next.y) {
+            return;
+        }
+        if (!drag.committed) {
+            this.opts.store.beginBatch();
+        }
+        drag.committed = next;
+        drag.lastCommitAt = now;
+        void this.opts.store.update(drag.annotation.id, { payload: { ...drag.payload, ...next } });
     }
 
     // ---- internals ------------------------------------------------------
