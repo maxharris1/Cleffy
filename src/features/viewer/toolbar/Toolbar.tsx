@@ -1,5 +1,6 @@
 import { useSyncExternalStore, type ReactNode } from 'react';
 
+import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
 import type { StrokeWidthKey, Tool } from '@/types/models';
@@ -175,7 +176,13 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     }
                     aria-label="Print handwriting"
                     aria-pressed={printHandwriting}
-                    onClick={() => setPrintHandwriting(!printHandwriting)}
+                    onClick={() => {
+                        const next = !printHandwriting;
+                        setPrintHandwriting(next);
+                        if (next) {
+                            warmPrintPipeline();
+                        }
+                    }}
                     className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
                         printHandwriting ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
                     }`}

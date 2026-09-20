@@ -26,6 +26,7 @@ import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
 import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
 import { makeTranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
+import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { editedTextPayload } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
@@ -346,6 +347,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 return pageLayout ? pageLayout.height / pageLayout.width : null;
             },
         });
+        if (useViewerStore.getState().printHandwriting) {
+            warmPrintPipeline();
+        }
         const ink = new InkController({
             store: annotationStore,
             registry,

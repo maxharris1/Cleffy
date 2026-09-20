@@ -46,6 +46,25 @@ const parseGeminiText = (body: GeminiResponse): string =>
 
 const fallbackableStatus = (status: number): boolean => status === 404 || status === 503;
 
+/** Last model that returned 2xx in this isolate — skip a 404 candidate next time. */
+let lastOkModel: string | null = null;
+const notFoundModels = new Set<string>();
+
+const candidateOrder = (models: readonly string[]): string[] => {
+    const available = models.filter((model) => !notFoundModels.has(model));
+    const pool = available.length > 0 ? [...available] : [...models];
+    if (lastOkModel && pool.includes(lastOkModel)) {
+        return [lastOkModel, ...pool.filter((model) => model !== lastOkModel)];
+    }
+    return pool;
+};
+
+/** Test hook — sticky memory is process-local and would leak across cases. */
+export const resetGeminiModelMemoryForTests = (): void => {
+    lastOkModel = null;
+    notFoundModels.clear();
+};
+
 export const geminiGenerateUrl = (model: string): string =>
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
@@ -94,6 +113,8 @@ const generateOnce = async (
 /**
  * Ask Gemini for plain text about one image, trying each model candidate in
  * turn while the failure is a 404/503. Any other HTTP failure throws at once.
+ * Remembers the last 2xx model in this isolate and skips a candidate after
+ * 404 (new keys often cannot call 3.1).
  */
 export const geminiGenerateText = async (input: {
     apiKey: string;
@@ -104,14 +125,18 @@ export const geminiGenerateText = async (input: {
     signal?: AbortSignal;
 }): Promise<{ text: string; model: string }> => {
     const fetchImpl = input.fetchImpl ?? fetch;
-    const models = input.models ?? GEMINI_MODEL_CANDIDATES;
+    const models = candidateOrder(input.models ?? GEMINI_MODEL_CANDIDATES);
     let lastError = 'Gemini returned no model';
     for (const model of models) {
         const once = await generateOnce(fetchImpl, input.apiKey, model, input.image, input.prompt, input.signal);
         if (once.status >= 200 && once.status < 300) {
+            lastOkModel = model;
             return { text: once.text, model };
         }
         lastError = `Gemini ${model} failed: ${once.status} ${once.errorText}`;
+        if (once.status === 404) {
+            notFoundModels.add(model);
+        }
         if (!fallbackableStatus(once.status)) {
             throw new Error(lastError);
         }

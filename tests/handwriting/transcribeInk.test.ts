@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     GEMINI_MODEL_CANDIDATES,
     geminiApiKey,
     geminiGenerateText,
     geminiGenerateUrl,
+    resetGeminiModelMemoryForTests,
 } from '../../supabase/functions/_shared/gemini';
 import { cleanTranscription, TRANSCRIBE_PROMPT, UNREADABLE } from '../../supabase/functions/_shared/transcription';
 import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
@@ -28,6 +29,10 @@ describe('geminiApiKey', () => {
 });
 
 describe('geminiGenerateText', () => {
+    beforeEach(() => {
+        resetGeminiModelMemoryForTests();
+    });
+
     it('tries the cheapest model first and sends the key as a header, not in the URL', async () => {
         const fetchImpl = vi.fn(async () => geminiOk('use wrist'));
         const result = await geminiGenerateText({ apiKey: 'secret', image: IMAGE, prompt: 'p', fetchImpl });
@@ -68,6 +73,20 @@ describe('geminiGenerateText', () => {
             /gemini-3.5-flash-lite failed: 503/,
         );
         expect(fetchImpl).toHaveBeenCalledTimes(GEMINI_MODEL_CANDIDATES.length);
+    });
+
+    it('skips a 404 model on the next call and prefers the last 2xx model', async () => {
+        const first = vi
+            .fn()
+            .mockResolvedValueOnce(geminiError(404, 'model not found for this key'))
+            .mockResolvedValueOnce(geminiOk('rit.'));
+        await geminiGenerateText({ apiKey: 'k', image: IMAGE, prompt: 'p', fetchImpl: first });
+
+        const second = vi.fn(async () => geminiOk('use wrist'));
+        const result = await geminiGenerateText({ apiKey: 'k', image: IMAGE, prompt: 'p', fetchImpl: second });
+        expect(result).toEqual({ text: 'use wrist', model: 'gemini-3.5-flash-lite' });
+        expect(second).toHaveBeenCalledTimes(1);
+        expect((second.mock.calls[0] as unknown as [string])[0]).toContain('gemini-3.5-flash-lite');
     });
 });
 
