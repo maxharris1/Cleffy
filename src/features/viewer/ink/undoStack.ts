@@ -3,6 +3,10 @@
  * Entries are batches of INVERSE ops (an eraser drag deleting 5 strokes undoes
  * as one step). Undo/redo replay through AnnotationStore.commit, so they
  * persist and sync like any other edit (plan §sync).
+ *
+ * Batches nest: each `beginBatch` opens its own frame, and `endBatch` closes
+ * only that frame. Convert can therefore land as its own Cmd+Z step while an
+ * eraser/drag/pinch batch is still open, instead of closing the outer slot.
  */
 
 import type { Annotation } from '@/types/models';
@@ -18,7 +22,8 @@ const MAX_DEPTH = 100;
 export class UndoStack {
     private undoStack: UndoableOp[][] = [];
     private redoStack: UndoableOp[][] = [];
-    private batch: UndoableOp[] | null = null;
+    /** Open batches, innermost last. Inverse ops record into the top frame. */
+    private batches: UndoableOp[][] = [];
 
     get canUndo(): boolean {
         return this.undoStack.length > 0;
@@ -31,8 +36,9 @@ export class UndoStack {
     /** Record the inverse of a user op. Clears the redo stack. */
     pushInverse(op: UndoableOp): void {
         this.redoStack = [];
-        if (this.batch) {
-            this.batch.push(op);
+        const current = this.batches[this.batches.length - 1];
+        if (current) {
+            current.push(op);
             return;
         }
         this.undoStack.push([op]);
@@ -42,19 +48,22 @@ export class UndoStack {
     }
 
     beginBatch(): void {
-        if (!this.batch) {
-            this.batch = [];
-        }
+        this.batches.push([]);
     }
 
     endBatch(): void {
-        if (this.batch && this.batch.length > 0) {
-            this.undoStack.push(this.batch);
+        const batch = this.batches.pop();
+        if (batch && batch.length > 0) {
+            this.undoStack.push(batch);
             if (this.undoStack.length > MAX_DEPTH) {
                 this.undoStack.shift();
             }
         }
-        this.batch = null;
+    }
+
+    /** Drop the innermost open batch without recording it (aborted convert). */
+    cancelBatch(): void {
+        this.batches.pop();
     }
 
     /** Pop the ops to replay for undo; push their redo counterparts via fn. */
@@ -80,6 +89,6 @@ export class UndoStack {
     clear(): void {
         this.undoStack = [];
         this.redoStack = [];
-        this.batch = null;
+        this.batches = [];
     }
 }

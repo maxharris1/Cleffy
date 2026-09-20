@@ -327,7 +327,7 @@ export class AnnotationStore {
         this.notifyPage(existing.page);
     }
 
-    /** Group several ops (e.g. an eraser drag) into one undo entry. */
+    /** Group several ops (e.g. an eraser drag) into one undo entry. Nests. */
     beginBatch(): void {
         this.undo.beginBatch();
     }
@@ -335,6 +335,24 @@ export class AnnotationStore {
     endBatch(): void {
         this.undo.endBatch();
         this.notifyMeta();
+    }
+
+    /** Drop the innermost open batch without recording it. */
+    cancelBatch(): void {
+        this.undo.cancelBatch();
+        this.notifyMeta();
+    }
+
+    /** Undelete a tombstone (convert abort restores siblings it already deleted). */
+    async restore(id: string): Promise<void> {
+        const prev = this.byId.get(id);
+        if (!prev || !prev.deletedAt) {
+            return;
+        }
+        await this.commit(
+            { type: 'restore', annotation: { ...prev, deletedAt: null, updatedAt: nowIso() } },
+            { recordUndo: true },
+        );
     }
 
     async undoLast(): Promise<void> {

@@ -114,6 +114,31 @@ describe('AnnotationStore', () => {
         expect(store.getPage(0).size).toBe(3);
     });
 
+    it('nested batches are independent: inner endBatch does not close the outer', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+        await store.create(makeStroke('a3'));
+
+        store.beginBatch();
+        await store.delete('a1');
+        store.beginBatch();
+        await store.delete('a2');
+        await store.create(makeStroke('print'));
+        store.endBatch();
+        await store.delete('a3');
+        store.endBatch();
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a1')).toBe(true);
+        expect(store.getPage(0).has('a3')).toBe(true);
+        expect(store.getPage(0).has('a2')).toBe(false);
+        expect(store.getPage(0).has('print')).toBe(true);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a2')).toBe(true);
+        expect(store.getPage(0).has('print')).toBe(false);
+    });
+
     it('a new op clears the redo stack', async () => {
         await store.create(makeStroke('a1'));
         await store.undoLast();
