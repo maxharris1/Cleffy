@@ -31,6 +31,9 @@ export interface TranscribeInkDeps {
 
 const defaultIsOnline = (): boolean => typeof navigator === 'undefined' || navigator.onLine !== false;
 
+/** Client cap on a hung transcribe-ink call (edge Gemini abort is 30s). */
+export const TRANSCRIBE_CLIENT_TIMEOUT_MS = 9_000;
+
 /** Build the transcription fn for a cloud document the caller can write on. */
 export const makeTranscribeInkFn = (docId: string, deps: TranscribeInkDeps = {}): TranscribeInkFn => {
     const render = deps.render ?? renderGroupJpeg;
@@ -42,15 +45,15 @@ export const makeTranscribeInkFn = (docId: string, deps: TranscribeInkDeps = {})
         }
         try {
             const supabase = getSupabase();
-            const { data: sessionData } = await supabase.auth.getSession();
-            const accessToken = sessionData.session?.access_token;
+            const [sessionResult, image] = await Promise.all([supabase.auth.getSession(), render(group)]);
+            const accessToken = sessionResult.data.session?.access_token;
             if (!accessToken) {
                 return null;
             }
-            const image = await render(group);
             const { url: projectUrl, anonKey } = requireSupabaseConfig();
             const response = await fetchImpl(`${projectUrl}/functions/v1/transcribe-ink`, {
                 method: 'POST',
+                signal: AbortSignal.timeout(TRANSCRIBE_CLIENT_TIMEOUT_MS),
                 headers: {
                     Authorization: `Bearer ${accessToken}`,
                     apikey: anonKey,
