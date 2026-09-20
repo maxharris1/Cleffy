@@ -7,12 +7,18 @@ import {
     displayEditionName,
     displayWorkTitle,
     editionAvailability,
+    editionListSummary,
     formatBytes,
+    isEditionImportable,
+    rankEditions,
     recommendEdition,
+    recommendedBadge,
     searchTokens,
     splitSearchResults,
     suggestedPdfName,
+    urtextBadge,
 } from '@/features/imslp/imslpDisplay';
+import { moonlightFilenames, moonlightWorkDetail } from '../../../tests/imslp/moonlightEditions';
 import { groupPopularByComposer, POPULAR_WORKS, popularWorkTags } from '@/features/imslp/popularWorks';
 import { buildSearchFilters, hasActiveFilters } from '@/features/imslp/searchFacets';
 
@@ -50,7 +56,9 @@ const hit = (title: string, pageid: number) => ({
     imslpUrl: `https://imslp.org/wiki/${pageid}`,
 });
 
-const searchOk = (overrides: Partial<ImslpSearchResponse> & Pick<ImslpSearchResponse, 'results'>): ImslpSearchResponse => ({
+const searchOk = (
+    overrides: Partial<ImslpSearchResponse> & Pick<ImslpSearchResponse, 'results'>,
+): ImslpSearchResponse => ({
     filterRelaxed: false,
     relaxed: [],
     total: overrides.results.length,
@@ -104,19 +112,160 @@ describe('imslp display helpers', () => {
     it('recommends a mid-size edition over tiny or huge files', () => {
         const pick = recommendEdition([
             { filename: 'tiny.pdf', size: 12_000 },
-            { filename: 'good-urtext.pdf', size: 1_800_000 },
+            { filename: 'good-scan.pdf', size: 1_800_000 },
             { filename: 'huge-complete.pdf', size: 40_000_000 },
         ]);
-        expect(pick?.filename).toBe('good-urtext.pdf');
+        expect(pick?.filename).toBe('good-scan.pdf');
     });
 
-    it('never recommends a restricted or license-unknown edition', () => {
-        const pick = recommendEdition([
-            edition('henle-urtext.pdf', { downloadable: false, license: 'pd', restriction: 'Non-PD US' }),
-            edition('mystery.pdf', { license: 'unknown' }),
-            edition('plain-scan.pdf', { size: 900_000 }),
+    it('ranks a Urtext-house file first even when the filename says nothing about it', () => {
+        const ranked = rankEditions([
+            edition('schirmer-bulow.pdf', { publisher: 'Schirmer', year: 1895 }),
+            edition('PMLP01458-E621557_247-260-beethoven--sonatas-vol1.pdf', {
+                publisher: 'G. Henle Verlag',
+                year: 1976,
+                urtext: true,
+                description: 'Complete Score',
+                size: 30_000_000,
+            }),
+            edition('konemann.pdf', { publisher: 'Könemann', year: 1993, urtext: true, description: 'Complete Score' }),
+            edition('plain-scan.pdf', { description: 'Complete Score' }),
         ]);
-        expect(pick?.filename).toBe('plain-scan.pdf');
+        expect(ranked.map((e) => e.filename)).toEqual([
+            'PMLP01458-E621557_247-260-beethoven--sonatas-vol1.pdf',
+            'konemann.pdf',
+            'plain-scan.pdf',
+            'schirmer-bulow.pdf',
+        ]);
+        expect(recommendedBadge(ranked[0]!)).toBe('Urtext · Henle · 1976');
+        expect(urtextBadge(ranked[0]!)).toBe('Urtext · Henle · 1976');
+        expect(urtextBadge(ranked[1]!)).toBe('Urtext · 1993');
+        // Filename-only hints never claim the Urtext badge.
+        expect(urtextBadge(edition('henle-urtext-scan.pdf'))).toBeNull();
+        expect(recommendedBadge(edition('henle-urtext-scan.pdf'))).toBe('Recommended');
+    });
+
+    it('no longer prefers Schirmer, Breitkopf, typeset or edited filenames', () => {
+        const ranked = rankEditions([
+            edition('beethoven-schirmer-edited.pdf', { size: 2_000_000 }),
+            edition('beethoven-breitkopf-typeset.pdf', { size: 2_000_000 }),
+            edition('beethoven-plain.pdf', { size: 2_000_000 }),
+        ]);
+        // Equal size, no Urtext signal: IMSLP's own order stands.
+        expect(ranked.map((e) => e.filename)).toEqual([
+            'beethoven-schirmer-edited.pdf',
+            'beethoven-breitkopf-typeset.pdf',
+            'beethoven-plain.pdf',
+        ]);
+    });
+
+    it('does not read bare "wiener" as Wiener Urtext, and demotes arrangements', () => {
+        const ranked = rankEditions([
+            edition('beethoven.moonlight.wiener.pdf', {
+                publisher: 'Editio Musica Budapest',
+                year: 1959,
+                description: 'Complete Score',
+            }),
+            edition('moonlight-arr-cello.pdf', { description: 'Complete Score (arr. cello)' }),
+            edition('sonata-no14.pdf', { description: 'Complete Score' }),
+        ]);
+        expect(ranked.map((e) => e.filename)).toEqual([
+            'beethoven.moonlight.wiener.pdf',
+            'sonata-no14.pdf',
+            'moonlight-arr-cello.pdf',
+        ]);
+        expect(recommendedBadge(ranked[0]!)).toBe('Recommended');
+        expect(recommendEdition(ranked)?.filename).toBe('beethoven.moonlight.wiener.pdf');
+    });
+
+    it('does not fall through to Weiner when a restricted Henle Urtext leads', () => {
+        const pick = recommendEdition([
+            edition('PMLP01458-beethoven_piano-sonata-op27-no2_henle-pp17-30.pdf', {
+                publisher: 'G. Henle Verlag',
+                year: 1976,
+                urtext: true,
+                description: 'Complete Score',
+                downloadable: false,
+                restriction: 'See notes on copyright status for urtext editions',
+            }),
+            edition('beethoven.moonlight.wiener.pdf', {
+                publisher: 'Editio Musica Budapest',
+                year: 1959,
+                description: 'Complete Score',
+            }),
+        ]);
+        expect(pick).toBeNull();
+    });
+
+    it('demotes a file whose IMSLP block names an arranger even when it is a "Complete Score"', () => {
+        const ranked = rankEditions([
+            edition('lopez-villanueva-trio.pdf', { description: 'Complete Score', arrangement: true, size: 2_000_000 }),
+            edition('huge-original-dump.pdf', { description: 'Complete Score', size: 40_000_000 }),
+            edition('original-scan.pdf', { description: 'Complete Score', size: 3_000_000 }),
+        ]);
+        expect(ranked.map((e) => e.filename)).toEqual([
+            'original-scan.pdf',
+            'huge-original-dump.pdf',
+            'lopez-villanueva-trio.pdf',
+        ]);
+    });
+
+    it('gives Complete Score parentheticals the same complete bonus', () => {
+        const ranked = rankEditions([
+            edition('piano-original.pdf', { description: 'Complete Score (piano)', size: 2_000_000 }),
+            edition('clean-typeset.pdf', { description: 'Complete Score', size: 2_000_000 }),
+        ]);
+        expect(ranked.map((e) => e.filename)).toEqual(['piano-original.pdf', 'clean-typeset.pdf']);
+    });
+
+    it('leads with tagged Urtext even when restricted; other restricted rows stay last', () => {
+        const ranked = rankEditions([
+            edition('restricted-henle.pdf', {
+                downloadable: false,
+                restriction: 'See notes on copyright status for urtext editions',
+                publisher: 'G. Henle Verlag',
+                urtext: true,
+            }),
+            edition('mystery.pdf', { license: 'unknown', licenseLabel: null }),
+            edition('plain-scan.pdf'),
+            edition('restricted-peters.pdf', { downloadable: false, restriction: 'Non-PD US' }),
+        ]);
+        expect(ranked.map((e) => e.filename)).toEqual([
+            'restricted-henle.pdf',
+            'plain-scan.pdf',
+            'mystery.pdf',
+            'restricted-peters.pdf',
+        ]);
+        expect(recommendEdition(ranked)).toBeNull();
+    });
+
+    it('never recommends a restricted Urtext or a license-unknown edition', () => {
+        expect(
+            recommendEdition([
+                edition('henle-urtext.pdf', {
+                    downloadable: false,
+                    license: 'pd',
+                    restriction: 'Non-PD US',
+                    publisher: 'G. Henle Verlag',
+                    urtext: true,
+                }),
+                edition('mystery.pdf', { license: 'unknown' }),
+                edition('plain-scan.pdf', { size: 900_000 }),
+            ]),
+        ).toBeNull();
+        expect(isEditionImportable(edition('mystery.pdf', { license: 'unknown' }))).toBe(false);
+        expect(
+            recommendEdition([
+                edition('mystery.pdf', { license: 'unknown' }),
+                edition('plain-scan.pdf', { size: 900_000 }),
+            ])?.filename,
+        ).toBe('plain-scan.pdf');
+    });
+
+    it('omits "Urtext first" from the count line when nothing is tagged', () => {
+        const editions = [edition('a.pdf'), edition('b.pdf'), edition('c.pdf'), edition('d.pdf')];
+        expect(editionListSummary(editions)).toBe('4 PDFs — scroll for others.');
+        expect(editionListSummary(editions.slice(0, 2))).toBe('2 PDFs');
     });
 
     it('returns null when nothing is downloadable — no auto-selection', () => {
@@ -406,8 +555,7 @@ describe('ImslpBrowser', () => {
             .mockImplementationOnce(
                 () =>
                     new Promise((resolve) => {
-                        releaseFirst = () =>
-                            resolve(searchOk({ results: [hit('Stale Result (Old, Query)', 1)] }));
+                        releaseFirst = () => resolve(searchOk({ results: [hit('Stale Result (Old, Query)', 1)] }));
                     }),
             )
             .mockResolvedValueOnce(searchOk({ results: [hit('Fresh Result (New, Query)', 2)] }));
@@ -430,8 +578,66 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText('Fresh Result')).toBeInTheDocument();
     });
 
-    it('opens a work from ?work=, orders restricted editions last, and gates import on consent', async () => {
-        const { screen, waitFor } = await import('@testing-library/react');
+    it('opens Moonlight with restricted Henle first, unlabeled Weiner, and no auto-import', async () => {
+        const { screen, waitFor, within, fireEvent } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work = moonlightWorkDetail();
+        const names = moonlightFilenames;
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText('Choose a PDF edition');
+        expect(
+            screen.getByText(`${work.editions.length} PDFs · Urtext first — scroll for others.`),
+        ).toBeInTheDocument();
+        expect(screen.queryByText('No Urtext file tagged on this IMSLP page.')).not.toBeInTheDocument();
+        expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
+
+        const list = screen.getByRole('list', { name: 'PDF editions' });
+        const rows = within(list).getAllByRole('listitem');
+        expect(rows.length).toBe(work.editions.length);
+        expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Show all/ })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
+
+        const henleII = within(rows[0]!);
+        expect(henleII.getAllByText('Urtext · Henle · 1976').length).toBeGreaterThan(0);
+        expect(henleII.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
+        expect(henleII.getByText(/Complete Score/)).toBeInTheDocument();
+        expect(henleII.queryByRole('button')).not.toBeInTheDocument();
+        expect(henleII.getByText('Restricted')).toBeInTheDocument();
+
+        const henleI = within(rows[1]!);
+        expect(henleI.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
+        expect(henleI.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
+        expect(henleI.queryByRole('button')).not.toBeInTheDocument();
+
+        expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
+        expect(onImportImslp).not.toHaveBeenCalled();
+
+        const weinerButton = screen.getByRole('button', {
+            name: /Download .*moonlight\.wiener/i,
+        });
+        expect(weinerButton).not.toHaveAttribute('aria-pressed');
+        expect(within(weinerButton.closest('li')!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+
+        fireEvent.click(within(rows[0]!).getByText(/G\. Henle Verlag 1976/));
+        expect(onImportImslp).not.toHaveBeenCalled();
+
+        fireEvent.click(weinerButton);
+        fireEvent.click(weinerButton);
+        await waitFor(() => {
+            expect(onImportImslp).toHaveBeenCalledTimes(1);
+        });
+        expect(onImportImslp).toHaveBeenCalledWith(names.weiner, work.title, true);
+    });
+
+    it('opens a work from ?work=, ranks downloadable Urtext first, and imports on tap', async () => {
+        const { screen, waitFor, within } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
@@ -440,11 +646,15 @@ describe('ImslpBrowser', () => {
             composer: 'Beethoven, Ludwig van',
             imslpUrl: 'https://imslp.org/wiki/Moonlight',
             editions: [
-                edition('restricted-henle.pdf', {
-                    downloadable: false,
-                    restriction: 'Non-PD US',
+                edition('restricted-peters.pdf', { downloadable: false, restriction: 'Non-PD US' }),
+                edition('schirmer-bulow.pdf', { publisher: 'Schirmer', year: 1895, description: 'Complete Score' }),
+                edition('clean-scan.pdf', { description: 'Complete Score' }),
+                edition('PMLP01458-beethoven_sonatas-vol1.pdf', {
+                    publisher: 'G. Henle Verlag',
+                    year: 1976,
+                    urtext: true,
+                    description: 'Complete Score',
                 }),
-                edition('clean-scan.pdf'),
             ],
         };
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
@@ -453,25 +663,116 @@ describe('ImslpBrowser', () => {
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
 
         await screen.findByText('Choose a PDF edition');
-        expect(screen.getByText('2 available — 1 downloadable directly. Recommended edition selected.')).toBeInTheDocument();
+        expect(screen.getByText('4 PDFs · Urtext first — scroll for others.')).toBeInTheDocument();
 
-        // The clean scan is recommended + auto-selected; the restricted row is
-        // disabled, badged, and sorted after it.
-        const radios = screen.getAllByRole('radio');
-        expect(radios).toHaveLength(2);
-        expect(radios[0]).toBeChecked();
-        expect(radios[1]).toBeDisabled();
-        expect(screen.getByText('Non-PD US')).toBeInTheDocument();
+        const list = screen.getByRole('list', { name: 'PDF editions' });
+        const rows = within(list).getAllByRole('listitem');
+        expect(rows).toHaveLength(4);
 
-        // Import is held until the disclaimer is actually acknowledged.
-        const importButton = screen.getByRole('button', { name: 'Add to my library' });
-        expect(importButton).toBeDisabled();
-        await userEvent.click(screen.getByRole('checkbox'));
-        expect(importButton).toBeEnabled();
-        await userEvent.click(importButton);
+        const henleRow = within(rows[0]!).getByRole('button');
+        expect(henleRow).not.toHaveAttribute('aria-pressed');
+        expect(within(henleRow).getByText('Urtext · Henle · 1976')).toBeInTheDocument();
+        expect(within(henleRow).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
+        expect(within(henleRow).getByText(/Complete Score/)).toBeInTheDocument();
+        expect(within(rows[0]!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        expect(within(rows[3]!).queryByRole('button')).not.toBeInTheDocument();
+        expect(within(rows[3]!).getByText('Non-PD US')).toBeInTheDocument();
+        expect(onImportImslp).not.toHaveBeenCalled();
+
+        expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
+
+        await userEvent.click(within(rows[2]!).getByRole('button'));
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true);
         });
+        expect(onImportImslp).toHaveBeenCalledTimes(1);
+    });
+
+    it('says when no Urtext is tagged and falls back to a Recommended badge', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [
+                edition('tiny.pdf', { size: 12_000 }),
+                edition('clean-scan.pdf'),
+                edition('other-scan.pdf'),
+                edition('another-scan.pdf'),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText('Choose a PDF edition');
+        expect(screen.getByText('4 PDFs — scroll for others.')).toBeInTheDocument();
+        expect(screen.queryByText(/Urtext first/)).not.toBeInTheDocument();
+        expect(screen.getByText('No Urtext file tagged on this IMSLP page.')).toBeInTheDocument();
+        const badge = screen.getByText('Recommended');
+        expect(badge.closest('button')).toHaveTextContent('clean-scan');
+        expect(screen.queryByText(/Urtext ·/)).not.toBeInTheDocument();
+    });
+
+    it('freezes the rows while a download is in flight and ignores a second click in the same tick', async () => {
+        const { screen, within, fireEvent } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('a.pdf'), edition('b.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockImplementation(() => new Promise(() => {}));
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        const list = screen.getByRole('list', { name: 'PDF editions' });
+        const downloadButtons = within(list).getAllByRole('button');
+        expect(downloadButtons).toHaveLength(2);
+        fireEvent.click(downloadButtons[1]!);
+        fireEvent.click(downloadButtons[0]!);
+        fireEvent.click(downloadButtons[1]!);
+
+        expect(await screen.findByText('Downloading from IMSLP…')).toBeInTheDocument();
+        for (const row of within(list).getAllByRole('button')) {
+            expect(row).toBeDisabled();
+        }
+        expect(downloadButtons[0]).not.toHaveAttribute('aria-pressed');
+        expect(downloadButtons[1]).not.toHaveAttribute('aria-pressed');
+        expect(onImportImslp).toHaveBeenCalledTimes(1);
+        expect(onImportImslp).toHaveBeenCalledWith('b.pdf', work.title, true);
+        expect(within(list).getAllByRole('link', { name: 'Open on IMSLP' })).toHaveLength(2);
+    });
+
+    it('does not turn a license-unknown row into a one-tap download', async () => {
+        const { screen, within } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [
+                edition('known.pdf', { description: 'Complete Score' }),
+                edition('mystery.pdf', { license: 'unknown', licenseLabel: null, description: 'Complete Score' }),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        const list = screen.getByRole('list', { name: 'PDF editions' });
+        expect(within(list).getAllByRole('button')).toHaveLength(1);
+        expect(within(list).getByText('License unknown')).toBeInTheDocument();
+        expect(onImportImslp).not.toHaveBeenCalled();
     });
 
     it('shows the guidance state when every edition is restricted', async () => {

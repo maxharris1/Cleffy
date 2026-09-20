@@ -52,6 +52,18 @@ export interface ImslpEdition {
     restriction?: string | null;
     /** Server verdict: Cleffy can fetch this file directly. */
     downloadable?: boolean;
+    /** Official IMSLP publisher name from the work page's `{{P}}` template. */
+    publisher?: string | null;
+    /** Publication year when the publisher template states one. */
+    year?: number | null;
+    /** Plate number when the publisher template states one. */
+    plate?: string | null;
+    /** IMSLP tagged this file's publisher line with `{{Urtext}}`. */
+    urtext?: boolean;
+    /** The IMSLP file block names an arranger. */
+    arrangement?: boolean;
+    /** IMSLP file description, e.g. "Complete Score". */
+    description?: string | null;
 }
 
 export interface ImslpWorkDetail {
@@ -61,7 +73,15 @@ export interface ImslpWorkDetail {
     editions: ImslpEdition[];
 }
 
-const FALLBACK_CODES = ['bot_check', 'disclaimer', 'not_pdf', 'too_large', 'upstream', 'non_pd', 'license_unknown'] as const;
+const FALLBACK_CODES = [
+    'bot_check',
+    'disclaimer',
+    'not_pdf',
+    'too_large',
+    'upstream',
+    'non_pd',
+    'license_unknown',
+] as const;
 type FallbackCode = (typeof FALLBACK_CODES)[number];
 
 export type ImslpDownloadFallback = {

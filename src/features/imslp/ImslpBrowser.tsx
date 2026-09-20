@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
-import { recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
+import { isEditionImportable, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
 import { ErrorText } from '@/ui/ErrorText';
@@ -55,15 +55,13 @@ const reduce = (state: Flow, action: Action): Flow => {
             return { phase: 'search' };
         case 'loadingWork':
             return { phase: 'loadingWork' };
-        case 'workLoaded': {
-            const recommended = recommendEdition(action.work.editions);
+        case 'workLoaded':
             return {
                 phase: 'work',
                 work: action.work,
-                selected: recommended,
+                selected: null,
                 download: { kind: 'idle' },
             };
-        }
         case 'select':
             if (state.phase !== 'work') {
                 return state;
@@ -96,6 +94,7 @@ export const ImslpBrowser = ({
     const workParam = searchParams.get('work');
     const workSeqRef = useRef(0);
     const loadedTitleRef = useRef<string | null>(null);
+    const importInFlightRef = useRef(false);
 
     useEffect(() => {
         if (!workParam) {
@@ -134,15 +133,26 @@ export const ImslpBrowser = ({
         setSearchParams({}, { replace: true });
     };
 
-    const importEdition = async (acceptedDisclaimer: boolean) => {
-        if (flow.phase !== 'work' || !flow.selected) {
+    // A row tap both selects and imports. The IMSLP disclaimer is static text
+    // above the list, so the tap is the acknowledgment the edge function's
+    // `acceptedDisclaimer` flag records.
+    const importEdition = async (edition: ImslpEdition) => {
+        if (flow.phase !== 'work') {
             return;
         }
-        const { work, selected } = flow;
+        if (flow.download.kind === 'downloading' || importInFlightRef.current) {
+            return;
+        }
+        if (!isEditionImportable(edition)) {
+            return;
+        }
+        importInFlightRef.current = true;
+        const { work } = flow;
         setError(null);
+        dispatch({ type: 'select', edition });
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(selected.filename, work.title, acceptedDisclaimer);
+            const result = await onImportImslp(edition.filename, work.title, true);
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -155,6 +165,8 @@ export const ImslpBrowser = ({
             // Recorded by the shell as uploadError/uploadLimit — reporting it
             // here too rendered the same message twice on /search.
             dispatch({ type: 'download', download: { kind: 'idle' } });
+        } finally {
+            importInFlightRef.current = false;
         }
     };
 
@@ -188,7 +200,11 @@ export const ImslpBrowser = ({
                         </div>
                     ) : null}
                     {flow.phase === 'work' ? (
-                        <button type="button" onClick={closeWork} className={buttonClassName('ghost', 'sm', 'shrink-0')}>
+                        <button
+                            type="button"
+                            onClick={closeWork}
+                            className={buttonClassName('ghost', 'sm', 'shrink-0')}
+                        >
                             Back
                         </button>
                     ) : null}
@@ -203,10 +219,7 @@ export const ImslpBrowser = ({
 
             {/* Kept mounted so query, facets and results survive opening a work. */}
             <div hidden={flow.phase !== 'search'}>
-                <ImslpSearchPanel
-                    disabled={blocked}
-                    onSelectTitle={(title) => setSearchParams({ work: title })}
-                />
+                <ImslpSearchPanel disabled={blocked} onSelectTitle={(title) => setSearchParams({ work: title })} />
             </div>
 
             {flow.phase === 'work' ? (
@@ -217,8 +230,7 @@ export const ImslpBrowser = ({
                     download={flow.download}
                     busy={busy}
                     importing={blocked}
-                    onSelect={(edition) => dispatch({ type: 'select', edition })}
-                    onImportSelected={(accepted) => void importEdition(accepted)}
+                    onImport={(edition) => void importEdition(edition)}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
             ) : null}
