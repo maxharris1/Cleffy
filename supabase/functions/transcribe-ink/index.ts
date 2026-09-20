@@ -50,6 +50,23 @@ const badImage = (img: TranscribeBody['image']): boolean =>
     img.dataBase64.length === 0 ||
     img.dataBase64.length > MAX_IMAGE_B64;
 
+/** Gateway already verified the JWT (`verify_jwt = true`); read `sub` for the user rate bucket. */
+const userIdFromBearer = (authHeader: string): string | null => {
+    const token = authHeader.slice('Bearer '.length).trim();
+    const payload = token.split('.')[1];
+    if (!payload) {
+        return null;
+    }
+    try {
+        const padded = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = padded.length % 4 === 0 ? '' : '='.repeat(4 - (padded.length % 4));
+        const json = JSON.parse(atob(padded + pad)) as { sub?: unknown };
+        return typeof json.sub === 'string' && json.sub.length > 0 ? json.sub : null;
+    } catch {
+        return null;
+    }
+};
+
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
         return optionsResponse();
@@ -63,17 +80,19 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Request too large' }, 413);
     }
 
-    const ipRate = await checkRateLimit(`transcribe-ip:${clientKey(req)}`, IP_LIMIT, WINDOW_MS);
-    if (!ipRate.ok) {
-        return jsonResponse({ error: 'Too many requests', retryAfterSec: ipRate.retryAfterSec }, 429);
-    }
-
     const authHeader = req.headers.get('Authorization');
     if (!authHeader?.startsWith('Bearer ')) {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    const parsedBody = await readCappedJson<TranscribeBody>(req, MAX_BODY_BYTES);
+    const [ipRate, parsedBody] = await Promise.all([
+        checkRateLimit(`transcribe-ip:${clientKey(req)}`, IP_LIMIT, WINDOW_MS),
+        readCappedJson<TranscribeBody>(req, MAX_BODY_BYTES),
+    ]);
+    if (!ipRate.ok) {
+        return jsonResponse({ error: 'Too many requests', retryAfterSec: ipRate.retryAfterSec }, 429);
+    }
+
     if (!parsedBody.ok) {
         return jsonResponse(
             parsedBody.status === 413 ? { error: 'Request too large' } : { error: 'Invalid JSON body' },
@@ -94,6 +113,11 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'image missing or over budget' }, 400);
     }
 
+    const userId = userIdFromBearer(authHeader);
+    if (!userId) {
+        return jsonResponse({ error: 'Unauthorized' }, 401);
+    }
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
     if (!supabaseUrl || !anonKey) {
@@ -106,34 +130,26 @@ Deno.serve(async (req) => {
         auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const { data: userData, error: userError } = await userClient.auth.getUser();
-    const userId = userData?.user?.id;
-    if (userError || !userId) {
-        return jsonResponse({ error: 'Unauthorized' }, 401);
-    }
-
-    const userRate = await checkRateLimit(`transcribe:${userId}`, USER_LIMIT, WINDOW_MS);
+    const [userRate, roleResult, docResult] = await Promise.all([
+        checkRateLimit(`transcribe:${userId}`, USER_LIMIT, WINDOW_MS),
+        userClient.rpc('document_role', { doc: documentId }),
+        userClient.from('documents').select('owner_id').eq('id', documentId).maybeSingle(),
+    ]);
     if (!userRate.ok) {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: userRate.retryAfterSec }, 429);
     }
 
     // Only the owner may fire the metered path — a student's Print toggle
     // must not drain the teacher's vision_reads on doodles.
-    const { data: role, error: roleError } = await userClient.rpc('document_role', { doc: documentId });
-    if (roleError || role !== 'owner') {
+    if (roleResult.error || roleResult.data !== 'owner') {
         return jsonResponse({ error: 'Only the score owner can transcribe handwriting' }, 403);
     }
 
     // The read bills the score's owner (teacher-pays) — members can read the row under RLS.
-    const { data: doc, error: docError } = await userClient
-        .from('documents')
-        .select('owner_id')
-        .eq('id', documentId)
-        .maybeSingle();
-    if (docError || !doc) {
+    if (docResult.error || !docResult.data) {
         return jsonResponse({ error: 'Not a member of this score' }, 403);
     }
-    const ownerId = doc.owner_id as string;
+    const ownerId = docResult.data.owner_id as string;
 
     const apiKey = geminiApiKey((name) => Deno.env.get(name));
     if (!apiKey) {
