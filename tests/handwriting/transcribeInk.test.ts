@@ -7,6 +7,7 @@ import {
     geminiGenerateUrl,
 } from '../../supabase/functions/_shared/gemini';
 import { cleanTranscription, TRANSCRIBE_PROMPT, UNREADABLE } from '../../supabase/functions/_shared/transcription';
+import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
 
 const IMAGE = { mimeType: 'image/jpeg', data: 'aW5r' };
 
@@ -86,5 +87,34 @@ describe('cleanTranscription', () => {
     it('asks for text only and tells the model how to abstain', () => {
         expect(TRANSCRIBE_PROMPT).toMatch(/text only/i);
         expect(TRANSCRIBE_PROMPT).toContain(`return exactly ${UNREADABLE}`);
+    });
+});
+
+describe('readCappedJson', () => {
+    it('rejects a body larger than the cap even when Content-Length is missing or understated', async () => {
+        const big = 'x'.repeat(80);
+        const understated = new Request('https://example.test', {
+            method: 'POST',
+            headers: { 'content-length': '4' },
+            body: JSON.stringify({ a: big }),
+        });
+        expect(await readCappedJson(understated, 20)).toEqual({ ok: false, status: 413 });
+
+        const missing = new Request('https://example.test', {
+            method: 'POST',
+            body: JSON.stringify({ a: big }),
+        });
+        expect(await readCappedJson(missing, 20)).toEqual({ ok: false, status: 413 });
+    });
+
+    it('parses a JSON body under the cap', async () => {
+        const req = new Request('https://example.test', {
+            method: 'POST',
+            body: JSON.stringify({ documentId: 'd' }),
+        });
+        expect(await readCappedJson<{ documentId: string }>(req, 1024)).toEqual({
+            ok: true,
+            value: { documentId: 'd' },
+        });
     });
 });

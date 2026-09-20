@@ -4,6 +4,7 @@ import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { geminiApiKey, geminiGenerateText } from '../_shared/gemini.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
+import { readCappedJson } from '../_shared/readCappedJson.ts';
 import { cleanTranscription, TRANSCRIBE_PROMPT } from '../_shared/transcription.ts';
 
 /**
@@ -14,10 +15,9 @@ import { cleanTranscription, TRANSCRIBE_PROMPT } from '../_shared/transcription.
  *
  * Mirrors analyze-annotations: JWT required (config.toml), strict body
  * budgets, per-IP and per-user rate limits (fail closed), and `vision_reads`
- * metering. The caller must be able to WRITE on the document (owner or
- * editor — they just inked it); the read bills the document OWNER, the
- * teacher-pays rule every other vision call follows. Never called for
- * digits or dynamics — those never leave the device.
+ * metering. Only the document OWNER may call this (an editor's local Print
+ * toggle must not auto-bill the teacher). Unreadable ink refunds the credit.
+ * Never called for digits or dynamics — those never leave the device.
  *
  * Model: Gemini Flash-Lite via generativelanguage.googleapis.com, key from
  * GEMINI_API_KEY (fallbacks GOOGLE_GENERATIVE_AI_API_KEY, GOOGLE_API_KEY).
@@ -73,12 +73,14 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    let body: TranscribeBody;
-    try {
-        body = await req.json();
-    } catch {
-        return jsonResponse({ error: 'Invalid JSON body' }, 400);
+    const parsedBody = await readCappedJson<TranscribeBody>(req, MAX_BODY_BYTES);
+    if (!parsedBody.ok) {
+        return jsonResponse(
+            parsedBody.status === 413 ? { error: 'Request too large' } : { error: 'Invalid JSON body' },
+            parsedBody.status,
+        );
     }
+    const body = parsedBody.value;
 
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {
@@ -115,10 +117,11 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: userRate.retryAfterSec }, 429);
     }
 
-    // Only someone who can ink on this score has handwriting to convert.
+    // Only the owner may fire the metered path — a student's Print toggle
+    // must not drain the teacher's vision_reads on doodles.
     const { data: role, error: roleError } = await userClient.rpc('document_role', { doc: documentId });
-    if (roleError || !['owner', 'editor'].includes(role as string)) {
-        return jsonResponse({ error: 'Only editors of this score can convert handwriting' }, 403);
+    if (roleError || role !== 'owner') {
+        return jsonResponse({ error: 'Only the score owner can transcribe handwriting' }, 403);
     }
 
     // The read bills the score's owner (teacher-pays) — members can read the row under RLS.
@@ -161,7 +164,11 @@ Deno.serve(async (req) => {
             prompt: TRANSCRIBE_PROMPT,
             signal: AbortSignal.timeout(30_000),
         });
-        return jsonResponse({ ok: true, page, text: cleanTranscription(raw), model });
+        const text = cleanTranscription(raw);
+        if (text === null) {
+            await giveBack();
+        }
+        return jsonResponse({ ok: true, page, text, model });
     } catch (err) {
         console.error('transcribe-ink model call failed', err);
         await giveBack();

@@ -1,5 +1,5 @@
 import { MIN_SELECTION_CSS, rectFromPoints } from '@/features/fingering/selection';
-import { MIN_TEXT_SIZE } from '@/features/import/textFit';
+import { MIN_TEXT_SIZE, measureInkText } from '@/features/import/textFit';
 import {
     decimateStroke,
     viewportToPageClamped,
@@ -16,7 +16,7 @@ import {
 } from '@/features/viewer/ink/strokeRenderer';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import type { InkDelegate } from '@/features/viewer/ink/GestureController';
-import { maxTextSizeFor, onMusicFontReady, textBoundsNorm } from '@/features/viewer/ink/musicFont';
+import { maxTextSizeFor, onMusicFontReady, textBoundsNorm, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
@@ -56,7 +56,7 @@ const TAP_SLOP_CSS = 6;
 /** Decimation threshold in CSS px. */
 const DECIMATE_CSS = 0.75;
 /** While dragging a text note, commit (and so live-sync) its position at most this often. */
-export const TEXT_DRAG_SYNC_MS = 80;
+export const TEXT_DRAG_SYNC_MS = 250;
 
 /** Pick radius (CSS px) around the selection's resize handle. */
 export const RESIZE_HANDLE_HIT_CSS = 14;
@@ -255,6 +255,7 @@ export class InkController {
         onInkCancel: () => this.onCancel(),
         onPinch: (factor) => this.onPinch(factor),
         onPinchEnd: () => this.onPinchEnd(),
+        canPinch: () => this.canPinch(),
     };
 
     /** The text note currently selected with the text tool, or null. */
@@ -583,6 +584,9 @@ export class InkController {
         if (this.textScale) {
             const scale = this.textScale;
             this.textScale = null;
+            if (scale.anchor === null) {
+                this.commitTextSize(scale, scale.startSize * scale.factor, true);
+            }
             this.endTextScale(scale);
         }
         if (useViewerStore.getState().tool === 'eraser') {
@@ -662,15 +666,18 @@ export class InkController {
 
     /**
      * Commit a new size — clamped to the note's range — as one store update.
-     * Every update inside the gesture live-syncs; all sit in ONE undo batch.
-     * Throttled unless `final`.
+     * Live fields (`text`, `hw`, `color` via payload) are read from the store
+     * so a peer edit during the gesture is not clobbered. Size grows about the
+     * visual top-left (payload `y` is shifted by `topInset`). Throttled unless
+     * `final`.
      */
     private commitTextSize(scale: TextScale, rawSize: number, final: boolean): void {
         const now = Date.now();
         if (!final && now - scale.lastCommitAt < TEXT_DRAG_SYNC_MS) {
             return;
         }
-        const size = Math.min(maxTextSizeFor(scale.payload), Math.max(MIN_TEXT_SIZE, rawSize));
+        const livePayload = this.liveTextPayload(scale.annotation.id, scale.payload);
+        const size = Math.min(maxTextSizeFor(livePayload), Math.max(MIN_TEXT_SIZE, rawSize));
         if (scale.committed === size || (scale.committed === null && size === scale.payload.size)) {
             return;
         }
@@ -679,7 +686,14 @@ export class InkController {
         }
         scale.committed = size;
         scale.lastCommitAt = now;
-        void this.opts.store.update(scale.annotation.id, { payload: { ...scale.payload, size } });
+        const layout = this.opts.getLayout().layouts[scale.pageIndex];
+        const aspect = layout ? layout.height / layout.width : 1;
+        const spec = textDrawSpec(livePayload.text, livePayload.hw === 1);
+        const metrics = measureInkText(spec.glyphs, { family: spec.family, style: spec.style });
+        const y = scale.payload.y + (metrics.topInset * (scale.payload.size - size)) / aspect;
+        void this.opts.store.update(scale.annotation.id, {
+            payload: { ...livePayload, size, y: Math.min(1, Math.max(0, y)) },
+        });
     }
 
     private endTextScale(scale: TextScale): void {
@@ -688,12 +702,25 @@ export class InkController {
         }
     }
 
+    /** Two-finger pinch: claimed while a text note is selected; never steals a handle drag. */
+    private canPinch(): boolean {
+        return (
+            useViewerStore.getState().tool === 'text' &&
+            !this.opts.isReadOnly() &&
+            this.selectedText !== null &&
+            this.textScale?.anchor == null
+        );
+    }
+
     /** Two-finger pinch: claimed (returns true) while a text note is selected with the text tool. */
     private onPinch(factor: number): boolean {
-        if (useViewerStore.getState().tool !== 'text' || this.opts.isReadOnly()) {
+        if (!this.canPinch()) {
             return false;
         }
         let scale = this.textScale;
+        if (scale?.anchor) {
+            return false;
+        }
         if (!scale) {
             const selection = this.getTextSelection();
             const live = selection ? this.opts.store.get(selection.id) : undefined;
@@ -720,11 +747,10 @@ export class InkController {
 
     private onPinchEnd(): void {
         const scale = this.textScale;
-        if (!scale) {
+        if (!scale || scale.anchor) {
             return;
         }
         this.textScale = null;
-        // Flush the throttled tail so the note lands exactly where the fingers left it.
         this.commitTextSize(scale, scale.startSize * scale.factor, true);
         this.endTextScale(scale);
     }
@@ -748,6 +774,7 @@ export class InkController {
         if (!final && now - drag.lastCommitAt < TEXT_DRAG_SYNC_MS) {
             return;
         }
+        const livePayload = this.liveTextPayload(drag.annotation.id, drag.payload);
         const next = {
             x: Math.min(1, Math.max(0, drag.payload.x + (point.nx - drag.startNx))),
             y: Math.min(1, Math.max(0, drag.payload.y + (point.ny - drag.startNy))),
@@ -760,10 +787,15 @@ export class InkController {
         }
         drag.committed = next;
         drag.lastCommitAt = now;
-        void this.opts.store.update(drag.annotation.id, { payload: { ...drag.payload, ...next } });
+        void this.opts.store.update(drag.annotation.id, { payload: { ...livePayload, ...next } });
     }
 
     // ---- internals ------------------------------------------------------
+
+    private liveTextPayload(id: string, fallback: TextPayload): TextPayload {
+        const live = this.opts.store.get(id);
+        return live && isTextPayload(live.payload) ? live.payload : fallback;
+    }
 
     private pressureOf(e: PointerEvent): number {
         // Mouse reports 0.5 while down; pens report real pressure (0 on some
@@ -773,8 +805,9 @@ export class InkController {
 
     private findTextAt(pageIndex: number, nx: number, ny: number): Annotation | null {
         const canvases = this.opts.registry.get(pageIndex);
-        const pageWpx = canvases?.committed.width ?? 1000;
-        const pageHpx = canvases?.committed.height ?? 1400;
+        const layout = this.opts.getLayout().layouts[pageIndex];
+        const pageWpx = canvases?.committed.width || layout?.width || 1000;
+        const pageHpx = canvases?.committed.height || layout?.height || 1400;
         const hits = hitTestPage(this.opts.store.getPage(pageIndex).values(), nx, ny, 4, pageWpx, pageHpx);
         return hits.find((h) => h.kind === 'text') ?? null;
     }

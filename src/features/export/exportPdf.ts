@@ -26,7 +26,7 @@ export const exportAnnotatedPdf = async (
         annotations = annotations.filter((a) => a.page === options.pageIndex);
     }
     // Converted dynamics need the music face embedded; fetch it only then
-    // (fails soft — the worker falls back to Helvetica for those symbols).
+    // (fails soft — the worker paints ASCII `mf` / `sfz` in Helvetica).
     let musicFont: ArrayBuffer | undefined;
     if (annotations.some(annotationNeedsMusicFont)) {
         try {

@@ -27,6 +27,7 @@ import { HandwritingController } from '@/features/viewer/ink/handwriting/handwri
 import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
 import { makeTranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
+import { editedTextPayload } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
@@ -119,6 +120,8 @@ export interface PdfViewportProps {
         name: string;
         isAnonymous: boolean;
         canWrite: boolean;
+        /** Only the document owner may fire the metered text-note transcribe. */
+        isOwner?: boolean;
         onStatus?: (status: SyncStatus) => void;
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
@@ -199,6 +202,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncName = sync?.name;
     const syncIsAnonymous = sync?.isAnonymous ?? false;
     const syncCanWrite = sync?.canWrite ?? false;
+    const syncIsOwner = sync?.isOwner ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
@@ -333,7 +337,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         const handwriting = new HandwritingController({
             store: annotationStore,
             recognizer: recognizeOnDevice,
-            transcribe: syncUserId ? makeTranscribeInkFn(docId) : undefined,
+            transcribe: syncUserId && syncIsOwner ? makeTranscribeInkFn(docId) : undefined,
             isEnabled: () => useViewerStore.getState().printHandwriting && !readOnlyRef.current,
             getAspect: (pageIndex) => {
                 const pageLayout = layoutRef.current.layouts[pageIndex];
@@ -481,6 +485,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncName,
         syncIsAnonymous,
         syncCanWrite,
+        syncIsOwner,
         syncOnStatus,
         syncOnPeers,
         syncOnDocReplaced,
@@ -560,10 +565,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             if (!isTextPayload(existing.payload)) {
                 return;
             }
-            if (trimmed === '') {
+            const next = editedTextPayload(existing.payload, trimmed);
+            if (next === 'delete') {
                 void annotationStore.delete(existing.id);
-            } else if (trimmed !== existing.payload.text) {
-                void annotationStore.update(existing.id, { payload: { ...existing.payload, text: trimmed } });
+            } else if (next !== 'unchanged') {
+                void annotationStore.update(existing.id, { payload: next });
             }
             return;
         }

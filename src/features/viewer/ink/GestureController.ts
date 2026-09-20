@@ -43,6 +43,11 @@ export interface InkDelegate {
      */
     onPinch?: (factor: number) => boolean;
     onPinchEnd?: () => void;
+    /**
+     * True when a second finger should steal the in-flight ink pointer and
+     * become a pinch (text-tool resize with Finger-draw on).
+     */
+    canPinch?: () => boolean;
 }
 
 interface TrackedPointer {
@@ -80,6 +85,9 @@ export class GestureController {
 
     private pointers = new Map<number, TrackedPointer>();
     private inkPointerId: number | null = null;
+    private inkX = 0;
+    private inkY = 0;
+    private inkType = '';
     private lastPenActivity = 0;
     private lastTouchDown = 0;
     private lastSafariGestureScale = 1;
@@ -152,16 +160,25 @@ export class GestureController {
         if (e.pointerType === 'touch') {
             this.lastTouchDown = performance.now();
         }
-        // Palm rejection: ignore touches that land while/just after the pen is active.
-        if (
-            e.pointerType === 'touch' &&
-            (this.inkPointerId !== null || performance.now() - this.lastPenActivity < PALM_REJECTION_WINDOW_MS)
-        ) {
+        // Palm rejection: ignore touches that land while/just after the pen is
+        // active. Finger-draw is the exception: a second finger on the text
+        // tool promotes the ink pointer into a pinch-resize.
+        if (e.pointerType === 'touch' && this.inkPointerId !== null) {
+            if (this.inkType === 'touch' && this.inkDelegate?.canPinch?.()) {
+                this.promoteInkToPinch(e);
+            }
+            return;
+        }
+        if (e.pointerType === 'touch' && performance.now() - this.lastPenActivity < PALM_REJECTION_WINDOW_MS) {
             return;
         }
 
         if (this.inkDelegate && this.inkPointerId === null && this.inkDelegate.shouldInk(e)) {
+            const { x, y } = this.toLocal(e);
             this.inkPointerId = e.pointerId;
+            this.inkX = x;
+            this.inkY = y;
+            this.inkType = e.pointerType;
             this.inkDelegate.onInkDown(e);
             return;
         }
@@ -190,6 +207,9 @@ export class GestureController {
     private onPointerMove = (e: PointerEvent): void => {
         if (e.pointerId === this.inkPointerId) {
             this.lastPenActivity = performance.now();
+            const { x, y } = this.toLocal(e);
+            this.inkX = x;
+            this.inkY = y;
             this.inkDelegate?.onInkMove(e);
             return;
         }
@@ -275,6 +295,46 @@ export class GestureController {
             this.callbacks.onGestureEnd();
         }
     };
+
+    /**
+     * Finger-draw claimed the first touch as ink; a second finger on a selected
+     * note becomes pinch-resize instead of a one-finger pan + rejected palm.
+     */
+    private promoteInkToPinch(e: PointerEvent): void {
+        const inkId = this.inkPointerId;
+        if (inkId === null) {
+            return;
+        }
+        this.inkDelegate?.onInkCancel(e);
+        this.inkPointerId = null;
+        const now = performance.now();
+        this.pointers.set(inkId, {
+            id: inkId,
+            x: this.inkX,
+            y: this.inkY,
+            type: this.inkType,
+            downX: this.inkX,
+            downY: this.inkY,
+            downAt: now,
+            maxDist: 0,
+            multi: true,
+            button: 0,
+        });
+        const { x, y } = this.toLocal(e);
+        this.pointers.set(e.pointerId, {
+            id: e.pointerId,
+            x,
+            y,
+            type: e.pointerType,
+            downX: x,
+            downY: y,
+            downAt: now,
+            maxDist: 0,
+            multi: true,
+            button: e.button,
+        });
+        this.navigating = true;
+    }
 
     /** A claimed pinch ends as soon as fewer than two fingers remain. */
     private endInkPinchIfDone(): void {

@@ -14,7 +14,7 @@ import {
     sanitizeWinAnsi,
     viewportToPdfPoint,
 } from '@/features/export/pdfMapping';
-import { annotationNeedsMusicFont, textDrawSpec } from '@/features/viewer/ink/musicFont';
+import { annotationNeedsMusicFont, pdfFallbackGlyphs, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import { FREEHAND_OPTIONS, getSvgPathFromStroke, HIGHLIGHT_ALPHA } from '@/features/viewer/ink/strokeRenderer';
 import { isTextPayload, type Annotation } from '@/types/models';
 
@@ -26,7 +26,8 @@ export interface ExportRequest {
     /**
      * The SMuFL music-text face (WOFF2/OTF bytes), present when a converted
      * dynamic/mark is among the annotations — embedded (subset) so exported
-     * `mf` matches the screen. Without it such symbols fall back to Helvetica.
+     * `mf` matches the screen. Without it such symbols fall back to Helvetica
+     * drawing the ASCII `text` field (`mf`, `sfz`), not SMuFL codepoints.
      */
     musicFont?: ArrayBuffer;
 }
@@ -98,7 +99,8 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
             const useMusic = spec.music && music !== null;
             const drawFont = useMusic ? music!.font : spec.style === 'italic' ? italic : font;
             const ascent = useMusic ? music!.ascent : STANDARD_ASCENT;
-            const lines = (useMusic ? spec.glyphs : sanitizeWinAnsi(spec.glyphs)).split('\n');
+            const source = useMusic ? spec.glyphs : pdfFallbackGlyphs(text, spec);
+            const lines = (useMusic ? source : sanitizeWinAnsi(source)).split('\n');
             lines.forEach((line, i) => {
                 // Anchor each line in DISPLAY space (top-left + baseline drop),
                 // then map — handles every page rotation uniformly.

@@ -32,19 +32,22 @@ afterEach(() => {
     el.remove();
 });
 
-const delegate = (claim: boolean) => {
+const delegate = (claim: boolean, shouldInk: InkDelegate['shouldInk'] = () => false) => {
     const onPinch = vi.fn<(factor: number) => boolean>(() => claim);
     const onPinchEnd = vi.fn<() => void>();
+    const onInkDown = vi.fn();
+    const onInkCancel = vi.fn();
     const ink: InkDelegate = {
-        shouldInk: () => false,
-        onInkDown: () => undefined,
+        shouldInk,
+        onInkDown,
         onInkMove: () => undefined,
         onInkUp: () => undefined,
-        onInkCancel: () => undefined,
+        onInkCancel,
         onPinch,
         onPinchEnd,
+        canPinch: () => claim,
     };
-    return { ink, onPinch, onPinchEnd };
+    return { ink, onPinch, onPinchEnd, onInkDown, onInkCancel };
 };
 
 const pinchOut = () => {
@@ -78,5 +81,18 @@ describe('GestureController pinch hand-off', () => {
         expect(callbacks.onZoomBy).toHaveBeenCalledTimes(2);
         expect(callbacks.onZoomBy.mock.calls[0]![0]).toBeCloseTo(1.5);
         expect(onPinchEnd).not.toHaveBeenCalled();
+    });
+
+    it('promotes the first finger-draw ink pointer into a pinch when Finger-draw is on', () => {
+        controller = new GestureController(el, callbacks);
+        const { ink, onPinch, onPinchEnd, onInkDown, onInkCancel } = delegate(true, (e) => e.pointerId === 1);
+        controller.setInkDelegate(ink);
+        pinchOut();
+        expect(onInkDown).toHaveBeenCalledTimes(1);
+        expect(onInkCancel).toHaveBeenCalledTimes(1);
+        expect(onPinch).toHaveBeenCalledTimes(2);
+        expect(onPinchEnd).toHaveBeenCalledTimes(1);
+        expect(callbacks.onZoomBy).not.toHaveBeenCalled();
+        expect(callbacks.onPan).not.toHaveBeenCalled();
     });
 });

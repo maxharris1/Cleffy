@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { inflateSync } from 'node:zlib';
 
 import { PDFDict, PDFDocument, PDFName } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
@@ -12,6 +13,24 @@ import type { Annotation } from '@/types/models';
 const musicFontBytes = (): ArrayBuffer => {
     const buffer = readFileSync(resolve(process.cwd(), 'public', MUSIC_FONT_URL.replace(/^\//, '')));
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+};
+
+/** Inflate every PDF content stream so we can assert the painted glyphs. */
+const decodedContent = (bytes: Uint8Array): string => {
+    const raw = new TextDecoder('latin1').decode(bytes);
+    const parts: string[] = [];
+    const re = /stream\r?\n([\s\S]*?)\nendstream/g;
+    let match: RegExpExecArray | null = re.exec(raw);
+    while (match) {
+        const payload = Uint8Array.from(match[1] ?? '', (c) => c.charCodeAt(0));
+        try {
+            parts.push(new TextDecoder('latin1').decode(inflateSync(payload)));
+        } catch {
+            parts.push(match[1] ?? '');
+        }
+        match = re.exec(raw);
+    }
+    return parts.join('\n');
 };
 
 /** /BaseFont names of every font dictionary in the saved PDF. */
@@ -85,6 +104,10 @@ describe('PDF export of converted handwriting', () => {
         const names = await fontNames(out);
         expect(bravura(names)).toHaveLength(0);
         expect(names).toContain('Helvetica');
+        const content = decodedContent(out);
+        // pdf-lib WinAnsi-encodes as hex; 6D66 = "mf", not 3F = "?".
+        expect(content).toMatch(/<6D66>\s+Tj/);
+        expect(content).not.toMatch(/<3F>\s+Tj/);
     });
 
     it('sets converted teaching words in the oblique face', async () => {

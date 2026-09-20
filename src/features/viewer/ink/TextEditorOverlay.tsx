@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { pagePointToViewport } from '@/features/viewer/geometry';
 import type { PageLayout } from '@/features/viewer/geometry';
 import type { TextIntent } from '@/features/viewer/ink/InkController';
+import { textForEditor } from '@/features/viewer/ink/musicFont';
 import { isTextPayload } from '@/types/models';
 import type { ViewState } from '@/types/models';
 
@@ -38,7 +39,7 @@ export const TextEditorOverlay = ({ intent, layout, view, onCommit, onCancel }: 
         <textarea
             ref={ref}
             data-ui-overlay
-            defaultValue={existingPayload?.text ?? ''}
+            defaultValue={existingPayload ? textForEditor(existingPayload.text) : ''}
             aria-label="Text note"
             rows={2}
             className="absolute z-30 min-w-32 resize rounded border border-accent bg-white/95 p-1 shadow-md outline-none"

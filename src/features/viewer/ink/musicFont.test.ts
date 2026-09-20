@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import {
     annotationNeedsMusicFont,
+    editedTextPayload,
     ensureMusicFontLoaded,
     isMusicFontReady,
     MUSIC_FONT_FAMILY,
     onMusicFontReady,
+    pdfFallbackGlyphs,
     resetMusicFontStateForTests,
     textDrawSpec,
+    textForEditor,
 } from '@/features/viewer/ink/musicFont';
 import type { Annotation } from '@/types/models';
 
@@ -72,6 +75,23 @@ describe('textDrawSpec', () => {
         expect(annotationNeedsMusicFont(textAnnotation('mf'))).toBe(false);
         expect(annotationNeedsMusicFont(textAnnotation('mf', 1))).toBe(true);
         expect(annotationNeedsMusicFont(textAnnotation('use wrist', 1))).toBe(false);
+    });
+
+    it('maps SMuFL marks to editable ASCII and drops hw when the user retypes', () => {
+        expect(textForEditor('\uE4A0')).toBe('>');
+        expect(textForEditor('\uE4C0')).toBe('fermata');
+        expect(textForEditor('mf')).toBe('mf');
+        expect(editedTextPayload({ x: 0, y: 0, text: 'mf', size: 0.02, hw: 1 }, 'mf')).toBe('unchanged');
+        expect(editedTextPayload({ x: 0, y: 0, text: '\uE4A0', size: 0.02, hw: 1 }, '>')).toBe('unchanged');
+        expect(editedTextPayload({ x: 0.1, y: 0.2, text: 'mf', size: 0.02, hw: 1 }, 'p')).toEqual({
+            x: 0.1,
+            y: 0.2,
+            text: 'p',
+            size: 0.02,
+        });
+        expect(editedTextPayload({ x: 0, y: 0, text: 'mf', size: 0.02, hw: 1 }, '')).toBe('delete');
+        expect(pdfFallbackGlyphs('mf', textDrawSpec('mf', true))).toBe('mf');
+        expect(pdfFallbackGlyphs('\uE4A0', textDrawSpec('\uE4A0', true))).toBe('>');
     });
 });
 

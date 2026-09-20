@@ -426,6 +426,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                       name: displayNameOf(session),
                                       isAnonymous: Boolean(session?.user.is_anonymous),
                                       canWrite: !readOnly,
+                                      isOwner: state.role === 'owner',
                                       onStatus,
                                       onPeers,
                                       onDocReplaced,

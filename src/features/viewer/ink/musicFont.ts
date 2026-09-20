@@ -71,6 +71,46 @@ export const textDrawSpec = (text: string, hw: boolean): TextDrawSpec => {
     return { family: SYSTEM_FONT_FAMILY, style: 'normal', glyphs: text, music: false };
 };
 
+/** Readable spelling for the text editor (SMuFL marks are tofu in system-ui). */
+export const textForEditor = (text: string): string => {
+    if (text === '\uE4A0') {
+        return '>';
+    }
+    if (text === '\uE4C0') {
+        return 'fermata';
+    }
+    return text;
+};
+
+/**
+ * Apply a text-editor commit to a converted/typed payload. Changing the
+ * letters drops `hw` so a retyped `p` is not a Bravura *p* without consent.
+ */
+export const editedTextPayload = (existing: TextPayload, trimmed: string): 'delete' | 'unchanged' | TextPayload => {
+    if (trimmed === '') {
+        return 'delete';
+    }
+    if (trimmed === textForEditor(existing.text)) {
+        return 'unchanged';
+    }
+    const next: TextPayload = { x: existing.x, y: existing.y, text: trimmed, size: existing.size };
+    if (existing.src === 1) {
+        next.src = 1;
+    }
+    if (existing.sf === 1) {
+        next.sf = 1;
+    }
+    return next;
+};
+
+/** ASCII (or a named alias) to paint when the music face is missing from a PDF. */
+export const pdfFallbackGlyphs = (text: string, spec: TextDrawSpec): string => {
+    if (!spec.music) {
+        return spec.glyphs;
+    }
+    return textForEditor(text);
+};
+
 /** Does this annotation draw with the music face (so an export must embed it)? */
 export const annotationNeedsMusicFont = (annotation: Annotation): boolean =>
     isTextPayload(annotation.payload) && textDrawSpec(annotation.payload.text, annotation.payload.hw === 1).music;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MAX_MUSIC_TEXT_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE } from '@/features/import/textFit';
+import { MAX_MUSIC_TEXT_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, measureInkText } from '@/features/import/textFit';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import {
@@ -9,6 +9,7 @@ import {
     TEXT_DRAG_SYNC_MS,
     type TextIntent,
 } from '@/features/viewer/ink/InkController';
+import { textBoundsNorm, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { useViewerStore } from '@/state/store';
@@ -148,6 +149,20 @@ describe('InkController text tool: tap edits, drag moves', () => {
         expect(payloadOf('other')).toMatchObject({ x: 0.3, y: 0.7, text: 'slow' });
     });
 
+    it('live drag updates keep a peer edit of text/hw instead of the pointer-down snapshot', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf', { hw: 1 }));
+        ink.delegate.onInkDown(pointer(305, 655));
+        await store.update('note', { payload: { ...payloadOf('note'), text: 'use wrist', hw: undefined } });
+        vi.setSystemTime(Date.now() + TEXT_DRAG_SYNC_MS + 1);
+        ink.delegate.onInkMove(pointer(355, 655));
+        ink.delegate.onInkUp(pointer(355, 655));
+        await settle();
+        const moved = payloadOf('note');
+        expect(moved.x).toBeCloseTo(0.35, 5);
+        expect(moved.text).toBe('use wrist');
+        expect(moved.hw).toBeUndefined();
+    });
+
     it('a tap without movement still opens the editor on the existing note', async () => {
         await store.create(textNote('note', 0.3, 0.5, 'mf'));
         ink.delegate.onInkDown(pointer(310, 655));
@@ -221,19 +236,24 @@ describe('InkController text tool: resize', () => {
         await settle();
     };
 
-    it('dragging the handle scales size proportionally and keeps x/y anchored', async () => {
+    it('dragging the handle scales size about the visual top-left', async () => {
         await store.create(textNote('note', 0.3, 0.5, 'use wrist', { hw: 1 }));
+        const aspect = PAGE_H / PAGE_W;
+        const before = textBoundsNorm(payloadOf('note'), aspect);
         const { handle, anchor } = await select('note', 310, 655);
         await dragHandleBy(handle, anchor, 1.5);
         const scaled = payloadOf('note');
         expect(scaled.size).toBeCloseTo(0.03, 5);
         expect(scaled.x).toBe(0.3);
-        expect(scaled.y).toBe(0.5);
         expect(scaled.text).toBe('use wrist');
         expect(scaled.hw).toBe(1);
-        // The handle followed the pointer: the box grew from its top-left corner.
-        const after = ink.getTextSelection()!;
-        expect(after.handle.nx * PAGE_W).toBeCloseTo(anchor.x + (handle.x - anchor.x) * 1.5, 3);
+        const after = textBoundsNorm(scaled, aspect);
+        expect(after[1]).toBeCloseTo(before[1], 5);
+        const spec = textDrawSpec('use wrist', true);
+        const metrics = measureInkText(spec.glyphs, { family: spec.family, style: spec.style });
+        expect(scaled.y).toBeCloseTo(0.5 + (metrics.topInset * (0.02 - 0.03)) / aspect, 5);
+        const selection = ink.getTextSelection()!;
+        expect(selection.handle.nx * PAGE_W).toBeCloseTo(anchor.x + (handle.x - anchor.x) * 1.5, 3);
         expect(intents).toHaveLength(0);
     });
 
@@ -291,7 +311,7 @@ describe('InkController text tool: resize', () => {
         ink.delegate.onPinchEnd!();
         await settle();
         expect(payloadOf('note').size).toBeCloseTo(0.02 * 1.25 * 1.6, 6);
-        expect(payloadOf('note')).toMatchObject({ x: 0.3, y: 0.5 });
+        expect(payloadOf('note').x).toBe(0.3);
 
         await store.undoLast();
         expect(payloadOf('note').size).toBe(0.02);
@@ -302,6 +322,21 @@ describe('InkController text tool: resize', () => {
         await select('note', 305, 655);
         useViewerStore.getState().setTool('pan');
         expect(ink.delegate.onPinch!(1.2)).toBe(false);
+    });
+
+    it('a pinch does not steal an in-flight handle drag or close its undo batch', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf', { hw: 1 }));
+        const { handle, anchor } = await select('note', 305, 655);
+        ink.delegate.onInkDown(pointer(handle.x, handle.y));
+        vi.setSystemTime(Date.now() + TEXT_DRAG_SYNC_MS + 1);
+        ink.delegate.onInkMove(pointer(anchor.x + (handle.x - anchor.x) * 2, anchor.y + (handle.y - anchor.y) * 2));
+        expect(ink.delegate.onPinch!(1.5)).toBe(false);
+        ink.delegate.onPinchEnd!();
+        ink.delegate.onInkUp(pointer(anchor.x + (handle.x - anchor.x) * 2, anchor.y + (handle.y - anchor.y) * 2));
+        await settle();
+        expect(payloadOf('note').size).toBeCloseTo(0.04, 5);
+        await store.undoLast();
+        expect(payloadOf('note').size).toBe(0.02);
     });
 
     it('tap without movement still opens the editor on a selected note', async () => {
