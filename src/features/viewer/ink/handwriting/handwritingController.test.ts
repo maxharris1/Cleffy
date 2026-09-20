@@ -319,33 +319,39 @@ describe('HandwritingController', () => {
         expect(strokes()).toHaveLength(0);
     });
 
-    it('does not convert after Print is turned off during font load', async () => {
-        let release: (loaded: boolean) => void = () => undefined;
-        const spy = vi.spyOn(musicFont, 'ensureMusicFontLoaded').mockReturnValue(
+    it('converts without waiting for the music font to load', async () => {
+        let released = false;
+        const loadSpy = vi.spyOn(musicFont, 'ensureMusicFontLoaded').mockReturnValue(
             new Promise<boolean>((resolve) => {
-                release = resolve;
+                setTimeout(() => {
+                    released = true;
+                    resolve(true);
+                }, 30_000);
             }),
         );
+        const readySpy = vi.spyOn(musicFont, 'isMusicFontReady').mockReturnValue(false);
         const controller = make(() => ({ text: 'mf', kind: 'symbol' }));
         await write(controller, strokeAnnotation('m', 0.3));
         await write(controller, strokeAnnotation('f', 0.3 + H));
         timers.fire();
-        enabled = false;
-        release(true);
         await controller.settle();
-        expect(texts()).toHaveLength(0);
-        expect(strokes()).toHaveLength(2);
-        spy.mockRestore();
+        expect(released).toBe(false);
+        expect(texts()).toHaveLength(1);
+        expect((texts()[0]!.payload as TextPayload).text).toBe('mf');
+        loadSpy.mockRestore();
+        readySpy.mockRestore();
     });
 
-    it('measures fallback ASCII in system-ui when the music face fails to load', async () => {
-        const spy = vi.spyOn(musicFont, 'ensureMusicFontLoaded').mockResolvedValue(false);
-        const measured = await fontForRecognition({ text: 'mf', kind: 'symbol' });
+    it('measures fallback ASCII in system-ui when the music face is not ready', async () => {
+        const loadSpy = vi.spyOn(musicFont, 'ensureMusicFontLoaded').mockResolvedValue(false);
+        const readySpy = vi.spyOn(musicFont, 'isMusicFontReady').mockReturnValue(false);
+        const measured = fontForRecognition({ text: 'mf', kind: 'symbol' });
         expect(measured.font.family).toBe(SYSTEM_FONT_FAMILY);
         expect(measured.font.style).toBe('italic');
         expect(measured.text).toBe('mf');
         expect(measured.music).toBe(false);
-        spy.mockRestore();
+        loadSpy.mockRestore();
+        readySpy.mockRestore();
     });
 
     it('aborts convert and restores siblings when a stroke vanishes mid-batch', async () => {

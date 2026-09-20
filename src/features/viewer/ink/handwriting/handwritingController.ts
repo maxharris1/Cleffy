@@ -16,7 +16,7 @@ import {
 import { lineHasDigit, splitDigitRun } from '@/features/viewer/ink/handwriting/recognizer';
 import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
-import { ensureMusicFontLoaded, textDrawSpec } from '@/features/viewer/ink/musicFont';
+import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { isTextPayload, type Annotation } from '@/types/models';
 
@@ -42,20 +42,19 @@ export interface HandwritingControllerOptions {
 /**
  * Font the print is measured in — the same choice the renderer makes for an
  * `hw` payload, so the sized text lands where the ink was. Music-font
- * symbols wait for the face so their real metrics (not a fallback's) are
- * measured.
+ * symbols do not wait for Bravura: the canvas already draws a system-ui
+ * fallback and repaints on `onMusicFontReady`. Print-on warmup loads the
+ * face in the background so the first `f`/`mf` usually measures the real
+ * metrics.
  */
-export const fontForRecognition = async (
-    recognition: Recognition,
-): Promise<{ font: FontSpec; text: string; music: boolean }> => {
+export const fontForRecognition = (recognition: Recognition): { font: FontSpec; text: string; music: boolean } => {
     const spec = textDrawSpec(recognition.text, true);
     if (spec.music) {
-        const loaded = await ensureMusicFontLoaded();
-        if (loaded) {
+        if (isMusicFontReady()) {
             return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: true };
         }
-        // Match the canvas fallback: system-ui italic of the ASCII spelling,
-        // never "Bravura Text" metrics for a face that is not going to draw.
+        void ensureMusicFontLoaded();
+        // Match the canvas fallback: system-ui italic of the ASCII spelling.
         return { font: { family: SYSTEM_FONT_FAMILY, style: 'italic' }, text: recognition.text, music: false };
     }
     return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: false };
@@ -187,7 +186,7 @@ export class HandwritingController {
             }
         }
         const text = recognition.text.trim();
-        const measured = await fontForRecognition({ ...recognition, text });
+        const measured = fontForRecognition({ ...recognition, text });
         if (this.disposed || !this.opts.isEnabled()) {
             return;
         }

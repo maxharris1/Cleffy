@@ -563,8 +563,11 @@ export class InkController {
             deletedAt: null,
             seq: 0,
         };
-        // Commit first; only then may print conversion consider the stroke.
-        void this.opts.store.create(annotation).then(() => this.opts.onStrokeCommitted?.(annotation));
+        // Ink is in the live map as soon as create() runs (before Dexie
+        // persist). Arm the grouping pause now so IndexedDB is not on the
+        // convert clock.
+        void this.opts.store.create(annotation);
+        this.opts.onStrokeCommitted?.(annotation);
     }
 
     private onCancel(): void {

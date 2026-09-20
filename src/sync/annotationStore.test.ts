@@ -277,7 +277,14 @@ describe('AnnotationStore', () => {
             const live = store.get('a1');
             if (live && !live.deletedAt) {
                 await store.applyRemoteBatch(
-                    [{ ...live, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), seq: live.seq + 1 }],
+                    [
+                        {
+                            ...live,
+                            deletedAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                            seq: live.seq + 1,
+                        },
+                    ],
                     new Set(),
                 );
             }
@@ -287,6 +294,18 @@ describe('AnnotationStore', () => {
         expect(store.get('a1')?.deletedAt).not.toBeNull();
         await store.undoLast();
         expect(store.get('a1')?.deletedAt).not.toBeNull();
+        spy.mockRestore();
+    });
+
+    it('create is visible in memory before the snapshot yield so grouping can start at pointer-up', async () => {
+        const orig = snapshotService.ensureDayStartingSnapshot;
+        const spy = vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+            expect(store.get('new')?.id).toBe('new');
+            expect(args[2]?.some((a) => a.id === 'new')).toBe(false);
+            return orig(...args);
+        });
+        await store.create(makeStroke('new'));
+        expect(store.get('new')?.id).toBe('new');
         spy.mockRestore();
     });
 });

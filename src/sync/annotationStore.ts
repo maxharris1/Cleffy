@@ -463,6 +463,24 @@ export class AnnotationStore {
             return false;
         }
 
+        // Creates apply to the live map before any IndexedDB yield so the
+        // handwriting pause can start at pointer-up. Snapshot still uses the
+        // pre-edit set. Updates/deletes keep snapshot-first because a peer
+        // tombstone during that yield must not still apply (`stillApplies`).
+        if (op.type === 'create') {
+            const preEdit = options.recordUndo ? this.liveAnnotations() : [];
+            this.applyMemory(op.annotation);
+            if (options.recordUndo) {
+                this.pushCommitInverse(op);
+                await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
+            }
+            await this.persistMany([op]);
+            this.notifyPage(op.annotation.page);
+            this.notifyMeta();
+            this.onDirty?.();
+            return true;
+        }
+
         // Capture today's starting point before the first user edit of the day.
         if (options.recordUndo) {
             await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
