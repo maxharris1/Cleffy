@@ -174,6 +174,59 @@ const isNarrowStemBox = (b: { x0: number; y0: number; x1: number; y1: number }):
 };
 
 /**
+ * True when the pending group is already a finished closed-set digit, accent,
+ * or fermata — safe to flush on the short pause. A 1-stroke stem (prefix of
+ * `4` / `t` / `p` / `i` / `1`) and every letter stay on the long pause.
+ */
+export const isCompleteClosedMark = (glyphs: Glyph[], aspect: number): boolean => {
+    if (glyphs.length !== 1) {
+        return false;
+    }
+    const glyph = glyphs[0];
+    if (!glyph) {
+        return false;
+    }
+    if (glyph.strokes.length === 1 && isNarrowStemBox(glyph.box)) {
+        return false;
+    }
+    const match = classifyGlyph(glyphStrokes(glyph, aspect));
+    if (!match) {
+        return false;
+    }
+    switch (match.cls) {
+        case '0':
+        case '2':
+        case '3':
+        case '5':
+            return true;
+        case '4':
+            return glyph.strokes.length >= 2;
+        case '1':
+            return false;
+        case 'accent':
+            return true;
+        case 'fermata':
+            return glyph.strokes.length >= 2;
+        case 'p':
+        case 'f':
+        case 'm':
+        case 's':
+        case 'z':
+        case 'r':
+        case 'c':
+        case 'e':
+        case 'd':
+        case 'i':
+        case 't':
+            return false;
+        default: {
+            const exhaustive: never = match.cls;
+            return exhaustive;
+        }
+    }
+};
+
+/**
  * Mouse `p`: stem then bowl often land as two glyphs on one line. The line
  * reader then sees a `1` and abstains; re-read the pair as one glyph.
  */

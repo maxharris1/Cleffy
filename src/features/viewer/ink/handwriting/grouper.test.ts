@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    FAST_PAUSE_MS,
     FINGERING_GAP,
     GLYPH_PAUSE_MS,
     groupBboxNormalized,
@@ -10,7 +11,8 @@ import {
     MAX_GROUP_HEIGHT,
     type StrokeGroup,
 } from '@/features/viewer/ink/handwriting/grouper';
-import { ASPECT, boxStroke, FakeTimers } from '@/features/viewer/ink/handwriting/testStrokes';
+import { HANDS } from '@/features/viewer/ink/handwriting/recognizer/fixtures';
+import { ASPECT, boxStroke, FakeTimers, placeHand } from '@/features/viewer/ink/handwriting/testStrokes';
 
 /** Letter height used throughout (fraction of page width). */
 const H = 0.012;
@@ -217,5 +219,73 @@ describe('HandwritingGrouper', () => {
         expect(bbox.y).toBeCloseTo((0.52 - 0.0005) / ASPECT, 4);
         expect(bbox.w).toBeCloseTo(H + 0.001, 4);
         expect(bbox.h).toBeCloseTo((H + 0.001) / ASPECT, 4);
+    });
+
+    const addHand = (grouper: HandwritingGrouper, prefix: string, name: keyof typeof HANDS, x = 0.3) => {
+        for (const stroke of placeHand(prefix, HANDS[name]!, x, 0.5, H)) {
+            grouper.add(stroke, ASPECT);
+        }
+    };
+
+    it('flushes a finished digit in ~300ms, not the 1000ms line pause', () => {
+        const { timers, flushed, grouper } = setup();
+        addHand(grouper, 'three', 'three');
+        expect(timers.pending()).toEqual([FAST_PAUSE_MS]);
+        timers.elapse(FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(1);
+        expect(flushed[0]!.kind).toBe('glyph');
+    });
+
+    it('does not early-flush a 1-stroke stem (prefix of 4 / t / p)', () => {
+        const { timers, flushed, grouper } = setup();
+        addHand(grouper, 'one', 'one');
+        expect(timers.pending()).toEqual([LINE_PAUSE_MS]);
+        timers.elapse(FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(0);
+        timers.elapse(LINE_PAUSE_MS - FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(1);
+    });
+
+    it('flushes a finished 4 after the crossbar joins, not after the first stem/bar', () => {
+        const { timers, flushed, grouper } = setup();
+        const strokes = placeHand('four', HANDS.four!, 0.3, 0.5, H);
+        grouper.add(strokes[0]!, ASPECT);
+        expect(timers.pending()).toEqual([LINE_PAUSE_MS]);
+        timers.elapse(FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(0);
+        grouper.add(strokes[1]!, ASPECT);
+        expect(timers.pending()).toEqual([FAST_PAUSE_MS]);
+        timers.elapse(FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(1);
+        expect(flushed[0]!.glyphs[0]!.strokes).toHaveLength(2);
+    });
+
+    it('flushes a finished accent quickly; letters keep the 1000ms pause', () => {
+        const accent = setup();
+        addHand(accent.grouper, 'accent', 'accent');
+        expect(accent.timers.pending()).toEqual([FAST_PAUSE_MS]);
+        accent.timers.elapse(FAST_PAUSE_MS);
+        expect(accent.flushed).toHaveLength(1);
+
+        const letter = setup();
+        addHand(letter.grouper, 'm', 'm');
+        expect(letter.timers.pending()).toEqual([LINE_PAUSE_MS]);
+        letter.timers.elapse(FAST_PAUSE_MS);
+        expect(letter.flushed).toHaveLength(0);
+        letter.timers.elapse(LINE_PAUSE_MS - FAST_PAUSE_MS);
+        expect(letter.flushed).toHaveLength(1);
+    });
+
+    it('waits for the fermata dot, then flushes on the short pause', () => {
+        const { timers, flushed, grouper } = setup();
+        const strokes = placeHand('fermata', HANDS.fermata!, 0.3, 0.5, H);
+        grouper.add(strokes[0]!, ASPECT);
+        expect(timers.pending()).toEqual([LINE_PAUSE_MS]);
+        timers.elapse(FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(0);
+        grouper.add(strokes[1]!, ASPECT);
+        expect(timers.pending()).toEqual([FAST_PAUSE_MS]);
+        timers.elapse(FAST_PAUSE_MS);
+        expect(flushed).toHaveLength(1);
     });
 });

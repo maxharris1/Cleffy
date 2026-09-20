@@ -1,4 +1,5 @@
 import { strokeBbox } from '@/features/viewer/geometry';
+import { isCompleteClosedMark } from '@/features/viewer/ink/handwriting/recognizer';
 
 /**
  * Groups the writer's COMMITTED pen strokes into candidate print objects.
@@ -62,8 +63,13 @@ export interface StrokeGroup {
  * A spatially new mark still flushes immediately (`add` → `flush`).
  */
 export const LINE_PAUSE_MS = 1000;
-/** @deprecated Same as `LINE_PAUSE_MS` — lone glyphs share the line pause. */
+/** @deprecated Same as `LINE_PAUSE_MS` — lone letters share the line pause. */
 export const GLYPH_PAUSE_MS = LINE_PAUSE_MS;
+/**
+ * Finished digits / accents / fermatas can convert this soon after pen-up.
+ * Letters and teaching words keep `LINE_PAUSE_MS` so `mf`/`pp`/`cresc.` join.
+ */
+export const FAST_PAUSE_MS = 300;
 
 /** Marks taller than this (fraction of page width) are expressive ink, not print. */
 export const MAX_GROUP_HEIGHT = 0.05;
@@ -307,7 +313,7 @@ export class HandwritingGrouper {
 
     private arm(pending: Pending): void {
         this.disarm(pending);
-        const ms = LINE_PAUSE_MS;
+        const ms = isCompleteClosedMark(pending.glyphs, pending.aspect) ? FAST_PAUSE_MS : LINE_PAUSE_MS;
         pending.timer = this.schedule(() => {
             if (this.pending === pending) {
                 this.flush();
