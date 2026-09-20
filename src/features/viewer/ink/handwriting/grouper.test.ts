@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    FINGERING_GAP,
     GLYPH_PAUSE_MS,
     groupBboxNormalized,
     groupStrokeIds,
@@ -58,25 +59,43 @@ describe('HandwritingGrouper', () => {
         expect(flushed[1]!.kind).toBe('glyph');
     });
 
-    it('flushes gapped fingerings as one object each', () => {
+    it('flushes chord fingerings (~one digit-height apart) as one object each', () => {
         const { timers, flushed, grouper } = setup();
-        // "1 2 3" over three notes ~2.5 heights apart.
+        // Origins 1.0 glyph-height apart, width 0.4 H → gap 0.6 H, above FINGERING_GAP.
+        const pitch = 1.0 * H;
         grouper.add(boxStroke('one', 0.2, 0.4, H * 0.4, H), ASPECT);
-        grouper.add(boxStroke('two', 0.2 + 2.5 * H, 0.4, H * 0.8, H), ASPECT);
-        grouper.add(boxStroke('three', 0.2 + 5 * H, 0.4, H * 0.8, H), ASPECT);
+        grouper.add(boxStroke('two', 0.2 + pitch, 0.4, H * 0.4, H), ASPECT);
+        grouper.add(boxStroke('three', 0.2 + 2 * pitch, 0.4, H * 0.4, H), ASPECT);
+        expect(flushed.map((g) => groupStrokeIds(g))).toEqual([['one'], ['two']]);
         timers.fire();
         expect(flushed.map((g) => g.kind)).toEqual(['glyph', 'glyph', 'glyph']);
         expect(flushed.map((g) => groupStrokeIds(g))).toEqual([['one'], ['two'], ['three']]);
+        expect(pitch - H * 0.4).toBeGreaterThan(FINGERING_GAP * H);
     });
 
-    it('a lone glyph flushes after the short pause as a single object', () => {
+    it('a lone glyph flushes after the line pause as a single object', () => {
         const { timers, flushed, grouper } = setup();
         grouper.add(boxStroke('p', 0.5, 0.5, H * 0.7, H), ASPECT);
-        expect(timers.pending()).toEqual([GLYPH_PAUSE_MS]);
+        expect(timers.pending()).toEqual([LINE_PAUSE_MS]);
+        expect(GLYPH_PAUSE_MS).toBe(LINE_PAUSE_MS);
         timers.fire();
         expect(flushed).toHaveLength(1);
         expect(flushed[0]!.kind).toBe('glyph');
         expect(flushed[0]!.glyphs).toHaveLength(1);
+    });
+
+    it('does not convert a lone p/f at 600 ms, so mf can still join', () => {
+        const { timers, flushed, grouper } = setup();
+        grouper.add(boxStroke('m', 0.3, 0.5, H * 0.9, H), ASPECT);
+        timers.elapse(600);
+        expect(flushed).toHaveLength(0);
+        grouper.add(boxStroke('f', 0.3 + 1.1 * H, 0.5, H * 0.7, H), ASPECT);
+        expect(flushed).toHaveLength(0);
+        expect(timers.pending()).toEqual([LINE_PAUSE_MS]);
+        timers.fire();
+        expect(flushed).toHaveLength(1);
+        expect(flushed[0]!.kind).toBe('line');
+        expect(groupStrokeIds(flushed[0]!)).toEqual(['m', 'f']);
     });
 
     it('joins the strokes of a multi-stroke glyph (t-bar, i-dot, second stroke of a 4)', () => {
@@ -145,6 +164,7 @@ describe('HandwritingGrouper', () => {
         grouper.add(boxStroke('b', 0.3 + 1.2 * H, 0.5, H, H), ASPECT);
         grouper.remove('b');
         expect(grouper.pendingIds()).toEqual(['a']);
+        expect(timers.pending()).toEqual([LINE_PAUSE_MS]);
         grouper.remove('a');
         expect(grouper.pendingIds()).toEqual([]);
         timers.fire();

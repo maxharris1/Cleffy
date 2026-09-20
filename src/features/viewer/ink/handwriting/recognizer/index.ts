@@ -225,3 +225,41 @@ export const recognizeOnDevice: Recognizer = (group: StrokeGroup): Recognition |
     }
     return SYMBOL_LEXICON.has(word) ? { text: word, kind: 'symbol' } : null;
 };
+
+/** True when any glyph of a writing line classifies as a fingering digit. */
+export const lineHasDigit = (group: StrokeGroup): boolean => {
+    if (group.kind !== 'line') {
+        return false;
+    }
+    return group.glyphs.some((glyph) => {
+        const match = classifyGlyph(glyphStrokes(glyph, group.aspect));
+        return match !== null && isDigit(match.cls);
+    });
+};
+
+/**
+ * Chord/scale fingerings grouped as one writing line: split into one glyph
+ * group each so they never become a Gemini `"12"` note. Null when the line
+ * is not a pure digit run (mixed ink stays ink; letters may transcribe).
+ */
+export const splitDigitRun = (group: StrokeGroup): StrokeGroup[] | null => {
+    if (group.kind !== 'line' || group.glyphs.length < 2) {
+        return null;
+    }
+    const pieces: StrokeGroup[] = [];
+    for (const glyph of group.glyphs) {
+        const match = classifyGlyph(glyphStrokes(glyph, group.aspect));
+        if (!match || !isDigit(match.cls)) {
+            return null;
+        }
+        pieces.push({
+            page: group.page,
+            color: group.color,
+            aspect: group.aspect,
+            glyphs: [glyph],
+            kind: 'glyph',
+            box: glyph.box,
+        });
+    }
+    return pieces;
+};

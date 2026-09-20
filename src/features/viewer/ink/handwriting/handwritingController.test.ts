@@ -1,13 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
+import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
+import { fontForRecognition, HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { groupFromHands, HANDS } from '@/features/viewer/ink/handwriting/recognizer/fixtures';
+import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
 import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ASPECT, boxStroke, FakeTimers } from '@/features/viewer/ink/handwriting/testStrokes';
+import type * as MusicFontModule from '@/features/viewer/ink/musicFont';
+import * as musicFont from '@/features/viewer/ink/musicFont';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import { parseDbChange } from '@/sync/wire';
 import { isTextPayload, type Annotation, type TextPayload } from '@/types/models';
+
+vi.mock('@/features/viewer/ink/musicFont', async (importOriginal) => {
+    const actual = (await importOriginal()) as typeof MusicFontModule;
+    return { ...actual, ensureMusicFontLoaded: vi.fn(() => actual.ensureMusicFontLoaded()) };
+});
 
 const DOC = 'local-hw-doc';
 const H = 0.012;
@@ -238,5 +249,132 @@ describe('HandwritingController', () => {
         expect(row).not.toBeNull();
         expect((row?.payload as TextPayload).hw).toBe(1);
         expect((row?.payload as TextPayload).text).toBe('2');
+    });
+
+    it('nested undo: convert does not close an open eraser batch', async () => {
+        const controller = make(() => ({ text: '3', kind: 'digit' }));
+        await store.create(strokeAnnotation('keep', 0.7));
+        await write(controller, strokeAnnotation('three', 0.3));
+        store.beginBatch();
+        await store.delete('keep');
+        timers.fire();
+        await controller.settle();
+        expect(texts()).toHaveLength(1);
+        await store.create(strokeAnnotation('later', 0.8));
+        store.endBatch();
+
+        await store.undoLast();
+        expect(store.get('keep')?.deletedAt).toBeNull();
+        expect(texts()).toHaveLength(1);
+        expect(store.get('later')?.deletedAt).not.toBeNull();
+
+        await store.undoLast();
+        expect(texts()).toHaveLength(0);
+        expect(store.get('three')?.deletedAt).toBeNull();
+    });
+
+    it('does not transcribe a nearby fingering run; each digit converts on-device', async () => {
+        const transcribe = vi.fn<TranscribeInkFn>(async () => '12');
+        const controller = make(recognizeOnDevice, transcribe);
+        const group = groupFromHands([HANDS.one!, HANDS.two!], { gapW: 0.25 * 0.012 });
+        for (const glyph of group.glyphs) {
+            for (const stroke of glyph.strokes) {
+                const annotation: Annotation = {
+                    id: stroke.id,
+                    docId: DOC,
+                    page: 0,
+                    kind: 'stroke',
+                    color: stroke.color,
+                    payload: { pts: stroke.pts, w: stroke.w },
+                    createdBy: null,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    deletedAt: null,
+                    seq: 0,
+                };
+                await write(controller, annotation);
+            }
+        }
+        timers.fire();
+        await controller.settle();
+        expect(transcribe).not.toHaveBeenCalled();
+        const printed = texts()
+            .map((a) => (a.payload as TextPayload).text)
+            .sort();
+        expect(printed).toEqual(['1', '2']);
+        expect(strokes()).toHaveLength(0);
+    });
+
+    it('does not convert after Print is turned off during font load', async () => {
+        let release: (loaded: boolean) => void = () => undefined;
+        const spy = vi.spyOn(musicFont, 'ensureMusicFontLoaded').mockReturnValue(
+            new Promise<boolean>((resolve) => {
+                release = resolve;
+            }),
+        );
+        const controller = make(() => ({ text: 'mf', kind: 'symbol' }));
+        await write(controller, strokeAnnotation('m', 0.3));
+        await write(controller, strokeAnnotation('f', 0.3 + H));
+        timers.fire();
+        enabled = false;
+        release(true);
+        await controller.settle();
+        expect(texts()).toHaveLength(0);
+        expect(strokes()).toHaveLength(2);
+        spy.mockRestore();
+    });
+
+    it('measures fallback ASCII in system-ui when the music face fails to load', async () => {
+        const spy = vi.spyOn(musicFont, 'ensureMusicFontLoaded').mockResolvedValue(false);
+        const measured = await fontForRecognition({ text: 'mf', kind: 'symbol' });
+        expect(measured.font.family).toBe(SYSTEM_FONT_FAMILY);
+        expect(measured.font.style).toBe('italic');
+        expect(measured.text).toBe('mf');
+        expect(measured.music).toBe(false);
+        spy.mockRestore();
+    });
+
+    it('aborts convert and restores siblings when a stroke vanishes mid-batch', async () => {
+        const group = groupFromHands([HANDS.one!, HANDS.two!]);
+        const anns: Annotation[] = [];
+        for (const glyph of group.glyphs) {
+            for (const stroke of glyph.strokes) {
+                anns.push({
+                    id: stroke.id,
+                    docId: DOC,
+                    page: 0,
+                    kind: 'stroke',
+                    color: stroke.color,
+                    payload: { pts: stroke.pts, w: stroke.w },
+                    createdBy: null,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    deletedAt: null,
+                    seq: 0,
+                });
+            }
+        }
+        for (const a of anns) {
+            await store.create(a);
+        }
+        const first = anns[0]!.id;
+        const peerErase = anns[1]!.id;
+        const origDelete = store.delete.bind(store);
+        store.delete = async (id: string) => {
+            if (id === first) {
+                await origDelete(peerErase);
+            }
+            await origDelete(id);
+        };
+        const created = await convertGroupToText(store, group, {
+            x: 0.3,
+            y: 0.5,
+            text: '12',
+            size: 0.02,
+        });
+        expect(created).toBeNull();
+        expect(texts()).toHaveLength(0);
+        expect(store.get(first)?.deletedAt).toBeNull();
+        expect(store.get(peerErase)?.deletedAt).not.toBeNull();
     });
 });

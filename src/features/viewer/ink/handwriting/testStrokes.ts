@@ -57,4 +57,21 @@ export class FakeTimers {
             t.fn();
         }
     }
+
+    /** Advance `ms` and fire timers whose delay has elapsed. */
+    elapse(ms: number): void {
+        const due: Array<{ fn: () => void; ms: number; id: number }> = [];
+        const rest: Array<{ fn: () => void; ms: number; id: number }> = [];
+        for (const t of this.queue) {
+            if (t.ms <= ms) {
+                due.push(t);
+            } else {
+                rest.push({ ...t, ms: t.ms - ms });
+            }
+        }
+        this.queue = rest;
+        for (const t of due) {
+            t.fn();
+        }
+    }
 }

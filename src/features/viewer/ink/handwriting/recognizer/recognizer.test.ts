@@ -9,6 +9,7 @@ import {
     classifyGlyph,
     FERMATA_TEXT,
     recognizeOnDevice,
+    splitDigitRun,
 } from '@/features/viewer/ink/handwriting/recognizer';
 
 const hand = (name: string) => HANDS[name]!;
@@ -108,6 +109,17 @@ describe('recognizeOnDevice', () => {
         expect(recognizeOnDevice(groupFromHands([hand('m')]))).toBeNull();
         expect(recognizeOnDevice(groupFromHands([hand('f'), hand('m')]))).toBeNull();
         expect(recognizeOnDevice(groupFromHands([hand('one'), hand('two')]))).toBeNull();
+    });
+
+    it('splits a digit-run line into one glyph group per fingering', () => {
+        const line = groupFromHands([hand('one'), hand('two')]);
+        const pieces = splitDigitRun(line);
+        expect(pieces).toHaveLength(2);
+        expect(pieces!.map((g) => recognizeOnDevice(g))).toEqual([
+            { text: '1', kind: 'digit' },
+            { text: '2', kind: 'digit' },
+        ]);
+        expect(splitDigitRun(groupFromHands([hand('m'), hand('f')]))).toBeNull();
     });
 
     it('abstains on marks that are not print (hairpin, cross, scribble) so the ink stays', () => {

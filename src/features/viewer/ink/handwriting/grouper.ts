@@ -55,10 +55,15 @@ export interface StrokeGroup {
     box: Box;
 }
 
-/** Pause after which one isolated glyph flushes (multi-stroke `4`, `t`, `ff` still join). */
-export const GLYPH_PAUSE_MS = 600;
-/** Longer pause for a writing line, so a slow writer's word is not cut mid-way. */
+/**
+ * Pause after which a pending group flushes. Lone `p`/`f` must wait as long as
+ * a writing line, otherwise `mf`/`pp`/`ff` cannot be written — the first
+ * letter would convert as a glyph and steal the second stroke's window.
+ * A spatially new mark still flushes immediately (`add` → `flush`).
+ */
 export const LINE_PAUSE_MS = 1000;
+/** @deprecated Same as `LINE_PAUSE_MS` — lone glyphs share the line pause. */
+export const GLYPH_PAUSE_MS = LINE_PAUSE_MS;
 
 /** Marks taller than this (fraction of page width) are expressive ink, not print. */
 export const MAX_GROUP_HEIGHT = 0.05;
@@ -75,6 +80,14 @@ const GLYPH_JOIN_GAP = 0.15;
 const GLYPH_JOIN_VGAP = 0.4;
 /** Horizontal gap (in line heights) under which a new glyph continues the line. */
 const WORD_GAP = 1.0;
+/**
+ * Compact tall marks (fingerings) this far apart are separate objects, even
+ * when the gap is under `WORD_GAP`. Chord `1 3 5` sits closer than a word
+ * space; treating them as one line would skip the closed set and bill Gemini.
+ */
+export const FINGERING_GAP = 0.4;
+/** Width/height at or under which a glyph is digit-shaped (not a square letter). */
+const DIGIT_MAX_ASPECT = 0.85;
 /** New glyph centre must sit within this many line heights of the line centre. */
 const LINE_BAND = 0.6;
 
@@ -130,13 +143,25 @@ const joinsGlyph = (glyph: Glyph, box: Box): boolean => {
     return overlap >= 0.4 * Math.min(width(glyph.box), width(box));
 };
 
+const isDigitShaped = (b: Box): boolean => {
+    const h = height(b);
+    return h > 0 && width(b) <= DIGIT_MAX_ASPECT * h;
+};
+
 /** Does a new glyph continue the pending writing line? */
-const continuesLine = (lineBox: Box, box: Box): boolean => {
+const continuesLine = (lineBox: Box, box: Box, lastBox: Box): boolean => {
     const lineH = Math.max(height(lineBox), 1e-6);
     if (Math.abs(centerY(box) - centerY(lineBox)) > LINE_BAND * lineH) {
         return false;
     }
-    return gap(lineBox.x0, lineBox.x1, box.x0, box.x1) <= WORD_GAP * lineH;
+    const xGap = gap(lineBox.x0, lineBox.x1, box.x0, box.x1);
+    if (isDigitShaped(box) && isDigitShaped(lastBox)) {
+        const ref = Math.max(height(box), height(lastBox), 1e-6);
+        if (xGap > FINGERING_GAP * ref) {
+            return false;
+        }
+    }
+    return xGap <= WORD_GAP * lineH;
 };
 
 export interface GrouperOptions {
@@ -182,7 +207,8 @@ export class HandwritingGrouper {
                 this.arm(current);
                 return;
             }
-            if (continuesLine(current.box, box) && current.glyphs.length < MAX_LINE_GLYPHS) {
+            const last = current.glyphs[current.glyphs.length - 1];
+            if (last && continuesLine(current.box, box, last.box) && current.glyphs.length < MAX_LINE_GLYPHS) {
                 current.glyphs.push({ strokes: [stroke], box });
                 current.box = union(current.box, box);
                 this.arm(current);
@@ -221,6 +247,7 @@ export class HandwritingGrouper {
             glyph.box = glyph.strokes.map((s) => strokeBox(s, pending.aspect)).reduce(union);
         }
         pending.box = pending.glyphs.map((g) => g.box).reduce(union);
+        this.arm(pending);
     }
 
     /** Ids currently held (for tests and for cancel-on-erase bookkeeping). */
@@ -251,7 +278,7 @@ export class HandwritingGrouper {
 
     private arm(pending: Pending): void {
         this.disarm(pending);
-        const ms = pending.glyphs.length >= 2 ? LINE_PAUSE_MS : GLYPH_PAUSE_MS;
+        const ms = LINE_PAUSE_MS;
         pending.timer = this.schedule(() => {
             if (this.pending === pending) {
                 this.flush();

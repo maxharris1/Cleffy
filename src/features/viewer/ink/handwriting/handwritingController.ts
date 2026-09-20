@@ -1,4 +1,10 @@
-import { MAX_MUSIC_TEXT_SIZE, measureInkText, textPayloadForInk, type FontSpec } from '@/features/import/textFit';
+import {
+    MAX_MUSIC_TEXT_SIZE,
+    measureInkText,
+    SYSTEM_FONT_FAMILY,
+    textPayloadForInk,
+    type FontSpec,
+} from '@/features/import/textFit';
 import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
 import {
     groupBboxNormalized,
@@ -7,6 +13,7 @@ import {
     type GrouperOptions,
     type StrokeGroup,
 } from '@/features/viewer/ink/handwriting/grouper';
+import { lineHasDigit, splitDigitRun } from '@/features/viewer/ink/handwriting/recognizer';
 import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ensureMusicFontLoaded, textDrawSpec } from '@/features/viewer/ink/musicFont';
@@ -47,7 +54,9 @@ export const fontForRecognition = async (
         if (loaded) {
             return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: true };
         }
-        return { font: { family: spec.family, style: 'italic' }, text: recognition.text, music: false };
+        // Match the canvas fallback: system-ui italic of the ASCII spelling,
+        // never "Bravura Text" metrics for a face that is not going to draw.
+        return { font: { family: SYSTEM_FONT_FAMILY, style: 'italic' }, text: recognition.text, music: false };
     }
     return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: false };
 };
@@ -144,9 +153,21 @@ export class HandwritingController {
         let recognition: Recognition | null;
         try {
             recognition = await this.opts.recognizer(group);
-            if (!recognition && group.kind === 'line' && this.opts.transcribe && this.opts.isEnabled()) {
-                const text = await this.opts.transcribe(group);
-                recognition = text ? { text, kind: 'text' } : null;
+            if (!recognition && group.kind === 'line') {
+                const digits = splitDigitRun(group);
+                if (digits) {
+                    for (const piece of digits) {
+                        await this.handleGroup(piece);
+                    }
+                    return;
+                }
+                if (lineHasDigit(group)) {
+                    return;
+                }
+                if (this.opts.transcribe && this.opts.isEnabled()) {
+                    const text = await this.opts.transcribe(group);
+                    recognition = text ? { text, kind: 'text' } : null;
+                }
             }
         } catch (err) {
             console.warn('Handwriting recognition failed; ink stays', err);
@@ -167,6 +188,15 @@ export class HandwritingController {
         }
         const text = recognition.text.trim();
         const measured = await fontForRecognition({ ...recognition, text });
+        if (this.disposed || !this.opts.isEnabled()) {
+            return;
+        }
+        for (const id of groupStrokeIds(group)) {
+            const live = this.opts.store.get(id);
+            if (!live || live.deletedAt) {
+                return;
+            }
+        }
         const metrics = measureInkText(measured.text, measured.font);
         const payload = textPayloadForInk(groupBboxNormalized(group), text, group.aspect, metrics, {
             fitWidth: group.kind === 'line',
