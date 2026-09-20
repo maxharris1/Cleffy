@@ -339,6 +339,38 @@ describe('InkController text tool: resize', () => {
         expect(payloadOf('note').size).toBe(0.02);
     });
 
+    it('keeps the selection on a miss so Finger-draw can pinch from empty paper', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf'));
+        await select('note', 305, 655);
+        expect(ink.delegate.canPinch?.()).toBe(true);
+        ink.delegate.onInkDown(pointer(800, 200));
+        expect(ink.getTextSelection()?.id).toBe('note');
+        expect(ink.delegate.canPinch?.()).toBe(true);
+        ink.delegate.onInkUp(pointer(800, 200));
+        expect(ink.getTextSelection()).toBeNull();
+    });
+
+    it('a drag that promotes into a pinch is one undo step', async () => {
+        await store.create(textNote('note', 0.3, 0.5, 'mf', { hw: 1 }));
+        ink.delegate.onInkDown(pointer(310, 655));
+        vi.setSystemTime(Date.now() + TEXT_DRAG_SYNC_MS + 1);
+        ink.delegate.onInkMove(pointer(360, 655));
+        await settle();
+        expect(payloadOf('note').x).toBeCloseTo(0.35, 5);
+        expect(ink.delegate.canPinch?.()).toBe(true);
+        ink.delegate.onPromoteToPinch?.();
+        expect(ink.delegate.onPinch!(1.5)).toBe(true);
+        await settle();
+        ink.delegate.onPinchEnd!();
+        await settle();
+        expect(payloadOf('note').x).toBeCloseTo(0.35, 5);
+        expect(payloadOf('note').size).toBeCloseTo(0.03, 5);
+
+        await store.undoLast();
+        expect(payloadOf('note').x).toBeCloseTo(0.3, 5);
+        expect(payloadOf('note').size).toBe(0.02);
+    });
+
     it('tap without movement still opens the editor on a selected note', async () => {
         await store.create(textNote('note', 0.3, 0.5, 'mf'));
         await select('note', 305, 655);

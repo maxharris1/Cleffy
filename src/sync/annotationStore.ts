@@ -1,5 +1,5 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
-import { UndoStack, type UndoableOp } from '@/features/viewer/ink/undoStack';
+import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, PendingOpType, ScribblerDb } from '@/sync/db';
 import type { Annotation, AnnotationPayload } from '@/types/models';
 
@@ -145,7 +145,7 @@ export class AnnotationStore {
             this.setHistoryOverlay(null);
         }
         const snapById = new Map(snapshot.filter((a) => !a.deletedAt).map((a) => [a.id, a]));
-        this.beginBatch();
+        const batch = this.beginBatch();
         try {
             for (const live of this.liveAnnotations()) {
                 if (!snapById.has(live.id)) {
@@ -195,7 +195,7 @@ export class AnnotationStore {
                 }
             }
         } finally {
-            this.endBatch();
+            this.endBatch(batch);
         }
     }
 
@@ -269,12 +269,13 @@ export class AnnotationStore {
         await this.commit({ type: 'update', annotation: next, prev }, { recordUndo: true });
     }
 
-    async delete(id: string): Promise<void> {
+    /** True when this call tombstoned the row; false if it was already gone. */
+    async delete(id: string): Promise<boolean> {
         const prev = this.byId.get(id);
         if (!prev || prev.deletedAt) {
-            return;
+            return false;
         }
-        await this.commit(
+        return this.commit(
             { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() } },
             {
                 recordUndo: true,
@@ -328,18 +329,18 @@ export class AnnotationStore {
     }
 
     /** Group several ops (e.g. an eraser drag) into one undo entry. Nests. */
-    beginBatch(): void {
-        this.undo.beginBatch();
+    beginBatch(): UndoBatchHandle {
+        return this.undo.beginBatch();
     }
 
-    endBatch(): void {
-        this.undo.endBatch();
+    endBatch(handle?: UndoBatchHandle): void {
+        this.undo.endBatch(handle);
         this.notifyMeta();
     }
 
-    /** Drop the innermost open batch without recording it. */
-    cancelBatch(): void {
-        this.undo.cancelBatch();
+    /** Drop `handle`'s open batch without recording it. */
+    cancelBatch(handle?: UndoBatchHandle): void {
+        this.undo.cancelBatch(handle);
         this.notifyMeta();
     }
 
@@ -457,14 +458,20 @@ export class AnnotationStore {
         }
     }
 
-    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<void> {
+    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<boolean> {
         if (this.historyOverlay) {
-            return;
+            return false;
         }
 
         // Capture today's starting point before the first user edit of the day.
         if (options.recordUndo) {
             await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
+        }
+
+        // The snapshot read yields. A peer erase in that window must not still
+        // tombstone (or undo-record) a row that is already gone.
+        if (!this.stillApplies(op)) {
+            return false;
         }
 
         const { annotation } = op;
@@ -474,20 +481,7 @@ export class AnnotationStore {
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
-            switch (op.type) {
-                case 'create':
-                    this.undo.pushInverse({ type: 'delete', id: annotation.id });
-                    break;
-                case 'update':
-                    this.undo.pushInverse({ type: 'update', id: annotation.id, annotation: op.prev });
-                    break;
-                case 'delete':
-                    this.undo.pushInverse({ type: 'restore', id: annotation.id });
-                    break;
-                case 'restore':
-                    this.undo.pushInverse({ type: 'delete', id: annotation.id });
-                    break;
-            }
+            this.pushCommitInverse(op);
         }
 
         // 3. Durable mirror + outbox, atomically.
@@ -497,6 +491,49 @@ export class AnnotationStore {
         this.notifyPage(annotation.page);
         this.notifyMeta();
         this.onDirty?.();
+        return true;
+    }
+
+    /** False when a concurrent erase/restore won during `commit`'s snapshot yield. */
+    private stillApplies(op: CommitOp): boolean {
+        switch (op.type) {
+            case 'create':
+                return true;
+            case 'update':
+            case 'delete': {
+                const live = this.byId.get(op.annotation.id);
+                return !!live && !live.deletedAt;
+            }
+            case 'restore': {
+                const live = this.byId.get(op.annotation.id);
+                return !!live && !!live.deletedAt;
+            }
+            default: {
+                const _exhaustive: never = op;
+                return _exhaustive;
+            }
+        }
+    }
+
+    private pushCommitInverse(op: CommitOp): void {
+        switch (op.type) {
+            case 'create':
+                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                return;
+            case 'update':
+                this.undo.pushInverse({ type: 'update', id: op.annotation.id, annotation: op.prev });
+                return;
+            case 'delete':
+                this.undo.pushInverse({ type: 'restore', id: op.annotation.id });
+                return;
+            case 'restore':
+                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                return;
+            default: {
+                const _exhaustive: never = op;
+                return _exhaustive;
+            }
+        }
     }
 
     /** In-memory map updates (render source) — synchronous, UI never waits on IndexedDB. */

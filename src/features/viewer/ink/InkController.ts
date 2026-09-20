@@ -123,6 +123,8 @@ export class InkController {
     private textScale: TextScale | null = null;
     /** Text tool: the note last pressed — shows a box + resize handle until deselected. */
     private selectedText: { id: string; pageIndex: number } | null = null;
+    /** Open gesture undo frame (eraser / text drag / pinch). Convert uses its own handle. */
+    private openBatch: ReturnType<AnnotationStore['beginBatch']> | null = null;
     private downX = 0;
     private downY = 0;
     private moved = false;
@@ -256,6 +258,7 @@ export class InkController {
         onPinch: (factor) => this.onPinch(factor),
         onPinchEnd: () => this.onPinchEnd(),
         canPinch: () => this.canPinch(),
+        onPromoteToPinch: () => this.onPromoteToPinch(),
     };
 
     /** The text note currently selected with the text tool, or null. */
@@ -325,7 +328,7 @@ export class InkController {
             return;
         }
         if (tool === 'eraser') {
-            this.opts.store.beginBatch();
+            this.startUndoBatch();
             this.eraseAt(point.pageIndex, point.nx, point.ny);
             return;
         }
@@ -350,9 +353,9 @@ export class InkController {
                     lastCommitAt: 0,
                 };
                 this.selectText(existing.id, point.pageIndex);
-            } else {
-                this.clearTextSelection();
             }
+            // Miss: keep the selection so a second Finger-draw touch can still
+            // pinch-resize. A tap-up on empty paper deselects in `onUp`.
             return;
         }
 
@@ -480,7 +483,7 @@ export class InkController {
             return;
         }
         if (tool === 'eraser') {
-            this.opts.store.endBatch();
+            this.finishUndoBatch();
             return;
         }
         if (tool === 'text') {
@@ -493,25 +496,27 @@ export class InkController {
                 if (this.moved) {
                     this.scaleTextToHandle(scale, x, y, true);
                 }
-                this.endTextScale(scale);
+                this.endTextScale();
                 return;
             }
             if (drag && this.moved) {
                 // Final position, then close the single undo step.
                 this.moveTextTo(drag, x, y, true);
-                if (drag.committed) {
-                    this.opts.store.endBatch();
-                }
+                this.finishUndoBatch();
                 return;
             }
             if (!this.moved) {
                 const point = viewportToPagePoint(this.opts.getView(), this.opts.getLayout().layouts, x, y);
                 if (point) {
+                    const existing = drag?.annotation ?? this.findTextAt(point.pageIndex, point.nx, point.ny);
+                    if (!existing) {
+                        this.clearTextSelection();
+                    }
                     this.opts.onTextIntent({
                         pageIndex: point.pageIndex,
                         nx: point.nx,
                         ny: point.ny,
-                        existing: drag?.annotation ?? this.findTextAt(point.pageIndex, point.nx, point.ny),
+                        existing,
                     });
                 }
             }
@@ -576,9 +581,7 @@ export class InkController {
         }
         if (this.textDrag) {
             // The note stays where it was last committed; just close the step.
-            if (this.textDrag.committed) {
-                this.opts.store.endBatch();
-            }
+            this.finishUndoBatch();
             this.textDrag = null;
         }
         if (this.textScale) {
@@ -587,11 +590,31 @@ export class InkController {
             if (scale.anchor === null) {
                 this.commitTextSize(scale, scale.startSize * scale.factor, true);
             }
-            this.endTextScale(scale);
+            this.endTextScale();
         }
         if (useViewerStore.getState().tool === 'eraser') {
-            this.opts.store.endBatch();
+            this.finishUndoBatch();
         }
+    }
+
+    /**
+     * Finger-draw first touch is becoming a pinch. Keep any drag undo frame
+     * open so move + resize is one Cmd+Z; do not deselect.
+     */
+    private onPromoteToPinch(): void {
+        if (this.live) {
+            const page = this.live.pageIndex;
+            this.live = null;
+            this.publisher?.cancel();
+            this.renderPageLive(page);
+        }
+        if (this.fingeringSel) {
+            const page = this.fingeringSel.pageIndex;
+            this.fingeringSel = null;
+            this.renderPageLive(page);
+        }
+        this.textDrag = null;
+        this.moved = true;
     }
 
     // ---- text selection: scale by handle or pinch -------------------------
@@ -682,7 +705,7 @@ export class InkController {
             return;
         }
         if (scale.committed === null) {
-            this.opts.store.beginBatch();
+            this.startUndoBatch();
         }
         scale.committed = size;
         scale.lastCommitAt = now;
@@ -696,10 +719,20 @@ export class InkController {
         });
     }
 
-    private endTextScale(scale: TextScale): void {
-        if (scale.committed !== null) {
-            this.opts.store.endBatch();
+    private endTextScale(): void {
+        this.finishUndoBatch();
+    }
+
+    private startUndoBatch(): void {
+        this.openBatch ??= this.opts.store.beginBatch();
+    }
+
+    private finishUndoBatch(): void {
+        if (this.openBatch === null) {
+            return;
         }
+        this.opts.store.endBatch(this.openBatch);
+        this.openBatch = null;
     }
 
     /** Two-finger pinch: claimed while a text note is selected; never steals a handle drag. */
@@ -752,7 +785,7 @@ export class InkController {
         }
         this.textScale = null;
         this.commitTextSize(scale, scale.startSize * scale.factor, true);
-        this.endTextScale(scale);
+        this.endTextScale();
     }
 
     /**
@@ -783,7 +816,7 @@ export class InkController {
             return;
         }
         if (!drag.committed) {
-            this.opts.store.beginBatch();
+            this.startUndoBatch();
         }
         drag.committed = next;
         drag.lastCommitAt = now;

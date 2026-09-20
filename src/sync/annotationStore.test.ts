@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';
@@ -139,6 +140,28 @@ describe('AnnotationStore', () => {
         expect(store.getPage(0).has('print')).toBe(false);
     });
 
+    it('endBatch(handle) closes only that frame while an inner batch is still open', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+        await store.create(makeStroke('a3'));
+
+        const outer = store.beginBatch();
+        await store.delete('a1');
+        const inner = store.beginBatch();
+        await store.delete('a2');
+        store.endBatch(outer);
+        await store.create(makeStroke('print'));
+        store.endBatch(inner);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a2')).toBe(true);
+        expect(store.getPage(0).has('print')).toBe(false);
+        expect(store.getPage(0).has('a1')).toBe(false);
+
+        await store.undoLast();
+        expect(store.getPage(0).has('a1')).toBe(true);
+    });
+
     it('a new op clears the redo stack', async () => {
         await store.create(makeStroke('a1'));
         await store.undoLast();
@@ -245,5 +268,25 @@ describe('AnnotationStore', () => {
         expect(store.overlayMode).toBe('history');
         store.setHistoryOverlay(null);
         expect(store.overlayMode).toBe(null);
+    });
+
+    it('delete is a no-op if a peer tombstones the row during the snapshot yield', async () => {
+        await store.create(makeStroke('a1'));
+        const orig = snapshotService.ensureDayStartingSnapshot;
+        const spy = vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+            const live = store.get('a1');
+            if (live && !live.deletedAt) {
+                await store.applyRemoteBatch(
+                    [{ ...live, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), seq: live.seq + 1 }],
+                    new Set(),
+                );
+            }
+            return orig(...args);
+        });
+        expect(await store.delete('a1')).toBe(false);
+        expect(store.get('a1')?.deletedAt).not.toBeNull();
+        await store.undoLast();
+        expect(store.get('a1')?.deletedAt).not.toBeNull();
+        spy.mockRestore();
     });
 });

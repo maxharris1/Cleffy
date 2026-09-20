@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
+import type { StrokeGroup } from '@/features/viewer/ink/handwriting/grouper';
 import { fontForRecognition, HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
 import { groupFromHands, HANDS } from '@/features/viewer/ink/handwriting/recognizer/fixtures';
 import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
@@ -64,6 +65,19 @@ const write = async (controller: HandwritingController, annotation: Annotation) 
 
 const texts = () => [...store.getPage(0).values()].filter((a) => a.kind === 'text');
 const strokes = () => [...store.getPage(0).values()].filter((a) => a.kind === 'stroke');
+
+const glyphGroup = (id: string, x: number): StrokeGroup => {
+    const ink = boxStroke(id, x, 0.5, H * 0.4, H);
+    const box = { x0: x, y0: 0.5, x1: x + H * 0.4, y1: 0.5 + H };
+    return {
+        page: 0,
+        color: '#dc2626',
+        aspect: ASPECT,
+        glyphs: [{ strokes: [ink], box }],
+        kind: 'glyph',
+        box,
+    };
+};
 
 beforeEach(async () => {
     db = new ScribblerDb(`test-${crypto.randomUUID()}`);
@@ -364,7 +378,7 @@ describe('HandwritingController', () => {
             if (id === first) {
                 await origDelete(peerErase);
             }
-            await origDelete(id);
+            return origDelete(id);
         };
         const created = await convertGroupToText(store, group, {
             x: 0.3,
@@ -376,5 +390,103 @@ describe('HandwritingController', () => {
         expect(texts()).toHaveLength(0);
         expect(store.get(first)?.deletedAt).toBeNull();
         expect(store.get(peerErase)?.deletedAt).not.toBeNull();
+    });
+
+    it('overlapping converts do not share a batch frame', async () => {
+        const groupA = glyphGroup('dyn-a', 0.2);
+        const groupB = glyphGroup('dyn-b', 0.5);
+        await store.create(strokeAnnotation('dyn-a', 0.2));
+        await store.create(strokeAnnotation('dyn-b', 0.5));
+
+        let releaseA = () => undefined;
+        const blockA = new Promise<void>((resolve) => {
+            releaseA = resolve;
+        });
+        let sawA = () => undefined;
+        const enteredA = new Promise<void>((resolve) => {
+            sawA = resolve;
+        });
+        let aBlocked = false;
+        let bWhileA = false;
+        const origDelete = store.delete.bind(store);
+        store.delete = async (id: string) => {
+            if (id === 'dyn-a') {
+                aBlocked = true;
+                sawA();
+                await blockA;
+                aBlocked = false;
+            } else if (aBlocked) {
+                bWhileA = true;
+            }
+            return origDelete(id);
+        };
+
+        const first = convertGroupToText(store, groupA, { x: 0.2, y: 0.5, text: 'p', size: 0.02 });
+        await enteredA;
+        const second = convertGroupToText(store, groupB, { x: 0.5, y: 0.5, text: 'f', size: 0.02 });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(bWhileA).toBe(false);
+        releaseA();
+        await Promise.all([first, second]);
+
+        expect(
+            texts()
+                .map((a) => (a.payload as TextPayload).text)
+                .sort(),
+        ).toEqual(['f', 'p']);
+
+        await store.undoLast();
+        expect(texts().map((a) => (a.payload as TextPayload).text)).toEqual(['p']);
+        expect(store.get('dyn-b')?.deletedAt).toBeNull();
+        expect(store.get('dyn-a')?.deletedAt).not.toBeNull();
+
+        await store.undoLast();
+        expect(texts()).toHaveLength(0);
+        expect(store.get('dyn-a')?.deletedAt).toBeNull();
+    });
+
+    it('outer endBatch during convert delete does not steal the convert frame', async () => {
+        const controller = make(() => ({ text: '3', kind: 'digit' }));
+        await store.create(strokeAnnotation('keep', 0.7));
+        await write(controller, strokeAnnotation('three', 0.3));
+
+        let release = () => undefined;
+        const blocked = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let sawThree = () => undefined;
+        const enteredThree = new Promise<void>((resolve) => {
+            sawThree = resolve;
+        });
+        let firstThree = true;
+        const origDelete = store.delete.bind(store);
+        store.delete = async (id: string) => {
+            if (id === 'three' && firstThree) {
+                firstThree = false;
+                sawThree();
+                await blocked;
+            }
+            return origDelete(id);
+        };
+
+        const outer = store.beginBatch();
+        await store.delete('keep');
+        timers.fire();
+        await enteredThree;
+        store.endBatch(outer);
+        release();
+        await controller.settle();
+
+        expect(texts()).toHaveLength(1);
+        expect(store.get('keep')?.deletedAt).not.toBeNull();
+
+        await store.undoLast();
+        expect(texts()).toHaveLength(0);
+        expect(store.get('three')?.deletedAt).toBeNull();
+        expect(store.get('keep')?.deletedAt).not.toBeNull();
+
+        await store.undoLast();
+        expect(store.get('keep')?.deletedAt).toBeNull();
     });
 });

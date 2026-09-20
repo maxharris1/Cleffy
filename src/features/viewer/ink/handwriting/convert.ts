@@ -3,6 +3,27 @@ import type { AnnotationStore } from '@/sync/annotationStore';
 import type { Annotation, TextPayload } from '@/types/models';
 
 /**
+ * One convert at a time per store. Two groups that overlap at an `await`
+ * (first Bravura load + two dynamics, two Gemini lines) must not both open
+ * frames — `pushInverse` records into the innermost, so a nested convert
+ * would glue or drop Cmd+Z.
+ */
+const convertTails = new WeakMap<AnnotationStore, Promise<unknown>>();
+
+const enqueueConvert = <T>(store: AnnotationStore, task: () => Promise<T>): Promise<T> => {
+    const prev = convertTails.get(store) ?? Promise.resolve();
+    const run = prev.then(task, task);
+    convertTails.set(
+        store,
+        run.then(
+            () => undefined,
+            () => undefined,
+        ),
+    );
+    return run;
+};
+
+/**
  * Swap a group of committed strokes for ONE print `text` annotation.
  *
  * `kind` cannot be patched, so this is delete + create inside a nested undo
@@ -14,7 +35,13 @@ import type { Annotation, TextPayload } from '@/types/models';
  * longer live (erased, undone, or replaced by a peer) — then nothing changes:
  * strokes already deleted in this attempt are restored and the batch is dropped.
  */
-export const convertGroupToText = async (
+export const convertGroupToText = (
+    store: AnnotationStore,
+    group: StrokeGroup,
+    payload: TextPayload,
+): Promise<Annotation | null> => enqueueConvert(store, () => convertGroupToTextExclusive(store, group, payload));
+
+const convertGroupToTextExclusive = async (
     store: AnnotationStore,
     group: StrokeGroup,
     payload: TextPayload,
@@ -40,29 +67,32 @@ export const convertGroupToText = async (
         deletedAt: null,
         seq: 0,
     };
-    store.beginBatch();
+    const batch = store.beginBatch();
     const deleted: string[] = [];
+    const abort = async (): Promise<null> => {
+        for (const gone of deleted) {
+            await store.restore(gone);
+        }
+        store.cancelBatch(batch);
+        return null;
+    };
     try {
         for (const id of ids) {
             const live = store.get(id);
             if (!live || live.deletedAt || live.kind !== 'stroke') {
-                for (const gone of deleted) {
-                    await store.restore(gone);
-                }
-                store.cancelBatch();
-                return null;
+                return abort();
             }
-            await store.delete(id);
+            const did = await store.delete(id);
+            if (!did) {
+                return abort();
+            }
             deleted.push(id);
         }
         await store.create(text);
-        store.endBatch();
+        store.endBatch(batch);
         return text;
     } catch (err) {
-        for (const gone of deleted) {
-            await store.restore(gone);
-        }
-        store.cancelBatch();
+        await abort();
         throw err;
     }
 };

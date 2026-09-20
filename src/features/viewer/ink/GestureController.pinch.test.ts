@@ -95,4 +95,17 @@ describe('GestureController pinch hand-off', () => {
         expect(callbacks.onZoomBy).not.toHaveBeenCalled();
         expect(callbacks.onPan).not.toHaveBeenCalled();
     });
+
+    it('does not ink a third Finger-draw touch during a claimed pinch', () => {
+        controller = new GestureController(el, callbacks);
+        const { ink, onPinch, onInkDown } = delegate(true, () => true);
+        controller.setInkDelegate(ink);
+        el.dispatchEvent(touch('pointerdown', 1, 100, 100));
+        el.dispatchEvent(touch('pointerdown', 2, 200, 100));
+        el.dispatchEvent(touch('pointermove', 2, 250, 100));
+        expect(onPinch).toHaveBeenCalled();
+        el.dispatchEvent(touch('pointerdown', 3, 150, 180));
+        expect(onInkDown).toHaveBeenCalledTimes(1);
+        expect(callbacks.onZoomBy).not.toHaveBeenCalled();
+    });
 });

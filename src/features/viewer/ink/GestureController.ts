@@ -48,6 +48,11 @@ export interface InkDelegate {
      * become a pinch (text-tool resize with Finger-draw on).
      */
     canPinch?: () => boolean;
+    /**
+     * The ink pointer is being promoted into a pinch. Unlike `onInkCancel`,
+     * this must not close an already-open drag undo batch — pinch joins it.
+     */
+    onPromoteToPinch?: () => void;
 }
 
 interface TrackedPointer {
@@ -174,6 +179,11 @@ export class GestureController {
         }
 
         if (this.inkDelegate && this.inkPointerId === null && this.inkDelegate.shouldInk(e)) {
+            // A claimed two-finger pinch (or any multi-touch) must not let a
+            // third Finger-draw touch start a drag/deselect.
+            if (this.inkPinch || this.pointers.size >= 2) {
+                return;
+            }
             const { x, y } = this.toLocal(e);
             this.inkPointerId = e.pointerId;
             this.inkX = x;
@@ -305,7 +315,11 @@ export class GestureController {
         if (inkId === null) {
             return;
         }
-        this.inkDelegate?.onInkCancel(e);
+        if (this.inkDelegate?.onPromoteToPinch) {
+            this.inkDelegate.onPromoteToPinch();
+        } else {
+            this.inkDelegate?.onInkCancel(e);
+        }
         this.inkPointerId = null;
         const now = performance.now();
         this.pointers.set(inkId, {
