@@ -333,7 +333,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             return { x: e.clientX - rect.left, y: e.clientY - rect.top };
         };
         // Opt-in print conversion of THIS writer's committed pen strokes.
-        // Text notes need the metered edge function, so only cloud documents get it.
+        // Text notes need the metered edge function, so only the score owner
+        // of a cloud document gets it — editors still convert digits/symbols
+        // on-device.
         const handwriting = new HandwritingController({
             store: annotationStore,
             recognizer: recognizeOnDevice,

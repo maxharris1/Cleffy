@@ -94,10 +94,11 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
             const fontPx = size * vw;
             const spec = textDrawSpec(text, hw === 1);
             // Same face as the screen: music glyphs when the font is embedded,
+            // italic Helvetica when a music token has no face (matches canvas),
             // oblique for italic teaching words, else Helvetica. The baseline
             // drop follows the chosen face's ascent so tops line up.
             const useMusic = spec.music && music !== null;
-            const drawFont = useMusic ? music!.font : spec.style === 'italic' ? italic : font;
+            const drawFont = useMusic ? music!.font : spec.style === 'italic' || spec.music ? italic : font;
             const ascent = useMusic ? music!.ascent : STANDARD_ASCENT;
             const source = useMusic ? spec.glyphs : pdfFallbackGlyphs(text, spec);
             const lines = (useMusic ? source : sanitizeWinAnsi(source)).split('\n');

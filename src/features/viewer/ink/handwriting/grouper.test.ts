@@ -73,6 +73,19 @@ describe('HandwritingGrouper', () => {
         expect(pitch - H * 0.4).toBeGreaterThan(FINGERING_GAP * H);
     });
 
+    it('keeps an airy pp as one line (FINGERING_GAP does not fire on p/f bowls)', () => {
+        const { timers, flushed, grouper } = setup();
+        // width 0.7 H (bowl, not a stem); gap 0.6 H — would split if FINGERING_GAP
+        // applied to every digit-shaped box, still a word space under WORD_GAP.
+        grouper.add(boxStroke('p1', 0.3, 0.5, H * 0.7, H), ASPECT);
+        grouper.add(boxStroke('p2', 0.3 + H * 1.3, 0.5, H * 0.7, H), ASPECT);
+        expect(flushed).toHaveLength(0);
+        timers.fire();
+        expect(flushed).toHaveLength(1);
+        expect(flushed[0]!.kind).toBe('line');
+        expect(groupStrokeIds(flushed[0]!)).toEqual(['p1', 'p2']);
+    });
+
     it('a lone glyph flushes after the line pause as a single object', () => {
         const { timers, flushed, grouper } = setup();
         grouper.add(boxStroke('p', 0.5, 0.5, H * 0.7, H), ASPECT);

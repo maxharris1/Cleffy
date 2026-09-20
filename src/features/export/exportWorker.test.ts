@@ -103,7 +103,7 @@ describe('PDF export of converted handwriting', () => {
         });
         const names = await fontNames(out);
         expect(bravura(names)).toHaveLength(0);
-        expect(names).toContain('Helvetica');
+        expect(names).toContain('Helvetica-Oblique');
         const content = decodedContent(out);
         // pdf-lib WinAnsi-encodes as hex; 6D66 = "mf", not 3F = "?".
         expect(content).toMatch(/<6D66>\s+Tj/);

@@ -86,8 +86,12 @@ const WORD_GAP = 1.0;
  * space; treating them as one line would skip the closed set and bill Gemini.
  */
 export const FINGERING_GAP = 0.4;
-/** Width/height at or under which a glyph is digit-shaped (not a square letter). */
-const DIGIT_MAX_ASPECT = 0.85;
+/**
+ * Stems (chord `1 3 5`) are narrower than `p`/`f` bowls. Applying
+ * `FINGERING_GAP` to every digit-shaped box split airy `pp`/`ff` into two
+ * printed letters; those still join under `WORD_GAP`.
+ */
+const FINGERING_MAX_ASPECT = 0.5;
 /** New glyph centre must sit within this many line heights of the line centre. */
 const LINE_BAND = 0.6;
 
@@ -143,9 +147,9 @@ const joinsGlyph = (glyph: Glyph, box: Box): boolean => {
     return overlap >= 0.4 * Math.min(width(glyph.box), width(box));
 };
 
-const isDigitShaped = (b: Box): boolean => {
+const isFingeringShaped = (b: Box): boolean => {
     const h = height(b);
-    return h > 0 && width(b) <= DIGIT_MAX_ASPECT * h;
+    return h > 0 && width(b) <= FINGERING_MAX_ASPECT * h;
 };
 
 /** Does a new glyph continue the pending writing line? */
@@ -155,7 +159,7 @@ const continuesLine = (lineBox: Box, box: Box, lastBox: Box): boolean => {
         return false;
     }
     const xGap = gap(lineBox.x0, lineBox.x1, box.x0, box.x1);
-    if (isDigitShaped(box) && isDigitShaped(lastBox)) {
+    if (isFingeringShaped(box) && isFingeringShaped(lastBox)) {
         const ref = Math.max(height(box), height(lastBox), 1e-6);
         if (xGap > FINGERING_GAP * ref) {
             return false;
