@@ -15,11 +15,11 @@ export interface ImslpFileMeta {
     publisher: string | null;
     /** Publication year when `{{P}}` states one. */
     year: number | null;
-    /** Plate number (`{{P}}` field 7) when present. */
+    /** Plate number (`{{P}}` field 7, or field 6 when that slot holds HN/BA-style plates). */
     plate: string | null;
-    /** `{{Urtext}}` sits on this file's publisher line. */
+    /** `{{Urtext}}` or `{{Urtext|…}}` sits on this file's publisher line. */
     urtext: boolean;
-    /** The block names an `Arranger` — the file is an arrangement, whatever the description says. */
+    /** The block names an Arranger / Transcriber (including `Arranger 2`). */
     arrangement: boolean;
     /** `File Description N`, e.g. "Complete Score". */
     description: string | null;
@@ -37,6 +37,19 @@ export const fileBlockKey = (filename: string): string => {
     }
     return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 };
+
+export const NO_FILE_META: ImslpFileMeta = {
+    publisher: null,
+    year: null,
+    plate: null,
+    urtext: false,
+    arrangement: false,
+    description: null,
+};
+
+/** Look up parsed meta, or the empty defaults when the image was not in any block. */
+export const fileMetaFor = (fileMeta: Map<string, ImslpFileMeta>, filename: string): ImslpFileMeta =>
+    fileMeta.get(fileBlockKey(filename)) ?? NO_FILE_META;
 
 const BLOCK_OPEN = '{{#fte:imslpfile';
 
@@ -66,7 +79,10 @@ const extractBlocks = (wikitext: string): string[] => {
             }
         }
         if (end < 0) {
-            break;
+            // Skip the broken opener and keep scanning — one unclosed block
+            // must not drop later well-formed Henle/Bärenreiter blocks.
+            cursor = start + BLOCK_OPEN.length;
+            continue;
         }
         blocks.push(wikitext.slice(start + BLOCK_OPEN.length, end - 2));
         cursor = end;
@@ -75,13 +91,13 @@ const extractBlocks = (wikitext: string): string[] => {
 };
 
 /**
- * Split a block body into `Key=value` fields. Fields start on their own line
- * with `|`; template pipes inside a value never follow a newline, so the
- * newline-then-pipe split is safe.
+ * Split a block body into `Key=value` fields. Pipes inside `{{ }}` / `[[ ]]`
+ * stay in the value, so both the usual multiline `|Key=` form and a one-line
+ * `{{#fte:imslpfile|File Name 1=a.pdf|…}}` parse.
  */
 const parseFields = (body: string): Map<string, string> => {
     const fields = new Map<string, string>();
-    for (const raw of body.split(/\n\|/)) {
+    for (const raw of splitTemplateArgs(body)) {
         const eq = raw.indexOf('=');
         if (eq < 0) {
             continue;
@@ -94,6 +110,8 @@ const parseFields = (body: string): Map<string, string> => {
     }
     return fields;
 };
+
+const isArrangerField = (key: string): boolean => /^(Arranger|Transcriber)(?:\s+\d+)?$/i.test(key);
 
 /** Split `{{P|a|b|…}}` arguments, keeping nested-template pipes intact. */
 const splitTemplateArgs = (inner: string): string[] => {
@@ -141,8 +159,10 @@ interface PublisherInfo {
  * Template:P positional args: 1 official name, 2 imprint, 3 city, 4 date
  * string (`n.d.[1959]`), 5 numeric year, 6 edition number, 7 plate.
  */
+const LOOKS_LIKE_PLATE = /^[A-Z]{1,4}\s?\d/i;
+
 const parsePublisherInfo = (value: string): PublisherInfo => {
-    const urtext = /\{\{\s*Urtext\s*\}\}/i.test(value);
+    const urtext = /\{\{\s*Urtext(?:\s*\|[^}]*)?\s*\}\}/i.test(value);
     const match = value.match(/\{\{P\|((?:[^{}]|\{\{[^{}]*\}\})*)\}\}/);
     if (!match) {
         return { publisher: null, year: null, plate: null, urtext };
@@ -152,7 +172,9 @@ const parsePublisherInfo = (value: string): PublisherInfo => {
     const imprint = stripMarkup(args[1] ?? '');
     const dateText = `${args[3] ?? ''} ${args[4] ?? ''}`;
     const yearMatch = dateText.match(/\d{4}/);
-    const plate = stripMarkup(args[6] ?? '');
+    const plateArg = stripMarkup(args[6] ?? '');
+    const editionNo = stripMarkup(args[5] ?? '');
+    const plate = plateArg || (LOOKS_LIKE_PLATE.test(editionNo) ? editionNo : '');
     return {
         publisher: official || imprint || null,
         year: yearMatch ? Number(yearMatch[0]) : null,
@@ -171,7 +193,9 @@ export const parseImslpFileBlocks = (wikitext: string): Map<string, ImslpFileMet
     for (const block of extractBlocks(wikitext)) {
         const fields = parseFields(block);
         const shared = parsePublisherInfo(fields.get('Publisher Information') ?? '');
-        const arrangement = (fields.get('Arranger') ?? '').trim().length > 0;
+        const arrangement = [...fields.entries()].some(
+            ([key, value]) => isArrangerField(key) && value.trim().length > 0,
+        );
         for (const [key, filename] of fields) {
             const nameMatch = key.match(/^File Name (\d+)$/);
             if (!nameMatch || !filename) {

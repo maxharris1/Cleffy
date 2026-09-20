@@ -11,7 +11,8 @@ import {
     stripFilePrefix,
     workPageUrl,
 } from '../_shared/imslp.ts';
-import { fileBlockKey, parseImslpFileBlocks, type ImslpFileMeta } from '../_shared/imslpFileBlocks.ts';
+import { fileMetaFor, parseImslpFileBlocks, type ImslpFileMeta } from '../_shared/imslpFileBlocks.ts';
+import { fetchWorkPageOrImages, wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
 import {
     LICENSE_TTL_MS,
     classifyLicense,
@@ -31,15 +32,6 @@ interface Edition extends ImslpFileMeta {
     restriction: string | null;
     downloadable: boolean;
 }
-
-const NO_FILE_META: ImslpFileMeta = {
-    publisher: null,
-    year: null,
-    plate: null,
-    urtext: false,
-    arrangement: false,
-    description: null,
-};
 
 interface LicenseRow {
     filename: string;
@@ -160,14 +152,7 @@ Deno.serve(async (req) => {
         // The wikitext rides along with the image list: its #fte:imslpfile
         // blocks are the only place IMSLP states each PDF's publisher and
         // {{Urtext}} tag.
-        const imagesData = (await mwFetch({
-            action: 'query',
-            titles: title,
-            prop: 'images|revisions',
-            imlimit: '500',
-            rvprop: 'content',
-            redirects: '1',
-        })) as {
+        const imagesData = (await fetchWorkPageOrImages(title, mwFetch)) as {
             query?: {
                 pages?: Record<
                     string,
@@ -191,11 +176,13 @@ Deno.serve(async (req) => {
             .filter(isPdfFileTitle)
             .map(stripFilePrefix);
 
-        const fileMeta = parseImslpFileBlocks(page.revisions?.[0]?.['*'] ?? '');
-        const metaFields = (filename: string): ImslpFileMeta => fileMeta.get(fileBlockKey(filename)) ?? NO_FILE_META;
+        const fileMeta = parseImslpFileBlocks(wikitextFromMwPage(page));
+        const metaFields = (filename: string): ImslpFileMeta => fileMetaFor(fileMeta, filename);
 
         const { licenses, source: licenseSource } = await resolveLicenses(page.title ?? title, pdfTitles);
-        const licenseFields = (filename: string): Pick<Edition, 'license' | 'licenseLabel' | 'restriction' | 'downloadable'> => {
+        const licenseFields = (
+            filename: string,
+        ): Pick<Edition, 'license' | 'licenseLabel' | 'restriction' | 'downloadable'> => {
             const license = licenses.get(filename);
             if (license) {
                 return {

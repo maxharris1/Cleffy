@@ -37,7 +37,7 @@ describe('parseImslpFileBlocks', () => {
         expect(bandI).toEqual({
             publisher: 'G. Henle Verlag',
             year: 1976,
-            plate: null,
+            plate: 'HN1032',
             urtext: true,
             arrangement: false,
             description: 'Complete Score',
@@ -153,5 +153,67 @@ describe('parseImslpFileBlocks', () => {
             arrangement: false,
             description: 'Parts',
         });
+    });
+
+    it('keeps later blocks when an earlier block is left unclosed', () => {
+        const wikitext = [
+            '{{#fte:imslpfile',
+            '|File Name 1=broken.pdf',
+            '|Publisher Information={{P|Schirmer||New York||1895||}}',
+            '{{#fte:imslpfile',
+            '|File Name 1=henle.pdf',
+            '|File Description 1=Complete Score',
+            '|Publisher Information={{P|G. Henle Verlag||Munich||1976||}} {{Urtext}}',
+            '}}',
+        ].join('\n');
+        const parsed = parseImslpFileBlocks(wikitext);
+        expect(parsed.has('Broken.pdf')).toBe(false);
+        expect(parsed.get('Henle.pdf')?.urtext).toBe(true);
+        expect(parsed.get('Henle.pdf')?.publisher).toBe('G. Henle Verlag');
+    });
+
+    it('parses a one-line block that never uses newline-then-pipe', () => {
+        const wikitext =
+            '{{#fte:imslpfile|File Name 1=a.pdf|File Description 1=Complete Score|Publisher Information={{P|G. Henle Verlag||Munich||1976||}} {{Urtext}}}}';
+        expect(parseImslpFileBlocks(wikitext).get('A.pdf')).toEqual({
+            publisher: 'G. Henle Verlag',
+            year: 1976,
+            plate: null,
+            urtext: true,
+            arrangement: false,
+            description: 'Complete Score',
+        });
+    });
+
+    it('treats Arranger N and Transcriber as arrangements', () => {
+        const numbered = [
+            '{{#fte:imslpfile',
+            '|File Name 1=duo.pdf',
+            '|File Description 1=Complete Score',
+            '|Arranger 2={{LinkArr|J. J.|Olson|1947|}}',
+            '|Publisher Information={{P|Mutopia||||2016||}}',
+            '}}',
+        ].join('\n');
+        expect(parseImslpFileBlocks(numbered).get('Duo.pdf')?.arrangement).toBe(true);
+
+        const transcriber = [
+            '{{#fte:imslpfile',
+            '|File Name 1=guitar.pdf',
+            '|File Description 1=Complete Score',
+            '|Transcriber={{LinkArr|Jane|Doe||}}',
+            '}}',
+        ].join('\n');
+        expect(parseImslpFileBlocks(transcriber).get('Guitar.pdf')?.arrangement).toBe(true);
+    });
+
+    it('treats {{Urtext|1}} as Urtext', () => {
+        const wikitext = [
+            '{{#fte:imslpfile',
+            '|File Name 1=barenreiter.pdf',
+            '|File Description 1=Complete Score',
+            '|Publisher Information={{P|Bärenreiter||Kassel||1980||BA 4001}} {{Urtext|1}}',
+            '}}',
+        ].join('\n');
+        expect(parseImslpFileBlocks(wikitext).get('Barenreiter.pdf')?.urtext).toBe(true);
     });
 });
