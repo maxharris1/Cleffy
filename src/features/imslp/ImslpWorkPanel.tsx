@@ -5,19 +5,18 @@ import {
     displayEditionName,
     displayWorkTitle,
     editionAvailability,
+    editionListSummary,
     formatBytes,
+    isEditionImportable,
     rankEditions,
     recommendEdition,
-    recommendedBadge,
+    urtextBadge,
 } from '@/features/imslp/imslpDisplay';
 import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
 const DISCLAIMER =
     'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
-
-/** Rows visible before the list scrolls: the highlighted pick plus two others. */
-const VISIBLE_ROWS = 3;
 
 export type DownloadStatus =
     { kind: 'idle' } | { kind: 'downloading' } | { kind: 'fallback'; openUrl: string; message: string };
@@ -34,7 +33,27 @@ interface ImslpWorkPanelProps {
     onImportLocalPdf: (file: File) => void;
 }
 
-const isRestricted = (edition: ImslpEdition): boolean => edition.downloadable === false;
+const URTEXT_COPYRIGHT_NOTE = /copyright status for urtext/i;
+
+type Availability = NonNullable<ReturnType<typeof editionAvailability>>;
+
+const warnBadgeLabel = (availability: Availability): string => {
+    switch (availability.kind) {
+        case 'restricted':
+            if (availability.label.length > 32 || URTEXT_COPYRIGHT_NOTE.test(availability.label)) {
+                return 'Restricted';
+            }
+            return availability.label;
+        case 'unknown':
+            return availability.label;
+        case 'downloadable':
+            return availability.label;
+        default: {
+            const _exhaustive: never = availability;
+            return _exhaustive;
+        }
+    }
+};
 
 export const ImslpWorkPanel = ({
     work,
@@ -51,19 +70,12 @@ export const ImslpWorkPanel = ({
     const recommended = useMemo(() => recommendEdition(work.editions), [work.editions]);
     const ranked = useMemo(() => rankEditions(work.editions), [work.editions]);
 
-    const importableCount = work.editions.filter((e) => !isRestricted(e)).length;
+    const importableCount = work.editions.filter(isEditionImportable).length;
     const noneImportable = work.editions.length > 0 && importableCount === 0;
     const noUrtext = work.editions.length > 0 && !work.editions.some((e) => e.urtext);
+    const countLine = editionListSummary(work.editions);
 
     const statusLine = download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : null;
-
-    const total = work.editions.length;
-    const countLine =
-        total === 0
-            ? null
-            : total > VISIBLE_ROWS
-              ? `${total} PDFs · Urtext first — scroll for others.`
-              : `${total} ${total === 1 ? 'PDF' : 'PDFs'}`;
 
     return (
         <div className="imslp-panel-view mt-4">
@@ -87,82 +99,100 @@ export const ImslpWorkPanel = ({
                     {noUrtext ? (
                         <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
                     ) : null}
-                    {/* One scrollable list sized for three rows; nothing is hidden behind an expand. */}
-                    <ul className="mt-2 max-h-[10.75rem] overflow-y-auto" aria-label="PDF editions">
+                    {!noneImportable ? (
+                        <p className="mt-3 max-w-prose text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
+                    ) : null}
+                    <ul className="mt-2 max-h-[16.5rem] overflow-y-auto" aria-label="PDF editions">
                         {ranked.map((edition) => {
                             const checked = selected?.filename === edition.filename;
-                            const restricted = isRestricted(edition);
+                            const importable = isEditionImportable(edition);
                             const availability = editionAvailability(edition);
                             const publisherLabel = edition.publisher
                                 ? [edition.publisher, edition.year].filter(Boolean).join(' ')
                                 : null;
                             const meta = [
                                 publisherLabel,
-                                availability && availability.kind !== 'restricted' ? availability.label : null,
+                                edition.description,
+                                availability && availability.kind === 'downloadable' ? availability.label : null,
                                 formatBytes(edition.size) || null,
                             ].filter(Boolean);
                             const name = displayEditionName(edition.filename);
                             const rowClass = `flex items-start gap-2.5 border-b border-stone-200/80 py-2.5 ${
                                 checked ? 'bg-accent-soft' : ''
                             }`;
-                            const titleRow = (
-                                <span className="flex items-center gap-1.5 text-sm text-stone-800">
-                                    {recommended?.filename === edition.filename ? (
-                                        <Badge tone="accent" className="shrink-0">
-                                            {recommendedBadge(edition)}
-                                        </Badge>
-                                    ) : null}
-                                    {restricted && availability ? (
-                                        <Badge tone="warn" className="shrink-0">
-                                            {availability.label}
-                                        </Badge>
-                                    ) : null}
-                                    <span
-                                        className={`min-w-0 flex-1 truncate ${restricted ? 'text-stone-500' : ''}`}
-                                        title={name}
-                                    >
-                                        {name}
+                            const badge = urtextBadge(edition);
+                            const showRecommended = !badge && recommended?.filename === edition.filename;
+                            const showWarn = !importable && availability !== null;
+                            const identity = (
+                                <span className="min-w-0 flex-1">
+                                    <span className="flex flex-wrap items-center gap-1.5 text-sm text-stone-800">
+                                        {badge ? (
+                                            <Badge tone="accent" className="shrink-0">
+                                                {badge}
+                                            </Badge>
+                                        ) : null}
+                                        {showRecommended ? (
+                                            <Badge tone="accent" className="shrink-0">
+                                                Recommended
+                                            </Badge>
+                                        ) : null}
+                                        {showWarn && availability ? (
+                                            <Badge tone="warn" className="shrink-0">
+                                                {warnBadgeLabel(availability)}
+                                            </Badge>
+                                        ) : null}
+                                        <span
+                                            className={`min-w-0 flex-1 break-words ${importable ? '' : 'text-stone-500'}`}
+                                        >
+                                            {name}
+                                        </span>
                                     </span>
+                                    {meta.length > 0 ? (
+                                        <span className="mt-0.5 block text-xs text-stone-500">{meta.join(' · ')}</span>
+                                    ) : null}
+                                    {!importable ? (
+                                        <span className="mt-0.5 block text-xs text-stone-500">
+                                            {availability?.kind === 'unknown'
+                                                ? 'License unknown — '
+                                                : 'Not downloadable here — '}
+                                            <a
+                                                href={edition.openUrl}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className={`text-xs ${linkClassName}`}
+                                            >
+                                                open on IMSLP
+                                            </a>
+                                        </span>
+                                    ) : null}
                                 </span>
                             );
                             return (
                                 <li key={edition.filename}>
-                                    {restricted ? (
-                                        <div className={`${rowClass} opacity-70`}>
-                                            <span className="min-w-0 flex-1">
-                                                {titleRow}
-                                                <span className="mt-0.5 block text-xs text-stone-500">
-                                                    Not downloadable here —{' '}
-                                                    <a
-                                                        href={edition.openUrl}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        className={`text-xs ${linkClassName}`}
-                                                    >
-                                                        open on IMSLP
-                                                    </a>
-                                                </span>
-                                            </span>
+                                    {importable ? (
+                                        <div className={rowClass}>
+                                            <button
+                                                type="button"
+                                                onClick={() => onImport(edition)}
+                                                disabled={importing}
+                                                aria-label={`Download ${name}`}
+                                                className={`min-w-0 flex-1 text-left disabled:cursor-default ${
+                                                    importing ? 'opacity-70' : 'cursor-pointer hover:bg-stone-50'
+                                                }`}
+                                            >
+                                                {identity}
+                                            </button>
+                                            <a
+                                                href={edition.openUrl}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className={`mt-0.5 shrink-0 self-start text-xs ${linkClassName}`}
+                                            >
+                                                Open on IMSLP
+                                            </a>
                                         </div>
                                     ) : (
-                                        <button
-                                            type="button"
-                                            onClick={() => onImport(edition)}
-                                            disabled={importing}
-                                            aria-pressed={checked}
-                                            className={`${rowClass} w-full text-left disabled:cursor-default ${
-                                                importing ? 'opacity-70' : 'cursor-pointer hover:bg-stone-50'
-                                            }`}
-                                        >
-                                            <span className="min-w-0 flex-1">
-                                                {titleRow}
-                                                {meta.length > 0 ? (
-                                                    <span className="block text-xs text-stone-500">
-                                                        {meta.join(' · ')}
-                                                    </span>
-                                                ) : null}
-                                            </span>
-                                        </button>
+                                        <div className={`${rowClass} opacity-70`}>{identity}</div>
                                     )}
                                 </li>
                             );
@@ -197,10 +227,6 @@ export const ImslpWorkPanel = ({
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
                 </div>
-            ) : work.editions.length > 0 ? (
-                // Static notice: tapping a row is the acknowledgment, so the
-                // import sends acceptedDisclaimer: true without a checkbox.
-                <p className="mt-4 max-w-prose text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
             ) : null}
 
             {download.kind === 'fallback' ? (

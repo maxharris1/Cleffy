@@ -114,12 +114,17 @@ export const urtextConfidence = (edition: EditionRankFields): UrtextConfidence =
     if (edition.urtext) {
         return urtextHouse(edition.publisher) ? 'high' : 'medium';
     }
-    return URTEXT_NAME_HINT.test(`${edition.filename} ${edition.plate ?? ''}`) ? 'low' : 'none';
+    return URTEXT_NAME_HINT.test(`${edition.filename} ${edition.plate ?? ''} ${edition.publisher ?? ''}`)
+        ? 'low'
+        : 'none';
 };
 
 const URTEXT_BOOST: Record<UrtextConfidence, number> = { high: 1000, medium: 500, low: 15, none: 0 };
 
 const ARRANGEMENT_HINT = /\b(arr|arrangement|arranged|transcription|parts?|incomplete|excerpts?)\b/i;
+
+/** Enough to put a 2 MB arrangement below a 40 MB original, still above tiny stubs. */
+const ARRANGEMENT_PENALTY = 80;
 
 /** Prefer 0.4–8 MB when size is known; penalize tiny and huge files. */
 const sizeScore = (size: number, index: number): number => {
@@ -132,27 +137,41 @@ const sizeScore = (size: number, index: number): number => {
     return size < 400_000 ? 20 : 40;
 };
 
+const isCompleteScore = (description: string): boolean => /^complete score\b/i.test(description.trim());
+
+const isArrangement = (edition: EditionRankFields, description: string): boolean =>
+    edition.arrangement === true || ARRANGEMENT_HINT.test(`${description} ${edition.filename}`);
+
 const scoreEdition = (edition: EditionRankFields, index: number): number => {
-    let score = sizeScore(edition.size ?? 0, index) + URTEXT_BOOST[urtextConfidence(edition)];
-    const description = (edition.description ?? '').trim().toLowerCase();
-    if (description === 'complete score') {
+    const confidence = urtextConfidence(edition);
+    let score = sizeScore(edition.size ?? 0, index) + URTEXT_BOOST[confidence];
+    const description = edition.description ?? '';
+    if (isCompleteScore(description)) {
         score += 10;
     }
-    // Below every mid-size original, above tiny stubs; IMSLP's Arranger field
-    // catches arrangements whose description just says "Complete Score".
-    if (edition.arrangement || ARRANGEMENT_HINT.test(`${description} ${edition.filename}`)) {
-        score -= 50;
+    // Below originals (including huge dumps) and above tiny stubs.
+    if (isArrangement(edition, description)) {
+        score -= ARRANGEMENT_PENALTY;
     }
-    if (/complete|vollst|band|vol\.?\s*\d/i.test(edition.filename)) {
+    const house = urtextHouse(edition.publisher);
+    if (!edition.urtext && !house && /complete|vollst|band|vol\.?\s*\d/i.test(edition.filename)) {
         score -= 5;
     }
     return score;
 };
 
 /**
- * 0 = cleared for direct download, 1 = license unknown (fail-open, never
- * recommended), 2 = restricted. `!== false` keeps editions without license
- * data (older responses, fixtures) eligible.
+ * Cleared for a one-tap fetch. `downloadable !== false` keeps older responses
+ * without license fields eligible; `license === 'unknown'` is fail-open on the
+ * server but must not be a one-tap import (the download 409s after insert).
+ */
+export const isEditionImportable = (edition: EditionLicenseFields): boolean =>
+    edition.downloadable !== false && edition.license !== 'unknown';
+
+/**
+ * 0 = cleared for direct download, 1 = license unknown, 2 = restricted.
+ * Used only among non-`{{Urtext}}` files so tagged Urtext still leads the list
+ * when IMSLP has marked those rows not-downloadable.
  */
 const availabilityTier = (edition: EditionLicenseFields): number => {
     if (edition.downloadable === false) {
@@ -161,38 +180,80 @@ const availabilityTier = (edition: EditionLicenseFields): number => {
     return edition.license === 'unknown' ? 1 : 0;
 };
 
+const urtextLead = (edition: EditionRankFields): number => (edition.urtext ? 0 : 1);
+
 /**
- * Full list in picker order: downloadable editions first, Urtext-house files
- * ahead of other `{{Urtext}}` files ahead of everything else, size as the
- * tie-break, restricted rows last. IMSLP order breaks remaining ties.
+ * Full list in picker order: `{{Urtext}}` files first (including restricted
+ * Henle), then downloadable non-Urtext, then license-unknown, then other
+ * restricted rows. Score (house, complete original, size) breaks ties.
  */
 export const rankEditions = <T extends EditionRankFields>(editions: T[]): T[] =>
     editions
         .map((edition, index) => ({
             edition,
             index,
+            urtextLead: urtextLead(edition),
             tier: availabilityTier(edition),
             score: scoreEdition(edition, index),
         }))
-        .sort((a, b) => a.tier - b.tier || b.score - a.score || a.index - b.index)
+        .sort(
+            (a, b) =>
+                a.urtextLead - b.urtextLead ||
+                (a.urtextLead !== 0 ? a.tier - b.tier : 0) ||
+                b.score - a.score ||
+                a.index - b.index,
+        )
         .map((r) => r.edition);
 
 /**
- * Default-highlighted edition: the top-ranked one that IMSLP lets us download
- * directly. Null when nothing qualifies — the panel then makes no selection.
+ * Suggested import target: the top-ranked row, only when that row is actually
+ * importable. Does not skip past a leading restricted Urtext to Weiner.
  */
 export const recommendEdition = <T extends EditionRankFields>(editions: T[]): T | null => {
     const top = rankEditions(editions)[0];
-    return top && availabilityTier(top) === 0 ? top : null;
+    return top && isEditionImportable(top) ? top : null;
 };
 
-/** Badge for the recommended row: "Urtext · Henle · 1976" only on a high-confidence hit. */
-export const recommendedBadge = (edition: EditionRankFields): string => {
-    if (urtextConfidence(edition) !== 'high') {
-        return 'Recommended';
+const VISIBLE_ROWS = 3;
+
+/** Count line for the picker: never claims "Urtext first" when tagged files are last or absent. */
+export const editionListSummary = (editions: EditionRankFields[], visibleRows = VISIBLE_ROWS): string | null => {
+    const total = editions.length;
+    if (total === 0) {
+        return null;
     }
-    return ['Urtext', urtextHouse(edition.publisher), edition.year].filter(Boolean).join(' · ');
+    if (total <= visibleRows) {
+        return `${total} ${total === 1 ? 'PDF' : 'PDFs'}`;
+    }
+    const ranked = rankEditions(editions);
+    const hasUrtext = editions.some((e) => e.urtext);
+    const urtextInViewport = ranked.slice(0, visibleRows).some((e) => e.urtext);
+    if (hasUrtext && urtextInViewport) {
+        return `${total} PDFs · Urtext first — scroll for others.`;
+    }
+    return `${total} PDFs — scroll for others.`;
 };
+
+/** "Urtext · Henle · 1976" on every high-confidence hit; "Urtext · year" on other `{{Urtext}}`. */
+export const urtextBadge = (edition: EditionRankFields): string | null => {
+    const confidence = urtextConfidence(edition);
+    switch (confidence) {
+        case 'high':
+            return ['Urtext', urtextHouse(edition.publisher), edition.year].filter(Boolean).join(' · ');
+        case 'medium':
+            return ['Urtext', edition.year].filter(Boolean).join(' · ');
+        case 'low':
+        case 'none':
+            return null;
+        default: {
+            const _exhaustive: never = confidence;
+            return _exhaustive;
+        }
+    }
+};
+
+/** Badge for a recommended (non-Urtext) row, or the Urtext badge when confidence is high/medium. */
+export const recommendedBadge = (edition: EditionRankFields): string => urtextBadge(edition) ?? 'Recommended';
 
 /** Split query into highlight tokens (≥2 chars). */
 export const searchTokens = (query: string): string[] =>
