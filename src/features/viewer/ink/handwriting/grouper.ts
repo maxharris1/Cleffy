@@ -74,12 +74,23 @@ const MAX_LONE_GLYPH_ASPECT = 6;
 /** Hard cap on glyphs per line, so a page of scribble never becomes one text. */
 const MAX_LINE_GLYPHS = 24;
 
-/** Horizontal gap (in glyph heights) under which two strokes are one glyph. */
+/**
+ * Horizontal gap (in glyph heights) under which a fragment (t-bar, i-dot)
+ * still joins its glyph. Full letters never use this — they become a line.
+ */
 const GLYPH_JOIN_GAP = 0.15;
+/**
+ * A `p` stem may sit a little off its bowl when drawn with a mouse. Wider
+ * than `GLYPH_JOIN_GAP`, but only for a narrow stem + non-stem neighbour.
+ */
+const STEM_BOWL_JOIN_GAP = 0.4;
 /** Vertical gap (in glyph heights) tolerated when joining (i-dot, t-bar). */
 const GLYPH_JOIN_VGAP = 0.4;
-/** Horizontal gap (in line heights) under which a new glyph continues the line. */
-const WORD_GAP = 1.0;
+/**
+ * Horizontal gap (in line heights) under which a new glyph continues the line.
+ * Mouse-written `mf` / "use wrist" sit farther apart than print spacing.
+ */
+export const WORD_GAP = 1.5;
 /**
  * Compact tall marks (fingerings) this far apart are separate objects, even
  * when the gap is under `WORD_GAP`. Chord `1 3 5` sits closer than a word
@@ -123,12 +134,27 @@ const median = (values: number[]): number => {
     return sorted.length % 2 === 1 ? (sorted[mid] ?? 0) : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
 };
 
+/** A t-bar, i-dot, or `p` stem — not a complete neighbouring letter. */
+const isFragment = (b: Box, ref: number): boolean => width(b) < 0.6 * ref || height(b) < 0.6 * ref;
+
+const isFingeringShaped = (b: Box): boolean => {
+    const h = height(b);
+    return h > 0 && width(b) <= FINGERING_MAX_ASPECT * h;
+};
+
 /** Does this stroke belong to an existing glyph (t-bar, i-dot, the second stroke of a 4)? */
 const joinsGlyph = (glyph: Glyph, box: Box): boolean => {
     const ref = Math.max(height(glyph.box), height(box), 1e-6);
     const xGap = gap(glyph.box.x0, glyph.box.x1, box.x0, box.x1);
     const yGap = gap(glyph.box.y0, glyph.box.y1, box.y0, box.y1);
-    if (xGap > GLYPH_JOIN_GAP * ref || yGap > GLYPH_JOIN_VGAP * ref) {
+    if (yGap > GLYPH_JOIN_VGAP * ref) {
+        return false;
+    }
+    const stemBowl =
+        (isFingeringShaped(glyph.box) && !isFingeringShaped(box) && height(box) < 0.75 * height(glyph.box)) ||
+        (isFingeringShaped(box) && !isFingeringShaped(glyph.box) && height(glyph.box) < 0.75 * height(box));
+    const joinGap = stemBowl ? STEM_BOWL_JOIN_GAP : GLYPH_JOIN_GAP;
+    if (xGap > joinGap * ref) {
         return false;
     }
     if (yGap > 0) {
@@ -136,20 +162,19 @@ const joinsGlyph = (glyph: Glyph, box: Box): boolean => {
         // be a fragment — two full letters one above the other are two lines.
         return xGap === 0 && Math.min(height(glyph.box), height(box)) < 0.45 * ref;
     }
+    const newFragment = isFragment(box, ref);
     if (xGap > 0) {
-        // Side by side but nearly touching: only when the newcomer is small
-        // (a stroke fragment), never a full neighbouring letter.
-        return width(box) < 0.6 * ref || height(box) < 0.6 * ref;
+        // Side by side: a t-bar / i-dot / `p` bowl may join. Two full letters
+        // (`m` then `f`) and a neighbouring fingering stem must not.
+        return newFragment || stemBowl;
     }
-    // Overlapping boxes: same glyph unless they merely brush edges (adjacent
-    // letters written tight). Require real horizontal overlap.
+    // Overlapping boxes: italic `mf` overlaps a lot and must NOT collapse
+    // into one blob classified as `f`. Only a fragment (stem/bar/dot) joins.
+    if (!isFragment(glyph.box, ref) && !newFragment) {
+        return false;
+    }
     const overlap = Math.min(glyph.box.x1, box.x1) - Math.max(glyph.box.x0, box.x0);
     return overlap >= 0.4 * Math.min(width(glyph.box), width(box));
-};
-
-const isFingeringShaped = (b: Box): boolean => {
-    const h = height(b);
-    return h > 0 && width(b) <= FINGERING_MAX_ASPECT * h;
 };
 
 /** Does a new glyph continue the pending writing line? */
@@ -203,7 +228,7 @@ export class HandwritingGrouper {
         }
         if (this.pending) {
             const current = this.pending;
-            const glyph = current.glyphs.find((g) => joinsGlyph(g, box));
+            const glyph = [...current.glyphs].reverse().find((g) => joinsGlyph(g, box));
             if (glyph) {
                 glyph.strokes.push(stroke);
                 glyph.box = union(glyph.box, box);

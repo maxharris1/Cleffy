@@ -1,6 +1,7 @@
 import type { Glyph, StrokeGroup } from '@/features/viewer/ink/handwriting/grouper';
 import {
     cloudDistance,
+    pathLength,
     toCloud,
     type GlyphStrokes,
     type Point,
@@ -35,6 +36,14 @@ export const CLASS_MARGIN = 0.01;
 const DOT_FRACTION = 0.18;
 /** A `1` is a near-vertical line: width / height under this. */
 const ONE_MAX_ASPECT = 0.42;
+/**
+ * A `1` is a short path (stem, maybe a serif). A mouse `p` whose bowl is
+ * too small to fail the aspect check still walks extra length around the
+ * bowl — treat that as not a `1`.
+ */
+const ONE_MAX_PATH_RATIO = 1.45;
+/** Stem-like box (same cut as the grouper's fingering shape). */
+const STEM_MAX_ASPECT = 0.5;
 
 /** Dynamics and teaching tokens the closed set may produce from a writing line. */
 export const SYMBOL_LEXICON: ReadonlySet<string> = new Set([
@@ -116,13 +125,16 @@ export const classifyGlyph = (strokes: GlyphStrokes): GlyphMatch | null => {
     const strokeCount = cleaned.length;
     const dots = countDots(cleaned);
     const { w, h } = bboxOf(cleaned);
+    const straightness = h > 0 ? pathLength(cleaned) / Math.hypot(w, h) : 0;
+    const tooWideForOne = h > 0 && w / h > ONE_MAX_ASPECT;
+    const tooLoopyForOne = straightness > ONE_MAX_PATH_RATIO;
 
     const bestPerClass = new Map<GlyphClass, number>();
     for (const template of PREPARED) {
         if (template.dots !== dots || Math.abs(template.strokeCount - strokeCount) > 1) {
             continue;
         }
-        if (template.cls === '1' && h > 0 && w / h > ONE_MAX_ASPECT) {
+        if (template.cls === '1' && (tooWideForOne || tooLoopyForOne)) {
             continue;
         }
         const d = cloudDistance(cloud, template.cloud);
@@ -155,6 +167,31 @@ export const glyphStrokes = (glyph: Glyph, aspect: number): GlyphStrokes =>
     });
 
 const isDigit = (cls: GlyphClass): boolean => cls >= '0' && cls <= '5';
+
+const isNarrowStemBox = (b: { x0: number; y0: number; x1: number; y1: number }): boolean => {
+    const h = b.y1 - b.y0;
+    return h > 0 && b.x1 - b.x0 <= STEM_MAX_ASPECT * h;
+};
+
+/**
+ * Mouse `p`: stem then bowl often land as two glyphs on one line. The line
+ * reader then sees a `1` and abstains; re-read the pair as one glyph.
+ */
+const combinedStemGlyph = (group: StrokeGroup): Recognition | null => {
+    if (group.glyphs.length !== 2) {
+        return null;
+    }
+    const left = group.glyphs[0]!;
+    const right = group.glyphs[1]!;
+    if (!isNarrowStemBox(left.box) && !isNarrowStemBox(right.box)) {
+        return null;
+    }
+    const match = classifyGlyph([...glyphStrokes(left, group.aspect), ...glyphStrokes(right, group.aspect)]);
+    if (!match || match.cls !== 'p') {
+        return null;
+    }
+    return loneGlyph(match);
+};
 
 const loneGlyph = (match: GlyphMatch): Recognition | null => {
     switch (match.cls) {
@@ -219,11 +256,15 @@ export const recognizeOnDevice: Recognizer = (group: StrokeGroup): Recognition |
         }
         const match = classifyGlyph(glyphStrokes(glyph, group.aspect));
         if (!match || match.cls === 'accent' || match.cls === 'fermata' || isDigit(match.cls)) {
-            return null;
+            word = '';
+            break;
         }
         word += match.cls;
     }
-    return SYMBOL_LEXICON.has(word) ? { text: word, kind: 'symbol' } : null;
+    if (word !== '' && SYMBOL_LEXICON.has(word)) {
+        return { text: word, kind: 'symbol' };
+    }
+    return combinedStemGlyph(group);
 };
 
 /** True when any glyph of a writing line classifies as a fingering digit. */

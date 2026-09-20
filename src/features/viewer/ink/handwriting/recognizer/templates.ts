@@ -98,6 +98,11 @@ export const TEMPLATES: readonly Template[] = [
     // p: descender stem with a bowl at x-height.
     t('p', line([0.12, 0.3], [0.12, 1]), arc(0.36, 0.5, 0.24, 180, 540)),
     t('p', line([0.1, 0.28], [0.1, 1]), join(line([0.1, 0.35], [0.2, 0.28]), arc(0.34, 0.5, 0.24, 240, 540))),
+    // One-stroke mouse `p`: down the stem then around the bowl without lifting.
+    t('p', join(line([0.12, 0.0], [0.12, 1.0]), arc(0.36, 0.48, 0.24, 180, 540))),
+    t('p', join(line([0.16, 0.02], [0.16, 1.0]), ellipse(0.38, 0.48, 0.2, 0.18, 200, 560))),
+    // Smaller bowl, still one stroke — mouse users often under-draw the loop.
+    t('p', join(line([0.16, 0.0], [0.16, 1.0]), ellipse(0.32, 0.48, 0.16, 0.16, 190, 550))),
     // f: tall curved stem crossing the x-height, hooked top, tail below.
     t(
         'f',

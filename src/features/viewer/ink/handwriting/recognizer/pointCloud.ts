@@ -17,7 +17,8 @@ export type GlyphStrokes = readonly (readonly Point[])[];
 
 export const CLOUD_POINTS = 32;
 
-const pathLength = (strokes: GlyphStrokes): number => {
+/** Total polyline length of a glyph (sum of consecutive-point distances). */
+export const pathLength = (strokes: GlyphStrokes): number => {
     let total = 0;
     for (const stroke of strokes) {
         for (let i = 1; i < stroke.length; i++) {

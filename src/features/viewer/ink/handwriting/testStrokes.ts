@@ -1,4 +1,5 @@
 import type { InkStroke } from '@/features/viewer/ink/handwriting/grouper';
+import type { GlyphStrokes } from '@/features/viewer/ink/handwriting/recognizer/pointCloud';
 
 /** US Letter-ish page: height / width. */
 export const ASPECT = 1.3;
@@ -27,6 +28,53 @@ export const boxStroke = (
         pts.push(x + w * t, (y + h * t) / ASPECT, 0.5);
     }
     return { id, page, color, pts, w: PEN_W, at: 0 };
+};
+
+const handExtent = (hand: GlyphStrokes): { minX: number; minY: number; maxX: number; maxY: number } => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const stroke of hand) {
+        for (const [x, y] of stroke) {
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+        }
+    }
+    return { minX, minY, maxX, maxY };
+};
+
+/**
+ * Scale a recognizer-frame hand onto the page (same units as `boxStroke`) so
+ * grouper tests can feed real mouse-like polylines, not just filled boxes.
+ */
+export const placeHand = (
+    prefix: string,
+    hand: GlyphStrokes,
+    x: number,
+    y: number,
+    heightW: number,
+    page = 0,
+    color = '#1f2937',
+): InkStroke[] => {
+    const ext = handExtent(hand);
+    const scale = heightW / Math.max(ext.maxY - ext.minY, 1e-6);
+    let n = 0;
+    return hand.map((stroke) => {
+        const pts: number[] = [];
+        for (const [px, py] of stroke) {
+            pts.push(x + (px - ext.minX) * scale, (y + (py - ext.minY) * scale) / ASPECT, 0.5);
+        }
+        return { id: `${prefix}-${n++}`, page, color, pts, w: PEN_W, at: 0 };
+    });
+};
+
+/** Width of a hand after `placeHand` scaling, in page-width units. */
+export const placedHandWidth = (hand: GlyphStrokes, heightW: number): number => {
+    const ext = handExtent(hand);
+    return ((ext.maxX - ext.minX) / Math.max(ext.maxY - ext.minY, 1e-6)) * heightW;
 };
 
 /** Manual timers so tests decide when the grouper's pause elapses. */

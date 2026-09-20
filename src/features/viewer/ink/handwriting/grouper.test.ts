@@ -111,6 +111,30 @@ describe('HandwritingGrouper', () => {
         expect(groupStrokeIds(flushed[0]!)).toEqual(['m', 'f']);
     });
 
+    it('keeps overlapping full letters as two glyphs on one line (tight mouse mf)', () => {
+        const { timers, flushed, grouper } = setup();
+        // 40% overlap — old joinsGlyph collapsed these into one glyph (`f`).
+        grouper.add(boxStroke('m', 0.3, 0.5, H * 0.95, H), ASPECT);
+        grouper.add(boxStroke('f', 0.3 + H * 0.55, 0.5, H * 0.7, H), ASPECT);
+        expect(flushed).toHaveLength(0);
+        timers.fire();
+        expect(flushed).toHaveLength(1);
+        expect(flushed[0]!.kind).toBe('line');
+        expect(groupStrokeIds(flushed[0]!)).toEqual(['m', 'f']);
+    });
+
+    it('keeps an airy mouse mf on one line past a print-spacing gap', () => {
+        const { timers, flushed, grouper } = setup();
+        // Gap 1.2 H — old WORD_GAP 1.0 flushed `m` alone (ink) and converted `f`.
+        grouper.add(boxStroke('m', 0.3, 0.5, H * 0.9, H), ASPECT);
+        grouper.add(boxStroke('f', 0.3 + H * 0.9 + H * 1.2, 0.5, H * 0.7, H), ASPECT);
+        expect(flushed).toHaveLength(0);
+        timers.fire();
+        expect(flushed).toHaveLength(1);
+        expect(flushed[0]!.kind).toBe('line');
+        expect(groupStrokeIds(flushed[0]!)).toEqual(['m', 'f']);
+    });
+
     it('joins the strokes of a multi-stroke glyph (t-bar, i-dot, second stroke of a 4)', () => {
         const { timers, flushed, grouper } = setup();
         // t: stem, then a crossbar overlapping the stem.

@@ -264,6 +264,60 @@ export const HANDS: Record<string, GlyphStrokes> = {
 };
 
 /**
+ * Coarse mouse polylines from the UI smoke: fewer points, a small bowl on
+ * `p`, and letter boxes that sit tighter / farther than the print fixtures.
+ */
+export const MOUSE: Record<string, GlyphStrokes> = {
+    /**
+     * One-stroke `p`: down the stem, then a small right bowl. The old
+     * reader treated the stem as a `1` because the bowl was too small to
+     * fail the aspect gate.
+     */
+    pSmallBowl: [
+        jitter(
+            shear(
+                [
+                    ...sample((t): Point => [0.16, t], 8),
+                    ...sample((t): Point => {
+                        const a = rad(185 + 350 * t);
+                        return [0.32 + 0.16 * Math.cos(a), 0.5 + 0.16 * Math.sin(a)];
+                    }, 14),
+                ],
+                0.05,
+            ),
+            0.012,
+            30,
+        ),
+    ],
+    /** Angular mouse `m` (two humps). */
+    m: [
+        [
+            [0.04, 0.52],
+            [0.06, 0.08],
+            [0.2, 0.08],
+            [0.28, 0.5],
+            [0.36, 0.1],
+            [0.52, 0.1],
+            [0.62, 0.52],
+        ],
+    ],
+    /** Angular mouse `f` (hooked stem + crossbar). */
+    f: [
+        [
+            [0.08, 1.0],
+            [0.16, 0.7],
+            [0.28, 0.28],
+            [0.48, 0.04],
+            [0.66, 0.1],
+        ],
+        [
+            [0.12, 0.42],
+            [0.52, 0.4],
+        ],
+    ],
+};
+
+/**
  * Turn hand glyphs into a StrokeGroup at a letter-sized scale on the page,
  * left to right with a small gap, the way the grouper would have emitted it.
  */
