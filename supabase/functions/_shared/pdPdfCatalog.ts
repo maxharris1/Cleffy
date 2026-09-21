@@ -304,6 +304,9 @@ export const matchStoreRow = (
         if (underWork.length >= 1) {
             return sortCatalogRows(underWork)[0] ?? null;
         }
+        // Seed-join loads the store row by sha; its work_title may be the
+        // first-insert title, not the alias the caller searched.
+        return sortCatalogRows(servable)[0] ?? null;
     }
     return null;
 };

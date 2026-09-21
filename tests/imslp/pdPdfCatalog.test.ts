@@ -135,6 +135,17 @@ describe('matchStoreRow', () => {
             matchStoreRow([row({ pdf_sha256: 'bad', licence_tag: 'CC-BY-NC' })], { pdfSha256: 'bad' }),
         ).toBeNull();
     });
+
+    it('matches a seed-join alias title whose store row kept a different work_title', () => {
+        const stored = row({
+            pdf_sha256: 'sha-clair',
+            filename: 'debussy_Ste_Bergamesq_Clair-let.pdf',
+            work_title: 'Suite bergamasque, CD 82 (Debussy, Claude)',
+        });
+        expect(matchStoreRow([stored], { workTitle: 'Clair de lune (Debussy, Claude)' })?.filename).toBe(
+            'debussy_Ste_Bergamesq_Clair-let.pdf',
+        );
+    });
 });
 
 describe('seed-join catalog presence', () => {
