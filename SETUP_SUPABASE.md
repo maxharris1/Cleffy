@@ -187,6 +187,21 @@ turns it into editable Cleffy annotations. Its parts:
     npx supabase secrets set ANALYZE_NOTES_MODEL=claude-sonnet-5 --project-ref jibgwgosihadbjgxdsfe
     ```
 
+- **Edge function** `transcribe-ink` — the opt-in "Print handwriting" toggle
+  converts digits and dynamics on the device; a handwritten **text note** it
+  cannot read is sent here as a small ink raster and transcribed with Gemini
+  Flash-Lite (`gemini-3.1-flash-lite`, falling back to `gemini-3.5-flash-lite`).
+  Editors of the score may call it; the read bills the owner's `vision_reads`.
+  No key → the ink simply stays handwritten:
+
+    ```bash
+    npx supabase secrets set GEMINI_API_KEY=... --project-ref jibgwgosihadbjgxdsfe
+    npx supabase functions deploy transcribe-ink --project-ref jibgwgosihadbjgxdsfe
+    ```
+
+    `GOOGLE_GENERATIVE_AI_API_KEY` and `GOOGLE_API_KEY` are accepted as
+    fallback names for the same secret.
+
 ## 5. Play-along analysis (OMR service + Edge Function)
 
 The play-along feature converts uploaded PDFs to notes + measure positions via

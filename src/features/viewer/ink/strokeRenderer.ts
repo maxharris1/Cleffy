@@ -1,5 +1,7 @@
 import { getStroke } from 'perfect-freehand';
 
+import { canvasFont, SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
+import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import { isTextPayload, type Annotation, type StrokePayload } from '@/types/models';
 
 /** Ink alpha/composite for the highlighter so it reads over dark scans. */
@@ -87,13 +89,20 @@ export const drawAnnotation = (
     cache?: StrokePathCache,
 ): void => {
     if (isTextPayload(annotation.payload)) {
-        const { x, y, text, size } = annotation.payload;
+        const { x, y, text, size, hw } = annotation.payload;
         const fontPx = Math.max(6, size * pageWpx);
+        let spec = textDrawSpec(text, hw === 1, annotation.payload);
+        if (spec.music && !isMusicFontReady()) {
+            // Canvas never triggers a CSS font load; ask for it and draw the
+            // ASCII spelling meanwhile (the ready hook repaints the page).
+            void ensureMusicFontLoaded();
+            spec = { family: SYSTEM_FONT_FAMILY, style: 'italic', glyphs: text, music: false };
+        }
         ctx.save();
         ctx.fillStyle = annotation.color;
-        ctx.font = `${fontPx}px system-ui, -apple-system, sans-serif`;
+        ctx.font = canvasFont(spec, fontPx);
         ctx.textBaseline = 'top';
-        const lines = text.split('\n');
+        const lines = spec.glyphs.split('\n');
         lines.forEach((line, i) => {
             ctx.fillText(line, x * pageWpx, y * pageHpx + i * fontPx * 1.25);
         });

@@ -1,7 +1,14 @@
 import { create } from 'zustand';
 
 import type { PageColumns } from '@/features/viewer/geometry';
-import { readPageColumns, readSpreadCover, writePageColumns, writeSpreadCover } from '@/features/viewer/viewerPrefs';
+import {
+    readPageColumns,
+    readPrintHandwriting,
+    readSpreadCover,
+    writePageColumns,
+    writePrintHandwriting,
+    writeSpreadCover,
+} from '@/features/viewer/viewerPrefs';
 import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
@@ -76,6 +83,12 @@ interface ViewerStore extends PlaybackSlice {
     focusedPageIndex: number;
     /** Accessibility: let a finger draw (no Apple Pencil / stylus available). */
     fingerDraws: boolean;
+    /**
+     * Opt-in: convert this writer's committed pen strokes to print (digits,
+     * dynamics, text notes). Per-user viewer setting, persisted per device —
+     * never a document flag, so a teacher cannot rewrite a pupil's handwriting.
+     */
+    printHandwriting: boolean;
     /** Pages per row: 1 (stack) or 2 (facing pages). Persisted per device. */
     pageColumns: PageColumns;
     /** Two-page spreads open on a cover: page 1 alone, then 2|3. Persisted per device. */
@@ -88,8 +101,12 @@ interface ViewerStore extends PlaybackSlice {
     setWidthKey: (widthKey: StrokeWidthKey) => void;
     setFocusedPageIndex: (focusedPageIndex: number) => void;
     setFingerDraws: (fingerDraws: boolean) => void;
+    setPrintHandwriting: (printHandwriting: boolean) => void;
     setPageColumns: (pageColumns: PageColumns) => void;
     setSpreadCover: (spreadCover: boolean) => void;
+    /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
+    selectedTextId: string | null;
+    setSelectedTextId: (selectedTextId: string | null) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -122,6 +139,7 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     widthKey: 'medium',
     focusedPageIndex: 0,
     fingerDraws: false,
+    printHandwriting: readPrintHandwriting(),
     pageColumns: readPageColumns(),
     spreadCover: readSpreadCover(),
     setView: (view) => set({ view }),
@@ -132,6 +150,10 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     setWidthKey: (widthKey) => set({ widthKey }),
     setFocusedPageIndex: (focusedPageIndex) => set({ focusedPageIndex }),
     setFingerDraws: (fingerDraws) => set({ fingerDraws }),
+    setPrintHandwriting: (printHandwriting) => {
+        writePrintHandwriting(printHandwriting);
+        set({ printHandwriting });
+    },
     setPageColumns: (pageColumns) => {
         writePageColumns(pageColumns);
         set({ pageColumns });
@@ -140,6 +162,8 @@ export const useViewerStore = create<ViewerStore>((set) => ({
         writeSpreadCover(spreadCover);
         set({ spreadCover });
     },
+    selectedTextId: null,
+    setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),

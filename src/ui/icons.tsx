@@ -31,6 +31,7 @@ import {
     Upload,
     Volume2,
     VolumeX,
+    WandSparkles,
     X,
 } from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
@@ -54,6 +55,7 @@ export const ZoomOutIcon = withBrandStroke(Minus);
 export const Columns2Icon = withBrandStroke(Columns2);
 export const CoverPageIcon = withBrandStroke(BookOpen);
 export const PointerIcon = withBrandStroke(Pointer);
+export const PrintHandwritingIcon = withBrandStroke(WandSparkles);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);

@@ -23,7 +23,12 @@ import {
 } from '@/features/viewer/geometry';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
+import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
+import { makeTranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
+import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
+import { editedTextPayload } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
@@ -116,6 +121,8 @@ export interface PdfViewportProps {
         name: string;
         isAnonymous: boolean;
         canWrite: boolean;
+        /** Only the document owner may fire the metered text-note transcribe. */
+        isOwner?: boolean;
         onStatus?: (status: SyncStatus) => void;
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
@@ -135,6 +142,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const pageColumns = useViewerStore((s) => s.pageColumns);
     const spreadCover = useViewerStore((s) => s.spreadCover);
     const containerRef = useRef<HTMLDivElement | null>(null);
+    const inkRef = useRef<InkController | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
     const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
@@ -196,6 +204,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncName = sync?.name;
     const syncIsAnonymous = sync?.isAnonymous ?? false;
     const syncCanWrite = sync?.canWrite ?? false;
+    const syncIsOwner = sync?.isOwner ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
@@ -325,6 +334,23 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             const rect = el.getBoundingClientRect();
             return { x: e.clientX - rect.left, y: e.clientY - rect.top };
         };
+        // Opt-in print conversion of THIS writer's committed pen strokes.
+        // Text notes need the metered edge function, so only the score owner
+        // of a cloud document gets it — editors still convert digits/symbols
+        // on-device.
+        const handwriting = new HandwritingController({
+            store: annotationStore,
+            recognizer: recognizeOnDevice,
+            transcribe: syncUserId && syncIsOwner ? makeTranscribeInkFn(docId) : undefined,
+            isEnabled: () => useViewerStore.getState().printHandwriting && !readOnlyRef.current,
+            getAspect: (pageIndex) => {
+                const pageLayout = layoutRef.current.layouts[pageIndex];
+                return pageLayout ? pageLayout.height / pageLayout.width : null;
+            },
+        });
+        if (useViewerStore.getState().printHandwriting) {
+            warmPrintPipeline();
+        }
         const ink = new InkController({
             store: annotationStore,
             registry,
@@ -337,7 +363,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 setTextIntent(intent);
             },
             onFingeringSelect: (selection) => setFingeringSel(selection),
+            onStrokeCommitted: (annotation) => handwriting.onStrokeCommitted(annotation),
         });
+        inkRef.current = ink;
 
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
             clampScroll(v, layoutRef.current, viewportSizeRef.current.width, viewportSizeRef.current.height);
@@ -454,6 +482,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             engine?.stop();
             controller.destroy();
             ink.destroy();
+            inkRef.current = null;
+            handwriting.dispose();
         };
     }, [
         annotationStore,
@@ -464,6 +494,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncName,
         syncIsAnonymous,
         syncCanWrite,
+        syncIsOwner,
         syncOnStatus,
         syncOnPeers,
         syncOnDocReplaced,
@@ -540,13 +571,17 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         const trimmed = text.trim();
         const { existing } = textIntent;
         if (existing) {
-            if (!isTextPayload(existing.payload)) {
+            const live = annotationStore.get(existing.id);
+            const base = live && isTextPayload(live.payload) ? live.payload : existing.payload;
+            if (!isTextPayload(base)) {
                 return;
             }
-            if (trimmed === '') {
+            // Live payload keeps a font change made while this editor is open.
+            const next = editedTextPayload(base, trimmed);
+            if (next === 'delete') {
                 void annotationStore.delete(existing.id);
-            } else if (trimmed !== existing.payload.text) {
-                void annotationStore.update(existing.id, { payload: { ...existing.payload, text: trimmed } });
+            } else if (next !== 'unchanged') {
+                void annotationStore.update(existing.id, { payload: next });
             }
             return;
         }
@@ -554,8 +589,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             return;
         }
         const now = new Date().toISOString();
+        const id = crypto.randomUUID();
         void annotationStore.create({
-            id: crypto.randomUUID(),
+            id,
             docId,
             page: textIntent.pageIndex,
             kind: 'text',
@@ -567,6 +603,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             deletedAt: null,
             seq: 0,
         });
+        inkRef.current?.selectTextNote(id, textIntent.pageIndex);
     };
 
     // Device pixels per CSS pixel for page bitmaps, reduced when everything
@@ -669,6 +706,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             intent={textIntent}
                             layout={textIntentLayout}
                             view={view}
+                            store={annotationStore}
                             onCommit={commitText}
                             onCancel={() => {
                                 textIntentHandled.current = true;

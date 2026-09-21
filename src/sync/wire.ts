@@ -44,7 +44,8 @@ export const parseDocumentChange = (payload: unknown): { id: string; content_rev
     return parsed.success ? parsed.data.record : null;
 };
 
-// Provenance flags (`src` smart-import, `sf` suggested fingering) MUST be
+// Provenance flags (`src` smart-import, `sf` suggested fingering, `hw`
+// converted handwriting) and prose style (`font`, `bold`, `italic`) MUST be
 // declared here: zod strips unknown keys, so omitting one would silently
 // diverge peer payloads from the writer's.
 const strokePayloadSchema = z.object({
@@ -61,6 +62,10 @@ const textPayloadSchema = z.object({
     size: z.number().positive(),
     src: z.literal(1).optional(),
     sf: z.literal(1).optional(),
+    hw: z.literal(1).optional(),
+    font: z.enum(['sans', 'serif']).optional(),
+    bold: z.literal(1).optional(),
+    italic: z.union([z.literal(0), z.literal(1)]).optional(),
 });
 
 /** Envelope produced by realtime.broadcast_changes() for annotation writes. */

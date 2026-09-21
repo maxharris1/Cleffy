@@ -103,6 +103,10 @@ export default defineConfig({
                 // App shell only. Supabase traffic must never be cached by the SW;
                 // PDFs are cached as blobs in IndexedDB (see plan §sync), not here.
                 globPatterns: ['**/*.{js,css,html,png,svg,woff2,wasm}'],
+                // The SMuFL music-text face (~450 KB) serves only the opt-in
+                // handwriting → print feature; like the piano samples it is
+                // fetched on first use and then kept, not precached.
+                globIgnores: ['**/fonts/BravuraText.woff2'],
                 navigateFallback: '/index.html',
                 navigateFallbackDenylist: [/^\/auth\/callback/],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
@@ -115,6 +119,14 @@ export default defineConfig({
                         options: {
                             cacheName: 'piano-samples',
                             expiration: { maxEntries: 40 },
+                        },
+                    },
+                    {
+                        urlPattern: /\/fonts\/BravuraText\.woff2$/,
+                        handler: 'CacheFirst',
+                        options: {
+                            cacheName: 'music-font',
+                            expiration: { maxEntries: 2 },
                         },
                     },
                 ],

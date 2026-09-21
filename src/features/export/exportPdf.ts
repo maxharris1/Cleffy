@@ -1,5 +1,6 @@
 import type { ExportRequest, ExportResponse } from '@/features/export/exportWorker';
 import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
+import { annotationNeedsMusicFont, MUSIC_FONT_URL } from '@/features/viewer/ink/musicFont';
 import { getDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';
 
@@ -24,6 +25,19 @@ export const exportAnnotatedPdf = async (
     if (options.pageIndex !== undefined) {
         annotations = annotations.filter((a) => a.page === options.pageIndex);
     }
+    // Converted dynamics need the music face embedded; fetch it only then
+    // (fails soft — the worker paints ASCII `mf` / `sfz` in Helvetica-Oblique).
+    let musicFont: ArrayBuffer | undefined;
+    if (annotations.some(annotationNeedsMusicFont)) {
+        try {
+            const response = await fetch(MUSIC_FONT_URL);
+            if (response.ok) {
+                musicFont = await response.arrayBuffer();
+            }
+        } catch {
+            // Offline without the font cached: export without it.
+        }
+    }
 
     const worker = new Worker(new URL('./exportWorker.ts', import.meta.url), { type: 'module' });
     const outBytes = await new Promise<Uint8Array>((resolve, reject) => {
@@ -39,8 +53,9 @@ export const exportAnnotatedPdf = async (
             bytes: sourceBytes.slice(0),
             annotations,
             pageIndex: options.pageIndex,
+            musicFont,
         };
-        worker.postMessage(request, [request.bytes]);
+        worker.postMessage(request, musicFont ? [request.bytes, musicFont] : [request.bytes]);
     }).finally(() => worker.terminate());
 
     const blob = new Blob([outBytes as BlobPart], { type: 'application/pdf' });
