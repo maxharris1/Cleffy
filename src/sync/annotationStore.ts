@@ -346,6 +346,29 @@ export class AnnotationStore {
         }
     }
 
+    /**
+     * The server accepted the outbox for this row. A local create is born with
+     * createdBy null, which means "this device, still waiting". Leave it null
+     * after the ack and the next account on this browser treats the row as
+     * theirs — including a student layer the server would hide.
+     */
+    async markSynced(id: string, createdBy: string | null): Promise<void> {
+        const current = this.byId.get(id);
+        if (current && createdBy && !current.createdBy) {
+            this.applyMemory({ ...current, createdBy });
+            this.notifyPage(current.page);
+        }
+        const mirror = await this.db.annotations.get(id);
+        if (!mirror) {
+            return;
+        }
+        const attributed = mirror.createdBy ?? createdBy;
+        if (mirror.pending === 0 && mirror.createdBy === attributed) {
+            return;
+        }
+        await this.db.annotations.put({ ...mirror, pending: 0, createdBy: attributed });
+    }
+
     /** Remove an annotation the server rejected/never had (sync repair path). */
     async discardLocal(id: string): Promise<void> {
         const existing = this.byId.get(id);

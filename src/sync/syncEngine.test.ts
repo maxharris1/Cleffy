@@ -129,6 +129,8 @@ describe('SyncEngine.flush', () => {
         expect(api.rows.get('a1')?.created_by).toBe(USER);
         expect(await db.ops.count()).toBe(0);
         expect((await db.annotations.get('a1'))?.pending).toBe(0);
+        expect((await db.annotations.get('a1'))?.createdBy).toBe(USER);
+        expect(store.get('a1')?.createdBy).toBe(USER);
     });
 
     it('keeps ops queued while offline and drains after reconnect', async () => {

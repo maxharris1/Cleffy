@@ -208,10 +208,8 @@ export class SyncEngine {
             .filter((o) => o.annotationId === op.annotationId)
             .count();
         if (remaining === 0) {
-            const mirror = await db.annotations.get(op.annotationId);
-            if (mirror) {
-                await db.annotations.put({ ...mirror, pending: 0 });
-            }
+            const createdBy = op.type === 'create' ? this.deps.getUserId() : null;
+            await this.deps.store.markSynced(op.annotationId, createdBy);
         }
     }
 
