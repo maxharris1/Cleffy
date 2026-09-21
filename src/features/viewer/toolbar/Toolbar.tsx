@@ -66,7 +66,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const selectedText = useSelectedText(store);
     const selectedPayload = selectedText && isTextPayload(selectedText.payload) ? selectedText.payload : null;
     const musicFace = selectedPayload !== null && ignoresProseFont(selectedPayload);
-    const showType = selectedPayload !== null;
+    const showType = printHandwriting && selectedPayload !== null;
     const face: TextFont = selectedPayload?.font === 'serif' ? 'serif' : 'sans';
     const boldOn = selectedPayload?.bold === 1;
     const italicOn =
