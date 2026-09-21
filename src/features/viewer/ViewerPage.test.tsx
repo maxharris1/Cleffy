@@ -32,6 +32,7 @@ vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
     isRegisteredSession: () => true,
     displayNameOf: () => 'Teacher',
+    userTypeOf: () => null,
 }));
 
 vi.mock('@/features/viewer/pdf/PdfProvider', () => ({

@@ -1,6 +1,7 @@
 import { pointSegmentDistanceSq, strokeBbox, type Bbox } from '@/features/viewer/geometry';
+import { hairpinBboxNorm, hitTestHairpin } from '@/features/viewer/ink/hairpin';
 import { textBoundsNorm } from '@/features/viewer/ink/musicFont';
-import { isTextPayload, type Annotation } from '@/types/models';
+import { isHairpinPayload, isTextPayload, type Annotation } from '@/types/models';
 
 /**
  * Does the point (nx, ny in normalized page coords) hit this annotation?
@@ -27,6 +28,10 @@ export const hitTestAnnotation = (
             py >= minY * pageHpx - radiusPx &&
             py <= maxY * pageHpx + radiusPx
         );
+    }
+
+    if (isHairpinPayload(annotation.payload)) {
+        return hitTestHairpin(annotation.payload, nx, ny, radiusPx, pageWpx, pageHpx);
     }
 
     const { pts, w } = annotation.payload;
@@ -71,6 +76,9 @@ export const annotationBboxNorm = (annotation: Annotation, aspect: number): Bbox
     if (isTextPayload(annotation.payload)) {
         // textBoundsNorm takes height / width.
         return textBoundsNorm(annotation.payload, 1 / aspect);
+    }
+    if (isHairpinPayload(annotation.payload)) {
+        return hairpinBboxNorm(annotation.payload, aspect);
     }
     const [minX, minY, maxX, maxY] = strokeBbox(annotation.payload.pts);
     const rx = annotation.payload.w / 2;

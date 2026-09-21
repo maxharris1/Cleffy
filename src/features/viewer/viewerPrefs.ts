@@ -62,6 +62,31 @@ export const writeSpreadCover = (coverPage: boolean): void => {
     }
 };
 
+/** Storage key for concert dim (hide invite, history, and presence while reading). */
+const CONCERT_DIM_STORAGE_KEY = 'cleffy:concert-dim';
+
+/** Reading chrome stays up until the reader asks for a clear page. */
+const DEFAULT_CONCERT_DIM = false;
+
+/** Reads concert dim. Same guarded access as the other viewer preferences. */
+export const readConcertDim = (): boolean => {
+    try {
+        const stored = window.localStorage.getItem(CONCERT_DIM_STORAGE_KEY);
+        return stored === '1' ? true : stored === '0' ? false : DEFAULT_CONCERT_DIM;
+    } catch {
+        return DEFAULT_CONCERT_DIM;
+    }
+};
+
+/** Persists concert dim, best-effort. */
+export const writeConcertDim = (dim: boolean): void => {
+    try {
+        window.localStorage.setItem(CONCERT_DIM_STORAGE_KEY, dim ? '1' : '0');
+    } catch {
+        // Storage disabled or full: the page still dims for this session.
+    }
+};
+
 /** Storage key for the opt-in handwriting → print conversion. */
 const PRINT_HANDWRITING_STORAGE_KEY = 'cleffy:print-handwriting';
 

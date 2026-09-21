@@ -13,6 +13,7 @@ const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }
     { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
     { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
+    { tool: 'hairpin', label: 'Hairpin — drag a crescendo or diminuendo', short: 'Hairpin', icon: <HairpinIcon /> },
     { tool: 'fingering', label: 'Fingering — drag over a chord or phrase', short: 'Hands', icon: <FingeringIcon /> },
 ];
 
@@ -55,7 +56,21 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const widthKey = useViewerStore((s) => s.widthKey);
     const fingerDraws = useViewerStore((s) => s.fingerDraws);
     const printHandwriting = useViewerStore((s) => s.printHandwriting);
-    const { setTool, setColor, setWidthKey, setFingerDraws, setPrintHandwriting } = useViewerStore.getState();
+    const markupMode = useViewerStore((s) => s.markupMode);
+    const concertDim = useViewerStore((s) => s.concertDim);
+    const markLayer = useViewerStore((s) => s.markLayer);
+    const layerAudience = useViewerStore((s) => s.layerAudience);
+    const shareStudentLayerToggle = useViewerStore((s) => s.shareStudentLayerToggle);
+    const {
+        setTool,
+        setColor,
+        setWidthKey,
+        setFingerDraws,
+        setPrintHandwriting,
+        setMarkupMode,
+        setConcertDim,
+        setMarkLayer,
+    } = useViewerStore.getState();
 
     const undoState = useSyncExternalStore(
         (cb) => store.subscribeMeta(cb),
@@ -66,7 +81,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const selectedText = useSelectedText(store);
     const selectedPayload = selectedText && isTextPayload(selectedText.payload) ? selectedText.payload : null;
     const musicFace = selectedPayload !== null && ignoresProseFont(selectedPayload);
-    const showType = printHandwriting && selectedPayload !== null;
+    const showType = markupMode && printHandwriting && selectedPayload !== null;
     const face: TextFont = selectedPayload?.font === 'serif' ? 'serif' : 'sans';
     const boldOn = selectedPayload?.bold === 1;
     const italicOn =
@@ -83,9 +98,54 @@ export const Toolbar = ({ store }: ToolbarProps) => {
         }
     };
 
-    const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text';
-    const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser';
-    const sizeCaption = tool === 'eraser' ? 'Eraser size' : tool === 'highlighter' ? 'Marker size' : 'Pen size';
+    const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text' || tool === 'hairpin';
+    const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser' || tool === 'hairpin';
+    const sizeCaption =
+        tool === 'eraser'
+            ? 'Eraser size'
+            : tool === 'highlighter'
+              ? 'Marker size'
+              : tool === 'hairpin'
+                ? 'Hairpin spread'
+                : 'Pen size';
+
+    if (!markupMode) {
+        return (
+            <div
+                data-ui-overlay
+                className="pointer-events-none absolute inset-x-0 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:bottom-auto sm:top-3"
+            >
+                <div className="pointer-events-auto flex max-w-[calc(100vw-1rem)] flex-wrap items-center justify-center gap-1 rounded-2xl border border-stone-200 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur">
+                    <button
+                        type="button"
+                        title="Annotate — pen, text, and hairpins"
+                        aria-label="Annotate"
+                        onClick={() => {
+                            setMarkupMode(true);
+                            if (useViewerStore.getState().tool === 'pan') {
+                                setTool('pen');
+                            }
+                        }}
+                        className="flex h-10 items-center justify-center rounded-xl px-3 text-sm font-medium text-stone-700 transition hover:bg-ink/5"
+                    >
+                        Annotate
+                    </button>
+                    <button
+                        type="button"
+                        title="Concert dim — hide share, history, and who's here"
+                        aria-label="Concert dim"
+                        aria-pressed={concertDim}
+                        onClick={() => setConcertDim(!concertDim)}
+                        className={`flex h-10 items-center justify-center rounded-xl px-3 text-sm font-medium transition ${
+                            concertDim ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
+                        }`}
+                    >
+                        Dim
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div
@@ -93,6 +153,18 @@ export const Toolbar = ({ store }: ToolbarProps) => {
             className="pointer-events-none absolute inset-x-0 bottom-[calc(0.75rem+var(--safe-bottom))] z-20 flex justify-center sm:bottom-auto sm:top-3"
         >
             <div className="pointer-events-auto flex max-w-[calc(100vw-1rem)] flex-wrap items-center justify-center gap-1 rounded-2xl border border-stone-200 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur">
+                <button
+                    type="button"
+                    title="Done — back to reading"
+                    aria-label="Done"
+                    onClick={() => {
+                        setMarkupMode(false);
+                        setTool('pan');
+                    }}
+                    className="flex h-10 items-center justify-center rounded-xl px-3 text-sm font-medium text-accent transition hover:bg-accent-soft"
+                >
+                    Done
+                </button>
                 {TOOLS.map(({ tool: t, label, short, icon }) => (
                     <button
                         key={t}
@@ -231,6 +303,52 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                 <div className="mx-1 h-6 w-px bg-stone-200" />
                 <button
                     type="button"
+                    title={
+                        layerAudience.canUseTeacherLayer
+                            ? 'Stamp new marks on the teacher layer'
+                            : 'Students mark on their own layer'
+                    }
+                    aria-label="Teacher layer"
+                    aria-pressed={markLayer === 'teacher'}
+                    disabled={!layerAudience.canUseTeacherLayer}
+                    onClick={() => setMarkLayer('teacher')}
+                    className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition disabled:opacity-40 ${
+                        markLayer === 'teacher' ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
+                    }`}
+                >
+                    Teacher
+                </button>
+                <button
+                    type="button"
+                    title="Stamp new marks on your student layer"
+                    aria-label="Student layer"
+                    aria-pressed={markLayer === 'student'}
+                    onClick={() => setMarkLayer('student')}
+                    className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition ${
+                        markLayer === 'student' ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
+                    }`}
+                >
+                    Student
+                </button>
+                {layerAudience.canShareStudentLayer && shareStudentLayerToggle ? (
+                    <button
+                        type="button"
+                        title="Let other members see the student layer"
+                        aria-label="Share student marks"
+                        aria-pressed={layerAudience.shareStudentLayer}
+                        onClick={() => shareStudentLayerToggle(!layerAudience.shareStudentLayer)}
+                        className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition ${
+                            layerAudience.shareStudentLayer
+                                ? 'bg-accent-soft text-accent'
+                                : 'text-stone-700 hover:bg-ink/5'
+                        }`}
+                    >
+                        {layerAudience.shareStudentLayer ? 'Marks shared' : 'Share marks'}
+                    </button>
+                ) : null}
+                <div className="mx-1 h-6 w-px bg-stone-200" />
+                <button
+                    type="button"
                     title="Undo"
                     aria-label="Undo"
                     disabled={!canUndo}
@@ -343,6 +461,14 @@ function TextIcon() {
     return (
         <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
             <path strokeLinecap="round" strokeLinejoin="round" d="M5 7V5h14v2M12 5v14M9 19h6" />
+        </svg>
+    );
+}
+
+function HairpinIcon() {
+    return (
+        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 12 20 6M4 12 20 18" />
         </svg>
     );
 }

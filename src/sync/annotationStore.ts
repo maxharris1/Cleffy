@@ -316,6 +316,36 @@ export class AnnotationStore {
         }
     }
 
+    /**
+     * Drop rows this viewer is not allowed to see, without tombstoning them
+     * on the server. Pending local ops are left alone.
+     */
+    async dropLocalWhere(hide: (annotation: Annotation) => boolean): Promise<void> {
+        const pending = new Set(
+            (await this.db.ops.where('docId').equals(this.docId).toArray()).map((op) => op.annotationId),
+        );
+        const doomed: Annotation[] = [];
+        for (const annotation of this.byId.values()) {
+            if (pending.has(annotation.id) || !hide(annotation)) {
+                continue;
+            }
+            doomed.push(annotation);
+        }
+        if (doomed.length === 0) {
+            return;
+        }
+        const pages = new Set<number>();
+        for (const annotation of doomed) {
+            this.byId.delete(annotation.id);
+            this.pageMap(annotation.page).delete(annotation.id);
+            pages.add(annotation.page);
+        }
+        await this.db.annotations.bulkDelete(doomed.map((annotation) => annotation.id));
+        for (const page of pages) {
+            this.notifyPage(page);
+        }
+    }
+
     /** Remove an annotation the server rejected/never had (sync repair path). */
     async discardLocal(id: string): Promise<void> {
         const existing = this.byId.get(id);

@@ -206,6 +206,9 @@ export const editedTextPayload = (existing: TextPayload, trimmed: string): 'dele
     if (existing.italic === 0 || existing.italic === 1) {
         next.italic = existing.italic;
     }
+    if (existing.layer !== undefined) {
+        next.layer = existing.layer;
+    }
     return next;
 };
 

@@ -21,8 +21,9 @@ import {
     textDrawSpec,
     type TextDrawSpec,
 } from '@/features/viewer/ink/musicFont';
+import { hairpinPointsPx } from '@/features/viewer/ink/hairpin';
 import { FREEHAND_OPTIONS, getSvgPathFromStroke, HIGHLIGHT_ALPHA } from '@/features/viewer/ink/strokeRenderer';
-import { isTextPayload, type Annotation } from '@/types/models';
+import { isHairpinPayload, isTextPayload, type Annotation } from '@/types/models';
 
 export interface ExportRequest {
     bytes: ArrayBuffer;
@@ -175,6 +176,18 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
                     // A line that still fails to encode shouldn't kill the export.
                 }
             });
+            continue;
+        }
+
+        if (isHairpinPayload(annotation.payload)) {
+            const wedge = hairpinPointsPx(annotation.payload, vw, vh);
+            const toPdf = (point: { x: number; y: number }) => {
+                const [x, y] = viewportToPdfPoint(rot, pw, ph, point.x, point.y);
+                return { x, y };
+            };
+            const thickness = Math.max(0.6, vw * 0.0018);
+            page.drawLine({ start: toPdf(wedge.tip), end: toPdf(wedge.mouthA), thickness, color });
+            page.drawLine({ start: toPdf(wedge.tip), end: toPdf(wedge.mouthB), thickness, color });
             continue;
         }
 

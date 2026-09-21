@@ -2,6 +2,7 @@ import { getDocument } from 'pdfjs-dist';
 
 import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
 import { drawAnnotation, StrokePathCache } from '@/features/viewer/ink/strokeRenderer';
+import { filterVisibleAnnotations } from '@/features/viewer/layers';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
 import { getDb } from '@/sync/db';
@@ -31,9 +32,9 @@ export const buildAnnotatedPagePng = async (
     title: string,
 ): Promise<File> => {
     const rows = await getDb().annotations.where('docId').equals(docId).toArray();
-    const annotations: Annotation[] = rows
-        .filter((row) => !row.deletedAt && row.page === pageIndex)
-        .map(({ pending: _pending, ...a }) => a);
+    const annotations: Annotation[] = filterVisibleAnnotations(
+        rows.filter((row) => !row.deletedAt && row.page === pageIndex).map(({ pending: _pending, ...a }) => a),
+    );
 
     const worker = createPdfWorker();
     const loadingTask = getDocument({ data: sourceBytes.slice(0), worker, ...pdfDocumentOptions });

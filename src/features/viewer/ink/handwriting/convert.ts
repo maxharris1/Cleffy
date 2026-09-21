@@ -1,4 +1,5 @@
 import { groupStrokeIds, type StrokeGroup } from '@/features/viewer/ink/handwriting/grouper';
+import { annotationLayer } from '@/features/viewer/layers';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { Annotation, TextPayload } from '@/types/models';
 
@@ -54,13 +55,14 @@ const convertGroupToTextExclusive = async (
         }
     }
     const now = new Date().toISOString();
+    const source = store.get(ids[0] ?? '');
     const text: Annotation = {
         id: crypto.randomUUID(),
         docId: store.docId,
         page: group.page,
         kind: 'text',
         color: group.color,
-        payload: { ...payload, hw: 1 },
+        payload: { ...payload, hw: 1, layer: source ? annotationLayer(source.payload) : 'teacher' },
         createdBy: null,
         createdAt: now,
         updatedAt: now,

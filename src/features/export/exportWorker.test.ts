@@ -126,6 +126,38 @@ describe('PDF export of converted handwriting', () => {
         expect(names).not.toContain('Times-Roman');
     });
 
+    it('draws a hairpin as two wedge strokes', async () => {
+        const out = await flatten({
+            bytes: await blankPdf(),
+            annotations: [
+                {
+                    id: 'hp',
+                    docId: 'doc',
+                    page: 0,
+                    kind: 'shape',
+                    color: '#111111',
+                    payload: {
+                        type: 'hairpin',
+                        x1: 0.2,
+                        y1: 0.4,
+                        x2: 0.7,
+                        y2: 0.4,
+                        spread: 0.02,
+                        open: 'end',
+                    },
+                    createdBy: null,
+                    createdAt: '2026-09-21T00:00:00.000Z',
+                    updatedAt: '2026-09-21T00:00:00.000Z',
+                    deletedAt: null,
+                    seq: 0,
+                },
+            ],
+        });
+        const content = decodedContent(out);
+        const lines = content.match(/\bl\b/g) ?? [];
+        expect(lines.length).toBeGreaterThanOrEqual(2);
+    });
+
     it('sets converted teaching words in the oblique face', async () => {
         const out = await flatten({
             bytes: await blankPdf(),

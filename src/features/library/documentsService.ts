@@ -78,6 +78,7 @@ export const documentRowFromCache = (cached: {
     cachedAt: string;
     contentRev?: number;
     archivedAt?: string | null;
+    shareStudentLayer?: boolean;
 }): DocumentRow => ({
     id: cached.id,
     owner_id: '',
@@ -89,6 +90,7 @@ export const documentRowFromCache = (cached: {
     created_at: cached.cachedAt,
     updated_at: cached.cachedAt,
     archived_at: cached.archivedAt ?? null,
+    share_student_layer: cached.shareStudentLayer === true,
 });
 
 /**
@@ -112,6 +114,7 @@ export const loadDocumentOffline = async (docId: string, userId: string): Promis
             // answer is the same bytes it already painted.
             contentRev: cached.contentRev,
             archivedAt: cached.archivedAt,
+            shareStudentLayer: cached.shareStudentLayer,
         }),
         role: cachedRole ?? 'viewer',
         cachedRole,
@@ -327,6 +330,18 @@ export const setDocumentFavorite = async (docId: string, userId: string, favorit
     noteLibraryMutationCommitted();
 };
 
+/** Owner-only via RLS. Open viewers hear it on the documents broadcast. */
+export const setShareStudentLayer = async (docId: string, shared: boolean): Promise<void> => {
+    const { error } = await getSupabase().from('documents').update({ share_student_layer: shared }).eq('id', docId);
+    if (error) {
+        throw new Error(`Could not update student marks: ${error.message}`);
+    }
+    const cached = await getCachedPdf(docId);
+    if (cached) {
+        await putCachedPdf({ ...cached, shareStudentLayer: shared });
+    }
+};
+
 export const renameDocument = async (docId: string, title: string): Promise<void> => {
     noteLibraryMutation();
     const { error } = await getSupabase().from('documents').update({ title }).eq('id', docId);
@@ -404,6 +419,7 @@ export interface PreloadedBytes {
     bytes: ArrayBuffer;
     contentRev: number;
     archivedAt: string | null;
+    shareStudentLayer?: boolean;
 }
 
 /** A download started before the row was known — see prefetchDocumentBytes. */
@@ -438,13 +454,14 @@ export const loadDocumentBytes = async (
 ): Promise<ArrayBuffer> => {
     const wantRev = doc.content_rev ?? 0;
     const { preloaded, prefetch, userId } = options;
+    const shareStudentLayer = doc.share_student_layer === true;
     if (preloaded && preloaded.contentRev >= wantRev) {
         // The warm open already read and materialised these bytes; a second
         // Dexie read would hold a second multi-megabyte copy for nothing.
-        if (preloaded.archivedAt !== doc.archived_at) {
+        if (preloaded.archivedAt !== doc.archived_at || (preloaded.shareStudentLayer ?? false) !== shareStudentLayer) {
             const cached = await getCachedPdf(doc.id);
             if (cached) {
-                await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
+                await putCachedPdf({ ...cached, archivedAt: doc.archived_at, shareStudentLayer });
             }
         }
         return preloaded.bytes;
@@ -453,16 +470,15 @@ export const loadDocumentBytes = async (
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
         // Refresh the archive flag from the row we were handed, same as fetchMyRole
         // does for the role — an offline open must know the score is read-only.
-        if (cached.archivedAt !== doc.archived_at) {
-            await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
+        if (cached.archivedAt !== doc.archived_at || (cached.shareStudentLayer ?? false) !== shareStudentLayer) {
+            await putCachedPdf({ ...cached, archivedAt: doc.archived_at, shareStudentLayer });
         }
         return readCachedPdfBytes(cached.bytes);
     }
     // Prefetch left before the row was known. Honour it only for an
     // unreplaced score (content_rev 0): a replace that raced the download
     // would otherwise be cached under the new revision and never re-fetched.
-    const prefetched =
-        prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
+    const prefetched = prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
     let bytes: ArrayBuffer;
     if (prefetched) {
         bytes = prefetched;
@@ -485,6 +501,7 @@ export const loadDocumentBytes = async (
         myRole: cached?.myRole,
         contentRev: wantRev,
         archivedAt: doc.archived_at,
+        shareStudentLayer,
         userId: userId ?? cached?.userId,
     });
     return bytes;

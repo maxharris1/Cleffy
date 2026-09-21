@@ -294,6 +294,43 @@ describe('SyncEngine.applyServerRow (broadcast path)', () => {
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
     });
 
+    it('drops a student mark the audience cannot see and still advances the watermark', async () => {
+        await store.applyRemoteBatch(
+            [
+                {
+                    ...makeStroke('s1'),
+                    payload: { pts: [0.1, 0.1, 0.5], w: 0.005, layer: 'student' },
+                    createdBy: 'other',
+                    seq: 1,
+                },
+            ],
+            new Set(),
+        );
+        const filtered = new SyncEngine({
+            db,
+            store,
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            acceptsRemote: (annotation) => !('layer' in annotation.payload && annotation.payload.layer === 'student'),
+        });
+        await filtered.applyServerRow({
+            id: 's1',
+            document_id: DOC,
+            page: 0,
+            kind: 'stroke',
+            color: '#111',
+            payload: { pts: [0.1, 0.1, 0.5], w: 0.005, layer: 'student' },
+            created_by: 'other',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            deleted_at: null,
+            seq: 4,
+        });
+        expect(store.get('s1')).toBeUndefined();
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(4);
+    });
+
     it('ignores rows for other documents', async () => {
         await engine.applyServerRow({
             id: 'x1',

@@ -32,6 +32,11 @@ export type DocumentRow = {
     updated_at: string;
     /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
     archived_at: string | null;
+    /**
+     * When true, members besides the owner and each mark's author can see the
+     * student layer. Absent on rows cached before the column existed: not shared.
+     */
+    share_student_layer?: boolean;
 };
 
 export type DocumentInsert = {
@@ -43,6 +48,7 @@ export type DocumentInsert = {
     content_rev?: number;
     thumb_rev?: number | null;
     archived_at?: string | null;
+    share_student_layer?: boolean;
 };
 
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';

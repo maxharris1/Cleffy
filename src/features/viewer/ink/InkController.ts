@@ -7,7 +7,9 @@ import {
     type Bbox,
     type DocumentLayout,
 } from '@/features/viewer/geometry';
+import { drawHairpin, hairpinAnchorAt, hairpinSpreadFor } from '@/features/viewer/ink/hairpin';
 import { hitTestPage } from '@/features/viewer/ink/hitTest';
+import { annotationVisible, withActiveLayer } from '@/features/viewer/layers';
 import {
     buildStrokePath,
     drawAnnotation,
@@ -22,7 +24,15 @@ import type { LiveInkPublisher } from '@/sync/realtimeChannel';
 import { RemoteInkBuffers } from '@/sync/remoteInkBuffers';
 import type { InkProgressMsg } from '@/sync/wire';
 import { ERASER_RADIUS_CSS, HIGHLIGHT_WIDTH_FACTOR, STROKE_WIDTHS, useViewerStore } from '@/state/store';
-import { isTextPayload, type Annotation, type StrokePayload, type TextPayload, type ViewState } from '@/types/models';
+import {
+    isHairpinPayload,
+    isTextPayload,
+    type Annotation,
+    type HairpinPayload,
+    type StrokePayload,
+    type TextPayload,
+    type ViewState,
+} from '@/types/models';
 
 export interface TextIntent {
     pageIndex: number;
@@ -57,6 +67,10 @@ const TAP_SLOP_CSS = 6;
 const DECIMATE_CSS = 0.75;
 /** While dragging a text note, commit (and so live-sync) its position at most this often. */
 export const TEXT_DRAG_SYNC_MS = 250;
+/** Pick radius (CSS px) around a hairpin anchor. */
+export const HAIRPIN_HANDLE_HIT_CSS = 14;
+/** Drawn size of a hairpin anchor (CSS px). */
+const HAIRPIN_HANDLE_CSS = 8;
 
 /** Pick radius (CSS px) around the selection's resize handle. */
 export const RESIZE_HANDLE_HIT_CSS = 14;
@@ -123,6 +137,26 @@ export class InkController {
     private textScale: TextScale | null = null;
     /** Text tool: the note last pressed — shows a box + resize handle until deselected. */
     private selectedText: { id: string; pageIndex: number } | null = null;
+    /** Hairpin being drawn: one anchor is down, the other follows the pointer. Committed on up. */
+    private hairpinDraft: {
+        pageIndex: number;
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        spread: number;
+        color: string;
+    } | null = null;
+    /** Moving one anchor of a committed hairpin. One undo step for the gesture. */
+    private hairpinEdit: {
+        id: string;
+        pageIndex: number;
+        which: 'start' | 'end';
+        committed: boolean;
+        lastCommitAt: number;
+    } | null = null;
+    /** Hairpin whose anchors are showing. */
+    private selectedHairpin: { id: string; pageIndex: number } | null = null;
     /** Open gesture undo frame (eraser / text drag / pinch). Convert uses its own handle. */
     private openBatch: ReturnType<AnnotationStore['beginBatch']> | null = null;
     private downX = 0;
@@ -153,6 +187,14 @@ export class InkController {
         this.unsubscribes = [
             opts.store.subscribe((pageIndex) => {
                 this.repaintPage(pageIndex);
+                const selectedHairpin = this.selectedHairpin;
+                if (selectedHairpin && selectedHairpin.pageIndex === pageIndex) {
+                    const liveHairpin = opts.store.get(selectedHairpin.id);
+                    if (!liveHairpin || liveHairpin.deletedAt || !isHairpinPayload(liveHairpin.payload)) {
+                        this.selectedHairpin = null;
+                    }
+                    this.renderPageLive(pageIndex);
+                }
                 const selected = this.selectedText;
                 if (selected && selected.pageIndex === pageIndex) {
                     // The note moved, resized, or vanished (eraser, undo, peer).
@@ -169,6 +211,13 @@ export class InkController {
             useViewerStore.subscribe((state, prev) => {
                 if (state.tool !== prev.tool && state.tool !== 'text') {
                     this.clearTextSelection();
+                }
+                const leftMarkupTools = state.tool !== prev.tool && state.tool !== 'text' && state.tool !== 'hairpin';
+                const leftMarkup = state.markupMode !== prev.markupMode && !state.markupMode;
+                if (leftMarkupTools || leftMarkup) {
+                    this.clearHairpinSelection();
+                    this.hairpinDraft = null;
+                    this.hairpinEdit = null;
                 }
             }),
             // Converted symbols were drawn as fallback text until the music face arrived.
@@ -243,7 +292,7 @@ export class InkController {
             return;
         }
         ctx.clearRect(0, 0, committed.width, committed.height);
-        for (const annotation of this.opts.store.getPage(pageIndex).values()) {
+        for (const annotation of this.visibleOnPage(pageIndex)) {
             drawAnnotation(ctx, annotation, committed.width, committed.height, this.pathCache);
         }
     }
@@ -299,7 +348,10 @@ export class InkController {
     }
 
     private shouldInk(e: PointerEvent): boolean {
-        const { tool, fingerDraws } = useViewerStore.getState();
+        const { tool, fingerDraws, markupMode } = useViewerStore.getState();
+        if (!markupMode && tool !== 'fingering') {
+            return false;
+        }
         if (tool === 'pan') {
             return false;
         }
@@ -345,7 +397,49 @@ export class InkController {
             this.eraseAt(point.pageIndex, point.nx, point.ny);
             return;
         }
+        if (tool === 'hairpin') {
+            const anchor = this.selectedHairpin ? this.anchorOnSelected(point.pageIndex, point.nx, point.ny) : null;
+            if (anchor) {
+                this.hairpinEdit = {
+                    id: anchor.id,
+                    pageIndex: point.pageIndex,
+                    which: anchor.which,
+                    committed: false,
+                    lastCommitAt: 0,
+                };
+                return;
+            }
+            this.clearHairpinSelection();
+            this.hairpinDraft = {
+                pageIndex: point.pageIndex,
+                x1: point.nx,
+                y1: point.ny,
+                x2: point.nx,
+                y2: point.ny,
+                spread: hairpinSpreadFor(widthKey),
+                color,
+            };
+            this.scheduleLiveRender();
+            return;
+        }
         if (tool === 'text') {
+            const hairpin = this.hairpinAt(point.pageIndex, point.nx, point.ny);
+            if (hairpin && isHairpinPayload(hairpin.payload)) {
+                this.clearTextSelection();
+                this.selectHairpin(hairpin.id, point.pageIndex);
+                const anchor = this.anchorOnSelected(point.pageIndex, point.nx, point.ny);
+                if (anchor) {
+                    this.hairpinEdit = {
+                        id: hairpin.id,
+                        pageIndex: point.pageIndex,
+                        which: anchor.which,
+                        committed: false,
+                        lastCommitAt: 0,
+                    };
+                }
+                return;
+            }
+            this.clearHairpinSelection();
             // The selected note's corner handle wins over anything under it.
             const scale = this.beginHandleScale(x, y);
             if (scale) {
@@ -424,10 +518,23 @@ export class InkController {
             return;
         }
         if (tool === 'text') {
+            if (this.hairpinEdit && this.moved) {
+                this.moveHairpinAnchor(this.hairpinEdit, x, y, false);
+                return;
+            }
             if (this.textScale && this.moved) {
                 this.scaleTextToHandle(this.textScale, x, y, false);
             } else if (this.textDrag && this.moved) {
                 this.moveTextTo(this.textDrag, x, y, false);
+            }
+            return;
+        }
+        if (tool === 'hairpin') {
+            if (this.hairpinEdit && this.moved) {
+                this.moveHairpinAnchor(this.hairpinEdit, x, y, false);
+            } else if (this.hairpinDraft) {
+                this.trackHairpinDraft(this.hairpinDraft, x, y);
+                this.scheduleLiveRender();
             }
             return;
         }
@@ -499,7 +606,37 @@ export class InkController {
             this.finishUndoBatch();
             return;
         }
+        if (tool === 'hairpin') {
+            const edit = this.hairpinEdit;
+            const draft = this.hairpinDraft;
+            this.hairpinEdit = null;
+            this.hairpinDraft = null;
+            const { x, y } = this.opts.toLocal(e);
+            if (edit) {
+                if (this.moved) {
+                    this.moveHairpinAnchor(edit, x, y, true);
+                }
+                this.finishUndoBatch();
+                return;
+            }
+            if (draft) {
+                this.trackHairpinDraft(draft, x, y);
+                this.commitHairpinDraft(draft);
+                this.renderPageLive(draft.pageIndex);
+            }
+            return;
+        }
         if (tool === 'text') {
+            const edit = this.hairpinEdit;
+            if (edit) {
+                this.hairpinEdit = null;
+                const { x, y } = this.opts.toLocal(e);
+                if (this.moved) {
+                    this.moveHairpinAnchor(edit, x, y, true);
+                }
+                this.finishUndoBatch();
+                return;
+            }
             const drag = this.textDrag;
             this.textDrag = null;
             const { x, y } = this.opts.toLocal(e);
@@ -557,7 +694,7 @@ export class InkController {
         }
 
         const now = new Date().toISOString();
-        const payload: StrokePayload = { pts, w: live.w };
+        const payload: StrokePayload = withActiveLayer({ pts, w: live.w });
         if (live.simulatePressure) {
             payload.sp = 1;
         }
@@ -611,6 +748,15 @@ export class InkController {
         if (useViewerStore.getState().tool === 'eraser') {
             this.finishUndoBatch();
         }
+        if (this.hairpinDraft) {
+            const page = this.hairpinDraft.pageIndex;
+            this.hairpinDraft = null;
+            this.renderPageLive(page);
+        }
+        if (this.hairpinEdit) {
+            this.finishUndoBatch();
+            this.hairpinEdit = null;
+        }
     }
 
     /**
@@ -630,6 +776,8 @@ export class InkController {
             this.renderPageLive(page);
         }
         this.textDrag = null;
+        this.hairpinDraft = null;
+        this.hairpinEdit = null;
         this.moved = true;
     }
 
@@ -859,6 +1007,155 @@ export class InkController {
         return live && isTextPayload(live.payload) ? live.payload : fallback;
     }
 
+    /** Live page marks this viewer may see. Import preview is the owner's review, unfiltered. */
+    private visibleOnPage(pageIndex: number): Annotation[] {
+        const marks = [...this.opts.store.getPage(pageIndex).values()];
+        if (this.opts.store.overlayMode === 'preview') {
+            return marks;
+        }
+        const audience = useViewerStore.getState().layerAudience;
+        return marks.filter((annotation) => annotationVisible(annotation, audience));
+    }
+
+    private selectHairpin(id: string, pageIndex: number): void {
+        const prev = this.selectedHairpin;
+        this.selectedHairpin = { id, pageIndex };
+        if (prev && prev.pageIndex !== pageIndex) {
+            this.renderPageLive(prev.pageIndex);
+        }
+        this.renderPageLive(pageIndex);
+    }
+
+    private clearHairpinSelection(): void {
+        const selected = this.selectedHairpin;
+        this.selectedHairpin = null;
+        if (selected) {
+            this.renderPageLive(selected.pageIndex);
+        }
+    }
+
+    private hairpinAt(pageIndex: number, nx: number, ny: number): Annotation | null {
+        const canvases = this.opts.registry.get(pageIndex);
+        const layout = this.opts.getLayout().layouts[pageIndex];
+        const pageWpx = canvases?.committed.width || layout?.width || 1000;
+        const pageHpx = canvases?.committed.height || layout?.height || 1400;
+        const hits = hitTestPage(this.visibleOnPage(pageIndex), nx, ny, 6, pageWpx, pageHpx);
+        return hits.find((hit) => isHairpinPayload(hit.payload)) ?? null;
+    }
+
+    private anchorOnSelected(pageIndex: number, nx: number, ny: number): { id: string; which: 'start' | 'end' } | null {
+        const selected = this.selectedHairpin;
+        if (!selected || selected.pageIndex !== pageIndex) {
+            return null;
+        }
+        const live = this.opts.store.get(selected.id);
+        const layout = this.opts.getLayout().layouts[pageIndex];
+        if (!live || !isHairpinPayload(live.payload) || !layout) {
+            return null;
+        }
+        const view = this.opts.getView();
+        const radiusPx = HAIRPIN_HANDLE_HIT_CSS / view.scale;
+        const which = hairpinAnchorAt(live.payload, nx, ny, radiusPx, layout.width, layout.height);
+        return which ? { id: selected.id, which } : null;
+    }
+
+    private trackHairpinDraft(draft: { x2: number; y2: number; pageIndex: number }, x: number, y: number): void {
+        const layout = this.opts.getLayout().layouts[draft.pageIndex];
+        if (!layout) {
+            return;
+        }
+        const point = viewportToPageClamped(this.opts.getView(), layout, x, y);
+        if (!point) {
+            return;
+        }
+        draft.x2 = point.nx;
+        draft.y2 = point.ny;
+    }
+
+    private commitHairpinDraft(draft: {
+        pageIndex: number;
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+        spread: number;
+        color: string;
+    }): void {
+        const layout = this.opts.getLayout().layouts[draft.pageIndex];
+        const view = this.opts.getView();
+        if (!layout) {
+            return;
+        }
+        const dx = (draft.x2 - draft.x1) * layout.width * view.scale;
+        const dy = (draft.y2 - draft.y1) * layout.height * view.scale;
+        if (Math.hypot(dx, dy) < TAP_SLOP_CSS) {
+            return;
+        }
+        const now = new Date().toISOString();
+        const id = crypto.randomUUID();
+        const payload: HairpinPayload = withActiveLayer({
+            type: 'hairpin',
+            x1: draft.x1,
+            y1: draft.y1,
+            x2: draft.x2,
+            y2: draft.y2,
+            spread: draft.spread,
+            open: 'end',
+        });
+        void this.opts.store.create({
+            id,
+            docId: this.opts.store.docId,
+            page: draft.pageIndex,
+            kind: 'shape',
+            color: draft.color,
+            payload,
+            createdBy: null,
+            createdAt: now,
+            updatedAt: now,
+            deletedAt: null,
+            seq: 0,
+        });
+        this.selectHairpin(id, draft.pageIndex);
+    }
+
+    private moveHairpinAnchor(
+        edit: { id: string; pageIndex: number; which: 'start' | 'end'; committed: boolean; lastCommitAt: number },
+        x: number,
+        y: number,
+        final: boolean,
+    ): void {
+        const layout = this.opts.getLayout().layouts[edit.pageIndex];
+        const live = this.opts.store.get(edit.id);
+        if (!layout || !live || !isHairpinPayload(live.payload)) {
+            return;
+        }
+        const point = viewportToPageClamped(this.opts.getView(), layout, x, y);
+        if (!point) {
+            return;
+        }
+        const now = Date.now();
+        if (!final && now - edit.lastCommitAt < TEXT_DRAG_SYNC_MS) {
+            return;
+        }
+        const next: HairpinPayload = {
+            ...live.payload,
+            ...(edit.which === 'start' ? { x1: point.nx, y1: point.ny } : { x2: point.nx, y2: point.ny }),
+        };
+        if (
+            edit.which === 'start'
+                ? next.x1 === live.payload.x1 && next.y1 === live.payload.y1
+                : next.x2 === live.payload.x2 && next.y2 === live.payload.y2
+        ) {
+            return;
+        }
+        if (!edit.committed) {
+            this.startUndoBatch();
+            edit.committed = true;
+        }
+        edit.lastCommitAt = now;
+        void this.opts.store.update(edit.id, { payload: next });
+    }
+
     private pressureOf(e: PointerEvent): number {
         // Mouse reports 0.5 while down; pens report real pressure (0 on some
         // hover/misfires — clamp into a sane inking range).
@@ -870,7 +1167,7 @@ export class InkController {
         const layout = this.opts.getLayout().layouts[pageIndex];
         const pageWpx = canvases?.committed.width || layout?.width || 1000;
         const pageHpx = canvases?.committed.height || layout?.height || 1400;
-        const hits = hitTestPage(this.opts.store.getPage(pageIndex).values(), nx, ny, 4, pageWpx, pageHpx);
+        const hits = hitTestPage(this.visibleOnPage(pageIndex), nx, ny, 4, pageWpx, pageHpx);
         return hits.find((h) => h.kind === 'text') ?? null;
     }
 
@@ -888,7 +1185,7 @@ export class InkController {
         const eraserCss = ERASER_RADIUS_CSS[useViewerStore.getState().widthKey];
         const radiusPx = (eraserCss / (layout.width * view.scale)) * canvases.committed.width;
         const hits = hitTestPage(
-            this.opts.store.getPage(pageIndex).values(),
+            this.visibleOnPage(pageIndex),
             nx,
             ny,
             radiusPx,
@@ -917,6 +1214,9 @@ export class InkController {
         }
         if (this.fingeringSel) {
             this.renderPageLive(this.fingeringSel.pageIndex);
+        }
+        if (this.hairpinDraft) {
+            this.renderPageLive(this.hairpinDraft.pageIndex);
         }
     }
 
@@ -991,6 +1291,51 @@ export class InkController {
             ctx.fillRect(x + w - handle / 2, y + h - handle / 2, handle, handle);
             ctx.strokeRect(x + w - handle / 2, y + h - handle / 2, handle, handle);
             ctx.restore();
+        }
+
+        const draft = this.hairpinDraft;
+        if (draft && draft.pageIndex === pageIndex) {
+            drawHairpin(
+                ctx,
+                {
+                    type: 'hairpin',
+                    x1: draft.x1,
+                    y1: draft.y1,
+                    x2: draft.x2,
+                    y2: draft.y2,
+                    spread: draft.spread,
+                    open: 'end',
+                },
+                width,
+                height,
+                draft.color,
+            );
+        }
+
+        const hairpinSel = this.selectedHairpin;
+        const activeTool = useViewerStore.getState().tool;
+        if (hairpinSel && hairpinSel.pageIndex === pageIndex && (activeTool === 'hairpin' || activeTool === 'text')) {
+            const liveHairpin = this.opts.store.get(hairpinSel.id);
+            const pageLayout = this.opts.getLayout().layouts[pageIndex];
+            if (liveHairpin && isHairpinPayload(liveHairpin.payload) && pageLayout) {
+                const pxPerCss = width / (pageLayout.width * this.opts.getView().scale);
+                const radius = (HAIRPIN_HANDLE_CSS * pxPerCss) / 2;
+                const anchors = [
+                    { x: liveHairpin.payload.x1 * width, y: liveHairpin.payload.y1 * height },
+                    { x: liveHairpin.payload.x2 * width, y: liveHairpin.payload.y2 * height },
+                ];
+                ctx.save();
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#4338ca';
+                ctx.lineWidth = Math.max(1, pxPerCss);
+                for (const anchor of anchors) {
+                    ctx.beginPath();
+                    ctx.arc(anchor.x, anchor.y, radius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+                ctx.restore();
+            }
         }
 
         const sel = this.fingeringSel;

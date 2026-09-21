@@ -62,6 +62,8 @@ export interface CachedPdf {
     contentRev?: number;
     /** Last-known archive state — archived scores are read-only (billing, M6). */
     archivedAt?: string | null;
+    /** Last-known documents.share_student_layer. Absent means not shared. */
+    shareStudentLayer?: boolean;
     /**
      * Account that cached these bytes. Warm-open and offline load refuse a
      * row whose userId is missing (legacy) or does not match the session —

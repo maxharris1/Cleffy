@@ -32,13 +32,20 @@ import { editedTextPayload } from '@/features/viewer/ink/musicFont';
 import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
+import { annotationVisible, withActiveLayer } from '@/features/viewer/layers';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
 import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel } from '@/sync/realtimeChannel';
-import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
+import {
+    createSupabaseAnnotationsApi,
+    fetchStudentLayerRows,
+    fromServerRow,
+    SyncEngine,
+    type SyncStatus,
+} from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
@@ -127,6 +134,8 @@ export interface PdfViewportProps {
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
         onDocReplaced?: (contentRev: number) => void;
+        /** The owner shared or hid the student layer. */
+        onStudentLayerShare?: (shared: boolean) => void;
         /** Play-along analysis status changed. */
         onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
     };
@@ -208,8 +217,42 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
+    const syncOnStudentLayerShare = sync?.onStudentLayerShare;
     const syncOnScoreAnalysis = sync?.onScoreAnalysis;
+    const shareStudentLayer = useViewerStore((s) => s.layerAudience.shareStudentLayer);
+    const audienceRole = useViewerStore((s) => s.layerAudience.role);
+    const audienceUserId = useViewerStore((s) => s.layerAudience.userId);
     const channelRef = useRef<DocRealtimeChannel | null>(null);
+
+    // The watermark pull skips student rows written while they were hidden.
+    // Sharing them, or hiding them again, has to catch the local copy up.
+    useEffect(() => {
+        if (!syncUserId || audienceRole === 'owner' || audienceRole === 'local') {
+            return;
+        }
+        let cancelled = false;
+        void (async () => {
+            const audience = useViewerStore.getState().layerAudience;
+            if (!audience.shareStudentLayer) {
+                await annotationStore.dropLocalWhere((annotation) => !annotationVisible(annotation, audience));
+                return;
+            }
+            const rows = await fetchStudentLayerRows(docId);
+            if (cancelled) {
+                return;
+            }
+            const pendingIds = new Set(
+                (await getDb().ops.where('docId').equals(docId).toArray()).map((op) => op.annotationId),
+            );
+            const visible = rows
+                .map(fromServerRow)
+                .filter((annotation) => annotationVisible(annotation, useViewerStore.getState().layerAudience));
+            await annotationStore.applyRemoteBatch(visible, pendingIds);
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [annotationStore, docId, syncUserId, shareStudentLayer, audienceRole, audienceUserId]);
 
     // Track viewport size.
     useEffect(() => {
@@ -444,6 +487,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 docId,
                 getUserId: () => syncUserId,
                 onStatus: syncOnStatus,
+                acceptsRemote: (annotation) => annotationVisible(annotation, useViewerStore.getState().layerAudience),
             });
             channel = new DocRealtimeChannel({
                 supabase: getSupabase(),
@@ -466,6 +510,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     void engine?.sync();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
+                onStudentLayerShare: (shared) => syncOnStudentLayerShare?.(shared),
                 onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
             });
             if (syncCanWrite) {
@@ -498,6 +543,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncOnStatus,
         syncOnPeers,
         syncOnDocReplaced,
+        syncOnStudentLayerShare,
         syncOnScoreAnalysis,
     ]);
 
@@ -596,7 +642,12 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             page: textIntent.pageIndex,
             kind: 'text',
             color: useViewerStore.getState().color,
-            payload: { x: textIntent.nx, y: textIntent.ny, text: trimmed, size: DEFAULT_TEXT_SIZE },
+            payload: withActiveLayer({
+                x: textIntent.nx,
+                y: textIntent.ny,
+                text: trimmed,
+                size: DEFAULT_TEXT_SIZE,
+            }),
             createdBy: null,
             createdAt: now,
             updatedAt: now,

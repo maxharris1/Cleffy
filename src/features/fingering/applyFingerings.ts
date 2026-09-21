@@ -1,6 +1,7 @@
 import { MAX_TEXT_SIZE, MIN_TEXT_SIZE } from '@/features/import/textFit';
 import type { FingeringSequence, Hand, RecognizedNote, RecognizedRegion } from '@/features/fingering/model';
 import { annotationBboxNorm } from '@/features/viewer/ink/hitTest';
+import { withActiveLayer } from '@/features/viewer/layers';
 import type { Annotation, TextPayload } from '@/types/models';
 
 /**
@@ -79,9 +80,7 @@ export const buildFingeringProposals = ({
     const now = new Date().toISOString();
     const proposals: Annotation[] = [];
     const placedBoxes: Array<[number, number, number, number]> = [];
-    const existingBoxes = existing
-        .filter((a) => a.kind === 'text')
-        .map((a) => annotationBboxNorm(a, aspect));
+    const existingBoxes = existing.filter((a) => a.kind === 'text').map((a) => annotationBboxNorm(a, aspect));
 
     for (const placement of placements) {
         const { note, hand, finger, rank } = placement;
@@ -107,13 +106,13 @@ export const buildFingeringProposals = ({
         }
         placedBoxes.push([x, y, x + 0.6 * size, y + lineH]);
 
-        const payload: TextPayload = {
+        const payload: TextPayload = withActiveLayer({
             x: Math.min(1, Math.max(0, x)),
             y: Math.min(1, Math.max(0, y)),
             text: String(finger),
             size,
             sf: 1,
-        };
+        });
         proposals.push({
             id: crypto.randomUUID(),
             docId,
@@ -132,5 +131,4 @@ export const buildFingeringProposals = ({
 };
 
 /** True when a region can host proposals at all (vision anchors present). */
-export const canPlaceProposals = (region: RecognizedRegion): boolean =>
-    region.notes.some((n) => n.bbox.w > 0);
+export const canPlaceProposals = (region: RecognizedRegion): boolean => region.notes.some((n) => n.bbox.w > 0);

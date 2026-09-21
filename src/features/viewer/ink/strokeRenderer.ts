@@ -1,8 +1,9 @@
 import { getStroke } from 'perfect-freehand';
 
 import { canvasFont, SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
+import { drawHairpin } from '@/features/viewer/ink/hairpin';
 import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
-import { isTextPayload, type Annotation, type StrokePayload } from '@/types/models';
+import { isHairpinPayload, isTextPayload, type Annotation, type StrokePayload } from '@/types/models';
 
 /** Ink alpha/composite for the highlighter so it reads over dark scans. */
 export const HIGHLIGHT_ALPHA = 0.35;
@@ -64,7 +65,7 @@ export class StrokePathCache {
     private cache = new Map<string, Path2D>();
 
     get(annotation: Annotation, pageWpx: number, pageHpx: number): Path2D | null {
-        if (isTextPayload(annotation.payload)) {
+        if (isTextPayload(annotation.payload) || isHairpinPayload(annotation.payload)) {
             return null;
         }
         const key = `${annotation.id}:${annotation.updatedAt}:${Math.round(pageWpx)}`;
@@ -88,6 +89,11 @@ export const drawAnnotation = (
     pageHpx: number,
     cache?: StrokePathCache,
 ): void => {
+    if (isHairpinPayload(annotation.payload)) {
+        drawHairpin(ctx, annotation.payload, pageWpx, pageHpx, annotation.color);
+        return;
+    }
+
     if (isTextPayload(annotation.payload)) {
         const { x, y, text, size, hw } = annotation.payload;
         const fontPx = Math.max(6, size * pageWpx);

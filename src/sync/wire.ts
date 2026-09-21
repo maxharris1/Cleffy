@@ -32,14 +32,20 @@ export const INK_PROGRESS_EVENT = 'ink:progress';
 
 /**
  * documents-row change fanned out by the documents_broadcast trigger
- * (fires only when content_rev changes — i.e. the PDF bytes were replaced).
+ * (the PDF bytes were replaced, or the student-layer share flag flipped).
  */
 const documentChangeSchema = z.object({
     table: z.literal('documents'),
-    record: z.object({ id: z.string().min(1), content_rev: z.number().int().nonnegative() }),
+    record: z.object({
+        id: z.string().min(1),
+        content_rev: z.number().int().nonnegative(),
+        share_student_layer: z.boolean().optional(),
+    }),
 });
 
-export const parseDocumentChange = (payload: unknown): { id: string; content_rev: number } | null => {
+export const parseDocumentChange = (
+    payload: unknown,
+): { id: string; content_rev: number; share_student_layer?: boolean } | null => {
     const parsed = documentChangeSchema.safeParse(payload);
     return parsed.success ? parsed.data.record : null;
 };
@@ -48,11 +54,14 @@ export const parseDocumentChange = (payload: unknown): { id: string; content_rev
 // converted handwriting) and prose style (`font`, `bold`, `italic`) MUST be
 // declared here: zod strips unknown keys, so omitting one would silently
 // diverge peer payloads from the writer's.
+const annotationLayerSchema = z.enum(['teacher', 'student']).optional();
+
 const strokePayloadSchema = z.object({
     pts: z.array(z.number()),
     w: z.number().positive(),
     sp: z.literal(1).optional(),
     src: z.literal(1).optional(),
+    layer: annotationLayerSchema,
 });
 
 const textPayloadSchema = z.object({
@@ -66,6 +75,18 @@ const textPayloadSchema = z.object({
     font: z.enum(['sans', 'serif']).optional(),
     bold: z.literal(1).optional(),
     italic: z.union([z.literal(0), z.literal(1)]).optional(),
+    layer: annotationLayerSchema,
+});
+
+const hairpinPayloadSchema = z.object({
+    type: z.literal('hairpin'),
+    x1: z.number(),
+    y1: z.number(),
+    x2: z.number(),
+    y2: z.number(),
+    spread: z.number().positive(),
+    open: z.enum(['start', 'end']),
+    layer: annotationLayerSchema,
 });
 
 /** Envelope produced by realtime.broadcast_changes() for annotation writes. */
@@ -73,9 +94,9 @@ const annotationRowSchema = z.object({
     id: z.string().min(1),
     document_id: z.string().min(1),
     page: z.number().int().nonnegative(),
-    kind: z.enum(['stroke', 'highlight', 'text']),
+    kind: z.enum(['stroke', 'highlight', 'text', 'shape']),
     color: z.string(),
-    payload: z.union([strokePayloadSchema, textPayloadSchema]),
+    payload: z.union([hairpinPayloadSchema, strokePayloadSchema, textPayloadSchema]),
     created_by: z.string(),
     created_at: z.string(),
     updated_at: z.string(),

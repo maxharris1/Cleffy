@@ -18,7 +18,7 @@ import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcri
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import { isTextPayload, type Annotation } from '@/types/models';
+import { isHairpinPayload, isTextPayload, type Annotation } from '@/types/models';
 
 export interface HandwritingControllerOptions {
     store: AnnotationStore;
@@ -100,7 +100,12 @@ export class HandwritingController {
 
     /** Called by the InkController right after it commits a stroke. */
     onStrokeCommitted(annotation: Annotation): void {
-        if (this.disposed || annotation.kind !== 'stroke' || isTextPayload(annotation.payload)) {
+        if (
+            this.disposed ||
+            annotation.kind !== 'stroke' ||
+            isTextPayload(annotation.payload) ||
+            isHairpinPayload(annotation.payload)
+        ) {
             return;
         }
         if (!this.opts.isEnabled()) {

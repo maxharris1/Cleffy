@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useParams, useSearchParams } from 'react-router';
 
-import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
+import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
@@ -15,6 +15,7 @@ import {
     isCloudDocId,
     loadDocumentBytes,
     loadDocumentOffline,
+    setShareStudentLayer,
     prefetchDocumentBytes,
 } from '@/features/library/documentsService';
 import { TransportBar } from '@/features/playback/TransportBar';
@@ -24,11 +25,13 @@ import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
+import { publishLayerAudience } from '@/features/viewer/layers';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
+import { useViewerStore } from '@/state/store';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
@@ -178,7 +181,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         prev?.provisional
                             ? {
                                   ...prev,
-                                  doc: { ...prev.doc, archived_at: confirmedDoc.archived_at },
+                                  doc: {
+                                      ...prev.doc,
+                                      archived_at: confirmedDoc.archived_at,
+                                      share_student_layer: confirmedDoc.share_student_layer,
+                                  },
                                   role: confirmedRole,
                                   provisional: false,
                               }
@@ -193,6 +200,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                   bytes: offline.bytes,
                                   contentRev: offline.doc.content_rev ?? 0,
                                   archivedAt: offline.doc.archived_at,
+                                  shareStudentLayer: offline.doc.share_student_layer === true,
                               }
                             : undefined,
                         prefetch: offline ? undefined : prefetch,
@@ -219,7 +227,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     }
                     if (offline) {
                         setState({
-                            doc: { ...offline.doc, archived_at: confirmedDoc.archived_at },
+                            doc: {
+                                ...offline.doc,
+                                archived_at: confirmedDoc.archived_at,
+                                share_student_layer: confirmedDoc.share_student_layer,
+                            },
                             role: confirmedRole ?? offline.role,
                             bytes: offline.bytes,
                             provisional: roleResult.status !== 'fulfilled' ? true : undefined,
@@ -273,6 +285,59 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         }
     }, [searchParams, setSearchParams]);
 
+    const markupMode = useViewerStore((s) => s.markupMode);
+    const concertDim = useViewerStore((s) => s.concertDim);
+    const readingDim = concertDim && !markupMode;
+
+    useEffect(() => {
+        const viewer = useViewerStore.getState();
+        viewer.setMarkupMode(false);
+        viewer.setTool('pan');
+    }, [docId]);
+
+    useEffect(() => {
+        if (!state) {
+            return;
+        }
+        const isOwner = state.role === 'owner';
+        publishLayerAudience({
+            userId: userId ?? '',
+            role: state.role ?? 'viewer',
+            shareStudentLayer: state.doc.share_student_layer === true,
+            canUseTeacherLayer: isOwner || userTypeOf(session) !== 'student',
+            canShareStudentLayer: isOwner && state.provisional !== true,
+        });
+    }, [state, session, userId]);
+
+    const persistShare = useCallback(
+        (shared: boolean) => {
+            setState((prev) => (prev ? { ...prev, doc: { ...prev.doc, share_student_layer: shared } } : prev));
+            void setShareStudentLayer(docId, shared).catch(() => {
+                setState((prev) => (prev ? { ...prev, doc: { ...prev.doc, share_student_layer: !shared } } : prev));
+            });
+        },
+        [docId],
+    );
+
+    useEffect(() => {
+        const ownerOpen = state?.role === 'owner' && state.provisional !== true;
+        if (!ownerOpen) {
+            useViewerStore.getState().setShareStudentLayerToggle(null);
+            return;
+        }
+        useViewerStore.getState().setShareStudentLayerToggle(persistShare);
+        return () => useViewerStore.getState().setShareStudentLayerToggle(null);
+    }, [state?.role, state?.provisional, persistShare]);
+
+    const onStudentLayerShare = useCallback((shared: boolean) => {
+        setState((prev) => {
+            if (!prev || prev.doc.share_student_layer === shared) {
+                return prev;
+            }
+            return { ...prev, doc: { ...prev.doc, share_student_layer: shared } };
+        });
+    }, []);
+
     if (!loading && !session) {
         return <Navigate to="/" replace />;
     }
@@ -317,7 +382,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     return (
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
-                <PresenceBar peers={peers} selfUserId={resolvedUserId} />
+                {readingDim ? null : <PresenceBar peers={peers} selfUserId={resolvedUserId} />}
                 <SyncDot status={syncStatus} />
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
@@ -339,7 +404,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         autoOpen={autoOpenImport}
                     />
                 ) : null}
-                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore={!readOnly} /> : null}
+                {annotationStore && !readingDim ? (
+                    <LessonHistoryButton store={annotationStore} canRestore={!readOnly} />
+                ) : null}
                 {/*
                   Shown to everyone on the score, not just the owner. Whether a
                   member has anything to read would take a query to know, and
@@ -385,8 +452,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </button>
                 ) : null}
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
-                {!state.provisional ? <ShareExportMenu docId={docId} title={state.doc.title} /> : null}
-                {!state.provisional && state.role === 'owner' ? (
+                {!state.provisional && !readingDim ? <ShareExportMenu docId={docId} title={state.doc.title} /> : null}
+                {!state.provisional && state.role === 'owner' && !readingDim ? (
                     <Button size="sm" onClick={() => setShareOpen(true)}>
                         Invite
                     </Button>
@@ -430,6 +497,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                       onStatus,
                                       onPeers,
                                       onDocReplaced,
+                                      onStudentLayerShare,
                                       onScoreAnalysis: applyBroadcast,
                                   }
                                 : undefined
@@ -485,11 +553,28 @@ const SyncDot = ({ status }: { status: SyncStatus }) => {
 
 const LocalViewer = ({ docId }: { docId: string }) => {
     const [, forceRender] = useState(0);
+    const markupMode = useViewerStore((s) => s.markupMode);
+    const concertDim = useViewerStore((s) => s.concertDim);
+    const readingDim = concertDim && !markupMode;
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     const [reopenError, setReopenError] = useState<string | null>(null);
     const bytes = getLocalDoc(docId);
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
+
+    useEffect(() => {
+        const viewer = useViewerStore.getState();
+        viewer.setMarkupMode(false);
+        viewer.setTool('pan');
+        viewer.setShareStudentLayerToggle(null);
+        publishLayerAudience({
+            userId: '',
+            role: 'local',
+            shareStudentLayer: false,
+            canUseTeacherLayer: true,
+            canShareStudentLayer: false,
+        });
+    }, [docId]);
 
     const reopenFile = useCallback(
         async (picked: File) => {
@@ -558,8 +643,8 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                         clean={null}
                     />
                 ) : null}
-                {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
-                <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
+                {annotationStore && !readingDim ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
+                {readingDim ? null : <ShareExportMenu docId={docId} bytes={bytes} title="Score" />}
             </ViewerHeader>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>

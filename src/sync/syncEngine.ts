@@ -1,4 +1,4 @@
-import type { TypedSupabaseClient } from '@/lib/supabase';
+import { getSupabase, type TypedSupabaseClient } from '@/lib/supabase';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { PendingOp, ScribblerDb } from '@/sync/db';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
@@ -79,6 +79,8 @@ export class SyncEngine {
             docId: string;
             getUserId: () => string | null;
             onStatus?: (status: SyncStatus) => void;
+            /** False drops the row before it can paint. Absent accepts every row. */
+            acceptsRemote?: (annotation: Annotation) => boolean;
         },
     ) {}
 
@@ -297,7 +299,14 @@ export class SyncEngine {
             return;
         }
         const pendingIds = new Set((await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId));
-        await store.applyRemoteBatch([fromServerRow(row)], pendingIds);
+        const annotation = fromServerRow(row);
+        if (this.deps.acceptsRemote && !this.deps.acceptsRemote(annotation)) {
+            if (!pendingIds.has(annotation.id)) {
+                await store.discardLocal(annotation.id);
+            }
+        } else {
+            await store.applyRemoteBatch([annotation], pendingIds);
+        }
         const state = await db.syncState.get(docId);
         if (!state || row.seq > state.watermarkSeq) {
             await db.syncState.put({ docId, watermarkSeq: row.seq });
@@ -331,7 +340,18 @@ export class SyncEngine {
                 const pendingIds = new Set(
                     (await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId),
                 );
-                await store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
+                const mapped = rows.map(fromServerRow);
+                const visible = this.deps.acceptsRemote
+                    ? mapped.filter((annotation) => this.deps.acceptsRemote?.(annotation))
+                    : mapped;
+                await store.applyRemoteBatch(visible, pendingIds);
+                if (this.deps.acceptsRemote) {
+                    for (const annotation of mapped) {
+                        if (!this.deps.acceptsRemote(annotation) && !pendingIds.has(annotation.id)) {
+                            await store.discardLocal(annotation.id);
+                        }
+                    }
+                }
                 const last = rows[rows.length - 1];
                 if (last) {
                     watermark = Math.max(watermark, last.seq);
@@ -410,6 +430,24 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
             return { data, error: error ? classify(error.message, status) : null };
         },
     };
+};
+
+/**
+ * Student-layer rows the watermark pull can miss: they were written while
+ * this member could not see them, so their seq is already behind the cursor.
+ * Called when the owner shares the layer. RLS still hides them until then.
+ */
+export const fetchStudentLayerRows = async (docId: string): Promise<AnnotationRow[]> => {
+    const { data, error } = await getSupabase()
+        .from('annotations')
+        .select('*')
+        .eq('document_id', docId)
+        .filter('payload->>layer', 'eq', 'student');
+    if (error) {
+        console.warn('Could not load the student layer', error.message);
+        return [];
+    }
+    return data ?? [];
 };
 
 /** Leading run of same op family (create vs mutate), capped at `limit`. */

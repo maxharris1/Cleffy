@@ -4,7 +4,10 @@ export interface PageSize {
     height: number;
 }
 
-export type AnnotationKind = 'stroke' | 'highlight' | 'text';
+export type AnnotationKind = 'stroke' | 'highlight' | 'text' | 'shape';
+
+/** Teacher marks are the shared lesson. Student marks stay private until the owner shares that layer. */
+export type AnnotationLayer = 'teacher' | 'student';
 
 /**
  * Ink payload. Coordinates are normalized 0–1 against the ROTATED page
@@ -20,6 +23,8 @@ export interface StrokePayload {
     sp?: 1;
     /** 1 when adopted from a document's pre-existing markings (smart import). */
     src?: 1;
+    /** Absent counts as teacher. */
+    layer?: AnnotationLayer;
 }
 
 export interface TextPayload {
@@ -47,12 +52,32 @@ export interface TextPayload {
      * Music tokens ignore this.
      */
     italic?: 0 | 1;
+    /** Absent counts as teacher. */
+    layer?: AnnotationLayer;
+}
+
+/**
+ * A placed shape. Coordinates match other ink: x/y are 0–1 on the rotated
+ * page, `spread` is a fraction of page width. `open` says which anchor is
+ * the mouth — `end` is a crescendo drawn left to right.
+ */
+export interface HairpinPayload {
+    type: 'hairpin';
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    /** Half-width of the open end, / page width. */
+    spread: number;
+    open: 'start' | 'end';
+    /** Absent counts as teacher. */
+    layer?: AnnotationLayer;
 }
 
 /** Faces a prose note can be set in. The default system face is already a sans. */
 export type TextFont = 'sans' | 'serif';
 
-export type AnnotationPayload = StrokePayload | TextPayload;
+export type AnnotationPayload = StrokePayload | TextPayload | HairpinPayload;
 
 export interface Annotation {
     /** Client-generated UUID — also the server primary key. */
@@ -76,7 +101,11 @@ export const isTextPayload = (payload: AnnotationPayload): payload is TextPayloa
     return 'text' in payload;
 };
 
-export type Tool = 'pan' | 'pen' | 'highlighter' | 'eraser' | 'text' | 'fingering';
+export const isHairpinPayload = (payload: AnnotationPayload): payload is HairpinPayload => {
+    return 'type' in payload && payload.type === 'hairpin';
+};
+
+export type Tool = 'pan' | 'pen' | 'highlighter' | 'eraser' | 'text' | 'fingering' | 'hairpin';
 
 export type StrokeWidthKey = 'thin' | 'medium' | 'thick';
 

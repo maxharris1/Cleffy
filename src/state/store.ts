@@ -2,14 +2,17 @@ import { create } from 'zustand';
 
 import type { PageColumns } from '@/features/viewer/geometry';
 import {
+    readConcertDim,
     readPageColumns,
     readPrintHandwriting,
     readSpreadCover,
+    writeConcertDim,
     writePageColumns,
     writePrintHandwriting,
     writeSpreadCover,
 } from '@/features/viewer/viewerPrefs';
-import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
+import { DEFAULT_LAYER_AUDIENCE, type LayerAudience } from '@/features/viewer/layerAudience';
+import type { AnnotationLayer, PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
 export const STROKE_COLORS = ['#1f2937', '#dc2626', '#2563eb', '#16a34a', '#eab308', '#ea580c', '#9333ea'] as const;
@@ -89,6 +92,16 @@ interface ViewerStore extends PlaybackSlice {
      * never a document flag, so a teacher cannot rewrite a pupil's handwriting.
      */
     printHandwriting: boolean;
+    /** Reading vs markup. A score opens in reading; Annotate reveals the ink tools. */
+    markupMode: boolean;
+    /** While reading, hide invite, history, and presence. One toggle. */
+    concertDim: boolean;
+    /** Stamped onto new strokes, text, print, and hairpins. */
+    markLayer: AnnotationLayer;
+    /** Who is looking, so paint and sync can apply the layer rule. */
+    layerAudience: LayerAudience;
+    /** Owner's share-student-layer control. Null until a cloud score is open. */
+    shareStudentLayerToggle: ((shared: boolean) => void) | null;
     /** Pages per row: 1 (stack) or 2 (facing pages). Persisted per device. */
     pageColumns: PageColumns;
     /** Two-page spreads open on a cover: page 1 alone, then 2|3. Persisted per device. */
@@ -102,6 +115,10 @@ interface ViewerStore extends PlaybackSlice {
     setFocusedPageIndex: (focusedPageIndex: number) => void;
     setFingerDraws: (fingerDraws: boolean) => void;
     setPrintHandwriting: (printHandwriting: boolean) => void;
+    setMarkupMode: (markupMode: boolean) => void;
+    setConcertDim: (concertDim: boolean) => void;
+    setMarkLayer: (markLayer: AnnotationLayer) => void;
+    setShareStudentLayerToggle: (shareStudentLayerToggle: ((shared: boolean) => void) | null) => void;
     setPageColumns: (pageColumns: PageColumns) => void;
     setSpreadCover: (spreadCover: boolean) => void;
     /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
@@ -131,15 +148,20 @@ const INITIAL_PLAYBACK = {
  * AnnotationStore's in-memory map (plan §sync). Usable outside React via
  * useViewerStore.getState() from high-frequency pointer handlers.
  */
-export const useViewerStore = create<ViewerStore>((set) => ({
+export const useViewerStore = create<ViewerStore>((set, get) => ({
     view: INITIAL_VIEW,
     pinch: null,
-    tool: 'pen',
+    tool: 'pan',
     color: STROKE_COLORS[0],
     widthKey: 'medium',
     focusedPageIndex: 0,
     fingerDraws: false,
     printHandwriting: readPrintHandwriting(),
+    markupMode: false,
+    concertDim: readConcertDim(),
+    markLayer: 'teacher',
+    layerAudience: DEFAULT_LAYER_AUDIENCE,
+    shareStudentLayerToggle: null,
     pageColumns: readPageColumns(),
     spreadCover: readSpreadCover(),
     setView: (view) => set({ view }),
@@ -154,6 +176,16 @@ export const useViewerStore = create<ViewerStore>((set) => ({
         writePrintHandwriting(printHandwriting);
         set({ printHandwriting });
     },
+    setMarkupMode: (markupMode) => set({ markupMode }),
+    setConcertDim: (concertDim) => {
+        writeConcertDim(concertDim);
+        set({ concertDim });
+    },
+    setMarkLayer: (markLayer) => {
+        const { layerAudience } = get();
+        set({ markLayer: markLayer === 'teacher' && !layerAudience.canUseTeacherLayer ? 'student' : markLayer });
+    },
+    setShareStudentLayerToggle: (shareStudentLayerToggle) => set({ shareStudentLayerToggle }),
     setPageColumns: (pageColumns) => {
         writePageColumns(pageColumns);
         set({ pageColumns });

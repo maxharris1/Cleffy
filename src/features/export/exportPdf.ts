@@ -1,6 +1,7 @@
 import type { ExportRequest, ExportResponse } from '@/features/export/exportWorker';
 import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
 import { annotationNeedsMusicFont, MUSIC_FONT_URL } from '@/features/viewer/ink/musicFont';
+import { filterVisibleAnnotations } from '@/features/viewer/layers';
 import { getDb } from '@/sync/db';
 import type { Annotation } from '@/types/models';
 
@@ -21,7 +22,9 @@ export const exportAnnotatedPdf = async (
     options: ExportAnnotatedPdfOptions = {},
 ): Promise<void> => {
     const rows = await getDb().annotations.where('docId').equals(docId).toArray();
-    let annotations: Annotation[] = rows.filter((row) => !row.deletedAt).map(({ pending: _pending, ...a }) => a);
+    let annotations: Annotation[] = filterVisibleAnnotations(
+        rows.filter((row) => !row.deletedAt).map(({ pending: _pending, ...a }) => a),
+    );
     if (options.pageIndex !== undefined) {
         annotations = annotations.filter((a) => a.page === options.pageIndex);
     }

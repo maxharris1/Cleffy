@@ -56,6 +56,8 @@ export interface DocRealtimeChannelOptions {
     onReconnect: () => void;
     /** Another member replaced the document's PDF bytes (smart-import cleanup). */
     onDocReplaced?: (contentRev: number) => void;
+    /** The owner flipped documents.share_student_layer. Same broadcast as a byte replace. */
+    onStudentLayerShare?: (shared: boolean) => void;
     /** Play-along analysis lifecycle changed (trimmed broadcast). */
     onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
 }
@@ -104,6 +106,9 @@ export class DocRealtimeChannel {
             // The topic multiplexes two tables: documents (bytes replaced) and annotations.
             const docChange = parseDocumentChange(payload);
             if (docChange) {
+                if (docChange.share_student_layer !== undefined) {
+                    this.opts.onStudentLayerShare?.(docChange.share_student_layer);
+                }
                 this.opts.onDocReplaced?.(docChange.content_rev);
                 return;
             }
