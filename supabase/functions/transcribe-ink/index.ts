@@ -1,5 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
+import { ipv4Fetch } from '../_shared/ipv4Fetch.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { geminiApiKey, geminiGenerateText } from '../_shared/gemini.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
@@ -178,6 +179,7 @@ Deno.serve(async (req) => {
             apiKey,
             image: { mimeType: body.image!.mediaType!, data: body.image!.dataBase64! },
             prompt: TRANSCRIBE_PROMPT,
+            fetchImpl: ipv4Fetch,
             signal: AbortSignal.timeout(30_000),
         });
         const text = cleanTranscription(raw);

@@ -75,6 +75,14 @@ describe('geminiGenerateText', () => {
         expect(fetchImpl).toHaveBeenCalledTimes(GEMINI_MODEL_CANDIDATES.length);
     });
 
+    it('falls back when a candidate aborts or times out', async () => {
+        const abort = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+        const fetchImpl = vi.fn().mockRejectedValueOnce(abort).mockResolvedValueOnce(geminiOk('mmm mm'));
+        const result = await geminiGenerateText({ apiKey: 'k', image: IMAGE, prompt: 'p', fetchImpl });
+        expect(result).toEqual({ text: 'mmm mm', model: 'gemini-3.5-flash-lite' });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
     it('skips a 404 model on the next call and prefers the last 2xx model', async () => {
         const first = vi
             .fn()

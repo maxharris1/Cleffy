@@ -46,6 +46,9 @@ const parseGeminiText = (body: GeminiResponse): string =>
 
 const fallbackableStatus = (status: number): boolean => status === 404 || status === 503;
 
+const isAbortLike = (err: unknown): boolean =>
+    err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+
 /** Last model that returned 2xx in this isolate — skip a 404 candidate next time. */
 let lastOkModel: string | null = null;
 const notFoundModels = new Set<string>();
@@ -76,21 +79,29 @@ const generateOnce = async (
     prompt: string,
     signal: AbortSignal | undefined,
 ): Promise<{ text: string; status: number; errorText: string }> => {
-    const res = await fetchImpl(geminiGenerateUrl(model), {
-        method: 'POST',
-        signal,
-        // Header, not `?key=` — keeps the secret out of URLs and access logs.
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-        body: JSON.stringify({
-            contents: [
-                {
-                    role: 'user',
-                    parts: [{ inlineData: { mimeType: image.mimeType, data: image.data } }, { text: prompt }],
-                },
-            ],
-            generationConfig: { temperature: 0, maxOutputTokens: 64 },
-        }),
-    });
+    let res: Response;
+    try {
+        res = await fetchImpl(geminiGenerateUrl(model), {
+            method: 'POST',
+            signal,
+            // Header, not `?key=` — keeps the secret out of URLs and access logs.
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+            body: JSON.stringify({
+                contents: [
+                    {
+                        role: 'user',
+                        parts: [{ inlineData: { mimeType: image.mimeType, data: image.data } }, { text: prompt }],
+                    },
+                ],
+                generationConfig: { temperature: 0, maxOutputTokens: 64 },
+            }),
+        });
+    } catch (err) {
+        if (isAbortLike(err)) {
+            return { text: '', status: 503, errorText: 'timed out' };
+        }
+        throw err;
+    }
     const raw = await res.text();
     if (!res.ok) {
         let message = raw.slice(0, 200);
