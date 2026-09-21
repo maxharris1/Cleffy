@@ -10,6 +10,7 @@ import {
     FERMATA_TEXT,
     recognizeOnDevice,
     splitDigitRun,
+    splitMixedLine,
 } from '@/features/viewer/ink/handwriting/recognizer';
 
 const hand = (name: string) => HANDS[name]!;
@@ -120,6 +121,43 @@ describe('recognizeOnDevice', () => {
             { text: '2', kind: 'digit' },
         ]);
         expect(splitDigitRun(groupFromHands([hand('m'), hand('f')]))).toBeNull();
+    });
+
+    it('splits a mixed digit and letter line without gluing them or keeping the line as ink', () => {
+        const line = groupFromHands([hand('one'), hand('two'), hand('three'), hand('m'), hand('m')]);
+        const pieces = splitMixedLine(line);
+        expect(pieces).toHaveLength(4);
+        expect(pieces!.slice(0, 3).every((g) => g.kind === 'glyph')).toBe(true);
+        expect(pieces!.slice(0, 3).map((g) => recognizeOnDevice(g))).toEqual([
+            { text: '1', kind: 'digit' },
+            { text: '2', kind: 'digit' },
+            { text: '3', kind: 'digit' },
+        ]);
+        const word = pieces![3]!;
+        expect(word.kind).toBe('line');
+        expect(word.glyphs).toHaveLength(2);
+        expect(recognizeOnDevice(word)).toBeNull();
+        const digitIds = new Set(
+            pieces!.slice(0, 3).flatMap((g) => g.glyphs.flatMap((glyph) => glyph.strokes.map((s) => s.id))),
+        );
+        const letterIds = word.glyphs.flatMap((glyph) => glyph.strokes.map((s) => s.id));
+        expect(letterIds.length).toBeGreaterThan(0);
+        expect(letterIds.some((id) => digitIds.has(id))).toBe(false);
+        expect(splitMixedLine(groupFromHands([hand('one'), hand('two')]))).toBeNull();
+        expect(splitMixedLine(groupFromHands([hand('m'), hand('f')]))).toBeNull();
+    });
+
+    it('keeps a letter run on each side of a digit, and reads a lone accent beside a digit on device', () => {
+        const around = splitMixedLine(groupFromHands([hand('m'), hand('m'), hand('one'), hand('m'), hand('m')]));
+        expect(around?.map((g) => g.kind)).toEqual(['line', 'glyph', 'line']);
+        expect(recognizeOnDevice(around![1]!)).toEqual({ text: '1', kind: 'digit' });
+        expect(recognizeOnDevice(around![0]!)).toBeNull();
+        expect(recognizeOnDevice(around![2]!)).toBeNull();
+
+        const marked = splitMixedLine(groupFromHands([hand('three'), hand('accent')]));
+        expect(marked).toHaveLength(2);
+        expect(recognizeOnDevice(marked![0]!)).toEqual({ text: '3', kind: 'digit' });
+        expect(recognizeOnDevice(marked![1]!)).toEqual({ text: ACCENT_TEXT, kind: 'symbol' });
     });
 
     it('abstains on marks that are not print (hairpin, cross, scribble) so the ink stays', () => {

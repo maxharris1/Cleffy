@@ -13,7 +13,7 @@ import {
     type GrouperOptions,
     type StrokeGroup,
 } from '@/features/viewer/ink/handwriting/grouper';
-import { lineHasDigit, splitDigitRun } from '@/features/viewer/ink/handwriting/recognizer';
+import { splitDigitRun, splitMixedLine } from '@/features/viewer/ink/handwriting/recognizer';
 import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
@@ -25,9 +25,11 @@ export interface HandwritingControllerOptions {
     /** On-device closed-set reader (digits, dynamics, marks). */
     recognizer: Recognizer;
     /**
-     * Metered text-note transcription, tried ONLY for a writing line the
-     * on-device reader refused — never for a lone digit or symbol. Absent for
-     * local documents; resolves null offline.
+     * Metered text-note transcription. Tried for a writing line the on-device
+     * reader refused, including each letter run peeled off a mixed
+     * digit+letter line. Never for a digit or symbol, and never given the
+     * digit strokes of a mixed line. Absent for local documents and for
+     * non-owners; resolves null offline.
      */
     transcribe?: TranscribeInkFn;
     /** The writer's opt-in (read at commit AND at convert time). */
@@ -160,7 +162,15 @@ export class HandwritingController {
                     }
                     return;
                 }
-                if (lineHasDigit(group)) {
+                // A digit anywhere on the line used to leave the whole line as
+                // ink. Peel each digit off for on-device `$P` and keep each
+                // letter run as its own object (lexicon on device, otherwise
+                // one transcription). Digits are not in the letter groups.
+                const mixed = splitMixedLine(group);
+                if (mixed) {
+                    for (const piece of mixed) {
+                        await this.handleGroup(piece);
+                    }
                     return;
                 }
                 if (this.opts.transcribe && this.opts.isEnabled()) {

@@ -289,7 +289,10 @@ const medianHeight = (group: StrokeGroup): number => {
 
 /** Closed-set on-device recognizer over a flushed group. */
 export const recognizeOnDevice: Recognizer = (group: StrokeGroup): Recognition | null => {
-    if (group.kind === 'glyph') {
+    // A one-glyph letter run peeled off a mixed line is kind `line` so a
+    // refused letter can still be transcribed. Read it as a lone mark first
+    // (`p`, accent, fermata) so that path does not send symbols to Gemini.
+    if (group.kind === 'glyph' || group.glyphs.length === 1) {
         const glyph = group.glyphs[0];
         if (!glyph) {
             return null;
@@ -320,21 +323,37 @@ export const recognizeOnDevice: Recognizer = (group: StrokeGroup): Recognition |
     return combinedStemGlyph(group);
 };
 
-/** True when any glyph of a writing line classifies as a fingering digit. */
-export const lineHasDigit = (group: StrokeGroup): boolean => {
-    if (group.kind !== 'line') {
-        return false;
+const unionBox = (glyphs: Glyph[]): Glyph['box'] => {
+    let box = glyphs[0]!.box;
+    for (const glyph of glyphs.slice(1)) {
+        box = {
+            x0: Math.min(box.x0, glyph.box.x0),
+            y0: Math.min(box.y0, glyph.box.y0),
+            x1: Math.max(box.x1, glyph.box.x1),
+            y1: Math.max(box.y1, glyph.box.y1),
+        };
     }
-    return group.glyphs.some((glyph) => {
-        const match = classifyGlyph(glyphStrokes(glyph, group.aspect));
-        return match !== null && isDigit(match.cls);
-    });
+    return box;
+};
+
+const pieceFrom = (group: StrokeGroup, glyphs: Glyph[], kind: StrokeGroup['kind']): StrokeGroup => ({
+    page: group.page,
+    color: group.color,
+    aspect: group.aspect,
+    glyphs,
+    kind,
+    box: unionBox(glyphs),
+});
+
+const glyphIsDigit = (group: StrokeGroup, glyph: Glyph): boolean => {
+    const match = classifyGlyph(glyphStrokes(glyph, group.aspect));
+    return match !== null && isDigit(match.cls);
 };
 
 /**
  * Chord/scale fingerings grouped as one writing line: split into one glyph
- * group each so they never become a Gemini `"12"` note. Null when the line
- * is not a pure digit run (mixed ink stays ink; letters may transcribe).
+ * group each so they never become a Gemini `"12"` note. Null when any glyph
+ * is not a digit — a mixed line is `splitMixedLine`, not one ink blob.
  */
 export const splitDigitRun = (group: StrokeGroup): StrokeGroup[] | null => {
     if (group.kind !== 'line' || group.glyphs.length < 2) {
@@ -342,18 +361,52 @@ export const splitDigitRun = (group: StrokeGroup): StrokeGroup[] | null => {
     }
     const pieces: StrokeGroup[] = [];
     for (const glyph of group.glyphs) {
-        const match = classifyGlyph(glyphStrokes(glyph, group.aspect));
-        if (!match || !isDigit(match.cls)) {
+        if (!glyphIsDigit(group, glyph)) {
             return null;
         }
-        pieces.push({
-            page: group.page,
-            color: group.color,
-            aspect: group.aspect,
-            glyphs: [glyph],
-            kind: 'glyph',
-            box: glyph.box,
-        });
+        pieces.push(pieceFrom(group, [glyph], 'glyph'));
     }
+    return pieces;
+};
+
+/**
+ * A writing line that mixes fingering digits with letters or other marks.
+ * Each digit becomes its own glyph group (on-device `$P`, never Gemini).
+ * Each contiguous non-digit run becomes one writing line, even when it is a
+ * single glyph, so the letter half converts instead of the whole line staying
+ * ink. Digit strokes are not included in those runs.
+ *
+ * Null when there is no digit to peel, or every glyph is a digit (the caller
+ * uses `splitDigitRun` for that).
+ */
+export const splitMixedLine = (group: StrokeGroup): StrokeGroup[] | null => {
+    if (group.kind !== 'line' || group.glyphs.length < 2) {
+        return null;
+    }
+    const digitAt = group.glyphs.map((glyph) => glyphIsDigit(group, glyph));
+    if (!digitAt.some(Boolean) || digitAt.every(Boolean)) {
+        return null;
+    }
+    const pieces: StrokeGroup[] = [];
+    let letters: Glyph[] = [];
+    const flushLetters = () => {
+        if (letters.length === 0) {
+            return;
+        }
+        // Kind `line` even for one glyph: a refused letter still reaches
+        // transcription. `recognizeOnDevice` reads a one-glyph line as a lone
+        // mark first, so `p` / accent / fermata stay on device.
+        pieces.push(pieceFrom(group, letters, 'line'));
+        letters = [];
+    };
+    group.glyphs.forEach((glyph, index) => {
+        if (digitAt[index]) {
+            flushLetters();
+            pieces.push(pieceFrom(group, [glyph], 'glyph'));
+            return;
+        }
+        letters.push(glyph);
+    });
+    flushLetters();
     return pieces;
 };

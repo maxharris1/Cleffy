@@ -4,8 +4,9 @@ import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
 import type { StrokeGroup } from '@/features/viewer/ink/handwriting/grouper';
 import { fontForRecognition, HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
+import { groupStrokeIds } from '@/features/viewer/ink/handwriting/grouper';
 import { groupFromHands, HANDS } from '@/features/viewer/ink/handwriting/recognizer/fixtures';
-import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
+import { ACCENT_TEXT, recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
 import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ASPECT, boxStroke, FakeTimers } from '@/features/viewer/ink/handwriting/testStrokes';
@@ -62,6 +63,32 @@ const write = async (controller: HandwritingController, annotation: Annotation) 
     await store.create(annotation);
     controller.onStrokeCommitted(annotation);
 };
+
+const writeGroup = async (controller: HandwritingController, group: StrokeGroup) => {
+    for (const glyph of group.glyphs) {
+        for (const stroke of glyph.strokes) {
+            await write(controller, {
+                id: stroke.id,
+                docId: DOC,
+                page: 0,
+                kind: 'stroke',
+                color: stroke.color,
+                payload: { pts: stroke.pts, w: stroke.w },
+                createdBy: null,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                deletedAt: null,
+                seq: 0,
+            });
+        }
+    }
+};
+
+const textsByX = () =>
+    texts()
+        .map((a) => ({ text: (a.payload as TextPayload).text, x: (a.payload as TextPayload).x }))
+        .sort((a, b) => a.x - b.x)
+        .map((a) => a.text);
 
 const texts = () => [...store.getPage(0).values()].filter((a) => a.kind === 'text');
 const strokes = () => [...store.getPage(0).values()].filter((a) => a.kind === 'stroke');
@@ -317,6 +344,66 @@ describe('HandwritingController', () => {
             .sort();
         expect(printed).toEqual(['1', '2']);
         expect(strokes()).toHaveLength(0);
+    });
+
+    it('splits 123 + a word: digits on device, one Gemini call for the letter run after the pause', async () => {
+        const transcribe = vi.fn<TranscribeInkFn>(async () => 'HI');
+        const controller = make(recognizeOnDevice, transcribe);
+        const group = groupFromHands([HANDS.one!, HANDS.two!, HANDS.three!, HANDS.m!, HANDS.m!]);
+        const digitIds = new Set(group.glyphs.slice(0, 3).flatMap((glyph) => glyph.strokes.map((s) => s.id)));
+        await writeGroup(controller, group);
+        expect(transcribe).not.toHaveBeenCalled();
+        timers.elapse(300);
+        await controller.settle();
+        expect(transcribe).not.toHaveBeenCalled();
+        expect(texts()).toHaveLength(0);
+        timers.elapse(700);
+        await controller.settle();
+
+        expect(transcribe).toHaveBeenCalledTimes(1);
+        const sent = transcribe.mock.calls[0]![0]!;
+        expect(sent.kind).toBe('line');
+        expect(sent.glyphs).toHaveLength(2);
+        const sentIds = groupStrokeIds(sent);
+        expect(sentIds.length).toBeGreaterThan(0);
+        expect(sentIds.some((id) => digitIds.has(id))).toBe(false);
+        expect(textsByX()).toEqual(['1', '2', '3', 'HI']);
+        expect(strokes()).toHaveLength(0);
+    });
+
+    it('keeps mf on device when it shares a line with a fingering, and does not send the digit', async () => {
+        const transcribe = vi.fn<TranscribeInkFn>(async () => 'mf');
+        const controller = make(recognizeOnDevice, transcribe);
+        await writeGroup(controller, groupFromHands([HANDS.one!, HANDS.m!, HANDS.f!]));
+        timers.fire();
+        await controller.settle();
+        expect(transcribe).not.toHaveBeenCalled();
+        expect(textsByX()).toEqual(['1', 'mf']);
+        expect(strokes()).toHaveLength(0);
+    });
+
+    it('converts an accent beside a digit on device and does not transcribe either', async () => {
+        const transcribe = vi.fn<TranscribeInkFn>(async () => 'nope');
+        const controller = make(recognizeOnDevice, transcribe);
+        await writeGroup(controller, groupFromHands([HANDS.three!, HANDS.accent!]));
+        timers.fire();
+        await controller.settle();
+        expect(transcribe).not.toHaveBeenCalled();
+        expect(textsByX()).toEqual(['3', ACCENT_TEXT]);
+        expect(strokes()).toHaveLength(0);
+    });
+
+    it('leaves the letter run as ink when transcription is unavailable', async () => {
+        const controller = make(recognizeOnDevice);
+        await writeGroup(controller, groupFromHands([HANDS.one!, HANDS.two!, HANDS.three!, HANDS.m!, HANDS.m!]));
+        timers.fire();
+        await controller.settle();
+        expect(textsByX()).toEqual(['1', '2', '3']);
+        expect(
+            strokes()
+                .map((s) => s.id)
+                .sort(),
+        ).toEqual(['g3', 'g4']);
     });
 
     it('converts without waiting for the music font to load', async () => {
