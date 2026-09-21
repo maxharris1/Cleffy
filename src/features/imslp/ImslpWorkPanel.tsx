@@ -59,7 +59,6 @@ export const ImslpWorkPanel = ({
     const [acceptedDisclaimer, setAcceptedDisclaimer] = useState(false);
 
     const recommended = useMemo(() => recommendEdition(work.editions), [work.editions]);
-    const catalogWork = work.editions.some(isCatalog);
 
     // Recommended first, then remaining importable editions, restricted last —
     // each group in IMSLP's own order.
@@ -70,20 +69,29 @@ export const ImslpWorkPanel = ({
         return [...(recommended ? [recommended] : []), ...importable, ...restricted];
     }, [work.editions, recommended]);
 
+    const catalogEditions = orderedEditions.filter(isCatalog);
+    const hasCatalog = catalogEditions.length > 0;
     const importableCount = work.editions.filter((e) => !isRestricted(e)).length;
     const noneImportable = work.editions.length > 0 && importableCount === 0;
     const catalogSelected = selected != null && isCatalog(selected);
 
-    const visibleEditions =
-        showAllEditions || orderedEditions.length <= EDITION_PREVIEW
-            ? orderedEditions
-            : orderedEditions.slice(0, EDITION_PREVIEW);
+    // Catalog hit: our PDF is the default; other IMSLP versions stay collapsed.
+    // Miss: the usual IMSLP preview (6), then expand.
+    const visibleEditions = (() => {
+        if (hasCatalog && !showAllEditions) {
+            return catalogEditions;
+        }
+        if (!hasCatalog && !showAllEditions && orderedEditions.length > EDITION_PREVIEW) {
+            return orderedEditions.slice(0, EDITION_PREVIEW);
+        }
+        return orderedEditions;
+    })();
 
     const hiddenCount = Math.max(0, orderedEditions.length - visibleEditions.length);
 
     const buttonLabel = (() => {
         if (download.kind === 'downloading') {
-            return catalogSelected || catalogWork ? 'Adding from library…' : 'Downloading from IMSLP…';
+            return catalogSelected ? 'Adding from library…' : 'Downloading from IMSLP…';
         }
         if (busy) {
             return 'Adding to library…';
@@ -96,8 +104,12 @@ export const ImslpWorkPanel = ({
         if (total === 0) {
             return null;
         }
-        if (catalogWork) {
-            const counts = `${total} in Cleffy's library`;
+        if (hasCatalog) {
+            const extra = total - catalogEditions.length;
+            const counts =
+                extra > 0
+                    ? `${catalogEditions.length} in Cleffy's library · ${extra} more on IMSLP`
+                    : `${catalogEditions.length} in Cleffy's library`;
             return recommended ? `${counts}. Recommended edition selected.` : `${counts}.`;
         }
         const counts = `${total} available — ${importableCount} downloadable directly`;
@@ -112,22 +124,7 @@ export const ImslpWorkPanel = ({
                 View on IMSLP
             </a>
 
-            {work.editions.length === 0 ? (
-                <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
-                    <p className="text-sm text-amber-950">This score is not in Cleffy's library yet.</p>
-                    <p className="mt-1 text-xs text-amber-900/80">
-                        Open the work on IMSLP, save the PDF, then choose it here. Cleffy does not fetch IMSLP
-                        files automatically.
-                    </p>
-                    <div className="mt-3 flex flex-wrap items-center gap-3">
-                        <a href={work.imslpUrl} target="_blank" rel="noreferrer" className={buttonClassName('primary', 'sm')}>
-                            Open on IMSLP
-                        </a>
-                        <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
-                    </div>
-                </div>
-            ) : (
-                <fieldset className="mt-4">
+            <fieldset className="mt-4">
                     <legend className="text-xs font-medium uppercase tracking-wide text-stone-500">
                         Choose a PDF edition
                     </legend>
@@ -210,7 +207,8 @@ export const ImslpWorkPanel = ({
                             Show all {orderedEditions.length} editions
                         </button>
                     ) : null}
-                    {showAllEditions && orderedEditions.length > EDITION_PREVIEW ? (
+                    {showAllEditions &&
+                    (hasCatalog ? orderedEditions.length > catalogEditions.length : orderedEditions.length > EDITION_PREVIEW) ? (
                         <button
                             type="button"
                             onClick={() => setShowAllEditions(false)}
@@ -220,7 +218,6 @@ export const ImslpWorkPanel = ({
                         </button>
                     ) : null}
                 </fieldset>
-            )}
 
             {noneImportable ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
@@ -238,9 +235,9 @@ export const ImslpWorkPanel = ({
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
                 </div>
-            ) : work.editions.length > 0 ? (
+            ) : (
                 <>
-                    {catalogWork ? null : (
+                    {work.editions.length > 0 && !catalogSelected ? (
                         <label className="mt-4 flex max-w-prose items-start gap-2.5">
                             <input
                                 type="checkbox"
@@ -251,28 +248,30 @@ export const ImslpWorkPanel = ({
                             />
                             <span className="text-xs leading-relaxed text-stone-600">{DISCLAIMER}</span>
                         </label>
-                    )}
+                    ) : null}
 
                     <div className="mt-4 flex flex-wrap items-center gap-3">
-                        <button
-                            type="button"
-                            onClick={() => onImportSelected(catalogWork || acceptedDisclaimer)}
-                            disabled={
-                                !selected ||
-                                importing ||
-                                work.editions.length === 0 ||
-                                (!catalogWork && !acceptedDisclaimer)
-                            }
-                            className={buttonClassName('primary', 'sm')}
-                        >
-                            {buttonLabel}
-                        </button>
+                        {work.editions.length > 0 ? (
+                            <button
+                                type="button"
+                                onClick={() => onImportSelected(catalogSelected || acceptedDisclaimer)}
+                                disabled={
+                                    !selected ||
+                                    importing ||
+                                    (!catalogSelected && !acceptedDisclaimer)
+                                }
+                                className={buttonClassName('primary', 'sm')}
+                            >
+                                {buttonLabel}
+                            </button>
+                        ) : null}
                         <a href={work.imslpUrl} target="_blank" rel="noreferrer" className={linkClassName}>
                             Open on IMSLP
                         </a>
+                        <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
                 </>
-            ) : null}
+            )}
 
             {download.kind === 'fallback' ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">

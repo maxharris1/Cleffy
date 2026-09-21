@@ -552,7 +552,87 @@ describe('ImslpBrowser', () => {
         });
     });
 
-    it('promotes Open on IMSLP and a file picker when the work is not in the catalog', async () => {
+    it('keeps the catalog PDF recommended and collapses other IMSLP editions behind expand', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Moonlight',
+            editions: [
+                {
+                    filename: 'moonlight-let.pdf',
+                    size: 442_963,
+                    mime: 'application/pdf',
+                    openUrl: 'https://imslp.org/wiki/Moonlight',
+                    license: 'cc',
+                    licenseLabel: 'CC-BY-SA',
+                    restriction: null,
+                    downloadable: true,
+                    source: 'catalog',
+                    pdfSha256: 'sha-moon',
+                    origin: 'mutopia',
+                    editorCredit: 'Stewart Holmes',
+                },
+                edition('imslp-scan.pdf', { source: 'imslp' }),
+                edition('other-scan.pdf', { source: 'imslp' }),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText(/1 in Cleffy's library · 2 more on IMSLP/);
+        expect(screen.getByText('In library')).toBeInTheDocument();
+        expect(screen.getByText('moonlight-let')).toBeInTheDocument();
+        expect(screen.queryByText('imslp-scan')).not.toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled();
+        expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
+
+        await userEvent.click(screen.getByRole('button', { name: 'Show all 3 editions' }));
+        expect(screen.getByText('imslp-scan')).toBeInTheDocument();
+        expect(screen.getByText('other-scan')).toBeInTheDocument();
+
+        await userEvent.click(screen.getByLabelText(/imslp-scan/));
+        expect(screen.getByRole('checkbox')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeDisabled();
+        await userEvent.click(screen.getByRole('checkbox'));
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+        await waitFor(() => {
+            expect(onImportImslp).toHaveBeenCalledWith('imslp-scan.pdf', work.title, true, undefined);
+        });
+    });
+
+    it('lists IMSLP editions on a catalog miss instead of an empty library card', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Für Elise, WoO 59 (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Fur_Elise',
+            editions: [edition('PMLP14377-Fur Elise WoO59.pdf'), edition('other-elise.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText('Choose a PDF edition');
+        expect(
+            screen.getByText('2 available — 2 downloadable directly. Recommended edition selected.'),
+        ).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeDisabled();
+        expect(screen.getByRole('checkbox')).toBeInTheDocument();
+        expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
+        expect(screen.queryByText(/not in Cleffy's library yet/)).not.toBeInTheDocument();
+        expect(screen.getAllByRole('radio')).toHaveLength(2);
+    });
+
+    it('keeps Open on IMSLP and a file picker as secondary actions when no editions arrived', async () => {
         const { screen } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
@@ -566,7 +646,8 @@ describe('ImslpBrowser', () => {
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
 
-        await screen.findByText(/not in Cleffy's library yet/);
+        await screen.findByText('Choose a PDF edition');
+        expect(screen.queryByText(/not in Cleffy's library yet/)).not.toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Open on IMSLP' })).toHaveAttribute('href', work.imslpUrl);
         expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();

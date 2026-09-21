@@ -34,6 +34,7 @@ interface Edition {
     licenseLabel: string | null;
     restriction: string | null;
     downloadable: boolean;
+    source?: 'catalog' | 'imslp';
 }
 
 interface LicenseRow {
@@ -151,9 +152,11 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'title is required' }, 400);
     }
 
+    const imslpUrl = workPageUrl(title);
+    const composer = parseComposerFromTitle(title);
+    let catalog: ReturnType<typeof catalogEditionsFromRows> = [];
+
     try {
-        const imslpUrl = workPageUrl(title);
-        const composer = parseComposerFromTitle(title);
         const admin = serviceClient();
         if (admin) {
             const { data } = await admin
@@ -163,27 +166,7 @@ Deno.serve(async (req) => {
                 )
                 .eq('work_title', title)
                 .in('licence_tag', [...SERVABLE_LICENCE_TAGS]);
-            const catalog = catalogEditionsFromRows((data ?? []) as PdPdfStoreRow[], imslpUrl);
-            if (catalog.length > 0) {
-                return jsonResponse({
-                    title,
-                    composer,
-                    imslpUrl,
-                    editions: catalog,
-                });
-            }
-        }
-
-        // Catalog miss: do not list IMSLP File: pages or fetch PDFs. The client
-        // promotes Open on IMSLP + a file picker. Live ImagefromIndex listing
-        // stays behind the same flag as the Edge PDF fetch stopgap.
-        if (Deno.env.get('IMSLP_EDGE_PDF_FETCH') !== '1') {
-            return jsonResponse({
-                title,
-                composer,
-                imslpUrl,
-                editions: [],
-            });
+            catalog = catalogEditionsFromRows((data ?? []) as PdPdfStoreRow[], imslpUrl);
         }
 
         const imagesData = (await mwFetch({
@@ -200,6 +183,9 @@ Deno.serve(async (req) => {
 
         const page = Object.values(imagesData.query?.pages ?? {})[0];
         if (!page || page.missing) {
+            if (catalog.length > 0) {
+                return jsonResponse({ title, composer, imslpUrl, editions: catalog });
+            }
             return jsonResponse({ error: 'Work not found on IMSLP' }, 404);
         }
 
@@ -269,6 +255,7 @@ Deno.serve(async (req) => {
                     size: info?.size ?? null,
                     mime: info?.mime ?? null,
                     openUrl: imagefromIndexUrl(filename),
+                    source: 'imslp',
                     ...licenseFields(filename),
                 });
             }
@@ -278,13 +265,19 @@ Deno.serve(async (req) => {
         const order = new Map(pdfTitles.map((f, idx) => [f, idx]));
         editions.sort((a, b) => (order.get(a.filename) ?? 0) - (order.get(b.filename) ?? 0));
 
+        const catalogNames = new Set(catalog.map((row) => row.filename.toLowerCase()));
+        const merged = [...catalog, ...editions.filter((edition) => !catalogNames.has(edition.filename.toLowerCase()))];
+
         return jsonResponse({
             title: page.title ?? title,
             composer: parseComposerFromTitle(page.title ?? title),
             imslpUrl: workPageUrl(page.title ?? title),
-            editions,
+            editions: merged,
         });
     } catch (err) {
+        if (catalog.length > 0) {
+            return jsonResponse({ title, composer, imslpUrl, editions: catalog });
+        }
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP work lookup failed' }, 502);
     }
 });
