@@ -142,6 +142,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const pageColumns = useViewerStore((s) => s.pageColumns);
     const spreadCover = useViewerStore((s) => s.spreadCover);
     const containerRef = useRef<HTMLDivElement | null>(null);
+    const inkRef = useRef<InkController | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
     const [renderScale, setRenderScale] = useState(view.scale);
     const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
@@ -364,6 +365,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             onFingeringSelect: (selection) => setFingeringSel(selection),
             onStrokeCommitted: (annotation) => handwriting.onStrokeCommitted(annotation),
         });
+        inkRef.current = ink;
 
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
             clampScroll(v, layoutRef.current, viewportSizeRef.current.width, viewportSizeRef.current.height);
@@ -480,6 +482,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             engine?.stop();
             controller.destroy();
             ink.destroy();
+            inkRef.current = null;
             handwriting.dispose();
         };
     }, [
@@ -568,10 +571,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         const trimmed = text.trim();
         const { existing } = textIntent;
         if (existing) {
-            if (!isTextPayload(existing.payload)) {
+            const live = annotationStore.get(existing.id);
+            const base = live && isTextPayload(live.payload) ? live.payload : existing.payload;
+            if (!isTextPayload(base)) {
                 return;
             }
-            const next = editedTextPayload(existing.payload, trimmed);
+            // Live payload keeps a font change made while this editor is open.
+            const next = editedTextPayload(base, trimmed);
             if (next === 'delete') {
                 void annotationStore.delete(existing.id);
             } else if (next !== 'unchanged') {
@@ -583,8 +589,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             return;
         }
         const now = new Date().toISOString();
+        const id = crypto.randomUUID();
         void annotationStore.create({
-            id: crypto.randomUUID(),
+            id,
             docId,
             page: textIntent.pageIndex,
             kind: 'text',
@@ -596,6 +603,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             deletedAt: null,
             seq: 0,
         });
+        inkRef.current?.selectTextNote(id, textIntent.pageIndex);
     };
 
     // Device pixels per CSS pixel for page bitmaps, reduced when everything
@@ -698,6 +706,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             intent={textIntent}
                             layout={textIntentLayout}
                             view={view}
+                            store={annotationStore}
                             onCommit={commitText}
                             onCancel={() => {
                                 textIntentHandled.current = true;

@@ -110,6 +110,22 @@ describe('PDF export of converted handwriting', () => {
         expect(content).not.toMatch(/<3F>\s+Tj/);
     });
 
+    it('sets a serif bold italic note in Times and still embeds Bravura for a styled mf', async () => {
+        const note = text('note', 'slow', 1);
+        note.payload = { ...note.payload, font: 'serif', bold: 1, italic: 1 };
+        const dynamic = text('mf', 'mf', 1);
+        dynamic.payload = { ...dynamic.payload, font: 'serif', bold: 1, italic: 1 };
+        const out = await flatten({
+            bytes: await blankPdf(),
+            annotations: [note, dynamic],
+            musicFont: musicFontBytes(),
+        });
+        const names = await fontNames(out);
+        expect(names).toContain('Times-BoldItalic');
+        expect(bravura(names).length).toBeGreaterThanOrEqual(1);
+        expect(names).not.toContain('Times-Roman');
+    });
+
     it('sets converted teaching words in the oblique face', async () => {
         const out = await flatten({
             bytes: await blankPdf(),

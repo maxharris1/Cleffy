@@ -53,13 +53,21 @@ export const fontForRecognition = (recognition: Recognition): { font: FontSpec; 
     const spec = textDrawSpec(recognition.text, true);
     if (spec.music) {
         if (isMusicFontReady()) {
-            return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: true };
+            return {
+                font: { family: spec.family, style: spec.style, weight: spec.weight },
+                text: spec.glyphs,
+                music: true,
+            };
         }
         void ensureMusicFontLoaded();
         // Match the canvas fallback: system-ui italic of the ASCII spelling.
         return { font: { family: SYSTEM_FONT_FAMILY, style: 'italic' }, text: recognition.text, music: false };
     }
-    return { font: { family: spec.family, style: spec.style }, text: spec.glyphs, music: false };
+    return {
+        font: { family: spec.family, style: spec.style, weight: spec.weight },
+        text: spec.glyphs,
+        music: false,
+    };
 };
 
 /**

@@ -104,6 +104,9 @@ interface ViewerStore extends PlaybackSlice {
     setPrintHandwriting: (printHandwriting: boolean) => void;
     setPageColumns: (pageColumns: PageColumns) => void;
     setSpreadCover: (spreadCover: boolean) => void;
+    /** Text note selected with the text tool, or null. Not annotation data — chrome only. */
+    selectedTextId: string | null;
+    setSelectedTextId: (selectedTextId: string | null) => void;
 }
 
 const INITIAL_VIEW: ViewState = { scale: 1, scrollX: 0, scrollY: 0 };
@@ -159,6 +162,8 @@ export const useViewerStore = create<ViewerStore>((set) => ({
         writeSpreadCover(spreadCover);
         set({ spreadCover });
     },
+    selectedTextId: null,
+    setSelectedTextId: (selectedTextId) => set({ selectedTextId }),
     ...INITIAL_PLAYBACK,
     setPlaybackStatus: (playbackStatus) => set({ playbackStatus }),
     setBpm: (bpm) => set({ bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(bpm))) }),

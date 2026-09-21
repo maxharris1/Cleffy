@@ -159,6 +159,7 @@ export class InkController {
                     const live = opts.store.get(selected.id);
                     if (!live || live.deletedAt || !isTextPayload(live.payload)) {
                         this.selectedText = null;
+                        this.publishSelection();
                     }
                     this.renderPageLive(pageIndex);
                 }
@@ -278,11 +279,23 @@ export class InkController {
 
     clearTextSelection(): void {
         const selected = this.selectedText;
-        if (!selected) {
+        this.selectedText = null;
+        this.publishSelection();
+        if (selected) {
+            this.renderPageLive(selected.pageIndex);
+        }
+    }
+
+    /** Select a text note so its box and the toolbar style controls show. */
+    selectTextNote(id: string, pageIndex: number): void {
+        if (useViewerStore.getState().tool !== 'text') {
             return;
         }
-        this.selectedText = null;
-        this.renderPageLive(selected.pageIndex);
+        const live = this.opts.store.get(id);
+        if (!live || live.deletedAt || !isTextPayload(live.payload)) {
+            return;
+        }
+        this.selectText(id, pageIndex);
     }
 
     private shouldInk(e: PointerEvent): boolean {
@@ -625,10 +638,19 @@ export class InkController {
     private selectText(id: string, pageIndex: number): void {
         const prev = this.selectedText;
         this.selectedText = { id, pageIndex };
+        this.publishSelection();
         if (prev && prev.pageIndex !== pageIndex) {
             this.renderPageLive(prev.pageIndex);
         }
         this.renderPageLive(pageIndex);
+    }
+
+    /** Keep the toolbar's selected-note id aligned with the text-tool selection. */
+    private publishSelection(): void {
+        const id = this.selectedText?.id ?? null;
+        if (useViewerStore.getState().selectedTextId !== id) {
+            useViewerStore.getState().setSelectedTextId(id);
+        }
     }
 
     /** Selection handle in viewport CSS coords, or null when nothing is selected/visible. */
@@ -714,8 +736,12 @@ export class InkController {
         scale.lastCommitAt = now;
         const layout = this.opts.getLayout().layouts[scale.pageIndex];
         const aspect = layout ? layout.height / layout.width : 1;
-        const spec = textDrawSpec(livePayload.text, livePayload.hw === 1);
-        const metrics = measureInkText(spec.glyphs, { family: spec.family, style: spec.style });
+        const spec = textDrawSpec(livePayload.text, livePayload.hw === 1, livePayload);
+        const metrics = measureInkText(spec.glyphs, {
+            family: spec.family,
+            style: spec.style,
+            weight: spec.weight,
+        });
         const y = scale.payload.y + (metrics.topInset * (scale.payload.size - size)) / aspect;
         void this.opts.store.update(scale.annotation.id, {
             payload: { ...livePayload, size, y: Math.min(1, Math.max(0, y)) },

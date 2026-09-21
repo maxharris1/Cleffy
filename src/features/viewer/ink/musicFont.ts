@@ -7,7 +7,7 @@ import {
     SYSTEM_FONT_FAMILY,
 } from '@/features/import/textFit';
 import type { Bbox } from '@/features/viewer/geometry';
-import { isTextPayload, type Annotation, type TextPayload } from '@/types/models';
+import { isTextPayload, type Annotation, type TextFont, type TextPayload } from '@/types/models';
 
 /**
  * The music-text face for converted handwriting. Typed notes are untouched:
@@ -22,6 +22,27 @@ import { isTextPayload, type Annotation, type TextPayload } from '@/types/models
 export const MUSIC_FONT_FAMILY = 'Bravura Text';
 /** Served from public/ — fetched on first use (canvas) and for PDF export. */
 export const MUSIC_FONT_URL = '/fonts/BravuraText.woff2';
+
+/**
+ * Serif for prose notes. Bodoni is already shipped for the app's display
+ * face (including italic); the default text face is already a sans, so
+ * there is no third family.
+ */
+export const SERIF_FONT_FAMILY = '"Bodoni Moda Variable", ui-serif, Georgia, "Times New Roman", serif';
+
+const proseFamily = (font: TextFont | undefined): string => {
+    switch (font) {
+        case 'serif':
+            return SERIF_FONT_FAMILY;
+        case 'sans':
+        case undefined:
+            return SYSTEM_FONT_FAMILY;
+        default: {
+            const unexpected: never = font;
+            return unexpected;
+        }
+    }
+};
 
 /** Dynamics / ornament tokens → SMuFL text-font glyphs. */
 const SMUFL_BY_TOKEN: Record<string, string> = {
@@ -55,7 +76,24 @@ export interface TextDrawSpec extends FontSpec {
     music: boolean;
 }
 
-export const textDrawSpec = (text: string, hw: boolean): TextDrawSpec => {
+/** Prose style carried on a text payload. Music tokens do not read it. */
+export type ProseStyle = Pick<TextPayload, 'font' | 'bold' | 'italic'>;
+
+const proseItalic = (text: string, hw: boolean, italic: ProseStyle['italic']): boolean => {
+    if (italic === 1) {
+        return true;
+    }
+    if (italic === 0) {
+        return false;
+    }
+    return hw && ITALIC_TOKENS.has(text);
+};
+
+/**
+ * What to paint. A converted dynamic, accent, or fermata stays on the music
+ * face no matter which prose font, bold, or italic is stored beside it.
+ */
+export const textDrawSpec = (text: string, hw: boolean, prose: ProseStyle = {}): TextDrawSpec => {
     if (hw) {
         const mapped = SMUFL_BY_TOKEN[text];
         if (mapped !== undefined) {
@@ -64,11 +102,70 @@ export const textDrawSpec = (text: string, hw: boolean): TextDrawSpec => {
         if (isSmufl(text)) {
             return { family: MUSIC_FONT_FAMILY, style: 'normal', glyphs: text, music: true };
         }
-        if (ITALIC_TOKENS.has(text)) {
-            return { family: SYSTEM_FONT_FAMILY, style: 'italic', glyphs: text, music: false };
+    }
+    const italic = proseItalic(text, hw, prose.italic);
+    const bold = prose.bold === 1;
+    return {
+        family: proseFamily(prose.font),
+        style: italic ? 'italic' : 'normal',
+        ...(bold ? { weight: 'bold' as const } : {}),
+        glyphs: text,
+        music: false,
+    };
+};
+
+/** True when this note is a music-font token, so prose style must not change its face. */
+export const ignoresProseFont = (payload: TextPayload): boolean => textDrawSpec(payload.text, payload.hw === 1).music;
+
+export type TextStylePatch = {
+    font?: TextFont;
+    bold?: boolean;
+    italic?: boolean;
+};
+
+/**
+ * Apply a font, bold, or italic change. Music tokens are returned unchanged.
+ * Returns the same object when the stored style already matches.
+ */
+export const styledTextPayload = (payload: TextPayload, patch: TextStylePatch): TextPayload => {
+    if (ignoresProseFont(payload)) {
+        return payload;
+    }
+    const next: TextPayload = { ...payload };
+    if (patch.font !== undefined) {
+        if (patch.font === 'serif') {
+            next.font = 'serif';
+        } else if (payload.font === 'sans') {
+            next.font = 'sans';
+        } else {
+            delete next.font;
         }
     }
-    return { family: SYSTEM_FONT_FAMILY, style: 'normal', glyphs: text, music: false };
+    if (patch.bold !== undefined) {
+        if (patch.bold) {
+            next.bold = 1;
+        } else {
+            delete next.bold;
+        }
+    }
+    if (patch.italic !== undefined) {
+        const implicitItalic = payload.hw === 1 && ITALIC_TOKENS.has(payload.text);
+        if (patch.italic) {
+            if (implicitItalic) {
+                delete next.italic;
+            } else {
+                next.italic = 1;
+            }
+        } else if (implicitItalic) {
+            next.italic = 0;
+        } else {
+            delete next.italic;
+        }
+    }
+    if (next.font === payload.font && next.bold === payload.bold && next.italic === payload.italic) {
+        return payload;
+    }
+    return next;
 };
 
 /** Readable spelling for the text editor (SMuFL marks are tofu in system-ui). */
@@ -100,6 +197,15 @@ export const editedTextPayload = (existing: TextPayload, trimmed: string): 'dele
     if (existing.sf === 1) {
         next.sf = 1;
     }
+    if (existing.font !== undefined) {
+        next.font = existing.font;
+    }
+    if (existing.bold === 1) {
+        next.bold = 1;
+    }
+    if (existing.italic === 0 || existing.italic === 1) {
+        next.italic = existing.italic;
+    }
     return next;
 };
 
@@ -113,11 +219,12 @@ export const pdfFallbackGlyphs = (text: string, spec: TextDrawSpec): string => {
 
 /** Does this annotation draw with the music face (so an export must embed it)? */
 export const annotationNeedsMusicFont = (annotation: Annotation): boolean =>
-    isTextPayload(annotation.payload) && textDrawSpec(annotation.payload.text, annotation.payload.hw === 1).music;
+    isTextPayload(annotation.payload) &&
+    textDrawSpec(annotation.payload.text, annotation.payload.hw === 1, annotation.payload).music;
 
 /** Largest `size` a text may be scaled to: music glyphs fill a fraction of their em, so they get more room. */
 export const maxTextSizeFor = (payload: TextPayload): number =>
-    textDrawSpec(payload.text, payload.hw === 1).music ? MAX_MUSIC_TEXT_SIZE : MAX_TEXT_SIZE;
+    textDrawSpec(payload.text, payload.hw === 1, payload).music ? MAX_MUSIC_TEXT_SIZE : MAX_TEXT_SIZE;
 
 /** Line pitch as a multiple of the font size (shared by renderer, hit test and export). */
 export const TEXT_LINE_HEIGHT = 1.25;
@@ -129,14 +236,18 @@ export const TEXT_LINE_HEIGHT = 1.25;
  * the box of its letters.
  */
 export const textBoundsNorm = (payload: TextPayload, aspect: number): Bbox => {
-    const { x, y, text, size, hw } = payload;
-    const spec = textDrawSpec(text, hw === 1);
+    const { x, y, size, hw } = payload;
+    const spec = textDrawSpec(payload.text, hw === 1, payload);
     const lines = spec.glyphs.split('\n');
     let width = 0;
     let top = Infinity;
     let bottom = -Infinity;
     lines.forEach((line, i) => {
-        const m = measureInkText(line === '' ? ' ' : line, { family: spec.family, style: spec.style });
+        const m = measureInkText(line === '' ? ' ' : line, {
+            family: spec.family,
+            style: spec.style,
+            weight: spec.weight,
+        });
         width = Math.max(width, m.widthRatio);
         const lineTop = i * TEXT_LINE_HEIGHT + m.topInset;
         top = Math.min(top, lineTop);

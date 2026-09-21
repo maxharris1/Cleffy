@@ -1,9 +1,10 @@
 import { useSyncExternalStore, type ReactNode } from 'react';
 
 import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
+import { ignoresProseFont, SERIF_FONT_FAMILY, styledTextPayload, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import { STROKE_COLORS, useViewerStore } from '@/state/store';
-import type { StrokeWidthKey, Tool } from '@/types/models';
+import { isTextPayload, type Annotation, type StrokeWidthKey, type TextFont, type Tool } from '@/types/models';
 import { PointerIcon, PrintHandwritingIcon, RedoIcon, UndoIcon } from '@/ui/icons';
 
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
@@ -25,6 +26,25 @@ export interface ToolbarProps {
     store: AnnotationStore;
 }
 
+/** The text note the text tool has selected, or null. */
+const useSelectedText = (store: AnnotationStore): Annotation | null => {
+    const selectedTextId = useViewerStore((s) => s.selectedTextId);
+    const tool = useViewerStore((s) => s.tool);
+    return useSyncExternalStore(
+        (cb) => store.subscribe(() => cb()),
+        () => {
+            if (tool !== 'text' || !selectedTextId) {
+                return null;
+            }
+            const annotation = store.get(selectedTextId);
+            if (!annotation || annotation.deletedAt || !isTextPayload(annotation.payload)) {
+                return null;
+            }
+            return annotation;
+        },
+    );
+};
+
 /**
  * Floating tool palette. Desktop: top-center. Phones: bottom (thumb-reachable),
  * above the safe area. Hidden entirely for view-only roles (M3).
@@ -42,6 +62,26 @@ export const Toolbar = ({ store }: ToolbarProps) => {
         () => `${store.canUndo}|${store.canRedo}`,
     );
     const [canUndo, canRedo] = undoState.split('|').map((v) => v === 'true');
+
+    const selectedText = useSelectedText(store);
+    const selectedPayload = selectedText && isTextPayload(selectedText.payload) ? selectedText.payload : null;
+    const musicFace = selectedPayload !== null && ignoresProseFont(selectedPayload);
+    const showType = selectedPayload !== null;
+    const face: TextFont = selectedPayload?.font === 'serif' ? 'serif' : 'sans';
+    const boldOn = selectedPayload?.bold === 1;
+    const italicOn =
+        selectedPayload !== null &&
+        textDrawSpec(selectedPayload.text, selectedPayload.hw === 1, selectedPayload).style === 'italic';
+
+    const applyStyle = (patch: { font?: TextFont; bold?: boolean; italic?: boolean }) => {
+        if (!selectedText || !selectedPayload) {
+            return;
+        }
+        const next = styledTextPayload(selectedPayload, patch);
+        if (next !== selectedPayload) {
+            void store.update(selectedText.id, { payload: next });
+        }
+    };
 
     const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text';
     const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser';
@@ -95,6 +135,67 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                                 />
                             </button>
                         ))}
+                    </>
+                ) : null}
+
+                {showType && selectedPayload ? (
+                    <>
+                        <div className="mx-1 h-6 w-px bg-stone-200" />
+                        <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500 sm:inline">
+                            Font
+                        </span>
+                        {(['sans', 'serif'] as const).map((option) => (
+                            <button
+                                key={option}
+                                type="button"
+                                title={
+                                    musicFace
+                                        ? 'Music symbols stay on the music font'
+                                        : option === 'serif'
+                                          ? 'Serif'
+                                          : 'Sans'
+                                }
+                                aria-label={option === 'serif' ? 'Font Serif' : 'Font Sans'}
+                                aria-pressed={face === option}
+                                disabled={musicFace}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => applyStyle({ font: option })}
+                                style={option === 'serif' ? { fontFamily: SERIF_FONT_FAMILY } : undefined}
+                                className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition disabled:opacity-40 ${
+                                    face === option ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
+                                }`}
+                            >
+                                {option === 'serif' ? 'Serif' : 'Sans'}
+                            </button>
+                        ))}
+                        <button
+                            type="button"
+                            title={musicFace ? 'Music symbols stay on the music font' : 'Bold'}
+                            aria-label="Bold"
+                            aria-pressed={boldOn}
+                            disabled={musicFace}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => applyStyle({ bold: !boldOn })}
+                            className={`flex h-8 w-8 items-center justify-center rounded-xl text-sm font-bold transition disabled:opacity-40 ${
+                                boldOn ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
+                            }`}
+                        >
+                            B
+                        </button>
+                        <button
+                            type="button"
+                            title={musicFace ? 'Music symbols stay on the music font' : 'Italic'}
+                            aria-label="Italic"
+                            aria-pressed={italicOn}
+                            disabled={musicFace}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => applyStyle({ italic: !italicOn })}
+                            className={`flex h-8 w-8 items-center justify-center rounded-xl text-sm italic transition disabled:opacity-40 ${
+                                italicOn ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
+                            }`}
+                        >
+                            I
+                        </button>
                     </>
                 ) : null}
 

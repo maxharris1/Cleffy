@@ -100,8 +100,12 @@ export const textPayloadFromBbox = (
 // footprint, and a music-font dynamic (mf) has metrics of its own. These
 // measure the ACTUAL string in the ACTUAL font.
 
-/** CSS font shorthand minus the size, e.g. `italic system-ui` or `"Bravura Text"`. */
-export type FontSpec = { family: string; style?: 'normal' | 'italic' };
+/** CSS font shorthand minus the size, e.g. `italic bold system-ui` or `"Bravura Text"`. */
+export type FontSpec = { family: string; style?: 'normal' | 'italic'; weight?: 'normal' | 'bold' };
+
+/** Canvas `font` string. Style and weight both default to normal. */
+export const canvasFont = (font: FontSpec, px: number): string =>
+    `${font.style ?? 'normal'} ${font.weight ?? 'normal'} ${px}px ${font.family}`;
 
 export const SYSTEM_FONT_FAMILY = 'system-ui, -apple-system, sans-serif';
 
@@ -138,7 +142,7 @@ const metricsCache = new Map<string, InkTextMetrics>();
 
 /** Measure one string in one font (probe canvas, cached; deterministic fallback). */
 export const measureInkText = (text: string, font: FontSpec = { family: SYSTEM_FONT_FAMILY }): InkTextMetrics => {
-    const key = `${font.style ?? 'normal'}|${font.family}|${text}`;
+    const key = `${font.style ?? 'normal'}|${font.family}|${font.weight ?? 'normal'}|${text}`;
     const hit = metricsCache.get(key);
     if (hit) {
         return hit;
@@ -151,7 +155,7 @@ export const measureInkText = (text: string, font: FontSpec = { family: SYSTEM_F
         const ctx = canvas.getContext('2d');
         if (ctx) {
             const probePx = 100;
-            ctx.font = `${font.style ?? 'normal'} ${probePx}px ${font.family}`;
+            ctx.font = canvasFont(font, probePx);
             // Measure against the SAME baseline the renderer draws with: the
             // glyph box then comes back relative to the 'top' anchor itself
             // (ascent is negative when the ink starts below it), with no

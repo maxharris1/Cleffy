@@ -1,6 +1,6 @@
 import { getStroke } from 'perfect-freehand';
 
-import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
+import { canvasFont, SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import { isTextPayload, type Annotation, type StrokePayload } from '@/types/models';
 
@@ -91,7 +91,7 @@ export const drawAnnotation = (
     if (isTextPayload(annotation.payload)) {
         const { x, y, text, size, hw } = annotation.payload;
         const fontPx = Math.max(6, size * pageWpx);
-        let spec = textDrawSpec(text, hw === 1);
+        let spec = textDrawSpec(text, hw === 1, annotation.payload);
         if (spec.music && !isMusicFontReady()) {
             // Canvas never triggers a CSS font load; ask for it and draw the
             // ASCII spelling meanwhile (the ready hook repaints the page).
@@ -100,7 +100,7 @@ export const drawAnnotation = (
         }
         ctx.save();
         ctx.fillStyle = annotation.color;
-        ctx.font = `${spec.style ?? 'normal'} ${fontPx}px ${spec.family}`;
+        ctx.font = canvasFont(spec, fontPx);
         ctx.textBaseline = 'top';
         const lines = spec.glyphs.split('\n');
         lines.forEach((line, i) => {

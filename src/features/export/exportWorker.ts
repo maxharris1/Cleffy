@@ -14,7 +14,13 @@ import {
     sanitizeWinAnsi,
     viewportToPdfPoint,
 } from '@/features/export/pdfMapping';
-import { annotationNeedsMusicFont, pdfFallbackGlyphs, textDrawSpec } from '@/features/viewer/ink/musicFont';
+import {
+    annotationNeedsMusicFont,
+    pdfFallbackGlyphs,
+    SERIF_FONT_FAMILY,
+    textDrawSpec,
+    type TextDrawSpec,
+} from '@/features/viewer/ink/musicFont';
 import { FREEHAND_OPTIONS, getSvgPathFromStroke, HIGHLIGHT_ALPHA } from '@/features/viewer/ink/strokeRenderer';
 import { isTextPayload, type Annotation } from '@/types/models';
 
@@ -37,6 +43,37 @@ export type ExportResponse = { ok: true; bytes: Uint8Array } | { ok: false; erro
 /** Baseline drop (fraction of font size) below the 'top' anchor for the standard faces. */
 const STANDARD_ASCENT = 0.9;
 
+/** PDF standard face matching a prose draw spec. A missing music face stays oblique Helvetica. */
+const standardFontFor = (spec: TextDrawSpec, musicFallback: boolean): StandardFonts => {
+    if (musicFallback) {
+        return StandardFonts.HelveticaOblique;
+    }
+    const italic = spec.style === 'italic';
+    const bold = spec.weight === 'bold';
+    if (spec.family === SERIF_FONT_FAMILY) {
+        if (bold && italic) {
+            return StandardFonts.TimesRomanBoldItalic;
+        }
+        if (bold) {
+            return StandardFonts.TimesRomanBold;
+        }
+        if (italic) {
+            return StandardFonts.TimesRomanItalic;
+        }
+        return StandardFonts.TimesRoman;
+    }
+    if (bold && italic) {
+        return StandardFonts.HelveticaBoldOblique;
+    }
+    if (bold) {
+        return StandardFonts.HelveticaBold;
+    }
+    if (italic) {
+        return StandardFonts.HelveticaOblique;
+    }
+    return StandardFonts.Helvetica;
+};
+
 export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: ExportRequest): Promise<Uint8Array> => {
     // Some IMSLP scans are owner-password encrypted; loading still works.
     const source = await PDFDocument.load(bytes, { ignoreEncryption: true });
@@ -52,8 +89,6 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
                   single.addPage(copied);
                   return single;
               })();
-    const font = await doc.embedFont(StandardFonts.Helvetica);
-    const italic = await doc.embedFont(StandardFonts.HelveticaOblique);
     let music: { font: PDFFont; ascent: number } | null = null;
     if (musicFont && annotations.some(annotationNeedsMusicFont)) {
         doc.registerFontkit(fontkit);
@@ -63,6 +98,23 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
             font: await doc.embedFont(bytes, { subset: true }),
             ascent: parsed.ascent / parsed.unitsPerEm,
         };
+    }
+    const standardFonts = new Map<StandardFonts, PDFFont>();
+    for (const annotation of annotations) {
+        if (annotation.deletedAt || !isTextPayload(annotation.payload)) {
+            continue;
+        }
+        if (pageIndex !== undefined && annotation.page !== pageIndex) {
+            continue;
+        }
+        const spec = textDrawSpec(annotation.payload.text, annotation.payload.hw === 1, annotation.payload);
+        if (spec.music && music !== null) {
+            continue;
+        }
+        const name = standardFontFor(spec, spec.music);
+        if (!standardFonts.has(name)) {
+            standardFonts.set(name, await doc.embedFont(name));
+        }
     }
     const pages = doc.getPages();
 
@@ -92,13 +144,16 @@ export const flatten = async ({ bytes, annotations, pageIndex, musicFont }: Expo
         if (isTextPayload(annotation.payload)) {
             const { x, y, text, size, hw } = annotation.payload;
             const fontPx = size * vw;
-            const spec = textDrawSpec(text, hw === 1);
+            const spec = textDrawSpec(text, hw === 1, annotation.payload);
             // Same face as the screen: music glyphs when the font is embedded,
-            // italic Helvetica when a music token has no face (matches canvas),
-            // oblique for italic teaching words, else Helvetica. The baseline
-            // drop follows the chosen face's ascent so tops line up.
+            // oblique Helvetica when a music token has no face (matches canvas),
+            // Times for a serif prose note, bold/oblique when asked, else
+            // Helvetica. The baseline drop follows the chosen face's ascent.
             const useMusic = spec.music && music !== null;
-            const drawFont = useMusic ? music!.font : spec.style === 'italic' || spec.music ? italic : font;
+            const drawFont = useMusic ? music!.font : standardFonts.get(standardFontFor(spec, spec.music));
+            if (!drawFont) {
+                continue;
+            }
             const ascent = useMusic ? music!.ascent : STANDARD_ASCENT;
             const source = useMusic ? spec.glyphs : pdfFallbackGlyphs(text, spec);
             const lines = (useMusic ? source : sanitizeWinAnsi(source)).split('\n');
