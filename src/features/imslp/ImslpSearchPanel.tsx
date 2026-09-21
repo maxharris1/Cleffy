@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { displayWorkTitle, searchTokens, splitSearchResults } from '@/features/imslp/imslpDisplay';
-import { searchImslp, type ImslpPeriod, type ImslpSearchHit } from '@/features/imslp/imslpApi';
+import { lookupCatalogTitles, searchImslp, type ImslpPeriod, type ImslpSearchHit } from '@/features/imslp/imslpApi';
 import { ImslpScoreCard } from '@/features/imslp/ImslpScoreCard';
 import { readImslpView, writeImslpView, type ImslpView } from '@/features/imslp/imslpPrefs';
 import {
@@ -115,6 +115,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const [ignoreQueryPeriod, setIgnoreQueryPeriod] = useState(false);
     const [sort, setSort] = useState<SearchSort>('relevance');
     const [view, setView] = useState<ImslpView>(readImslpView);
+    const [catalogTitles, setCatalogTitles] = useState<Set<string>>(() => new Set());
 
     const seqRef = useRef(0);
     const abortRef = useRef<AbortController | null>(null);
@@ -150,6 +151,22 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const requestKey = (nextQ: string, nextFilters: unknown, nextSort: SearchSort) =>
         `${nextQ}\0${JSON.stringify(nextFilters)}\0${nextSort}`;
     const liveError = searchError && errorKey === requestKey(q, filters, sort) ? searchError : null;
+
+    useEffect(() => {
+        let cancelled = false;
+        lookupCatalogTitles(POPULAR_WORKS.map((work) => work.title))
+            .then((titles) => {
+                if (!cancelled) {
+                    setCatalogTitles(titles);
+                }
+            })
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const isInCatalog = (title: string, hitFlag?: boolean): boolean => hitFlag === true || catalogTitles.has(title);
 
     const applyResponse = (
         response: Awaited<ReturnType<typeof searchImslp>>,
@@ -448,6 +465,9 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                     {composer ? (
                         <span className="text-xs text-stone-500">{highlightMatches(composer, tokens)}</span>
                     ) : null}
+                    {isInCatalog(hit.title, hit.inCatalog) ? (
+                        <span className="text-[0.65rem] font-medium text-emerald-700">In library</span>
+                    ) : null}
                     {hit.snippet ? (
                         <span className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-stone-500/90">
                             {hit.snippet}
@@ -469,6 +489,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 coverComposer={composer}
                 title={highlightMatches(parsed.work, tokens)}
                 composer={composer ? highlightMatches(composer, tokens) : null}
+                inCatalog={isInCatalog(hit.title, hit.inCatalog)}
                 description={hit.snippet || null}
                 disabled={disabled}
                 onClick={() => onSelectTitle(hit.title)}
@@ -621,6 +642,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                                             coverComposer={null}
                                             title={item.label}
                                             tags={popularWorkTags(item)}
+                                            inCatalog={isInCatalog(item.title)}
                                             description={item.note ?? null}
                                             disabled={disabled}
                                             onClick={() => onSelectTitle(item.title)}
@@ -637,6 +659,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                                                 <span className="text-xs text-stone-500">
                                                     {item.composer}
                                                     {item.note ? ` · ${item.note}` : ''}
+                                                    {isInCatalog(item.title) ? ' · In library' : ''}
                                                 </span>
                                             </button>
                                         </li>

@@ -235,14 +235,16 @@ export const uploadDocument = async (
 };
 
 /**
- * IMSLP import: create the documents row, let Edge fetch+store the PDF, then
- * hydrate Dexie from Storage (one download leg — no Edge→browser PDF proxy).
+ * IMSLP / catalog import: create the documents row, let Edge copy from
+ * `pd-pdfs` (catalog hit) or fetch+store the PDF, then hydrate Dexie from
+ * Storage (one download leg — no Edge→browser PDF proxy).
  */
 export const importDocumentFromImslp = async (
     imslpFilename: string,
     workTitle: string,
     ownerId: string,
     acceptedDisclaimer: boolean,
+    pdfSha256?: string,
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
     noteLibraryMutation();
     const supabase = getSupabase();
@@ -275,7 +277,7 @@ export const importDocumentFromImslp = async (
     };
 
     try {
-        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle);
+        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle, pdfSha256);
         if (!result.ok) {
             await rollback();
             return { ok: false, fallback: result };

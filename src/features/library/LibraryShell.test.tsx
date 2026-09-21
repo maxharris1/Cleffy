@@ -46,6 +46,10 @@ vi.mock('@/features/library/documentsService', () => ({
     uploadDocument: (...args: unknown[]) => uploadDocument(...args),
 }));
 
+vi.mock('@/features/playback/scoreAnalysisService', () => ({
+    requestScoreAnalysis: vi.fn().mockResolvedValue({ ok: true }),
+}));
+
 const readCachedLibraryList = vi.fn();
 const prependCachedLibraryDocument = vi.fn();
 vi.mock('@/features/library/libraryBootstrap', () => ({

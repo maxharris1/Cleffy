@@ -22,6 +22,7 @@ export interface ImslpBrowserProps {
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
+        pdfSha256?: string,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
@@ -142,7 +143,12 @@ export const ImslpBrowser = ({
         setError(null);
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(selected.filename, work.title, acceptedDisclaimer);
+            const result = await onImportImslp(
+                selected.filename,
+                work.title,
+                acceptedDisclaimer,
+                selected.pdfSha256,
+            );
             if (!result.ok) {
                 dispatch({
                     type: 'download',
