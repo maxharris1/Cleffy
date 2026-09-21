@@ -4,14 +4,17 @@ import {
     catalogAttribution,
     catalogEditionsFromRows,
     catalogRowScore,
+    catalogTitlesFromSeedJoin,
     isServableLicence,
     licenseClassFromTag,
     licenseLabelFromTag,
     matchStoreRow,
+    mergeStoreRowsBySha,
     originLabel,
     pdObjectPath,
     safeObjectName,
     sortCatalogRows,
+    uniquePdfShas,
     type PdPdfStoreRow,
 } from '../../supabase/functions/_shared/pdPdfCatalog';
 
@@ -131,6 +134,54 @@ describe('matchStoreRow', () => {
         expect(
             matchStoreRow([row({ pdf_sha256: 'bad', licence_tag: 'CC-BY-NC' })], { pdfSha256: 'bad' }),
         ).toBeNull();
+    });
+});
+
+describe('seed-join catalog presence', () => {
+    const furElise = 'Für Elise, WoO 59 (Beethoven, Ludwig van)';
+    const bagatelle = 'Bagatelle in F minor (Beethoven, Ludwig van)';
+    const clair = 'Clair de lune (Debussy, Claude)';
+    const suite = 'Suite bergamasque, CD 82 (Debussy, Claude)';
+    const shaElise = 'sha-elise';
+    const shaClair = 'sha-clair';
+
+    it('treats a fetched seed title as in-catalog when its sha is in the store, even if store.work_title differs', () => {
+        expect(
+            catalogTitlesFromSeedJoin(
+                [furElise, bagatelle, clair],
+                [
+                    { work_title: furElise, pdf_sha256: shaElise },
+                    { work_title: bagatelle, pdf_sha256: shaElise },
+                    { work_title: clair, pdf_sha256: shaClair },
+                    { work_title: suite, pdf_sha256: shaClair },
+                ],
+                [shaElise, shaClair],
+            ).sort(),
+        ).toEqual([bagatelle, clair, furElise].sort());
+    });
+
+    it('does not mark a fetched title whose sha never landed in the store', () => {
+        expect(
+            catalogTitlesFromSeedJoin(
+                [furElise],
+                [{ work_title: furElise, pdf_sha256: 'missing' }],
+                [shaElise],
+            ),
+        ).toEqual([]);
+    });
+
+    it('merges store rows by sha so an alias title and the stored title share one PDF', () => {
+        const stored = row({
+            pdf_sha256: shaElise,
+            filename: 'fur_Elise_WoO59-let.pdf',
+            work_title: furElise,
+        });
+        const merged = mergeStoreRowsBySha([[], [stored]]);
+        expect(merged).toHaveLength(1);
+        expect(merged[0]?.filename).toBe('fur_Elise_WoO59-let.pdf');
+        expect(uniquePdfShas([{ pdf_sha256: shaElise }, { pdf_sha256: shaElise }, { pdf_sha256: null }])).toEqual([
+            shaElise,
+        ]);
     });
 });
 

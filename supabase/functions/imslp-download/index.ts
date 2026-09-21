@@ -17,6 +17,7 @@ import {
     isDownloadable,
     parseWorkPageLicenses,
 } from '../_shared/imslpLicense.ts';
+import { STORE_ROW_SELECT, loadStoreRowsForCatalogTitle } from '../_shared/catalogTitleLookup.ts';
 import {
     matchStoreRow,
     pdObjectPath,
@@ -25,9 +26,6 @@ import {
 import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const STORE_SELECT =
-    'pdf_sha256, filename, work_title, origin, source_url, licence_tag, editor_credit, us_pd, byte_length, page_count';
 
 const edgePdfFetchEnabled = (): boolean => Deno.env.get('IMSLP_EDGE_PDF_FETCH') === '1';
 
@@ -132,14 +130,13 @@ Deno.serve(async (req) => {
 
     const loadStoreRows = async (): Promise<PdPdfStoreRow[]> => {
         if (pdfSha256) {
-            const { data } = await admin.from('pd_pdf_store').select(STORE_SELECT).eq('pdf_sha256', pdfSha256).limit(1);
+            const { data } = await admin.from('pd_pdf_store').select(STORE_ROW_SELECT).eq('pdf_sha256', pdfSha256).limit(1);
             return (data ?? []) as PdPdfStoreRow[];
         }
         if (workTitle) {
-            const { data } = await admin.from('pd_pdf_store').select(STORE_SELECT).eq('work_title', workTitle);
-            return (data ?? []) as PdPdfStoreRow[];
+            return loadStoreRowsForCatalogTitle(admin, workTitle);
         }
-        const { data } = await admin.from('pd_pdf_store').select(STORE_SELECT).eq('filename', filename);
+        const { data } = await admin.from('pd_pdf_store').select(STORE_ROW_SELECT).eq('filename', filename);
         return (data ?? []) as PdPdfStoreRow[];
     };
 

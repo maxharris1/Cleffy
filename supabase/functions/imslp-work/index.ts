@@ -19,11 +19,8 @@ import {
     type FileLicense,
     type ImslpLicenseClass,
 } from '../_shared/imslpLicense.ts';
-import {
-    SERVABLE_LICENCE_TAGS,
-    catalogEditionsFromRows,
-    type PdPdfStoreRow,
-} from '../_shared/pdPdfCatalog.ts';
+import { loadStoreRowsForCatalogTitle } from '../_shared/catalogTitleLookup.ts';
+import { catalogEditionsFromRows } from '../_shared/pdPdfCatalog.ts';
 
 interface Edition {
     filename: string;
@@ -159,14 +156,7 @@ Deno.serve(async (req) => {
     try {
         const admin = serviceClient();
         if (admin) {
-            const { data } = await admin
-                .from('pd_pdf_store')
-                .select(
-                    'pdf_sha256, filename, work_title, origin, source_url, licence_tag, editor_credit, us_pd, byte_length, page_count',
-                )
-                .eq('work_title', title)
-                .in('licence_tag', [...SERVABLE_LICENCE_TAGS]);
-            catalog = catalogEditionsFromRows((data ?? []) as PdPdfStoreRow[], imslpUrl);
+            catalog = catalogEditionsFromRows(await loadStoreRowsForCatalogTitle(admin, title), imslpUrl);
         }
 
         const imagesData = (await mwFetch({

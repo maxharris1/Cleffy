@@ -199,6 +199,65 @@ export const catalogEditionsFromRows = (rows: PdPdfStoreRow[], imslpUrl: string)
     return editions;
 };
 
+/** Distinct `pdf_sha256` values, preserving first-seen order. */
+export const uniquePdfShas = (rows: Array<{ pdf_sha256?: string | null }>): string[] => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+        const sha = row.pdf_sha256?.trim();
+        if (!sha || seen.has(sha)) {
+            continue;
+        }
+        seen.add(sha);
+        out.push(sha);
+    }
+    return out;
+};
+
+export const mergeStoreRowsBySha = (groups: PdPdfStoreRow[][]): PdPdfStoreRow[] => {
+    const map = new Map<string, PdPdfStoreRow>();
+    for (const group of groups) {
+        for (const row of group) {
+            if (row.pdf_sha256) {
+                map.set(row.pdf_sha256, row);
+            }
+        }
+    }
+    return [...map.values()];
+};
+
+/**
+ * A work title is in the catalog when `playalong_corpus_seed` is `fetched`
+ * for that title and that row’s `pdf_sha256` exists in `pd_pdf_store`.
+ * Store `work_title` may differ (first-insert collisions / nicknames).
+ */
+export const catalogTitlesFromSeedJoin = (
+    requestedTitles: string[],
+    fetchedSeed: Array<{ work_title: string; pdf_sha256: string | null }>,
+    storeShas: Iterable<string>,
+): string[] => {
+    const wanted = new Set(requestedTitles.map((title) => title.trim()).filter(Boolean));
+    const have = new Set(storeShas);
+    const present = new Set<string>();
+    for (const row of fetchedSeed) {
+        const title = row.work_title?.trim();
+        const sha = row.pdf_sha256?.trim();
+        if (!title || !sha || !wanted.has(title) || !have.has(sha)) {
+            continue;
+        }
+        present.add(title);
+    }
+    return [...present];
+};
+
+export const chunkValues = <T>(items: readonly T[], size: number): T[][] => {
+    const out: T[][] = [];
+    for (let i = 0; i < items.length; i += size) {
+        out.push(items.slice(i, i + size));
+    }
+    return out;
+};
+
 /**
  * Pick the store row the download should copy. Prefer an explicit sha, then
  * work+filename, then a unique filename. Never a non-servable licence.

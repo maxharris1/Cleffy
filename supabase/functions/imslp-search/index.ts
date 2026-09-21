@@ -17,7 +17,7 @@ import {
 } from '../_shared/searchFacetData.ts';
 import { browseFromIndex as queryBrowseIndex, type BrowseRpcClient } from '../_shared/imslpBrowse.ts';
 import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, serviceClient, workPageUrl } from '../_shared/imslp.ts';
-import { SERVABLE_LICENCE_TAGS } from '../_shared/pdPdfCatalog.ts';
+import { catalogTitlesInStore as lookupCatalogTitlesInStore } from '../_shared/catalogTitleLookup.ts';
 import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
 import {
     aliasTitlesForQuery,
@@ -300,23 +300,11 @@ const fillCachedMembership = async (
 };
 
 const catalogTitlesInStore = async (titles: string[]): Promise<string[]> => {
-    const unique = uniq(titles.map((t) => t.trim()).filter(Boolean)).slice(0, 300);
-    if (unique.length === 0) {
-        return [];
-    }
     const admin = serviceClient();
     if (!admin) {
         return [];
     }
-    const { data, error } = await admin
-        .from('pd_pdf_store')
-        .select('work_title')
-        .in('work_title', unique)
-        .in('licence_tag', [...SERVABLE_LICENCE_TAGS]);
-    if (error || !Array.isArray(data)) {
-        return [];
-    }
-    return uniq(data.map((row) => (row as { work_title?: string }).work_title).filter((t): t is string => Boolean(t)));
+    return lookupCatalogTitlesInStore(admin, titles);
 };
 
 const markCatalogHits = async (hits: SearchHit[]): Promise<SearchHit[]> => {
