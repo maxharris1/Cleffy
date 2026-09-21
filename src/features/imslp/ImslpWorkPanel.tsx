@@ -136,7 +136,7 @@ export const ImslpWorkPanel = ({
                             const availability = editionAvailability(edition);
                             const sizeLabel = formatBytes(edition.size);
                             const origin = catalogOriginText(edition);
-                            const credit = catalogAttribution(edition);
+                            const credit = isCatalog(edition) ? catalogAttribution(edition) : null;
                             const meta = [
                                 origin && isCatalog(edition) ? origin : null,
                                 availability && availability.kind !== 'restricted' ? availability.label : null,
