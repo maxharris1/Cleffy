@@ -82,7 +82,9 @@ export const editionAvailability = (edition: EditionLicenseFields): EditionAvail
  * (often cleaner typesets) over tiny stubs and huge multi-volume scans.
  * Null when nothing qualifies — the panel then makes no auto-selection.
  */
-export const recommendEdition = <T extends { filename: string; size: number | null } & EditionLicenseFields>(
+export const recommendEdition = <
+    T extends { filename: string; size: number | null; source?: string } & EditionLicenseFields,
+>(
     editions: T[],
 ): T | null => {
     // `!== false` keeps editions without license data (older responses,
@@ -111,6 +113,9 @@ export const recommendEdition = <T extends { filename: string; size: number | nu
         }
         if (/complete|vollst|band|vol\.?\s*\d/i.test(name)) {
             score -= 5;
+        }
+        if (edition.source === 'catalog') {
+            score += 50;
         }
         return { edition, score };
     });

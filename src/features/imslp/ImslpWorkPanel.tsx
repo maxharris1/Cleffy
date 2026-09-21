@@ -10,6 +10,7 @@ import {
 } from '@/features/imslp/imslpDisplay';
 import { Badge } from '@/ui/Badge';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
+import { asCatalogOrigin, catalogAttribution, originLabel } from '../../../supabase/functions/_shared/pdPdfCatalog';
 
 const DISCLAIMER =
     'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
@@ -33,6 +34,12 @@ interface ImslpWorkPanelProps {
 }
 
 const isRestricted = (edition: ImslpEdition): boolean => edition.downloadable === false;
+const isCatalog = (edition: ImslpEdition): boolean => edition.source === 'catalog';
+
+const catalogOriginText = (edition: ImslpEdition): string | null => {
+    const origin = edition.origin ? asCatalogOrigin(edition.origin) : null;
+    return origin ? originLabel(origin) : null;
+};
 
 export const ImslpWorkPanel = ({
     work,
@@ -52,6 +59,7 @@ export const ImslpWorkPanel = ({
     const [acceptedDisclaimer, setAcceptedDisclaimer] = useState(false);
 
     const recommended = useMemo(() => recommendEdition(work.editions), [work.editions]);
+    const catalogWork = work.editions.some(isCatalog);
 
     // Recommended first, then remaining importable editions, restricted last —
     // each group in IMSLP's own order.
@@ -64,6 +72,7 @@ export const ImslpWorkPanel = ({
 
     const importableCount = work.editions.filter((e) => !isRestricted(e)).length;
     const noneImportable = work.editions.length > 0 && importableCount === 0;
+    const catalogSelected = selected != null && isCatalog(selected);
 
     const visibleEditions =
         showAllEditions || orderedEditions.length <= EDITION_PREVIEW
@@ -72,13 +81,24 @@ export const ImslpWorkPanel = ({
 
     const hiddenCount = Math.max(0, orderedEditions.length - visibleEditions.length);
 
-    const buttonLabel =
-        download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
+    const buttonLabel = (() => {
+        if (download.kind === 'downloading') {
+            return catalogSelected || catalogWork ? 'Adding from library…' : 'Downloading from IMSLP…';
+        }
+        if (busy) {
+            return 'Adding to library…';
+        }
+        return 'Add to my library';
+    })();
 
     const countLine = (() => {
         const total = work.editions.length;
         if (total === 0) {
             return null;
+        }
+        if (catalogWork) {
+            const counts = `${total} in Cleffy's library`;
+            return recommended ? `${counts}. Recommended edition selected.` : `${counts}.`;
         }
         const counts = `${total} available — ${importableCount} downloadable directly`;
         return recommended ? `${counts}. Recommended edition selected.` : `${counts}.`;
@@ -93,7 +113,19 @@ export const ImslpWorkPanel = ({
             </a>
 
             {work.editions.length === 0 ? (
-                <p className="mt-4 text-sm text-stone-500">No PDF editions found for this work.</p>
+                <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
+                    <p className="text-sm text-amber-950">This score is not in Cleffy's library yet.</p>
+                    <p className="mt-1 text-xs text-amber-900/80">
+                        Open the work on IMSLP, save the PDF, then choose it here. Cleffy does not fetch IMSLP
+                        files automatically.
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                        <a href={work.imslpUrl} target="_blank" rel="noreferrer" className={buttonClassName('primary', 'sm')}>
+                            Open on IMSLP
+                        </a>
+                        <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
+                    </div>
+                </div>
             ) : (
                 <fieldset className="mt-4">
                     <legend className="text-xs font-medium uppercase tracking-wide text-stone-500">
@@ -106,12 +138,15 @@ export const ImslpWorkPanel = ({
                             const restricted = isRestricted(edition);
                             const availability = editionAvailability(edition);
                             const sizeLabel = formatBytes(edition.size);
+                            const origin = catalogOriginText(edition);
+                            const credit = catalogAttribution(edition);
                             const meta = [
+                                origin && isCatalog(edition) ? origin : null,
                                 availability && availability.kind !== 'restricted' ? availability.label : null,
                                 sizeLabel || null,
                             ].filter(Boolean);
                             return (
-                                <li key={edition.filename}>
+                                <li key={edition.pdfSha256 ?? edition.filename}>
                                     <label
                                         className={`flex items-start gap-2.5 border-b border-stone-200/80 py-2.5 ${
                                             checked ? 'bg-accent-soft' : ''
@@ -130,6 +165,7 @@ export const ImslpWorkPanel = ({
                                                 {recommended?.filename === edition.filename ? (
                                                     <Badge tone="accent">Recommended</Badge>
                                                 ) : null}
+                                                {isCatalog(edition) ? <Badge tone="ok">In library</Badge> : null}
                                                 {restricted && availability ? (
                                                     <Badge tone="warn">{availability.label}</Badge>
                                                 ) : null}
@@ -149,9 +185,16 @@ export const ImslpWorkPanel = ({
                                                         open on IMSLP
                                                     </a>
                                                 </span>
-                                            ) : meta.length > 0 ? (
-                                                <span className="text-xs text-stone-500">{meta.join(' · ')}</span>
-                                            ) : null}
+                                            ) : (
+                                                <>
+                                                    {meta.length > 0 ? (
+                                                        <span className="text-xs text-stone-500">{meta.join(' · ')}</span>
+                                                    ) : null}
+                                                    {credit ? (
+                                                        <span className="mt-0.5 block text-xs text-stone-500">{credit}</span>
+                                                    ) : null}
+                                                </>
+                                            )}
                                         </span>
                                     </label>
                                 </li>
@@ -195,9 +238,9 @@ export const ImslpWorkPanel = ({
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
                 </div>
-            ) : (
+            ) : work.editions.length > 0 ? (
                 <>
-                    {work.editions.length > 0 ? (
+                    {catalogWork ? null : (
                         <label className="mt-4 flex max-w-prose items-start gap-2.5">
                             <input
                                 type="checkbox"
@@ -208,25 +251,28 @@ export const ImslpWorkPanel = ({
                             />
                             <span className="text-xs leading-relaxed text-stone-600">{DISCLAIMER}</span>
                         </label>
-                    ) : null}
+                    )}
 
                     <div className="mt-4 flex flex-wrap items-center gap-3">
                         <button
                             type="button"
-                            onClick={() => onImportSelected(acceptedDisclaimer)}
-                            disabled={!selected || importing || work.editions.length === 0 || !acceptedDisclaimer}
+                            onClick={() => onImportSelected(catalogWork || acceptedDisclaimer)}
+                            disabled={
+                                !selected ||
+                                importing ||
+                                work.editions.length === 0 ||
+                                (!catalogWork && !acceptedDisclaimer)
+                            }
                             className={buttonClassName('primary', 'sm')}
                         >
                             {buttonLabel}
                         </button>
-                        {selected ? (
-                            <a href={selected.openUrl} target="_blank" rel="noreferrer" className={linkClassName}>
-                                Open on IMSLP
-                            </a>
-                        ) : null}
+                        <a href={work.imslpUrl} target="_blank" rel="noreferrer" className={linkClassName}>
+                            Open on IMSLP
+                        </a>
                     </div>
                 </>
-            )}
+            ) : null}
 
             {download.kind === 'fallback' ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">

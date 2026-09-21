@@ -17,6 +17,7 @@ import {
 } from '../_shared/searchFacetData.ts';
 import { browseFromIndex as queryBrowseIndex, type BrowseRpcClient } from '../_shared/imslpBrowse.ts';
 import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, serviceClient, workPageUrl } from '../_shared/imslp.ts';
+import { SERVABLE_LICENCE_TAGS } from '../_shared/pdPdfCatalog.ts';
 import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
 import {
     aliasTitlesForQuery,
@@ -40,6 +41,7 @@ interface SearchHit {
     snippet: string;
     composer: string | null;
     imslpUrl: string;
+    inCatalog?: boolean;
 }
 
 interface MwSearchHit {
@@ -297,6 +299,37 @@ const fillCachedMembership = async (
     }
 };
 
+const catalogTitlesInStore = async (titles: string[]): Promise<string[]> => {
+    const unique = uniq(titles.map((t) => t.trim()).filter(Boolean)).slice(0, 300);
+    if (unique.length === 0) {
+        return [];
+    }
+    const admin = serviceClient();
+    if (!admin) {
+        return [];
+    }
+    const { data, error } = await admin
+        .from('pd_pdf_store')
+        .select('work_title')
+        .in('work_title', unique)
+        .in('licence_tag', [...SERVABLE_LICENCE_TAGS]);
+    if (error || !Array.isArray(data)) {
+        return [];
+    }
+    return uniq(data.map((row) => (row as { work_title?: string }).work_title).filter((t): t is string => Boolean(t)));
+};
+
+const markCatalogHits = async (hits: SearchHit[]): Promise<SearchHit[]> => {
+    if (hits.length === 0) {
+        return hits;
+    }
+    const present = new Set(await catalogTitlesInStore(hits.map((h) => h.title)));
+    if (present.size === 0) {
+        return hits.map((hit) => ({ ...hit, inCatalog: false }));
+    }
+    return hits.map((hit) => ({ ...hit, inCatalog: present.has(hit.title) }));
+};
+
 const categoriesMissingSnapshot = async (categories: string[]): Promise<string[]> => {
     if (categories.length === 0) {
         return [];
@@ -331,6 +364,7 @@ Deno.serve(async (req) => {
         offset?: number;
         filters?: unknown;
         sort?: unknown;
+        catalogTitles?: unknown;
     };
     try {
         body = await req.json();
@@ -342,6 +376,13 @@ Deno.serve(async (req) => {
     const filters = parseFilters(body.filters);
     const sort = parseSort(body.sort);
     const activeFilters = hasActiveFilters(filters);
+    const catalogLookup = Array.isArray(body.catalogTitles)
+        ? body.catalogTitles.filter((t): t is string => typeof t === 'string')
+        : null;
+
+    if (catalogLookup && q.length === 0 && !activeFilters) {
+        return jsonResponse({ catalogTitles: await catalogTitlesInStore(catalogLookup) });
+    }
 
     if (q.length < 2 && !activeFilters) {
         return jsonResponse({ error: 'Query must be at least 2 characters' }, 400);
@@ -354,7 +395,7 @@ Deno.serve(async (req) => {
         if (q.length < 2 && activeFilters) {
             const browsed = await browseFromIndex(filters, limit, offset, sort);
             return jsonResponse({
-                results: browsed.results,
+                results: await markCatalogHits(browsed.results),
                 total: browsed.total,
                 mode: 'browse',
                 indexReady: browsed.indexReady,
@@ -527,7 +568,7 @@ Deno.serve(async (req) => {
 
         const page = ranked.slice(offset, offset + limit);
         const filterRelaxed = relaxed.length > 0;
-        const results = page.map((h) => toHit(h.title, h.pageid, h.snippet));
+        const results = await markCatalogHits(page.map((h) => toHit(h.title, h.pageid, h.snippet)));
         const source = periodSource(queryEras, chipEras);
 
         return jsonResponse({

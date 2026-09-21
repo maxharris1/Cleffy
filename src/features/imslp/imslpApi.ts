@@ -8,6 +8,8 @@ export interface ImslpSearchHit {
     snippet: string;
     composer: string | null;
     imslpUrl: string;
+    /** True when `pd_pdf_store` has a servable PDF for this work title. */
+    inCatalog?: boolean;
 }
 
 export interface ImslpSearchOptions {
@@ -52,6 +54,13 @@ export interface ImslpEdition {
     restriction?: string | null;
     /** Server verdict: Cleffy can fetch this file directly. */
     downloadable?: boolean;
+    /** Catalog hit: copy from `pd-pdfs`. Absent/imslp = live IMSLP edition. */
+    source?: 'catalog' | 'imslp';
+    pdfSha256?: string;
+    origin?: string;
+    editorCredit?: string | null;
+    sourceUrl?: string | null;
+    pageCount?: number | null;
 }
 
 export interface ImslpWorkDetail {
@@ -200,7 +209,10 @@ export const searchImslp = async (
         ? body.relaxed.filter((v): v is RelaxedConstraint => v === 'instrument' || v === 'era')
         : [];
     const result: ImslpSearchResponse = {
-        results: body.results ?? [],
+        results: (body.results ?? []).map((hit) => ({
+            ...hit,
+            inCatalog: hit.inCatalog === true,
+        })),
         filterRelaxed: body.filterRelaxed === true || relaxed.length > 0,
         relaxed,
         total: typeof body.total === 'number' ? body.total : (body.results?.length ?? 0),
@@ -220,6 +232,38 @@ export const searchImslp = async (
         }
     }
     return result;
+};
+
+export const lookupCatalogTitles = async (titles: string[]): Promise<Set<string>> => {
+    const unique = [...new Set(titles.map((t) => t.trim()).filter(Boolean))];
+    if (unique.length === 0) {
+        return new Set();
+    }
+    const supabase = getSupabase();
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    if (!accessToken) {
+        return new Set();
+    }
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
+    const response = await fetch(`${projectUrl}/functions/v1/imslp-search`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            apikey: anonKey,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ catalogTitles: unique }),
+        signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+        return new Set();
+    }
+    const body = (await response.json()) as { catalogTitles?: unknown };
+    const found = Array.isArray(body.catalogTitles)
+        ? body.catalogTitles.filter((t): t is string => typeof t === 'string')
+        : [];
+    return new Set(found);
 };
 
 export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> => {
@@ -245,6 +289,7 @@ export const importImslpPdfToStorage = async (
     documentId: string,
     acceptedDisclaimer: boolean,
     workTitle?: string,
+    pdfSha256?: string,
 ): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
@@ -261,7 +306,7 @@ export const importImslpPdfToStorage = async (
             apikey: anonKey,
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
+        body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle, pdfSha256 }),
     });
 
     // Smart-import quota exhausted. Surfaced as the same typed error the other

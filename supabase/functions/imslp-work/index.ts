@@ -19,6 +19,11 @@ import {
     type FileLicense,
     type ImslpLicenseClass,
 } from '../_shared/imslpLicense.ts';
+import {
+    SERVABLE_LICENCE_TAGS,
+    catalogEditionsFromRows,
+    type PdPdfStoreRow,
+} from '../_shared/pdPdfCatalog.ts';
 
 interface Edition {
     filename: string;
@@ -147,6 +152,40 @@ Deno.serve(async (req) => {
     }
 
     try {
+        const imslpUrl = workPageUrl(title);
+        const composer = parseComposerFromTitle(title);
+        const admin = serviceClient();
+        if (admin) {
+            const { data } = await admin
+                .from('pd_pdf_store')
+                .select(
+                    'pdf_sha256, filename, work_title, origin, source_url, licence_tag, editor_credit, us_pd, byte_length, page_count',
+                )
+                .eq('work_title', title)
+                .in('licence_tag', [...SERVABLE_LICENCE_TAGS]);
+            const catalog = catalogEditionsFromRows((data ?? []) as PdPdfStoreRow[], imslpUrl);
+            if (catalog.length > 0) {
+                return jsonResponse({
+                    title,
+                    composer,
+                    imslpUrl,
+                    editions: catalog,
+                });
+            }
+        }
+
+        // Catalog miss: do not list IMSLP File: pages or fetch PDFs. The client
+        // promotes Open on IMSLP + a file picker. Live ImagefromIndex listing
+        // stays behind the same flag as the Edge PDF fetch stopgap.
+        if (Deno.env.get('IMSLP_EDGE_PDF_FETCH') !== '1') {
+            return jsonResponse({
+                title,
+                composer,
+                imslpUrl,
+                editions: [],
+            });
+        }
+
         const imagesData = (await mwFetch({
             action: 'query',
             titles: title,

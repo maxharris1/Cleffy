@@ -110,6 +110,14 @@ describe('imslp display helpers', () => {
         expect(pick?.filename).toBe('good-urtext.pdf');
     });
 
+    it('prefers a catalog edition over a same-size IMSLP file', () => {
+        const pick = recommendEdition([
+            edition('imslp-scan.pdf', { size: 1_800_000 }),
+            edition('moonlight-let.pdf', { size: 1_800_000, source: 'catalog' }),
+        ]);
+        expect(pick?.filename).toBe('moonlight-let.pdf');
+    });
+
     it('never recommends a restricted or license-unknown edition', () => {
         const pick = recommendEdition([
             edition('henle-urtext.pdf', { downloadable: false, license: 'pd', restriction: 'Non-PD US' }),
@@ -200,9 +208,11 @@ describe('search facets', () => {
 });
 
 describe('ImslpBrowser', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
         vi.stubEnv('VITE_SUPABASE_URL', 'https://example.supabase.co');
         vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'test-anon-key');
+        const api = await import('@/features/imslp/imslpApi');
+        vi.spyOn(api, 'lookupCatalogTitles').mockResolvedValue(new Set());
     });
 
     afterEach(async () => {
@@ -470,7 +480,7 @@ describe('ImslpBrowser', () => {
         expect(importButton).toBeEnabled();
         await userEvent.click(importButton);
         await waitFor(() => {
-            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true);
+            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true, undefined);
         });
     });
 
@@ -495,6 +505,70 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText(/None of these editions can be imported automatically/)).toBeInTheDocument();
         expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
         // No import button, no consent checkbox — there is nothing to import.
+        expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    });
+
+    it('opens a cataloged work from Cleffy storage without the IMSLP disclaimer', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Moonlight',
+            editions: [
+                {
+                    filename: 'moonlight-let.pdf',
+                    size: 442_963,
+                    mime: 'application/pdf',
+                    openUrl: 'https://imslp.org/wiki/Moonlight',
+                    license: 'cc',
+                    licenseLabel: 'CC-BY-SA',
+                    restriction: null,
+                    downloadable: true,
+                    source: 'catalog',
+                    pdfSha256: 'sha-moon',
+                    origin: 'mutopia',
+                    editorCredit: 'Stewart Holmes',
+                },
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText(/in Cleffy's library/);
+        expect(screen.getByText('In library')).toBeInTheDocument();
+        expect(screen.getByText(/Edition by Stewart Holmes \(Mutopia\) · CC-BY-SA/)).toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+        const importButton = screen.getByRole('button', { name: 'Add to my library' });
+        expect(importButton).toBeEnabled();
+        await userEvent.click(importButton);
+        await waitFor(() => {
+            expect(onImportImslp).toHaveBeenCalledWith('moonlight-let.pdf', work.title, true, 'sha-moon');
+        });
+    });
+
+    it('promotes Open on IMSLP and a file picker when the work is not in the catalog', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Second Rhapsody (Gershwin, George)',
+            composer: 'Gershwin, George',
+            imslpUrl: 'https://imslp.org/wiki/Second_Rhapsody_(Gershwin,_George)',
+            editions: [],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+
+        await screen.findByText(/not in Cleffy's library yet/);
+        expect(screen.getByRole('link', { name: 'Open on IMSLP' })).toHaveAttribute('href', work.imslpUrl);
+        expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     });

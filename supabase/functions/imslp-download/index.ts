@@ -8,6 +8,7 @@ import {
     imagefromIndexUrl,
     serviceClient,
     tryDownloadPdf,
+    workPageUrl,
 } from '../_shared/imslp.ts';
 import {
     LICENSE_TTL_MS,
@@ -16,9 +17,19 @@ import {
     isDownloadable,
     parseWorkPageLicenses,
 } from '../_shared/imslpLicense.ts';
+import {
+    matchStoreRow,
+    pdObjectPath,
+    type PdPdfStoreRow,
+} from '../_shared/pdPdfCatalog.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const STORE_SELECT =
+    'pdf_sha256, filename, work_title, origin, source_url, licence_tag, editor_credit, us_pd, byte_length, page_count';
+
+const edgePdfFetchEnabled = (): boolean => Deno.env.get('IMSLP_EDGE_PDF_FETCH') === '1';
 
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
@@ -38,7 +49,13 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    let body: { filename?: string; acceptedDisclaimer?: boolean; documentId?: string; workTitle?: string };
+    let body: {
+        filename?: string;
+        acceptedDisclaimer?: boolean;
+        documentId?: string;
+        workTitle?: string;
+        pdfSha256?: string;
+    };
     try {
         body = await req.json();
     } catch {
@@ -49,23 +66,13 @@ Deno.serve(async (req) => {
     if (!filename || !filename.toLowerCase().endsWith('.pdf')) {
         return jsonResponse({ error: 'filename must be a .pdf' }, 400);
     }
-    if (!body.acceptedDisclaimer) {
-        return jsonResponse(
-            {
-                error: 'Copyright disclaimer must be accepted before download',
-                code: 'disclaimer_required',
-            },
-            400,
-        );
-    }
-
-    // Reject path traversal / unexpected characters in filenames.
     if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
         return jsonResponse({ error: 'Invalid filename' }, 400);
     }
 
     const canonicalFilename = canonicalImslpFilename(filename);
     const workTitle = typeof body.workTitle === 'string' ? body.workTitle.trim() : '';
+    const pdfSha256 = typeof body.pdfSha256 === 'string' ? body.pdfSha256.trim().toLowerCase() : '';
 
     const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
     if (!documentId || !uuidRe.test(documentId)) {
@@ -110,6 +117,39 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Server misconfigured' }, 500);
     }
 
+    const missOpenUrl = workTitle ? workPageUrl(workTitle) : imagefromIndexUrl(canonicalFilename);
+    const handoff = (message: string) =>
+        jsonResponse(
+            {
+                ok: false,
+                code: 'upstream',
+                message,
+                openUrl: missOpenUrl,
+                filename: canonicalFilename,
+            },
+            409,
+        );
+
+    const loadStoreRows = async (): Promise<PdPdfStoreRow[]> => {
+        if (pdfSha256) {
+            const { data } = await admin.from('pd_pdf_store').select(STORE_SELECT).eq('pdf_sha256', pdfSha256).limit(1);
+            return (data ?? []) as PdPdfStoreRow[];
+        }
+        if (workTitle) {
+            const { data } = await admin.from('pd_pdf_store').select(STORE_SELECT).eq('work_title', workTitle);
+            return (data ?? []) as PdPdfStoreRow[];
+        }
+        const { data } = await admin.from('pd_pdf_store').select(STORE_SELECT).eq('filename', filename);
+        return (data ?? []) as PdPdfStoreRow[];
+    };
+
+    const storeRows = await loadStoreRows();
+    const catalogRow = matchStoreRow(storeRows, {
+        pdfSha256: pdfSha256 || undefined,
+        filename,
+        workTitle: workTitle || undefined,
+    });
+
     const licenseConflict = (code: 'non_pd' | 'license_unknown', restriction: string | null) =>
         jsonResponse(
             {
@@ -121,65 +161,81 @@ Deno.serve(async (req) => {
                             ? `IMSLP lists this edition as copyright-restricted (${restriction}); it can't be imported automatically.`
                             : "IMSLP lists this edition as copyright-restricted; it can't be imported automatically."
                         : "IMSLP didn't confirm a public-domain or Creative Commons license for this edition; it can't be imported automatically.",
-                openUrl: imagefromIndexUrl(canonicalFilename),
+                openUrl: missOpenUrl,
                 filename: canonicalFilename,
             },
             409,
         );
 
-    // License backstop, checked BEFORE the quota so a restricted file never
-    // costs a smart_imports credit. Cache miss or stale row live-parses the
-    // work page; unknown or restricted fails closed and never fetches the PDF.
-    const { data: licenseRow } = await admin
-        .from('imslp_file_licenses')
-        .select('restriction, downloadable, fetched_at')
-        .eq('filename', canonicalFilename)
-        .maybeSingle();
-    const fresh =
-        licenseRow && Date.now() - new Date(licenseRow.fetched_at as string).getTime() < LICENSE_TTL_MS
-            ? licenseRow
-            : null;
-    if (fresh && fresh.downloadable === false) {
-        const restriction = typeof fresh.restriction === 'string' ? fresh.restriction : null;
-        return licenseConflict('non_pd', restriction);
-    }
-    if (!fresh || fresh.downloadable !== true) {
-        if (!workTitle) {
-            return licenseConflict('license_unknown', null);
+    if (!catalogRow) {
+        if (!edgePdfFetchEnabled()) {
+            return handoff(
+                "This score is not in Cleffy's library yet. Open it on IMSLP, save the PDF, then choose it here.",
+            );
         }
-        const html = await fetchWorkPageHtml(workTitle);
-        if (!html) {
-            return licenseConflict('license_unknown', null);
+        if (!body.acceptedDisclaimer) {
+            return jsonResponse(
+                {
+                    error: 'Copyright disclaimer must be accepted before download',
+                    code: 'disclaimer_required',
+                },
+                400,
+            );
         }
-        const parsed = parseWorkPageLicenses(html);
-        const license = parsed.get(canonicalFilename);
-        if (license) {
-            try {
-                await admin.from('imslp_file_licenses').upsert({
-                    filename: canonicalFilename,
-                    work_title: workTitle,
-                    license: classifyLicense(license.licenseLabel),
-                    license_label: license.licenseLabel,
-                    restriction: license.restriction,
-                    eu_hosted: license.euHosted,
-                    downloadable: isDownloadable(license),
-                    fetched_at: new Date().toISOString(),
-                });
-            } catch {
-                // cache write is best-effort
+
+        // License backstop, checked BEFORE the quota so a restricted file never
+        // costs a smart_imports credit. Cache miss or stale row live-parses the
+        // work page; unknown or restricted fails closed and never fetches the PDF.
+        const { data: licenseRow } = await admin
+            .from('imslp_file_licenses')
+            .select('restriction, downloadable, fetched_at')
+            .eq('filename', canonicalFilename)
+            .maybeSingle();
+        const fresh =
+            licenseRow && Date.now() - new Date(licenseRow.fetched_at as string).getTime() < LICENSE_TTL_MS
+                ? licenseRow
+                : null;
+        if (fresh && fresh.downloadable === false) {
+            const restriction = typeof fresh.restriction === 'string' ? fresh.restriction : null;
+            return licenseConflict('non_pd', restriction);
+        }
+        if (!fresh || fresh.downloadable !== true) {
+            if (!workTitle) {
+                return licenseConflict('license_unknown', null);
             }
-        }
-        if (!license) {
-            return licenseConflict('license_unknown', null);
-        }
-        if (!isDownloadable(license)) {
-            return licenseConflict('non_pd', license.restriction);
+            const html = await fetchWorkPageHtml(workTitle);
+            if (!html) {
+                return licenseConflict('license_unknown', null);
+            }
+            const parsed = parseWorkPageLicenses(html);
+            const license = parsed.get(canonicalFilename);
+            if (license) {
+                try {
+                    await admin.from('imslp_file_licenses').upsert({
+                        filename: canonicalFilename,
+                        work_title: workTitle,
+                        license: classifyLicense(license.licenseLabel),
+                        license_label: license.licenseLabel,
+                        restriction: license.restriction,
+                        eu_hosted: license.euHosted,
+                        downloadable: isDownloadable(license),
+                        fetched_at: new Date().toISOString(),
+                    });
+                } catch {
+                    // cache write is best-effort
+                }
+            }
+            if (!license) {
+                return licenseConflict('license_unknown', null);
+            }
+            if (!isDownloadable(license)) {
+                return licenseConflict('non_pd', license.restriction);
+            }
         }
     }
 
-    // Metered as smart_imports, and gated BEFORE the IMSLP fetch — the expensive
-    // part. Every failure path below refunds, so a teacher is only charged for an
-    // import that actually landed in Storage.
+    // Metered as smart_imports, and gated BEFORE any Storage work. Every failure
+    // path below refunds, so a teacher is only charged for an import that landed.
     const gate = await enforce(admin, doc.owner_id, 'smart_imports');
     if (!gate.ok) {
         return jsonResponse(gate.body, gate.status);
@@ -195,7 +251,48 @@ Deno.serve(async (req) => {
         }
     };
 
+    const copyCatalog = async (row: PdPdfStoreRow): Promise<{ ok: true } | { ok: false; message: string }> => {
+        const sourcePath = pdObjectPath(row.pdf_sha256, row.filename);
+        const { error: copyError } = await admin.storage.from('pd-pdfs').copy(sourcePath, doc.storage_path, {
+            destinationBucket: 'scores',
+        });
+        if (!copyError) {
+            return { ok: true };
+        }
+        // Copy can fail when the destination exists or the Storage build lacks
+        // cross-bucket copy. Fall back to a service-role download + owner upload
+        // — still zero IMSLP bytes.
+        const { data: blob, error: dlError } = await admin.storage.from('pd-pdfs').download(sourcePath);
+        if (dlError || !blob) {
+            return { ok: false, message: copyError.message };
+        }
+        const { error: uploadError } = await userClient.storage.from('scores').upload(doc.storage_path, blob, {
+            contentType: 'application/pdf',
+            upsert: true,
+        });
+        if (uploadError) {
+            return { ok: false, message: uploadError.message };
+        }
+        return { ok: true };
+    };
+
     try {
+        if (catalogRow) {
+            const copied = await copyCatalog(catalogRow);
+            if (!copied.ok) {
+                await giveBack();
+                return jsonResponse({ error: `Catalog copy failed: ${copied.message}` }, 502);
+            }
+            return jsonResponse({
+                ok: true,
+                documentId,
+                storagePath: doc.storage_path,
+                filename: catalogRow.filename,
+                byteLength: catalogRow.byte_length,
+                source: 'catalog',
+            });
+        }
+
         const result = await tryDownloadPdf(canonicalFilename);
         if (!result.ok) {
             await giveBack();
@@ -207,7 +304,6 @@ Deno.serve(async (req) => {
                     openUrl: result.openUrl,
                     filename: result.filename,
                 },
-                // 409 signals hybrid fallback to the client.
                 409,
             );
         }
@@ -221,14 +317,13 @@ Deno.serve(async (req) => {
             return jsonResponse({ error: `Storage upload failed: ${uploadError.message}` }, 502);
         }
 
-        // Intentionally JSON-only — never proxy PDF bytes through the Edge
-        // response (saves egress + keeps worker memory to one buffer).
         return jsonResponse({
             ok: true,
             documentId,
             storagePath: doc.storage_path,
             filename: result.filename,
             byteLength: result.bytes.byteLength,
+            source: 'imslp',
         });
     } catch (err) {
         await giveBack();
