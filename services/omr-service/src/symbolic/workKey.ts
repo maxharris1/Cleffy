@@ -70,6 +70,11 @@ const COMPOSER_ALIASES: ReadonlyArray<readonly [RegExp, string]> = [
     [/\bfaure\b/i, 'faure'],
     [/\bscriabina\b/i, 'scriabin'],
     [/\bscriabin\b/i, 'scriabin'],
+    [/\bmussorgsky\b/i, 'mussorgsky'],
+    [/\bmoussorgsky\b/i, 'mussorgsky'],
+    [/\bjohn\s+field\b/i, 'field'],
+    [/\bfieldj\b/i, 'field'],
+    [/\bfield\b/i, 'field'],
 ];
 
 const MUTOPIA_COMPOSER: Record<string, string> = {
@@ -102,6 +107,8 @@ const MUTOPIA_COMPOSER: Record<string, string> = {
     DussekJL: 'dussek',
     FaureG: 'faure',
     ScriabinA: 'scriabin',
+    MussorgskyM: 'mussorgsky',
+    FieldJ: 'field',
 };
 
 const fold = (text: string): string => text.normalize('NFKD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').trim();
@@ -218,6 +225,13 @@ const catalogFromText = (text: string): CatalogHit | undefined => {
         return { catalogType: 'L', catalogN: Number(lesure[1]) };
     }
 
+    if (/\bfield\b/i.test(folded)) {
+        const hopkinson = folded.match(/\bH\.?\s*(\d+)\b/);
+        if (hopkinson?.[1]) {
+            return { catalogType: 'H', catalogN: Number(hopkinson[1]) };
+        }
+    }
+
     const numbered = folded.match(/\b(?:gymnop[eé]die|gnossienne)[_-\s]*(?:No\.?\s*)?(\d+)\b/i);
     if (numbered?.[1]) {
         return { catalogType: 'No', catalogN: Number(numbered[1]) };
@@ -280,10 +294,42 @@ const composerFromCatalog = (hit: CatalogHit): string | undefined => {
 };
 
 /**
+ * Works Mutopia files by title folder rather than opus. CatalogN 0 is the
+ * set (3 Gymnopédies); 9 is the Gnossiennes set.
+ */
+const titleWorkKey = (text: string): WorkKey | null => {
+    const folded = fold(text);
+    if (/pictures[-_\s]at[-_\s]an[-_\s]exhibition/i.test(folded)) {
+        return { composerId: 'mussorgsky', catalogType: 'No', catalogN: 1 };
+    }
+    if (/maple[-_\s]?leaf/i.test(folded)) {
+        return { composerId: 'joplin', catalogType: 'No', catalogN: 2 };
+    }
+    if (/\bentertainer\b/i.test(folded)) {
+        return { composerId: 'joplin', catalogType: 'No', catalogN: 1 };
+    }
+    if (/\bgnossiennes?\b/i.test(folded) && !/\bgnossienne[_-\s]*(?:no\.?\s*)?\d+\b/i.test(folded)) {
+        return { composerId: 'satie', catalogType: 'No', catalogN: 9 };
+    }
+    if (
+        (/\b\d+\s+gymnopedies\b/i.test(folded) || /\bgymnopedies\b/i.test(folded)) &&
+        !/\bgymnopedie[_-\s]*(?:no\.?\s*)?\d+\b/i.test(folded)
+    ) {
+        return { composerId: 'satie', catalogType: 'No', catalogN: 0 };
+    }
+    return null;
+};
+
+/**
  * Normalize a `WorkKey` from an IMSLP page title, PDF text tokens, or a
- * Mutopia / filename string. Structured catalog tokens win over prose.
+ * Mutopia / filename string. Structured catalog tokens win over prose except
+ * for title-folder works that have no catalogue number.
  */
 export const workKeyFromText = (text: string): WorkKey | null => {
+    const fromTitle = titleWorkKey(text);
+    if (fromTitle) {
+        return fromTitle;
+    }
     const catalog = catalogFromText(text);
     if (!catalog) {
         return null;
@@ -364,6 +410,26 @@ const catalogFromMutopiaFolder = (folder: string): CatalogHit | undefined => {
     const hob = folder.match(/^HOB-XVI-(\d+)$/i);
     if (hob?.[1]) {
         return { catalogType: 'Hob', catalogN: Number(hob[1]) };
+    }
+    const gym = folder.match(/^gymnopedie_(\d+)$/i);
+    if (gym?.[1]) {
+        return { catalogType: 'No', catalogN: Number(gym[1]) };
+    }
+    if (/^pictures-at-an-exhibition$/i.test(folder)) {
+        return { catalogType: 'No', catalogN: 1 };
+    }
+    if (/^entertainer$/i.test(folder)) {
+        return { catalogType: 'No', catalogN: 1 };
+    }
+    if (/^maple$/i.test(folder)) {
+        return { catalogType: 'No', catalogN: 2 };
+    }
+    if (/^gnossienne$/i.test(folder)) {
+        return { catalogType: 'No', catalogN: 9 };
+    }
+    const hopkinson = folder.match(/^H\.?(\d+)$/i);
+    if (hopkinson?.[1]) {
+        return { catalogType: 'H', catalogN: Number(hopkinson[1]) };
     }
     return undefined;
 };

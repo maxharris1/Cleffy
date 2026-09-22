@@ -30,6 +30,7 @@ import {
     failJob,
     heartbeatJob,
     mintSignedUrl,
+    releaseJob,
     sha256Hex,
     stillOwnsJob,
     type OmJobRow,
@@ -39,11 +40,18 @@ import { expressionSeedAt, parseMxlFiles, type MusicalScore, type ParseSeed } fr
 import { parseOmrGeometry, type OmrGeometry } from './omrGeometry.js';
 import { summarizeStructure, type StructureSummary } from './repeats.js';
 import { isSymbolicFirstEnabled } from './symbolic/flag.js';
+import { PIANO_MIDI_CREDIT, PIANO_MIDI_SOURCE_URL, isPianoMidiUrl } from './symbolic/pianoMidi.js';
 import type { SymbolicAcceptResult, SymbolicLayoutKey } from './symbolic/jobResult.js';
 import { defaultSymbolicDeps, trySymbolicJob, type TrySymbolicDeps } from './symbolic/tryJob.js';
 import { emptyTimings, type JobTimings } from './timings.js';
 import type { Writeback } from './writeback.js';
 import type { ScoreData } from './scoreData.js';
+
+/** Drain-only: accept Mutopia MIDI or park the job. Never start Audiveris. */
+const isSymbolicOnly = (raw: string | undefined = process.env.CLEFFY_SYMBOLIC_ONLY): boolean => {
+    const v = raw?.trim().toLowerCase();
+    return v === '1' || v === 'true' || v === 'on' || v === 'yes';
+};
 
 /**
  * Bump svc-<n> when anything that changes the ScoreData a given PDF produces
@@ -286,6 +294,18 @@ export const runClaimedJob = async (
             isAbandoned: () => abandoned,
             resolveEra: () => eraForDocument(job.document_id),
         });
+        if (!ok && isSymbolicOnly() && !abandoned) {
+            const released = await releaseJob(job.id, workerId, 'symbolic_defer');
+            console.log(
+                JSON.stringify({
+                    event: 'omr_job',
+                    documentId: job.document_id,
+                    jobId: job.id,
+                    ok: false,
+                    symbolicDefer: released,
+                }),
+            );
+        }
         return { ok };
     } finally {
         clearInterval(leaseTimer);
@@ -456,6 +476,18 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             }
             // Fallthrough keeps band/reason. Do not re-score after OMR.
             omrLayout = symbolic.layout;
+            if (isSymbolicOnly()) {
+                console.log(
+                    JSON.stringify({
+                        event: 'omr_job',
+                        documentId: adapters.documentId,
+                        ok: false,
+                        symbolicDefer: true,
+                        ...timings,
+                    }),
+                );
+                return false;
+            }
         }
 
         const era = await resolveEra();
@@ -541,9 +573,8 @@ const corpusPutProvenance = (
           };
 
 /**
- * Organic corpus growth from a symbolic accept: only a public Mutopia match.
- * A user-uploaded XML, an IMSLP file, the eval MIDI set, and a corpus layout
- * hit (already in the corpus) are never written back.
+ * Organic corpus growth from a symbolic accept: Mutopia FTP MIDI/XML, or
+ * piano-midi.de (Wayback) under CC-BY-SA. User XML and live IMSLP files stay out.
  */
 const corpusPutSymbolic = async (
     pdfSha256: string,
@@ -551,15 +582,37 @@ const corpusPutSymbolic = async (
     imslpPageTitle: string | undefined,
     pd: PdProvenance | null,
 ): Promise<void> => {
-    if (accept.candidate === null || accept.candidate.source !== 'mutopia') {
+    if (accept.candidate === null) {
         return;
     }
+    const pianoMidi = isPianoMidiUrl(accept.candidate.url);
+    if (accept.candidate.source !== 'mutopia' && !pianoMidi) {
+        return;
+    }
+    const midiCredit = pianoMidi
+        ? {
+              licenceTag: 'CC-BY-SA' as const,
+              editorCredit: PIANO_MIDI_CREDIT,
+              sourceUrl: PIANO_MIDI_SOURCE_URL,
+          }
+        : corpusPutProvenance(pd);
     const source: CorpusSource = {
         ...accept.source,
-        origin: 'mutopia',
+        origin: pianoMidi ? 'ia' : 'mutopia',
         ...(imslpPageTitle !== undefined ? { imslp_page_title: imslpPageTitle } : {}),
-        ...corpusProvenanceKeys(pd),
+        ...(pianoMidi
+            ? {
+                  licence_tag: 'CC-BY-SA' as const,
+                  editor_credit: PIANO_MIDI_CREDIT,
+                  source_url: PIANO_MIDI_SOURCE_URL,
+              }
+            : corpusProvenanceKeys(pd)),
     };
+    if (pianoMidi) {
+        source.licence = 'CC-BY-SA';
+        source.editorCredit = PIANO_MIDI_CREDIT;
+        source.sourceUrl = PIANO_MIDI_SOURCE_URL;
+    }
     await corpusPut({
         pdfSha256,
         engineVersion: ENGINE_VERSION,
@@ -572,10 +625,10 @@ const corpusPutSymbolic = async (
         pageCount: accept.layout.pageCount,
         candidateSha256: accept.candidate.sha256,
         candidateUrl: accept.candidate.url,
-        symbolicSource: 'mutopia',
+        symbolicSource: pianoMidi ? 'ia' : 'mutopia',
         symbolicFormat: accept.candidate.format,
         ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}),
-        ...corpusPutProvenance(pd),
+        ...midiCredit,
     });
 };
 
@@ -583,7 +636,17 @@ const logJob = (documentId: string, timings: JobTimings, score: ScoreData, ok: b
     if (ok) {
         console.log(`[job] ${documentId}: ready — ${score.notes.length} notes`);
     }
-    console.log(JSON.stringify({ event: 'omr_job', documentId, ok, ...timings }));
+    const { alignmentMap, ...rest } = timings;
+    console.log(
+        JSON.stringify({
+            event: 'omr_job',
+            documentId,
+            ok,
+            notes: score.notes.length,
+            alignmentBars: alignmentMap?.printedBars ?? null,
+            ...rest,
+        }),
+    );
 };
 
 const completeWithRetry = async (

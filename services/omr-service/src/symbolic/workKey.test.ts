@@ -160,6 +160,36 @@ describe('WorkKey normalization', () => {
             composerId: 'petzold',
             catalogType: 'Anh',
         });
+        expect(workKeyFromText('3 Gymnopédies (Satie, Erik)')).toEqual({
+            composerId: 'satie',
+            catalogType: 'No',
+            catalogN: 0,
+        });
+        expect(workKeyFromText('Pictures at an Exhibition (Mussorgsky, Modest)')).toEqual({
+            composerId: 'mussorgsky',
+            catalogType: 'No',
+            catalogN: 1,
+        });
+        expect(workKeyFromText('The Entertainer (Joplin, Scott)')).toEqual({
+            composerId: 'joplin',
+            catalogType: 'No',
+            catalogN: 1,
+        });
+        expect(workKeyFromText('2 Arabesques, CD 74 (Debussy, Claude)')).toEqual({
+            composerId: 'debussy',
+            catalogType: 'CD',
+            catalogN: 74,
+        });
+        expect(workKeyFromText('Nocturne in E-flat major, H 56 (Field, John)')).toEqual({
+            composerId: 'field',
+            catalogType: 'H',
+            catalogN: 56,
+        });
+        expect(workKeyFromText('Gnossiennes (Satie, Erik)')).toEqual({
+            composerId: 'satie',
+            catalogType: 'No',
+            catalogN: 9,
+        });
     });
 
     it('reads Mutopia catalogue folders for the added composers', () => {
@@ -193,5 +223,27 @@ describe('WorkKey normalization', () => {
             catalogType: 'Op',
             catalogN: 19,
         });
+        expect(
+            workKeyFromMutopiaPath(
+                'https://www.mutopiaproject.org/ftp/SatieE/gymnopedie_2/gymnopedie_2.mid',
+            ),
+        ).toMatchObject({ composerId: 'satie', catalogType: 'No', catalogN: 2 });
+        expect(
+            workKeyFromMutopiaPath(
+                'https://www.mutopiaproject.org/ftp/MussorgskyM/pictures-at-an-exhibition/pictures-at-an-exhibition-mids.zip',
+            ),
+        ).toMatchObject({ composerId: 'mussorgsky', catalogType: 'No', catalogN: 1 });
+        expect(
+            catalogAgrees(
+                { composerId: 'debussy', catalogType: 'CD', catalogN: 74 },
+                { composerId: 'debussy', catalogType: 'L', catalogN: 66 },
+            ),
+        ).toBe(true);
+        expect(
+            catalogAgrees(
+                { composerId: 'satie', catalogType: 'No', catalogN: 0 },
+                { composerId: 'satie', catalogType: 'No', catalogN: 2 },
+            ),
+        ).toBe(true);
     });
 });

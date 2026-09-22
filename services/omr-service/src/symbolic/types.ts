@@ -40,6 +40,53 @@ export const workKeysEqual = (a: WorkKey, b: WorkKey): boolean =>
     (a.movementIndex ?? null) === (b.movementIndex ?? null);
 
 /**
+ * IMSLP titles Debussy by Catalogue Debussy (`CD 82`); Mutopia files him by
+ * Lesure (`L75`). Same popular piano works, both ways.
+ */
+export const DEBUSSY_CD_TO_LESURE: Readonly<Record<number, number>> = {
+    74: 66, // 2 Arabesques
+    76: 68, // Rêverie
+    82: 75, // Suite bergamasque
+    119: 113, // Children's Corner
+    125: 117, // Préludes, Livre 1
+};
+
+const debussyLesure = (key: WorkKey): number | undefined => {
+    if (key.composerId !== 'debussy') {
+        return undefined;
+    }
+    if (key.catalogType === 'L') {
+        return key.catalogN;
+    }
+    if (key.catalogType === 'CD') {
+        return DEBUSSY_CD_TO_LESURE[key.catalogN];
+    }
+    return undefined;
+};
+
+/**
+ * Composer + catalogue token, ignoring movement. `No` catalogN 0 means the
+ * whole uncatalogued set (3 Gymnopédies) and agrees with any piece number.
+ */
+export const catalogTokensAgree = (a: WorkKey, b: WorkKey): boolean => {
+    if (a.composerId !== b.composerId) {
+        return false;
+    }
+    const lesureA = debussyLesure(a);
+    const lesureB = debussyLesure(b);
+    if (lesureA !== undefined && lesureA === lesureB) {
+        return true;
+    }
+    if (a.catalogType !== b.catalogType) {
+        return false;
+    }
+    if (a.catalogType === 'No' && (a.catalogN === 0 || b.catalogN === 0)) {
+        return true;
+    }
+    return a.catalogN === b.catalogN;
+};
+
+/**
  * Catalog token for PDF vs candidate. Mutopia headers often omit "No. N"
  * while the pin title has it; a missing movementIndex on either side still
  * agrees. Both present and different → miss (Op. 68 No. 1 vs No. 2).
@@ -48,11 +95,7 @@ export const catalogAgrees = (pdf: WorkKey, candidate: WorkKey): boolean => {
     if (pdf.composerId === 'unknown' || candidate.composerId === 'unknown') {
         return false;
     }
-    if (
-        pdf.composerId !== candidate.composerId ||
-        pdf.catalogType !== candidate.catalogType ||
-        pdf.catalogN !== candidate.catalogN
-    ) {
+    if (!catalogTokensAgree(pdf, candidate)) {
         return false;
     }
     if (pdf.movementIndex === undefined || candidate.movementIndex === undefined) {

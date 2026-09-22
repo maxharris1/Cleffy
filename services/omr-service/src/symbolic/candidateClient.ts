@@ -1,10 +1,11 @@
-import { assertFetchAllowed, imslpWikitextUrl, type TextFetcher } from './http.js';
-import { harvestImslpWikitext } from './imslp.js';
+import { assertFetchAllowed, type TextFetcher } from './http.js';
 import { discoverCandidates } from './discover.js';
 import { harvestMutopiaFtp } from './mutopia.js';
+import { expandMutopiaMidiZips, wrapZipBytesFetcher } from './midiZip.js';
+import { pianoMidiCandidates } from './pianoMidi.js';
 import type { RankedCandidate, WorkKey } from './types.js';
 
-export const DEFAULT_SYMBOLIC_TIMEOUT_MS = 20_000;
+export const DEFAULT_SYMBOLIC_TIMEOUT_MS = 120_000;
 
 export interface SymbolicJobClient {
     discover: (workKey: WorkKey, meta: { imslpPageTitle?: string }) => Promise<RankedCandidate[]>;
@@ -30,62 +31,44 @@ export const createNetworkBytesFetcher = (fetchImpl: typeof fetch = fetch): Byte
     },
 });
 
-const parseImslpWikitextPayload = (raw: string): string => {
-    try {
-        const parsed: unknown = JSON.parse(raw);
-        if (typeof parsed === 'object' && parsed !== null && 'parse' in parsed) {
-            const parse = (parsed as { parse?: { wikitext?: string } }).parse;
-            if (typeof parse?.wikitext === 'string') {
-                return parse.wikitext;
-            }
-        }
-    } catch {
-        // plain wikitext
-    }
-    return raw;
-};
-
 /**
- * Mutopia index + optional IMSLP harvest, then byte fetch. All network
- * calls share `timeoutMs` via AbortSignal.
- *
- * The index comes from the FTP directory listing for this work's composer and
- * catalogue, not from piece-list.html: that page stopped embedding ftp:// links,
- * so parsing it yields zero candidates and every job falls through to OMR.
+ * Mutopia FTP (including `-mids.zip`) plus piano-midi.de via Wayback.
+ * IMSLP wikitext harvest stays off so we never wait on imslp.org PDFs.
  */
 export const createNetworkSymbolicClient = (
     text: TextFetcher,
     bytes: BytesFetcher,
     timeoutMs: number = DEFAULT_SYMBOLIC_TIMEOUT_MS,
-): SymbolicJobClient => ({
-    discover: async (workKey, meta) => {
-        const signal = AbortSignal.timeout(timeoutMs);
-        const index = await Promise.race([
-            harvestMutopiaFtp((url) => text.fetchText(url), workKey),
-            abortError(signal, 'mutopia index'),
-        ]);
-        let imslpFiles: ReturnType<typeof harvestImslpWikitext> = [];
-        if (meta.imslpPageTitle) {
-            try {
-                const raw = await Promise.race([
-                    text.fetchText(imslpWikitextUrl(meta.imslpPageTitle)),
-                    abortError(signal, 'imslp wikitext'),
-                ]);
-                imslpFiles = harvestImslpWikitext(parseImslpWikitextPayload(raw));
-            } catch {
-                // imslp.org/api.php answers 500 often enough that failing the whole
-                // discovery here would drop the Mutopia candidates already in hand.
+): SymbolicJobClient => {
+    const zipBytes = wrapZipBytesFetcher(bytes);
+    return {
+        discover: async (workKey, meta) => {
+            const signal = AbortSignal.timeout(timeoutMs);
+            const index = await Promise.race([
+                harvestMutopiaFtp((url) => text.fetchText(url), workKey),
+                abortError(signal, 'mutopia index'),
+            ]);
+            const ranked = discoverCandidates({
+                workKey,
+                mutopiaIndex: index,
+                imslpFiles: [],
+                ...(meta.imslpPageTitle !== undefined ? { imslpPageTitle: meta.imslpPageTitle } : {}),
+            });
+            const expanded = await expandMutopiaMidiZips(ranked, zipBytes);
+            const extra = pianoMidiCandidates(workKey);
+            const seen = new Set(expanded.map((c) => c.url));
+            const out = [...expanded];
+            for (const cand of extra) {
+                if (!seen.has(cand.url)) {
+                    seen.add(cand.url);
+                    out.push(cand);
+                }
             }
-        }
-        return discoverCandidates({
-            workKey,
-            mutopiaIndex: index,
-            imslpFiles,
-            ...(meta.imslpPageTitle !== undefined ? { imslpPageTitle: meta.imslpPageTitle } : {}),
-        });
-    },
-    fetchBytes: (url) => bytes.fetchBytes(url, AbortSignal.timeout(timeoutMs)),
-});
+            return out;
+        },
+        fetchBytes: (url) => zipBytes.fetchBytes(url, AbortSignal.timeout(timeoutMs)),
+    };
+};
 
 const abortError = (signal: AbortSignal, label: string): Promise<never> =>
     new Promise((_, reject) => {

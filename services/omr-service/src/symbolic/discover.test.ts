@@ -8,6 +8,7 @@ import {
     lookupMutopia,
     mutopiaFtpCatalogDirs,
     mutopiaFtpComposerDir,
+    mutopiaFtpTitleDirs,
     parseMutopiaHtml,
 } from './mutopia.js';
 import type { WorkKey } from './types.js';
@@ -207,6 +208,14 @@ describe('Mutopia index + lookup', () => {
         expect(mutopiaFtpCatalogDirs({ composerId: 'haydn', catalogType: 'Hob', catalogN: 27 })).toEqual([
             'HOB-XVI-27',
         ]);
+        expect(mutopiaFtpCatalogDirs({ composerId: 'field', catalogType: 'H', catalogN: 37 })).toEqual([
+            'H37',
+            'H.37',
+        ]);
+        expect(mutopiaFtpComposerDir('mussorgsky')).toBe('MussorgskyM');
+        expect(
+            mutopiaFtpTitleDirs({ composerId: 'satie', catalogType: 'No', catalogN: 0 }),
+        ).toEqual(['gymnopedie_1', 'gymnopedie_2', 'gymnopedie_3']);
         expect(fetched.every((url) => url.startsWith('https://www.mutopiaproject.org/ftp/'))).toBe(true);
     });
 
@@ -237,6 +246,59 @@ describe('Mutopia index + lookup', () => {
             `${dir}fur_Elise_WoO59/fur_Elise_WoO59.ly`,
             `${dir}fur_Elise_WoO59/fur_Elise_WoO59.mid`,
         ]);
+    });
+
+    it('indexes Mutopia -mids.zip archives as MIDI candidates', async () => {
+        const dir = 'https://www.mutopiaproject.org/ftp/BeethovenLv/O27/';
+        const piece = `${dir}moonlight/`;
+        const pages: Record<string, string> = {
+            [dir]: `<a href="${piece}">moonlight/</a>`,
+            [piece]: ['moonlight-let.pdf', 'moonlight-mids.zip', 'moonlight-lys.zip']
+                .map((n) => `<a href="${piece}${n}">${n}</a>`)
+                .join('\n'),
+        };
+        const fetchText = async (url: string): Promise<string> => {
+            const html = pages[url];
+            if (html === undefined) {
+                throw new Error(`404 ${url}`);
+            }
+            return html;
+        };
+        const key: WorkKey = { composerId: 'beethoven', catalogType: 'Op', catalogN: 27, movementIndex: 2 };
+        const pieces = await harvestMutopiaFtp(fetchText, key);
+        expect(pieces.flatMap((p) => p.files.map((f) => f.filename))).toEqual(['moonlight-mids.zip']);
+        expect(lookupMutopia(pieces, key).map((c) => c.url)).toEqual([`${piece}moonlight-mids.zip`]);
+    });
+
+    it('finds Mutopia title-folder MIDI for Gymnopédies and Debussy CD→L', async () => {
+        const gymDir = 'https://www.mutopiaproject.org/ftp/SatieE/gymnopedie_2/';
+        const l66 = 'https://www.mutopiaproject.org/ftp/DebussyC/L66/';
+        const arab = `${l66}debussy_Arabesque_1/`;
+        const pages: Record<string, string> = {
+            [gymDir]: ['gymnopedie_2.ly', 'gymnopedie_2.mid']
+                .map((n) => `<a href="${gymDir}${n}">${n}</a>`)
+                .join('\n'),
+            [l66]: `<a href="${arab}">debussy_Arabesque_1/</a>`,
+            [arab]: ['debussy_Arabesque_1.ly', 'debussy_Arabesque_1.mid']
+                .map((n) => `<a href="${arab}${n}">${n}</a>`)
+                .join('\n'),
+        };
+        const fetchText = async (url: string): Promise<string> => {
+            const html = pages[url];
+            if (html === undefined) {
+                throw new Error(`404 ${url}`);
+            }
+            return html;
+        };
+        const gymSet = workKeyFromText('3 Gymnopédies (Satie, Erik)')!;
+        const gymPieces = await harvestMutopiaFtp(fetchText, gymSet);
+        expect(lookupMutopia(gymPieces, gymSet).map((c) => c.url)).toEqual([
+            `${gymDir}gymnopedie_2.ly`,
+            `${gymDir}gymnopedie_2.mid`,
+        ]);
+        const arabesques = workKeyFromText('2 Arabesques, CD 74 (Debussy, Claude)')!;
+        const arabPieces = await harvestMutopiaFtp(fetchText, arabesques);
+        expect(lookupMutopia(arabPieces, arabesques).some((c) => c.url.endsWith('.mid'))).toBe(true);
     });
 });
 
