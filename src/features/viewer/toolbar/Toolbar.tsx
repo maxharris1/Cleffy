@@ -3,17 +3,23 @@ import { useSyncExternalStore, type ReactNode } from 'react';
 import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { ignoresProseFont, SERIF_FONT_FAMILY, styledTextPayload, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import { useViewerStore } from '@/state/store';
-import { isTextPayload, type Annotation, type TextFont, type Tool } from '@/types/models';
-import { RedoIcon, UndoIcon } from '@/ui/icons';
+import { STROKE_COLORS, useViewerStore } from '@/state/store';
+import { isTextPayload, type Annotation, type StrokeWidthKey, type TextFont, type Tool } from '@/types/models';
+import { PointerIcon, RedoIcon, UndoIcon } from '@/ui/icons';
 
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
     { tool: 'pen', label: 'Pen', short: 'Pen', icon: <PenIcon /> },
-    { tool: 'highlighter', label: 'Marker', short: 'Marker', icon: <HighlighterIcon /> },
+    { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
-    { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
     { tool: 'hairpin', label: 'Hairpin — drag a crescendo or diminuendo', short: 'Hairpin', icon: <HairpinIcon /> },
+    { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
     { tool: 'fingering', label: 'Fingering — drag over a chord or phrase', short: 'Hands', icon: <FingeringIcon /> },
+];
+
+const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
+    { key: 'thin', label: 'Thin', preview: 2 },
+    { key: 'medium', label: 'Medium', preview: 4 },
+    { key: 'thick', label: 'Thick', preview: 7 },
 ];
 
 export interface ToolbarProps {
@@ -45,6 +51,9 @@ const useSelectedText = (store: AnnotationStore): Annotation | null => {
  */
 export const Toolbar = ({ store }: ToolbarProps) => {
     const tool = useViewerStore((s) => s.tool);
+    const color = useViewerStore((s) => s.color);
+    const widthKey = useViewerStore((s) => s.widthKey);
+    const fingerDraws = useViewerStore((s) => s.fingerDraws);
     const printHandwriting = useViewerStore((s) => s.printHandwriting);
     const markupMode = useViewerStore((s) => s.markupMode);
     const concertDim = useViewerStore((s) => s.concertDim);
@@ -53,6 +62,9 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const shareStudentLayerToggle = useViewerStore((s) => s.shareStudentLayerToggle);
     const {
         setTool,
+        setColor,
+        setWidthKey,
+        setFingerDraws,
         setPrintHandwriting,
         setMarkupMode,
         setConcertDim,
@@ -88,6 +100,16 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const layerWord = markLayer === 'teacher' ? 'Teacher' : 'Student';
     const printWord = printHandwriting ? 'Type' : 'Ink';
     const markingStatus = `Marking · ${layerWord} · ${printWord}`;
+    const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text' || tool === 'hairpin';
+    const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser' || tool === 'hairpin';
+    const sizeCaption =
+        tool === 'eraser'
+            ? 'Eraser size'
+            : tool === 'highlighter'
+              ? 'Marker size'
+              : tool === 'hairpin'
+                ? 'Hairpin spread'
+                : 'Pen size';
 
     if (!markupMode) {
         return (
@@ -161,6 +183,65 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                         <span className="hidden text-[10px] font-medium leading-none sm:block">{short}</span>
                     </button>
                 ))}
+
+                {showColors ? (
+                    <>
+                        <div className="mx-1 h-6 w-px bg-stone-200" />
+                        {tool === 'highlighter' ? (
+                            <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-amber-700 sm:inline">
+                                Marker
+                            </span>
+                        ) : null}
+                        {STROKE_COLORS.map((c) => (
+                            <button
+                                key={c}
+                                type="button"
+                                aria-label={`Color ${c}`}
+                                aria-pressed={color === c}
+                                onClick={() => setColor(c)}
+                                className={`flex h-8 w-8 items-center justify-center rounded-full ${
+                                    color === c ? 'ring-2 ring-accent ring-offset-1' : ''
+                                }`}
+                            >
+                                <span
+                                    className={`h-5 w-5 rounded-full ${tool === 'highlighter' ? 'opacity-55' : ''}`}
+                                    style={{ backgroundColor: c }}
+                                />
+                            </button>
+                        ))}
+                    </>
+                ) : null}
+
+                {showSize ? (
+                    <>
+                        <div className="mx-1 h-6 w-px bg-stone-200" />
+                        <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500 sm:inline">
+                            {sizeCaption}
+                        </span>
+                        {WIDTHS.map(({ key, label, preview }) => (
+                            <button
+                                key={key}
+                                type="button"
+                                title={`${sizeCaption}: ${label}`}
+                                aria-label={`${sizeCaption} ${label}`}
+                                aria-pressed={widthKey === key}
+                                onClick={() => setWidthKey(key)}
+                                className={`flex h-8 w-8 items-center justify-center rounded-xl transition ${
+                                    widthKey === key ? 'bg-accent-soft' : 'hover:bg-ink/5'
+                                }`}
+                            >
+                                <span
+                                    className={`rounded-full ${tool === 'highlighter' ? 'bg-amber-400/70' : 'bg-stone-700'} ${
+                                        tool === 'eraser' ? 'border-2 border-stone-500 bg-transparent' : ''
+                                    }`}
+                                    style={{ width: preview, height: preview }}
+                                />
+                            </button>
+                        ))}
+                    </>
+                ) : null}
+
+                <div className="mx-1 h-6 w-px bg-stone-200" />
                 <button
                     type="button"
                     title="Undo"
@@ -180,6 +261,21 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
                 >
                     <RedoIcon size={20} />
+                </button>
+                <button
+                    type="button"
+                    title={fingerDraws ? 'Finger drawing on — a finger draws ink' : 'Finger drawing off — a finger pans'}
+                    aria-label="Draw with finger"
+                    aria-pressed={fingerDraws}
+                    onClick={() => setFingerDraws(!fingerDraws)}
+                    className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
+                        fingerDraws ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
+                    }`}
+                >
+                    <span className="flex h-5 w-5 items-center justify-center">
+                        <PointerIcon size={20} />
+                    </span>
+                    <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
                 </button>
 
                 {showType && selectedPayload ? (
