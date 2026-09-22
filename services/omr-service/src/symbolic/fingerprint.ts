@@ -80,7 +80,8 @@ const fromMidi = (ranked: RankedCandidate, bytes: Buffer, pdf: PdfSignals): Matc
         fifths: pdf.fifths ?? 0,
         pickupQuarters: pdf.pickupQuarters,
         arrangement: ranked.arrangement,
-        printedBars: pdf.printedBars,
+        // Count bars from the MIDI. Copying pdf.printedBars made every
+        // movement of an opus score identically and forced `ambiguous`.
     });
 
 /**

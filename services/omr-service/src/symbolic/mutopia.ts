@@ -1,5 +1,5 @@
 import { movementIndexFromFilename, workKeyFromMutopiaPath } from './workKey.js';
-import { formatFromFilename, sourcePriority, type RankedCandidate, type WorkKey } from './types.js';
+import { catalogTokensAgree, DEBUSSY_CD_TO_LESURE, formatFromFilename, sourcePriority, type RankedCandidate, type WorkKey } from './types.js';
 
 export interface MutopiaFile {
     url: string;
@@ -63,6 +63,9 @@ const isPianoInstrument = (instrument: string): boolean => {
 
 const decodeHref = (raw: string): string => raw.replace(/&amp;/g, '&');
 
+/** Mutopia ships multi-movement MIDI as `*-mids.zip`, not loose `.mid` files. */
+export const isMutopiaMidiZip = (filename: string): boolean => /(?:^|[-_])mids\.zip$/i.test(filename);
+
 const collectFtpUrls = (html: string): string[] => {
     const out: string[] = [];
     const seen = new Set<string>();
@@ -108,7 +111,9 @@ const titleFromRow = (row: string): string => {
 };
 
 const pieceFromUrls = (urls: readonly string[], instrument: string, title: string): MutopiaPiece | null => {
-    const midLyPdf = urls.filter((u) => /\.(mid|midi|ly|mxl|xml|pdf)(?:\b|$)/i.test(u));
+    const midLyPdf = urls.filter(
+        (u) => /\.(mid|midi|ly|mxl|xml|pdf)(?:\b|$)/i.test(u) || isMutopiaMidiZip(basename(u)),
+    );
     const files: MutopiaFile[] = (midLyPdf.length > 0 ? midLyPdf : [...urls]).map((url) => ({
         url,
         filename: basename(url),
@@ -228,13 +233,7 @@ export const mergeMutopiaIndexes = (chunks: readonly MutopiaPiece[][]): MutopiaP
 };
 
 const catalogCompatible = (query: WorkKey, candidate: WorkKey): boolean => {
-    if (query.composerId !== candidate.composerId) {
-        return false;
-    }
-    if (query.catalogType !== candidate.catalogType) {
-        return false;
-    }
-    if (query.catalogN !== candidate.catalogN) {
+    if (!catalogTokensAgree(query, candidate)) {
         return false;
     }
     if (query.movementIndex !== undefined && candidate.movementIndex !== undefined) {
@@ -246,10 +245,8 @@ const catalogCompatible = (query: WorkKey, candidate: WorkKey): boolean => {
 /**
  * Guitar / tab / ukulele transcriptions of a keyboard work. They share the
  * work's catalogue number, so nothing else separates them from the piano
- * edition — and because a MIDI candidate borrows the PDF's meter and printed
- * bars, one of these scores exactly as high as the real edition and turns a
- * clean accept into `ambiguous`. The instrument field alone is not a signal:
- * BWV 999 is a lute piece and stays.
+ * edition. The instrument field alone is not a signal: BWV 999 is a lute
+ * piece and stays.
  */
 const isTranscriptionFilename = (filename: string): boolean => /guitar|[-_]tab[-_.]|ukulele/i.test(filename);
 
@@ -260,7 +257,7 @@ export const lookupMutopia = (index: readonly MutopiaPiece[], workKey: WorkKey):
             continue;
         }
         for (const file of piece.files) {
-            const format = formatFromFilename(file.filename);
+            const format = isMutopiaMidiZip(file.filename) ? 'mid' : formatFromFilename(file.filename);
             // .pdf (and other non-candidate suffixes) stay index-only.
             if (format === null) {
                 continue;
@@ -359,21 +356,13 @@ export const mutopiaFtpComposerDir = (composerId: string): string | undefined =>
             return 'FaureG';
         case 'scriabin':
             return 'ScriabinA';
+        case 'mussorgsky':
+            return 'MussorgskyM';
+        case 'field':
+            return 'FieldJ';
         default:
             return undefined;
     }
-};
-
-/**
- * IMSLP titles Debussy by the Catalogue Debussy (`CD 82`); Mutopia files him by
- * Lesure (`L75`). The popular piano works, both ways.
- */
-const DEBUSSY_CD_TO_LESURE: Record<number, number> = {
-    74: 66, // 2 Arabesques
-    76: 68, // Rêverie
-    82: 75, // Suite bergamasque
-    119: 113, // Children's Corner
-    125: 117, // Préludes, Livre 1
 };
 
 export const mutopiaFtpCatalogDirs = (workKey: WorkKey): string[] => {
@@ -406,13 +395,54 @@ export const mutopiaFtpCatalogDirs = (workKey: WorkKey): string[] => {
         }
         case 'Hob':
             return [`HOB-XVI-${workKey.catalogN}`];
-        case 'No':
         case 'H':
+            return [`H${workKey.catalogN}`, `H.${workKey.catalogN}`];
+        case 'No':
             return [];
         default: {
             const exhaustive: never = workKey.catalogType;
             throw new Error(`unhandled catalog type ${exhaustive}`);
         }
+    }
+};
+
+/**
+ * Mutopia sometimes files uncatalogued piano works as composer-root folders
+ * (`SatieE/gymnopedie_1`, `JoplinS/entertainer`) instead of `Op_N`.
+ */
+export const mutopiaFtpTitleDirs = (workKey: WorkKey): string[] => {
+    switch (workKey.composerId) {
+        case 'satie': {
+            if (workKey.catalogType !== 'No') {
+                return [];
+            }
+            if (workKey.catalogN === 0) {
+                return ['gymnopedie_1', 'gymnopedie_2', 'gymnopedie_3'];
+            }
+            if (workKey.catalogN === 9) {
+                return ['Gnossienne'];
+            }
+            if (workKey.catalogN >= 1 && workKey.catalogN <= 3) {
+                return [`gymnopedie_${workKey.catalogN}`];
+            }
+            return [];
+        }
+        case 'joplin': {
+            if (workKey.catalogType !== 'No') {
+                return [];
+            }
+            if (workKey.catalogN === 1) {
+                return ['entertainer'];
+            }
+            if (workKey.catalogN === 2) {
+                return ['maple'];
+            }
+            return [];
+        }
+        case 'mussorgsky':
+            return ['pictures-at-an-exhibition'];
+        default:
+            return [];
     }
 };
 
@@ -442,9 +472,9 @@ const listingEntries = (html: string, baseUrl: string): { dirs: string[]; files:
             continue;
         }
         const last = abs.pathname.split('/').filter(Boolean).pop() ?? '';
-        if (abs.pathname.endsWith('/') && formatFromFilename(last) === null) {
+        if (abs.pathname.endsWith('/') && formatFromFilename(last) === null && !isMutopiaMidiZip(last)) {
             dirs.push(abs.toString());
-        } else if (formatFromFilename(last) !== null) {
+        } else if (formatFromFilename(last) !== null || isMutopiaMidiZip(last)) {
             files.push(abs.toString());
         }
     }
@@ -466,7 +496,7 @@ export const harvestMutopiaFtp = async (
     if (composer === undefined) {
         return [];
     }
-    const catalogs = mutopiaFtpCatalogDirs(workKey);
+    const catalogs = [...mutopiaFtpCatalogDirs(workKey), ...mutopiaFtpTitleDirs(workKey)];
     const fileUrls: string[] = [];
     for (const catalog of catalogs) {
         const dirUrl = `${MUTOPIA_ORIGIN}/ftp/${composer}/${catalog}/`;

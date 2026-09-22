@@ -44,8 +44,11 @@ describe('createNetworkSymbolicClient.discover', () => {
 
         const candidates = await client.discover(FUR_ELISE, {});
 
-        expect(candidates.map((c) => c.url)).toEqual([`${piece}fur_Elise_WoO59.ly`, `${piece}fur_Elise_WoO59.mid`]);
-        expect(candidates.every((c) => c.source === 'mutopia')).toBe(true);
+        expect(candidates.filter((c) => c.source === 'mutopia').map((c) => c.url)).toEqual([
+            `${piece}fur_Elise_WoO59.ly`,
+            `${piece}fur_Elise_WoO59.mid`,
+        ]);
+        expect(candidates.some((c) => c.url.includes('elise_format0.mid'))).toBe(true);
         expect(seen.some((url) => url.includes('piece-list.html'))).toBe(false);
     });
 
@@ -62,15 +65,21 @@ describe('createNetworkSymbolicClient.discover', () => {
             imslpPageTitle: 'Für Elise, WoO 59 (Beethoven, Ludwig van)',
         });
 
-        expect(candidates.map((c) => c.url)).toEqual([`${piece}fur_Elise_WoO59.mid`]);
-        expect(seen.some((url) => url.includes('imslp.org'))).toBe(true);
+        expect(candidates.filter((c) => c.source === 'mutopia').map((c) => c.url)).toEqual([
+            `${piece}fur_Elise_WoO59.mid`,
+        ]);
+        expect(seen.some((url) => url.includes('imslp.org'))).toBe(false);
     });
 
-    it('returns no candidates when the composer has no FTP directory for the catalogue', async () => {
+    it('still returns piano-midi.de when Mutopia FTP has no files', async () => {
         const seen: string[] = [];
         const client = createNetworkSymbolicClient(fetcherFor({}, seen), noBytes);
 
-        await expect(client.discover(FUR_ELISE, {})).resolves.toEqual([]);
+        await expect(client.discover(FUR_ELISE, {})).resolves.toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ url: expect.stringContaining('elise_format0.mid') }),
+            ]),
+        );
         expect(seen).toEqual(['https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/']);
     });
 });

@@ -126,6 +126,38 @@ export const completeJob = async (
     return data === true;
 };
 
+/**
+ * Return a claimed job to `queued` without failing it (symbolic-only drain:
+ * Mutopia MIDI miss should wait for OMR, not burn attempts or start Audiveris).
+ * No-op if this worker no longer holds the running lease.
+ */
+export const releaseJob = async (jobId: number, workerId: string, reason: string): Promise<boolean> => {
+    const supabase = serviceClient();
+    if (!supabase) {
+        return false;
+    }
+    const runAfter = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabase
+        .from('omr_jobs')
+        .update({
+            status: 'queued',
+            worker_id: null,
+            claimed_at: null,
+            lease_expires_at: null,
+            last_error: reason,
+            run_after: runAfter,
+        })
+        .eq('id', jobId)
+        .eq('worker_id', workerId)
+        .eq('status', 'running')
+        .select('id');
+    if (error) {
+        console.warn('[jobStore] release failed:', error.message);
+        return false;
+    }
+    return Array.isArray(data) && data.length > 0;
+};
+
 /** Permanence / backoff decided entirely in SQL. */
 export const failJob = async (jobId: number, workerId: string, code: ErrorCode): Promise<string | null> => {
     const supabase = serviceClient();
