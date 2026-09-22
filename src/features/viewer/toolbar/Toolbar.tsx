@@ -3,24 +3,17 @@ import { useSyncExternalStore, type ReactNode } from 'react';
 import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { ignoresProseFont, SERIF_FONT_FAMILY, styledTextPayload, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import { STROKE_COLORS, useViewerStore } from '@/state/store';
-import { isTextPayload, type Annotation, type StrokeWidthKey, type TextFont, type Tool } from '@/types/models';
-import { PointerIcon, PrintHandwritingIcon, RedoIcon, UndoIcon } from '@/ui/icons';
+import { useViewerStore } from '@/state/store';
+import { isTextPayload, type Annotation, type TextFont, type Tool } from '@/types/models';
+import { RedoIcon, UndoIcon } from '@/ui/icons';
 
 const TOOLS: Array<{ tool: Tool; label: string; short: string; icon: ReactNode }> = [
-    { tool: 'pan', label: 'Pan', short: 'Pan', icon: <PanIcon /> },
     { tool: 'pen', label: 'Pen', short: 'Pen', icon: <PenIcon /> },
-    { tool: 'highlighter', label: 'Highlighter', short: 'Mark', icon: <HighlighterIcon /> },
+    { tool: 'highlighter', label: 'Marker', short: 'Marker', icon: <HighlighterIcon /> },
     { tool: 'eraser', label: 'Eraser', short: 'Erase', icon: <EraserIcon /> },
     { tool: 'text', label: 'Text note', short: 'Text', icon: <TextIcon /> },
     { tool: 'hairpin', label: 'Hairpin — drag a crescendo or diminuendo', short: 'Hairpin', icon: <HairpinIcon /> },
     { tool: 'fingering', label: 'Fingering — drag over a chord or phrase', short: 'Hands', icon: <FingeringIcon /> },
-];
-
-const WIDTHS: Array<{ key: StrokeWidthKey; label: string; preview: number }> = [
-    { key: 'thin', label: 'Thin', preview: 2 },
-    { key: 'medium', label: 'Medium', preview: 4 },
-    { key: 'thick', label: 'Thick', preview: 7 },
 ];
 
 export interface ToolbarProps {
@@ -52,9 +45,6 @@ const useSelectedText = (store: AnnotationStore): Annotation | null => {
  */
 export const Toolbar = ({ store }: ToolbarProps) => {
     const tool = useViewerStore((s) => s.tool);
-    const color = useViewerStore((s) => s.color);
-    const widthKey = useViewerStore((s) => s.widthKey);
-    const fingerDraws = useViewerStore((s) => s.fingerDraws);
     const printHandwriting = useViewerStore((s) => s.printHandwriting);
     const markupMode = useViewerStore((s) => s.markupMode);
     const concertDim = useViewerStore((s) => s.concertDim);
@@ -63,9 +53,6 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     const shareStudentLayerToggle = useViewerStore((s) => s.shareStudentLayerToggle);
     const {
         setTool,
-        setColor,
-        setWidthKey,
-        setFingerDraws,
         setPrintHandwriting,
         setMarkupMode,
         setConcertDim,
@@ -98,16 +85,9 @@ export const Toolbar = ({ store }: ToolbarProps) => {
         }
     };
 
-    const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text' || tool === 'hairpin';
-    const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser' || tool === 'hairpin';
-    const sizeCaption =
-        tool === 'eraser'
-            ? 'Eraser size'
-            : tool === 'highlighter'
-              ? 'Marker size'
-              : tool === 'hairpin'
-                ? 'Hairpin spread'
-                : 'Pen size';
+    const layerWord = markLayer === 'teacher' ? 'Teacher' : 'Student';
+    const printWord = printHandwriting ? 'Type' : 'Ink';
+    const markingStatus = `Marking · ${layerWord} · ${printWord}`;
 
     if (!markupMode) {
         return (
@@ -181,41 +161,30 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                         <span className="hidden text-[10px] font-medium leading-none sm:block">{short}</span>
                     </button>
                 ))}
-
-                {showColors ? (
-                    <>
-                        <div className="mx-1 h-6 w-px bg-stone-200" />
-                        {tool === 'highlighter' ? (
-                            <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-amber-700 sm:inline">
-                                Marker
-                            </span>
-                        ) : null}
-                        {STROKE_COLORS.map((c) => (
-                            <button
-                                key={c}
-                                type="button"
-                                aria-label={`Color ${c}`}
-                                aria-pressed={color === c}
-                                onClick={() => setColor(c)}
-                                className={`flex h-8 w-8 items-center justify-center rounded-full ${
-                                    color === c ? 'ring-2 ring-accent ring-offset-1' : ''
-                                }`}
-                            >
-                                <span
-                                    className={`h-5 w-5 rounded-full ${tool === 'highlighter' ? 'opacity-55' : ''}`}
-                                    style={{ backgroundColor: c }}
-                                />
-                            </button>
-                        ))}
-                    </>
-                ) : null}
+                <button
+                    type="button"
+                    title="Undo"
+                    aria-label="Undo"
+                    disabled={!canUndo}
+                    onClick={() => void store.undoLast()}
+                    className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                    <UndoIcon size={20} />
+                </button>
+                <button
+                    type="button"
+                    title="Redo"
+                    aria-label="Redo"
+                    disabled={!canRedo}
+                    onClick={() => void store.redoLast()}
+                    className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                    <RedoIcon size={20} />
+                </button>
 
                 {showType && selectedPayload ? (
                     <>
                         <div className="mx-1 h-6 w-px bg-stone-200" />
-                        <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500 sm:inline">
-                            Font
-                        </span>
                         {(['sans', 'serif'] as const).map((option) => (
                             <button
                                 key={option}
@@ -271,130 +240,55 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                     </>
                 ) : null}
 
-                {showSize ? (
-                    <>
-                        <div className="mx-1 h-6 w-px bg-stone-200" />
-                        <span className="hidden px-1 text-[10px] font-medium uppercase tracking-wide text-stone-500 sm:inline">
-                            {sizeCaption}
-                        </span>
-                        {WIDTHS.map(({ key, label, preview }) => (
-                            <button
-                                key={key}
-                                type="button"
-                                title={`${sizeCaption}: ${label}`}
-                                aria-label={`${sizeCaption} ${label}`}
-                                aria-pressed={widthKey === key}
-                                onClick={() => setWidthKey(key)}
-                                className={`flex h-8 w-8 items-center justify-center rounded-xl transition ${
-                                    widthKey === key ? 'bg-accent-soft' : 'hover:bg-ink/5'
-                                }`}
-                            >
-                                <span
-                                    className={`rounded-full ${tool === 'highlighter' ? 'bg-amber-400/70' : 'bg-stone-700'} ${
-                                        tool === 'eraser' ? 'border-2 border-stone-500 bg-transparent' : ''
-                                    }`}
-                                    style={{ width: preview, height: preview }}
-                                />
-                            </button>
-                        ))}
-                    </>
-                ) : null}
-
-                <div className="mx-1 h-6 w-px bg-stone-200" />
-                <button
-                    type="button"
-                    title={
-                        layerAudience.canUseTeacherLayer
-                            ? 'Stamp new marks on the teacher layer'
-                            : 'Students mark on their own layer'
-                    }
-                    aria-label="Teacher layer"
-                    aria-pressed={markLayer === 'teacher'}
-                    disabled={!layerAudience.canUseTeacherLayer}
-                    onClick={() => setMarkLayer('teacher')}
-                    className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition disabled:opacity-40 ${
-                        markLayer === 'teacher' ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
-                    }`}
+                <div
+                    className="ml-1 inline-flex h-8 items-stretch overflow-hidden rounded-full border border-stone-200 bg-stone-50 text-xs text-stone-700"
+                    role="group"
+                    aria-label="Mark layer"
                 >
-                    Teacher
-                </button>
-                <button
-                    type="button"
-                    title="Stamp new marks on your student layer"
-                    aria-label="Student layer"
-                    aria-pressed={markLayer === 'student'}
-                    onClick={() => setMarkLayer('student')}
-                    className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition ${
-                        markLayer === 'student' ? 'bg-accent-soft text-accent' : 'text-stone-700 hover:bg-ink/5'
-                    }`}
-                >
-                    Student
-                </button>
-                {layerAudience.canShareStudentLayer && shareStudentLayerToggle ? (
                     <button
                         type="button"
-                        title="Let other members see the student layer"
-                        aria-label="Share student marks"
-                        aria-pressed={layerAudience.shareStudentLayer}
-                        onClick={() => shareStudentLayerToggle(!layerAudience.shareStudentLayer)}
-                        className={`flex h-8 items-center justify-center rounded-xl px-2 text-xs transition ${
-                            layerAudience.shareStudentLayer
-                                ? 'bg-accent-soft text-accent'
-                                : 'text-stone-700 hover:bg-ink/5'
-                        }`}
+                        title={
+                            layerAudience.canUseTeacherLayer
+                                ? `Marking on the ${layerWord.toLowerCase()} layer`
+                                : 'Students mark on their own layer'
+                        }
+                        aria-label={markLayer === 'teacher' ? 'Teacher layer' : 'Student layer'}
+                        disabled={!layerAudience.canUseTeacherLayer}
+                        onClick={() => setMarkLayer(markLayer === 'teacher' ? 'student' : 'teacher')}
+                        className="px-2.5 font-medium transition hover:bg-ink/5 disabled:hover:bg-transparent"
                     >
-                        {layerAudience.shareStudentLayer ? 'Marks shared' : 'Share marks'}
+                        {layerWord}
                     </button>
-                ) : null}
-                <div className="mx-1 h-6 w-px bg-stone-200" />
+                    {layerAudience.canShareStudentLayer && shareStudentLayerToggle ? (
+                        <button
+                            type="button"
+                            title="Let other members see the student layer"
+                            aria-label="Share student marks"
+                            aria-pressed={layerAudience.shareStudentLayer}
+                            onClick={() => shareStudentLayerToggle(!layerAudience.shareStudentLayer)}
+                            className={`border-l border-stone-200 px-2.5 transition ${
+                                layerAudience.shareStudentLayer
+                                    ? 'bg-accent-soft text-accent'
+                                    : 'text-stone-600 hover:bg-ink/5'
+                            }`}
+                        >
+                            {layerAudience.shareStudentLayer ? 'Marks shared' : 'Share marks'}
+                        </button>
+                    ) : null}
+                </div>
+                <p className="m-0 px-1.5 text-xs text-stone-500" role="status">
+                    {markingStatus}
+                </p>
                 <button
                     type="button"
-                    title="Undo"
-                    aria-label="Undo"
-                    disabled={!canUndo}
-                    onClick={() => void store.undoLast()}
-                    className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
-                >
-                    <UndoIcon size={20} />
-                </button>
-                <button
-                    type="button"
-                    title="Redo"
-                    aria-label="Redo"
-                    disabled={!canRedo}
-                    onClick={() => void store.redoLast()}
-                    className="flex h-10 w-10 items-center justify-center rounded-xl text-stone-600 transition hover:bg-ink/5 disabled:opacity-40 disabled:hover:bg-transparent"
-                >
-                    <RedoIcon size={20} />
-                </button>
-
-                <div className="mx-1 h-6 w-px bg-stone-200" />
-                <button
-                    type="button"
-                    title={
-                        fingerDraws ? 'Finger drawing on — a finger draws ink' : 'Finger drawing off — a finger pans'
-                    }
-                    aria-label="Draw with finger"
-                    aria-pressed={fingerDraws}
-                    onClick={() => setFingerDraws(!fingerDraws)}
-                    className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
-                        fingerDraws ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
-                    }`}
-                >
-                    <span className="flex h-5 w-5 items-center justify-center">
-                        <PointerIcon size={20} />
-                    </span>
-                    <span className="hidden text-[10px] font-medium leading-none sm:block">Finger</span>
-                </button>
-                <button
-                    type="button"
+                    role="switch"
                     title={
                         printHandwriting
-                            ? 'Print handwriting on — digits and dynamics convert on this device; only the score owner converts text notes (a metered vision read billed to them)'
-                            : 'Print handwriting off — your pen stays ink'
+                            ? 'Print on — digits and dynamics convert on this device; only the score owner converts text notes (a metered vision read billed to them)'
+                            : 'Print off — your pen stays ink'
                     }
-                    aria-label="Print handwriting"
-                    aria-pressed={printHandwriting}
+                    aria-label="Print"
+                    aria-checked={printHandwriting}
                     onClick={() => {
                         const next = !printHandwriting;
                         setPrintHandwriting(next);
@@ -402,31 +296,25 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                             warmPrintPipeline();
                         }
                     }}
-                    className={`flex h-10 items-center justify-center gap-1 rounded-xl px-2 text-stone-600 transition sm:min-w-[3.25rem] sm:flex-col sm:gap-0 sm:px-1.5 sm:py-1 ${
-                        printHandwriting ? 'bg-accent-soft text-accent' : 'hover:bg-ink/5'
-                    }`}
+                    className="flex h-8 items-center gap-1.5 rounded-full border border-stone-200 bg-stone-50 px-2 text-xs"
                 >
-                    <span className="flex h-5 w-5 items-center justify-center">
-                        <PrintHandwritingIcon size={20} />
+                    <span className={printHandwriting ? 'text-stone-400' : 'font-medium text-stone-800'}>Ink</span>
+                    <span
+                        aria-hidden
+                        className={`relative h-4 w-7 rounded-full transition ${printHandwriting ? 'bg-accent' : 'bg-stone-300'}`}
+                    >
+                        <span
+                            className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow ${
+                                printHandwriting ? 'left-3.5' : 'left-0.5'
+                            }`}
+                        />
                     </span>
-                    <span className="hidden text-[10px] font-medium leading-none sm:block">Print</span>
+                    <span className={printHandwriting ? 'font-medium text-accent' : 'text-stone-400'}>Type</span>
                 </button>
             </div>
         </div>
     );
 };
-
-function PanIcon() {
-    return (
-        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-            <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M9 11V6a1.5 1.5 0 0 1 3 0v5M12 11V4.5a1.5 1.5 0 0 1 3 0V11M15 11V6.5a1.5 1.5 0 0 1 3 0V14a5 5 0 0 1-5 5h-1.5a5 5 0 0 1-5-5v-2.5a1.5 1.5 0 0 1 3 0V11"
-            />
-        </svg>
-    );
-}
 
 function PenIcon() {
     return (
