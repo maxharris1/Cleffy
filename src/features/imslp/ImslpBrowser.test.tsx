@@ -831,7 +831,13 @@ describe('ImslpBrowser', () => {
         expect(importButton).toBeEnabled();
         await userEvent.click(importButton);
         await waitFor(() => {
-            expect(onImportImslp).toHaveBeenCalledWith('moonlight-let.pdf', work.title, true, 'sha-moon');
+            expect(onImportImslp).toHaveBeenCalledWith(
+                'moonlight-let.pdf',
+                work.title,
+                true,
+                'sha-moon',
+                expect.any(Function),
+            );
         });
     });
 
@@ -886,7 +892,13 @@ describe('ImslpBrowser', () => {
         await userEvent.click(screen.getByRole('checkbox'));
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         await waitFor(() => {
-            expect(onImportImslp).toHaveBeenCalledWith('imslp-scan.pdf', work.title, true, undefined);
+            expect(onImportImslp).toHaveBeenCalledWith(
+                'imslp-scan.pdf',
+                work.title,
+                true,
+                undefined,
+                expect.any(Function),
+            );
         });
     });
 
