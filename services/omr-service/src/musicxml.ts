@@ -3029,6 +3029,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const pendingGlissandi = new Map<string, ScoreNote>();
     let arpBuffer: ScoreNote[] = [];
     let arpDirection: 'up' | 'down' | null = null;
+    const arpeggios: Array<{ notes: ScoreNote[]; direction: 'up' | 'down' }> = [];
     let swing = false;
 
     const voiceSlots = assignVoiceSlots(raws, ctx.warnings, ctx.seed.voiceSlotsByPart?.[ctx.partIndex]);
@@ -3111,19 +3112,10 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         if (arpBuffer.length === 0) {
             return;
         }
-        arpBuffer = mergeSharedHeads(arpBuffer);
-        const t0 = arpBuffer[0]?.t;
-        const realized = arpeggiateChord(arpBuffer, arpDirection ?? 'up');
-        if (t0 !== undefined && realized.some((n) => n.t !== t0)) {
-            ctx.warnings.add('ornaments_realized');
-        }
-        const sources = [...arpBuffer].sort((a, b) => (arpDirection === 'down' ? b.p - a.p : a.p - b.p));
-        realized.forEach((note, i) => {
-            const source = realized === arpBuffer ? arpBuffer[i] : sources[i];
-            const head = source && heads.get(source);
-            if (head) heads.set(note, head);
-        });
-        notes.push(...realized);
+        // Keep the original objects until ties close: realization clones notes,
+        // and cloning here would strand subsequent tie-duration updates.
+        arpeggios.push({ notes: arpBuffer, direction: arpDirection ?? 'up' });
+        notes.push(...arpBuffer);
         arpBuffer = [];
         arpDirection = null;
     };
@@ -3507,9 +3499,22 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     // voice happened to appear first in the XML. A tie-stop emits no attack, so
     // another voice reattacking that head remains a separate sounding event.
     const soundingNotes = mergeSharedHeads(notes);
+    const surviving = new Set(soundingNotes);
+    const rolled = new Map<ScoreNote, ScoreNote>();
+    for (const group of arpeggios) {
+        const members = group.notes.filter((note) => surviving.has(note));
+        const realized = arpeggiateChord(members, group.direction);
+        if (realized === members) continue;
+        const ordered = [...members].sort((a, b) => (group.direction === 'up' ? a.p - b.p : b.p - a.p));
+        realized.forEach((note, i) => {
+            const original = ordered[i];
+            if (original) rolled.set(original, note);
+        });
+        ctx.warnings.add('ornaments_realized');
+    }
 
     return {
-        notes: soundingNotes,
+        notes: soundingNotes.map((note) => rolled.get(note) ?? note),
         measures,
         timeSignatures,
         keySignatures,

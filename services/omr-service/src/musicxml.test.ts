@@ -1957,6 +1957,70 @@ describe('voices', () => {
             expect(score.openTiesAtEnd).toBe(0);
         });
 
+        it('preserves both tied voices when their shared attack is arpeggiated', () => {
+            const head = (duration: number, voice: number, tie: string) =>
+                vn(
+                    'C',
+                    4,
+                    duration,
+                    voice,
+                    1,
+                    `<tie type="${tie}"/><notations><arpeggiate/></notations>`,
+                    'default-x="20"',
+                );
+            const xml = wrap(
+                bar(1, head(16, 1, 'start') + back(16) + head(16, 2, 'start'), true) +
+                    bar(2, head(4, 1, 'stop') + rest(12, 1) + back(16) + head(8, 2, 'stop') + rest(8, 2)),
+            );
+            const score = parseMusicXmlString(xml);
+            expect(score.notes).toHaveLength(1);
+            expect(score.notes[0]).toMatchObject({ t: 0, p: 60, d: plain(2880) });
+            expect(score.openTiesAtEnd).toBe(0);
+        });
+
+        it('rolls shared tied chords only after their final durations are resolved', () => {
+            const chord = (voice: number, tie: string) =>
+                vn('C', 4, 16, voice, 1, `<tie type="${tie}"/><notations><arpeggiate/></notations>`, 'default-x="20"') +
+                vn(
+                    'E',
+                    4,
+                    16,
+                    voice,
+                    1,
+                    `<chord/><tie type="${tie}"/><notations><arpeggiate/></notations>`,
+                    'default-x="20"',
+                );
+            const score = parseMusicXmlString(
+                wrap(
+                    bar(1, chord(1, 'start') + back(16) + chord(2, 'start'), true) +
+                        bar(2, chord(1, 'stop') + back(16) + chord(2, 'stop')),
+                ),
+            );
+            expect(score.notes.map((n) => [n.t, n.d, n.p])).toEqual([
+                [0, plain(3840), 60],
+                [60, plain(3840) - 60, 64],
+            ]);
+            expect(score.openTiesAtEnd).toBe(0);
+        });
+
+        it('merges a shared head before rolling chords of different sizes', () => {
+            const arp = '<notations><arpeggiate/></notations>';
+            const xml = wrap(
+                bar(
+                    1,
+                    vn('C', 4, 16, 1, 1, arp, 'default-x="20"') +
+                        vn('E', 4, 16, 1, 1, `<chord/>${arp}`, 'default-x="20"') +
+                        back(16) +
+                        vn('E', 4, 16, 2, 1, arp, 'default-x="20"'),
+                    true,
+                ),
+            );
+            expect(parseMusicXmlString(xml).notes.map((n) => [n.t, n.p])).toEqual([
+                [0, 60],
+                [60, 64],
+            ]);
+        });
+
         it('keeps a new attack when the other voice is continuing a tie at that head', () => {
             const xml = wrap(
                 bar(1, vn('C', 4, 16, 1, 1, '<tie type="start"/>', 'default-x="20"'), true) +
