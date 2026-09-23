@@ -202,6 +202,8 @@ export const analysisSourceFromCorpus = (source: CorpusSource): AnalysisSource =
 
 /** Provenance the seed recorded for a PDF it fetched from a public mirror. */
 export interface PdProvenance {
+    /** IMSLP work page title the seed filed these bytes under. */
+    workTitle: string;
     licenceTag: CorpusLicenceTag;
     editorCredit: string | null;
     sourceUrl: string | null;
@@ -211,6 +213,7 @@ export interface PdProvenance {
 const LICENCE_TAGS: readonly CorpusLicenceTag[] = ['PD', 'CC0', 'CC-BY', 'CC-BY-SA'];
 
 const pdProvenanceSchema = z.object({
+    work_title: z.string().min(1),
     licence_tag: z.enum(LICENCE_TAGS),
     editor_credit: z.string().nullable().optional(),
     source_url: z.string().nullable().optional(),
@@ -230,7 +233,7 @@ export const pdProvenance = async (pdfSha256: string): Promise<PdProvenance | nu
     }
     const { data, error } = await supabase
         .from('pd_pdf_store')
-        .select('licence_tag,editor_credit,source_url,us_pd')
+        .select('work_title,licence_tag,editor_credit,source_url,us_pd')
         .eq('pdf_sha256', pdfSha256)
         .maybeSingle();
     if (error) {
@@ -246,6 +249,7 @@ export const pdProvenance = async (pdfSha256: string): Promise<PdProvenance | nu
         return null;
     }
     return {
+        workTitle: parsed.data.work_title,
         licenceTag: parsed.data.licence_tag,
         editorCredit: parsed.data.editor_credit ?? null,
         sourceUrl: parsed.data.source_url ?? null,

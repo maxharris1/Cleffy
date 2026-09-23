@@ -112,7 +112,13 @@ afterEach(() => {
 
 describe('runClaimedJob — corpus adapters', () => {
     it('passes titleForDocument into the pipeline: a verified public import is written under its title', async () => {
-        pdProvenance.mockResolvedValue({ licenceTag: 'PD', editorCredit: null, sourceUrl: null, usPd: true });
+        pdProvenance.mockResolvedValue({
+            workTitle: 'Inventions (Bach, Johann Sebastian)',
+            licenceTag: 'PD',
+            editorCredit: null,
+            sourceUrl: null,
+            usPd: true,
+        });
         titleForDocument.mockResolvedValue(TITLE);
         const { ok } = await runClaimedJob(claimed(null), 'worker', writeback);
         expect(ok).toBe(true);
@@ -173,7 +179,13 @@ describe('runClaimedJob — corpus adapters', () => {
 
 describe('runJob — push mode', () => {
     it('forwards the /jobs imslpPageTitle for a verified public import', async () => {
-        pdProvenance.mockResolvedValue({ licenceTag: 'PD', editorCredit: null, sourceUrl: null, usPd: true });
+        pdProvenance.mockResolvedValue({
+            workTitle: 'Inventions (Bach, Johann Sebastian)',
+            licenceTag: 'PD',
+            editorCredit: null,
+            sourceUrl: null,
+            usPd: true,
+        });
         await runJob(
             { documentId: DOC, pdfSignedUrl: 'https://example.test/signed.pdf', pageCount: 1, imslpPageTitle: TITLE },
             writeback,

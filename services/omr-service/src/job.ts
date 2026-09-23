@@ -76,6 +76,11 @@ const isSymbolicOnly = (raw: string | undefined = process.env.CLEFFY_SYMBOLIC_ON
  * svc-13: implicit tuplets / fingerings at the source; D.C./Fine and tempo OCR;
  * key-signature repair; ghost-part fill; per-system geometry zip.
  * svc-14: skip staff-less pages (covers, blank, front matter) instead of omr_crash.
+ * svc-36: parser corrections that change existing scores — a notehead two
+ * voices share sounds once (whole readings merged, so an ornament or tremolo
+ * on one stem is not doubled by the other), swing ordering, tied arpeggio
+ * lengths. The corpus is keyed by this string, so a bump orphans every seeded
+ * row: rebuild them with `npm run corpus:seed -- --reseed-ready`.
  * svc-35: a near-blank scanned leaf is skipped like a cover instead of failing
  * the whole book export. Only PDFs that produced nothing under svc-34 change.
  * svc-34: raster-honest Audiveris patches 0001-0004 and 0007 (octave G clef,
@@ -356,17 +361,27 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
 
         // A document title is editable metadata, never proof that its PDF is
         // public. Publication requires provenance for these exact bytes or an
-        // authenticated seed job owned by the configured corpus account.
+        // authenticated seed job owned by the configured corpus account. The
+        // lookup is one primary-key read and runs for every job, so licence
+        // attribution for public bytes never depends on the title or a flag.
         const corpusOwner = corpusOwnerUserId();
         const isSeedJob = corpusOwner !== null && adapters.createdBy === corpusOwner;
         let provenance: PdProvenance | null | undefined;
         const resolveProvenance = async (): Promise<PdProvenance | null> => {
             if (provenance === undefined) {
-                provenance =
-                    corpusOn || adapters.imslpPageTitle !== undefined || isSeedJob ? await pdProvenance(hash) : null;
+                provenance = await pdProvenance(hash);
             }
             return provenance;
         };
+        /**
+         * The work identity a corpus row is published under. Verified bytes
+         * carry the title the seed filed them under; the document title is
+         * trusted only on a seed job, whose document the seed itself titled.
+         * Anything else would let a mis-titled upload of public bytes index
+         * one work's notes under another work's layout key.
+         */
+        const publishedTitle = async (): Promise<string | undefined> =>
+            (await resolveProvenance())?.workTitle ?? (isSeedJob ? adapters.imslpPageTitle : undefined);
         /**
          * Carry licence / credit / source onto what the player badges from. A
          * CC-BY / CC-BY-SA edition obliges us to attribute it wherever it is
@@ -423,10 +438,11 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 console.warn(`[corpus] ${adapters.documentId}: not promoted (${gate.reason})`);
                 return;
             }
+            const title = await publishedTitle();
             const source: CorpusSource = {
                 ...(timings.source ?? { tier: 'omr', band: 'reject', reason: 'no_candidate' }),
                 origin: 'omr',
-                ...(adapters.imslpPageTitle !== undefined ? { imslp_page_title: adapters.imslpPageTitle } : {}),
+                ...(title !== undefined ? { imslp_page_title: title } : {}),
                 ...corpusProvenanceKeys(pd),
             };
             await corpusPut({
@@ -438,7 +454,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 ...(omrLayout !== undefined ? { workKey: omrLayout.workKey, printedBars: omrLayout.printedBars } : {}),
                 ...(timings.pageCount !== undefined ? { pageCount: timings.pageCount } : {}),
                 symbolicSource: 'omr',
-                ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
+                ...(title !== undefined ? { imslpPageTitle: title } : {}),
                 ...corpusPutProvenance(pd),
             });
         };
@@ -454,12 +470,16 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                               corpusTimed(() => corpusLookupByLayout(ENGINE_VERSION, workKey, printedBars, pageCount)),
                       }
                     : baseDeps;
+            // Identify verified public bytes by the title they were filed
+            // under, so the layout key a corpus row is published with (and
+            // looked up by) never comes from an editable document title.
+            const symbolicTitle = (await resolveProvenance())?.workTitle ?? adapters.imslpPageTitle;
             const symbolic = await trySymbolicJob(
                 pdfBytes,
                 {
                     uploadId: adapters.documentId,
                     pageCount: timings.pageCount,
-                    ...(adapters.imslpPageTitle !== undefined ? { imslpPageTitle: adapters.imslpPageTitle } : {}),
+                    ...(symbolicTitle !== undefined ? { imslpPageTitle: symbolicTitle } : {}),
                 },
                 deps,
             );
@@ -476,7 +496,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                     // Public candidate notes do not make an uploaded PDF's
                     // geometry or its association with that work public.
                     if (isSeedJob || pd !== null) {
-                        await corpusPutSymbolic(hash, symbolic, adapters.imslpPageTitle, pd);
+                        await corpusPutSymbolic(hash, symbolic, await publishedTitle(), pd);
                     }
                 }
                 await stampAttribution();

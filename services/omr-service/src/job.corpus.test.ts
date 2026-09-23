@@ -57,6 +57,7 @@ const DOC = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const OWNER = '11111111-1111-1111-1111-111111111111';
 const TITLE = 'Inventions (Bach, Johann Sebastian)';
 const PUBLIC_PROVENANCE: PdProvenance = {
+    workTitle: TITLE,
     licenceTag: 'PD',
     editorCredit: null,
     sourceUrl: 'https://example.test/public.pdf',
@@ -386,6 +387,7 @@ describe('runOmrPipeline — play-along corpus', () => {
 
     it('carries the seed’s licence and credit onto the corpus row and onto what the player badges from', async () => {
         pdProvenance.mockResolvedValueOnce({
+            workTitle: TITLE,
             licenceTag: 'CC-BY-SA',
             editorCredit: 'Chris Sawer, after Breitkopf & Härtel (Mutopia)',
             sourceUrl: 'https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=44',
@@ -457,6 +459,36 @@ describe('runOmrPipeline — play-along corpus', () => {
             expect(corpusPut).not.toHaveBeenCalled();
         },
     );
+
+    it('publishes verified bytes under the title they were filed under, not the editable document title', async () => {
+        pdProvenance.mockResolvedValue(PUBLIC_PROVENANCE);
+        const identify = vi.fn(async () => []);
+        const deps = {
+            ...mutopiaDeps(vi.fn(async () => [ranked({ arrangement: true })])),
+            workKeyProvider: { identify },
+        };
+        await run({
+            symbolicEnabled: true,
+            corpusEnabled: true,
+            symbolicDeps: deps,
+            imslpPageTitle: 'Some Other Work (Someone, Else)',
+            createdBy: 'someone-else',
+        });
+        expect(identify).toHaveBeenCalledWith(expect.objectContaining({ imslpPageTitle: TITLE }));
+        expect(corpusPut).toHaveBeenCalledTimes(1);
+        expect(corpusPut.mock.calls[0]![0]).toMatchObject({
+            imslpPageTitle: TITLE,
+            source: { imslp_page_title: TITLE },
+        });
+    });
+
+    it('attributes public bytes with the corpus flag off and no IMSLP-shaped title', async () => {
+        pdProvenance.mockResolvedValue({ ...PUBLIC_PROVENANCE, licenceTag: 'CC-BY-SA', editorCredit: 'Mutopia' });
+        const result = await run({ symbolicEnabled: false, corpusEnabled: false, createdBy: 'someone-else' });
+        expect(pdProvenance).toHaveBeenCalledExactlyOnceWith(PDF_SHA);
+        expect(result.ready[0]?.timings.source).toMatchObject({ licence: 'CC-BY-SA', editorCredit: 'Mutopia' });
+        expect(corpusPut).not.toHaveBeenCalled();
+    });
 
     it('allows a seed-owned symbolic result without PDF-store provenance', async () => {
         const result = await run({
