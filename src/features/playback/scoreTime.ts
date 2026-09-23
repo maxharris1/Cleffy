@@ -1,3 +1,4 @@
+import type { AlignmentMap } from '@/features/playback/analysisSource';
 import type { ScoreData, ScoreMeasure, ScoreNote, ScoreTimeSig } from '@/types/scoreData';
 import { TICKS_PER_QUARTER } from '@/types/scoreData';
 
@@ -319,25 +320,35 @@ export const measureIndexAtPagePoint = (
      * always back to the first. Omit for the plain first-match behaviour.
      */
     nearTick?: number,
+    alignmentMap?: AlignmentMap | null,
 ): number => {
     let best = -1;
-    for (let sysIndex = 0; sysIndex < score.systems.length; sysIndex++) {
-        const system = score.systems[sysIndex];
-        if (!system || system.page !== pageIndex || ny < system.y0 || ny > system.y1) {
+    for (let i = 0; i < score.measures.length; i++) {
+        const measure = score.measures[i];
+        if (!measure) {
             continue;
         }
-        for (let i = 0; i < score.measures.length; i++) {
-            const measure = score.measures[i];
-            if (!measure || measure.sys !== sysIndex || nx < measure.x0 || nx > measure.x1) {
-                continue;
-            }
-            if (nearTick === undefined) {
-                return i;
-            }
-            const bestMeasure = best >= 0 ? score.measures[best] : undefined;
-            if (!bestMeasure || Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)) {
-                best = i;
-            }
+        // Printed-bar identities survive repeat expansion. Prefer the target
+        // edition's box to the candidate's old geometry, just like the playhead.
+        const box = alignmentMap?.bySrcIndex[measure.srcIndex ?? i];
+        const system = score.systems[measure.sys];
+        const bounds = box ?? (system ? { ...measure, y0: system.y0, y1: system.y1 } : null);
+        if (
+            !bounds ||
+            bounds.page !== pageIndex ||
+            ny < bounds.y0 ||
+            ny > bounds.y1 ||
+            nx < bounds.x0 ||
+            nx > bounds.x1
+        ) {
+            continue;
+        }
+        if (nearTick === undefined) {
+            return i;
+        }
+        const bestMeasure = best >= 0 ? score.measures[best] : undefined;
+        if (!bestMeasure || Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)) {
+            best = i;
         }
     }
     return best;

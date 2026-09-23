@@ -411,6 +411,49 @@ describe('PlaybackEngine', () => {
         expect(ctx.sources.length).toBeGreaterThan(before); // muted hand still schedules → instant unmute
     });
 
+    it.each([0, 1] as const)('keeps both unison voices available when hand %s is muted', async (mutedHand) => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 1920, p: 60, h: 0, v: 0.8 },
+                { t: 0, d: 1920, p: 60, h: 1, v: 0.6 },
+            ],
+        };
+        const { ctx, engine } = makeEngine({ score });
+        engine.setHandMuted(mutedHand, true);
+        await engine.play();
+        expect(ctx.sources).toHaveLength(2);
+        const destinations = ctx.panners.flatMap((panner) => panner.connections);
+        expect(destinations).toContain(ctx.gains[BUS_RH]);
+        expect(destinations).toContain(ctx.gains[BUS_LH]);
+        // Neither hand's unison was prematurely stolen. Unmuting can reveal
+        // the already-ringing voice without waiting for another attack.
+        expect(ctx.sources.every((source) => lifespanOf(source) > 1)).toBe(true);
+        engine.setHandMuted(mutedHand, false);
+        expect(ctx.gains[mutedHand === 0 ? BUS_RH : BUS_LH]?.gain.targets.at(-1)?.target).toBe(1);
+        expect(ctx.sources).toHaveLength(2);
+        engine.destroy();
+    });
+
+    it('does not let a muted hand re-strike cut off the other hand', async () => {
+        const { ctx, engine } = makeEngine({
+            score: {
+                ...tinyScore,
+                notes: [
+                    { t: 0, d: 1920, p: 60, h: 1 },
+                    { t: 480, d: 480, p: 60, h: 0 },
+                ],
+            },
+        });
+        engine.setHandMuted(0, true);
+        await engine.play();
+        const originalStop = ctx.sources[0]?.stoppedAt;
+        await advance(ctx, 0.6);
+        expect(ctx.sources).toHaveLength(2);
+        expect(ctx.sources[0]?.stoppedAt).toBe(originalStop);
+        engine.destroy();
+    });
+
     it('wraps an A-B loop seamlessly and stays inside it', async () => {
         const { ctx, engine, buffers } = makeEngine();
         // Loop m.0–m.1 (ticks 0–2400): 2400 ticks at 120 bpm = 2.5 s per pass.
@@ -616,7 +659,7 @@ describe('expression through the engine', () => {
         }
     });
 
-    it('keeps the lifted G when the left hand doubles it on the same tick', async () => {
+    it('keeps the lifted G and independent left-hand voice when doubled on the same tick', async () => {
         const notes: ScoreNote[] = [
             { t: 0, d: 480, p: 60, h: 0 },
             { t: 0, d: 480, p: 64, h: 0 },
@@ -628,7 +671,7 @@ describe('expression through the engine', () => {
         await engine.play();
         await advance(ctx, 0.5);
         const gSources = ctx.sources.filter((s) => s.buffer === sampleOf(buffers, 67));
-        expect(gSources).toHaveLength(1);
+        expect(gSources).toHaveLength(2);
         const lifted = clampVelocity(DEFAULT_VELOCITY + noteJitter(0, 67, 0).dv + MELODY_LIFT);
         expect(voiceGainOf(gSources[0])).toBeCloseTo(velocityToGain(lifted), 10);
     });

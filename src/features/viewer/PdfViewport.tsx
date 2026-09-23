@@ -425,6 +425,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     point.nx,
                     point.ny,
                     feature.getEngine()?.getPositionTicks() ?? 0,
+                    feature.alignmentMap,
                 );
                 if (index < 0) {
                     return;
