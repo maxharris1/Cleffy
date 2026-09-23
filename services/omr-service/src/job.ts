@@ -83,7 +83,7 @@ const isSymbolicOnly = (raw: string | undefined = process.env.CLEFFY_SYMBOLIC_ON
  * repairs from the RSI cycles land in the same stamp. Not svc-15..33: those
  * numbers were vector-hint images or mixed patch sets this product image omits.
  */
-export const ENGINE_VERSION = 'audiveris-5.11.0+svc-35';
+export const ENGINE_VERSION = 'audiveris-5.11.0+svc-36';
 
 /**
  * The `score_cache` key for one engine and one era. The era comes from the
