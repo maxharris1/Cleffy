@@ -586,3 +586,53 @@ describe('measureIndexAtPagePoint with repeats', () => {
         expect(measureIndexAtPagePoint(repeated, inM1.page, nx, 0.999, 0)).toBe(-1);
     });
 });
+
+describe('measureIndexAtPagePoint with a new edition alignment', () => {
+    const map = {
+        pdfSha256: 'new-edition',
+        candidateSha256: 'candidate',
+        pickup: false,
+        printedBars: 1,
+        bySrcIndex: { 1: { page: 3, system: 7, x0: 0.6, x1: 0.9, y0: 0.7, y1: 0.8 } },
+    };
+    const measure = { ...tinyScore.measures[1]!, srcIndex: 1 };
+    const repeated: ScoreData = {
+        ...tinyScore,
+        measures: [measure, { ...measure, tick: measure.tick + tinyScore.totalTicks }],
+    };
+
+    it('seeks geometry-less MIDI measures and chooses the nearest repeat pass', () => {
+        const midi = {
+            ...repeated,
+            systems: [],
+            measures: repeated.measures.map((m) => ({ ...m, page: -1, sys: -1 })),
+        };
+        expect(measureIndexAtPagePoint(midi, 3, 0.75, 0.75, undefined, map)).toBe(0);
+        expect(measureIndexAtPagePoint(midi, 3, 0.75, 0.75, tinyScore.totalTicks, map)).toBe(1);
+        expect(measureIndexAtPagePoint(midi, 2, 0.75, 0.75, 0, map)).toBe(-1);
+        expect(measureIndexAtPagePoint(midi, 3, 0.75, 0.6, 0, map)).toBe(-1);
+    });
+
+    it('replaces old edition hit targets instead of retaining both editions', () => {
+        const oldSystem = tinyScore.systems[measure.sys]!;
+        const oldX = (measure.x0 + measure.x1) / 2;
+        const oldY = (oldSystem.y0 + oldSystem.y1) / 2;
+        expect(measureIndexAtPagePoint(repeated, measure.page, oldX, oldY)).toBe(0);
+        expect(measureIndexAtPagePoint(repeated, measure.page, oldX, oldY, 0, map)).toBe(-1);
+        expect(measureIndexAtPagePoint(repeated, 3, 0.75, 0.75, 0, map)).toBe(0);
+    });
+
+    it('retains original geometry for measures without an alignment box', () => {
+        const system = tinyScore.systems[measure.sys]!;
+        expect(
+            measureIndexAtPagePoint(
+                repeated,
+                measure.page,
+                (measure.x0 + measure.x1) / 2,
+                (system.y0 + system.y1) / 2,
+                0,
+                { ...map, bySrcIndex: {} },
+            ),
+        ).toBe(0);
+    });
+});

@@ -35,6 +35,32 @@ describe('playheadRect', () => {
         expect(playheadRect(degraded, 0)).not.toBeNull();
     });
 
+    it('discards old edition chord columns when using an alignment box', () => {
+        const score = {
+            ...tinyScore,
+            measures: [
+                {
+                    ...tinyScore.measures[0]!,
+                    sl: [
+                        { t: 0, x: 0.1 },
+                        { t: 240, x: 0.2 },
+                    ],
+                },
+            ],
+        };
+        const map = {
+            pdfSha256: 'new-edition',
+            candidateSha256: 'old-edition',
+            pickup: true,
+            printedBars: 1,
+            bySrcIndex: { 0: { page: 1, system: 3, x0: 0.6, x1: 0.9, y0: 0.4, y1: 0.5 } },
+        };
+        expect(playheadRect(score, 120)?.x).toBeCloseTo(0.15);
+        expect(playheadRect(score, 120, map)?.x).toBeCloseTo(0.675);
+        expect(playheadRect(score, 480, map)?.x).toBeCloseTo(0.9);
+        expect(score.measures[0]?.sl).toHaveLength(2);
+    });
+
     it('uses AlignmentMap boxes when ScoreData has no printed geometry', () => {
         const midiLike = {
             ...tinyScore,

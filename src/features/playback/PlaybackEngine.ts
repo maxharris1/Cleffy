@@ -444,7 +444,7 @@ export class PlaybackEngine {
     private volumes: [number, number] = [1, 1];
     private metronome = false;
     private timer: ReturnType<typeof setInterval> | null = null;
-    private readonly active = new Set<ScheduledVoice>();
+    private readonly active = new Set<ScheduledVoice & { hand: 0 | 1 }>();
     private warnedSourceCap = false;
     private destroyed = false;
 
@@ -1251,18 +1251,18 @@ export class PlaybackEngine {
      * held pedal a repeated note would otherwise stack a voice per strike until
      * the cap cut the music off — so stealing runs before the cap is consulted.
      *
-     * Same-tick unisons are the exception: two hands on one key are one sound,
-     * and the louder strike (the one carrying the melody lift) is the one that
-     * should speak. Returning false means the incoming voice is the quieter
+     * Same-tick unisons within a hand keep the louder strike. Hands must
+     * retain independent voices: their buses can be muted or turned back up
+     * while a note is ringing. Returning false means the incoming voice is the quieter
      * copy and must not be scheduled.
      */
-    private stealSamePitch(midi: number, startAt: number, velocity: number): boolean {
+    private stealSamePitch(midi: number, hand: 0 | 1, startAt: number, velocity: number): boolean {
         // Chord roll + jitter can split two same-tick strikes by up to this
         // much; 1 ms is the "same instant" floor, and anything inside the roll
         // ceiling is still one musical event, not a re-strike.
         const unisonWindow = CHORD_ROLL_MAX_S + 2 * JITTER_TIME_S + 0.001;
         for (const voice of [...this.active]) {
-            if (voice.midi !== midi || voice.stopsAt <= startAt) {
+            if (voice.hand !== hand || voice.midi !== midi || voice.stopsAt <= startAt) {
                 continue;
             }
             const unison = Math.abs(voice.startAt - startAt) <= unisonWindow;
@@ -1274,7 +1274,7 @@ export class PlaybackEngine {
         return true;
     }
 
-    private stealVoice(voice: ScheduledVoice, at: number): void {
+    private stealVoice(voice: ScheduledVoice & { hand: 0 | 1 }, at: number): void {
         try {
             voice.gain.gain.cancelScheduledValues(at);
             voice.gain.gain.setTargetAtTime(0, at, STEAL_TAU_S);
@@ -1306,7 +1306,7 @@ export class PlaybackEngine {
         if (!ctx || !buffers || !bus) {
             return;
         }
-        if (!this.stealSamePitch(midi, startAt, velocity)) {
+        if (!this.stealSamePitch(midi, hand, startAt, velocity)) {
             return;
         }
         if (this.active.size >= MAX_ACTIVE_SOURCES) {
@@ -1316,7 +1316,7 @@ export class PlaybackEngine {
             }
             // Dropping the incoming note is the most audible failure: steal the
             // voice that is nearest to finishing so the new attack still speaks.
-            let victim: ScheduledVoice | undefined;
+            let victim: (ScheduledVoice & { hand: 0 | 1 }) | undefined;
             for (const voice of this.active) {
                 if (!victim || voice.stopsAt < victim.stopsAt) {
                     victim = voice;
@@ -1339,9 +1339,10 @@ export class PlaybackEngine {
         if (!entry) {
             return;
         }
-        this.active.add(entry);
+        const voice = Object.assign(entry, { hand });
+        this.active.add(voice);
         entry.source.onended = () => {
-            this.active.delete(entry);
+            this.active.delete(voice);
             entry.dispose();
         };
     }

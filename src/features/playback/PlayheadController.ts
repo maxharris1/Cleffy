@@ -43,7 +43,9 @@ export const playheadRect = (score: ScoreData, tick: number, map?: AlignmentMap 
     const src = measure.srcIndex ?? measureIndex;
     const box = map?.bySrcIndex[src];
     if (box) {
-        const boxed = { ...measure, page: box.page, sys: box.system, x0: box.x0, x1: box.x1 };
+        // Chord columns belong to the original edition. The new alignment
+        // supplies only bar bounds, so interpolate within those bounds.
+        const boxed = { ...measure, sl: undefined, page: box.page, sys: box.system, x0: box.x0, x1: box.x1 };
         return {
             measureIndex,
             pageIndex: box.page,
