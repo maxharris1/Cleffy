@@ -17,8 +17,7 @@ import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/
  *   `f`), an accent or a fermata. Anything else abstains.
  * - One writing line: every glyph must read as a letter AND the word must
  *   be in the dynamics/teaching lexicon (`mf`, `sfz`, `cresc.`, `tr`, …).
- *   Free text is not this reader's job — it abstains so the ink stays (a
- *   metered transcription may pick it up later; see the controller).
+ *   Free text is not this reader's job — it abstains and the ink stays.
  *
  * Precision over recall: a match must be close AND clearly better than the
  * runner-up class. Undo is the correction UI for the rare miss.
@@ -289,9 +288,8 @@ const medianHeight = (group: StrokeGroup): number => {
 
 /** Closed-set on-device recognizer over a flushed group. */
 export const recognizeOnDevice: Recognizer = (group: StrokeGroup): Recognition | null => {
-    // A one-glyph letter run peeled off a mixed line is kind `line` so a
-    // refused letter can still be transcribed. Read it as a lone mark first
-    // (`p`, accent, fermata) so that path does not send symbols to Gemini.
+    // A one-glyph letter run peeled off a mixed line is kind `line`. Read it
+    // as a lone mark first (`p`, accent, fermata). A refused letter stays ink.
     if (group.kind === 'glyph' || group.glyphs.length === 1) {
         const glyph = group.glyphs[0];
         if (!glyph) {
@@ -371,10 +369,10 @@ export const splitDigitRun = (group: StrokeGroup): StrokeGroup[] | null => {
 
 /**
  * A writing line that mixes fingering digits with letters or other marks.
- * Each digit becomes its own glyph group (on-device `$P`, never Gemini).
- * Each contiguous non-digit run becomes one writing line, even when it is a
- * single glyph, so the letter half converts instead of the whole line staying
- * ink. Digit strokes are not included in those runs.
+ * Each digit becomes its own glyph group (on-device `$P`).
+ * Each contiguous non-digit run becomes one writing line so a lexicon symbol
+ * can still convert. A run the reader refuses stays ink. Digit strokes are
+ * not included in those runs.
  *
  * Null when there is no digit to peel, or every glyph is a digit (the caller
  * uses `splitDigitRun` for that).
@@ -393,9 +391,9 @@ export const splitMixedLine = (group: StrokeGroup): StrokeGroup[] | null => {
         if (letters.length === 0) {
             return;
         }
-        // Kind `line` even for one glyph: a refused letter still reaches
-        // transcription. `recognizeOnDevice` reads a one-glyph line as a lone
-        // mark first, so `p` / accent / fermata stay on device.
+        // Kind `line` even for one glyph. `recognizeOnDevice` reads a one-glyph
+        // line as a lone mark first, so `p` / accent / fermata stay on device.
+        // A refused letter stays ink.
         pieces.push(pieceFrom(group, letters, 'line'));
         letters = [];
     };

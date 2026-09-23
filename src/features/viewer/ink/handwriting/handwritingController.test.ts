@@ -4,10 +4,8 @@ import { SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import { convertGroupToText } from '@/features/viewer/ink/handwriting/convert';
 import type { StrokeGroup } from '@/features/viewer/ink/handwriting/grouper';
 import { fontForRecognition, HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
-import { groupStrokeIds } from '@/features/viewer/ink/handwriting/grouper';
 import { groupFromHands, HANDS } from '@/features/viewer/ink/handwriting/recognizer/fixtures';
 import { ACCENT_TEXT, recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
-import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ASPECT, boxStroke, FakeTimers } from '@/features/viewer/ink/handwriting/testStrokes';
 import type * as MusicFontModule from '@/features/viewer/ink/musicFont';
@@ -47,11 +45,10 @@ let store: AnnotationStore;
 let timers: FakeTimers;
 let enabled: boolean;
 
-const make = (recognizer: Recognizer, transcribe?: TranscribeInkFn) =>
+const make = (recognizer: Recognizer) =>
     new HandwritingController({
         store,
         recognizer,
-        transcribe,
         isEnabled: () => enabled,
         getAspect: () => ASPECT,
         schedule: timers.schedule,
@@ -211,55 +208,34 @@ describe('HandwritingController', () => {
         expect(store.getPage(0).get('hl')?.kind).toBe('highlight');
     });
 
-    describe('text-note transcription (metered path)', () => {
-        it('is tried only for a writing line the on-device reader refused, and converts its text', async () => {
-            const transcribe = vi.fn<TranscribeInkFn>(async () => 'use wrist');
-            const controller = make(() => null, transcribe);
-            await write(controller, strokeAnnotation('u', 0.3));
-            await write(controller, strokeAnnotation('s', 0.3 + H));
-            timers.fire();
-            await controller.settle();
-            expect(transcribe).toHaveBeenCalledTimes(1);
-            expect(transcribe.mock.calls[0]![0]!.kind).toBe('line');
-            const created = texts();
-            expect(created).toHaveLength(1);
-            expect((created[0]!.payload as TextPayload).text).toBe('use wrist');
-            expect((created[0]!.payload as TextPayload).hw).toBe(1);
-            expect(strokes()).toHaveLength(0);
-        });
-
-        it('is never called for a lone digit/symbol glyph, even when on-device abstains', async () => {
-            const transcribe = vi.fn<TranscribeInkFn>(async () => '3');
-            const controller = make(() => null, transcribe);
-            await write(controller, strokeAnnotation('lone', 0.3));
-            timers.fire();
-            await controller.settle();
-            expect(transcribe).not.toHaveBeenCalled();
-            expect(strokes()).toHaveLength(1);
-        });
-
-        it('is skipped when the on-device reader already read the line', async () => {
-            const transcribe = vi.fn<TranscribeInkFn>(async () => 'wrong');
-            const controller = make(() => ({ text: 'mf', kind: 'symbol' }), transcribe);
-            await write(controller, strokeAnnotation('m', 0.3));
-            await write(controller, strokeAnnotation('f', 0.3 + H));
-            timers.fire();
-            await controller.settle();
-            expect(transcribe).not.toHaveBeenCalled();
-            expect((texts()[0]!.payload as TextPayload).text).toBe('mf');
-        });
-
-        it('leaves the ink when transcription resolves null (offline, abstained, unavailable)', async () => {
-            const controller = make(
-                () => null,
-                async () => null,
-            );
+    describe('letters stay ink', () => {
+        it('leaves a writing line the on-device reader refused', async () => {
+            const controller = make(() => null);
             await write(controller, strokeAnnotation('u', 0.3));
             await write(controller, strokeAnnotation('s', 0.3 + H));
             timers.fire();
             await controller.settle();
             expect(strokes()).toHaveLength(2);
             expect(texts()).toHaveLength(0);
+        });
+
+        it('leaves a lone glyph as ink when the on-device reader abstains', async () => {
+            const controller = make(() => null);
+            await write(controller, strokeAnnotation('lone', 0.3));
+            timers.fire();
+            await controller.settle();
+            expect(strokes()).toHaveLength(1);
+            expect(texts()).toHaveLength(0);
+        });
+
+        it('still converts a line the on-device reader already read', async () => {
+            const controller = make(() => ({ text: 'mf', kind: 'symbol' }));
+            await write(controller, strokeAnnotation('m', 0.3));
+            await write(controller, strokeAnnotation('f', 0.3 + H));
+            timers.fire();
+            await controller.settle();
+            expect((texts()[0]!.payload as TextPayload).text).toBe('mf');
+            expect(strokes()).toHaveLength(0);
         });
     });
 
@@ -314,9 +290,8 @@ describe('HandwritingController', () => {
         expect(store.get('three')?.deletedAt).toBeNull();
     });
 
-    it('does not transcribe a nearby fingering run; each digit converts on-device', async () => {
-        const transcribe = vi.fn<TranscribeInkFn>(async () => '12');
-        const controller = make(recognizeOnDevice, transcribe);
+    it('converts a nearby fingering run on-device, one digit each', async () => {
+        const controller = make(recognizeOnDevice);
         const group = groupFromHands([HANDS.one!, HANDS.two!], { gapW: 0.25 * 0.012 });
         for (const glyph of group.glyphs) {
             for (const stroke of glyph.strokes) {
@@ -338,7 +313,6 @@ describe('HandwritingController', () => {
         }
         timers.fire();
         await controller.settle();
-        expect(transcribe).not.toHaveBeenCalled();
         const printed = texts()
             .map((a) => (a.payload as TextPayload).text)
             .sort();
@@ -346,49 +320,36 @@ describe('HandwritingController', () => {
         expect(strokes()).toHaveLength(0);
     });
 
-    it('splits 123 + a word: digits on device, one Gemini call for the letter run after the pause', async () => {
-        const transcribe = vi.fn<TranscribeInkFn>(async () => 'HI');
-        const controller = make(recognizeOnDevice, transcribe);
-        const group = groupFromHands([HANDS.one!, HANDS.two!, HANDS.three!, HANDS.m!, HANDS.m!]);
-        const digitIds = new Set(group.glyphs.slice(0, 3).flatMap((glyph) => glyph.strokes.map((s) => s.id)));
-        await writeGroup(controller, group);
-        expect(transcribe).not.toHaveBeenCalled();
+    it('splits 123 + a word: digits print on device and the letter run stays ink', async () => {
+        const controller = make(recognizeOnDevice);
+        await writeGroup(controller, groupFromHands([HANDS.one!, HANDS.two!, HANDS.three!, HANDS.m!, HANDS.m!]));
         timers.elapse(300);
         await controller.settle();
-        expect(transcribe).not.toHaveBeenCalled();
         expect(texts()).toHaveLength(0);
         timers.elapse(700);
         await controller.settle();
-
-        expect(transcribe).toHaveBeenCalledTimes(1);
-        const sent = transcribe.mock.calls[0]![0]!;
-        expect(sent.kind).toBe('line');
-        expect(sent.glyphs).toHaveLength(2);
-        const sentIds = groupStrokeIds(sent);
-        expect(sentIds.length).toBeGreaterThan(0);
-        expect(sentIds.some((id) => digitIds.has(id))).toBe(false);
-        expect(textsByX()).toEqual(['1', '2', '3', 'HI']);
-        expect(strokes()).toHaveLength(0);
+        expect(textsByX()).toEqual(['1', '2', '3']);
+        expect(
+            strokes()
+                .map((s) => s.id)
+                .sort(),
+        ).toEqual(['g3', 'g4']);
     });
 
-    it('keeps mf on device when it shares a line with a fingering, and does not send the digit', async () => {
-        const transcribe = vi.fn<TranscribeInkFn>(async () => 'mf');
-        const controller = make(recognizeOnDevice, transcribe);
+    it('keeps mf on device when it shares a line with a fingering', async () => {
+        const controller = make(recognizeOnDevice);
         await writeGroup(controller, groupFromHands([HANDS.one!, HANDS.m!, HANDS.f!]));
         timers.fire();
         await controller.settle();
-        expect(transcribe).not.toHaveBeenCalled();
         expect(textsByX()).toEqual(['1', 'mf']);
         expect(strokes()).toHaveLength(0);
     });
 
-    it('converts an accent beside a digit on device and does not transcribe either', async () => {
-        const transcribe = vi.fn<TranscribeInkFn>(async () => 'nope');
-        const controller = make(recognizeOnDevice, transcribe);
+    it('converts an accent beside a digit on device', async () => {
+        const controller = make(recognizeOnDevice);
         await writeGroup(controller, groupFromHands([HANDS.three!, HANDS.accent!]));
         timers.fire();
         await controller.settle();
-        expect(transcribe).not.toHaveBeenCalled();
         expect(textsByX()).toEqual(['3', ACCENT_TEXT]);
         expect(strokes()).toHaveLength(0);
     });

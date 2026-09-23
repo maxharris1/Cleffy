@@ -1,10 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { HandwritingGrouper, groupStrokeIds, type StrokeGroup } from '@/features/viewer/ink/handwriting/grouper';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
 import { MOUSE, groupFromHands, HANDS } from '@/features/viewer/ink/handwriting/recognizer/fixtures';
 import { classifyGlyph, recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
-import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import { ASPECT, FakeTimers, placeHand, placedHandWidth } from '@/features/viewer/ink/handwriting/testStrokes';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
@@ -124,11 +123,10 @@ describe('mouse-polyline convert (controller)', () => {
         timers = new FakeTimers();
     });
 
-    const make = (transcribe?: TranscribeInkFn) =>
+    const make = () =>
         new HandwritingController({
             store,
             recognizer: recognizeOnDevice,
-            transcribe,
             isEnabled: () => true,
             getAspect: () => ASPECT,
             schedule: timers.schedule,
@@ -174,9 +172,8 @@ describe('mouse-polyline convert (controller)', () => {
         expect((texts()[0]!.payload as TextPayload).text).toBe('p');
     });
 
-    it('clumps a handwritten phrase into one transcribeable text row', async () => {
-        const transcribe = vi.fn<TranscribeInkFn>(async () => 'use wrist');
-        const controller = make(transcribe);
+    it('leaves a handwritten phrase as ink', async () => {
+        const controller = make();
         let x = 0.25;
         for (const [id, hand] of [
             ['u', HANDS.m!],
@@ -197,14 +194,9 @@ describe('mouse-polyline convert (controller)', () => {
             await writeAll(controller, placeHand(id, hand, x, 0.51, H));
             x += w + 0.3 * H;
         }
-        expect(transcribe).not.toHaveBeenCalled();
         timers.fire();
         await controller.settle();
-        expect(transcribe).toHaveBeenCalledTimes(1);
-        expect(transcribe.mock.calls[0]![0]!.kind).toBe('line');
-        expect(strokes()).toHaveLength(0);
-        expect(texts()).toHaveLength(1);
-        expect((texts()[0]!.payload as TextPayload).text).toBe('use wrist');
-        expect((texts()[0]!.payload as TextPayload).hw).toBe(1);
+        expect(strokes().length).toBeGreaterThan(0);
+        expect(texts()).toHaveLength(0);
     });
 });
