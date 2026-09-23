@@ -343,7 +343,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                         type="button"
                         title={
                             layerAudience.canUseTeacherLayer
-                                ? `Marking on the ${layerWord.toLowerCase()} layer`
+                                ? `New marks go on the ${layerWord.toLowerCase()} layer`
                                 : 'Students mark on their own layer'
                         }
                         aria-label={markLayer === 'teacher' ? 'Teacher layer' : 'Student layer'}
