@@ -117,7 +117,7 @@ Cloud Run at 4 GiB / 2 vCPU instance-based billing ≈ **$0.011–0.020 per OMR 
 
 ## Merge order (flags on in order)
 
-1. `mh/symbolic-first-all` — Max's test merge first; freeze `ENGINE_VERSION` before seeding.
+1. `mh/symbolic-first-all` — Max's test merge first; freeze `ENGINE_VERSION` before seeding. Corpus rows are keyed by it, so a later bump orphans every seeded row; `npm run corpus:seed -- --reseed-ready` re-queues the ledger's `ready` rows under the new engine.
 2. `mh/corpus-schema-lookup-ab47` — Phase 0+1 schema + lookup, both flags **off**. Deploy `cleffy-omr`. Then `CLEFFY_CORPUS_LOOKUP=1` on the user worker, then `CLEFFY_SYMBOLIC_FIRST=1`.
 3. `mh/corpus-seed-script-ab47` — Phase 2+2b seed script and `pd-pdfs` migration. Run `--limit 131` first (drains on `cleffy-omr` alone via `omr_sweep`).
 4. `mh/corpus-seed-pool-ab47` (this) — claim-filter + seed-sweep migrations, `deploy-seed.sh`, vault `omr_seed_service_url`, `GCP_OMR_SEED_SERVICE`. Then `--limit 2000`.

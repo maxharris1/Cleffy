@@ -432,6 +432,23 @@ describe('seed modes against a fake backend', () => {
         expect(backend.tables.documents).toHaveLength(1);
         expect(backend.tables.omr_jobs).toHaveLength(1);
         expect(backend.tables.score_analyses).toHaveLength(1);
+
+        // An ENGINE_VERSION bump re-keys the corpus: --reseed-ready re-queues
+        // the finished row against the same document instead of skipping it.
+        ledger[0]!.status = 'ready';
+        backend.tables.omr_jobs![0]!.status = 'done';
+        backend.tables.score_analyses![0]!.status = 'ready';
+        const reseeded = await runSeed(['--reseed-ready', '--sleep', '0'], { ...env, CORPUS_OWNER_USER_ID: OWNER });
+        expect(reseeded.status, reseeded.stderr).toBe(0);
+        expect(reseeded.stderr).toMatch(/enqueue: 1 ready ledger rows/);
+        expect(ledger[0]).toMatchObject({ status: 'queued', document_id: doc.id });
+        expect(backend.tables.documents).toHaveLength(1);
+        expect(backend.tables.score_analyses).toEqual([
+            expect.objectContaining({ document_id: doc.id, status: 'pending' }),
+        ]);
+        expect(backend.tables.omr_jobs!.filter((job) => job.status === 'queued')).toEqual([
+            expect.objectContaining({ document_id: doc.id, priority: -10 }),
+        ]);
     });
 
     it('the default pass fetches and enqueues in one go', async () => {

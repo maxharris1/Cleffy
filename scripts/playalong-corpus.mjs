@@ -2107,7 +2107,9 @@ export const LEDGER_TRANSITIONS = Object.freeze({
     queued: ['ready', 'failed'],
     failed: ['pending', 'fetched', 'skipped', 'failed'],
     skipped: ['pending', 'fetched'],
-    ready: [],
+    // Only `--reseed-ready`: an ENGINE_VERSION bump re-keys the corpus, so a
+    // row built under the old engine is re-queued against the new one.
+    ready: ['queued'],
 });
 
 export const canTransition = (from, to) => (LEDGER_TRANSITIONS[from] ?? []).includes(to);

@@ -19,6 +19,7 @@
  *   npm run corpus:seed -- --dry-run
  *   npm run corpus:seed -- --fetch-only --limit 5000 --batch 40        # PDFs into pd-pdfs, no owner needed
  *   npm run corpus:seed -- --enqueue-fetched                           # fetched rows → documents + jobs
+ *   npm run corpus:seed -- --reseed-ready                              # after an ENGINE_VERSION bump
  *   npm run corpus:seed -- --limit 2000 --batch 40 --re-rank           # both in one pass
  *   npm run corpus:seed -- --fetch-only --source imslp --sleep 0       # IMSLP.org, one file at a time
  *
@@ -27,6 +28,8 @@
  *                        no documents / score_analyses / omr_jobs; CORPUS_OWNER_USER_ID not needed
  *   --enqueue-fetched    for ledger rows in `fetched`: corpus-owner document, copy to scores/{id}/original.pdf,
  *                        pending score_analyses + omr_jobs (priority -10), ledger `queued`; needs the owner
+ *   --reseed-ready       the same for ledger rows in `ready`. Corpus rows are keyed by ENGINE_VERSION, so
+ *                        after a bump every `ready` row is orphaned; this rebuilds them under the new engine
  *   --rank-only          print the ranked list (JSON lines, `corpus_rank`) and exit — eyeball before a long run
  *   (neither)            fetch and enqueue in one pass
  *
@@ -185,6 +188,7 @@ const parseArgs = (argv) => {
         dryRun: false,
         fetchOnly: false,
         enqueueFetched: false,
+        reseedReady: false,
         rankOnly: false,
         noWiki: false,
         noEditions: false,
@@ -246,6 +250,9 @@ const parseArgs = (argv) => {
                 break;
             case '--enqueue-fetched':
                 out.enqueueFetched = true;
+                break;
+            case '--reseed-ready':
+                out.reseedReady = true;
                 break;
             case '--max-runtime': {
                 const minutes = Number(argv[++i]);
@@ -1599,10 +1606,13 @@ const heartbeat = (ledger, { target, batchId, mode, attempted, startedAt }) => {
     });
 };
 
-/** `--enqueue-fetched`: every `fetched` ledger row → document + job. */
-const enqueueFetched = async (ctx, args, startedAt, deadlineMs, seedPoke = null) => {
-    const rows = [...ctx.ledger.values()].filter((row) => row.status === 'fetched');
-    info(`enqueue: ${rows.length} fetched ledger rows`);
+/**
+ * `--enqueue-fetched`: every `fetched` ledger row → document + job.
+ * `--reseed-ready`: every `ready` row, re-run under the current ENGINE_VERSION.
+ */
+const enqueueFetched = async (ctx, args, startedAt, deadlineMs, seedPoke = null, status = 'fetched') => {
+    const rows = [...ctx.ledger.values()].filter((row) => row.status === status);
+    info(`enqueue: ${rows.length} ${status} ledger rows`);
     let batchId = Math.max(0, ...[...ctx.ledger.values()].map((r) => Number(r.batch_id ?? 0))) + 1;
     let done = 0;
     for (const row of rows) {
@@ -1635,7 +1645,7 @@ const main = async () => {
     const args = parseArgs(process.argv.slice(2));
     const mode = args.rankOnly
         ? 'rank'
-        : args.enqueueFetched
+        : args.enqueueFetched || args.reseedReady
           ? 'enqueue'
           : args.fetchOnly
             ? 'fetch'
@@ -1734,7 +1744,7 @@ const main = async () => {
     }
 
     if (mode === 'enqueue') {
-        await enqueueFetched(ctx, args, startedAt, deadlineMs, seedPoke);
+        await enqueueFetched(ctx, args, startedAt, deadlineMs, seedPoke, args.reseedReady ? 'ready' : 'fetched');
         return;
     }
 

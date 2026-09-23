@@ -1240,6 +1240,7 @@ describe('ledger', () => {
         expect(canTransition('failed', 'pending')).toBe(true);
         expect(canTransition('skipped', 'pending')).toBe(true);
         expect(canTransition('ready', 'pending')).toBe(false);
+        expect(canTransition('ready', 'queued')).toBe(true);
         expect(canTransition('pending', 'ready')).toBe(false);
         expect(canTransition('pending', 'paused')).toBe(true);
         expect(canTransition('paused', 'fetched')).toBe(true);
