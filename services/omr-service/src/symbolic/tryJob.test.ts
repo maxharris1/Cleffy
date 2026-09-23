@@ -129,6 +129,41 @@ describe('trySymbolicJob', () => {
         expect(result.score.notes.length).toBeGreaterThan(0);
     });
 
+    it('prefers movement concat over a short MIDI when the PDF bar count is unknown', async () => {
+        const short = synthQuantizedMidi({
+            meter: { num: 4, den: 4 },
+            pickupQuarters: 0,
+            printedBars: 4,
+            fifths: 0,
+            pitches: [60],
+        });
+        const full = synthQuantizedMidi({
+            meter: { num: 4, den: 4 },
+            pickupQuarters: 0,
+            printedBars: 16,
+            fifths: 0,
+            pitches: [60, 62, 64],
+        });
+        const concat = 'cleffy-concat:https://example.test/a.mid|https://example.test/b.mid';
+        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
+            client: {
+                discover: async () => [
+                    mutopiaMid({ url: 'https://example.test/a.mid' }),
+                    mutopiaMid({ url: concat }),
+                ],
+                fetchBytes: async (url) => (url === concat ? full : short),
+            },
+            pdfSignals: async () => pdf({ printedBars: 0, layoutBars: 0, barBoxes: [] }),
+        }));
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect(result.candidate?.url).toBe(concat);
+        expect(result.alignmentMap).toBeNull();
+        expect(result.score.notes.length).toBeGreaterThan(0);
+    });
+
     it('ingests same-work MIDI when only the bar count disagrees, with a null alignment map', async () => {
         const bytes = midi();
         const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
