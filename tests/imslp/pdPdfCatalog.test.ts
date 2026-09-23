@@ -56,9 +56,7 @@ describe('licence filter', () => {
 describe('pd object path', () => {
     it('matches the seed script sanitizer so copy hits the stored object', () => {
         expect(safeObjectName('moonlight-let.pdf')).toBe('moonlight-let.pdf');
-        expect(safeObjectName('Beethoven, L.v. - Piano Sonata 13.pdf')).toBe(
-            'Beethoven_L.v._-_Piano_Sonata_13.pdf',
-        );
+        expect(safeObjectName('Beethoven, L.v. - Piano Sonata 13.pdf')).toBe('Beethoven_L.v._-_Piano_Sonata_13.pdf');
         expect(pdObjectPath('deadbeef', 'moonlight-let.pdf')).toBe('deadbeef/moonlight-let.pdf');
     });
 });
@@ -115,9 +113,9 @@ describe('matchStoreRow', () => {
     });
 
     it('matches an explicit sha before filename', () => {
-        expect(matchStoreRow([moonlight, scan], { pdfSha256: 'sha-scan', filename: 'moonlight-let.pdf' })?.filename).toBe(
-            'PMLP01458.pdf',
-        );
+        expect(
+            matchStoreRow([moonlight, scan], { pdfSha256: 'sha-scan', filename: 'moonlight-let.pdf' })?.filename,
+        ).toBe('PMLP01458.pdf');
     });
 
     it('matches work + filename, and falls back to the ranked row for that work', () => {
@@ -130,10 +128,25 @@ describe('matchStoreRow', () => {
         );
     });
 
-    it('never returns a non-servable row even when the sha matches', () => {
+    it('does not substitute another edition for an explicit filename miss', () => {
         expect(
-            matchStoreRow([row({ pdf_sha256: 'bad', licence_tag: 'CC-BY-NC' })], { pdfSha256: 'bad' }),
+            matchStoreRow([moonlight, scan], { filename: 'movement-2.pdf', workTitle: moonlight.work_title }),
         ).toBeNull();
+        expect(matchStoreRow([moonlight], { filename: 'movement-2.pdf', workTitle: 'A seed alias title' })).toBeNull();
+        expect(matchStoreRow([moonlight], { filename: 'movement-2.pdf' })).toBeNull();
+    });
+
+    it('does not replace a non-servable requested edition with a servable edition', () => {
+        expect(
+            matchStoreRow([moonlight, row({ filename: 'restricted.pdf', licence_tag: 'CC-BY-NC' })], {
+                filename: 'restricted.pdf',
+                workTitle: moonlight.work_title,
+            }),
+        ).toBeNull();
+    });
+
+    it('never returns a non-servable row even when the sha matches', () => {
+        expect(matchStoreRow([row({ pdf_sha256: 'bad', licence_tag: 'CC-BY-NC' })], { pdfSha256: 'bad' })).toBeNull();
     });
 
     it('matches a seed-join alias title whose store row kept a different work_title', () => {
@@ -173,11 +186,7 @@ describe('seed-join catalog presence', () => {
 
     it('does not mark a fetched title whose sha never landed in the store', () => {
         expect(
-            catalogTitlesFromSeedJoin(
-                [furElise],
-                [{ work_title: furElise, pdf_sha256: 'missing' }],
-                [shaElise],
-            ),
+            catalogTitlesFromSeedJoin([furElise], [{ work_title: furElise, pdf_sha256: 'missing' }], [shaElise]),
         ).toEqual([]);
     });
 

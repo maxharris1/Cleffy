@@ -354,16 +354,16 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             }
         };
 
-        // A corpus candidate is a public edition: an IMSLP import or a seed job.
-        // Only those can be in `pd_pdf_store`, and only those carry a licence we
-        // owe attribution for.
+        // A document title is editable metadata, never proof that its PDF is
+        // public. Publication requires provenance for these exact bytes or an
+        // authenticated seed job owned by the configured corpus account.
         const corpusOwner = corpusOwnerUserId();
         const isSeedJob = corpusOwner !== null && adapters.createdBy === corpusOwner;
-        const isCorpusCandidate = adapters.imslpPageTitle !== undefined || isSeedJob;
         let provenance: PdProvenance | null | undefined;
         const resolveProvenance = async (): Promise<PdProvenance | null> => {
             if (provenance === undefined) {
-                provenance = isCorpusCandidate ? await pdProvenance(hash) : null;
+                provenance =
+                    corpusOn || adapters.imslpPageTitle !== undefined || isSeedJob ? await pdProvenance(hash) : null;
             }
             return provenance;
         };
@@ -404,11 +404,15 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             }
         }
 
-        // OMR rows only join the corpus for public work: an IMSLP import (the
-        // title is the work page) or a corpus-owner seed job. Never a user upload.
+        // Apply the same publication boundary to cached and newly recognized
+        // OMR results. A title-shaped private upload must stay private.
         let omrLayout: SymbolicLayoutKey | undefined;
         const corpusPutOmr = async (score: ScoreData, omrEra: Era): Promise<void> => {
-            if (!corpusOn || !isCorpusCandidate) {
+            if (!corpusOn) {
+                return;
+            }
+            const pd = await resolveProvenance();
+            if (!isSeedJob && pd === null) {
                 return;
             }
             // A bulk mirror can hand us a file that is not the work it is filed
@@ -419,7 +423,6 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 console.warn(`[corpus] ${adapters.documentId}: not promoted (${gate.reason})`);
                 return;
             }
-            const pd = await resolveProvenance();
             const source: CorpusSource = {
                 ...(timings.source ?? { tier: 'omr', band: 'reject', reason: 'no_candidate' }),
                 origin: 'omr',
@@ -469,7 +472,12 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                     timings.corpusHit = symbolic.corpusHit;
                 }
                 if (corpusOn) {
-                    await corpusPutSymbolic(hash, symbolic, adapters.imslpPageTitle, await resolveProvenance());
+                    const pd = await resolveProvenance();
+                    // Public candidate notes do not make an uploaded PDF's
+                    // geometry or its association with that work public.
+                    if (isSeedJob || pd !== null) {
+                        await corpusPutSymbolic(hash, symbolic, adapters.imslpPageTitle, pd);
+                    }
                 }
                 await stampAttribution();
                 const ok = await adapters.onReady(symbolic.score, timings);

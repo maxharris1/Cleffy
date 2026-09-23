@@ -298,6 +298,9 @@ export const matchStoreRow = (
         if (byName.length > 1) {
             return sortCatalogRows(byName)[0] ?? null;
         }
+        // An explicit edition must fall back to its live download, never a
+        // different catalog PDF of the same work (or a seed-title alias).
+        return null;
     }
     if (workTitle) {
         const underWork = servable.filter((row) => row.work_title === workTitle);
