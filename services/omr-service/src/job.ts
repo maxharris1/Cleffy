@@ -462,7 +462,9 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             );
             timings.source = symbolic.source;
             if (symbolic.kind === 'accept') {
-                timings.alignmentMap = symbolic.alignmentMap;
+                if (symbolic.alignmentMap) {
+                    timings.alignmentMap = symbolic.alignmentMap;
+                }
                 if (symbolic.corpusHit !== undefined) {
                     timings.corpusHit = symbolic.corpusHit;
                 }
@@ -618,7 +620,7 @@ const corpusPutSymbolic = async (
         engineVersion: ENGINE_VERSION,
         era: '',
         score: accept.score,
-        alignmentMap: accept.alignmentMap,
+        ...(accept.alignmentMap ? { alignmentMap: accept.alignmentMap } : {}),
         source,
         workKey: accept.layout.workKey,
         printedBars: accept.layout.printedBars,

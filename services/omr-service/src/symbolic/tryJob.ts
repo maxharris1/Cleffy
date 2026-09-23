@@ -9,7 +9,7 @@ import { createNetworkFetcher, rateLimitedFetcher } from './http.js';
 import { ingestSymbolic } from './ingest.js';
 import { analysisSourceFromDecision, type SymbolicJobResult, type SymbolicLayoutKey } from './jobResult.js';
 import { decisionLogLine, formatDecisionLine, sha256Hex } from './log.js';
-import { decideSymbolic, type Decision, type MatchReason } from './match.js';
+import { decideSymbolic, type Decision, type MatchReason, type MatchResult } from './match.js';
 import { pdfSignalsFromPdf } from './pdfRead.js';
 import type { MatchCandidateInput, PdfSignals } from './signals.js';
 import type { RankedCandidate, WorkKey } from './types.js';
@@ -67,6 +67,46 @@ export const defaultSymbolicDeps = (): TrySymbolicDeps => {
 const emptyDecision = (): Decision => ({ band: 'reject', reason: 'no_candidate', best: null, results: [] });
 
 const unknownWorkKey = (): WorkKey => ({ composerId: 'unknown', catalogType: 'Op', catalogN: 0 });
+
+/** Same-work Mutopia/CC MIDI we already fetched. Bar-count misses still play. */
+const isFoundSameWorkMidi = (row: MatchResult): boolean => {
+    if (!row.signals.catalogHit || row.candidate.arrangement || row.candidate.format !== 'mid') {
+        return false;
+    }
+    switch (row.reason) {
+        case 'arrangement':
+        case 'performance_midi':
+        case 'meter':
+        case 'no_candidate':
+        case 'parser_unusable':
+            return false;
+        case 'accept':
+        case 'ambiguous':
+        case 'bars':
+        case 'low_score':
+        case 'alignment_failed':
+            return true;
+        default: {
+            const exhaustive: never = row.reason;
+            throw new Error(`unhandled match reason ${exhaustive}`);
+        }
+    }
+};
+
+const choosePlaybackCandidate = (decision: Decision): MatchResult | null => {
+    if (decision.best !== null && decision.band === 'accept') {
+        return decision.best;
+    }
+    if (decision.reason !== 'bars' && decision.reason !== 'ambiguous') {
+        return null;
+    }
+    const playable = decision.results.filter(isFoundSameWorkMidi);
+    if (playable.length === 0) {
+        return null;
+    }
+    const ranked = [...playable].sort((a, b) => a.barError - b.barError || b.score - a.score);
+    return ranked[0] ?? null;
+};
 
 const emit = (deps: TrySymbolicDeps, line: string): void => {
     if (deps.log) {
@@ -234,20 +274,27 @@ export const trySymbolicJob = async (
     }
 
     const decision = decideSymbolic(pdf, inputs);
-    if (decision.band !== 'accept' || decision.best === null) {
+    const chosen = choosePlaybackCandidate(decision);
+    if (chosen === null) {
         return fallthrough(ctx, pdfSha256, workKey, decision, decision.reason, deps, layout);
     }
 
     let candidateBytes: Buffer;
     try {
-        candidateBytes = await deps.client.fetchBytes(decision.best.candidate.url);
+        candidateBytes = await deps.client.fetchBytes(chosen.candidate.url);
     } catch {
         return fallthrough(ctx, pdfSha256, workKey, emptyDecision(), 'no_candidate', deps, layout);
     }
 
+    const ingestDecision: Decision = {
+        band: 'accept',
+        reason: 'accept',
+        best: chosen,
+        results: decision.results,
+    };
     let ingested: ReturnType<typeof ingestSymbolic>;
     try {
-        ingested = ingest(decision, candidateBytes);
+        ingested = ingest(ingestDecision, candidateBytes);
     } catch {
         return fallthrough(ctx, pdfSha256, workKey, decision, 'parser_unusable', deps, layout);
     }
@@ -257,36 +304,33 @@ export const trySymbolicJob = async (
     }
 
     const aligned = align(pdfLayout, ingested.score, pdfSha256, ingested.source.sha256);
-    if (!aligned.ok) {
-        return fallthrough(ctx, pdfSha256, workKey, decision, 'alignment_failed', deps, layout);
-    }
-
+    const alignmentMap = aligned.ok ? aligned.map : null;
     const line = decisionLogLine({
         uploadId: ctx.uploadId,
         pdfSha256,
         pageCount: ctx.pageCount,
         workKey,
         ...(ctx.imslpPageTitle !== undefined ? { imslpPageTitle: ctx.imslpPageTitle } : {}),
-        match: decision.best,
+        match: chosen,
         band: 'accept',
-        reason: 'accept',
+        reason: aligned.ok ? 'accept' : decision.reason === 'accept' ? 'alignment_failed' : decision.reason,
     });
     const text = formatDecisionLine(line);
     emit(deps, text);
     return {
         kind: 'accept',
         score: ingested.score,
-        alignmentMap: aligned.map,
-        source: analysisSourceFromDecision('symbolic', 'accept', 'accept', decision.best.score, {
-            source: decision.best.candidate.source,
-            format: decision.best.candidate.format,
+        alignmentMap,
+        source: analysisSourceFromDecision('symbolic', 'accept', 'accept', chosen.score, {
+            source: chosen.candidate.source,
+            format: chosen.candidate.format,
         }),
         logLine: text,
         layout,
         candidate: {
-            source: decision.best.candidate.source,
-            format: decision.best.candidate.format,
-            url: decision.best.candidate.url,
+            source: chosen.candidate.source,
+            format: chosen.candidate.format,
+            url: chosen.candidate.url,
             sha256: ingested.source.sha256,
         },
     };
