@@ -10,6 +10,7 @@ import { ingestSymbolic } from './ingest.js';
 import { analysisSourceFromDecision, type SymbolicJobResult, type SymbolicLayoutKey } from './jobResult.js';
 import { decisionLogLine, formatDecisionLine, sha256Hex } from './log.js';
 import { decideSymbolic, type Decision, type MatchReason, type MatchResult } from './match.js';
+import { isConcatUrl } from './midiConcat.js';
 import { pdfSignalsFromPdf } from './pdfRead.js';
 import type { MatchCandidateInput, PdfSignals } from './signals.js';
 import type { RankedCandidate, WorkKey } from './types.js';
@@ -104,7 +105,15 @@ const choosePlaybackCandidate = (decision: Decision): MatchResult | null => {
     if (playable.length === 0) {
         return null;
     }
-    const ranked = [...playable].sort((a, b) => a.barError - b.barError || b.score - a.score);
+    const concat = playable.filter((row) => isConcatUrl(row.candidate.url));
+    const pool = concat.length > 0 ? concat : playable;
+    const unknownPrint = pool.every((row) => row.signals.barCountPdf <= 0);
+    const ranked = [...pool].sort((a, b) => {
+        if (unknownPrint) {
+            return b.signals.barCountCand - a.signals.barCountCand || b.score - a.score;
+        }
+        return a.barError - b.barError || b.score - a.score;
+    });
     return ranked[0] ?? null;
 };
 
