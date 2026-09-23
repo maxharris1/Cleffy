@@ -87,7 +87,9 @@ const ImportStub = ({ onStage, onResult }: { onStage: (s: string) => void; onRes
     return (
         <button
             type="button"
-            onClick={() => void onImportImslp('nocturnes.pdf', 'Nocturnes, Op.9', true, onStage).then(onResult)}
+            onClick={() =>
+                void onImportImslp('nocturnes.pdf', 'Nocturnes, Op.9', true, undefined, onStage).then(onResult)
+            }
         >
             import from imslp
         </button>
@@ -168,7 +170,7 @@ describe('LibraryShell', () => {
         readCachedLibraryList.mockResolvedValue(null);
         let resolveImport: (value: unknown) => void = () => undefined;
         importDocumentFromImslp.mockImplementation(
-            (_f: string, _t: string, _o: string, _a: boolean, onStage?: (s: string) => void) =>
+            (_f: string, _t: string, _o: string, _a: boolean, _sha?: string, onStage?: (s: string) => void) =>
                 new Promise((resolve) => {
                     // The download layer reports a real pacing wait, then its retry.
                     onStage?.('downloadQueued');
