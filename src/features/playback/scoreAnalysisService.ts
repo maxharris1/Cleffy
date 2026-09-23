@@ -42,9 +42,13 @@ export interface ScoreAnalysisStatusRow {
  * svc-14 skips staff-less cover/blank pages instead of failing the book.
  * svc-34 is the raster-honest OMR image (patches 0001-0004 and 0007): octave G
  * clefs, ottava ink, tuplet brackets, ledger heads, and ledger-fragment dots.
+ * svc-35 only rescues PDFs that produced nothing, so it stays behind at 34.
+ * svc-36 changes existing scores: a notehead two voices share sounds once at
+ * its longest reading (ornaments and tremolos included), swing is applied in
+ * score order, and tied arpeggiated chords roll at their resolved length.
  * DEPLOYED_ENGINE_GENERATION stays 6 until Cloud Run ships this image.
  */
-export const CURRENT_ENGINE_GENERATION = 34;
+export const CURRENT_ENGINE_GENERATION = 36;
 
 /**
  * The svc-<n> the DEPLOYED worker can actually produce. The OMR deploy fires
@@ -101,11 +105,7 @@ export const analysisIsStaleAgainst = (
 };
 
 export const analysisIsStale = (engineVersion: string | null, options: AnalysisStaleOptions = {}): boolean =>
-    analysisIsStaleAgainst(
-        engineVersion,
-        Math.min(CURRENT_ENGINE_GENERATION, DEPLOYED_ENGINE_GENERATION),
-        options,
-    );
+    analysisIsStaleAgainst(engineVersion, Math.min(CURRENT_ENGINE_GENERATION, DEPLOYED_ENGINE_GENERATION), options);
 
 /** A processing row untouched for this long is a lost job (service died/recycled). */
 export const STALE_PROCESSING_MS = 20 * 60 * 1000;

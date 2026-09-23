@@ -2990,26 +2990,54 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const notes: ScoreNote[] = [];
     // Keep every voice through rhythm repair and tie resolution. A shared glyph
     // can carry different durations or independent tie chains in its two voices.
-    const heads = new Map<ScoreNote, { origin: string; x: number }>();
+    // `reading` identifies one voice's emission of the head: an ornament,
+    // tremolo or glissando spells one reading as several output notes.
+    const heads = new Map<ScoreNote, { origin: string; x: number; reading: number }>();
+    let readingSeq = 0;
     const mergeSharedHeads = (candidates: ScoreNote[]): ScoreNote[] => {
-        const attacks = new Map<string, Array<{ x: number; note: ScoreNote }>>();
-        return candidates.filter((note) => {
+        // Group whole readings per printed head, never individual output notes:
+        // matching the plain reading against an ornament's first note would
+        // stretch that note over the ornament, and a trill's re-strikes never
+        // match at all, leaving the plain reading sounding underneath.
+        const glyphs = new Map<string, Array<{ x: number; readings: Map<number, ScoreNote[]> }>>();
+        for (const note of candidates) {
             const head = heads.get(note);
-            if (!head) return true;
-            const key = `${head.origin}:${note.t}:${note.p}`;
-            const group = attacks.get(key) ?? [];
-            const existing = group.find((entry) => Math.abs(entry.x - head.x) <= SAME_NOTEHEAD_TENTHS);
-            if (existing) {
-                if (note.d > existing.note.d) {
-                    existing.note.d = note.d;
-                    (existing.note as GatedNote).gate = (note as GatedNote).gate;
-                }
-                return false;
+            if (!head) continue;
+            const group = glyphs.get(head.origin) ?? [];
+            let glyph = group.find((entry) => Math.abs(entry.x - head.x) <= SAME_NOTEHEAD_TENTHS);
+            if (!glyph) {
+                glyph = { x: head.x, readings: new Map() };
+                group.push(glyph);
+                glyphs.set(head.origin, group);
             }
-            group.push({ x: head.x, note });
-            attacks.set(key, group);
-            return true;
-        });
+            const reading = glyph.readings.get(head.reading) ?? [];
+            reading.push(note);
+            glyph.readings.set(head.reading, reading);
+        }
+        const dropped = new Set<ScoreNote>();
+        for (const group of glyphs.values()) {
+            for (const glyph of group) {
+                if (glyph.readings.size < 2) continue;
+                // The most elaborate reading wins (an ornament or tremolo
+                // is printed on one stem only); among equals, the first in
+                // the XML. It then sounds as long as the longest reading.
+                const readings = [...glyph.readings.values()];
+                const winner = readings.reduce((best, r) => (r.length > best.length ? r : best));
+                const endOf = (r: ScoreNote[]): number => Math.max(...r.map((n) => n.t + n.d));
+                const longest = readings.reduce((best, r) => (endOf(r) > endOf(best) ? r : best));
+                const last = winner.reduce((a, b) => (b.t >= a.t ? b : a));
+                const end = endOf(longest);
+                if (end > last.t + last.d) {
+                    last.d = end - last.t;
+                    const tail = longest.reduce((a, b) => (b.t + b.d >= a.t + a.d ? b : a));
+                    (last as GatedNote).gate = (tail as GatedNote).gate;
+                }
+                for (const r of readings) {
+                    if (r !== winner) for (const n of r) dropped.add(n);
+                }
+            }
+        }
+        return dropped.size === 0 ? candidates : candidates.filter((note) => !dropped.has(note));
     };
     const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }> = [];
     const timeSignatures: ScoreTimeSig[] = [];
@@ -3365,9 +3393,12 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         ctx.warnings.add('ornaments_realized');
                     }
                     if (ev.x !== undefined) {
-                        for (const output of emitted) {
-                            heads.set(output, { origin: `${pos}:${ev.staff}:${start}:${ev.midi}`, x: ev.x });
-                        }
+                        const head = {
+                            origin: `${pos}:${ev.staff}:${start}:${ev.midi}`,
+                            x: ev.x,
+                            reading: readingSeq++,
+                        };
+                        for (const output of emitted) heads.set(output, head);
                     }
                     if (ev.arpeggiate) {
                         arpDirection = arpDirection ?? ev.arpeggiate;

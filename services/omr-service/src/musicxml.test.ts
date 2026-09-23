@@ -2037,6 +2037,64 @@ describe('voices', () => {
             ]);
         });
 
+        it('sounds an ornament once when only one voice reading of the shared head carries it', () => {
+            const xml = wrap(
+                bar(
+                    1,
+                    vn('C', 5, 8, 1, 1, '<notations><ornaments><mordent/></ornaments></notations>', 'default-x="20"') +
+                        rest(8, 1) +
+                        back(16) +
+                        vn('C', 5, 8, 2, 1, '', 'default-x="20"') +
+                        rest(8, 2),
+                    true,
+                ),
+            );
+            const withMark = parseMusicXmlString(xml).notes.map((n) => [n.t, n.p]);
+            const alone = parseMusicXmlString(
+                wrap(
+                    bar(
+                        1,
+                        vn(
+                            'C',
+                            5,
+                            8,
+                            1,
+                            1,
+                            '<notations><ornaments><mordent/></ornaments></notations>',
+                            'default-x="20"',
+                        ) + rest(8, 1),
+                        true,
+                    ),
+                ),
+            ).notes;
+            expect(withMark).toEqual(alone.map((n) => [n.t, n.p]));
+            expect(withMark.length).toBeGreaterThan(1);
+            // The principal is struck, left for the auxiliary, and struck again:
+            // nothing sounds across the re-strike.
+            const c5 = parseMusicXmlString(xml).notes.filter((n) => n.p === 72);
+            expect(c5[0]!.t + c5[0]!.d).toBeLessThanOrEqual(c5[1]!.t);
+        });
+
+        it('sounds a tremolo once when only one voice reading of the shared head carries it', () => {
+            const trem = '<notations><ornaments><tremolo type="single">3</tremolo></ornaments></notations>';
+            const xml = wrap(
+                bar(
+                    1,
+                    vn('C', 5, 8, 1, 1, trem, 'default-x="20"') +
+                        rest(8, 1) +
+                        back(16) +
+                        vn('C', 5, 8, 2, 1, '', 'default-x="20"') +
+                        rest(8, 2),
+                    true,
+                ),
+            );
+            const notes = parseMusicXmlString(xml).notes;
+            expect(notes.length).toBeGreaterThan(1);
+            for (let i = 1; i < notes.length; i++) {
+                expect(notes[i - 1]!.t + notes[i - 1]!.d).toBeLessThanOrEqual(notes[i]!.t);
+            }
+        });
+
         it('does not arpeggiate the same printed head twice', () => {
             const arp = '<notations><arpeggiate/></notations>';
             const xml = wrap(
