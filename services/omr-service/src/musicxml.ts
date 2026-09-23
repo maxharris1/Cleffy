@@ -1385,28 +1385,6 @@ const scanPart = (part: Elem): RawMeasure[] => {
         let hasTuplet = false;
         let lastNoteStart = 0;
         let newSystem = index === 0;
-        /** Noteheads already read in this bar: `staff:onset:midi` → `default-x`. */
-        const noteheadX = new Map<string, number>();
-        /**
-         * True when this `<note>` is a second reading of a head already taken.
-         * Two voices that meet on one pitch are engraved as ONE notehead with a
-         * stem going each way, and Audiveris reports that glyph once per voice —
-         * same staff, same onset, same pitch, and the identical `default-x`,
-         * because it is the identical glyph. Sounding it twice invents a note
-         * the page never printed.
-         */
-        const duplicateNotehead = (staff: number, onset: number, midi: number, x: number | null): boolean => {
-            if (x === null) {
-                return false;
-            }
-            const key = `${staff}:${onset}:${midi}`;
-            const seen = noteheadX.get(key);
-            if (seen !== undefined && Math.abs(x - seen) <= SAME_NOTEHEAD_TENTHS) {
-                return true;
-            }
-            noteheadX.set(key, x);
-            return false;
-        };
 
         for (const child of childElements(measure)) {
             switch (child.nodeName) {
@@ -1752,7 +1730,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                         const pitch = firstChild(child, 'pitch');
                         const accidental = firstChild(child, 'accidental') !== null;
                         const parsed = pitch ? pitchOf(pitch, accidental) : null;
-                        if (parsed && !duplicateNotehead(noteStaff, start, parsed.midi, headX)) {
+                        if (parsed) {
                             const tieTypes = childElements(child, 'tie').map((tie) => tie.getAttribute('type'));
                             const stemText = childText(child, 'stem');
                             const stem = stemText === 'up' || stemText === 'down' ? stemText : undefined;
@@ -3010,6 +2988,29 @@ const discloseClefs = (raws: readonly RawMeasure[], warnings: Set<string>): void
  */
 const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult => {
     const notes: ScoreNote[] = [];
+    // Keep every voice through rhythm repair and tie resolution. A shared glyph
+    // can carry different durations or independent tie chains in its two voices.
+    const heads = new Map<ScoreNote, { origin: string; x: number }>();
+    const mergeSharedHeads = (candidates: ScoreNote[]): ScoreNote[] => {
+        const attacks = new Map<string, Array<{ x: number; note: ScoreNote }>>();
+        return candidates.filter((note) => {
+            const head = heads.get(note);
+            if (!head) return true;
+            const key = `${head.origin}:${note.t}:${note.p}`;
+            const group = attacks.get(key) ?? [];
+            const existing = group.find((entry) => Math.abs(entry.x - head.x) <= SAME_NOTEHEAD_TENTHS);
+            if (existing) {
+                if (note.d > existing.note.d) {
+                    existing.note.d = note.d;
+                    (existing.note as GatedNote).gate = (note as GatedNote).gate;
+                }
+                return false;
+            }
+            group.push({ x: head.x, note });
+            attacks.set(key, group);
+            return true;
+        });
+    };
     const measures: Array<{ n: number; tick: number; dTicks: number; sysBreak?: boolean; pad?: number }> = [];
     const timeSignatures: ScoreTimeSig[] = [];
     const keySignatures: ScoreKeySig[] = [];
@@ -3110,11 +3111,18 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         if (arpBuffer.length === 0) {
             return;
         }
+        arpBuffer = mergeSharedHeads(arpBuffer);
         const t0 = arpBuffer[0]?.t;
         const realized = arpeggiateChord(arpBuffer, arpDirection ?? 'up');
         if (t0 !== undefined && realized.some((n) => n.t !== t0)) {
             ctx.warnings.add('ornaments_realized');
         }
+        const sources = [...arpBuffer].sort((a, b) => (arpDirection === 'down' ? b.p - a.p : a.p - b.p));
+        realized.forEach((note, i) => {
+            const source = realized === arpBuffer ? arpBuffer[i] : sources[i];
+            const head = source && heads.get(source);
+            if (head) heads.set(note, head);
+        });
         notes.push(...realized);
         arpBuffer = [];
         arpDirection = null;
@@ -3364,6 +3372,11 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     if (emitted.length > 1) {
                         ctx.warnings.add('ornaments_realized');
                     }
+                    if (ev.x !== undefined) {
+                        for (const output of emitted) {
+                            heads.set(output, { origin: `${pos}:${ev.staff}:${start}:${ev.midi}`, x: ev.x });
+                        }
+                    }
                     if (ev.arpeggiate) {
                         arpDirection = arpDirection ?? ev.arpeggiate;
                         arpBuffer.push(...emitted);
@@ -3380,6 +3393,8 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         if (from && at >= 0) {
                             const run = realizeGlissando(from, ev.midi);
                             if (run.length > 1) {
+                                const head = heads.get(from);
+                                if (head) for (const output of run) heads.set(output, head);
                                 notes.splice(at, 1, ...run);
                                 ctx.warnings.add('ornaments_realized');
                             }
@@ -3487,8 +3502,14 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
         }
     }
 
+    // Collapse only attacks backed by the same printed head, after all ties
+    // have closed. Retain the longest sounding duration rather than whichever
+    // voice happened to appear first in the XML. A tie-stop emits no attack, so
+    // another voice reattacking that head remains a separate sounding event.
+    const soundingNotes = mergeSharedHeads(notes);
+
     return {
-        notes,
+        notes: soundingNotes,
         measures,
         timeSignatures,
         keySignatures,
