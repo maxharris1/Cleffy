@@ -85,6 +85,7 @@ interface EditionRankFields extends EditionLicenseFields {
     urtext?: boolean;
     arrangement?: boolean;
     description?: string | null;
+    source?: string;
 }
 
 /**
@@ -157,6 +158,9 @@ const scoreEdition = (edition: EditionRankFields, index: number): number => {
     if (!edition.urtext && !house && /complete|vollst|band|vol\.?\s*\d/i.test(edition.filename)) {
         score -= 5;
     }
+    if (edition.source === 'catalog') {
+        score += 200;
+    }
     return score;
 };
 
@@ -210,6 +214,10 @@ export const rankEditions = <T extends EditionRankFields>(editions: T[]): T[] =>
  * importable. Does not skip past a leading restricted Urtext to Weiner.
  */
 export const recommendEdition = <T extends EditionRankFields>(editions: T[]): T | null => {
+    const catalog = editions.find((edition) => edition.source === 'catalog' && isEditionImportable(edition));
+    if (catalog) {
+        return catalog;
+    }
     const top = rankEditions(editions)[0];
     return top && isEditionImportable(top) ? top : null;
 };

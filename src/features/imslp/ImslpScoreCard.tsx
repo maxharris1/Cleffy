@@ -20,6 +20,7 @@ export const ImslpScoreCard = ({
     title,
     composer,
     tags,
+    inCatalog = false,
     description,
     index,
     disabled,
@@ -33,6 +34,8 @@ export const ImslpScoreCard = ({
     composer?: ReactNode | null;
     /** Real per-work metadata only; the row is omitted when there is none. */
     tags?: string[];
+    /** Catalog hit — the PDF is already in Cleffy storage. */
+    inCatalog?: boolean;
     description?: ReactNode | null;
     index: number;
     disabled: boolean;
@@ -62,9 +65,14 @@ export const ImslpScoreCard = ({
                     {title}
                 </span>
                 {composer ? <span className="mt-0.5 block truncate text-xs text-stone-500">{composer}</span> : null}
-                {tags && tags.length > 0 ? (
+                {inCatalog || (tags && tags.length > 0) ? (
                     <span className="mt-1 flex flex-wrap gap-1">
-                        {tags.map((tag) => (
+                        {inCatalog ? (
+                            <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[0.65rem] font-medium text-emerald-700">
+                                In library
+                            </span>
+                        ) : null}
+                        {(tags ?? []).map((tag) => (
                             <span
                                 key={tag}
                                 className="rounded-full bg-ink/5 px-1.5 py-0.5 text-[0.65rem] font-medium text-stone-600"

@@ -6,6 +6,7 @@ import { displayNameOf, signOut } from '@/features/auth/session';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
+import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
     prependCachedLibraryDocument,
@@ -37,6 +38,7 @@ export type LibraryOutletContext = {
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
+        pdfSha256?: string,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
@@ -183,14 +185,25 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
-    const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
+    const onImportImslp = async (
+        filename: string,
+        workTitle: string,
+        acceptedDisclaimer: boolean,
+        pdfSha256?: string,
+    ) => {
         clearErrors();
-        // The Edge function fetches server-side, so there is no byte progress
-        // to report — show the indeterminate bar instead of a stuck 0%.
+        // Catalog copies are server-side Storage copies; live IMSLP fetch is the
+        // miss stopgap. Neither reports byte progress.
         setImportingImslp(true);
         const before = snapshotBefore();
         try {
-            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer);
+            const result = await importDocumentFromImslp(
+                filename,
+                workTitle,
+                userId,
+                acceptedDisclaimer,
+                pdfSha256,
+            );
             if (!result.ok) {
                 return {
                     ok: false as const,
@@ -199,6 +212,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 };
             }
             rememberNewScore(before, result.document);
+            void requestScoreAnalysis(result.document.id);
             navigate(`/doc/${result.document.id}`);
             return { ok: true as const };
         } catch (err) {

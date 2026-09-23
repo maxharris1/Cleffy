@@ -21,6 +21,8 @@ import {
     type FileLicense,
     type ImslpLicenseClass,
 } from '../_shared/imslpLicense.ts';
+import { loadStoreRowsForCatalogTitle } from '../_shared/catalogTitleLookup.ts';
+import { catalogEditionsFromRows } from '../_shared/pdPdfCatalog.ts';
 
 interface Edition extends ImslpFileMeta {
     filename: string;
@@ -31,6 +33,12 @@ interface Edition extends ImslpFileMeta {
     licenseLabel: string | null;
     restriction: string | null;
     downloadable: boolean;
+    source?: 'catalog' | 'imslp';
+    pdfSha256?: string;
+    origin?: string;
+    editorCredit?: string | null;
+    sourceUrl?: string | null;
+    pageCount?: number | null;
 }
 
 interface LicenseRow {
@@ -148,7 +156,16 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'title is required' }, 400);
     }
 
+    const imslpUrl = workPageUrl(title);
+    const composer = parseComposerFromTitle(title);
+    let catalog: ReturnType<typeof catalogEditionsFromRows> = [];
+
     try {
+        const admin = serviceClient();
+        if (admin) {
+            catalog = catalogEditionsFromRows(await loadStoreRowsForCatalogTitle(admin, title), imslpUrl);
+        }
+
         // The wikitext rides along with the image list: its #fte:imslpfile
         // blocks are the only place IMSLP states each PDF's publisher and
         // {{Urtext}} tag.
@@ -168,6 +185,9 @@ Deno.serve(async (req) => {
 
         const page = Object.values(imagesData.query?.pages ?? {})[0];
         if (!page || page.missing) {
+            if (catalog.length > 0) {
+                return jsonResponse({ title, composer, imslpUrl, editions: catalog });
+            }
             return jsonResponse({ error: 'Work not found on IMSLP' }, 404);
         }
 
@@ -242,6 +262,7 @@ Deno.serve(async (req) => {
                     size: info?.size ?? null,
                     mime: info?.mime ?? null,
                     openUrl: imagefromIndexUrl(filename),
+                    source: 'imslp',
                     ...licenseFields(filename),
                     ...metaFields(filename),
                 });
@@ -252,13 +273,19 @@ Deno.serve(async (req) => {
         const order = new Map(pdfTitles.map((f, idx) => [f, idx]));
         editions.sort((a, b) => (order.get(a.filename) ?? 0) - (order.get(b.filename) ?? 0));
 
+        const catalogNames = new Set(catalog.map((row) => row.filename.toLowerCase()));
+        const merged = [...catalog, ...editions.filter((edition) => !catalogNames.has(edition.filename.toLowerCase()))];
+
         return jsonResponse({
             title: page.title ?? title,
             composer: parseComposerFromTitle(page.title ?? title),
             imslpUrl: workPageUrl(page.title ?? title),
-            editions,
+            editions: merged,
         });
     } catch (err) {
+        if (catalog.length > 0) {
+            return jsonResponse({ title, composer, imslpUrl, editions: catalog });
+        }
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP work lookup failed' }, 502);
     }
 });
