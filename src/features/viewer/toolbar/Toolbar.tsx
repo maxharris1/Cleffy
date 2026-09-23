@@ -98,8 +98,6 @@ export const Toolbar = ({ store }: ToolbarProps) => {
     };
 
     const layerWord = markLayer === 'teacher' ? 'Teacher' : 'Student';
-    const printWord = printHandwriting ? 'Type' : 'Ink';
-    const markingStatus = `Marking · ${layerWord} · ${printWord}`;
     const showColors = tool === 'pen' || tool === 'highlighter' || tool === 'text' || tool === 'hairpin';
     const showSize = tool === 'pen' || tool === 'highlighter' || tool === 'eraser' || tool === 'hairpin';
     const sizeCaption =
@@ -372,16 +370,13 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                         </button>
                     ) : null}
                 </div>
-                <p className="m-0 px-1.5 text-xs text-stone-500" role="status">
-                    {markingStatus}
-                </p>
                 <button
                     type="button"
                     role="switch"
                     title={
                         printHandwriting
-                            ? 'Print on — digits and dynamics convert on this device; only the score owner converts text notes (a metered vision read billed to them)'
-                            : 'Print off — your pen stays ink'
+                            ? 'Print on — digits and symbols convert on this device. Letters stay ink.'
+                            : 'Print off — handwriting stays ink'
                     }
                     aria-label="Print"
                     aria-checked={printHandwriting}
@@ -392,9 +387,12 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                             warmPrintPipeline();
                         }
                     }}
-                    className="flex h-8 items-center gap-1.5 rounded-full border border-stone-200 bg-stone-50 px-2 text-xs"
+                    className={`flex h-8 items-center gap-1.5 rounded-full border px-2 text-xs ${
+                        printHandwriting
+                            ? 'border-accent/30 bg-accent-soft text-accent'
+                            : 'border-stone-200 bg-stone-50 text-stone-600'
+                    }`}
                 >
-                    <span className={printHandwriting ? 'text-stone-400' : 'font-medium text-stone-800'}>Ink</span>
                     <span
                         aria-hidden
                         className={`relative h-4 w-7 rounded-full transition ${printHandwriting ? 'bg-accent' : 'bg-stone-300'}`}
@@ -405,7 +403,7 @@ export const Toolbar = ({ store }: ToolbarProps) => {
                             }`}
                         />
                     </span>
-                    <span className={printHandwriting ? 'font-medium text-accent' : 'text-stone-400'}>Type</span>
+                    Print
                 </button>
             </div>
         </div>

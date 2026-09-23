@@ -432,10 +432,6 @@ verify_jwt = true
 [functions.analyze-notes]
 verify_jwt = true
 
-# Handwriting → print text notes (Gemini). Editors only; bills the owner's vision_reads.
-[functions.transcribe-ink]
-verify_jwt = true
-
 # Billing — teacher-initiated, so a JWT is required.
 [functions.stripe-checkout]
 verify_jwt = true

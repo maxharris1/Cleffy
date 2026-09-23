@@ -7,7 +7,6 @@ import {
     geminiGenerateUrl,
     resetGeminiModelMemoryForTests,
 } from '../../supabase/functions/_shared/gemini';
-import { cleanTranscription, TRANSCRIBE_PROMPT, UNREADABLE } from '../../supabase/functions/_shared/transcription';
 import { readCappedJson } from '../../supabase/functions/_shared/readCappedJson';
 
 const IMAGE = { mimeType: 'image/jpeg', data: 'aW5r' };
@@ -95,25 +94,6 @@ describe('geminiGenerateText', () => {
         expect(result).toEqual({ text: 'use wrist', model: 'gemini-3.5-flash-lite' });
         expect(second).toHaveBeenCalledTimes(1);
         expect((second.mock.calls[0] as unknown as [string])[0]).toContain('gemini-3.5-flash-lite');
-    });
-});
-
-describe('cleanTranscription', () => {
-    it('keeps a short note as written, dropping wrapping quotes and extra lines', () => {
-        expect(cleanTranscription('  use wrist  ')).toBe('use wrist');
-        expect(cleanTranscription('"rit."')).toBe('rit.');
-        expect(cleanTranscription('slow here\nand more')).toBe('slow here');
-    });
-
-    it('returns null for the unreadable sentinel, empty output, or a rambling answer', () => {
-        expect(cleanTranscription(UNREADABLE)).toBeNull();
-        expect(cleanTranscription('   ')).toBeNull();
-        expect(cleanTranscription('x'.repeat(81))).toBeNull();
-    });
-
-    it('asks for text only and tells the model how to abstain', () => {
-        expect(TRANSCRIBE_PROMPT).toMatch(/text only/i);
-        expect(TRANSCRIBE_PROMPT).toContain(`return exactly ${UNREADABLE}`);
     });
 });
 

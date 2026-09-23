@@ -25,7 +25,6 @@ import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
 import { recognizeOnDevice } from '@/features/viewer/ink/handwriting/recognizer';
-import { makeTranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import { warmPrintPipeline } from '@/features/viewer/ink/handwriting/warmup';
 import { InkController, type FingeringSelection, type TextIntent } from '@/features/viewer/ink/InkController';
 import { editedTextPayload } from '@/features/viewer/ink/musicFont';
@@ -213,7 +212,6 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncName = sync?.name;
     const syncIsAnonymous = sync?.isAnonymous ?? false;
     const syncCanWrite = sync?.canWrite ?? false;
-    const syncIsOwner = sync?.isOwner ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
@@ -377,14 +375,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             const rect = el.getBoundingClientRect();
             return { x: e.clientX - rect.left, y: e.clientY - rect.top };
         };
-        // Opt-in print conversion of THIS writer's committed pen strokes.
-        // Text notes need the metered edge function, so only the score owner
-        // of a cloud document gets it — editors still convert digits/symbols
-        // on-device.
+        // Opt-in on-device print of THIS writer's committed pen strokes.
+        // Digits and symbols only. Letters stay ink. No cloud convert.
         const handwriting = new HandwritingController({
             store: annotationStore,
             recognizer: recognizeOnDevice,
-            transcribe: syncUserId && syncIsOwner ? makeTranscribeInkFn(docId) : undefined,
             isEnabled: () => useViewerStore.getState().printHandwriting && !readOnlyRef.current,
             getAspect: (pageIndex) => {
                 const pageLayout = layoutRef.current.layouts[pageIndex];
@@ -539,7 +534,6 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncName,
         syncIsAnonymous,
         syncCanWrite,
-        syncIsOwner,
         syncOnStatus,
         syncOnPeers,
         syncOnDocReplaced,

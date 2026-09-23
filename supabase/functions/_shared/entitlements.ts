@@ -108,7 +108,6 @@ export const METRIC_BY_FUNCTION: Record<string, UsageMetric> = {
     'score-analyze': 'omr_runs',
     'analyze-annotations': 'vision_reads',
     'analyze-notes': 'vision_reads',
-    'transcribe-ink': 'vision_reads',
     'imslp-download': 'smart_imports',
 };
 

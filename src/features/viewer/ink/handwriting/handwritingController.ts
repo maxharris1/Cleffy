@@ -14,7 +14,6 @@ import {
     type StrokeGroup,
 } from '@/features/viewer/ink/handwriting/grouper';
 import { splitDigitRun, splitMixedLine } from '@/features/viewer/ink/handwriting/recognizer';
-import type { TranscribeInkFn } from '@/features/viewer/ink/handwriting/transcribeApi';
 import type { Recognition, Recognizer } from '@/features/viewer/ink/handwriting/types';
 import { ensureMusicFontLoaded, isMusicFontReady, textDrawSpec } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
@@ -22,16 +21,8 @@ import { isHairpinPayload, isTextPayload, type Annotation } from '@/types/models
 
 export interface HandwritingControllerOptions {
     store: AnnotationStore;
-    /** On-device closed-set reader (digits, dynamics, marks). */
+    /** On-device closed-set reader (digits, dynamics, marks). Letters it refuses stay ink. */
     recognizer: Recognizer;
-    /**
-     * Metered text-note transcription. Tried for a writing line the on-device
-     * reader refused, including each letter run peeled off a mixed
-     * digit+letter line. Never for a digit or symbol, and never given the
-     * digit strokes of a mixed line. Absent for local documents and for
-     * non-owners; resolves null offline.
-     */
-    transcribe?: TranscribeInkFn;
     /** The writer's opt-in (read at commit AND at convert time). */
     isEnabled: () => boolean;
     /** Page height / page width for a page index (null when unknown). */
@@ -175,20 +166,14 @@ export class HandwritingController {
                     }
                     return;
                 }
-                // A digit anywhere on the line used to leave the whole line as
-                // ink. Peel each digit off for on-device `$P` and keep each
-                // letter run as its own object (lexicon on device, otherwise
-                // one transcription). Digits are not in the letter groups.
+                // Peel digits off for on-device `$P`. A letter run is read only if
+                // it is already in the on-device lexicon; otherwise it stays ink.
                 const mixed = splitMixedLine(group);
                 if (mixed) {
                     for (const piece of mixed) {
                         await this.handleGroup(piece);
                     }
                     return;
-                }
-                if (this.opts.transcribe && this.opts.isEnabled()) {
-                    const text = await this.opts.transcribe(group);
-                    recognition = text ? { text, kind: 'text' } : null;
                 }
             }
         } catch (err) {
