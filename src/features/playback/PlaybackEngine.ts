@@ -238,6 +238,21 @@ export interface ScheduledVoice {
     dispose: () => void;
 }
 
+/** A score voice the engine is tracking, tagged with the hand whose bus it plays through. */
+interface ActiveVoice extends ScheduledVoice {
+    hand: 0 | 1;
+    /** Context time the key comes up; the release tail rings on past it. */
+    keyUpAt: number;
+    /**
+     * Between the voice and its hand bus. Closed while another hand's voice
+     * on the same key speaks for it, so a cross-hand unison sounds once, yet
+     * reopens the moment that hand is muted.
+     */
+    gate: GainNodeLike;
+    /** Other-hand voices on this key, and the time each starts speaking for this one. */
+    coveredBy: Map<ActiveVoice, number>;
+}
+
 /**
  * The one place a sampled piano note is built: source(s) → (equal-power mix)
  * → lowpass → gain → panner → destination. Neighbouring velocity layers
@@ -444,7 +459,7 @@ export class PlaybackEngine {
     private volumes: [number, number] = [1, 1];
     private metronome = false;
     private timer: ReturnType<typeof setInterval> | null = null;
-    private readonly active = new Set<ScheduledVoice & { hand: 0 | 1 }>();
+    private readonly active = new Set<ActiveVoice>();
     private warnedSourceCap = false;
     private destroyed = false;
 
@@ -718,11 +733,13 @@ export class PlaybackEngine {
     setHandMuted(hand: 0 | 1, muted: boolean): void {
         this.muted[hand] = muted;
         this.applyBusGain(hand);
+        this.refreshGates();
     }
 
     setHandVolume(hand: 0 | 1, volume: number): void {
         this.volumes[hand] = Math.min(1, Math.max(0, volume));
         this.applyBusGain(hand);
+        this.refreshGates();
     }
 
     setMetronome(on: boolean): void {
@@ -1251,30 +1268,91 @@ export class PlaybackEngine {
      * held pedal a repeated note would otherwise stack a voice per strike until
      * the cap cut the music off — so stealing runs before the cap is consulted.
      *
-     * Same-tick unisons within a hand keep the louder strike. Hands must
-     * retain independent voices: their buses can be muted or turned back up
-     * while a note is ringing. Returning false means the incoming voice is the quieter
-     * copy and must not be scheduled.
+     * Same-tick unisons within a hand keep the louder strike. Across hands the
+     * key is still one string, but each hand keeps its own voice so a bus can
+     * be muted or turned back up while the note rings: the voice that should
+     * not be heard (the quieter unison copy, or the ring a re-strike cuts off)
+     * is gated shut instead of stolen, for as long as the covering hand is
+     * audible. Returns null when the incoming voice is a same-hand quieter
+     * copy and must not be scheduled; otherwise the other-hand voices that
+     * cover it, with the time each starts to.
      */
-    private stealSamePitch(midi: number, hand: 0 | 1, startAt: number, velocity: number): boolean {
+    private stealSamePitch(
+        midi: number,
+        hand: 0 | 1,
+        startAt: number,
+        velocity: number,
+    ): { coveredBy: Map<ActiveVoice, number>; covers: ActiveVoice[] } | null {
         // Chord roll + jitter can split two same-tick strikes by up to this
         // much; 1 ms is the "same instant" floor, and anything inside the roll
         // ceiling is still one musical event, not a re-strike.
         const unisonWindow = CHORD_ROLL_MAX_S + 2 * JITTER_TIME_S + 0.001;
+        const coveredBy = new Map<ActiveVoice, number>();
+        const covers: ActiveVoice[] = [];
         for (const voice of [...this.active]) {
-            if (voice.hand !== hand || voice.midi !== midi || voice.stopsAt <= startAt) {
+            if (voice.midi !== midi || voice.stopsAt <= startAt) {
                 continue;
             }
             const unison = Math.abs(voice.startAt - startAt) <= unisonWindow;
-            if (unison && velocity <= voice.velocity) {
-                return false;
+            if (voice.hand === hand) {
+                if (unison && velocity <= voice.velocity) {
+                    return null;
+                }
+                this.stealVoice(voice, startAt);
+            } else if (unison && velocity <= voice.velocity) {
+                coveredBy.set(voice, Math.min(voice.startAt, startAt));
+            } else {
+                covers.push(voice);
             }
-            this.stealVoice(voice, startAt);
         }
-        return true;
+        return { coveredBy, covers };
     }
 
-    private stealVoice(voice: ScheduledVoice & { hand: 0 | 1 }, at: number): void {
+    private handAudible(hand: 0 | 1): boolean {
+        return !this.muted[hand] && this.volumes[hand] > 0;
+    }
+
+    /**
+     * Re-derive one voice's gate from the voices covering it: shut from when
+     * an audible covering voice starts until its key comes up, open otherwise.
+     */
+    private applyGate(voice: ActiveVoice, now: number): void {
+        const spans: Array<[number, number]> = [];
+        for (const [cover, from] of voice.coveredBy) {
+            if (!this.active.has(cover) || !this.handAudible(cover.hand) || cover.keyUpAt <= now) {
+                continue;
+            }
+            spans.push([Math.max(now, from), cover.keyUpAt]);
+        }
+        const param = voice.gate.gain;
+        param.cancelScheduledValues(now);
+        if (spans.length === 0) {
+            param.setTargetAtTime(1, now, STEAL_TAU_S);
+            return;
+        }
+        spans.sort((a, b) => a[0] - b[0]);
+        let openFrom = now;
+        for (const [from, until] of spans) {
+            if (from > openFrom) {
+                param.setTargetAtTime(1, openFrom, STEAL_TAU_S);
+            }
+            param.setTargetAtTime(0, from, STEAL_TAU_S);
+            openFrom = Math.max(openFrom, until);
+        }
+        param.setTargetAtTime(1, openFrom, STEAL_TAU_S);
+    }
+
+    /** A hand was muted, unmuted or turned down to or up from zero. */
+    private refreshGates(): void {
+        const now = this.ctx?.currentTime ?? 0;
+        for (const voice of this.active) {
+            if (voice.coveredBy.size > 0) {
+                this.applyGate(voice, now);
+            }
+        }
+    }
+
+    private stealVoice(voice: ActiveVoice, at: number): void {
         try {
             voice.gain.gain.cancelScheduledValues(at);
             voice.gain.gain.setTargetAtTime(0, at, STEAL_TAU_S);
@@ -1306,7 +1384,8 @@ export class PlaybackEngine {
         if (!ctx || !buffers || !bus) {
             return;
         }
-        if (!this.stealSamePitch(midi, hand, startAt, velocity)) {
+        const overlap = this.stealSamePitch(midi, hand, startAt, velocity);
+        if (!overlap) {
             return;
         }
         if (this.active.size >= MAX_ACTIVE_SOURCES) {
@@ -1316,7 +1395,7 @@ export class PlaybackEngine {
             }
             // Dropping the incoming note is the most audible failure: steal the
             // voice that is nearest to finishing so the new attack still speaks.
-            let victim: (ScheduledVoice & { hand: 0 | 1 }) | undefined;
+            let victim: ActiveVoice | undefined;
             for (const voice of this.active) {
                 if (!victim || voice.stopsAt < victim.stopsAt) {
                     victim = voice;
@@ -1326,6 +1405,9 @@ export class PlaybackEngine {
                 this.stealVoice(victim, startAt);
             }
         }
+        const gate = ctx.createGain();
+        gate.gain.value = 1;
+        gate.connect(bus);
         const entry = schedulePianoVoice({
             ctx,
             buffers,
@@ -1333,17 +1415,35 @@ export class PlaybackEngine {
             velocity,
             startAt,
             holdSec: durationSec,
-            destination: bus,
+            destination: gate,
             releaseTauSec,
         });
         if (!entry) {
+            gate.disconnect();
             return;
         }
-        const voice = Object.assign(entry, { hand });
+        const voice: ActiveVoice = {
+            ...entry,
+            hand,
+            keyUpAt: startAt + durationSec,
+            gate,
+            coveredBy: overlap.coveredBy,
+        };
         this.active.add(voice);
+        const now = ctx.currentTime;
+        if (voice.coveredBy.size > 0) {
+            this.applyGate(voice, now);
+        }
+        for (const other of overlap.covers) {
+            // A louder unison, or a re-strike: the other hand's voice on this
+            // key falls silent from this attack while this hand is audible.
+            other.coveredBy.set(voice, startAt);
+            this.applyGate(other, now);
+        }
         entry.source.onended = () => {
             this.active.delete(voice);
             entry.dispose();
+            gate.disconnect();
         };
     }
 

@@ -231,7 +231,6 @@ const BUS_RH = 1;
 const BUS_LH = 2;
 const REVERB_SEND = 3;
 const CLICK_BUS = 4;
-const FIRST_VOICE_GAIN = 5;
 
 const makeEngine = (overrides?: {
     bpm?: number;
@@ -269,6 +268,25 @@ const voiceGainNodeOf = (source: MockSource | undefined): MockGain | undefined =
 };
 
 const voiceGainOf = (source: MockSource | undefined): number => voiceGainNodeOf(source)?.gain.value ?? -1;
+
+/** Walk on to the per-voice gate the engine puts between a voice and its hand bus. */
+const voiceGateOf = (source: MockSource | undefined): MockGain | undefined => {
+    const panner = voiceGainNodeOf(source)?.connections[0] as MockPanner | undefined;
+    return panner?.connections[0] as MockGain | undefined;
+};
+
+/** Where a voice's gate is left after its scheduled automation (no automation: open). */
+const gateTargetOf = (source: MockSource | undefined): number | undefined => {
+    const gate = voiceGateOf(source);
+    return gate ? (gate.gain.targets.at(-1)?.target ?? gate.gain.value) : undefined;
+};
+
+/** Gate targets at or before `time`, in schedule order: the last one is where it sits then. */
+const gateAt = (source: MockSource | undefined, time: number): number | undefined => {
+    const gate = voiceGateOf(source);
+    const before = (gate?.gain.targets ?? []).filter((t) => t.time <= time);
+    return before.at(-1)?.target ?? gate?.gain.value;
+};
 
 /** Seconds between a voice's attack and the point its source is torn down. */
 const lifespanOf = (source: MockSource | undefined): number => (source?.stoppedAt ?? 0) - (source?.startedAt ?? 0);
@@ -320,7 +338,7 @@ describe('PlaybackEngine', () => {
         // The pickup carries no dynamic of its own: the score default, nudged
         // by this note's jitter, lifted as the tune and placed in its phrase's
         // contour, through the dB velocity curve.
-        expect(ctx.gains[FIRST_VOICE_GAIN]?.gain.value).toBeCloseTo(velocityToGain(DEFAULT_VELOCITY), 10);
+        expect(voiceGainOf(ctx.sources[0])).toBeCloseTo(velocityToGain(DEFAULT_VELOCITY), 10);
         // Strict is on the printed grid: no roll, no jitter, practice BPM when
         // there is no tick-0 tempo (tinyScore's defaultBpm is not an opening).
         const map = buildTempoMap(tinyScore, 1, 120, []);
@@ -423,15 +441,60 @@ describe('PlaybackEngine', () => {
         engine.setHandMuted(mutedHand, true);
         await engine.play();
         expect(ctx.sources).toHaveLength(2);
-        const destinations = ctx.panners.flatMap((panner) => panner.connections);
+        const destinations = ctx.sources.flatMap((source) => voiceGateOf(source)?.connections ?? []);
         expect(destinations).toContain(ctx.gains[BUS_RH]);
         expect(destinations).toContain(ctx.gains[BUS_LH]);
+        // The audible hand's copy speaks; the muted hand's copy is not covered.
+        expect(ctx.sources.map((source) => gateTargetOf(source))).toEqual([1, 1]);
         // Neither hand's unison was prematurely stolen. Unmuting can reveal
         // the already-ringing voice without waiting for another attack.
         expect(ctx.sources.every((source) => lifespanOf(source) > 1)).toBe(true);
         engine.setHandMuted(mutedHand, false);
         expect(ctx.gains[mutedHand === 0 ? BUS_RH : BUS_LH]?.gain.targets.at(-1)?.target).toBe(1);
         expect(ctx.sources).toHaveLength(2);
+        // Both hands audible again: the key sounds once, as the louder RH strike.
+        expect(ctx.sources.map((source) => gateAt(source, 0.5))).toEqual([1, 0]);
+        engine.destroy();
+    });
+
+    it('sounds a cross-hand unison once, as the louder strike, when both hands are audible', async () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 1920, p: 60, h: 1, v: 0.6 },
+                { t: 0, d: 1920, p: 60, h: 0, v: 0.8 },
+            ],
+        };
+        const { ctx, engine } = makeEngine({ score });
+        await engine.play();
+        expect(ctx.sources).toHaveLength(2);
+        const [lh, rh] = ctx.sources;
+        expect(voiceGainOf(rh)).toBeGreaterThan(voiceGainOf(lh));
+        expect(gateAt(rh, 0.5)).toBe(1);
+        expect(gateAt(lh, 0.5)).toBe(0);
+        // Muting the right hand hands the key to the left.
+        engine.setHandMuted(0, true);
+        expect(gateAt(lh, ctx.currentTime + 0.5)).toBe(1);
+        engine.destroy();
+    });
+
+    it('silences the other hand\u2019s ring on a cross-hand re-strike while that hand is audible', async () => {
+        const { ctx, engine } = makeEngine({
+            score: {
+                ...tinyScore,
+                notes: [
+                    { t: 0, d: 1920, p: 60, h: 1 },
+                    { t: 480, d: 480, p: 60, h: 0 },
+                ],
+            },
+        });
+        await engine.play();
+        await advance(ctx, 0.6);
+        const [lh, rh] = ctx.sources;
+        const strike = rh?.startedAt ?? 0;
+        expect(gateAt(lh, strike - 0.01)).toBe(1);
+        expect(gateAt(lh, strike + 0.01)).toBe(0);
+        expect(gateAt(rh, strike + 0.01)).toBe(1);
         engine.destroy();
     });
 
@@ -568,7 +631,9 @@ describe('expression through the engine', () => {
         const panner = gain?.connections[0] as MockPanner | undefined;
         expect(filter?.type).toBe('lowpass');
         expect(panner).toBeInstanceOf(MockPanner);
-        expectConnections(panner, ctx.gains[BUS_RH]);
+        const gate = panner?.connections[0] as MockGain | undefined;
+        expect(gate).toBeInstanceOf(MockGain);
+        expectConnections(gate, ctx.gains[BUS_RH]);
         // The pickup C5 sits a fifth above middle C, so it leans slightly right.
         expect(panner?.pan.value).toBeCloseTo(0.4, 10);
     });
