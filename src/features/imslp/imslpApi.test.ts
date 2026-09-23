@@ -40,7 +40,14 @@ describe('importImslpPdfToStorage — deployment-wide IMSLP pacing', () => {
     it('succeeds first try without reporting any stage', async () => {
         fetchMock.mockResolvedValueOnce(json(stored));
         const onStage = vi.fn();
-        const result = await importImslpPdfToStorage('nocturnes.pdf', 'doc-1', true, 'Nocturnes', onStage);
+        const result = await importImslpPdfToStorage(
+            'nocturnes.pdf',
+            'doc-1',
+            true,
+            'Nocturnes',
+            undefined,
+            onStage,
+        );
         expect(result).toEqual({
             ok: true,
             filename: 'nocturnes.pdf',
@@ -54,7 +61,14 @@ describe('importImslpPdfToStorage — deployment-wide IMSLP pacing', () => {
     it('waits the server retryAfterSec and retries; announces the queue only once a real wait is under way', async () => {
         fetchMock.mockResolvedValueOnce(queued(9)).mockResolvedValueOnce(json(stored));
         const stages: ImslpDownloadStage[] = [];
-        const promise = importImslpPdfToStorage('nocturnes.pdf', 'doc-1', true, 'Nocturnes', (s) => stages.push(s));
+        const promise = importImslpPdfToStorage(
+            'nocturnes.pdf',
+            'doc-1',
+            true,
+            'Nocturnes',
+            undefined,
+            (s) => stages.push(s),
+        );
 
         await vi.advanceTimersByTimeAsync(DOWNLOAD_QUEUE_SIGNAL_MS - 1);
         expect(stages).toEqual([]);
@@ -71,7 +85,14 @@ describe('importImslpPdfToStorage — deployment-wide IMSLP pacing', () => {
     it('stays silent when the pacing wait is too short to notice', async () => {
         fetchMock.mockResolvedValueOnce(queued(1)).mockResolvedValueOnce(json(stored));
         const onStage = vi.fn();
-        const promise = importImslpPdfToStorage('nocturnes.pdf', 'doc-1', true, 'Nocturnes', onStage);
+        const promise = importImslpPdfToStorage(
+            'nocturnes.pdf',
+            'doc-1',
+            true,
+            'Nocturnes',
+            undefined,
+            onStage,
+        );
         await vi.advanceTimersByTimeAsync(1_000);
         await expect(promise).resolves.toMatchObject({ ok: true });
         expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -81,7 +102,15 @@ describe('importImslpPdfToStorage — deployment-wide IMSLP pacing', () => {
     it('gives up with the busy copy once the total wait would pass the cap', async () => {
         fetchMock.mockResolvedValue(queued(30));
         const onStage = vi.fn();
-        const promise = importImslpPdfToStorage('nocturnes.pdf', 'doc-1', true, 'Nocturnes', onStage, 60_000);
+        const promise = importImslpPdfToStorage(
+            'nocturnes.pdf',
+            'doc-1',
+            true,
+            'Nocturnes',
+            undefined,
+            onStage,
+            60_000,
+        );
         const outcome = promise.then(
             () => 'resolved',
             (err: Error) => err.message,
