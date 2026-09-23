@@ -1,0 +1,52 @@
+{
+    "slug": "fur-elise-mutopia",
+    "title": "Beethoven — Für Elise, WoO 59 (Mutopia typeset)",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59-let.pdf",
+        "sha256": "c5b64f7ad614e8737ed4710e8b7ebeb8359e85c64935767b9e49bfd164b3eba4",
+        "pages": 3
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.mid",
+        "sha256": "1c12c21c7bbf4cf163896732672648a69d497636059837abd153c71abe50215a",
+        "license": "Public Domain (Mutopia 2015/08/18-931, Stelios Samelis after Breitkopf & Härtel 1888). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Poco moto",
+            "midi": "fur_Elise_WoO59.mid",
+            "meter": {
+                "num": 3,
+                "den": 8
+            },
+            "pickupQuarters": 0.5,
+            "partialBars": [
+                {
+                    "bar": 8,
+                    "quarters": 1.0
+                }
+            ],
+            "printedBars": 106,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 60,
+                "max": 84
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 127,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "Same musical text as the `fur-elise` pin, but the PDF is the Mutopia LilyPond typeset at reference.url's sibling — so PDF, MIDI and .ly all come from one source and the whole entry is fetchable. `fur-elise` keeps the IMSLP scan for the hosted-vs-local shootout; do not cross the two.",
+        "LilyPond \\tempo 4 = 72 under a transparent MetronomeMark; the printed heading is 'Poco moto.' in 3/8 with a one-eighth pickup (pickupQuarters 0.5).",
+        "The first \\repeat volta 2 borrows an eighth across the barline: its first ending is `a'4` over `a,16 e a r`, a printed 2/8 bar (partialBars bar 8), completed by the one-eighth anacrusis when the repeat is retaken; the second ending spends the same eighth on the far side of a `\\bar \"\"`, which draws nothing, so the page shows one full 3/8 bar there. The second \\repeat volta 2's endings are both full 3/8 — the borrow happens exactly once.",
+        "Because of that borrow the reference MIDI, which is written straight through (repeats not taken), runs one eighth out of phase with the engraved barlines from bar 9 on. partialBars puts the reference notes back in the bars the page draws; without it every bar after the first ending pairs two thirds of the right notes at the wrong onsets. Both bar pins are therefore the ENGRAVED counts: printedBars 106 (pickup as bar 0) and performedBars 127, surplus 21 (repeat 1 surplus 8, repeat 2 surplus 13). Keep the two in one convention — do not move one without the other.",
+        "performedBars 127 is derived from the Mutopia .ly at https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/fur_Elise_WoO59/fur_Elise_WoO59.ly (sha256 828a7bd1b42e441fe1b0eb0389ba46f1502dab28bbe488389e635fb446ba7a67); the folded render reproduces the pinned reference MIDI byte-for-byte (905 notes). The retake of repeat 1 replays the anacrusis, which is what makes its 2/8 first ending a whole bar; the printed page is 106 bars and the performance is 127.",
+        "A minor throughout (expectedFifths 0).",
+        "Do not embed document UUIDs. --from document cannot --out a baseline-* oracle.",
+        "No ornament signs (the \\grace and \\appoggiatura figures are ordinary notes in the reference MIDI), so expectedExtraNotes is 0."
+    ]
+}

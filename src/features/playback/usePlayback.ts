@@ -21,6 +21,7 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
     const score = analysis.kind === 'ready' ? analysis.score : null;
     const bpmDefault = analysis.kind === 'ready' ? analysis.bpmDefault : null;
     const bpmOverride = analysis.kind === 'ready' ? analysis.bpmOverride : null;
+    const alignmentMap = analysis.kind === 'ready' ? analysis.alignmentMap : null;
 
     // Clear a stale sample warning when the document/score changes (during
     // render, per the React "adjusting state" pattern).
@@ -41,6 +42,8 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
         const engine = new PlaybackEngine({
             score,
             bpm: initialBpm,
+            tempoStyle: store.tempoStyle,
+            autoPedal: store.autoPedal,
             onStatus: (status) => useViewerStore.getState().setPlaybackStatus(status),
             onWarning: (code) => setWarning(code),
         });
@@ -87,6 +90,12 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
             if (state.metronomeOn !== prev.metronomeOn) {
                 engine.setMetronome(state.metronomeOn);
             }
+            if (state.tempoStyle !== prev.tempoStyle) {
+                engine.setTempoStyle(state.tempoStyle);
+            }
+            if (state.autoPedal !== prev.autoPedal) {
+                engine.setAutoPedal(state.autoPedal);
+            }
             if (state.loopRange !== prev.loopRange) {
                 engine.setLoop(
                     state.loopRange
@@ -109,8 +118,8 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
     const getEngine = useCallback(() => engineRef.current, []);
 
     const playbackFeature = useMemo<PlaybackFeature | undefined>(
-        () => (score ? { score, getEngine } : undefined),
-        [score, getEngine],
+        () => (score ? { score, getEngine, alignmentMap } : undefined),
+        [score, getEngine, alignmentMap],
     );
 
     return { playbackFeature, getEngine, warning, dismissWarning: () => setWarning(null) };

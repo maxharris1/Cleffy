@@ -10,17 +10,22 @@
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
         "test:watch": "vitest",
-        "check:engine-version": "node scripts/check-engine-version.mjs"
+        "check:engine-version": "node scripts/check-engine-version.mjs",
+        "eval": "CLEFFY_SYMBOLIC_FIRST=1 node dist/eval/cli.js",
+        "eval:moonlight": "bash eval/moonlight.sh"
     },
     "dependencies": {
         "@supabase/supabase-js": "^2.111.0",
         "@xmldom/xmldom": "^0.9.8",
         "adm-zip": "^0.5.16",
+        "pdfjs-dist": "^5.7.284",
         "zod": "^4.4.3"
     },
     "devDependencies": {
         "@types/adm-zip": "^0.5.7",
         "@types/node": "^22.10.0",
+        "midi-file": "^1.2.4",
+        "tsx": "^4.23.13",
         "typescript": "^6.0.3",
         "vitest": "^4.1.10"
     }

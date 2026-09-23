@@ -1,6 +1,8 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { composerSurnameOf } from '../_shared/era.ts';
+import { engineGenerationOf, regenerateWouldBeNoop } from '../_shared/noopRegenerate.ts';
 import { checkRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
@@ -78,7 +80,7 @@ Deno.serve(async (req) => {
     // owner_id rides along so the run can be metered against the owner's plan.
     const { data: doc, error: docError } = await userClient
         .from('documents')
-        .select('id, storage_path, page_count, owner_id')
+        .select('id, storage_path, page_count, owner_id, title')
         .eq('id', documentId)
         .maybeSingle();
     if (docError || !doc) {
@@ -99,6 +101,15 @@ Deno.serve(async (req) => {
         return jsonResponse({ ok: false, code: 'service_unreachable' }, 502);
     }
 
+    // Refuse a metered re-run that the live worker cannot improve. The client
+    // already hides the banner, but a stray click (or an old tab) must not
+    // spend an omr_runs credit on a cache-hit of the same row.
+    if (
+        await isNoopRegenerate(admin, documentId, typeof doc.title === 'string' ? doc.title : null)
+    ) {
+        return jsonResponse({ ok: false, code: 'already_current' }, 409);
+    }
+
     // Gate BEFORE dispatch, against the OWNER. A refused run costs nothing and
     // reports the owner's tier, so a free teacher's student sees the same
     // limit-reached body the teacher would.
@@ -114,11 +125,23 @@ Deno.serve(async (req) => {
         }
     };
 
+    // Pull mode: the worker reads documents.title itself (titleForDocument).
+    // Push mode carries it on the job body, so the same discriminator applies:
+    // only an IMSLP work title ("… (Last, First)") travels; an upload's file name does not.
+    const imslpPageTitle =
+        typeof doc.title === 'string' && composerSurnameOf(doc.title) !== null ? doc.title : undefined;
     const queueMode = (Deno.env.get('OMR_QUEUE_MODE') ?? 'push').toLowerCase();
     const response =
         queueMode === 'pull'
             ? await handlePull(userId, documentId, doc.storage_path, doc.page_count as number)
-            : await handlePush(userClient, userId, documentId, doc.storage_path, doc.page_count as number);
+            : await handlePush(
+                  userClient,
+                  userId,
+                  documentId,
+                  doc.storage_path,
+                  doc.page_count as number,
+                  imslpPageTitle,
+              );
 
     // A run that never queued must not cost a credit (already_running included —
     // that run was paid for when IT was queued).
@@ -211,6 +234,7 @@ const handlePush = async (
     documentId: string,
     storagePath: string,
     pageCount: number,
+    imslpPageTitle: string | undefined,
 ): Promise<Response> => {
     const { data: existing } = await userClient
         .from('score_analyses')
@@ -247,7 +271,12 @@ const handlePush = async (
         const res = await fetch(`${serviceUrl.replace(/\/$/, '')}/jobs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'x-omr-secret': serviceSecret },
-            body: JSON.stringify({ documentId, pdfSignedUrl: signed.signedUrl, pageCount }),
+            body: JSON.stringify({
+                documentId,
+                pdfSignedUrl: signed.signedUrl,
+                pageCount,
+                ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}),
+            }),
             signal: AbortSignal.timeout(10_000),
         });
         if (res.status === 429) {
@@ -277,5 +306,47 @@ const pokeWorker = async (): Promise<void> => {
         headers: { 'Content-Type': 'application/json', 'x-omr-secret': serviceSecret },
         body: '{}',
         signal: AbortSignal.timeout(5_000),
+    });
+};
+
+const fetchLiveEngineGeneration = async (): Promise<number | null> => {
+    const serviceUrl = Deno.env.get('OMR_SERVICE_URL');
+    if (!serviceUrl) {
+        return null;
+    }
+    try {
+        const res = await fetch(`${serviceUrl.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(5_000) });
+        if (!res.ok) {
+            return null;
+        }
+        const body = (await res.json()) as { engineVersion?: unknown };
+        return engineGenerationOf(body.engineVersion);
+    } catch {
+        return null;
+    }
+};
+
+type AdminClient = NonNullable<ReturnType<typeof serviceClient>>;
+
+/**
+ * True when a re-run would rewrite the same analysis the reader already has:
+ * the live worker's generation is not ahead of the row, and (when the worker
+ * is era-aware) the title still maps to the stamped era.
+ */
+const isNoopRegenerate = async (admin: AdminClient, documentId: string, title: string | null): Promise<boolean> => {
+    const { data } = await admin
+        .from('score_analyses')
+        .select('status, engine_version, score')
+        .eq('document_id', documentId)
+        .maybeSingle();
+    if (!data || data.status !== 'ready') {
+        return false;
+    }
+    return regenerateWouldBeNoop({
+        status: data.status,
+        existingEngineVersion: data.engine_version,
+        liveGeneration: await fetchLiveEngineGeneration(),
+        stampedEra: (data.score as { era?: unknown } | null)?.era,
+        title,
     });
 };

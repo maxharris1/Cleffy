@@ -1,0 +1,43 @@
+{
+    "slug": "schumann-op68-05",
+    "title": "Schumann — Album für die Jugend, Op. 68 No. 5 (Stückchen)",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/SchumannR/O68/schumann-op68-05-petite-piece/schumann-op68-05-petite-piece-let.pdf",
+        "sha256": "8f56f70d597a838d23590ed5bbc9ecf10b21e77f07620019cdc2d06b931f7c17",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/SchumannR/O68/schumann-op68-05-petite-piece/schumann-op68-05-petite-piece.mid",
+        "sha256": "85e286ab96e4929d6d2c1fd340f57ce9452f21cedfed84504e9ad01d05577193",
+        "license": "CC BY-SA 2.5 (Mutopia 2007/02/11-653, Philippe Hezaine after Peters). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Stuckchen",
+            "midi": "schumann-op68-05-petite-piece.mid",
+            "meter": {
+                "num": 4,
+                "den": 4
+            },
+            "pickupQuarters": 3,
+            "printedBars": 25,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 55,
+                "max": 90
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 25,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 0
+        }
+    ],
+    "editionNotes": [
+        "4/4, C major, \\partial 2. — a dotted-half pickup, so pickupQuarters is 3. The longest anacrusis in the suite and the one most likely to expose a pickup that is measured against a full bar.",
+        "printedBars 25 counts the pickup as bar 0 (the MIDI produces bars 0..24). No repeats in the MIDI and no \\unfoldRepeats, so performedBars is also 25.",
+        "Sibling of schumann-op68-01, which DOES unfold its repeats — the pair is the control that repeatsUnfoldedInMidi is read per piece and not assumed per collection.",
+        "No printed metronome mark; the \\midi block asks 68 to the quarter. expectedTempo is a band around it.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+    ]
+}

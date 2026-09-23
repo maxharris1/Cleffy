@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { validateJobRequest } from './server.js';
+import { ENGINE_VERSION } from './job.js';
+import { healthzPayload, validateJobRequest } from './server.js';
 
 const DOC = '0c7fdd18-7d2d-4d24-b4dc-a17971a2b3a4';
 const SUPA = 'https://project.supabase.co';
@@ -17,6 +18,22 @@ describe('validateJobRequest', () => {
 
     it('normalizes a missing page count to null', () => {
         expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED }, SUPA)?.pageCount).toBeNull();
+    });
+
+    it('carries an optional IMSLP work title and drops anything that is not a short string', () => {
+        const title = 'Nocturnes, Op.9 (Chopin, Frédéric)';
+        expect(
+            validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, pageCount: 3, imslpPageTitle: title }, SUPA),
+        ).toEqual({ documentId: DOC, pdfSignedUrl: SIGNED, pageCount: 3, imslpPageTitle: title });
+        expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, imslpPageTitle: '  ' }, SUPA)).not.toHaveProperty(
+            'imslpPageTitle',
+        );
+        expect(validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, imslpPageTitle: 7 }, SUPA)).not.toHaveProperty(
+            'imslpPageTitle',
+        );
+        expect(
+            validateJobRequest({ documentId: DOC, pdfSignedUrl: SIGNED, imslpPageTitle: 'x'.repeat(600) }, SUPA),
+        ).not.toHaveProperty('imslpPageTitle');
     });
 
     it('rejects malformed ids and URLs', () => {
@@ -55,5 +72,12 @@ describe('validateJobRequest', () => {
                 SUPA,
             ),
         ).toBeNull();
+    });
+});
+
+describe('healthzPayload', () => {
+    it('reports the live ENGINE_VERSION so regenerate can handshake', () => {
+        expect(healthzPayload()).toEqual({ ok: true, engineVersion: ENGINE_VERSION });
+        expect(ENGINE_VERSION).toMatch(/\+svc-\d+$/);
     });
 });

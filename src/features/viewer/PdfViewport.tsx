@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
+import type { AlignmentMap } from '@/features/playback/analysisSource';
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { PlayheadController } from '@/features/playback/PlayheadController';
@@ -105,6 +106,7 @@ interface ViewportSize {
 export interface PlaybackFeature {
     score: ScoreData | null;
     getEngine: () => PlaybackEngine | null;
+    alignmentMap?: AlignmentMap | null;
 }
 
 export interface PdfViewportProps {
@@ -504,6 +506,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     // Playhead: imperative rAF controller over the two overlay divs below.
     const playbackScore = playback?.score ?? null;
     const playbackGetEngine = playback?.getEngine;
+    const playbackMap = playback?.alignmentMap ?? null;
     useEffect(() => {
         if (!playbackScore || !playbackGetEngine || !playheadLineEl || !measureHighlightEl) {
             return;
@@ -511,6 +514,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         const controller = new PlayheadController({
             getEngine: playbackGetEngine,
             getScore: () => playbackScore,
+            getAlignmentMap: () => playbackMap,
             lineEl: playheadLineEl,
             highlightEl: measureHighlightEl,
             getLayout: () => layoutRef.current,
@@ -522,7 +526,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             playheadControllerRef.current = null;
             controller.destroy();
         };
-    }, [playbackScore, playbackGetEngine, playheadLineEl, measureHighlightEl]);
+    }, [playbackScore, playbackGetEngine, playbackMap, playheadLineEl, measureHighlightEl]);
 
     // Presence: report the top visible page (debounced against scroll churn).
     useEffect(() => {

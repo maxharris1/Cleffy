@@ -34,6 +34,31 @@ describe('playheadRect', () => {
         expect(playheadRect(degraded, 1000)).toBeNull();
         expect(playheadRect(degraded, 0)).not.toBeNull();
     });
+
+    it('uses AlignmentMap boxes when ScoreData has no printed geometry', () => {
+        const midiLike = {
+            ...tinyScore,
+            measures: tinyScore.measures.map((m) => ({ ...m, page: -1, sys: -1, x0: 0, x1: 1 })),
+            systems: [],
+        };
+        const map = {
+            pdfSha256: 'pdf',
+            candidateSha256: 'cand',
+            pickup: false,
+            printedBars: 1,
+            bySrcIndex: {
+                0: { page: 0, system: 0, x0: 0.1, x1: 0.4, y0: 0.2, y1: 0.3 },
+            },
+        };
+        expect(playheadRect(midiLike, 0)).toBeNull();
+        const rect = playheadRect(midiLike, 0, map);
+        expect(rect).not.toBeNull();
+        expect(rect?.pageIndex).toBe(0);
+        expect(rect?.x0).toBe(0.1);
+        expect(rect?.x1).toBe(0.4);
+        expect(rect?.y0).toBe(0.2);
+        expect(rect?.y1).toBe(0.3);
+    });
 });
 
 describe('PlayheadController drawing', () => {
@@ -81,6 +106,33 @@ describe('PlayheadController drawing', () => {
         expect(lineEl.style.display).toBe('block');
         expect(highlightEl.style.display).toBe('block');
         expect(useViewerStore.getState().currentMeasureIndex).toBe(0);
+        controller.destroy();
+    });
+
+    it('writes the sounding tempo while playing and clears it when stopped', () => {
+        const engine = {
+            getPositionTicks: () => 6000,
+            getBpmAt: (tick: number) => (tick >= 6000 ? 60 : 120),
+        };
+        vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+        vi.stubGlobal('cancelAnimationFrame', () => {});
+        const lineEl = document.createElement('div');
+        const highlightEl = document.createElement('div');
+        useViewerStore.getState().setPlaybackStatus('playing');
+        const controller = new PlayheadController({
+            getEngine: () => engine as never,
+            getScore: () => tinyScore,
+            lineEl,
+            highlightEl,
+            getLayout: () => PAGED_LAYOUT,
+            getRenderScale: () => 1,
+            getViewportSize: () => ({ width: 800, height: 600 }),
+        });
+        flushFrame();
+        expect(useViewerStore.getState().soundingBpm).toBe(60);
+        useViewerStore.getState().setPlaybackStatus('paused');
+        flushFrame();
+        expect(useViewerStore.getState().soundingBpm).toBeNull();
         controller.destroy();
     });
 

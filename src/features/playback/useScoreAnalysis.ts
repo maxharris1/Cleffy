@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { AlignmentMap, AnalysisSource } from '@/features/playback/analysisSource';
 import {
     fetchScoreAnalysisFull,
     fetchScoreAnalysisStatus,
@@ -7,6 +8,7 @@ import {
     loadCachedScoreAnalysis,
     requestScoreAnalysis,
 } from '@/features/playback/scoreAnalysisService';
+import type { CachedScoreAnalysis } from '@/sync/db';
 import type { ScoreAnalysisBroadcast } from '@/sync/wire';
 import type { ScoreData } from '@/types/scoreData';
 
@@ -22,8 +24,20 @@ export type ScoreAnalysisState =
           bpmOverride: number | null;
           /** Which engine produced this, so a stale analysis can offer a re-run. */
           engineVersion: string | null;
+          source?: AnalysisSource;
+          alignmentMap?: AlignmentMap;
       }
     | { kind: 'failed'; code: string };
+
+const readyFromCache = (cached: CachedScoreAnalysis & { score: ScoreData }): Extract<ScoreAnalysisState, { kind: 'ready' }> => ({
+    kind: 'ready',
+    score: cached.score,
+    bpmDefault: cached.bpmDefault,
+    bpmOverride: cached.bpmOverride ?? null,
+    engineVersion: cached.engineVersion,
+    ...(cached.source ? { source: cached.source } : {}),
+    ...(cached.alignmentMap ? { alignmentMap: cached.alignmentMap } : {}),
+});
 
 /** Fallback poll while pending/processing — Realtime is primary. */
 const POLL_MS = 30_000;
@@ -59,13 +73,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
             } catch {
                 const cached = await loadCachedScoreAnalysis(docIdNow).catch(() => null);
                 if (cached?.status === 'ready' && cached.score) {
-                    set({
-                        kind: 'ready',
-                        score: cached.score,
-                        bpmDefault: cached.bpmDefault,
-                        bpmOverride: cached.bpmOverride ?? null,
-                        engineVersion: cached.engineVersion,
-                    });
+                    set(readyFromCache({ ...cached, score: cached.score }));
                 } else {
                     set({ kind: 'unavailable' });
                 }
@@ -93,24 +101,12 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
 
             const cached = await loadCachedScoreAnalysis(docIdNow).catch(() => null);
             if (cached?.status === 'ready' && cached.score && cached.fetchedAt >= status.updatedAt) {
-                set({
-                    kind: 'ready',
-                    score: cached.score,
-                    bpmDefault: cached.bpmDefault,
-                    bpmOverride: cached.bpmOverride ?? null,
-                    engineVersion: cached.engineVersion,
-                });
+                set(readyFromCache({ ...cached, score: cached.score }));
                 return;
             }
             const full = await fetchScoreAnalysisFull(docIdNow).catch(() => null);
             if (full?.status === 'ready' && full.score) {
-                set({
-                    kind: 'ready',
-                    score: full.score,
-                    bpmDefault: full.bpmDefault,
-                    bpmOverride: full.bpmOverride ?? null,
-                    engineVersion: full.engineVersion,
-                });
+                set(readyFromCache({ ...full, score: full.score }));
             } else {
                 set({ kind: 'failed', code: 'internal' });
             }
@@ -150,6 +146,12 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!result.ok && result.code === 'already_running') {
             return;
         }
+        if (!result.ok && result.code === 'already_current') {
+            // Worker cannot improve this row — stay on the ready analysis,
+            // do not flash a failure or spend a credit.
+            void applyStatus(docId);
+            return;
+        }
         // backlog_full — show copy, Generate/Retry remains available via failed UI.
         if (!result.ok && result.code === 'backlog_full') {
             setState({ kind: 'failed', code: 'backlog_full' });
@@ -158,7 +160,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!result.ok) {
             setState({ kind: 'failed', code: result.code ?? 'internal' });
         }
-    }, [docId]);
+    }, [docId, applyStatus]);
 
     const refresh = useCallback(() => {
         void applyStatus(docId);
