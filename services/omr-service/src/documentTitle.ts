@@ -7,9 +7,9 @@ import { serviceClient } from './supabaseClient.js';
  * `importDocumentFromImslp` stores the work page title ("Nocturnes, Op.9
  * (Chopin, Frédéric)") as `documents.title`; an upload stores its file name.
  * There is no source column, so the "(Last, First)" composer suffix the era
- * lookup already keys on is the discriminator: a title without it is a file
- * name and must not reach discover (a bogus wikitext fetch) or the corpus
- * (a user upload written back as public work).
+ * lookup already keys on is a discovery hint: a title without it should not
+ * trigger a bogus wikitext fetch. Titles are editable and do not establish
+ * public provenance; corpus publication separately verifies the PDF hash.
  */
 export const imslpTitleOf = (title: string | null | undefined): string | null => {
     const trimmed = title?.trim();

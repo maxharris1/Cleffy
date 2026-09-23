@@ -13,6 +13,7 @@ const completeJob = vi.fn();
 const titleForDocument = vi.fn();
 const corpusLookupByHash = vi.fn();
 const corpusPut = vi.fn();
+const pdProvenance = vi.fn<typeof corpusStore.pdProvenance>();
 
 vi.mock('./jobStore.js', async (importOriginal) => {
     const actual = await importOriginal<typeof jobStore>();
@@ -44,7 +45,7 @@ vi.mock('./corpus/store.js', async (importOriginal) => {
         corpusLookupByHash: (...args: unknown[]) => corpusLookupByHash(...args),
         corpusLookupByLayout: async () => null,
         corpusPut: (...args: unknown[]) => corpusPut(...args),
-        pdProvenance: async () => null,
+        pdProvenance: (...args: Parameters<typeof corpusStore.pdProvenance>) => pdProvenance(...args),
     };
 });
 
@@ -91,6 +92,8 @@ beforeEach(() => {
     titleForDocument.mockReset();
     corpusLookupByHash.mockReset();
     corpusPut.mockReset();
+    pdProvenance.mockReset();
+    pdProvenance.mockResolvedValue(null);
     cacheLookup.mockResolvedValue({ score: omrScore(), bpmDefault: 90 });
     completeJob.mockResolvedValue(true);
     corpusLookupByHash.mockResolvedValue(null);
@@ -108,7 +111,8 @@ afterEach(() => {
 });
 
 describe('runClaimedJob — corpus adapters', () => {
-    it('passes titleForDocument into the pipeline: an IMSLP import is written to the corpus under its title', async () => {
+    it('passes titleForDocument into the pipeline: a verified public import is written under its title', async () => {
+        pdProvenance.mockResolvedValue({ licenceTag: 'PD', editorCredit: null, sourceUrl: null, usPd: true });
         titleForDocument.mockResolvedValue(TITLE);
         const { ok } = await runClaimedJob(claimed(null), 'worker', writeback);
         expect(ok).toBe(true);
@@ -123,6 +127,13 @@ describe('runClaimedJob — corpus adapters', () => {
         const timings = completeJob.mock.calls[0]![4] as JobTimings;
         expect(timings.cacheHit).toBe(true);
         expect(timings.corpusHit).toBeUndefined();
+    });
+
+    it('does not publish a private upload renamed to an IMSLP-style title', async () => {
+        titleForDocument.mockResolvedValue(TITLE);
+        const { ok } = await runClaimedJob(claimed('another-user'), 'worker', writeback);
+        expect(ok).toBe(true);
+        expect(corpusPut).not.toHaveBeenCalled();
     });
 
     it('a corpus-owner job is written even without a title; another user’s upload is not', async () => {
@@ -161,7 +172,8 @@ describe('runClaimedJob — corpus adapters', () => {
 });
 
 describe('runJob — push mode', () => {
-    it('forwards the /jobs imslpPageTitle so an IMSLP import is written to the corpus', async () => {
+    it('forwards the /jobs imslpPageTitle for a verified public import', async () => {
+        pdProvenance.mockResolvedValue({ licenceTag: 'PD', editorCredit: null, sourceUrl: null, usPd: true });
         await runJob(
             { documentId: DOC, pdfSignedUrl: 'https://example.test/signed.pdf', pageCount: 1, imslpPageTitle: TITLE },
             writeback,
@@ -169,6 +181,15 @@ describe('runJob — push mode', () => {
         expect(writeback.ready).toHaveBeenCalledTimes(1);
         expect(corpusPut).toHaveBeenCalledTimes(1);
         expect(corpusPut.mock.calls[0]![0]).toMatchObject({ imslpPageTitle: TITLE });
+    });
+
+    it('does not trust a /jobs title as public provenance', async () => {
+        await runJob(
+            { documentId: DOC, pdfSignedUrl: 'https://example.test/signed.pdf', pageCount: 1, imslpPageTitle: TITLE },
+            writeback,
+        );
+        expect(writeback.ready).toHaveBeenCalledTimes(1);
+        expect(corpusPut).not.toHaveBeenCalled();
     });
 
     it('without a title (an upload) nothing is written', async () => {

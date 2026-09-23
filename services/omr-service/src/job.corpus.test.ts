@@ -19,7 +19,7 @@ const runAudiverisTolerant = vi.fn();
 const corpusLookupByHash = vi.fn();
 const corpusLookupByLayout = vi.fn();
 const corpusPut = vi.fn();
-const pdProvenance = vi.fn<() => Promise<PdProvenance | null>>(async () => null);
+const pdProvenance = vi.fn<typeof corpusStore.pdProvenance>(async () => null);
 
 vi.mock('./jobStore.js', async (importOriginal) => {
     const actual = await importOriginal<typeof jobStore>();
@@ -37,7 +37,7 @@ vi.mock('./corpus/store.js', async (importOriginal) => {
         corpusLookupByHash: (...args: unknown[]) => corpusLookupByHash(...args),
         corpusLookupByLayout: (...args: unknown[]) => corpusLookupByLayout(...args),
         corpusPut: (...args: unknown[]) => corpusPut(...args),
-        pdProvenance: () => pdProvenance(),
+        pdProvenance: (...args: Parameters<typeof corpusStore.pdProvenance>) => pdProvenance(...args),
     };
 });
 
@@ -56,6 +56,12 @@ const PDF_SHA = sha256Hex(MINIMAL_PDF);
 const DOC = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const OWNER = '11111111-1111-1111-1111-111111111111';
 const TITLE = 'Inventions (Bach, Johann Sebastian)';
+const PUBLIC_PROVENANCE: PdProvenance = {
+    licenceTag: 'PD',
+    editorCredit: null,
+    sourceUrl: 'https://example.test/public.pdf',
+    usPd: true,
+};
 
 const WORK: WorkKey = { composerId: 'bach', catalogType: 'BWV', catalogN: 772 };
 const BARS = 4;
@@ -300,7 +306,8 @@ describe('runOmrPipeline — play-along corpus', () => {
         expect(deps.discover).toHaveBeenCalledTimes(1);
     });
 
-    it('accept Mutopia → corpusPut with era "", alignment map, WorkKey, candidate and title', async () => {
+    it('accept Mutopia for a verified public PDF → corpusPut with era "", alignment map, WorkKey, candidate and title', async () => {
+        pdProvenance.mockResolvedValue(PUBLIC_PROVENANCE);
         const deps = mutopiaDeps();
         const result = await run({
             symbolicEnabled: true,
@@ -344,7 +351,8 @@ describe('runOmrPipeline — play-along corpus', () => {
         expect(corpusPut).not.toHaveBeenCalled();
     });
 
-    it('OMR ready with imslpPageTitle → put with the document era, origin omr and the title', async () => {
+    it('OMR ready with verified PDF provenance → put with the document era, origin omr and the title', async () => {
+        pdProvenance.mockResolvedValue(PUBLIC_PROVENANCE);
         const result = await run({ symbolicEnabled: false, corpusEnabled: true, imslpPageTitle: TITLE });
         expect(result.ready[0]?.timings.cacheHit).toBe(true);
         expect(corpusPut).toHaveBeenCalledTimes(1);
@@ -426,12 +434,44 @@ describe('runOmrPipeline — play-along corpus', () => {
         });
     });
 
-    it('does not read pd_pdf_store for a user’s own upload', async () => {
+    it('checks exact PDF bytes for public provenance independently of the editable title', async () => {
+        pdProvenance.mockResolvedValue(PUBLIC_PROVENANCE);
         await run({ symbolicEnabled: false, corpusEnabled: true, createdBy: 'someone-else' });
-        expect(pdProvenance).not.toHaveBeenCalled();
+        expect(pdProvenance).toHaveBeenCalledExactlyOnceWith(PDF_SHA);
+        expect(corpusPut).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([false, true])(
+        'keeps a private upload with an IMSLP-shaped title out of the corpus (symbolic: %s)',
+        async (symbolicEnabled) => {
+            const result = await run({
+                symbolicEnabled,
+                corpusEnabled: true,
+                symbolicDeps: mutopiaDeps(),
+                imslpPageTitle: TITLE,
+                createdBy: 'someone-else',
+            });
+            expect(result.ok).toBe(true);
+            expect(result.ready).toHaveLength(1);
+            expect(pdProvenance).toHaveBeenCalledExactlyOnceWith(PDF_SHA);
+            expect(corpusPut).not.toHaveBeenCalled();
+        },
+    );
+
+    it('allows a seed-owned symbolic result without PDF-store provenance', async () => {
+        const result = await run({
+            symbolicEnabled: true,
+            corpusEnabled: true,
+            symbolicDeps: mutopiaDeps(),
+            createdBy: OWNER,
+        });
+        expect(result.ok).toBe(true);
+        expect(corpusPut).toHaveBeenCalledTimes(1);
+        expect(corpusPut.mock.calls[0]![0]).toMatchObject({ symbolicSource: 'mutopia' });
     });
 
     it('withholds a non-keyboard transcription from the corpus but still serves it', async () => {
+        pdProvenance.mockResolvedValue(PUBLIC_PROVENANCE);
         cacheLookup.mockReset();
         cacheLookup.mockResolvedValue({
             score: {
@@ -458,6 +498,7 @@ describe('runOmrPipeline — play-along corpus', () => {
     });
 
     it('records a promoted gate verdict on a score that passes', async () => {
+        pdProvenance.mockResolvedValue(PUBLIC_PROVENANCE);
         const result = await run({ symbolicEnabled: false, corpusEnabled: true, imslpPageTitle: TITLE });
         expect(result.ready[0]?.timings.corpusGate).toEqual({ promoted: true });
         expect(corpusPut).toHaveBeenCalledTimes(1);
