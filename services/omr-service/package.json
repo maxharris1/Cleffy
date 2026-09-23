@@ -18,13 +18,13 @@
         "@supabase/supabase-js": "^2.111.0",
         "@xmldom/xmldom": "^0.9.8",
         "adm-zip": "^0.5.16",
+        "midi-file": "^1.2.4",
         "pdfjs-dist": "^5.7.284",
         "zod": "^4.4.3"
     },
     "devDependencies": {
         "@types/adm-zip": "^0.5.7",
         "@types/node": "^22.10.0",
-        "midi-file": "^1.2.4",
         "tsx": "^4.23.13",
         "typescript": "^6.0.3",
         "vitest": "^4.1.10"

@@ -44,6 +44,22 @@ export const reapExpiredLeases = async (): Promise<number> => {
     return typeof data === 'number' ? data : 0;
 };
 
+/** Seed pools fail closed while paused or if the control row cannot be read. */
+const seedPoolMayRun = async (
+    supabase: NonNullable<ReturnType<typeof serviceClient>>,
+    maxPriority: number | null,
+): Promise<boolean> => {
+    if (maxPriority === null || maxPriority >= 0) {
+        return true;
+    }
+    const { data, error } = await supabase
+        .from('playalong_corpus_control')
+        .select('paused')
+        .eq('singleton', true)
+        .maybeSingle();
+    return !error && data?.paused === false;
+};
+
 /**
  * Claim ≤1 queued job. `maxPriority` (default: CLEFFY_CLAIM_MAX_PRIORITY) limits
  * the claim to rows with `priority <= maxPriority`; null claims anything. The
@@ -56,6 +72,9 @@ export const claimJob = async (
 ): Promise<OmJobRow | null> => {
     const supabase = serviceClient();
     if (!supabase) {
+        return null;
+    }
+    if (!(await seedPoolMayRun(supabase, maxPriority))) {
         return null;
     }
     const { data, error } = await supabase.rpc('omr_claim_job', {
@@ -232,11 +251,7 @@ export const cacheLookup = async (
     };
 };
 
-export const cacheStore = async (
-    contentHash: string,
-    engineVersion: string,
-    score: ScoreData,
-): Promise<void> => {
+export const cacheStore = async (contentHash: string, engineVersion: string, score: ScoreData): Promise<void> => {
     const supabase = serviceClient();
     if (!supabase) {
         return;
@@ -260,6 +275,9 @@ export const cacheStore = async (
 export const hasQueuedWork = async (maxPriority: number | null = claimMaxPriority()): Promise<boolean> => {
     const supabase = serviceClient();
     if (!supabase) {
+        return false;
+    }
+    if (!(await seedPoolMayRun(supabase, maxPriority))) {
         return false;
     }
     let query = supabase

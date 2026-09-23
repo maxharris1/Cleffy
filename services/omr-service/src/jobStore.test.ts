@@ -4,6 +4,8 @@ import { CLAIM_MAX_PRIORITY_ENV } from './claimPriority.js';
 import { claimJob, hasQueuedWork } from './jobStore.js';
 
 const rpc = vi.fn();
+let controlResult: { data: { paused: boolean } | null; error: unknown } = { data: { paused: false }, error: null };
+const controlRead = vi.fn();
 const filters: Array<[string, unknown, unknown]> = [];
 let countResult: { count: number | null; error: unknown } = { count: 0, error: null };
 
@@ -27,7 +29,18 @@ const builder = () => {
 vi.mock('./supabaseClient.js', () => ({
     serviceClient: () => ({
         rpc: (...args: unknown[]) => rpc(...args),
-        from: () => builder(),
+        from: (table: string) => {
+            if (table !== 'playalong_corpus_control') return builder();
+            const control = {
+                select: () => control,
+                eq: () => control,
+                maybeSingle: () => {
+                    controlRead();
+                    return Promise.resolve(controlResult);
+                },
+            };
+            return control;
+        },
     }),
 }));
 
@@ -47,6 +60,8 @@ const jobRow = (priority: number) => ({
 
 beforeEach(() => {
     rpc.mockReset();
+    controlRead.mockClear();
+    controlResult = { data: { paused: false }, error: null };
     filters.length = 0;
     countResult = { count: 0, error: null };
     delete process.env[CLAIM_MAX_PRIORITY_ENV];
@@ -123,5 +138,40 @@ describe('hasQueuedWork', () => {
         expect(filters).toContainEqual(['lte', 'priority', -10]);
         countResult = { count: null, error: { message: 'boom' } };
         expect(await hasQueuedWork(-10)).toBe(false);
+    });
+});
+
+describe('seed pool soft pause', () => {
+    it('stops claims and fan-out with due jobs still queued, then resumes', async () => {
+        countResult = { count: 4, error: null };
+        rpc.mockResolvedValue({ data: jobRow(-10), error: null });
+        controlResult = { data: { paused: true }, error: null };
+        expect(await claimJob('seed', -1)).toBeNull();
+        expect(await hasQueuedWork(-1)).toBe(false);
+        expect(rpc).not.toHaveBeenCalled();
+        expect(filters).toEqual([]);
+        controlResult = { data: { paused: false }, error: null };
+        expect((await claimJob('seed', -1))?.id).toBe(7);
+        expect(await hasQueuedWork(-1)).toBe(true);
+    });
+
+    it.each([
+        { data: null, error: null },
+        { data: null, error: { message: 'control unavailable' } },
+    ])('fails closed when seed control cannot be read: %j', async (result) => {
+        controlResult = result;
+        countResult = { count: 4, error: null };
+        expect(await claimJob('seed', -1)).toBeNull();
+        expect(await hasQueuedWork(-1)).toBe(false);
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it.each([null, 0])('leaves user workers unaffected with priority %s', async (priority) => {
+        controlResult = { data: { paused: true }, error: null };
+        countResult = { count: 4, error: null };
+        rpc.mockResolvedValue({ data: jobRow(0), error: null });
+        expect((await claimJob('user', priority))?.id).toBe(7);
+        expect(await hasQueuedWork(priority)).toBe(true);
+        expect(controlRead).not.toHaveBeenCalled();
     });
 });
