@@ -51,7 +51,8 @@ const applySwing = (notes: ScoreNote[]): ScoreNote[] => {
             break;
         }
     }
-    return out;
+    // Delayed eighths may cross an unchanged subdivision in another voice.
+    return out.sort((a, b) => a.t - b.t || a.h - b.h || a.p - b.p);
 };
 
 type Stack = { page: number; sys: number; x0: number; x1: number; slots: Array<{ x: number; t: number }> };

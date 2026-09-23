@@ -544,6 +544,21 @@ describe('buildScoreData structure', () => {
         expect(score.warnings).toContain('repeats_unrolled');
     });
 
+    it('keeps mixed subdivisions chronological after swing without mutating the input', () => {
+        const notes: MusicalScore['notes'] = [
+            { t: 0, d: 216, p: 60, h: 0 },
+            { t: 240, d: 216, p: 62, h: 0 },
+            { t: 300, d: 54, p: 48, h: 1 },
+        ];
+        const score = buildScoreData({ ...musical, swing: true, notes }, geometry);
+        expect(score.notes.map((n) => [n.t, n.d, n.p])).toEqual([
+            [0, 296, 60],
+            [300, 54, 48],
+            [320, 136, 62],
+        ]);
+        expect(notes.map((n) => n.t)).toEqual([0, 240, 300]);
+    });
+
     it('swings each hand independently on a two-hand bar of eighths', () => {
         const score = buildScoreData(
             {

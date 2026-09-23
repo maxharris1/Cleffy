@@ -1928,6 +1928,65 @@ describe('voices', () => {
             ]);
         });
 
+        it('keeps the quarter duration when an eighth voice reads the shared head first', () => {
+            const xml = wrap(
+                bar(
+                    1,
+                    vn('C', 4, 2, 1, 1, '<type>eighth</type>', 'default-x="20"') +
+                        rest(14, 1) +
+                        back(16) +
+                        vn('C', 4, 4, 2, 1, '<type>quarter</type>', 'default-x="20"') +
+                        rest(12, 2),
+                    true,
+                ),
+            );
+            expect(parseMusicXmlString(xml).notes).toMatchObject([{ t: 0, p: 60, d: plain(480) }]);
+            expect(parseMusicXmlString(xml).notes).toHaveLength(1);
+        });
+
+        it('resolves both voices ties before merging their shared attack', () => {
+            const head = (duration: number, voice: number, tie: string) =>
+                vn('C', 4, duration, voice, 1, `<tie type="${tie}"/>`, 'default-x="20"');
+            const xml = wrap(
+                bar(1, head(16, 1, 'start') + back(16) + head(16, 2, 'start'), true) +
+                    bar(2, head(4, 1, 'stop') + rest(12, 1) + back(16) + head(8, 2, 'stop') + rest(8, 2)),
+            );
+            const score = parseMusicXmlString(xml);
+            expect(score.notes).toHaveLength(1);
+            expect(score.notes[0]).toMatchObject({ t: 0, p: 60, d: plain(2880) });
+            expect(score.openTiesAtEnd).toBe(0);
+        });
+
+        it('keeps a new attack when the other voice is continuing a tie at that head', () => {
+            const xml = wrap(
+                bar(1, vn('C', 4, 16, 1, 1, '<tie type="start"/>', 'default-x="20"'), true) +
+                    bar(
+                        2,
+                        vn('C', 4, 16, 1, 1, '<tie type="stop"/>', 'default-x="20"') +
+                            back(16) +
+                            vn('C', 4, 16, 2, 1, '', 'default-x="20"'),
+                    ),
+            );
+            expect(parseMusicXmlString(xml).notes.map((n) => [n.t, n.d])).toEqual([
+                [0, plain(3840)],
+                [1920, plain(1920)],
+            ]);
+        });
+
+        it('does not arpeggiate the same printed head twice', () => {
+            const arp = '<notations><arpeggiate/></notations>';
+            const xml = wrap(
+                bar(
+                    1,
+                    vn('C', 4, 16, 1, 1, arp, 'default-x="20"') +
+                        back(16) +
+                        vn('C', 4, 16, 2, 1, arp, 'default-x="20"'),
+                    true,
+                ),
+            );
+            expect(parseMusicXmlString(xml).notes).toHaveLength(1);
+        });
+
         it('keeps both when the heads are engraved apart', () => {
             // A head width away is a real collision offset, so these are two heads.
             expect(voicesOf(meetOnD5('default-x="50"', 'default-x="62"'))).toEqual([
