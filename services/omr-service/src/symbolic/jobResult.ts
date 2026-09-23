@@ -89,7 +89,8 @@ export interface SymbolicLayoutKey {
 export interface SymbolicAcceptResult {
     kind: 'accept';
     score: ScoreData;
-    alignmentMap: AlignmentMap;
+    /** Null when MIDI plays but printed bars do not line up (repeats / whole-sonata). */
+    alignmentMap: AlignmentMap | null;
     source: AnalysisSource;
     logLine: string;
     layout: SymbolicLayoutKey;

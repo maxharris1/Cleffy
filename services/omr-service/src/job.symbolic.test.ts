@@ -192,7 +192,7 @@ describe('runOmrPipeline — symbolic-first', () => {
         expect(JSON.parse(logs[0] ?? '{}').symbolicTier).toBe(1);
     });
 
-    it('ambiguous keeps the log and runs the existing OMR path (cache)', async () => {
+    it('ambiguous with catalog MIDI plays from ScoreData instead of waiting on OMR', async () => {
         const bytes = midi();
         const logs: string[] = [];
         const result = await run({
@@ -209,13 +209,13 @@ describe('runOmrPipeline — symbolic-first', () => {
                 log: (line) => logs.push(line),
             },
         });
-        expect(cacheLookup).toHaveBeenCalled();
+        expect(result.ok).toBe(true);
+        expect(cacheLookup).not.toHaveBeenCalled();
         expect(runAudiverisTolerant).not.toHaveBeenCalled();
-        expect(result.ready[0]?.score).toEqual(omrScore());
-        expect(result.ready[0]?.timings.source?.band).toBe('ambiguous');
-        expect(result.ready[0]?.timings.source?.tier).toBe('omr');
-        expect(result.ready[0]?.timings.alignmentMap).toBeUndefined();
-        expect(JSON.parse(logs[0] ?? '{}').reason).toBe('ambiguous');
+        expect(result.ready[0]?.timings.source?.band).toBe('accept');
+        expect(result.ready[0]?.timings.source?.tier).toBe('symbolic');
+        expect(result.ready[0]?.score.notes.length).toBeGreaterThan(0);
+        expect(JSON.parse(logs[0] ?? '{}').band).toBe('accept');
     });
 
     it('reject keeps the log and runs the existing OMR path', async () => {

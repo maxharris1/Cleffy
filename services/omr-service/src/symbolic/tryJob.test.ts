@@ -94,8 +94,8 @@ describe('trySymbolicJob', () => {
         expect(result.source.sourceName).toBe('Mutopia');
         expect(result.source.matchScore).toBe(100);
         expect(result.score.notes.length).toBeGreaterThan(0);
-        expect(result.alignmentMap.entries.length).toBe(result.score.measures.length);
-        expect(result.alignmentMap.bySrcIndex[0]?.page).toBe(0);
+        expect(result.alignmentMap?.entries.length).toBe(result.score.measures.length);
+        expect(result.alignmentMap?.bySrcIndex[0]?.page).toBe(0);
         const parsed = JSON.parse(result.logLine) as { band: string; engineSkipped: boolean; symbolicTier: number };
         expect(parsed.band).toBe('accept');
         expect(parsed.engineSkipped).toBe(true);
@@ -103,7 +103,7 @@ describe('trySymbolicJob', () => {
         expect(logs).toHaveLength(1);
     });
 
-    it('falls through on ambiguous without ingesting', async () => {
+    it('ingests catalog-matching MIDI on ambiguous instead of waiting on OMR', async () => {
         const bytes = midi();
         let ingested = 0;
         const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
@@ -119,14 +119,33 @@ describe('trySymbolicJob', () => {
                 return ingestSymbolic(decision, buf);
             },
         }));
-        expect(result.kind).toBe('fallthrough');
-        if (result.kind !== 'fallthrough') {
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
             return;
         }
-        expect(result.source.tier).toBe('omr');
-        expect(result.source.band).toBe('ambiguous');
-        expect(ingested).toBe(0);
-        expect(JSON.parse(result.logLine).reason).toBe('ambiguous');
+        expect(result.source.tier).toBe('symbolic');
+        expect(result.source.band).toBe('accept');
+        expect(ingested).toBe(1);
+        expect(result.score.notes.length).toBeGreaterThan(0);
+    });
+
+    it('ingests same-work MIDI when only the bar count disagrees, with a null alignment map', async () => {
+        const bytes = midi();
+        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
+            client: {
+                discover: async () => [mutopiaMid()],
+                fetchBytes: async () => bytes,
+            },
+            pdfSignals: async () => pdf({ printedBars: 40, layoutBars: 40, barBoxes: boxes(40) }),
+        }));
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect(result.source.tier).toBe('symbolic');
+        expect(result.alignmentMap).toBeNull();
+        expect(result.score.notes.length).toBeGreaterThan(0);
+        expect(JSON.parse(result.logLine).reason).toBe('bars');
     });
 
     it('falls through on reject (arrangement) without ingesting', async () => {
@@ -313,9 +332,9 @@ describe('trySymbolicJob — corpus layout lookup', () => {
         expect(result.candidate).toBeNull();
         expect(result.score).toEqual(corpusScore(BARS));
         expect(result.source.sourceName).toBe('Mutopia');
-        expect(result.alignmentMap.candidateSha256).toBe('cand');
-        expect(result.alignmentMap.entries.length).toBe(BARS);
-        expect(result.alignmentMap.bySrcIndex[1]?.x0).toBeCloseTo(1 / BARS);
+        expect(result.alignmentMap?.candidateSha256).toBe('cand');
+        expect(result.alignmentMap?.entries.length).toBe(BARS);
+        expect(result.alignmentMap?.bySrcIndex[1]?.x0).toBeCloseTo(1 / BARS);
         expect(result.layout).toEqual({ workKey: WORK, printedBars: BARS, pageCount: 1 });
         const parsed = JSON.parse(logs[0] ?? '{}') as { band: string; candidate: { source: string } };
         expect(parsed.band).toBe('accept');
