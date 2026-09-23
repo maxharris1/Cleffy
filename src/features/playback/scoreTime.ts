@@ -320,35 +320,25 @@ export const measureIndexAtPagePoint = (
      * always back to the first. Omit for the plain first-match behaviour.
      */
     nearTick?: number,
-    alignmentMap?: AlignmentMap | null,
 ): number => {
     let best = -1;
-    for (let i = 0; i < score.measures.length; i++) {
-        const measure = score.measures[i];
-        if (!measure) {
+    for (let sysIndex = 0; sysIndex < score.systems.length; sysIndex++) {
+        const system = score.systems[sysIndex];
+        if (!system || system.page !== pageIndex || ny < system.y0 || ny > system.y1) {
             continue;
         }
-        // Printed-bar identities survive repeat expansion. Prefer the target
-        // edition's box to the candidate's old geometry, just like the playhead.
-        const box = alignmentMap?.bySrcIndex[measure.srcIndex ?? i];
-        const system = score.systems[measure.sys];
-        const bounds = box ?? (system ? { ...measure, y0: system.y0, y1: system.y1 } : null);
-        if (
-            !bounds ||
-            bounds.page !== pageIndex ||
-            ny < bounds.y0 ||
-            ny > bounds.y1 ||
-            nx < bounds.x0 ||
-            nx > bounds.x1
-        ) {
-            continue;
-        }
-        if (nearTick === undefined) {
-            return i;
-        }
-        const bestMeasure = best >= 0 ? score.measures[best] : undefined;
-        if (!bestMeasure || Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)) {
-            best = i;
+        for (let i = 0; i < score.measures.length; i++) {
+            const measure = score.measures[i];
+            if (!measure || measure.sys !== sysIndex || nx < measure.x0 || nx > measure.x1) {
+                continue;
+            }
+            if (nearTick === undefined) {
+                return i;
+            }
+            const bestMeasure = best >= 0 ? score.measures[best] : undefined;
+            if (!bestMeasure || Math.abs(measure.tick - nearTick) < Math.abs(bestMeasure.tick - nearTick)) {
+                best = i;
+            }
         }
     }
     return best;
@@ -646,3 +636,40 @@ const DEFAULT_MAP_BPM = 100;
 
 /** Quarter-BPM in force at a tick, as the map is actually playing it. */
 export const bpmAtTick = (map: TempoMap, tick: number): number => 60 / (sptAtTick(map, tick) * TICKS_PER_QUARTER);
+
+/**
+ * The score as it lies on THIS PDF. An AlignmentMap places another edition's
+ * performance (or a geometry-less MIDI one) onto this PDF's printed bars:
+ * every measure with a box takes the box's page and x-span, a system band
+ * built from the boxes, and drops its engraved chord columns, which belong to
+ * the other edition. Measures without a box keep their own geometry.
+ *
+ * Apply once where the analysis is loaded, so the playhead, tap-to-seek, the
+ * loop overlay and the fingering marquee all read one geometry.
+ */
+export const scoreOnEdition = (score: ScoreData, map: AlignmentMap | null | undefined): ScoreData => {
+    if (!map) {
+        return score;
+    }
+    const systems = [...score.systems];
+    const systemOf = new Map<string, number>();
+    const measures = score.measures.map((measure, i): ScoreMeasure => {
+        const box = map.bySrcIndex[measure.srcIndex ?? i];
+        if (!box) {
+            return measure;
+        }
+        const key = `${box.page}:${box.system}`;
+        let sys = systemOf.get(key);
+        const band = sys === undefined ? undefined : systems[sys];
+        if (sys === undefined || !band) {
+            sys = systems.length;
+            systemOf.set(key, sys);
+            systems.push({ page: box.page, y0: box.y0, y1: box.y1 });
+        } else {
+            systems[sys] = { ...band, y0: Math.min(band.y0, box.y0), y1: Math.max(band.y1, box.y1) };
+        }
+        const { sl: _oldColumns, ...rest } = measure;
+        return { ...rest, page: box.page, sys, x0: box.x0, x1: box.x1 };
+    });
+    return { ...score, measures, systems };
+};

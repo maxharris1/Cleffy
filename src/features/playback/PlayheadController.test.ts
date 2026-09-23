@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import { PlayheadController, playheadRect } from '@/features/playback/PlayheadController';
-import { measureIndexAtPagePoint } from '@/features/playback/scoreTime';
+import { measureIndexAtPagePoint, scoreOnEdition } from '@/features/playback/scoreTime';
 import { computeDocumentLayout } from '@/features/viewer/geometry';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { useViewerStore } from '@/state/store';
@@ -56,8 +56,8 @@ describe('playheadRect', () => {
             bySrcIndex: { 0: { page: 1, system: 3, x0: 0.6, x1: 0.9, y0: 0.4, y1: 0.5 } },
         };
         expect(playheadRect(score, 120)?.x).toBeCloseTo(0.15);
-        expect(playheadRect(score, 120, map)?.x).toBeCloseTo(0.675);
-        expect(playheadRect(score, 480, map)?.x).toBeCloseTo(0.9);
+        expect(playheadRect(scoreOnEdition(score, map), 120)?.x).toBeCloseTo(0.675);
+        expect(playheadRect(scoreOnEdition(score, map), 480)?.x).toBeCloseTo(0.9);
         expect(score.measures[0]?.sl).toHaveLength(2);
     });
 
@@ -77,7 +77,7 @@ describe('playheadRect', () => {
             },
         };
         expect(playheadRect(midiLike, 0)).toBeNull();
-        const rect = playheadRect(midiLike, 0, map);
+        const rect = playheadRect(scoreOnEdition(midiLike, map), 0);
         expect(rect).not.toBeNull();
         expect(rect?.pageIndex).toBe(0);
         expect(rect?.x0).toBe(0.1);

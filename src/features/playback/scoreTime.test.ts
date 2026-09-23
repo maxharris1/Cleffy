@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
 import {
+    scoreOnEdition,
     beatsForMeasure,
     beatWeight,
     bpmAtTick,
@@ -607,10 +608,10 @@ describe('measureIndexAtPagePoint with a new edition alignment', () => {
             systems: [],
             measures: repeated.measures.map((m) => ({ ...m, page: -1, sys: -1 })),
         };
-        expect(measureIndexAtPagePoint(midi, 3, 0.75, 0.75, undefined, map)).toBe(0);
-        expect(measureIndexAtPagePoint(midi, 3, 0.75, 0.75, tinyScore.totalTicks, map)).toBe(1);
-        expect(measureIndexAtPagePoint(midi, 2, 0.75, 0.75, 0, map)).toBe(-1);
-        expect(measureIndexAtPagePoint(midi, 3, 0.75, 0.6, 0, map)).toBe(-1);
+        expect(measureIndexAtPagePoint(scoreOnEdition(midi, map), 3, 0.75, 0.75, undefined)).toBe(0);
+        expect(measureIndexAtPagePoint(scoreOnEdition(midi, map), 3, 0.75, 0.75, tinyScore.totalTicks)).toBe(1);
+        expect(measureIndexAtPagePoint(scoreOnEdition(midi, map), 2, 0.75, 0.75, 0)).toBe(-1);
+        expect(measureIndexAtPagePoint(scoreOnEdition(midi, map), 3, 0.75, 0.6, 0)).toBe(-1);
     });
 
     it('replaces old edition hit targets instead of retaining both editions', () => {
@@ -618,20 +619,19 @@ describe('measureIndexAtPagePoint with a new edition alignment', () => {
         const oldX = (measure.x0 + measure.x1) / 2;
         const oldY = (oldSystem.y0 + oldSystem.y1) / 2;
         expect(measureIndexAtPagePoint(repeated, measure.page, oldX, oldY)).toBe(0);
-        expect(measureIndexAtPagePoint(repeated, measure.page, oldX, oldY, 0, map)).toBe(-1);
-        expect(measureIndexAtPagePoint(repeated, 3, 0.75, 0.75, 0, map)).toBe(0);
+        expect(measureIndexAtPagePoint(scoreOnEdition(repeated, map), measure.page, oldX, oldY, 0)).toBe(-1);
+        expect(measureIndexAtPagePoint(scoreOnEdition(repeated, map), 3, 0.75, 0.75, 0)).toBe(0);
     });
 
     it('retains original geometry for measures without an alignment box', () => {
         const system = tinyScore.systems[measure.sys]!;
         expect(
             measureIndexAtPagePoint(
-                repeated,
+                scoreOnEdition(repeated, { ...map, bySrcIndex: {} }),
                 measure.page,
                 (measure.x0 + measure.x1) / 2,
                 (system.y0 + system.y1) / 2,
                 0,
-                { ...map, bySrcIndex: {} },
             ),
         ).toBe(0);
     });
