@@ -1,0 +1,29 @@
+[
+    {
+        "name": "I. Adagio sostenuto",
+        "midi": "moonlight1.mid",
+        "beats": 4,
+        "pickupBeats": 0,
+        "lo": 0,
+        "hi": 68,
+        "gated": true
+    },
+    {
+        "name": "II. Allegretto",
+        "midi": "moonlight2.mid",
+        "beats": 3,
+        "pickupBeats": 0,
+        "lo": 69,
+        "hi": 128,
+        "gated": false
+    },
+    {
+        "name": "III. Presto agitato",
+        "midi": "moonlight3.mid",
+        "beats": 4,
+        "pickupBeats": 0,
+        "lo": 129,
+        "hi": 329,
+        "gated": false
+    }
+]

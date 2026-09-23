@@ -129,6 +129,32 @@ describe('useScoreAnalysis', () => {
         await waitFor(() => expect(result.current.state).toEqual({ kind: 'failed', code: 'too_large' }));
     });
 
+    it('already_current does not surface as a failure', async () => {
+        fake.row = {
+            document_id: DOC,
+            status: 'ready',
+            error: null,
+            progress: null,
+            engine_version: 'audiveris-5.6.1+svc-6',
+            bpm_default: 96,
+            score: JSON.parse(JSON.stringify(tinyScore)) as unknown,
+            created_by: null,
+            created_at: now(),
+            updated_at: now(),
+        };
+        fake.invoke = {
+            data: null,
+            error: {
+                message: '409',
+                context: new Response(JSON.stringify({ ok: false, code: 'already_current' }), { status: 409 }),
+            },
+        };
+        const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(result.current.state.kind).toBe('ready'));
+        await result.current.generate();
+        await waitFor(() => expect(result.current.state.kind).toBe('ready'));
+    });
+
     it('rehydrates backlog_full from a persisted failed analysis row', async () => {
         fake.row = {
             status: 'failed',

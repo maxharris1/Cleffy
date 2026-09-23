@@ -1,0 +1,109 @@
+{
+  "slug": "toy",
+  "title": "Toy two-bar 4/4",
+  "movements": [
+    {
+      "name": "I",
+      "refBars": 2,
+      "omrPrintedBars": 2,
+      "omrPerformedBars": 2,
+      "refNotes": 4,
+      "omrNotes": 4,
+      "pitchMatch": 100,
+      "exact": 100,
+      "missing": 0,
+      "extra": 0,
+      "octave": 0,
+      "semitone": 0,
+      "handErr": 0,
+      "barsImperfect": 0,
+      "refOnly": 0,
+      "omrOnly": 0,
+      "merge2": 0,
+      "barsAtCorrectLength": 2,
+      "melodySurvival": 100,
+      "melodyTotal": 2,
+      "melodyFound": 2,
+      "barsUnderWrongKey": 0,
+      "tempoInRange": true,
+      "tempoBpm": 100,
+      "performedBarsMatch": true,
+      "velocityDistinct": 1
+    }
+  ],
+  "overall": {
+    "refNotes": 4,
+    "omrNotes": 4,
+    "pitchMatch": 100,
+    "exact": 100,
+    "missing": 0,
+    "extra": 0,
+    "octave": 0,
+    "semitone": 0,
+    "velocityDistinct": 1
+  },
+  "structure": {
+    "movementCountOk": true,
+    "metersOk": true,
+    "warnings": [
+      "no_geometry",
+      "pedal_inferred"
+    ]
+  },
+  "bars": {
+    "I": [
+      {
+        "kind": "match",
+        "refBars": [
+          1
+        ],
+        "omrNs": [
+          1
+        ],
+        "sim": 1,
+        "dTicks": [
+          1920
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 2,
+        "exact": 2,
+        "refCount": 2,
+        "omrCount": 2
+      },
+      {
+        "kind": "match",
+        "refBars": [
+          2
+        ],
+        "omrNs": [
+          2
+        ],
+        "sim": 1,
+        "dTicks": [
+          1920
+        ],
+        "missing": [],
+        "extra": [],
+        "octave": 0,
+        "semitone": 0,
+        "handErr": 0,
+        "pitchMatched": 2,
+        "exact": 2,
+        "refCount": 2,
+        "omrCount": 2
+      }
+    ]
+  },
+  "composite": 100,
+  "generatedAt": "2026-09-09T00:00:00.000Z",
+  "engineVersion": "audiveris-5.11.0+svc-11",
+  "candidateSource": "artifacts",
+  "audiverisCacheHit": null,
+  "artifactHash": "3abda1691aa35bf449bd2b17f3703dece4ceee9281e25212d34403fd7f12e47e",
+  "audiverisVersion": null,
+  "audiverisOptions": "-option Book.Lyrics=false"
+}
