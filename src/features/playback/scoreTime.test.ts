@@ -588,6 +588,48 @@ describe('measureIndexAtPagePoint with repeats', () => {
     });
 });
 
+describe('scoreOnEdition', () => {
+    const boxOf = (i: number) => {
+        const m = tinyScore.measures[i]!;
+        const system = tinyScore.systems[m.sys]!;
+        return { page: m.page + 3, system: m.sys, x0: m.x0, x1: m.x1, y0: system.y0, y1: system.y1 };
+    };
+    const map = (count: number) => ({
+        pdfSha256: 'this-pdf',
+        candidateSha256: 'other-edition',
+        pickup: true,
+        printedBars: count,
+        bySrcIndex: Object.fromEntries(tinyScore.measures.slice(0, count).map((_, i) => [i, boxOf(i)])),
+    });
+
+    it('drops no_geometry once the boxes have placed the bars, and keeps the other warnings', () => {
+        const symbolic: ScoreData = { ...tinyScore, warnings: ['no_geometry', 'repeats_ignored'] };
+        expect(scoreOnEdition(symbolic, map(tinyScore.measures.length)).warnings).toEqual(['repeats_ignored']);
+        // Nothing placed: the warning still tells the truth.
+        expect(scoreOnEdition(symbolic, { ...map(0), bySrcIndex: {} }).warnings).toContain('no_geometry');
+    });
+
+    it('leaves an unboxed bar with no geometry, never the other edition\u2019s', () => {
+        const last = tinyScore.measures.length - 1;
+        const engraved: ScoreData = {
+            ...tinyScore,
+            measures: tinyScore.measures.map((m, i) => (i === last ? { ...m, sl: [{ x: m.x0 + 0.01, t: 0 }] } : m)),
+        };
+        const aligned = scoreOnEdition(engraved, map(last));
+        const unboxed = aligned.measures[last]!;
+        expect(unboxed.page).toBe(-1);
+        expect(unboxed.sys).toBe(-1);
+        expect(unboxed.sl).toBeUndefined();
+        // Only this PDF's systems remain, so no stale band answers a tap.
+        expect(aligned.systems.every((system) => system.page >= 3)).toBe(true);
+        const old = tinyScore.measures[last]!;
+        const oldSystem = tinyScore.systems[old.sys]!;
+        expect(
+            measureIndexAtPagePoint(aligned, old.page, (old.x0 + old.x1) / 2, (oldSystem.y0 + oldSystem.y1) / 2),
+        ).toBe(-1);
+    });
+});
+
 describe('measureIndexAtPagePoint with a new edition alignment', () => {
     const map = {
         pdfSha256: 'new-edition',
@@ -623,7 +665,7 @@ describe('measureIndexAtPagePoint with a new edition alignment', () => {
         expect(measureIndexAtPagePoint(scoreOnEdition(repeated, map), 3, 0.75, 0.75, 0)).toBe(0);
     });
 
-    it('retains original geometry for measures without an alignment box', () => {
+    it('leaves the score as it was when the map places none of its bars', () => {
         const system = tinyScore.systems[measure.sys]!;
         expect(
             measureIndexAtPagePoint(

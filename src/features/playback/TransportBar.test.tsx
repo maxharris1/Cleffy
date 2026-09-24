@@ -431,6 +431,32 @@ describe('analysis warnings', () => {
         expect(items[0]).toMatch(/repeats/i);
     });
 
+    it('does not claim there is no playhead once an alignment has placed the bars', () => {
+        const bySrcIndex = Object.fromEntries(
+            tinyScore.measures.map((m, i) => {
+                const system = tinyScore.systems[m.sys]!;
+                return [i, { page: m.page, system: m.sys, x0: m.x0, x1: m.x1, y0: system.y0, y1: system.y1 }];
+            }),
+        );
+        renderBar({
+            state: {
+                kind: 'ready',
+                score: { ...tinyScore, warnings: ['no_geometry'] },
+                bpmDefault: 90,
+                bpmOverride: null,
+                engineVersion: 'audiveris-5.6.1+svc-5',
+                alignmentMap: {
+                    pdfSha256: 'this-pdf',
+                    candidateSha256: 'musicxml',
+                    pickup: true,
+                    printedBars: tinyScore.measures.length,
+                    bySrcIndex,
+                },
+            },
+        });
+        expect(screen.queryByRole('button', { name: /things? to know/i })).toBeNull();
+    });
+
     it('warns before the bar count starts revisiting bars', async () => {
         withWarnings(['jumps_performed']);
         await userEvent.click(screen.getByRole('button', { name: /1 thing to know/i }));

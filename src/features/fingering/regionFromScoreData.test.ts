@@ -112,6 +112,29 @@ describe('regionFromScoreData', () => {
         );
     });
 
+    it('selects on an aligned symbolic reading, whose own warnings say it has no geometry', () => {
+        // A MusicXML accept: no page positions of its own, placed by the map.
+        const symbolic: ScoreData = {
+            ...tinyScore,
+            systems: [],
+            measures: tinyScore.measures.map((m) => ({ ...m, page: -1, sys: -1 })),
+            warnings: ['no_geometry'],
+        };
+        const map = {
+            pdfSha256: 'this-pdf',
+            candidateSha256: 'musicxml',
+            pickup: true,
+            printedBars: tinyScore.measures.length,
+            bySrcIndex: Object.fromEntries(
+                tinyScore.measures.map((m, i) => {
+                    const system = tinyScore.systems[m.sys]!;
+                    return [i, { page: m.page, system: m.sys, x0: m.x0, x1: m.x1, y0: system.y0, y1: system.y1 }];
+                }),
+            ),
+        };
+        expect(regionFromScoreData('doc', 0, SYS0_RECT, scoreOnEdition(symbolic, map))).not.toBeNull();
+    });
+
     it('returns null when the score has no_geometry', () => {
         const score: ScoreData = { ...tinyScore, warnings: ['no_geometry'] };
         expect(regionFromScoreData('doc', 0, SYS0_RECT, score)).toBeNull();

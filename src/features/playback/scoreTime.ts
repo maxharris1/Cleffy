@@ -1,5 +1,5 @@
 import type { AlignmentMap } from '@/features/playback/analysisSource';
-import type { ScoreData, ScoreMeasure, ScoreNote, ScoreTimeSig } from '@/types/scoreData';
+import type { ScoreData, ScoreMeasure, ScoreNote, ScoreSystem, ScoreTimeSig } from '@/types/scoreData';
 import { TICKS_PER_QUARTER } from '@/types/scoreData';
 
 /**
@@ -492,7 +492,8 @@ export interface TempoCurvePoint {
  *
  * `defaultBpm` is not an opening tempo: it may be a meter guess, and a late
  * `tempos[0]` is not in force yet. Until a point at this tick, stay at
- * `fallbackBpm` (the user/practice BPM).
+ * `fallbackBpm`, scaled like everything else (the engine passes its nominal
+ * here, so that stretch plays at the practice BPM).
  */
 export const buildTempoMap = (
     score: ScoreData,
@@ -642,7 +643,10 @@ export const bpmAtTick = (map: TempoMap, tick: number): number => 60 / (sptAtTic
  * performance (or a geometry-less MIDI one) onto this PDF's printed bars:
  * every measure with a box takes the box's page and x-span, a system band
  * built from the boxes, and drops its engraved chord columns, which belong to
- * the other edition. Measures without a box keep their own geometry.
+ * the other edition. Once any box lands, the map is the only geometry: a
+ * measure without one is left with none (page/sys -1) rather than keeping
+ * where the other edition engraved it, and the other edition's systems go
+ * too. A map that places nothing leaves the score as it was.
  *
  * Apply once where the analysis is loaded, so the playhead, tap-to-seek, the
  * loop overlay and the fingering marquee all read one geometry.
@@ -651,13 +655,16 @@ export const scoreOnEdition = (score: ScoreData, map: AlignmentMap | null | unde
     if (!map) {
         return score;
     }
-    const systems = [...score.systems];
+    const systems: ScoreSystem[] = [];
     const systemOf = new Map<string, number>();
+    let placed = false;
     const measures = score.measures.map((measure, i): ScoreMeasure => {
         const box = map.bySrcIndex[measure.srcIndex ?? i];
+        const { sl: _oldColumns, ...rest } = measure;
         if (!box) {
-            return measure;
+            return { ...rest, page: -1, sys: -1, x0: 0, x1: 0 };
         }
+        placed = true;
         const key = `${box.page}:${box.system}`;
         let sys = systemOf.get(key);
         const band = sys === undefined ? undefined : systems[sys];
@@ -668,8 +675,13 @@ export const scoreOnEdition = (score: ScoreData, map: AlignmentMap | null | unde
         } else {
             systems[sys] = { ...band, y0: Math.min(band.y0, box.y0), y1: Math.max(band.y1, box.y1) };
         }
-        const { sl: _oldColumns, ...rest } = measure;
         return { ...rest, page: box.page, sys, x0: box.x0, x1: box.x1 };
     });
-    return { ...score, measures, systems };
+    if (!placed) {
+        return score;
+    }
+    // A symbolic reading carries no page positions of its own and says so;
+    // the boxes have just given it some.
+    const warnings = score.warnings.filter((code) => code !== 'no_geometry');
+    return { ...score, measures, systems, warnings };
 };

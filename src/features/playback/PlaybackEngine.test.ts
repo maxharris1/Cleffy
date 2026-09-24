@@ -517,6 +517,65 @@ describe('PlaybackEngine', () => {
         engine.destroy();
     });
 
+    it('keeps a nearly silent hand from gating out the hand the player turned up', async () => {
+        const score: ScoreData = {
+            ...tinyScore,
+            notes: [
+                { t: 0, d: 1920, p: 60, h: 1 },
+                { t: 480, d: 480, p: 60, h: 0 },
+            ],
+        };
+        const quiet = makeEngine({ score });
+        quiet.engine.setHandVolume(0, 0.02);
+        await quiet.engine.play();
+        await advance(quiet.ctx, 0.6);
+        const [lh, rh] = quiet.ctx.sources;
+        const strike = rh?.startedAt ?? 0;
+        // A 2 % right hand cannot speak for a full-volume left: the key would
+        // drop to 2 % of what the player chose. Both copies sound instead.
+        expect(gateAt(lh, strike + 0.01)).toBe(1);
+        expect(gateAt(lh, strike + 0.4)).toBe(1);
+        quiet.engine.destroy();
+
+        // A covering hand at least as loud as the covered one still gates it.
+        const louder = makeEngine({ score });
+        louder.engine.setHandVolume(1, 0.5);
+        await louder.engine.play();
+        await advance(louder.ctx, 0.6);
+        const [lhUnder, rhOver] = louder.ctx.sources;
+        expect(gateAt(lhUnder, (rhOver?.startedAt ?? 0) + 0.01)).toBe(0);
+        // Turning the right hand below the left hands the key back.
+        louder.engine.setHandVolume(0, 0.3);
+        expect(gateAt(lhUnder, louder.ctx.currentTime + 0.1)).toBe(1);
+        louder.engine.destroy();
+    });
+
+    it('keeps the other hand gated until a same-hand re-strike of its cover lands', async () => {
+        const { ctx, engine } = makeEngine({
+            score: {
+                ...tinyScore,
+                notes: [
+                    { t: 0, d: 1920, p: 60, h: 1, v: 0.6 },
+                    { t: 0, d: 480, p: 60, h: 0, v: 0.8 },
+                    { t: 480, d: 480, p: 60, h: 0, v: 0.8 },
+                ],
+            },
+        });
+        await engine.play();
+        await advance(ctx, 0.6);
+        expect(ctx.sources).toHaveLength(3);
+        const [lh, , restrike] = ctx.sources;
+        const strike = restrike?.startedAt ?? 0;
+        // The first RH copy rings at full hold until the re-strike steals it,
+        // so the LH copy must stay shut all the way to that attack...
+        for (let at = 0.1; at < strike; at += 0.02) {
+            expect(gateAt(lh, at)).toBe(0);
+        }
+        // ...and on through the new strike's key-down.
+        expect(gateAt(lh, strike + 0.2)).toBe(0);
+        engine.destroy();
+    });
+
     it('wraps an A-B loop seamlessly and stays inside it', async () => {
         const { ctx, engine, buffers } = makeEngine();
         // Loop m.0–m.1 (ticks 0–2400): 2400 ticks at 120 bpm = 2.5 s per pass.
@@ -896,9 +955,23 @@ describe('tempo map', () => {
             defaultBpm: 145,
             tempos: [{ tick: 480, bpm: 40, src: 'word' }],
         };
-        const { engine } = makeEngine({ score: grave, bpm: 100 });
-        expect(engine.getBpmAt(0)).toBe(100);
+        // At the tempo the field opens on, the Grave plays as printed.
+        const { engine } = makeEngine({ score: grave, bpm: 145 });
+        expect(engine.getBpmAt(0)).toBe(145);
         expect(engine.getBpmAt(480)).toBe(40);
+        engine.setBpm(100);
+        expect(engine.getBpmAt(0)).toBe(100);
+        expect(engine.getBpmAt(480)).toBe(Math.round((40 * 100) / 145));
+    });
+
+    it('keeps scaling past a first printed tempo that is not at tick 0', () => {
+        const late: ScoreData = { ...tinyScore, defaultBpm: 80, tempos: [{ tick: 3840, bpm: 120 }] };
+        const { engine } = makeEngine({ score: late, bpm: 80 });
+        expect(engine.getBpmAt(0)).toBe(80);
+        expect(engine.getBpmAt(4000)).toBe(120);
+        engine.setBpm(40); // half speed, all the way through
+        expect(engine.getBpmAt(0)).toBe(40);
+        expect(engine.getBpmAt(4000)).toBe(60);
     });
 });
 
@@ -1088,6 +1161,92 @@ describe('tempo style', () => {
             );
         }
         expect(Math.max(...onsets)).toBeGreaterThan(0.08 + loopSeconds);
+    });
+});
+
+describe('loop wraps and jumps', () => {
+    // Steady quarters on middle C's octave, one per beat, through bar 4.
+    const quarters: ScoreData = {
+        ...tinyScore,
+        notes: Array.from({ length: 28 }, (_, i): ScoreNote => ({ t: i * 480, d: 480, p: 60 + (i % 12), h: 0 })),
+    };
+
+    /** Onsets of the voices created after `from`, sorted. */
+    const onsetsSince = (ctx: MockContext, from: number): number[] =>
+        ctx.sources
+            .slice(from)
+            .map((s) => s.startedAt ?? -1)
+            .sort((a, b) => a - b);
+
+    /** A burst is every overdue note clamped onto the same instant. */
+    const expectNoCluster = (onsets: number[]): void => {
+        for (let i = 1; i < onsets.length; i++) {
+            expect((onsets[i] ?? 0) - (onsets[i - 1] ?? 0)).toBeGreaterThan(0.05);
+        }
+    };
+
+    const rebuilds = {
+        style: (engine: PlaybackEngine) => engine.setTempoStyle('expressive'),
+        bpm: (engine: PlaybackEngine) => engine.setBpm(121),
+    };
+    for (const [name, rebuild] of Object.entries(rebuilds)) {
+        it(`keeps a pending wrap when the ${name} changes just before B`, async () => {
+            const { ctx, engine } = makeEngine({ score: quarters });
+            engine.setLoop({ startTick: 0, endTick: 3840 });
+            await engine.play();
+            // B sounds at 4.08 s: at 4.0 s the wrap is already scheduled.
+            await advance(ctx, 4.0);
+            const before = ctx.sources.length;
+            rebuild(engine);
+            await advance(ctx, 1.0);
+            const onsets = onsetsSince(ctx, before);
+            expect(onsets.length).toBeLessThanOrEqual(3);
+            expectNoCluster(onsets);
+            expect(engine.getPositionTicks()).toBeLessThan(3840 / 2);
+        });
+    }
+
+    it.each([null, { startTick: 0, endTick: 7680 }])(
+        'plays on from the playhead when the loop becomes %o just before B',
+        async (loop) => {
+            const { ctx, engine } = makeEngine({ score: quarters });
+            engine.setLoop({ startTick: 0, endTick: 3840 });
+            await engine.play();
+            await advance(ctx, 4.0);
+            const before = ctx.sources.length;
+            engine.setLoop(loop);
+            await advance(ctx, 1.0);
+            expectNoCluster(onsetsSince(ctx, before));
+            expect(engine.getPositionTicks()).toBeGreaterThan(3840);
+        },
+    );
+
+    it('jumps to A, one note at a time, when a seek lands past B while looping', async () => {
+        const { ctx, engine } = makeEngine({ score: quarters });
+        engine.setLoop({ startTick: 0, endTick: 1920 });
+        await engine.play();
+        await advance(ctx, 1);
+        const before = ctx.sources.length;
+        engine.seek(6720);
+        await advance(ctx, 0.3);
+        const onsets = onsetsSince(ctx, before);
+        expect(onsets.length).toBeLessThanOrEqual(1);
+        expectNoCluster(onsets);
+        expect(engine.getPositionTicks()).toBeLessThan(1920);
+    });
+
+    it('jumps to A, one note at a time, when a loop is set behind the playhead', async () => {
+        const { ctx, engine } = makeEngine({ score: quarters });
+        await engine.play();
+        await advance(ctx, 5);
+        const before = ctx.sources.length;
+        engine.setLoop({ startTick: 0, endTick: 1920 });
+        await advance(ctx, 0.3);
+        const onsets = onsetsSince(ctx, before);
+        expect(onsets.length).toBeLessThanOrEqual(1);
+        expectNoCluster(onsets);
+        // From the top of the loop, not mid-bar.
+        expect(engine.getPositionTicks()).toBeLessThan(480);
     });
 });
 

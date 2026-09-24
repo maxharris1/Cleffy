@@ -4,7 +4,7 @@ import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import type { Era } from '@/features/playback/era';
 import { analysisErrorText } from '@/features/playback/analysisErrorCopy';
 import { PlayAlongProgress } from '@/features/playback/PlayAlongProgress';
-import { stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
+import { scoreOnEdition, stepMeasure, timeSigAt } from '@/features/playback/scoreTime';
 import { analysisIsStale } from '@/features/playback/scoreAnalysisService';
 import { SourceBadge } from '@/features/playback/SourceBadge';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
@@ -174,10 +174,7 @@ const StaleAnalysisNotice = (props: {
     canManage: boolean;
     onGenerate: () => void;
 }) => {
-    if (
-        !props.canManage ||
-        !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })
-    ) {
+    if (!props.canManage || !analysisIsStale(props.engineVersion, { era: props.era, title: props.title })) {
         return null;
     }
     return (
@@ -233,12 +230,18 @@ const ScoreWarnings = (props: { warnings: readonly string[] }) => {
  */
 export const TransportBar = (props: TransportBarProps) => {
     const { state } = props;
+    // The same projection usePlayback plays from, so the warnings describe
+    // the geometry the playhead is actually drawn on.
+    const score = useMemo(
+        () => (state.kind === 'ready' ? scoreOnEdition(state.score, state.alignmentMap) : null),
+        [state],
+    );
     if (state.kind === 'unavailable') {
         return null;
     }
     return (
         <div className="flex-none border-t border-stone-200 bg-white/95 px-2 pb-[max(var(--safe-bottom),0.375rem)] pt-1.5 sm:px-3">
-            {state.kind === 'ready' ? <ReadyTransport {...props} score={state.score} /> : <StatusRow {...props} />}
+            {score ? <ReadyTransport {...props} score={score} /> : <StatusRow {...props} />}
         </div>
     );
 };

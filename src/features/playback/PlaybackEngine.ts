@@ -246,7 +246,7 @@ interface ActiveVoice extends ScheduledVoice {
     /**
      * Between the voice and its hand bus. Closed while another hand's voice
      * on the same key speaks for it, so a cross-hand unison sounds once, yet
-     * reopens the moment that hand is muted.
+     * reopens the moment that hand is muted or turned below this one.
      */
     gate: GainNodeLike;
     /** Other-hand voices on this key, and the time each starts speaking for this one. */
@@ -663,12 +663,13 @@ export class PlaybackEngine {
      * rit / broadening / agogic curve over that grid.
      */
     private buildMap(bpm: number): TempoMap {
+        const nominal = this.nominalBpm(bpm);
         switch (this.tempoStyle) {
             case 'strict':
-                return buildTempoMap(this.score, this.scaleFor(bpm), bpm, []);
+                return buildTempoMap(this.score, bpm / nominal, nominal, []);
             case 'expressive': {
                 this.expressiveCurve ??= expressiveTempoCurve(this.score, this.analysis);
-                return buildTempoMap(this.score, this.scaleFor(bpm), bpm, this.expressiveCurve);
+                return buildTempoMap(this.score, bpm / nominal, nominal, this.expressiveCurve);
             }
             default: {
                 const exhaustive: never = this.tempoStyle;
@@ -696,6 +697,14 @@ export class PlaybackEngine {
             this.map = this.buildMap(this.bpmValue);
             return;
         }
+        // A loop wrap already armed has moved the note, pedal and beat cursors
+        // to A and scheduled the next pass's opening against it. Dropping it
+        // would leave those cursors at A against an anchor near B, and every
+        // note in between would strike at once; re-time it on the new map.
+        // One whose time has already come is promoted first, and is no longer
+        // pending.
+        this.promotePendingAnchor(this.ctx.currentTime);
+        const pendingWrap = this.pendingAnchor !== null && this.loop !== null;
         if (this.status === 'counting') {
             // The count-in clicks are already in flight toward a start time the
             // player was promised; keep it, and start the score there on the
@@ -712,11 +721,15 @@ export class PlaybackEngine {
             this.anchor = this.anchorAt(positionNow, this.ctx.currentTime);
         }
         this.pendingAnchor = null;
+        if (pendingWrap && this.loop) {
+            const wrapAt = Math.max(this.ctx.currentTime, this.timeOfTick(this.loop.endTick));
+            this.pendingAnchor = this.anchorAt(this.loop.startTick, wrapAt);
+        }
         // Beat ticks do not depend on the map, so a beat already picked out but
         // not yet clicked is still the next one; dropping it would re-schedule
-        // clicks between the anchor and it. Only a beat now behind the anchor
-        // (a pending loop wrap was just discarded) needs finding again.
-        if (this.nextBeat !== null && this.nextBeat.tick < this.anchor.tick) {
+        // clicks between the anchor and it. Only a beat behind where scheduling
+        // now resumes needs finding again.
+        if (this.nextBeat !== null && this.nextBeat.tick < (this.pendingAnchor ?? this.anchor).tick) {
             this.nextBeat = null;
         }
     }
@@ -748,13 +761,25 @@ export class PlaybackEngine {
     }
 
     setLoop(loop: LoopRegion | null): void {
+        const playing = this.ctx !== null && (this.status === 'playing' || this.status === 'counting');
+        // Read first: this promotes a wrap whose time has come.
+        const position = playing ? this.getPositionTicks() : this.pausedTick;
+        // A wrap still pending has moved the cursors to the old A and scheduled
+        // that pass's opening; it cannot be taken back without a re-seek.
+        const armedWrap = this.pendingAnchor !== null;
         this.loop = loop && loop.endTick > loop.startTick ? loop : null;
         this.pendingAnchor = null;
-        if (this.loop && this.status !== 'playing' && this.status !== 'counting') {
+        if (!playing) {
             // Snap a paused transport into the loop so Play starts inside it.
-            if (this.pausedTick < this.loop.startTick || this.pausedTick >= this.loop.endTick) {
+            if (this.loop && (this.pausedTick < this.loop.startTick || this.pausedTick >= this.loop.endTick)) {
                 this.seek(this.loop.startTick);
             }
+        } else if (this.loop && position >= this.loop.endTick) {
+            // Already past B: go to A now, cutting what the unlooped pass
+            // had in flight, rather than playing on toward a B that has gone.
+            this.seek(this.loop.startTick);
+        } else if (armedWrap) {
+            this.seek(position);
         }
     }
 
@@ -939,14 +964,19 @@ export class PlaybackEngine {
 
     /**
      * The transport shows an absolute BPM, but with a tempo map it means "the
-     * printed opening tempo, rescaled" — the whole map moves by one factor.
-     * Only a tempo printed at tick 0 is an opening. `defaultBpm` and a late
-     * `tempos[0]` are guesses or later headings, not the Grave of the first page.
+     * printed opening tempo, rescaled" — the whole map moves by one factor,
+     * `bpm / nominal`. Only a tempo printed at tick 0 is an opening. Without
+     * one, the stretch before the first mark plays at the field's own BPM
+     * (the map's fallback is the nominal, so it scales to exactly that), and
+     * the nominal is `defaultBpm`, the value the field opens on: at that
+     * setting later marks play as printed, and halving the field halves them
+     * too. A late `tempos[0]` is a later heading, never the nominal — that
+     * would play its passage at the field's BPM and lose the change into it.
      */
-    private scaleFor(bpm: number): number {
+    private nominalBpm(bpm: number): number {
         const opening = this.score.tempos?.find((tempo) => tempo.tick === 0);
-        const nominal = opening?.bpm ?? bpm;
-        return nominal > 0 ? bpm / nominal : 1;
+        const nominal = opening?.bpm ?? this.score.defaultBpm ?? bpm;
+        return nominal > 0 ? nominal : bpm;
     }
 
     private schedulerTick(): void {
@@ -974,7 +1004,10 @@ export class PlaybackEngine {
                 // Seamless wrap: future content re-anchors at the loop start.
                 // A wrap is a damper: if the pedal is still down at B, the bloom
                 // lifts with the notes, then re-reads the state at A.
-                const wrapAt = this.timeOfTick(this.loop.endTick);
+                // B can already be behind the playhead (a seek or a play past
+                // it, or a late tick): wrap now, since a wrap in the past
+                // would strike everything from A up to now in one burst.
+                const wrapAt = Math.max(now, this.timeOfTick(this.loop.endTick));
                 this.liftResonanceAtLoopEnd(regionEnd, wrapAt);
                 this.pendingAnchor = {
                     tick: this.loop.startTick,
@@ -1273,9 +1306,9 @@ export class PlaybackEngine {
      * be muted or turned back up while the note rings: the voice that should
      * not be heard (the quieter unison copy, or the ring a re-strike cuts off)
      * is gated shut instead of stolen, for as long as the covering hand is
-     * audible. Returns null when the incoming voice is a same-hand quieter
-     * copy and must not be scheduled; otherwise the other-hand voices that
-     * cover it, with the time each starts to.
+     * at least as loud (see speaksFor). Returns null when the incoming voice
+     * is a same-hand quieter copy and must not be scheduled; otherwise the
+     * other-hand voices that cover it, with the time each starts to.
      */
     private stealSamePitch(
         midi: number,
@@ -1308,18 +1341,30 @@ export class PlaybackEngine {
         return { coveredBy, covers };
     }
 
-    private handAudible(hand: 0 | 1): boolean {
-        return !this.muted[hand] && this.volumes[hand] > 0;
+    private handLevel(hand: 0 | 1): number {
+        return this.muted[hand] ? 0 : this.volumes[hand];
+    }
+
+    /**
+     * Whether one hand's voice can speak for the other's on a shared key. Only
+     * when its bus is at least as loud: a hand turned down to a whisper must
+     * not take the key from the hand the player turned up, or that key would
+     * sound at the whisper.
+     */
+    private speaksFor(cover: 0 | 1, covered: 0 | 1): boolean {
+        const level = this.handLevel(cover);
+        return level > 0 && level >= this.handLevel(covered);
     }
 
     /**
      * Re-derive one voice's gate from the voices covering it: shut from when
-     * an audible covering voice starts until its key comes up, open otherwise.
+     * a covering voice that speaks for it starts until that key comes up (or
+     * the cover is stolen), open otherwise.
      */
     private applyGate(voice: ActiveVoice, now: number): void {
         const spans: Array<[number, number]> = [];
         for (const [cover, from] of voice.coveredBy) {
-            if (!this.active.has(cover) || !this.handAudible(cover.hand) || cover.keyUpAt <= now) {
+            if (!this.speaksFor(cover.hand, voice.hand) || cover.keyUpAt <= now) {
                 continue;
             }
             spans.push([Math.max(now, from), cover.keyUpAt]);
@@ -1342,7 +1387,7 @@ export class PlaybackEngine {
         param.setTargetAtTime(1, openFrom, STEAL_TAU_S);
     }
 
-    /** A hand was muted, unmuted or turned down to or up from zero. */
+    /** A hand was muted, unmuted or had its volume changed. */
     private refreshGates(): void {
         const now = this.ctx?.currentTime ?? 0;
         for (const voice of this.active) {
@@ -1353,6 +1398,9 @@ export class PlaybackEngine {
     }
 
     private stealVoice(voice: ActiveVoice, at: number): void {
+        // It still sounds until `at`. Whatever it covers must stay shut until
+        // then, so its span ends there rather than when it leaves `active`.
+        voice.keyUpAt = Math.min(voice.keyUpAt, at);
         try {
             voice.gain.gain.cancelScheduledValues(at);
             voice.gain.gain.setTargetAtTime(0, at, STEAL_TAU_S);
@@ -1436,7 +1484,7 @@ export class PlaybackEngine {
         }
         for (const other of overlap.covers) {
             // A louder unison, or a re-strike: the other hand's voice on this
-            // key falls silent from this attack while this hand is audible.
+            // key falls silent from this attack while this hand speaks for it.
             other.coveredBy.set(voice, startAt);
             this.applyGate(other, now);
         }
