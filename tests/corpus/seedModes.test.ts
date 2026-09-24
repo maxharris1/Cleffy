@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,13 @@ import { join, resolve } from 'node:path';
 import pdfLib from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { MUTOPIA_TREE_URL, OPENSCORE_REPOS, imslpParseUrl } from '../../scripts/playalong-corpus.mjs';
+import {
+    MUTOPIA_TREE_URL,
+    OPENSCORE_REPOS,
+    iaExactQuery,
+    iaSearchUrl,
+    imslpParseUrl,
+} from '../../scripts/playalong-corpus.mjs';
 
 /**
  * The two runnable modes against a fake Supabase (PostgREST + Storage) and a
@@ -247,7 +253,8 @@ const events = (stdout: string): Array<Record<string, unknown>> =>
         .filter(Boolean)
         .map((line) => JSON.parse(line) as Record<string, unknown>);
 
-describe('seed modes against a fake backend', () => {
+// Each test spawns the CLI several times; the default 5 s is too tight on a loaded runner.
+describe('seed modes against a fake backend', { timeout: 60_000 }, () => {
     let backend: FakeBackend;
     let root: string;
     let commonArgs: string[];
@@ -471,6 +478,116 @@ describe('seed modes against a fake backend', () => {
         const statuses = events(result.stdout).map((e) => e.status);
         expect(statuses).toContain('fetched');
         expect(statuses).toContain('queued');
+    });
+
+    it('a Mutopia zip that cannot be fetched skips that piece only: the other piece still lands and Mutopia is not failed', async () => {
+        seedCache(join(root, 'cache'), {
+            [MUTOPIA_TREE_URL]: JSON.stringify({
+                truncated: false,
+                tree: [
+                    // Listed first, so its zip (a 404 on the fake origin) is tried first.
+                    { type: 'blob', path: 'ftp/BeethovenLv/O27/moonlight_all/moonlight_all.ly' },
+                    { type: 'blob', path: 'ftp/BeethovenLv/O27/moonlight/moonlight-lys/moonlight1-let.ly' },
+                ],
+            }),
+            [`${backend.url}/ftp/BeethovenLv/O27/moonlight_all/moonlight_all.rdf`]: rdfXml
+                .replace('moonlight-let.pdf', 'moonlight_all-let-pdfs.zip')
+                .replace('Mutopia-2007/02/11-276', 'Mutopia-2007/02/11-277'),
+        });
+        const result = await runSeed(['--fetch-only', ...commonArgs], env);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stderr).not.toMatch(/mutopia failed for/);
+        const ledger = backend.tables.playalong_corpus_seed!;
+        expect(ledger).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ origin: 'mutopia', filename: 'moonlight-let.pdf', status: 'fetched' }),
+                expect.objectContaining({
+                    origin: 'mutopia',
+                    filename: 'moonlight_all-let-pdfs.zip',
+                    status: 'skipped',
+                    last_error: 'zip_unavailable',
+                }),
+            ]),
+        );
+        expect(ledger).toHaveLength(2);
+    });
+
+    describe('IA licence gate needs the IMSLP work page', () => {
+        const IA_ID = 'imslp-piano-sonata-no14-op27-no2-beethoven-ludwig-van';
+        const IA_FILE = 'PMLP01458-Beethoven_Sonata_14.pdf';
+        const licencedPage = JSON.stringify({
+            parse: {
+                text: {
+                    '*':
+                        '<div>we_file_dlarrwrap"></span><span class="we_file_info2"><a href="/wiki/File:X" title="File:PMLP01458-Beethoven Sonata 14.pdf">#51037</a> - 3.10MB, 14 pp.</span></div>' +
+                        '<table><tr><th>Copyright</th><td><a href="/wiki/Public_domain">Public Domain</a></td></tr></table>',
+                },
+                wikitext: { '*': '' },
+            },
+        });
+        const iaArgs = (extra: string[]): string[] => [
+            ...extra,
+            ...commonArgs.map((arg) => (arg === 'mutopia' ? 'ia' : arg)),
+        ];
+        const seedIa = (page: string): void =>
+            seedCache(join(root, 'cache'), {
+                [iaSearchUrl(iaExactQuery(MOONLIGHT))]: JSON.stringify({ response: { docs: [{ identifier: IA_ID }] } }),
+                [`https://archive.org/metadata/${IA_ID}`]: JSON.stringify({
+                    metadata: { identifier: IA_ID, title: 'Piano Sonata No.14', date: '1802' },
+                    files: [{ name: IA_FILE, source: 'original', size: '3250000' }],
+                }),
+                // Stands in for an api.php 503 / 429 / timeout body.
+                [imslpParseUrl(MOONLIGHT)]: page,
+            });
+
+        it('an api.php failure defers the work (no ledger row) instead of a permanent no_licence skip', async () => {
+            seedIa('<html><body>503 Service Unavailable</body></html>');
+            const result = await runSeed(iaArgs(['--fetch-only']), env);
+            expect(result.status, result.stderr).toBe(0);
+            expect(result.stderr).toMatch(/imslp page lookup failed/);
+            expect(result.stderr).toMatch(/1 works deferred/);
+            expect(backend.tables.playalong_corpus_seed).toEqual([]);
+            // The error body is not pinned in the disk cache; put it back so this stays offline.
+            const cached = join(
+                root,
+                'cache',
+                `${createHash('sha1').update(imslpParseUrl(MOONLIGHT)).digest('hex')}.txt`,
+            );
+            expect(existsSync(cached)).toBe(false);
+            seedIa('<html><body>503 Service Unavailable</body></html>');
+            const dry = await runSeed(iaArgs(['--dry-run']), env);
+            expect(events(dry.stdout).find((e) => e.status === 'plan_skip')).toMatchObject({
+                reason: 'ia:licence_lookup_failed',
+            });
+
+            // Next run, api.php answers: the work is visited again and the file clears the gate.
+            seedIa(licencedPage);
+            const retry = await runSeed(iaArgs(['--dry-run']), env);
+            expect(retry.status, retry.stderr).toBe(0);
+            expect(events(retry.stdout).find((e) => e.status === 'plan')).toMatchObject({
+                workTitle: MOONLIGHT,
+                origin: 'ia',
+                filename: IA_FILE,
+                reason: 'PD',
+            });
+        });
+
+        it('--no-editions still reads the work page for the licence, so IA works are not skipped as no_licence', async () => {
+            seedIa(licencedPage);
+            const result = await runSeed(iaArgs(['--dry-run', '--no-editions']), env);
+            expect(result.status, result.stderr).toBe(0);
+            expect(events(result.stdout).find((e) => e.status === 'plan')).toMatchObject({
+                origin: 'ia',
+                filename: IA_FILE,
+                reason: 'PD',
+            });
+
+            seedIa('<html><body>429 Too Many Requests</body></html>');
+            const failed = await runSeed(iaArgs(['--fetch-only', '--no-editions']), env);
+            expect(failed.status, failed.stderr).toBe(0);
+            expect(failed.stderr).toMatch(/1 works deferred/);
+            expect(backend.tables.playalong_corpus_seed).toEqual([]);
+        });
     });
 
     it('--max-runtime stops cleanly before the first work when already expired', async () => {

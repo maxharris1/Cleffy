@@ -374,6 +374,10 @@ export const IMSLP_PAUSE_AFTER: number;
 export const IMSLP_AUTO_PAUSE_MS: number;
 export const DEFAULT_IMSLP_CRAWLER_USER_AGENT: string;
 export function crawlerUserAgent(env?: Record<string, string | undefined>): { value: string; contactUnset: boolean };
+export function createCrawlGate(
+    delayMs: number,
+    options?: { now?: () => number; sleep?: (ms: number) => Promise<void> },
+): () => Promise<void>;
 export type ImslpBreakerOutcome = { paused: boolean; parkedUntil: number; delayMs: number; reason: string };
 export function createImslpBreaker(options?: {
     now?: () => number;

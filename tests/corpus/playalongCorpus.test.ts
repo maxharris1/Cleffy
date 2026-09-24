@@ -37,6 +37,7 @@ import {
     imslpResolution,
     licenceTagOf,
     licenceVerdict,
+    matchImslpEdition,
     mutopiaPieceCandidate,
     mutopiaPieceMatches,
     mutopiaPiecesFromTree,
@@ -76,6 +77,7 @@ import {
     zipEntries,
     zipExtract,
 } from '../../scripts/playalong-corpus.mjs';
+import type { FileLicence } from '../../scripts/playalong-corpus.mjs';
 import { POPULAR_WORKS } from '../../supabase/functions/_shared/popularWorks';
 
 const MOONLIGHT = 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)';
@@ -303,6 +305,38 @@ describe('licence filter', () => {
             ),
         ).toBeNull();
         expect(workLevelLicence(new Map())).toBeNull();
+    });
+
+    it('never binds a scan to a sibling file whose name differs only by digits', () => {
+        const clean: FileLicence = { licenseLabel: 'Public Domain', restriction: null, euHosted: false };
+        const flagged: FileLicence = { licenseLabel: 'Public Domain', restriction: 'Non-PD US', euHosted: false };
+        const licences = new Map<string, FileLicence>([
+            ['PMLP02305-Chopin Etudes Op10 Mikuli 1880.pdf', clean],
+            ['PMLP02305-Chopin Etudes Op10 Mikuli 1958.pdf', flagged],
+        ]);
+        expect(imslpFileLicenceFor('Chopin_Etudes_Op10_Mikuli_1958.pdf', licences)).toBe(flagged);
+        expect(imslpFileLicenceFor('Chopin_Etudes_Op10_Mikuli_1880.pdf', licences)).toBe(clean);
+        expect(imslpFileLicenceFor('Chopin_Etudes_Op10_Mikuli_1932.pdf', licences)).toBeNull();
+        // Undated IA item: the 1958 scan keeps its own Non-PD US flag.
+        const res = iaResolution(
+            { title: 'Etudes, Op.10 (Chopin, Frédéric)' },
+            { metadata: { identifier: 'imslp-etudes-op10', date: null } },
+            { name: 'Chopin_Etudes_Op10_Mikuli_1958.pdf', size: '1000' },
+            licences,
+        );
+        expect(res).toMatchObject({ ok: false, reason: 'not_us_pd' });
+        // Two loose matches with no canonical hit: refuse rather than pick one.
+        const twins = new Map<string, FileLicence>([
+            ['PMLP1-Etude Op10.pdf', clean],
+            ['PMLP2-Etude_Op10.pdf', flagged],
+        ]);
+        expect(imslpFileLicenceFor('etude-op10.pdf', twins)).toBeNull();
+        expect(
+            matchImslpEdition('Chopin_Etudes_Op10_Mikuli_1958.pdf', [
+                { filename: 'PMLP02305-Chopin Etudes Op10 Mikuli 1880.pdf' },
+                { filename: 'PMLP02305-Chopin Etudes Op10 Mikuli 1958.pdf' },
+            ])?.filename,
+        ).toBe('PMLP02305-Chopin Etudes Op10 Mikuli 1958.pdf');
     });
 });
 
@@ -799,11 +833,24 @@ describe('Internet Archive', () => {
         ]);
         expect(
             iaResolution({ title: FUR_ELISE }, { metadata: { ...item.metadata, date: null } }, files[1]!, unbound),
-        ).toMatchObject({ ok: false, reason: 'not_us_pd' });
+        ).toMatchObject({ ok: false, reason: 'unbound_licence' });
+        // The IA item date is the work's (1867), not the scanned edition's, so an
+        // unbound scan has no year of its own to clear US-PD on: fail closed,
+        // even when the page mixes a clean file with a flagged later edition.
         expect(iaResolution({ title: FUR_ELISE }, item, files[1]!, unbound)).toMatchObject({
-            ok: true,
-            licenceTag: 'PD',
+            ok: false,
+            reason: 'unbound_licence',
         });
+        const mixed = new Map<string, FileLicence>([
+            ...unbound,
+            [
+                'PMLP1-Fur Elise ed 1955.pdf',
+                { licenseLabel: 'Public Domain', restriction: 'Non-PD US', euHosted: false },
+            ],
+        ]);
+        expect(
+            iaResolution({ title: FUR_ELISE }, item, { name: 'scan_1955_edition_by_someone.pdf', size: '1' }, mixed),
+        ).toMatchObject({ ok: false, reason: 'unbound_licence' });
     });
 });
 

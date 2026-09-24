@@ -6,10 +6,12 @@ import { describe, expect, it } from 'vitest';
 import {
     IMSLP_AUTO_PAUSE_MS,
     IMSLP_BACKOFF_MS,
+    IMSLP_CRAWL_DELAY_MS,
     IMSLP_PAUSE_AFTER,
     IMSLP_WAIT_MS,
     classifyImslpResponse,
     crawlerUserAgent,
+    createCrawlGate,
     createImslpBreaker,
     isImslpRippingBan,
     nextImslpDownloadStep,
@@ -99,6 +101,44 @@ describe('IMSLP source — ripping-ban classifier', () => {
             action: 'fail',
             code: 'not_pdf',
         });
+    });
+});
+
+describe('IMSLP source — crawl delay', () => {
+    it('spaces consecutive requests by the delay, and only waits for what is left of it', async () => {
+        let clock = 10_000;
+        const waits: number[] = [];
+        const gate = createCrawlGate(IMSLP_CRAWL_DELAY_MS, {
+            now: () => clock,
+            sleep: async (ms: number) => {
+                waits.push(ms);
+                clock += ms;
+            },
+        });
+        await gate();
+        await gate();
+        clock += 500;
+        await gate();
+        clock += 5_000;
+        await gate();
+        expect(waits).toEqual([IMSLP_CRAWL_DELAY_MS, IMSLP_CRAWL_DELAY_MS - 500]);
+    });
+
+    it('every imslp.org request (api.php, ImagefromIndex, CDN) passes the same gate, whatever --sleep says', () => {
+        const cli = readFileSync(resolve(process.cwd(), 'scripts/seed-playalong-corpus.mjs'), 'utf8');
+        expect(cli).toMatch(/const imslpCrawlGate = createCrawlGate\(IMSLP_CRAWL_DELAY_MS\)/);
+        const body = (name: string) => {
+            const start = cli.indexOf(`const ${name} = async`);
+            expect(start, name).toBeGreaterThan(-1);
+            return cli.slice(start, cli.indexOf('\n};\n', start));
+        };
+        // The file GETs: both ImagefromIndex and the CDN go through imslpFetchBytes.
+        expect(body('imslpFetchBytes').indexOf('await imslpCrawlGate()')).toBeGreaterThan(-1);
+        expect(body('imslpFetchBytes').indexOf('await imslpCrawlGate()')).toBeLessThan(
+            body('imslpFetchBytes').indexOf('await fetch('),
+        );
+        expect(body('downloadImslpPdf')).not.toMatch(/await fetch\(|fetchBytes\(/);
+        expect(body('imslpJson')).toContain('await imslpCrawlGate()');
     });
 });
 

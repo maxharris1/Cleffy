@@ -70,7 +70,7 @@ export const OPENSCORE_REPOS = Object.freeze([
 export const IA_SEARCH_URL = 'https://archive.org/advancedsearch.php';
 export const IA_METADATA_URL = 'https://archive.org/metadata/';
 export const IMSLP_API = 'https://imslp.org/api.php';
-/** robots.txt Crawl-delay on imslp.org; metadata calls only. */
+/** robots.txt Crawl-delay on imslp.org; every request (api.php and file GETs), see createCrawlGate. */
 export const IMSLP_CRAWL_DELAY_MS = 2000;
 
 /**
@@ -437,18 +437,33 @@ export const licenceVerdict = ({ label, restriction = null, euHosted = false, ye
     return { accept: true, tag, usPd: true, reason: null };
 };
 
-/** IMSLP file names carry a `PMLP1234-` prefix; IA copies often drop it. */
+/**
+ * IMSLP file names carry a `PMLP1234-` prefix; IA copies often drop it. Digits
+ * stay in the key: siblings that differ only by edition year, volume or No.
+ * are different files with possibly different licences.
+ */
 const looseFilenameKey = (name) =>
-    lettersOnly(
+    fold(
         String(name)
             .replace(/^PMLP\d+-/i, '')
             .replace(/\.pdf$/i, ''),
-    );
+    ).replace(/[^a-z0-9]/g, '');
+
+/** The one entry whose loose key matches, or null when none or several do. */
+const uniqueLooseMatch = (filename, entries, nameOf) => {
+    const key = looseFilenameKey(filename);
+    if (key === '') {
+        return null;
+    }
+    const hits = entries.filter((entry) => looseFilenameKey(nameOf(entry)) === key);
+    return hits.length === 1 ? hits[0] : null;
+};
 
 /**
  * The IMSLP licence row for a file, by canonical name first, then loosely
- * (prefix / case / punctuation-insensitive). `licences` is
- * `parseWorkPageLicenses(html)` from supabase/functions/_shared/imslpLicense.ts.
+ * (prefix / case / punctuation-insensitive, and only when exactly one file
+ * matches). `licences` is `parseWorkPageLicenses(html)` from
+ * supabase/functions/_shared/imslpLicense.ts.
  */
 export const imslpFileLicenceFor = (filename, licences) => {
     if (!licences || licences.size === 0) {
@@ -460,23 +475,15 @@ export const imslpFileLicenceFor = (filename, licences) => {
     if (direct) {
         return direct;
     }
-    const key = looseFilenameKey(filename);
-    if (key === '') {
-        return null;
-    }
-    for (const [name, licence] of licences) {
-        if (looseFilenameKey(name) === key) {
-            return licence;
-        }
-    }
-    return null;
+    return uniqueLooseMatch(filename, [...licences], ([name]) => name)?.[1] ?? null;
 };
 
 /**
- * Work-level fallback when the scan's filename cannot be bound to one IMSLP
+ * Work-level fallback when the file's name cannot be bound to one IMSLP
  * file: the work must carry at least one clean (unflagged, non-EU) PD / CC
- * file. The caller still requires the scan's own publication year to be
- * US-PD, which is what keeps a flagged later edition out.
+ * file. The caller still requires the file's own edition year to be US-PD,
+ * which is what keeps a flagged later edition out — so only a caller that
+ * has that year (an IMSLP edition's publisher line) may use it.
  */
 export const workLevelLicence = (licences) => {
     if (!licences || licences.size === 0) {
@@ -1047,16 +1054,17 @@ export const iaResolution = (work, item, file, licences) => {
     const filename = file.name;
     const year = publicationYearOf(item.metadata?.date);
     const bound = imslpFileLicenceFor(filename, licences);
-    const licence = bound ?? workLevelLicence(licences);
-    if (!licence) {
-        return { ok: false, reason: 'no_licence', origin: 'ia', filename };
+    if (!bound) {
+        // `item.metadata.date` is the work's date, not the scanned edition's, so
+        // an unbound scan has no year of its own to clear US-PD on: fail closed.
+        const reason = workLevelLicence(licences) ? 'unbound_licence' : 'no_licence';
+        return { ok: false, reason, origin: 'ia', filename };
     }
     const verdict = licenceVerdict({
-        label: licence.licenseLabel,
-        restriction: licence.restriction,
-        euHosted: licence.euHosted,
-        // An unbound scan must clear US-PD on its own publication year.
-        year: bound ? year : (year ?? US_PD_BEFORE_YEAR),
+        label: bound.licenseLabel,
+        restriction: bound.restriction,
+        euHosted: bound.euHosted,
+        year,
     });
     if (!verdict.accept) {
         return { ok: false, reason: verdict.reason, origin: 'ia', filename };
@@ -1255,6 +1263,26 @@ export const IMSLP_BACKOFF_MS = Object.freeze([15 * 60_000, 60 * 60_000, 6 * 60 
 export const IMSLP_PAUSE_AFTER = 3;
 /** How long an auto-pause recorded in playalong_corpus_control lasts. */
 export const IMSLP_AUTO_PAUSE_MS = 24 * 60 * 60_000;
+
+/**
+ * Spaces requests to one host by `delayMs` (a robots.txt Crawl-delay): each
+ * call waits only for what is left of the delay since the previous one. The
+ * CLI shares one gate across api.php, ImagefromIndex and CDN GETs, so the
+ * delay holds whatever `--sleep` says. `now` / `sleep` are injectable for tests.
+ */
+export const createCrawlGate = (
+    delayMs,
+    { now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {},
+) => {
+    let last = null;
+    return async () => {
+        const wait = last === null ? 0 : last + delayMs - now();
+        if (wait > 0) {
+            await sleep(wait);
+        }
+        last = now();
+    };
+};
 
 /**
  * Circuit breaker for the IMSLP source. Pure state: `now` is injected so the
@@ -1789,14 +1817,8 @@ export const editionSummary = (edition) =>
           }
         : null;
 
-/** The IMSLP edition a source file is a copy of (loose name match), or null. */
-export const matchImslpEdition = (filename, editions) => {
-    const key = looseFilenameKey(filename);
-    if (key === '') {
-        return null;
-    }
-    return editions.find((e) => looseFilenameKey(e.filename) === key) ?? null;
-};
+/** The IMSLP edition a source file is a copy of (unique loose name match), or null. */
+export const matchImslpEdition = (filename, editions) => uniqueLooseMatch(filename, editions, (e) => e.filename);
 
 /**
  * What goes on the ledger / store row: the chosen file's own signals, the

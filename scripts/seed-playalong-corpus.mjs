@@ -8,8 +8,9 @@
  *
  * IMSLP is metadata by default (work identity, per-file licence tags via
  * api.php, crawl-delay 2s). `--source imslp` is opt-in and last: one file at
- * a time, wait-page → CDN parse (same as live `tryDownloadPdf`), no 15s sleep
- * unless `--imslp-wait`. Bot-check / MTCaptcha / Retry-After trip a circuit
+ * a time, wait-page → CDN parse (same as live `tryDownloadPdf`), each GET
+ * under the same 2s crawl delay whatever `--sleep` is, no 15s sleep unless
+ * `--imslp-wait`. Bot-check / MTCaptcha / Retry-After trip a circuit
  * breaker that auto-pauses the IMSLP source (`imslp_paused_until`). A ripping-ban
  * 403 pauses that source for 24h on the first hit and stops ImagefromIndex
  * requests; Mutopia / OpenScore / IA keep running. Live `tryDownloadPdf` is
@@ -36,7 +37,8 @@
  * Flags:
  *   --limit N            hard cap on ranked works and floor on covered works (5000)
  *   --no-wiki            skip the Wikipedia pageviews demand proxy (cold-start order only)
- *   --no-editions        skip the IMSLP edition lookup (no per-work api.php call; ignored for --source imslp)
+ *   --no-editions        skip the IMSLP edition lookup (no per-work api.php call except the IA licence
+ *                        gate, which needs the work page; ignored for --source imslp)
  *   --max-runtime M      stop cleanly after M minutes (finishes the current file)
  *   --batch N            works per batch before a progress line + pause check (40)
  *   --sleep S            seconds between works (2)
@@ -103,6 +105,7 @@ import {
     iaResolution,
     iaSearchUrl,
     imslpEditions,
+    createCrawlGate,
     createImslpBreaker,
     crawlerUserAgent,
     imslpImagefromIndexUrl,
@@ -411,7 +414,11 @@ class ImslpCircuitOpen extends Error {
     }
 }
 
+/** One robots.txt Crawl-delay for every imslp.org request: api.php, ImagefromIndex and the CDN. */
+const imslpCrawlGate = createCrawlGate(IMSLP_CRAWL_DELAY_MS);
+
 const imslpFetchBytes = async (url, accept) => {
+    await imslpCrawlGate();
     const res = await fetch(url, {
         redirect: 'follow',
         headers: {
@@ -808,13 +815,27 @@ const resolveMutopia = async (ctx, work) => {
         }
         const res = mutopiaResolution(work, piece, rdf);
         if (res.ok && res.zipUrl) {
+            let names;
+            try {
+                names = zipEntries(await zipBytes(ctx, res.zipUrl)).map((e) => e.name);
+            } catch (err) {
+                // One piece's zip must not cost the work its other pieces or count as
+                // a Mutopia outage: oversized / missing is a skip for that piece, a
+                // transient error defers it (no ledger row) so a later run retries.
+                const message = err instanceof Error ? err.message : String(err);
+                info(`mutopia zip unavailable for ${work.title} (${res.filename}): ${message}`);
+                const transient = isTransient(err);
+                out.push({
+                    ok: false,
+                    ...(transient ? { deferred: true } : {}),
+                    origin: 'mutopia',
+                    filename: res.filename,
+                    reason: message === 'too_large' ? 'too_large' : 'zip_unavailable',
+                });
+                continue;
+            }
             // Multi-movement piece: one ledger row per PDF inside the zip.
-            out.push(
-                ...expandZipResolution(
-                    res,
-                    zipEntries(await zipBytes(ctx, res.zipUrl)).map((e) => e.name),
-                ),
-            );
+            out.push(...expandZipResolution(res, names));
             continue;
         }
         out.push(res);
@@ -853,22 +874,20 @@ const resolveOpenscore = (ctx, work) =>
         .filter(({ entry }) => openscoreWorkMatches(work, entry))
         .map(({ repo, entry }) => openscoreResolution(work, entry, repo, { renderer: ctx.musescore !== null }));
 
-let lastImslpCallAt = 0;
-
 /** Cached api.php JSON; uncached calls are spaced by the robots.txt crawl delay. */
 const imslpJson = async (ctx, url) => {
     if (ctx.cache.get(url) === null) {
-        const wait = lastImslpCallAt + IMSLP_CRAWL_DELAY_MS - Date.now();
-        if (wait > 0) {
-            await sleep(wait);
-        }
-        lastImslpCallAt = Date.now();
+        await imslpCrawlGate();
     }
     return JSON.parse(await cachedText(ctx.cache, url, { Accept: 'application/json' }));
 };
 
 /** Per-file IMSLP licence tags for a work page (metadata only). */
 const EMPTY_PAGE = Object.freeze({ licences: new Map(), editions: [] });
+/** api.php did not answer (429 / 5xx / timeout / error body): unknown, not "no licences". */
+const FAILED_PAGE = Object.freeze({ licences: new Map(), editions: [], failed: true });
+/** api.php errors that are a real answer: IMSLP has no such page. */
+const MISSING_PAGE_CODES = new Set(['missingtitle', 'invalidtitle']);
 
 /**
  * One `action=parse&prop=text|wikitext` call per work: per-file licence tags
@@ -876,20 +895,25 @@ const EMPTY_PAGE = Object.freeze({ licences: new Map(), editions: [] });
  * Memoised per run; the disk cache makes reruns free.
  */
 const imslpWorkPage = async (ctx, title, { required = false } = {}) => {
-    if (ctx.noEditions && !required) {
-        return EMPTY_PAGE;
-    }
     if (ctx.pages.has(title)) {
         return ctx.pages.get(title);
     }
+    if (ctx.noEditions && !required) {
+        return EMPTY_PAGE;
+    }
     const url = imslpParseUrl(title);
-    let page = EMPTY_PAGE;
+    // A lookup that fails is FAILED_PAGE, never EMPTY_PAGE: callers defer the
+    // work to a later run instead of recording a permanent no-licence skip.
+    let page = FAILED_PAGE;
     try {
         const json = await imslpJson(ctx, url);
         const html = json?.parse?.text?.['*'];
         if (typeof html !== 'string') {
             // Missing page / API error: do not pin that answer in the cache.
             ctx.cache.delete(url);
+            if (MISSING_PAGE_CODES.has(json?.error?.code)) {
+                page = EMPTY_PAGE;
+            }
         } else {
             page = {
                 licences: parseWorkPageLicenses(html),
@@ -897,8 +921,11 @@ const imslpWorkPage = async (ctx, title, { required = false } = {}) => {
             };
         }
     } catch (err) {
+        // An unparseable body (an error page) must not stay in the disk cache either.
+        ctx.cache.delete(url);
         info(`imslp page lookup failed for ${title}: ${err instanceof Error ? err.message : err}`);
     }
+    // Memoised for this work's other lookups only; each title is resolved once per run.
     ctx.pages.set(title, page);
     return page;
 };
@@ -943,7 +970,8 @@ const resolveIa = async (ctx, work) => {
     if (!item?.metadata?.identifier) {
         return [];
     }
-    const page = await imslpWorkPage(ctx, work.title);
+    // The per-file licence tags gate every IA file, so this lookup runs even under --no-editions.
+    const page = await imslpWorkPage(ctx, work.title, { required: true });
     const file = pickIaPdf(item.files, page.editions);
     if (!file) {
         const anyPdf = (item.files ?? []).some((f) => /\.pdf$/i.test(f.name ?? ''));
@@ -955,6 +983,10 @@ const resolveIa = async (ctx, work) => {
                 filename: `${doc.identifier}.pdf`,
             },
         ];
+    }
+    if (page.failed) {
+        // api.php did not answer: defer (no ledger row), not a permanent no_licence skip.
+        return [{ ok: false, deferred: true, reason: 'licence_lookup_failed', origin: 'ia', filename: file.name }];
     }
     return [iaResolution(work, item, file, page.licences)];
 };
@@ -972,6 +1004,9 @@ const resolveImslp = async (ctx, work) => {
         ];
     }
     const page = await imslpWorkPage(ctx, work.title, { required: true });
+    if (page.failed) {
+        return [{ ok: false, deferred: true, reason: 'page_lookup_failed', origin: 'imslp', filename: '-' }];
+    }
     return [imslpResolution(work, page.editions, page.licences)];
 };
 
@@ -1012,7 +1047,8 @@ const resolveWork = async (ctx, work) => {
         resolutions.filter((r) => !r.deferred),
         { sources: ctx.sources },
     );
-    plan.deferred = plan.queue.length === 0 && resolutions.some((r) => r.deferred);
+    plan.held = resolutions.filter((r) => r.deferred);
+    plan.deferred = plan.queue.length === 0 && plan.held.length > 0;
     // Edition signals for every chosen file (and for the work itself when
     // nothing was chosen, so the best IMSLP edition is on record for --from-dir).
     const { editions } = await imslpWorkPage(ctx, work.title);
@@ -1896,12 +1932,14 @@ const main = async () => {
                 );
             }
             if (plan.queue.length === 0) {
-                const reason = plan.skips.map((s) => `${s.origin}:${s.reason}`).join(',') || 'no_source';
+                const reason =
+                    [...plan.skips, ...plan.held].map((s) => `${s.origin}:${s.reason}`).join(',') || 'no_source';
                 console.log(workEvent({ workTitle: work.title, status: 'plan_skip', reason }));
             }
         } else {
             if (plan.deferred) {
-                // IMSLP is backing off: leave the work untouched for a later run.
+                // IMSLP is backing off, or an upstream lookup did not answer:
+                // leave the work untouched for a later run.
                 deferred += 1;
                 continue;
             }
@@ -1952,7 +1990,9 @@ const main = async () => {
 
     console.log(heartbeat(ledger, { target, batchId, mode, attempted, startedAt }));
     if (deferred > 0) {
-        info(`imslp: ${deferred} works deferred while the source was backing off — rerun later to pick them up`);
+        info(
+            `${deferred} works deferred (IMSLP backing off or an upstream lookup failed) — rerun later to pick them up`,
+        );
     }
     reportNeedsReview(ledger);
     await pokeSeedPool(seedPoke);

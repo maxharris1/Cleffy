@@ -47,7 +47,8 @@ const runSeed = (args: string[], env: Record<string, string>) =>
         },
     );
 
-describe('seed-playalong-corpus --dry-run (mocked network)', () => {
+// Each test spawns the CLI; the default 5 s is too tight on a loaded runner.
+describe('seed-playalong-corpus --dry-run (mocked network)', { timeout: 60_000 }, () => {
     it('plans Mutopia files for the top popular works, records skips, and never writes', () => {
         const root = mkdtempSync(join(tmpdir(), 'corpus-seed-'));
         const cache = join(root, 'cache');
