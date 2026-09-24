@@ -1,0 +1,56 @@
+{
+    "slug": "moonlight",
+    "title": "Beethoven — Piano Sonata No. 14, Op. 27 No. 2",
+    "pdf": {
+        "url": "https://imslp.org/wiki/Special:IMSLPDisclaimerAccept/895428",
+        "pages": 14
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BeethovenLv/O27/moonlight/moonlight-mids.zip",
+        "sha256": "94915b176f0b999919a6cd1025a45ec8dd0a454dab33b2b332c5026291ea91f5",
+        "license": "CC BY-SA 2.5 (Mutopia 2007/02/11-276, Stewart Holmes after Berners 1908 / Winterberger)"
+    },
+    "movements": [
+        {
+            "name": "I. Adagio sostenuto",
+            "midi": "moonlight1.mid",
+            "meter": { "num": 2, "den": 2 },
+            "pickupQuarters": 0,
+            "printedBars": 69,
+            "expectedFifths": 4,
+            "expectedTempo": { "min": 50, "max": 80 },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 69
+        },
+        {
+            "name": "II. Allegretto",
+            "midi": "moonlight2.mid",
+            "meter": { "num": 3, "den": 4 },
+            "pickupQuarters": 1,
+            "printedBars": 61,
+            "expectedFifths": -5,
+            "expectedTempo": { "min": 100, "max": 130 },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 141
+        },
+        {
+            "name": "III. Presto agitato",
+            "midi": "moonlight3.mid",
+            "meter": { "num": 4, "den": 4 },
+            "pickupQuarters": 0,
+            "printedBars": 201,
+            "expectedFifths": 4,
+            "expectedTempo": { "min": 150, "max": 200 },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 264
+        }
+    ],
+    "editionNotes": [
+        "The public IMSLP #895428 scan may include extra cover pages. Do not fetch it from this CLI; vendor a 14-page extract and pin pdf.sha256 before --from pdf.",
+        "Upper staff is printed in bass clef from I bar 40; this edition never prints the treble clef the theme's return at 42–43 needs.",
+        "Mutopia MIDI is notation-quantized and does not unfold repeats. Compare printed bars, not performed length, against the MIDI.",
+        "Fingerings are dense; Audiveris often reads a '3' as a tuplet or a cluster as ff.",
+        "There is no committed Moonlight baseline on this branch. A regression oracle must come from --from artifacts with a non-null artifactHash; never --out baseline-* from --from document."
+    ]
+}

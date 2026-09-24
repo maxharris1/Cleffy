@@ -36,7 +36,10 @@ export interface PlayheadRect {
 export const playheadRect = (score: ScoreData, tick: number): PlayheadRect | null => {
     const measureIndex = measureIndexAtTick(score.measures, tick);
     const measure = score.measures[measureIndex];
-    if (!measure || measure.sys < 0 || measure.page < 0) {
+    if (!measure) {
+        return null;
+    }
+    if (measure.sys < 0 || measure.page < 0) {
         return null;
     }
     const system = score.systems[measure.sys];
@@ -46,7 +49,6 @@ export const playheadRect = (score: ScoreData, tick: number): PlayheadRect | nul
     return {
         measureIndex,
         pageIndex: measure.page,
-        // Rides the engraved chord columns when the analysis provides them.
         x: xAtTickInMeasure(measure, tick),
         x0: measure.x0,
         x1: measure.x1,
@@ -98,6 +100,11 @@ export class PlayheadController {
             if (state.followMode === 'on' && prev.followMode !== 'on') {
                 this.forceFollow = true;
             }
+            if (state.playbackStatus !== prev.playbackStatus) {
+                // Sounding BPM is only live while playing; a status change with
+                // a frozen tick must still refresh the transport readout.
+                this.lastTick = -1;
+            }
         });
     }
 
@@ -141,6 +148,14 @@ export class PlayheadController {
         }
         const engine = this.deps.getEngine();
         const tick = engine ? engine.getPositionTicks() : 0;
+        const store = useViewerStore.getState();
+        const live =
+            engine && (store.playbackStatus === 'playing' || store.playbackStatus === 'counting')
+                ? engine.getBpmAt(tick)
+                : null;
+        if (store.soundingBpm !== live) {
+            store.setSoundingBpm(live);
+        }
         const renderScale = this.deps.getRenderScale();
         const layoutNow = this.deps.getLayout();
         // Page geometry is part of the frame's identity: a paused transport

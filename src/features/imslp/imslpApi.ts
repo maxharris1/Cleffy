@@ -8,6 +8,8 @@ export interface ImslpSearchHit {
     snippet: string;
     composer: string | null;
     imslpUrl: string;
+    /** True when `pd_pdf_store` has a servable PDF for this work title. */
+    inCatalog?: boolean;
 }
 
 export interface ImslpSearchOptions {
@@ -64,6 +66,13 @@ export interface ImslpEdition {
     arrangement?: boolean;
     /** IMSLP file description, e.g. "Complete Score". */
     description?: string | null;
+    /** Catalog hit: copy from `pd-pdfs`. Absent/imslp = live IMSLP edition. */
+    source?: 'catalog' | 'imslp';
+    pdfSha256?: string;
+    origin?: string;
+    editorCredit?: string | null;
+    sourceUrl?: string | null;
+    pageCount?: number | null;
 }
 
 export interface ImslpWorkDetail {
@@ -220,7 +229,10 @@ export const searchImslp = async (
         ? body.relaxed.filter((v): v is RelaxedConstraint => v === 'instrument' || v === 'era')
         : [];
     const result: ImslpSearchResponse = {
-        results: body.results ?? [],
+        results: (body.results ?? []).map((hit) => ({
+            ...hit,
+            inCatalog: hit.inCatalog === true,
+        })),
         filterRelaxed: body.filterRelaxed === true || relaxed.length > 0,
         relaxed,
         total: typeof body.total === 'number' ? body.total : (body.results?.length ?? 0),
@@ -242,6 +254,38 @@ export const searchImslp = async (
     return result;
 };
 
+export const lookupCatalogTitles = async (titles: string[]): Promise<Set<string>> => {
+    const unique = [...new Set(titles.map((t) => t.trim()).filter(Boolean))];
+    if (unique.length === 0) {
+        return new Set();
+    }
+    const supabase = getSupabase();
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    if (!accessToken) {
+        return new Set();
+    }
+    const { url: projectUrl, anonKey } = requireSupabaseConfig();
+    const response = await fetch(`${projectUrl}/functions/v1/imslp-search`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            apikey: anonKey,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ catalogTitles: unique }),
+        signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+        return new Set();
+    }
+    const body = (await response.json()) as { catalogTitles?: unknown };
+    const found = Array.isArray(body.catalogTitles)
+        ? body.catalogTitles.filter((t): t is string => typeof t === 'string')
+        : [];
+    return new Set(found);
+};
+
 export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> => {
     const { data, error } = await getSupabase().functions.invoke<ImslpWorkDetail>('imslp-work', {
         body: { title },
@@ -260,11 +304,43 @@ export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> =>
  * `scores` bucket for an already-created document. Returns JSON only — never
  * proxies PDF bytes through the browser (Free-plan egress).
  */
+/**
+ * Where a live IMSLP download is, as seen from the panel. `downloadQueued`
+ * is only ever reported after the server actually turned a request away and
+ * the wait has run at least one interval — a first-try success never shows it.
+ */
+export type ImslpDownloadStage = 'downloadQueued' | 'downloading';
+
+/** Total time a client will wait behind the deployment-wide IMSLP pacing before giving up. */
+export const DOWNLOAD_QUEUE_MAX_WAIT_MS = 90_000;
+/** A queued wait shorter than this is not worth announcing. */
+export const DOWNLOAD_QUEUE_SIGNAL_MS = 2_000;
+const DOWNLOAD_QUEUE_FALLBACK_RETRY_SEC = 5;
+
+export const IMSLP_DOWNLOAD_BUSY_MESSAGE = 'IMSLP downloads are busy right now — wait a minute, then try again.';
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const asDownloadQueued = (body: unknown): number | null => {
+    if (!body || typeof body !== 'object') {
+        return null;
+    }
+    const record = body as { code?: unknown; retryAfterSec?: unknown };
+    if (record.code !== 'download_queued') {
+        return null;
+    }
+    const sec = typeof record.retryAfterSec === 'number' && record.retryAfterSec > 0 ? record.retryAfterSec : null;
+    return sec ?? DOWNLOAD_QUEUE_FALLBACK_RETRY_SEC;
+};
+
 export const importImslpPdfToStorage = async (
     filename: string,
     documentId: string,
     acceptedDisclaimer: boolean,
     workTitle?: string,
+    pdfSha256?: string,
+    onStage?: (stage: ImslpDownloadStage) => void,
+    maxWaitMs = DOWNLOAD_QUEUE_MAX_WAIT_MS,
 ): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
@@ -274,15 +350,47 @@ export const importImslpPdfToStorage = async (
     }
 
     const { url: projectUrl, anonKey } = requireSupabaseConfig();
-    const response = await fetch(`${projectUrl}/functions/v1/imslp-download`, {
-        method: 'POST',
-        headers: {
-            Authorization: `Bearer ${accessToken}`,
-            apikey: anonKey,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
-    });
+    const request = () =>
+        fetch(`${projectUrl}/functions/v1/imslp-download`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                apikey: anonKey,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle, pdfSha256 }),
+        });
+
+    // The deployment-wide IMSLP pacing answers 429 download_queued with
+    // retryAfterSec instead of holding the invocation. Wait it out here, up
+    // to maxWaitMs; announce the queue only once a real wait is under way.
+    let response = await request();
+    let waitedMs = 0;
+    let queuedReported = false;
+    for (;;) {
+        const retrySec = response.status === 429 ? asDownloadQueued(await response.clone().json().catch(() => null)) : null;
+        if (retrySec === null) {
+            break;
+        }
+        const retryMs = retrySec * 1000;
+        if (waitedMs + retryMs > maxWaitMs) {
+            throw new Error(IMSLP_DOWNLOAD_BUSY_MESSAGE);
+        }
+        if (!queuedReported && waitedMs + retryMs >= DOWNLOAD_QUEUE_SIGNAL_MS) {
+            const head = Math.max(0, DOWNLOAD_QUEUE_SIGNAL_MS - waitedMs);
+            await sleep(head);
+            queuedReported = true;
+            onStage?.('downloadQueued');
+            await sleep(retryMs - head);
+        } else {
+            await sleep(retryMs);
+        }
+        waitedMs += retryMs;
+        if (queuedReported) {
+            onStage?.('downloading');
+        }
+        response = await request();
+    }
 
     // Smart-import quota exhausted. Surfaced as the same typed error the other
     // metered features raise, so one notice component renders all of them.

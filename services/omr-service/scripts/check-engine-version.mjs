@@ -17,15 +17,39 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  * ScoreData schema is watched too: it is kept in lockstep with the service copy,
  * and a change there is just as much a contract change — editing it alone used to
  * slip past this guard entirely.
+ *
+ * The test is "could this change what a given PDF turns into", not "does this
+ * parse anything". Structure planning, shard merging and the schema-cap thinning
+ * all rewrite the score after the parse, and all three shipped silently before
+ * they were listed here.
  */
 const WATCHED = [
     'services/omr-service/src/musicxml.ts',
     'services/omr-service/src/omrGeometry.ts',
     'services/omr-service/src/buildScoreData.ts',
+    'services/omr-service/src/repeats.ts',
+    'services/omr-service/src/mergeScoreData.ts',
+    'services/omr-service/src/caps.ts',
     'services/omr-service/src/scoreData.ts',
     'services/omr-service/src/audiveris.ts',
+    'services/omr-service/src/ornaments.ts',
+    'services/omr-service/src/autoPedal.ts',
+    'services/omr-service/src/era.ts',
+    'services/omr-service/src/rhythmRepair.ts',
+    'services/omr-service/src/keyRepair.ts',
     'src/types/scoreData.ts',
 ];
+
+/**
+ * Watched by prefix rather than by exact path. Since svc-15 the image no longer
+ * ships stock Audiveris: `engine-patches/` holds recompiled engine classes and the
+ * Dockerfile applies them, so a change under either rewrites what a PDF turns into
+ * just as surely as the parser does — and neither is a file this list could name
+ * exhaustively (a second patch would slip past an exact-path entry).
+ */
+const WATCHED_PREFIXES = ['services/omr-service/engine-patches/'];
+
+const WATCHED_EXTRA = ['services/omr-service/Dockerfile'];
 
 const ENGINE_FILE = 'src/job.ts';
 const VERSION_RE = /export const ENGINE_VERSION = '(audiveris-\d+\.\d+\.\d+\+svc-\d+)'/;
@@ -54,10 +78,7 @@ const resolveBase = (candidate) => {
 
 const baseArg = process.argv.find((a) => a.startsWith('--base='));
 const requested =
-    baseArg?.slice('--base='.length) ||
-    process.env.GITHUB_BASE_REF ||
-    process.env.ENGINE_VERSION_BASE ||
-    'origin/main';
+    baseArg?.slice('--base='.length) || process.env.GITHUB_BASE_REF || process.env.ENGINE_VERSION_BASE || 'origin/main';
 const base = resolveBase(requested);
 
 if (base === null) {
@@ -86,7 +107,10 @@ const changed = new Set(
         .filter(Boolean),
 );
 
-const hit = WATCHED.filter((f) => changed.has(f));
+const hit = [
+    ...[...WATCHED, ...WATCHED_EXTRA].filter((f) => changed.has(f)),
+    ...[...changed].filter((f) => WATCHED_PREFIXES.some((p) => f.startsWith(p))),
+];
 if (hit.length === 0) {
     console.log('[engine-version] ok: no watched parser files changed');
     process.exit(0);

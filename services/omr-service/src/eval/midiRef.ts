@@ -1,0 +1,365 @@
+import type { CorpusMovement } from './manifest.js';
+
+export type RefHand = 0 | 1;
+
+export interface RefNote {
+    bar: number;
+    /** Onset from the start of the (full) bar, in quarter-notes. */
+    onsetQ: number;
+    durQ: number;
+    pitch: number;
+    hand: RefHand;
+}
+
+interface SmfNote {
+    tick: number;
+    dur: number;
+    pitch: number;
+    hand: RefHand;
+}
+
+const readU16 = (buf: Buffer, i: number): number => {
+    const hi = buf[i];
+    const lo = buf[i + 1];
+    if (hi === undefined || lo === undefined) {
+        throw new Error('MIDI: truncated u16');
+    }
+    return (hi << 8) | lo;
+};
+
+const readU32 = (buf: Buffer, i: number): number => {
+    const a = buf[i];
+    const b = buf[i + 1];
+    const c = buf[i + 2];
+    const d = buf[i + 3];
+    if (a === undefined || b === undefined || c === undefined || d === undefined) {
+        throw new Error('MIDI: truncated u32');
+    }
+    return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+};
+
+class Cursor {
+    constructor(
+        private readonly buf: Buffer,
+        private i: number,
+        private readonly end: number,
+    ) {}
+
+    remaining(): number {
+        return this.end - this.i;
+    }
+
+    u8(): number {
+        if (this.i >= this.end) {
+            throw new Error('MIDI: unexpected end of track');
+        }
+        const value = this.buf[this.i];
+        this.i += 1;
+        if (value === undefined) {
+            throw new Error('MIDI: unexpected end of track');
+        }
+        return value;
+    }
+
+    bytes(n: number): Buffer {
+        if (this.i + n > this.end) {
+            throw new Error('MIDI: truncated payload');
+        }
+        const slice = this.buf.subarray(this.i, this.i + n);
+        this.i += n;
+        return slice;
+    }
+
+    vlq(): number {
+        let value = 0;
+        for (let step = 0; step < 5; step++) {
+            const byte = this.u8();
+            value = (value << 7) | (byte & 0x7f);
+            if ((byte & 0x80) === 0) {
+                return value;
+            }
+        }
+        throw new Error('MIDI: VLQ too long');
+    }
+}
+
+const signedSf = (n: number): number => (n >= 128 ? n - 256 : n);
+
+const parseTrack = (
+    buf: Buffer,
+    start: number,
+    length: number,
+): {
+    name: string;
+    notes: Array<{ tick: number; pitch: number; dur: number }>;
+    keySignatures: Array<{ tick: number; fifths: number }>;
+} => {
+    const cur = new Cursor(buf, start, start + length);
+    let tick = 0;
+    let running = 0;
+    let name = '';
+    const pending = new Map<number, number[]>();
+    const notes: Array<{ tick: number; pitch: number; dur: number }> = [];
+    const keySignatures: Array<{ tick: number; fifths: number }> = [];
+
+    const pushOn = (pitch: number, at: number): void => {
+        const stack = pending.get(pitch) ?? [];
+        stack.push(at);
+        pending.set(pitch, stack);
+    };
+    const popOff = (pitch: number, at: number): void => {
+        const stack = pending.get(pitch);
+        const on = stack?.shift();
+        if (on === undefined) {
+            return;
+        }
+        if (stack && stack.length === 0) {
+            pending.delete(pitch);
+        }
+        const dur = at - on;
+        if (dur > 0) {
+            notes.push({ tick: on, pitch, dur });
+        }
+    };
+
+    while (cur.remaining() > 0) {
+        tick += cur.vlq();
+        const first = cur.u8();
+        let status = first;
+        let data1: number;
+        if (first < 0x80) {
+            if (running === 0) {
+                throw new Error('MIDI: running status with no prior status');
+            }
+            status = running;
+            data1 = first;
+        } else if (first === 0xff) {
+            const type = cur.u8();
+            const payload = cur.bytes(cur.vlq());
+            if (type === 0x2f) {
+                break;
+            }
+            if (type === 0x03) {
+                name = payload.toString('ascii').trim();
+            }
+            if (type === 0x59 && payload.length >= 1) {
+                const sf = payload[0];
+                if (sf !== undefined) {
+                    keySignatures.push({ tick, fifths: signedSf(sf) });
+                }
+            }
+            running = 0;
+            continue;
+        } else if (first === 0xf0 || first === 0xf7) {
+            cur.bytes(cur.vlq());
+            running = 0;
+            continue;
+        } else {
+            running = first >= 0xf0 ? 0 : first;
+            data1 = cur.u8();
+        }
+
+        const cmd = status & 0xf0;
+        switch (cmd) {
+            case 0x80: {
+                cur.u8();
+                popOff(data1, tick);
+                break;
+            }
+            case 0x90: {
+                const vel = cur.u8();
+                if (vel === 0) {
+                    popOff(data1, tick);
+                } else {
+                    pushOn(data1, tick);
+                }
+                break;
+            }
+            case 0xa0:
+            case 0xb0:
+            case 0xe0:
+                cur.u8();
+                break;
+            case 0xc0:
+            case 0xd0:
+                break;
+            default:
+                break;
+        }
+    }
+    return { name, notes, keySignatures };
+};
+
+const parseSmf = (buf: Buffer): { tpq: number; tracks: ReturnType<typeof parseTrack>[] } => {
+    if (buf.length < 14 || buf.subarray(0, 4).toString('ascii') !== 'MThd') {
+        throw new Error('MIDI: not a Standard MIDI File');
+    }
+    const headerLen = readU32(buf, 4);
+    if (headerLen < 6) {
+        throw new Error('MIDI: short header');
+    }
+    const ntrks = readU16(buf, 10);
+    const division = readU16(buf, 12);
+    if (division & 0x8000) {
+        throw new Error('MIDI: SMPTE division is not supported');
+    }
+    const tpq = division;
+    const tracks: ReturnType<typeof parseTrack>[] = [];
+    let offset = 8 + headerLen;
+    for (let i = 0; i < ntrks; i++) {
+        if (offset + 8 > buf.length || buf.subarray(offset, offset + 4).toString('ascii') !== 'MTrk') {
+            throw new Error(`MIDI: missing MTrk at track ${i}`);
+        }
+        const len = readU32(buf, offset + 4);
+        tracks.push(parseTrack(buf, offset + 8, len));
+        offset += 8 + len;
+    }
+    return { tpq, tracks };
+};
+
+const RH_TRACK_NAMES = new Set(['up', 'upper', 'treble', 'rh', 'right']);
+const LH_TRACK_NAMES = new Set(['down', 'lower', 'bass', 'lh', 'left']);
+
+/**
+ * Hand from the track name. LilyPond names a MIDI track `<staff>:<voice>`
+ * ('upper:', 'lower:2', 'down:VoiceI'), so only the staff part before the
+ * colon is matched. Anything else ('one:', 'two:') falls back to track order.
+ */
+const handOf = (tracks: ReturnType<typeof parseTrack>[]): Array<RefHand | null> => {
+    const named = tracks.map((track) => {
+        const staff = (track.name.split(':')[0] ?? '').trim().toLowerCase();
+        if (RH_TRACK_NAMES.has(staff)) {
+            return 0 as const;
+        }
+        if (LH_TRACK_NAMES.has(staff)) {
+            return 1 as const;
+        }
+        return null;
+    });
+    if (named.some((hand) => hand !== null)) {
+        return named;
+    }
+    let next: RefHand = 0;
+    return tracks.map((track) => {
+        if (track.notes.length === 0) {
+            return null;
+        }
+        const hand = next;
+        next = 1;
+        return hand;
+    });
+};
+
+/**
+ * Which printed bar a reference tick falls in, and how far into it.
+ *
+ * `partials` carries the corpus `partialBars` pin as bar → ticks. Empty (every
+ * bar the full meter) is the usual case and keeps the closed-form grid. When the
+ * page prints a short bar mid-piece the grid has to be WALKED instead: a bar
+ * that is not a whole meter long moves every barline after it, so the phase is
+ * not computable from the tick alone, and a uniform grid would quietly hand the
+ * scorer bars the page never drew.
+ */
+export const place = (
+    tick: number,
+    tpq: number,
+    beats: number,
+    pickup: number,
+    partials: ReadonlyMap<number, number>,
+): { bar: number; onsetQ: number } => {
+    const barTicks = tpq * beats;
+    const pickupTicks = Math.round(pickup * tpq);
+    if (pickupTicks > 0 && tick < pickupTicks) {
+        return { bar: 0, onsetQ: (tick + (barTicks - pickupTicks)) / tpq };
+    }
+    if (partials.size === 0) {
+        const body = tick - pickupTicks;
+        return { bar: 1 + Math.floor(body / barTicks), onsetQ: (body % barTicks) / tpq };
+    }
+    let start = pickupTicks;
+    for (let bar = 1; ; bar++) {
+        const length = partials.get(bar) ?? barTicks;
+        if (length <= 0 || tick < start + length) {
+            return { bar, onsetQ: (tick - start) / tpq };
+        }
+        start += length;
+    }
+};
+
+/** Snap an onset to 1/12 of a quarter so triplets stay exact. */
+export const quantizeOnset = (quarters: number): number => Math.round(quarters * 12) / 12;
+
+/**
+ * Snap a note LENGTH to 1/24 of a quarter. Coarser than the 1/12 onset grid is
+ * not an option: printed 32nd notes are 1/8 of a quarter, which is off the 1/12
+ * grid, and 3/8 pieces are full of them. 1/24 is the first grid that holds both
+ * the triplet family (1/6, 1/12) and the binary family (1/4, 1/8).
+ *
+ * This does not rescue every reference length. LilyPond realises a printed
+ * `\prall` or `\mordent` as a run of short notes in the MIDI, so a handful of
+ * reference notes carry a length no OMR reading of the engraved quarter-note
+ * can match. Those count as duration misses rather than being special-cased —
+ * under 1% of the corpus, and inventing an ornament classifier to forgive them
+ * would be fitting the scorer to the reference's quirks.
+ */
+export const quantizeDur = (quarters: number): number => Math.round(quarters * 24) / 24;
+
+export const notesFromMidi = (buf: Buffer, movement: CorpusMovement): RefNote[] => {
+    const { tpq, tracks } = parseSmf(buf);
+    const hands = handOf(tracks);
+    const beats = (movement.meter.num * 4) / movement.meter.den;
+    const partials = new Map(movement.partialBars.map((bar) => [bar.bar, Math.round(bar.quarters * tpq)] as const));
+    const out: RefNote[] = [];
+    tracks.forEach((track, i) => {
+        const hand = hands[i];
+        if (hand === null || hand === undefined) {
+            return;
+        }
+        for (const note of track.notes) {
+            const placed = place(note.tick, tpq, beats, movement.pickupQuarters, partials);
+            out.push({
+                bar: placed.bar,
+                onsetQ: quantizeOnset(placed.onsetQ),
+                durQ: note.dur / tpq,
+                pitch: note.pitch,
+                hand,
+            });
+        }
+    });
+    return out;
+};
+
+/** Group reference notes by engraved bar number. */
+export const refBarsOf = (notes: readonly RefNote[]): Map<number, RefNote[]> => {
+    const bars = new Map<number, RefNote[]>();
+    for (const note of notes) {
+        const list = bars.get(note.bar) ?? [];
+        list.push(note);
+        bars.set(note.bar, list);
+    }
+    return bars;
+};
+
+/** Exposed for tests that need to inspect the raw SMF parse. */
+export const parseSmfForTest = (
+    buf: Buffer,
+): {
+    tpq: number;
+    trackNames: string[];
+    notes: SmfNote[];
+    keySignatures: Array<{ tick: number; fifths: number }>;
+} => {
+    const { tpq, tracks } = parseSmf(buf);
+    const hands = handOf(tracks);
+    const notes: SmfNote[] = [];
+    const keySignatures: Array<{ tick: number; fifths: number }> = [];
+    tracks.forEach((track, i) => {
+        const hand = hands[i] ?? 0;
+        for (const note of track.notes) {
+            notes.push({ tick: note.tick, dur: note.dur, pitch: note.pitch, hand });
+        }
+        keySignatures.push(...track.keySignatures);
+    });
+    keySignatures.sort((a, b) => a.tick - b.tick);
+    return { tpq, trackNames: tracks.map((t) => t.name), notes, keySignatures };
+};

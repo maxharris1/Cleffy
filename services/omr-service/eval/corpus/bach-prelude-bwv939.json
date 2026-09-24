@@ -1,0 +1,42 @@
+{
+    "slug": "bach-prelude-bwv939",
+    "title": "Bach — Little Prelude in C, BWV 939",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV939/bwv-939/bwv-939-let.pdf",
+        "sha256": "4439ba40ce7916009c0c46186c1e3c71ec3ff16940926ddc8222f6f23a9f86f3",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/BachJS/BWV939/bwv-939/bwv-939.mid",
+        "sha256": "a3dc077fb05ad47984a62ac5f2edd6d55a1b2723fa4d26c187c65245d1ce8c4f",
+        "license": "CC BY-SA 3.0 (Mutopia 2008/11/06-1593, Hajo Dezelski after Bach-Gesellschaft Band 36 / Ernst Naumann 1890). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Praeludium",
+            "midi": "bwv-939.mid",
+            "meter": {
+                "num": 4,
+                "den": 4
+            },
+            "pickupQuarters": 0,
+            "printedBars": 16,
+            "expectedFifths": 0,
+            "expectedTempo": {
+                "min": 60,
+                "max": 120
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 16,
+            "expectedHolds": 0,
+            "expectedExtraNotes": 12
+        }
+    ],
+    "editionNotes": [
+        "4/4, C major, 16 bars, no repeats. The shortest real piece here after the Czerny exercise.",
+        "Six printed \\mordent signs at 2 added notes each: expectedExtraNotes 12. Dense ornaments over very few notes make this the sharpest check that the ornament allowance is derived from the page rather than fitted.",
+        "No printed metronome mark and no \\midi tempo directive, so expectedTempo is a wide band and tempoInRange is a diagnostic only.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs."
+    ]
+}

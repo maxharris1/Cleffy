@@ -1,8 +1,8 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
-import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
+import { QUEUED_AFTER_MS, useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { getDb } from '@/sync/db';
 
 interface FakeState {
@@ -78,6 +78,95 @@ describe('useScoreAnalysis', () => {
         expect(state.bpmDefault).toBe(96);
     });
 
+    it('carries a corpus hit on the ready state, and omits it when the row has none', async () => {
+        fake.row = {
+            document_id: DOC,
+            status: 'ready',
+            error: null,
+            progress: null,
+            engine_version: 'audiveris-test',
+            bpm_default: 96,
+            score: JSON.parse(JSON.stringify(tinyScore)) as unknown,
+            timings: { corpusHit: 'hash' },
+            created_by: null,
+            created_at: now(),
+            updated_at: now(),
+        };
+        const { result, unmount } = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(result.current.state.kind).toBe('ready'));
+        expect(result.current.state).toMatchObject({ kind: 'ready', corpusHit: 'hash' });
+        unmount();
+
+        // Cached path: the hit survives the Dexie round trip too.
+        fake.row = { ...fake.row, updated_at: '2026-01-01T00:00:00Z' };
+        const second = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(second.result.current.state.kind).toBe('ready'));
+        expect(second.result.current.state).toMatchObject({ kind: 'ready', corpusHit: 'hash' });
+        second.unmount();
+
+        await getDb().scoreCache.clear();
+        delete fake.row.timings;
+        const third = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(third.result.current.state.kind).toBe('ready'));
+        expect(third.result.current.state).not.toHaveProperty('corpusHit');
+    });
+
+    it('calls a pending row queued only after re-reading it still pending a poll interval later', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            fake.row = { status: 'pending', error: null, progress: null, updated_at: now() };
+            const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+            await waitFor(() => expect(result.current.state).toEqual({ kind: 'pending' }));
+
+            await vi.advanceTimersByTimeAsync(QUEUED_AFTER_MS - 50);
+            expect(result.current.state).toEqual({ kind: 'pending' });
+
+            await vi.advanceTimersByTimeAsync(100);
+            await waitFor(() => expect(result.current.state).toEqual({ kind: 'pending', queued: true }));
+
+            // The earned queue survives into processing so the strip keeps its step.
+            act(() =>
+                result.current.applyBroadcast({
+                    table: 'score_analyses',
+                    document_id: DOC,
+                    status: 'processing',
+                    progress: 1,
+                    updated_at: now(),
+                }),
+            );
+            expect(result.current.state).toEqual({ kind: 'processing', progress: 1, queued: true });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('never calls it queued when a worker claims (or a corpus hit finishes) inside the interval', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            fake.row = { status: 'pending', error: null, progress: null, updated_at: now() };
+            const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+            await waitFor(() => expect(result.current.state).toEqual({ kind: 'pending' }));
+
+            // Claimed before the re-read: the re-read sees processing, so no queue is named.
+            fake.row = { status: 'processing', error: null, progress: 1, updated_at: now() };
+            await vi.advanceTimersByTimeAsync(QUEUED_AFTER_MS + 100);
+            expect(result.current.state).toEqual({ kind: 'pending' });
+
+            act(() =>
+                result.current.applyBroadcast({
+                    table: 'score_analyses',
+                    document_id: DOC,
+                    status: 'processing',
+                    progress: 1,
+                    updated_at: now(),
+                }),
+            );
+            expect(result.current.state).toEqual({ kind: 'processing', progress: 1 });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('surfaces processing progress and stale jobs', async () => {
         fake.row = { status: 'processing', error: null, progress: 4, updated_at: now() };
         const { result, unmount } = renderHook(() => useScoreAnalysis(DOC, true));
@@ -127,6 +216,32 @@ describe('useScoreAnalysis', () => {
         await waitFor(() => expect(result.current.state.kind).toBe('none'));
         await result.current.generate();
         await waitFor(() => expect(result.current.state).toEqual({ kind: 'failed', code: 'too_large' }));
+    });
+
+    it('already_current does not surface as a failure', async () => {
+        fake.row = {
+            document_id: DOC,
+            status: 'ready',
+            error: null,
+            progress: null,
+            engine_version: 'audiveris-5.6.1+svc-6',
+            bpm_default: 96,
+            score: JSON.parse(JSON.stringify(tinyScore)) as unknown,
+            created_by: null,
+            created_at: now(),
+            updated_at: now(),
+        };
+        fake.invoke = {
+            data: null,
+            error: {
+                message: '409',
+                context: new Response(JSON.stringify({ ok: false, code: 'already_current' }), { status: 409 }),
+            },
+        };
+        const { result } = renderHook(() => useScoreAnalysis(DOC, true));
+        await waitFor(() => expect(result.current.state.kind).toBe('ready'));
+        await result.current.generate();
+        await waitFor(() => expect(result.current.state.kind).toBe('ready'));
     });
 
     it('rehydrates backlog_full from a persisted failed analysis row', async () => {

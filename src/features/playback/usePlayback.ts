@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { saveBpmOverride } from '@/features/playback/scoreAnalysisService';
-import { measureEndTick, measureStartTick } from '@/features/playback/scoreTime';
+import { measureEndTick, measureStartTick, scoreOnEdition } from '@/features/playback/scoreTime';
 import type { ScoreAnalysisState } from '@/features/playback/useScoreAnalysis';
 import type { PlaybackFeature } from '@/features/viewer/PdfViewport';
 import { BPM_MAX, BPM_MIN, DEFAULT_BPM, useViewerStore } from '@/state/store';
@@ -18,9 +18,17 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
     const engineRef = useRef<PlaybackEngine | null>(null);
     const [warning, setWarning] = useState<string | null>(null);
 
-    const score = analysis.kind === 'ready' ? analysis.score : null;
+    const analysedScore = analysis.kind === 'ready' ? analysis.score : null;
     const bpmDefault = analysis.kind === 'ready' ? analysis.bpmDefault : null;
     const bpmOverride = analysis.kind === 'ready' ? analysis.bpmOverride : null;
+    const alignmentMap = analysis.kind === 'ready' ? analysis.alignmentMap : null;
+    // Every consumer of the score's geometry (playhead, seek, loop overlay,
+    // fingering marquee) reads it off this PDF's edition, not the one the
+    // performance was recognized from.
+    const score = useMemo(
+        () => (analysedScore ? scoreOnEdition(analysedScore, alignmentMap) : null),
+        [analysedScore, alignmentMap],
+    );
 
     // Clear a stale sample warning when the document/score changes (during
     // render, per the React "adjusting state" pattern).
@@ -41,6 +49,8 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
         const engine = new PlaybackEngine({
             score,
             bpm: initialBpm,
+            tempoStyle: store.tempoStyle,
+            autoPedal: store.autoPedal,
             onStatus: (status) => useViewerStore.getState().setPlaybackStatus(status),
             onWarning: (code) => setWarning(code),
         });
@@ -86,6 +96,12 @@ export const usePlayback = (docId: string, analysis: ScoreAnalysisState) => {
             }
             if (state.metronomeOn !== prev.metronomeOn) {
                 engine.setMetronome(state.metronomeOn);
+            }
+            if (state.tempoStyle !== prev.tempoStyle) {
+                engine.setTempoStyle(state.tempoStyle);
+            }
+            if (state.autoPedal !== prev.autoPedal) {
+                engine.setAutoPedal(state.autoPedal);
             }
             if (state.loopRange !== prev.loopRange) {
                 engine.setLoop(

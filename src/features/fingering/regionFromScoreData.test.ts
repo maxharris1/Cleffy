@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { regionFromScoreData } from '@/features/fingering/regionFromScoreData';
 import { tinyScore } from '@/features/playback/fixtures/tinyScore';
+import { scoreOnEdition } from '@/features/playback/scoreTime';
 import type { ScoreData } from '@/types/scoreData';
 
 /** System 0 on page 0: measures 0–2 (x 0.08–0.92, y 0.1–0.28). */
@@ -69,10 +70,9 @@ describe('regionFromScoreData', () => {
             .map((n) => ({ ...n, t: n.t + shift }));
         const score: ScoreData = {
             ...tinyScore,
-            measures: [
-                ...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })),
-                ...secondPass,
-            ].sort((a, b) => a.tick - b.tick),
+            measures: [...tinyScore.measures.map((m, i) => ({ ...m, srcIndex: i })), ...secondPass].sort(
+                (a, b) => a.tick - b.tick,
+            ),
             notes: [...tinyScore.notes, ...repeatedNotes].sort((a, b) => a.t - b.t),
             totalTicks: shift + spanTicks,
         };
@@ -88,6 +88,53 @@ describe('regionFromScoreData', () => {
         expect(repeated!.notes.length).toBe(linear!.notes.length);
     });
 
+    it('selects on the aligned edition, not the edition the notes were recognized from', () => {
+        // Another edition's reading re-aligned onto this PDF, where every bar
+        // sits three pages later.
+        const map = {
+            pdfSha256: 'this-pdf',
+            candidateSha256: 'other-edition',
+            pickup: true,
+            printedBars: tinyScore.measures.length,
+            bySrcIndex: Object.fromEntries(
+                tinyScore.measures.map((m, i) => {
+                    const system = tinyScore.systems[m.sys]!;
+                    const box = { page: m.page + 3, system: m.sys, x0: m.x0, x1: m.x1, y0: system.y0, y1: system.y1 };
+                    return [i, box];
+                }),
+            ),
+        };
+        const aligned = scoreOnEdition(tinyScore, map);
+        const midis = (region: ReturnType<typeof regionFromScoreData>) => region?.notes.map((n) => n.midi).sort();
+        expect(regionFromScoreData('doc', 0, SYS0_RECT, aligned)).toBeNull();
+        expect(midis(regionFromScoreData('doc', 3, SYS0_RECT, aligned))).toEqual(
+            midis(regionFromScoreData('doc', 0, SYS0_RECT, tinyScore)),
+        );
+    });
+
+    it('selects on an aligned symbolic reading, whose own warnings say it has no geometry', () => {
+        // A MusicXML accept: no page positions of its own, placed by the map.
+        const symbolic: ScoreData = {
+            ...tinyScore,
+            systems: [],
+            measures: tinyScore.measures.map((m) => ({ ...m, page: -1, sys: -1 })),
+            warnings: ['no_geometry'],
+        };
+        const map = {
+            pdfSha256: 'this-pdf',
+            candidateSha256: 'musicxml',
+            pickup: true,
+            printedBars: tinyScore.measures.length,
+            bySrcIndex: Object.fromEntries(
+                tinyScore.measures.map((m, i) => {
+                    const system = tinyScore.systems[m.sys]!;
+                    return [i, { page: m.page, system: m.sys, x0: m.x0, x1: m.x1, y0: system.y0, y1: system.y1 }];
+                }),
+            ),
+        };
+        expect(regionFromScoreData('doc', 0, SYS0_RECT, scoreOnEdition(symbolic, map))).not.toBeNull();
+    });
+
     it('returns null when the score has no_geometry', () => {
         const score: ScoreData = { ...tinyScore, warnings: ['no_geometry'] };
         expect(regionFromScoreData('doc', 0, SYS0_RECT, score)).toBeNull();
@@ -95,9 +142,7 @@ describe('regionFromScoreData', () => {
 
     it('returns null on partial coverage (geometry-less measure in the tick span)', () => {
         // Drop geometry from m2 so a full system-0 x-span cannot cover continuously.
-        const measures = tinyScore.measures.map((m, i) =>
-            i === 2 ? { ...m, page: -1, sys: -1, x0: 0, x1: 0 } : m,
-        );
+        const measures = tinyScore.measures.map((m, i) => (i === 2 ? { ...m, page: -1, sys: -1, x0: 0, x1: 0 } : m));
         const score: ScoreData = {
             ...tinyScore,
             measures,
@@ -107,9 +152,7 @@ describe('regionFromScoreData', () => {
     });
 
     it('returns null when measure_geometry_mismatch leaves a hole inside the span', () => {
-        const measures = tinyScore.measures.map((m, i) =>
-            i === 1 ? { ...m, page: -1, sys: -1, x0: 0, x1: 0 } : m,
-        );
+        const measures = tinyScore.measures.map((m, i) => (i === 1 ? { ...m, page: -1, sys: -1, x0: 0, x1: 0 } : m));
         const score: ScoreData = {
             ...tinyScore,
             measures,

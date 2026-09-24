@@ -2,7 +2,8 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
-import { runClaimedJob, runJob, type JobRequest } from './job.js';
+import { CLAIM_MAX_PRIORITY_ENV, claimMaxPriority, claimMaxPriorityMisconfigured } from './claimPriority.js';
+import { ENGINE_VERSION, runClaimedJob, runJob, type JobRequest } from './job.js';
 import { claimJob, hasQueuedWork, newWorkerId, reapExpiredLeases } from './jobStore.js';
 import { JobQueue } from './queue.js';
 import { supabaseWriteback } from './writeback.js';
@@ -17,6 +18,7 @@ const SELF_URL = (process.env.SELF_URL ?? '').replace(/\/$/, '');
 const POKE_SEND_RACE_MS = 250;
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_TITLE_CHARS = 512;
 
 const secretMatches = (header: string | undefined): boolean => {
     if (!SECRET || !header) {
@@ -69,7 +71,14 @@ export const validateJobRequest = (raw: unknown, supabaseUrl: string | undefined
     if (!url.pathname.startsWith(expectedPath)) {
         return null;
     }
-    return { documentId, pdfSignedUrl, pageCount };
+    // Optional IMSLP work title; anything that is not a short non-empty string is dropped, not rejected.
+    const imslpPageTitle =
+        typeof body.imslpPageTitle === 'string' &&
+        body.imslpPageTitle.trim() !== '' &&
+        body.imslpPageTitle.length <= MAX_TITLE_CHARS
+            ? body.imslpPageTitle.trim()
+            : undefined;
+    return { documentId, pdfSignedUrl, pageCount, ...(imslpPageTitle !== undefined ? { imslpPageTitle } : {}) };
 };
 
 const queue = new JobQueue<JobRequest>(MAX_QUEUE_DEPTH, (job) => runJob(job, supabaseWriteback));
@@ -160,10 +169,16 @@ const handlePoke = async (res: ServerResponse): Promise<void> => {
     json(res, 200, { ok: true, claimed: true });
 };
 
+/** Public liveness plus the generation the client gates regenerate on. */
+export const healthzPayload = (): { ok: true; engineVersion: string } => ({
+    ok: true,
+    engineVersion: ENGINE_VERSION,
+});
+
 export const server = createServer((req, res) => {
     void (async () => {
         if (req.method === 'GET' && req.url === '/healthz') {
-            json(res, 200, { ok: true });
+            json(res, 200, healthzPayload());
             return;
         }
 
@@ -213,7 +228,18 @@ if (process.argv[1]?.endsWith('server.js')) {
         console.error('OMR_SERVICE_SECRET is required');
         process.exit(1);
     }
-    server.listen(PORT, () => console.log(`omr-service listening on :${PORT}`));
+    // A seed-only instance must never fall back to claiming user jobs because of a typo.
+    if (claimMaxPriorityMisconfigured()) {
+        console.error(`${CLAIM_MAX_PRIORITY_ENV} must be an integer or unset`);
+        process.exit(1);
+    }
+    const maxPriority = claimMaxPriority();
+    server.listen(PORT, () =>
+        console.log(
+            `omr-service listening on :${PORT}` +
+                (maxPriority !== null ? ` (claims only priority <= ${maxPriority})` : ''),
+        ),
+    );
 
     if (DEV_POLL_MS > 0) {
         console.warn(

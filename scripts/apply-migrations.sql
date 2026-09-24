@@ -4404,3 +4404,648 @@ grant execute on function public.imslp_promote_anchor (text, int) to service_rol
 
 revoke all on function public.imslp_sync_tick () from public, anon, authenticated;
 grant execute on function public.imslp_sync_tick () to service_role;
+
+-- ===== supabase/migrations/20260916140000_playalong_corpus.sql =====
+-- Play-along corpus: shared, precomputed ScoreData (+ AlignmentMap) for
+-- public-domain / CC PDFs, keyed by the PDF's sha256 so a second copy of the
+-- same file — or, by layout, another engraving of the same work — never
+-- re-runs Audiveris or fetches Mutopia. `score_cache` stays the per-hash OMR
+-- byte-cache (180-day purge); this table is the MIDI/XML + alignment store and
+-- the OMR seed store, and is never purged. Rows are only ever derived from
+-- public sources (Mutopia/OpenScore/IA/Commons/library scans or IMSLP-import /
+-- corpus-owner documents) — never from a user upload. See
+-- docs/omr-midi-preload-plan.md.
+--
+-- Every statement here is guarded (`if not exists` / `on conflict do nothing`)
+-- because production received this schema out-of-band ahead of the merge: the
+-- objects already exist there, so an unguarded `create` would fail the deploy.
+-- On a fresh database the guards change nothing.
+
+create table if not exists public.playalong_corpus (
+    pdf_sha256 text not null,
+    -- Bare ENGINE_VERSION (not the score_cache `#era=` key); the era is a column.
+    engine_version text not null,
+    -- '' for symbolic rows (era-independent); eraForDocument for OMR rows.
+    era text not null default '',
+    work_composer_id text,
+    work_catalog_type text,
+    work_catalog_n int,
+    work_movement_index int,
+    printed_bars int,
+    page_count int,
+    layout_fp text,
+    score jsonb not null,
+    alignment_map jsonb,
+    -- AnalysisSource plus provenance (origin, licence_tag, editor_credit, …).
+    source jsonb not null,
+    candidate_sha256 text,
+    candidate_url text,
+    symbolic_source text check (symbolic_source in ('mutopia', 'openscore', 'ia', 'omr')),
+    symbolic_format text,
+    -- Work identity for ranking / discover only; never a fetch URL.
+    imslp_page_title text,
+    licence_tag text check (licence_tag in ('PD', 'CC0', 'CC-BY', 'CC-BY-SA')),
+    editor_credit text,
+    source_url text,
+    created_at timestamptz not null default now(),
+    last_used_at timestamptz not null default now(),
+    use_count int not null default 1,
+    primary key (pdf_sha256, engine_version, era)
+);
+
+-- Layout lookup filters on these before it ever touches `score`.
+create index if not exists playalong_corpus_layout_idx on public.playalong_corpus (
+    engine_version,
+    work_composer_id,
+    work_catalog_type,
+    work_catalog_n,
+    printed_bars
+);
+
+alter table public.playalong_corpus enable row level security;
+-- Zero policies — service_role only, like score_cache.
+grant all on public.playalong_corpus to service_role;
+
+-- Seed ledger: one row per (work, origin, file) the offline seed script has
+-- looked at; `status` is the resume checkpoint.
+create table if not exists public.playalong_corpus_seed (
+    work_title text not null,
+    origin text not null,
+    filename text not null,
+    document_id uuid,
+    tier smallint not null default 0,
+    status text not null default 'pending'
+        check (status in ('pending', 'fetched', 'queued', 'ready', 'skipped', 'failed', 'paused')),
+    source_url text,
+    licence_tag text,
+    editor_credit text,
+    last_error text,
+    pdf_sha256 text,
+    page_count int,
+    batch_id int,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    primary key (work_title, origin, filename)
+);
+
+alter table public.playalong_corpus_seed enable row level security;
+grant all on public.playalong_corpus_seed to service_role;
+
+-- Kill switch for the seed crawl. Single row; `paused` stops the script.
+create table if not exists public.playalong_corpus_control (
+    singleton boolean primary key default true check (singleton),
+    paused boolean not null default false,
+    updated_at timestamptz not null default now()
+);
+
+alter table public.playalong_corpus_control enable row level security;
+grant all on public.playalong_corpus_control to service_role;
+
+insert into public.playalong_corpus_control (paused) values (false) on conflict do nothing;
+
+-- Hash lookup: the same PDF bytes under this engine. Prefer the row for this
+-- era, else the era-independent symbolic row (''). Bumps usage like score_cache_get.
+create or replace function public.playalong_corpus_get_by_hash (p_hash text, p_engine_version text, p_era text)
+returns setof public.playalong_corpus
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    hit public.playalong_corpus%rowtype;
+begin
+    select c.* into hit
+    from public.playalong_corpus c
+    where c.pdf_sha256 = p_hash
+      and c.engine_version = p_engine_version
+      and c.era in (p_era, '')
+    order by (c.era = p_era) desc
+    limit 1;
+    if not found then
+        return;
+    end if;
+
+    update public.playalong_corpus c
+    set last_used_at = now(), use_count = c.use_count + 1
+    where c.pdf_sha256 = hit.pdf_sha256
+      and c.engine_version = hit.engine_version
+      and c.era = hit.era
+    returning c.* into hit;
+    return next hit;
+end;
+$$;
+
+-- Layout lookup: another engraving of the same work with exactly the same
+-- printed bar count and page count. Counts distinct PDFs on the indexed columns
+-- first so `score` is only ever read for the one winner; two or more editions
+-- is a collision and returns nothing (the caller falls through to discover).
+create or replace function public.playalong_corpus_get_by_layout (
+    p_engine_version text,
+    p_work_composer_id text,
+    p_work_catalog_type text,
+    p_work_catalog_n int,
+    p_work_movement_index int,
+    p_printed_bars int,
+    p_page_count int
+) returns setof public.playalong_corpus
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    editions int;
+    hit public.playalong_corpus%rowtype;
+begin
+    if p_work_composer_id is null or p_work_composer_id = 'unknown' or p_work_catalog_n is null or p_printed_bars is null or p_page_count is null then
+        return;
+    end if;
+
+    select count(distinct c.pdf_sha256) into editions
+    from public.playalong_corpus c
+    where c.engine_version = p_engine_version
+      and c.work_composer_id = p_work_composer_id
+      and c.work_catalog_type = p_work_catalog_type
+      and c.work_catalog_n = p_work_catalog_n
+      and c.work_movement_index is not distinct from p_work_movement_index
+      and c.printed_bars = p_printed_bars
+      and c.page_count = p_page_count;
+    if editions <> 1 then
+        return;
+    end if;
+
+    select c.* into hit
+    from public.playalong_corpus c
+    where c.engine_version = p_engine_version
+      and c.work_composer_id = p_work_composer_id
+      and c.work_catalog_type = p_work_catalog_type
+      and c.work_catalog_n = p_work_catalog_n
+      and c.work_movement_index is not distinct from p_work_movement_index
+      and c.printed_bars = p_printed_bars
+      and c.page_count = p_page_count
+    order by (c.era = '') desc, c.use_count desc, c.created_at
+    limit 1;
+
+    update public.playalong_corpus c
+    set last_used_at = now(), use_count = c.use_count + 1
+    where c.pdf_sha256 = hit.pdf_sha256
+      and c.engine_version = hit.engine_version
+      and c.era = hit.era
+    returning c.* into hit;
+    return next hit;
+end;
+$$;
+
+-- Upsert. A Mutopia/OpenScore symbolic row is never overwritten by an OMR row
+-- for the same engine (a new engine_version is a new primary key, so the
+-- rebuild still lands). Returns whether the row was written.
+create or replace function public.playalong_corpus_put (
+    p_pdf_sha256 text,
+    p_engine_version text,
+    p_era text,
+    p_score jsonb,
+    p_source jsonb,
+    p_alignment_map jsonb default null,
+    p_work_composer_id text default null,
+    p_work_catalog_type text default null,
+    p_work_catalog_n int default null,
+    p_work_movement_index int default null,
+    p_printed_bars int default null,
+    p_page_count int default null,
+    p_layout_fp text default null,
+    p_candidate_sha256 text default null,
+    p_candidate_url text default null,
+    p_symbolic_source text default null,
+    p_symbolic_format text default null,
+    p_imslp_page_title text default null,
+    p_licence_tag text default null,
+    p_editor_credit text default null,
+    p_source_url text default null
+) returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    written int;
+begin
+    insert into public.playalong_corpus as c (
+        pdf_sha256, engine_version, era, score, source, alignment_map,
+        work_composer_id, work_catalog_type, work_catalog_n, work_movement_index,
+        printed_bars, page_count, layout_fp,
+        candidate_sha256, candidate_url, symbolic_source, symbolic_format,
+        imslp_page_title, licence_tag, editor_credit, source_url
+    )
+    values (
+        p_pdf_sha256, p_engine_version, coalesce(p_era, ''), p_score, p_source, p_alignment_map,
+        p_work_composer_id, p_work_catalog_type, p_work_catalog_n, p_work_movement_index,
+        p_printed_bars, p_page_count, p_layout_fp,
+        p_candidate_sha256, p_candidate_url, p_symbolic_source, p_symbolic_format,
+        p_imslp_page_title, p_licence_tag, p_editor_credit, p_source_url
+    )
+    on conflict (pdf_sha256, engine_version, era) do update
+    set
+        score = excluded.score,
+        source = excluded.source,
+        alignment_map = excluded.alignment_map,
+        work_composer_id = coalesce(excluded.work_composer_id, c.work_composer_id),
+        work_catalog_type = coalesce(excluded.work_catalog_type, c.work_catalog_type),
+        work_catalog_n = coalesce(excluded.work_catalog_n, c.work_catalog_n),
+        work_movement_index = coalesce(excluded.work_movement_index, c.work_movement_index),
+        printed_bars = coalesce(excluded.printed_bars, c.printed_bars),
+        page_count = coalesce(excluded.page_count, c.page_count),
+        layout_fp = coalesce(excluded.layout_fp, c.layout_fp),
+        candidate_sha256 = excluded.candidate_sha256,
+        candidate_url = excluded.candidate_url,
+        symbolic_source = excluded.symbolic_source,
+        symbolic_format = excluded.symbolic_format,
+        imslp_page_title = coalesce(excluded.imslp_page_title, c.imslp_page_title),
+        licence_tag = coalesce(excluded.licence_tag, c.licence_tag),
+        editor_credit = coalesce(excluded.editor_credit, c.editor_credit),
+        source_url = coalesce(excluded.source_url, c.source_url),
+        last_used_at = now(),
+        use_count = c.use_count + 1
+    where not (c.symbolic_source in ('mutopia', 'openscore') and excluded.symbolic_source = 'omr');
+    get diagnostics written = row_count;
+    return written > 0;
+end;
+$$;
+
+revoke all on function public.playalong_corpus_get_by_hash (text, text, text) from public, anon, authenticated;
+revoke all on function public.playalong_corpus_get_by_layout (text, text, text, int, int, int, int) from public, anon, authenticated;
+revoke all on function public.playalong_corpus_put (
+    text, text, text, jsonb, jsonb, jsonb, text, text, int, int, int, int, text, text, text, text, text, text, text, text, text
+) from public, anon, authenticated;
+grant execute on function public.playalong_corpus_get_by_hash (text, text, text) to service_role;
+grant execute on function public.playalong_corpus_get_by_layout (text, text, text, int, int, int, int) to service_role;
+grant execute on function public.playalong_corpus_put (
+    text, text, text, jsonb, jsonb, jsonb, text, text, int, int, int, int, text, text, text, text, text, text, text, text, text
+) to service_role;
+
+-- ===== supabase/migrations/20260916150000_playalong_corpus_seed_bucket.sql =====
+-- Play-along corpus seed: the shared public-domain PDF store and the ledger
+-- columns the offline seed script (scripts/seed-playalong-corpus.mjs) needs.
+-- See docs/omr-midi-preload-plan.md, Phase 2 / 2b / 2d.
+--
+-- `pd-pdfs` holds every PDF the seed ingested from a bulk-friendly public
+-- source (Mutopia / OpenScore / Internet Archive), keyed `{sha256}/{filename}`
+-- so the same bytes are stored once. It is service-role only: a user who picks
+-- a corpus work gets a Storage copy into `scores/{docId}/original.pdf`, so
+-- there is never a client read of this bucket and never an IMSLP fetch.
+--
+-- Every statement here is guarded (`if not exists` / `on conflict do nothing`)
+-- because production received this schema out-of-band ahead of the merge: the
+-- objects already exist there, so an unguarded `create` or `add column` would
+-- fail the deploy. On a fresh database the guards change nothing.
+
+-- ---------------------------------------------------------------------------
+-- pd-pdfs bucket (no client policies; service_role bypasses storage RLS)
+-- ---------------------------------------------------------------------------
+do $$
+begin
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('pd-pdfs', 'pd-pdfs', false, 52428800, array['application/pdf'])
+    on conflict (id) do nothing;
+exception
+    when insufficient_privilege then
+        -- Hosted projects may refuse storage.buckets writes from a migration
+        -- (SQLSTATE 42501); create the bucket by hand in the dashboard.
+        raise notice 'pd-pdfs bucket not created here (%): create it in the dashboard', sqlerrm;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- pd_pdf_store: index of what is in the bucket, with provenance per file
+-- ---------------------------------------------------------------------------
+create table if not exists public.pd_pdf_store (
+    pdf_sha256 text primary key,
+    filename text not null,
+    -- IMSLP work page title: identity for ranking / the corpus-first client path.
+    work_title text not null,
+    origin text not null check (origin in ('mutopia', 'openscore', 'ia', 'commons', 'library')),
+    source_url text,
+    licence_tag text not null check (licence_tag in ('PD', 'CC0', 'CC-BY', 'CC-BY-SA')),
+    editor_credit text,
+    us_pd boolean not null,
+    byte_length int not null,
+    page_count int,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists pd_pdf_store_work_title_idx on public.pd_pdf_store (work_title);
+
+alter table public.pd_pdf_store enable row level security;
+-- Zero policies — service_role only, like playalong_corpus.
+grant all on public.pd_pdf_store to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Ledger columns the seed script checkpoints on
+-- ---------------------------------------------------------------------------
+alter table public.playalong_corpus_seed
+    add column if not exists us_pd boolean,
+    -- Fetch / enqueue attempts for this row; the script stops retrying at 3.
+    add column if not exists attempts smallint not null default 0,
+    -- Optional symbolic-source URL (Mutopia .mid / OpenScore .mxl) next to the PDF.
+    add column if not exists candidate_url text;
+
+-- ===== supabase/migrations/20260916160000_playalong_corpus_edition_signals.sql =====
+-- Edition signals for the corpus seed: which edition was chosen for a work and
+-- why (typeset vs scan, complete score, IMSLP rating / download count of the
+-- matching IMSLP file, and the best IMSLP edition when no bulk source carried
+-- it). Stored as one jsonb blob per ledger row / store row so the pick can be
+-- revisited without re-crawling. See docs/omr-midi-preload-plan.md and
+-- internal/research/imslp-popularity-and-edition-signals.md.
+--
+-- Both adds are guarded with `if not exists` because production received this
+-- schema out-of-band ahead of the merge: the columns already exist there, so an
+-- unguarded `add column` would fail the deploy. On a fresh database the guards
+-- change nothing.
+
+alter table public.playalong_corpus_seed
+    add column if not exists edition jsonb;
+
+alter table public.pd_pdf_store
+    add column if not exists edition jsonb;
+
+-- ===== supabase/migrations/20260916170000_omr_claim_priority_filter.sql =====
+-- Seed-only claimers for the play-along corpus (plan Phase 2c).
+--
+-- The corpus seed inserts omr_jobs rows at priority -10; user rows stay at 0.
+-- A second Cloud Run service (cleffy-omr-seed) drains those seed rows in
+-- parallel and must never take a user's job. omr_claim_job therefore gains an
+-- optional upper bound on priority: null (the default, and what the user worker
+-- passes) keeps today's behaviour exactly; a seed instance passes -1 and only
+-- ever sees rows with priority <= -1. The user worker still claims everything,
+-- and its `order by priority desc` keeps user rows ahead of seed rows.
+--
+-- The (text, int) overload is dropped rather than left beside the new one: with
+-- both present a PostgREST call that names only p_worker_id / p_lease_seconds
+-- would match two functions. Existing two-argument callers keep working
+-- because the new parameter defaults to null.
+
+drop function if exists public.omr_claim_job (text, int);
+
+create or replace function public.omr_claim_job (
+    p_worker_id text,
+    p_lease_seconds int default 300,
+    p_max_priority int default null
+)
+returns public.omr_jobs
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    claimed public.omr_jobs;
+begin
+    if p_worker_id is null or length(trim(p_worker_id)) = 0 then
+        raise exception 'omr_claim_job: worker_id required';
+    end if;
+
+    select *
+    into claimed
+    from public.omr_jobs
+    where status = 'queued'
+      and run_after <= now()
+      and (p_max_priority is null or priority <= p_max_priority)
+    order by priority desc, id
+    for update skip locked
+    limit 1;
+
+    if claimed.id is null then
+        return null;
+    end if;
+
+    update public.omr_jobs
+    set
+        status = 'running',
+        attempt = claimed.attempt + 1,
+        claimed_at = now(),
+        worker_id = p_worker_id,
+        lease_expires_at = now() + make_interval(secs => greatest(p_lease_seconds, 60)),
+        last_error = null
+    where id = claimed.id
+    returning * into claimed;
+
+    return claimed;
+end;
+$$;
+
+revoke all on function public.omr_claim_job (text, int, int) from public, anon, authenticated;
+grant execute on function public.omr_claim_job (text, int, int) to service_role;
+
+-- ===== supabase/migrations/20260916170100_omr_seed_sweep.sql =====
+-- Wake the seed-only worker pool (cleffy-omr-seed) while corpus seed rows are
+-- queued. Same pg_cron + pg_net + vault pattern as omr_sweep, but:
+--
+--   * it only counts seed rows (priority < 0) — a user backlog never wakes the
+--     seed pool, and omr_sweep keeps poking the user URL exactly as today;
+--   * it does not reap or purge (omr_sweep already does both every minute);
+--   * it is silent while playalong_corpus_control.paused is true, so flipping
+--     that switch drains the pool to zero instances without touching jobs;
+--   * it is a no-op until vault holds `omr_seed_service_url` — the seed service
+--     is opt-in and this migration is safe to apply before it exists.
+--
+-- One poke per minute is enough: the worker self-pokes before it responds
+-- (server.ts pokeSelf, now priority-filtered) so a single wake fans out to
+-- --max-instances within seconds. When the last seed row is claimed the poke
+-- stops, in-flight jobs finish, and --min-instances 0 scales the pool to zero.
+
+create or replace function public.omr_seed_sweep ()
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions, vault
+as $$
+declare
+    queued int;
+    paused boolean;
+    svc_url text;
+    svc_secret text;
+begin
+    select c.paused into paused
+    from public.playalong_corpus_control c
+    limit 1;
+    if coalesce(paused, false) then
+        return;
+    end if;
+
+    select count(*)::int into queued
+    from public.omr_jobs
+    where status = 'queued'
+      and priority < 0
+      and run_after <= now();
+    if queued is null or queued <= 0 then
+        return;
+    end if;
+
+    select decrypted_secret into svc_url
+    from vault.decrypted_secrets
+    where name = 'omr_seed_service_url'
+    limit 1;
+
+    select decrypted_secret into svc_secret
+    from vault.decrypted_secrets
+    where name = 'omr_service_secret'
+    limit 1;
+
+    if svc_url is null or svc_secret is null or length(trim(svc_url)) = 0 then
+        -- Seed pool not deployed: seed rows drain on the user worker via omr_sweep.
+        return;
+    end if;
+
+    perform net.http_post(
+        url := rtrim(svc_url, '/') || '/poke',
+        headers := jsonb_build_object(
+            'Content-Type', 'application/json',
+            'x-omr-secret', svc_secret
+        ),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 5000
+    );
+end;
+$$;
+
+revoke all on function public.omr_seed_sweep () from public, anon, authenticated;
+grant execute on function public.omr_seed_sweep () to service_role;
+
+do $$
+begin
+    perform cron.unschedule (jobid)
+    from cron.job
+    where jobname = 'omr-seed-sweep';
+exception
+    when undefined_table then null;
+    when others then null;
+end;
+$$;
+
+select cron.schedule ('omr-seed-sweep', '* * * * *', $$select public.omr_seed_sweep ()$$);
+
+-- ===== supabase/migrations/20260916180000_playalong_corpus_imslp_origin.sql =====
+-- Play-along corpus: allow `imslp` as a pd_pdf_store / seed-ledger origin.
+-- The seed script can fetch one IMSLP PDF at a time via the same wait-page →
+-- CDN parse the live import uses (`extractCdnUrlFromWaitPage`); it does not
+-- sleep the 15s upsell. See scripts/seed-playalong-corpus.mjs `--source imslp`.
+--
+-- Idempotent: drop the origin check if present, then re-add it with `imslp`.
+-- Production already has `pd_pdf_store` from an earlier migration (or the
+-- out-of-band apply); this only widens the check. Ledger `origin` is unconstrained
+-- text and already accepts `imslp`.
+
+alter table public.pd_pdf_store drop constraint if exists pd_pdf_store_origin_check;
+
+alter table public.pd_pdf_store
+    add constraint pd_pdf_store_origin_check
+    check (origin in ('mutopia', 'openscore', 'ia', 'commons', 'library', 'imslp'));
+
+-- ===== supabase/migrations/20260916190000_playalong_corpus_imslp_pause.sql =====
+-- Corpus seed: record why and until when the IMSLP source paused itself.
+-- After three consecutive bot checks / captchas / disclaimer walls the seed
+-- stops using imslp.org for 24h and writes the reason here; the other sources
+-- keep running. Clearing `imslp_paused_until` resumes. Idempotent like the
+-- other corpus migrations (production may already have the columns).
+
+alter table public.playalong_corpus_control
+    add column if not exists imslp_paused_until timestamptz,
+    add column if not exists imslp_pause_reason text;
+
+-- ===== supabase/migrations/20260923140000_omr_seed_claim_pause.sql =====
+-- Honor soft pause for seed-only workers, including already queued pokes.
+
+create or replace function public.omr_claim_job (
+    p_worker_id text,
+    p_lease_seconds int default 300,
+    p_max_priority int default null
+)
+returns public.omr_jobs
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    claimed public.omr_jobs;
+begin
+    if p_worker_id is null or length(trim(p_worker_id)) = 0 then
+        raise exception 'omr_claim_job: worker_id required';
+    end if;
+
+    -- Check at the claim boundary as well as in the worker's fan-out loop.
+    -- Unfiltered user workers retain their existing fallback behavior.
+    if p_max_priority < 0 and coalesce((
+        select c.paused from public.playalong_corpus_control c where c.singleton
+    ), true) then
+        return null;
+    end if;
+
+    select *
+    into claimed
+    from public.omr_jobs
+    where status = 'queued'
+      and run_after <= now()
+      and (p_max_priority is null or priority <= p_max_priority)
+    order by priority desc, id
+    for update skip locked
+    limit 1;
+
+    if claimed.id is null then
+        return null;
+    end if;
+
+    update public.omr_jobs
+    set
+        status = 'running',
+        attempt = claimed.attempt + 1,
+        claimed_at = now(),
+        worker_id = p_worker_id,
+        lease_expires_at = now() + make_interval(secs => greatest(p_lease_seconds, 60)),
+        last_error = null
+    where id = claimed.id
+    returning * into claimed;
+
+    return claimed;
+end;
+$$;
+
+revoke all on function public.omr_claim_job (text, int, int) from public, anon, authenticated;
+grant execute on function public.omr_claim_job (text, int, int) to service_role;
+
+-- ===== supabase/migrations/20260924120000_playalong_corpus_hash_prefers_symbolic.sql =====
+-- Hash lookup: rank a symbolic row (Mutopia / OpenScore / IA MIDI + alignment)
+-- ahead of an OMR row for the same bytes. OMR rows are keyed by the document
+-- era and symbolic rows by '', so the put guard never lets one replace the
+-- other and both can coexist; ordering on the era match alone served the OMR
+-- fallback over the better symbolic analysis. Between OMR rows the era match
+-- still decides. Same body and grants as 20260916140000_playalong_corpus.sql.
+
+create or replace function public.playalong_corpus_get_by_hash (p_hash text, p_engine_version text, p_era text)
+returns setof public.playalong_corpus
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    hit public.playalong_corpus%rowtype;
+begin
+    select c.* into hit
+    from public.playalong_corpus c
+    where c.pdf_sha256 = p_hash
+      and c.engine_version = p_engine_version
+      and c.era in (p_era, '')
+    order by (c.symbolic_source is distinct from 'omr') desc, (c.era = p_era) desc
+    limit 1;
+    if not found then
+        return;
+    end if;
+
+    update public.playalong_corpus c
+    set last_used_at = now(), use_count = c.use_count + 1
+    where c.pdf_sha256 = hit.pdf_sha256
+      and c.engine_version = hit.engine_version
+      and c.era = hit.era
+    returning c.* into hit;
+    return next hit;
+end;
+$$;
+
+revoke all on function public.playalong_corpus_get_by_hash (text, text, text) from public, anon, authenticated;
+grant execute on function public.playalong_corpus_get_by_hash (text, text, text) to service_role;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { AlignmentMap, AnalysisSource, CorpusHit } from '@/features/playback/analysisSource';
 import {
     fetchScoreAnalysisFull,
     fetchScoreAnalysisStatus,
@@ -7,14 +8,17 @@ import {
     loadCachedScoreAnalysis,
     requestScoreAnalysis,
 } from '@/features/playback/scoreAnalysisService';
+import type { CachedScoreAnalysis } from '@/sync/db';
 import type { ScoreAnalysisBroadcast } from '@/sync/wire';
 import type { ScoreData } from '@/types/scoreData';
 
 export type ScoreAnalysisState =
     | { kind: 'unavailable' } // local doc, offline without cache, …
     | { kind: 'none' } // no analysis requested yet
-    | { kind: 'pending' }
-    | { kind: 'processing'; progress: number | null }
+    /** `queued` is set only once the row has been seen still pending a poll interval later — a real wait. */
+    | { kind: 'pending'; queued?: boolean }
+    /** `queued` carries over from a pending that had earned it, so the step strip keeps the stage it drew. */
+    | { kind: 'processing'; progress: number | null; queued?: boolean }
     | {
           kind: 'ready';
           score: ScoreData;
@@ -22,11 +26,42 @@ export type ScoreAnalysisState =
           bpmOverride: number | null;
           /** Which engine produced this, so a stale analysis can offer a re-run. */
           engineVersion: string | null;
+          source?: AnalysisSource;
+          alignmentMap?: AlignmentMap;
+          /** Present when the shared corpus answered — nothing was queued or analyzed for this row. */
+          corpusHit?: CorpusHit;
       }
     | { kind: 'failed'; code: string };
 
+const readyFromCache = (cached: CachedScoreAnalysis & { score: ScoreData }): Extract<ScoreAnalysisState, { kind: 'ready' }> => ({
+    kind: 'ready',
+    score: cached.score,
+    bpmDefault: cached.bpmDefault,
+    bpmOverride: cached.bpmOverride ?? null,
+    engineVersion: cached.engineVersion,
+    ...(cached.source ? { source: cached.source } : {}),
+    ...(cached.alignmentMap ? { alignmentMap: cached.alignmentMap } : {}),
+    ...(cached.corpusHit ? { corpusHit: cached.corpusHit } : {}),
+});
+
 /** Fallback poll while pending/processing — Realtime is primary. */
 const POLL_MS = 30_000;
+
+/**
+ * A pending row is only called "queued" once it has been re-read and found
+ * still pending this long after it was first seen. A worker that claims the
+ * job (or a corpus hit that finishes) inside this window never shows a queue.
+ */
+export const QUEUED_AFTER_MS = 2_000;
+
+const wasQueued = (state: ScoreAnalysisState): boolean =>
+    (state.kind === 'pending' || state.kind === 'processing') && state.queued === true;
+
+const processing = (prev: ScoreAnalysisState, progress: number | null): ScoreAnalysisState => ({
+    kind: 'processing',
+    progress,
+    ...(wasQueued(prev) ? { queued: true } : {}),
+});
 
 /**
  * Lifecycle of a document's play-along analysis: read the existing status on
@@ -59,13 +94,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
             } catch {
                 const cached = await loadCachedScoreAnalysis(docIdNow).catch(() => null);
                 if (cached?.status === 'ready' && cached.score) {
-                    set({
-                        kind: 'ready',
-                        score: cached.score,
-                        bpmDefault: cached.bpmDefault,
-                        bpmOverride: cached.bpmOverride ?? null,
-                        engineVersion: cached.engineVersion,
-                    });
+                    set(readyFromCache({ ...cached, score: cached.score }));
                 } else {
                     set({ kind: 'unavailable' });
                 }
@@ -84,33 +113,24 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                 if (isProcessingStale(status.updatedAt)) {
                     set({ kind: 'failed', code: 'stale' });
                 } else if (status.status === 'processing') {
-                    set({ kind: 'processing', progress: status.progress });
-                } else {
-                    set({ kind: 'pending' });
+                    if (aliveRef.current) {
+                        setState((prev) => processing(prev, status.progress));
+                    }
+                } else if (aliveRef.current) {
+                    // Keep an earned `queued`; a fresh pending starts unproven.
+                    setState((prev) => (prev.kind === 'pending' ? prev : { kind: 'pending' }));
                 }
                 return;
             }
 
             const cached = await loadCachedScoreAnalysis(docIdNow).catch(() => null);
             if (cached?.status === 'ready' && cached.score && cached.fetchedAt >= status.updatedAt) {
-                set({
-                    kind: 'ready',
-                    score: cached.score,
-                    bpmDefault: cached.bpmDefault,
-                    bpmOverride: cached.bpmOverride ?? null,
-                    engineVersion: cached.engineVersion,
-                });
+                set(readyFromCache({ ...cached, score: cached.score }));
                 return;
             }
             const full = await fetchScoreAnalysisFull(docIdNow).catch(() => null);
             if (full?.status === 'ready' && full.score) {
-                set({
-                    kind: 'ready',
-                    score: full.score,
-                    bpmDefault: full.bpmDefault,
-                    bpmOverride: full.bpmOverride ?? null,
-                    engineVersion: full.engineVersion,
-                });
+                set(readyFromCache({ ...full, score: full.score }));
             } else {
                 set({ kind: 'failed', code: 'internal' });
             }
@@ -141,6 +161,23 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         return () => clearInterval(timer);
     }, [inFlight, enabled, docId, applyStatus]);
 
+    // Prove the queue before naming it: re-read the row QUEUED_AFTER_MS after
+    // a pending was first seen, and only a still-pending answer earns `queued`.
+    const unprovenPending = state.kind === 'pending' && state.queued !== true;
+    useEffect(() => {
+        if (!unprovenPending || !enabled) {
+            return;
+        }
+        const timer = setTimeout(async () => {
+            const status = await fetchScoreAnalysisStatus(docId).catch(() => null);
+            if (!aliveRef.current || status?.status !== 'pending' || isProcessingStale(status.updatedAt)) {
+                return;
+            }
+            setState((prev) => (prev.kind === 'pending' ? { kind: 'pending', queued: true } : prev));
+        }, QUEUED_AFTER_MS);
+        return () => clearTimeout(timer);
+    }, [unprovenPending, enabled, docId]);
+
     const generate = useCallback(async () => {
         setState({ kind: 'pending' });
         const result = await requestScoreAnalysis(docId);
@@ -148,6 +185,12 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
             return;
         }
         if (!result.ok && result.code === 'already_running') {
+            return;
+        }
+        if (!result.ok && result.code === 'already_current') {
+            // Worker cannot improve this row — stay on the ready analysis,
+            // do not flash a failure or spend a credit.
+            void applyStatus(docId);
             return;
         }
         // backlog_full — show copy, Generate/Retry remains available via failed UI.
@@ -158,7 +201,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!result.ok) {
             setState({ kind: 'failed', code: result.code ?? 'internal' });
         }
-    }, [docId]);
+    }, [docId, applyStatus]);
 
     const refresh = useCallback(() => {
         void applyStatus(docId);
@@ -172,10 +215,10 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
             }
             switch (msg.status) {
                 case 'pending':
-                    setState({ kind: 'pending' });
+                    setState((prev) => (prev.kind === 'pending' ? prev : { kind: 'pending' }));
                     return;
                 case 'processing':
-                    setState({ kind: 'processing', progress: msg.progress ?? null });
+                    setState((prev) => processing(prev, msg.progress ?? null));
                     return;
                 case 'failed':
                     setState({ kind: 'failed', code: msg.error ?? 'internal' });

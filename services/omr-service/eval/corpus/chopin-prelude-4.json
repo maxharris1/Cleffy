@@ -1,0 +1,46 @@
+{
+    "slug": "chopin-prelude-4",
+    "title": "Chopin — Prelude in E minor, Op. 28 No. 4",
+    "pdf": {
+        "url": "https://www.mutopiaproject.org/ftp/ChopinFF/O28/Chop-28-4/Chop-28-4-let.pdf",
+        "sha256": "82c1e275802774095293f83f5ed38720fd5527afcf8e2b1239c70de1ead4b239",
+        "pages": 1
+    },
+    "reference": {
+        "source": "mutopia",
+        "url": "https://www.mutopiaproject.org/ftp/ChopinFF/O28/Chop-28-4/Chop-28-4.mid",
+        "sha256": "c1d7e05aa4e6e2baeec2e9108402a969c16d5df302b82fd66d110634697f2e3b",
+        "license": "Public Domain (Mutopia, Magnus Lewis-Smith after Peters 1879). reference.sha256 pins the bare Mutopia .mid at reference.url (fetch copies it into the midi dir; there is no archive)."
+    },
+    "movements": [
+        {
+            "name": "Largo",
+            "midi": "Chop-28-4.mid",
+            "meter": {
+                "num": 2,
+                "den": 2
+            },
+            "pickupQuarters": 1,
+            "printedBars": 26,
+            "expectedFifths": -1,
+            "expectedTempo": {
+                "min": 45,
+                "max": 70
+            },
+            "repeatsUnfoldedInMidi": false,
+            "performedBars": 26,
+            "expectedHolds": 2,
+            "expectedExtraNotes": 4
+        }
+    ],
+    "editionNotes": [
+        "This is the deliberate stress entry: the gate is expected to fail it, and the point is that the failure is a number instead of an opinion. Everything the parser finds hard is on one page.",
+        "LilyPond \\tempo 4 = 56 in 2/2, E minor (expectedFifths -1), \\partial 4 pickup (pickupQuarters 1). 25 numbered bars plus the pickup as bar 0 = printedBars 26; no repeats, so performedBars is also 26.",
+        "Two printed fermatas (bar 23 rest and the final bar), so expectedHolds is 2. The hold gate is one-sided — inventing a hold is a wonky pause, missing one still plays the printed grid — so a 0 here is visible in the numbers without failing the time gate.",
+        "Left-hand quarter-note chords move in dense chromatic steps under a slow right hand; \\tuplet 3/2 triplets appear in bars 12 and 18, which is what the 1/12-quarter onset quantum exists for.",
+        "The last two bars are cross-staff (\\change Staff + \\crossStaff), so staff is not hand there. Mutopia track names are the hand oracle.",
+        "Hairpins are engraved as a second spacer voice, and there are acciaccaturas and a turn. Grace notes are ordinary short notes in the MIDI; OMR may drop them.",
+        "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs.",
+        "One printed \\turn. realizeTurn spells it as four or five notes, so the allowance is the upper bound: expectedExtraNotes 4."
+    ]
+}

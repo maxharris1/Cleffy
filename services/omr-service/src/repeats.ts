@@ -9,10 +9,18 @@ import type { MeasureRepeatMarks } from './musicxml.js';
  * per-measure, so a duplicate with the same page/system/x-span sweeps the same
  * printed bar again for free.
  *
- * Scope is repeats and voltas only. D.C./D.S./Coda/Fine are text plus <sound>
- * attributes that Audiveris emits inconsistently or not at all — it produced
- * zero <grace> elements across an entire real score — and the failure costs are
- * asymmetric: a wrong repeat misplaces eight bars, a wrong D.S. reorders pages.
+ * Scope is repeats, voltas, and ONE jump: a D.C. or D.S. with whatever segno,
+ * To Coda, coda and Fine belong to it. Those arrive as often from OCR'd words as
+ * from <sound> attributes, and the failure costs are asymmetric — a wrong repeat
+ * misplaces eight bars, a wrong D.S. reorders pages. So the marks are validated
+ * as a set before a single measure is planned, and anything that does not add up
+ * (a second jump, a D.S. with no segno above it, a coda on the wrong side of the
+ * words that call for it) degrades the WHOLE plan to linear rather than being
+ * patched over. Half-understood structure is the one outcome worse than none.
+ *
+ * The converse matters just as much: a segno, a Fine or a coda sign with no jump
+ * anywhere to send the player back to it is decoration or a misread, and must
+ * cost the score nothing — not even its ordinary repeats.
  */
 
 export interface RepeatPlan {
@@ -20,6 +28,10 @@ export interface RepeatPlan {
     order: number[];
     /** True when the structure could not be resolved and this is just linear. */
     degraded: boolean;
+    /** True when a `:|` was actually retaken, not merely printed. */
+    performsRepeats: boolean;
+    /** True when a D.C./D.S. actually fired. */
+    performsJumps: boolean;
 }
 
 export interface RepeatLimits {
@@ -30,7 +42,202 @@ export interface RepeatLimits {
 const linear = (count: number, degraded: boolean): RepeatPlan => ({
     order: Array.from({ length: count }, (_, i) => i),
     degraded,
+    performsRepeats: false,
+    performsJumps: false,
 });
+
+/** A jump that survived validation: everything the loop needs, already checked. */
+export interface ResolvedJump {
+    /** The measure whose END carries the D.C./D.S. */
+    at: number;
+    kind: 'dc' | 'ds';
+    /** Where the jump lands: the segno, or 0 for a D.C. — the head, pickup and all. */
+    target: number;
+    /** Measure whose END diverts to the coda, on the post-jump pass only. */
+    toCoda?: number;
+    /** Where that diversion lands. */
+    codaTarget?: number;
+    /** Measure whose END ends the performance, on the post-jump pass only. */
+    fine?: number;
+}
+
+const indicesWhere = (marks: readonly MeasureRepeatMarks[], pred: (mark: MeasureRepeatMarks) => boolean): number[] => {
+    const out: number[] = [];
+    for (let i = 0; i < marks.length; i++) {
+        const mark = marks[i];
+        if (mark && pred(mark)) {
+            out.push(i);
+        }
+    }
+    return out;
+};
+
+/**
+ * Read the jump marks as a whole: `null` when there is nothing to perform,
+ * `'invalid'` when there is something we refuse to guess at.
+ *
+ * Multi-jump roadmaps (a D.S. that leads to a second D.C.) are real music but
+ * beyond this version — resolving them needs an ordering the marks alone do not
+ * carry, so they are declined rather than half-performed.
+ */
+export const resolveJump = (marks: readonly MeasureRepeatMarks[]): ResolvedJump | null | 'invalid' => {
+    const jumps = indicesWhere(marks, (m) => !!m.jump);
+    if (jumps.length === 0) {
+        return null;
+    }
+    if (jumps.length > 1) {
+        return 'invalid';
+    }
+    const at = jumps[0]!;
+    const instruction = marks[at]!.jump!;
+
+    const segnos = indicesWhere(marks, (m) => m.segno ?? false);
+    const fines = indicesWhere(marks, (m) => m.fine ?? false);
+    let toCodas = indicesWhere(marks, (m) => m.toCoda ?? false);
+    let codaTargets = indicesWhere(marks, (m) => m.codaTarget ?? false);
+    // A bare 𝄌 says nothing about which of its two roles it is playing.
+    // Engravers print the diversion first and the coda section second, so a
+    // clean pair resolves by position; any other count is a guess we decline.
+    let bare = indicesWhere(marks, (m) => (m.codaGlyph ?? false) && !(m.toCoda ?? false) && !(m.codaTarget ?? false));
+    if (toCodas.length === 0 && codaTargets.length === 0 && bare.length === 2) {
+        toCodas = [bare[0]!];
+        codaTargets = [bare[1]!];
+        bare = [];
+    }
+
+    if (segnos.length > 1 || fines.length > 1 || toCodas.length > 1 || codaTargets.length > 1) {
+        return 'invalid';
+    }
+    if (bare.length > 0 && instruction.al === 'coda') {
+        return 'invalid';
+    }
+
+    let target = 0;
+    if (instruction.kind === 'ds') {
+        const segno = segnos[0];
+        if (segno === undefined) {
+            return 'invalid';
+        }
+        target = segno;
+    }
+    // A jump that would land on or after its own instruction is not a reading of
+    // the page, it is a loop: a segno under its own D.S., or a "D.C." OCR hung
+    // on the head measure, which would replay that measure and nothing else.
+    if (target >= at) {
+        return 'invalid';
+    }
+    const resolved: ResolvedJump = { at, kind: instruction.kind, target };
+
+    // A To Coda / coda pair is itself the second half of the phrase. MusicXML
+    // has no attribute for the words — <sound tocoda>/<sound coda> IS the
+    // instruction — and engravers often let the 𝄌 stand in for "al Coda", so one
+    // clean pair with no Fine to contradict it reads a bare jump that way too.
+    const inferredCoda =
+        instruction.al === null && toCodas.length === 1 && codaTargets.length === 1 && fines.length === 0;
+    if (instruction.al === 'coda' || inferredCoda) {
+        const toCoda = toCodas[0];
+        const codaTarget = codaTargets[0];
+        // The diversion has to lie inside the stretch the jump replays, and the
+        // coda itself after the instruction — that is what makes it a coda.
+        if (toCoda !== undefined && codaTarget !== undefined && toCoda >= target && toCoda < at && codaTarget > at) {
+            return { ...resolved, toCoda, codaTarget };
+        }
+        // Words that say "al Coda" over a pair on the wrong side of them are a
+        // mark set we refuse whole. A pair we only inferred is likelier a stray
+        // 𝄌 sighting beside a plain jump that performs correctly as it stands,
+        // so that one falls back to the plain reading instead.
+        if (instruction.al === 'coda') {
+            return 'invalid';
+        }
+    }
+
+    const fine = fines[0];
+    if (instruction.al === 'fine' && fine === undefined) {
+        return 'invalid';
+    }
+    // A printed Fine binds a bare "D.C." too: that is how much of the literature
+    // writes "D.C. al Fine", leaving the second half of the phrase to the sign —
+    // and it is what a bare jump over BOTH a Fine and a coda pair reads as,
+    // which is why the inference above stands down whenever a Fine is printed.
+    if (fine !== undefined) {
+        // The post-jump pass starts at the target, so a Fine above it is never
+        // reached: that pass would run to the final barline with the "al Fine"
+        // silently dropped. A Fine exactly ON the target is reachable — the bar
+        // is played, then the Fine ends the performance.
+        if (fine >= at || fine < target) {
+            return 'invalid';
+        }
+        return { ...resolved, fine };
+    }
+    return resolved;
+};
+
+/** What a shard's marks say about structure that reaches beyond the shard. */
+export interface StructureSummary {
+    /** A `|:` — or a volta still open — after the last `:|`: its partner is elsewhere. */
+    openForwardAtEnd: boolean;
+    /** A `:|` with no `|:` above it: it returns to a top this range may not hold. */
+    bareBackwardAtStart: boolean;
+    /** A volta bracket the range never closes. */
+    openVoltaAtEnd: boolean;
+    /** Any segno/coda/Fine/D.C./D.S. sighting at all — jumps are global by nature. */
+    hasJumpMarks: boolean;
+}
+
+/**
+ * Structure that cannot be resolved from one shard alone. A repeat straddling a
+ * seam yields a wrong-but-plausible order once the shards are concatenated, and
+ * a jump is worse still: its target may sit in a shard this one never sees, so
+ * ANY jump mark is reported, resolvable-looking or not.
+ */
+export const summarizeStructure = (marks: readonly MeasureRepeatMarks[]): StructureSummary => {
+    let firstForward = -1;
+    let firstBackward = -1;
+    let lastBackward = -1;
+    let voltaOpen = false;
+    let hasJumpMarks = false;
+    for (let i = 0; i < marks.length; i++) {
+        const mark = marks[i];
+        if (!mark) {
+            continue;
+        }
+        if (mark.repeatForward && firstForward < 0) {
+            firstForward = i;
+        }
+        if (mark.repeatBackward) {
+            if (firstBackward < 0) {
+                firstBackward = i;
+            }
+            lastBackward = i;
+        }
+        if (mark.endingStart) {
+            voltaOpen = true;
+        }
+        if (mark.endingStop) {
+            voltaOpen = false;
+        }
+        if (mark.segno || mark.codaTarget || mark.toCoda || mark.codaGlyph || mark.fine || mark.jump) {
+            hasJumpMarks = true;
+        }
+    }
+
+    let openForwardAtEnd = false;
+    for (let i = lastBackward + 1; i < marks.length && !openForwardAtEnd; i++) {
+        const mark = marks[i];
+        if (!mark) {
+            continue;
+        }
+        const unclosedVolta = !!mark.endingStart && !marks.slice(i).some((later) => later.endingStop);
+        openForwardAtEnd = mark.repeatForward || unclosedVolta;
+    }
+
+    return {
+        openForwardAtEnd,
+        bareBackwardAtStart: firstBackward >= 0 && (firstForward < 0 || firstBackward < firstForward),
+        openVoltaAtEnd: voltaOpen,
+        hasJumpMarks,
+    };
+};
 
 /**
  * One past the end of the volta bracket beginning at `from`.
@@ -47,31 +254,106 @@ const pastEndingBlock = (marks: readonly MeasureRepeatMarks[], from: number): nu
     return i + 1;
 };
 
+/** True when some bracket in the group starting at `from` belongs to `pass`. */
+const endingGroupTakesPass = (marks: readonly MeasureRepeatMarks[], from: number, pass: number): boolean => {
+    let i = from;
+    while (i < marks.length) {
+        const brackets = marks[i]?.endingStart;
+        if (!brackets) {
+            return false;
+        }
+        if (brackets.includes(pass)) {
+            return true;
+        }
+        const next = pastEndingBlock(marks, i);
+        if (next <= i) {
+            return false;
+        }
+        i = next;
+    }
+    return false;
+};
+
+/**
+ * The total number of passes the repeat governing `from` makes.
+ *
+ * A post-jump traversal takes no repeats, but it is still the LAST pass, so its
+ * voltas are the ones the final pass would have taken. Sections with brackets
+ * but no `:|` at all are read as an ordinary two-pass repeat.
+ */
+const finalPassOf = (marks: readonly MeasureRepeatMarks[], from: number): number => {
+    let passes = 0;
+    for (let i = from; i < marks.length; i++) {
+        const mark = marks[i];
+        if (!mark) {
+            break;
+        }
+        if (i > from && mark.repeatForward) {
+            break;
+        }
+        if (mark.repeatBackward) {
+            passes = Math.max(passes, mark.repeatTimes);
+        }
+    }
+    return passes > 0 ? passes : 2;
+};
+
+/** The forward repeat a jump target lands under, so its voltas read correctly. */
+const forwardGoverning = (marks: readonly MeasureRepeatMarks[], upTo: number, fallback: number): number => {
+    for (let i = upTo; i >= 0; i--) {
+        if (marks[i]?.repeatForward) {
+            return i;
+        }
+    }
+    return fallback;
+};
+
 export const planRepeats = (
     marks: readonly MeasureRepeatMarks[],
     limits: RepeatLimits,
     isPickup: (index: number) => boolean = () => false,
+    /**
+     * True when the bar at this index is short by EXACTLY the anacrusis — the
+     * engraver's own proof that the two halves make one bar, so a repeat sitting
+     * on it retakes from the anacrusis. See the retake below.
+     */
+    completesPickup: (index: number) => boolean = () => false,
 ): RepeatPlan => {
     const n = marks.length;
     if (n === 0) {
-        return { order: [], degraded: false };
+        return linear(0, false);
     }
-    if (!marks.some((m) => m.repeatForward || m.repeatBackward)) {
+    const jump = resolveJump(marks);
+    if (jump === 'invalid') {
+        return linear(n, true);
+    }
+    if (jump === null && !marks.some((m) => m.repeatForward || m.repeatBackward)) {
         return linear(n, false);
     }
 
     // A backward repeat with no forward one returns to the top — but not into a
-    // pickup, which is played once on the way in and never again.
+    // pickup, which is played once on the way in and never again. A D.C. is the
+    // exception: "da capo" is the head of the piece, pickup included.
     let firstReal = 0;
     while (firstReal < n && isPickup(firstReal)) {
         firstReal += 1;
     }
+    const top = Math.min(firstReal, n - 1);
 
-    let lastForward = Math.min(firstReal, n - 1);
+    let lastForward = top;
     const passOf = new Map<number, number>();
     const order: number[] = [];
     let i = 0;
-    const guard = 4 * n + 64;
+    let afterJump = false;
+    let performsRepeats = false;
+    // A bare :| starts a new section after its final pass. Keep this separate
+    // from the repeat pass while a volta is being skipped: the next ending in
+    // the same repeat still needs the old pass number, but a later bare :| must
+    // not reuse the exhausted section's anchor.
+    let resetBareSectionAfterEnding = false;
+    let performsJumps = false;
+    // A jump buys the performance up to one whole extra traversal of the score.
+    const guard = 6 * n + 64;
 
     for (let steps = 0; ; steps++) {
         if (i >= n) {
@@ -95,10 +377,22 @@ export const planRepeats = (
         }
 
         const pass = passOf.get(lastForward) ?? 1;
-        if (mark.endingStart && !mark.endingStart.includes(pass)) {
+        const voltaPass = afterJump ? finalPassOf(marks, lastForward) : pass;
+        if (mark.endingStart && !mark.endingStart.includes(voltaPass)) {
+            if (afterJump && !endingGroupTakesPass(marks, i, voltaPass)) {
+                // Nothing here belongs to the final pass, so the brackets are
+                // not the shape we took them for. Say so instead of guessing.
+                return linear(n, true);
+            }
             const skipTo = pastEndingBlock(marks, i);
             if (skipTo <= i) {
                 return linear(n, true);
+            }
+            if (!afterJump && marks.slice(i, skipTo).some((candidate) => candidate?.repeatBackward)) {
+                // The first ending often carries the only :|. On the next
+                // pass it is skipped, so the reset cannot happen at that
+                // backward mark; defer it until the matching ending closes.
+                resetBareSectionAfterEnding = true;
             }
             i = skipTo;
             continue;
@@ -106,10 +400,53 @@ export const planRepeats = (
 
         order.push(i);
 
-        if (mark.repeatBackward && pass < mark.repeatTimes) {
-            passOf.set(lastForward, pass + 1);
-            i = lastForward;
-            continue;
+        if (!afterJump) {
+            // The repeat is exhausted before the jump fires: a `:|` sharing the
+            // bar with a D.C. is retaken first, and the D.C. waits its turn.
+            if (mark.repeatBackward && pass < mark.repeatTimes) {
+                passOf.set(lastForward, pass + 1);
+                performsRepeats = true;
+                // When the opening section repeats and the music began with an
+                // anacrusis, the engraver shortens the bar before the repeat
+                // sign by exactly that anacrusis, and the retake starts at the
+                // anacrusis — the two halves are one bar (Gould, Behind Bars).
+                // That short bar is the printed proof, and without it the
+                // default stands: the pickup is played once on the way in. A
+                // printed `|:` is what a retake goes back to, so a short bar
+                // under one says nothing about the head of the piece.
+                const retakesHead = lastForward === top && marks[lastForward]?.repeatForward !== true;
+                i = retakesHead && completesPickup(i) ? 0 : lastForward;
+                continue;
+            }
+            if (jump && i === jump.at) {
+                afterJump = true;
+                performsJumps = true;
+                i = jump.target;
+                lastForward = forwardGoverning(marks, jump.target, top);
+                continue;
+            }
+        } else if (jump) {
+            if (i === jump.fine) {
+                break;
+            }
+            if (i === jump.toCoda && jump.codaTarget !== undefined) {
+                i = jump.codaTarget;
+                continue;
+            }
+        }
+
+        if (!afterJump && resetBareSectionAfterEnding && mark.endingStop) {
+            // Keep the current volta's pass for the bar just emitted, then
+            // make the following printed section a fresh bare-repeat section.
+            lastForward = i + 1;
+            passOf.set(lastForward, 1);
+            resetBareSectionAfterEnding = false;
+        } else if (!afterJump && mark.repeatBackward && pass >= mark.repeatTimes) {
+            // An exhausted bare backward repeat must not lend its old anchor
+            // or pass counter to a later bare backward repeat. An explicit
+            // |: encountered later will replace this anchor as usual.
+            lastForward = i + 1;
+            passOf.set(lastForward, 1);
         }
         i += 1;
     }
@@ -118,10 +455,12 @@ export const planRepeats = (
         return linear(n, true);
     }
     // A volta whose pass never matched can leave bars unplayed; that is a
-    // structure we did not understand, not a performance decision.
+    // structure we did not understand, not a performance decision. Every legal
+    // jump form still performs each printed bar at least once on the way to the
+    // instruction, so this stays a sound test with jumps in play.
     const played = new Set(order);
     const unplayed = marks.some((_, index) => !played.has(index));
-    return { order, degraded: unplayed };
+    return { order, degraded: unplayed, performsRepeats, performsJumps };
 };
 
 /** The tick-keyed content unrolling has to remap, alongside measures. */
@@ -133,6 +472,7 @@ export interface UnrollableScore {
     clefs?: Array<{ tick: number }>;
     tempos?: Array<{ tick: number }>;
     holds?: Array<{ tick: number }>;
+    pedals?: Array<{ tick: number }>;
     totalTicks: number;
 }
 
@@ -142,6 +482,8 @@ interface Segment {
     /** Where the printed bar sits in the original timeline. */
     srcTick: number;
     dTicks: number;
+    /** How long it lasts in the performance: `dTicks` less any padding a retake drops. */
+    span: number;
     /** Where it sits in the performed timeline. */
     destTick: number;
     /** True when the PREVIOUS segment is not this one's printed predecessor. */
@@ -152,9 +494,26 @@ interface Segment {
  * State events (time/key/clef/tempo) describe what is in force from a tick
  * onward, so they cannot simply be copied: a jump can land in the middle of a
  * span. Walk the performance and re-emit whenever the value in force at a
- * segment's start differs from what the performed timeline last said.
+ * segment's start differs from what the performed timeline last said. Events
+ * that carry a staff (clefs) are one such stream per staff: both staves' clefs
+ * sit on the same tick, and each is in force on its own staff.
  */
 const remapStateEvents = <T extends { tick: number }>(events: readonly T[], segments: readonly Segment[]): T[] => {
+    const streams = new Map<unknown, T[]>();
+    for (const e of events) {
+        const staff = 'staff' in e ? e.staff : undefined;
+        const stream = streams.get(staff) ?? [];
+        stream.push(e);
+        streams.set(staff, stream);
+    }
+    if (streams.size <= 1) {
+        return remapStream(events, segments);
+    }
+    return [...streams.values()].flatMap((stream) => remapStream(stream, segments)).sort((a, b) => a.tick - b.tick);
+};
+
+/** {@link remapStateEvents} for one stream, where the latest event is the one in force. */
+const remapStream = <T extends { tick: number }>(events: readonly T[], segments: readonly Segment[]): T[] => {
     if (events.length === 0) {
         return [];
     }
@@ -181,7 +540,7 @@ const remapStateEvents = <T extends { tick: number }>(events: readonly T[], segm
         // Anything changing strictly inside this bar keeps its offset.
         for (const e of sorted) {
             if (e.tick > seg.srcTick && e.tick < seg.srcTick + seg.dTicks) {
-                out.push({ ...e, tick: seg.destTick + (e.tick - seg.srcTick) });
+                out.push({ ...e, tick: seg.destTick + Math.min(e.tick - seg.srcTick, seg.span) });
                 emitted = e;
             }
         }
@@ -193,8 +552,17 @@ const remapStateEvents = <T extends { tick: number }>(events: readonly T[], segm
  * Rebuild a score in performance order. Measures are cloned with their geometry
  * intact and given new ticks, which is what makes the playhead sweep the same
  * printed bar twice for free.
+ *
+ * `retakePad` is the padding to drop from a bar the performance leaves straight
+ * for the head of the score: the short bar an anacrusis completes was padded to
+ * a full bar on the page, and a retake from the anacrusis must follow its last
+ * note directly, or every retake carries a rest the length of the pickup.
  */
-export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readonly number[]): S => {
+export const unrollRepeats = <S extends UnrollableScore>(
+    score: S,
+    order: readonly number[],
+    retakePad: (index: number) => number = () => 0,
+): S => {
     const segments: Segment[] = [];
     // The performance starts where the score starts, which is not necessarily
     // where its first PERFORMED bar sat (and preserves the tick offset that
@@ -206,20 +574,24 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
         if (!measure) {
             continue;
         }
+        const pad = order[s + 1] === 0 ? Math.max(0, retakePad(src)) : 0;
+        const span = Math.max(1, measure.dTicks - pad);
         segments.push({
             src,
             srcTick: measure.tick,
             dTicks: measure.dTicks,
+            span,
             destTick,
             seamBefore: s > 0 && order[s - 1] !== src - 1,
         });
-        destTick += measure.dTicks;
+        destTick += span;
     }
     const totalTicks = Math.max(1, destTick);
 
     const measures = segments.map((seg) => ({
         ...score.measures[seg.src]!,
         tick: seg.destTick,
+        dTicks: seg.span,
         srcIndex: score.measures[seg.src]!.srcIndex ?? seg.src,
     }));
 
@@ -237,21 +609,41 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
             // segment really is what follows it on the page. Clipping every
             // seam would truncate legitimately long ties inside a run.
             if (next && next.seamBefore) {
-                d = Math.min(d, seg.dTicks - offset);
+                d = Math.min(d, seg.span - offset);
             }
             notes.push({ ...note, t: seg.destTick + offset, d: Math.max(1, d) });
         }
     }
 
-    const point = <T extends { tick: number }>(events: readonly T[] | undefined): T[] | undefined => {
+    const point = <T extends { tick: number; k?: 'down' | 'up' }>(
+        events: readonly T[] | undefined,
+    ): T[] | undefined => {
         if (!events) {
             return undefined;
         }
         const out: T[] = [];
-        for (const seg of segments) {
+        for (const [s, seg] of segments.entries()) {
+            // Whether the bar's opening bar line was just performed as the end
+            // of its page predecessor; if not, nothing has claimed it yet.
+            const entered = s === 0 || seg.seamBefore;
             for (const e of events) {
-                if (e.tick >= seg.srcTick && e.tick < seg.srcTick + seg.dTicks) {
-                    out.push({ ...e, tick: seg.destTick + (e.tick - seg.srcTick) });
+                // A pedal release engraved on a bar line — some engravers put
+                // the stop at the top of the next measure — damps the music
+                // before it, so an 'up' takes the left-open, right-closed bar.
+                // Handing it to the bar after would let a performed repeat
+                // replay the span with the release stranded past the jump. A
+                // bar reached any other way than from its page predecessor
+                // claims its opening bar line too: the performance's head (OMR
+                // losing the start of a pedal line leaves an orphan release on
+                // tick 0), and a volta, coda or retake, where the release of a
+                // re-catch on the downbeat must still come before its 'down'.
+                const inSeg =
+                    e.k === 'up'
+                        ? (e.tick > seg.srcTick || (e.tick === seg.srcTick && entered)) &&
+                          e.tick <= seg.srcTick + seg.dTicks
+                        : e.tick >= seg.srcTick && e.tick < seg.srcTick + seg.dTicks;
+                if (inSeg) {
+                    out.push({ ...e, tick: seg.destTick + Math.min(e.tick - seg.srcTick, seg.span) });
                 }
             }
         }
@@ -267,6 +659,10 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
         ...(score.clefs ? { clefs: remapStateEvents(score.clefs, segments) } : {}),
         ...(score.tempos ? { tempos: remapStateEvents(score.tempos, segments) } : {}),
         ...(score.holds ? { holds: point(score.holds) } : {}),
+        // Pedal edges are moments, not state in force: remapping them as state
+        // would collapse a re-catch pair and re-emit an edge the player already
+        // passed. `point` keeps both halves of a pair, in their engraved order.
+        ...(score.pedals ? { pedals: point(score.pedals) } : {}),
         totalTicks,
     };
 };
