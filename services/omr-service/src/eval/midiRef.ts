@@ -217,13 +217,21 @@ const parseSmf = (buf: Buffer): { tpq: number; tracks: ReturnType<typeof parseTr
     return { tpq, tracks };
 };
 
+const RH_TRACK_NAMES = new Set(['up', 'upper', 'treble', 'rh', 'right']);
+const LH_TRACK_NAMES = new Set(['down', 'lower', 'bass', 'lh', 'left']);
+
+/**
+ * Hand from the track name. LilyPond names a MIDI track `<staff>:<voice>`
+ * ('upper:', 'lower:2', 'down:VoiceI'), so only the staff part before the
+ * colon is matched. Anything else ('one:', 'two:') falls back to track order.
+ */
 const handOf = (tracks: ReturnType<typeof parseTrack>[]): Array<RefHand | null> => {
     const named = tracks.map((track) => {
-        const lower = track.name.toLowerCase();
-        if (lower === 'up' || lower === 'treble' || lower === 'rh') {
+        const staff = (track.name.split(':')[0] ?? '').trim().toLowerCase();
+        if (RH_TRACK_NAMES.has(staff)) {
             return 0 as const;
         }
-        if (lower === 'down' || lower === 'bass' || lower === 'lh') {
+        if (LH_TRACK_NAMES.has(staff)) {
             return 1 as const;
         }
         return null;
@@ -300,9 +308,7 @@ export const notesFromMidi = (buf: Buffer, movement: CorpusMovement): RefNote[] 
     const { tpq, tracks } = parseSmf(buf);
     const hands = handOf(tracks);
     const beats = (movement.meter.num * 4) / movement.meter.den;
-    const partials = new Map(
-        movement.partialBars.map((bar) => [bar.bar, Math.round(bar.quarters * tpq)] as const),
-    );
+    const partials = new Map(movement.partialBars.map((bar) => [bar.bar, Math.round(bar.quarters * tpq)] as const));
     const out: RefNote[] = [];
     tracks.forEach((track, i) => {
         const hand = hands[i];

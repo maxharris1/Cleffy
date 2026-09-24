@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createWriteStream, existsSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -6,6 +7,7 @@ import { promisify } from 'node:util';
 
 import { PLAY_ALONG_AUDIVERIS_OPTIONS, parseExtraOpts } from '../audiveris.js';
 import { buildScoreData } from '../buildScoreData.js';
+import { DEFAULT_ERA, eraOfTitle, type Era } from '../era.js';
 import { ENGINE_VERSION } from '../job.js';
 import { parseMxlFiles } from '../musicxml.js';
 import { parseOmrGeometry } from '../omrGeometry.js';
@@ -60,7 +62,39 @@ export const parseScoreJson = (raw: unknown): ScoreData => {
     return parsed.data;
 };
 
-export const fromArtifacts = async (dir: string, source: CandidateSource = 'artifacts'): Promise<Candidate> => {
+/**
+ * The era production would play this piece in. Production reads it from the
+ * document title's IMSLP "(Last, First)" suffix (era.ts `eraOfTitle`). Corpus
+ * titles lead with the composer instead ("Bach — Invention 1", "Petzold / Bach
+ * — Menuet", "Bach (attrib.) — Air"), so the last named composer is moved into
+ * that suffix and the same helper decides. A title without " — " is taken as a
+ * document title as-is.
+ */
+export const eraOfCorpusTitle = (title: string): Era => {
+    const dash = title.indexOf(' — ');
+    if (dash < 0) {
+        return eraOfTitle(title);
+    }
+    const composers = title
+        .slice(0, dash)
+        .replace(/\([^()]*\)/g, '')
+        .split('/')
+        .map((name) => name.trim())
+        .filter(Boolean);
+    const surname = composers[composers.length - 1];
+    return surname ? eraOfTitle(`${title} (${surname})`) : DEFAULT_ERA;
+};
+
+/**
+ * Parse and build exactly as job.ts `parseRangeArtifacts` does, era included:
+ * the era changes how ornaments are spelled (a Baroque prall is a four-note
+ * Pralltriller starting above) and how an unmarked score is pedalled.
+ */
+export const fromArtifacts = async (
+    dir: string,
+    source: CandidateSource = 'artifacts',
+    era: Era = DEFAULT_ERA,
+): Promise<Candidate> => {
     const files = walkFiles(dir);
     const mxl = files.filter((f) => f.toLowerCase().endsWith('.mxl')).sort();
     const omr = files.find((f) => f.toLowerCase().endsWith('.omr')) ?? null;
@@ -68,9 +102,9 @@ export const fromArtifacts = async (dir: string, source: CandidateSource = 'arti
         throw new Error(`no .mxl under ${dir}`);
     }
     const buffers = await Promise.all(mxl.map((f) => readFile(f)));
-    const musical = parseMxlFiles(buffers);
+    const musical = parseMxlFiles(buffers, undefined, { era });
     const geometry = omr ? parseOmrGeometry(await readFile(omr)) : null;
-    const score = buildScoreData(musical, geometry);
+    const score = buildScoreData(musical, geometry, { era });
     return {
         score,
         source,
@@ -135,14 +169,24 @@ export const readAudiverisVersion = async (): Promise<string> => {
     }
 };
 
-const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath: string): Promise<void> => {
-    await mkdir(destDir, { recursive: true });
-    const container = omrContainer();
-    const remotePdf = `/tmp/omr-eval-input.pdf`;
-    const remoteOut = `/tmp/omr-eval-out`;
+/**
+ * A per-run work directory inside the shared container. Two eval processes can
+ * export at once (bench in one shell, shootout in another); fixed paths would
+ * let one overwrite the other's input mid-run and be cached under the wrong
+ * PDF's key. The PDF keeps its fixed basename because Audiveris names its
+ * exports after it, and the artifact hash covers those names.
+ */
+const containerWorkDir = (): string => `/tmp/omr-eval-${process.pid}-${randomUUID()}`;
+
+const exportInContainer = async (
+    container: string,
+    pdfPath: string,
+    remotePdf: string,
+    remoteOut: string,
+    destDir: string,
+    logPath: string,
+): Promise<void> => {
     await execFileAsync('docker', ['cp', pdfPath, `${container}:${remotePdf}`]);
-    await dockerExec(container, ['rm', '-rf', remoteOut]);
-    await dockerExec(container, ['mkdir', '-p', remoteOut]);
 
     const args = [
         'exec',
@@ -173,7 +217,7 @@ const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath
         });
     });
 
-    const { stdout } = await dockerExec(container, ['sh', '-c', `find ${remoteOut} -type f`]);
+    const { stdout } = await dockerExec(container, ['find', remoteOut, '-type', 'f']);
     const remotes = stdout
         .split('\n')
         .map((s) => s.trim())
@@ -187,13 +231,29 @@ const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath
     }
 };
 
+const runAudiverisInContainer = async (pdfPath: string, destDir: string, logPath: string): Promise<void> => {
+    await mkdir(destDir, { recursive: true });
+    const container = omrContainer();
+    const remoteDir = containerWorkDir();
+    const remotePdf = `${remoteDir}/omr-eval-input.pdf`;
+    const remoteOut = `${remoteDir}/out`;
+    await dockerExec(container, ['mkdir', '-p', remoteOut]);
+    try {
+        await exportInContainer(container, pdfPath, remotePdf, remoteOut, destDir, logPath);
+    } finally {
+        await dockerExec(container, ['rm', '-rf', remoteDir]).catch(() => undefined);
+    }
+};
+
 let runAudiverisImpl: RunAudiveris = runAudiverisInContainer;
 
 /** Test-only process seam; production always uses Docker and the local exporter. */
-export const setCandidateRuntimeForTests = (runtime: {
-    dockerExec?: DockerExec;
-    runAudiveris?: RunAudiveris;
-} | null): void => {
+export const setCandidateRuntimeForTests = (
+    runtime: {
+        dockerExec?: DockerExec;
+        runAudiveris?: RunAudiveris;
+    } | null,
+): void => {
     dockerExecImpl = runtime?.dockerExec ?? defaultDockerExec;
     runAudiverisImpl = runtime?.runAudiveris ?? runAudiverisInContainer;
 };
@@ -235,7 +295,7 @@ const cacheReady = async (dir: string, pdfSha: string, options: string): Promise
     walkFiles(dir).some((f) => f.toLowerCase().endsWith('.mxl')) &&
     (await cacheMetaMatches(dir, pdfSha, options));
 
-export const fromPdf = async (pdfPath: string, force = false): Promise<Candidate> => {
+export const fromPdf = async (pdfPath: string, force = false, era: Era = DEFAULT_ERA): Promise<Candidate> => {
     const pdfSha = sha256File(pdfPath);
     const options = optionsFingerprint();
     const dest = join(artifactsCacheDir(), artifactCacheKey(pdfSha, options));
@@ -261,7 +321,7 @@ export const fromPdf = async (pdfPath: string, force = false): Promise<Candidate
             }),
         );
     }
-    const candidate = await fromArtifacts(dest, 'pdf');
+    const candidate = await fromArtifacts(dest, 'pdf', era);
     return {
         ...candidate,
         engineVersion: ENGINE_VERSION,

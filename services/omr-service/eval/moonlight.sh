@@ -10,6 +10,8 @@
 #   EVAL_DOCUMENT_ID=<uuid> npm run eval:moonlight   # local Postgres, UUID required
 #
 # Further arguments are passed to compareToReference.ts (--gate, --json, --record-baseline).
+# Empty arrays expand as ${a[@]+"${a[@]}"}: bash < 4.4 (macOS /bin/bash 3.2)
+# treats a bare "${a[@]}" of an empty array as unbound under set -u.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -53,15 +55,18 @@ if [ "${#score_args[@]}" -eq 0 ]; then
         echo "EVAL_DOCUMENT_ID is not a UUID" >&2
         exit 2
     fi
+    # psql interpolates :'doc_id' only in input it reads itself, never in a -c
+    # string, so the query goes in on stdin.
     query="select sa.score::text from public.score_analyses sa
            where sa.status = 'ready' and sa.score is not null and sa.document_id = :'doc_id'::uuid
            order by sa.updated_at desc limit 1"
-    score_json="$(docker exec "$DB_CONTAINER" psql -U postgres -d postgres -At -v doc_id="$EVAL_DOCUMENT_ID" -c "$query")"
+    score_json="$(printf '%s\n' "$query" |
+        docker exec -i "$DB_CONTAINER" psql -U postgres -d postgres -At -v ON_ERROR_STOP=1 -v doc_id="$EVAL_DOCUMENT_ID")"
     if [ -z "$score_json" ]; then
         echo "no ready analysis for $EVAL_DOCUMENT_ID in $DB_CONTAINER (or pass --score / --dir)" >&2
         exit 2
     fi
-    printf '%s' "$score_json" | npx tsx eval/compareToReference.ts --score - "${passthrough[@]}"
+    printf '%s' "$score_json" | npx tsx eval/compareToReference.ts --score - ${passthrough[@]+"${passthrough[@]}"}
 else
-    npx tsx eval/compareToReference.ts "${score_args[@]}" "${passthrough[@]}"
+    npx tsx eval/compareToReference.ts "${score_args[@]}" ${passthrough[@]+"${passthrough[@]}"}
 fi

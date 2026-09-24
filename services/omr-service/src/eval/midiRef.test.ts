@@ -48,15 +48,7 @@ describe('midiRef', () => {
     it('parses running status and track names', () => {
         const tpq = 96;
         const buf = smf(tpq, [
-            track([
-                ...nameEvent('up'),
-                ...on(0, 60),
-                48,
-                62,
-                80,
-                ...off(48, 60),
-                ...off(0, 62),
-            ]),
+            track([...nameEvent('up'), ...on(0, 60), 48, 62, 80, ...off(48, 60), ...off(0, 62)]),
             track([...nameEvent('down'), ...on(0, 48), ...off(tpq, 48)]),
         ]);
         const parsed = parseSmfForTest(buf);
@@ -70,16 +62,35 @@ describe('midiRef', () => {
         ]);
     });
 
+    it('reads hands from Mutopia track names even when the left hand is listed first', () => {
+        // wtk1-prelude1's real track order: control, 'lower:2', 'upper:'.
+        const buf = smf(96, [
+            track([...nameEvent('control track')]),
+            track([...nameEvent('lower:2'), ...on(0, 48), ...off(96, 48)]),
+            track([...nameEvent('upper:'), ...on(0, 72), ...off(96, 72)]),
+        ]);
+        expect(parseSmfForTest(buf).notes).toEqual([
+            { tick: 0, dur: 96, pitch: 48, hand: 1 },
+            { tick: 0, dur: 96, pitch: 72, hand: 0 },
+        ]);
+        for (const [rh, lh] of [
+            ['rh:', 'lh:'],
+            ['treble:', 'bass:'],
+            ['up:', 'down:VoiceI'],
+            ['upper', 'lower'],
+        ] as const) {
+            const swapped = smf(96, [
+                track([...nameEvent(lh), ...on(0, 48), ...off(96, 48)]),
+                track([...nameEvent(rh), ...on(0, 72), ...off(96, 72)]),
+            ]);
+            expect(parseSmfForTest(swapped).notes.map((n) => n.hand)).toEqual([1, 0]);
+        }
+    });
+
     it('places a pickup note in bar 0 and the next beat in bar 1', () => {
         const tpq = 480;
         const buf = smf(tpq, [
-            track([
-                ...nameEvent('up'),
-                ...on(0, 72),
-                ...off(tpq, 72),
-                ...on(0, 74),
-                ...off(tpq * 3, 74),
-            ]),
+            track([...nameEvent('up'), ...on(0, 72), ...off(tpq, 72), ...on(0, 74), ...off(tpq * 3, 74)]),
         ]);
         const notes = notesFromMidi(buf, MOVEMENT);
         expect(notes).toHaveLength(2);

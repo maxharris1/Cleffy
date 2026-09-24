@@ -4,10 +4,12 @@ import { dirname, join, resolve } from 'node:path';
 
 import { createClient } from '@supabase/supabase-js';
 
+import { eraOfTitle } from '../era.js';
 import { TICKS_PER_QUARTER, type ScoreData } from '../scoreData.js';
 import {
     DOCUMENT_ID_RE,
     assertDocumentReady,
+    eraOfCorpusTitle,
     fromPdf,
     fromScoreFile,
     parseScoreJson,
@@ -72,8 +74,7 @@ const repoRoot = (): string => resolve(packageRoot(), '..', '..');
 
 export const shootoutPdfPath = (slug: string): string => join(downloadsDir(), `shootout-${slug}.pdf`);
 
-export const shootoutSideDir = (slug: string, side: ShootoutSide): string =>
-    join(resultsDir(), `${slug}-${side}`);
+export const shootoutSideDir = (slug: string, side: ShootoutSide): string => join(resultsDir(), `${slug}-${side}`);
 
 export const shootoutScorePath = (slug: string, side: ShootoutSide): string =>
     join(shootoutSideDir(slug, side), 'score.json');
@@ -93,10 +94,7 @@ export const parseEnvFile = (contents: string): Record<string, string> => {
         }
         const key = line.slice(0, eq).trim();
         let value = line.slice(eq + 1).trim();
-        if (
-            (value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))
-        ) {
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
             value = value.slice(1, -1);
         }
         out[key] = value;
@@ -262,9 +260,7 @@ export const fetchProdShootout = async (entry: CorpusEntry, documentId: string):
     await mkdir(dirname(pdfPath), { recursive: true });
     await writeFile(pdfPath, pdfBuf);
 
-    const parsed = parseScoreJson(
-        typeof analysis.score === 'string' ? JSON.parse(analysis.score) : analysis.score,
-    );
+    const parsed = parseScoreJson(typeof analysis.score === 'string' ? JSON.parse(analysis.score) : analysis.score);
     const engineVersion = typeof analysis.engine_version === 'string' ? analysis.engine_version : null;
     const dest = shootoutSideDir(entry.slug, 'prod');
     await mkdir(dest, { recursive: true });
@@ -310,7 +306,9 @@ export const runLocalShootout = async (entry: CorpusEntry, forceAudiveris: boole
                 `Run shootout fetch first.`,
         );
     }
-    const candidate = await fromPdf(pdfPath, forceAudiveris);
+    // Same era as the prod side: production resolved it from this document's title.
+    const era = prodMeta.title ? eraOfTitle(prodMeta.title) : eraOfCorpusTitle(entry.title);
+    const candidate = await fromPdf(pdfPath, forceAudiveris, era);
     const dest = shootoutSideDir(entry.slug, 'local');
     await mkdir(dest, { recursive: true });
     await writeFile(join(dest, 'score.json'), `${JSON.stringify(candidate.score)}\n`);
@@ -330,11 +328,7 @@ export const runLocalShootout = async (entry: CorpusEntry, forceAudiveris: boole
     return dest;
 };
 
-const scoreCandidate = async (
-    entry: CorpusEntry,
-    candidate: Candidate,
-    midiDir: string,
-): Promise<EvalRecord> => {
+const scoreCandidate = async (entry: CorpusEntry, candidate: Candidate, midiDir: string): Promise<EvalRecord> => {
     const refs = [];
     for (const movement of entry.movements) {
         const buf = await readFile(midiPath({ pdfPath: null, midiDir }, movement.midi));

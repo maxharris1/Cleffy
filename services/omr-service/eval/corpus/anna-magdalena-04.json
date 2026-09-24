@@ -29,13 +29,13 @@
             },
             "repeatsUnfoldedInMidi": false,
             "performedBars": 64,
-            "expectedExtraNotes": 10
+            "expectedExtraNotes": 11
         }
     ],
     "editionNotes": [
         "LilyPond \\tempo 4 = 140 in 3/4, G major. Two \\repeat volta 2 blocks of 16 bars (printed 32; performed 64). Mutopia MIDI does not unfold them.",
         "Attributed to Christian Petzold; Mutopia still files it under BachJS BWV Anh. 114.",
         "pdf.sha256 pins the Mutopia letter PDF (1 page). Do not embed document UUIDs.",
-        "Five printed ornament signs (1 \\prall + 4 \\mordent). Cleffy realizes each as three notes (src/ornaments.ts realizeMordent) while LilyPond's MIDI leaves them as the plain principal, so a correct reading adds 2 notes per sign: expectedExtraNotes 10."
+        "Five printed ornament signs (1 \\prall + 4 \\mordent). The piece is scored in the baroque era (as production resolves a Bach title), so Cleffy realizes each \\mordent as three notes (src/ornaments.ts realizeMordent, +2) and the \\prall as a four-note Pralltriller from above (realizePralltriller, +3), while LilyPond's MIDI leaves them as the plain principal: expectedExtraNotes 4*2 + 3 = 11."
     ]
 }

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { ENGINE_VERSION } from '../job.js';
-import { fromPdf, optionsFingerprint, type Candidate } from './candidate.js';
+import { eraOfCorpusTitle, fromPdf, optionsFingerprint, type Candidate } from './candidate.js';
 import { compareScore, type EvalResult } from './compare.js';
 import { fetchCorpus, midiPath } from './fetch.js';
 import { loadCorpusEntry, type CorpusEntry } from './manifest.js';
@@ -115,7 +115,7 @@ export const scoreOnePiece = async (
             `${slug}: the pinned PDF is not available. Fetch it by hand into eval/cache/downloads/${slug}.pdf`,
         );
     }
-    const candidate = await fromPdf(fetched.pdfPath, options.forceAudiveris);
+    const candidate = await fromPdf(fetched.pdfPath, options.forceAudiveris, eraOfCorpusTitle(entry.title));
     const refs = await loadRefs(entry, fetched.midiDir);
     const result = compareScore(candidate.score, entry, refs, segmentMovements(candidate.score, entry));
     return { entry, candidate, result, verdict: playAlongGate(result, options.limits) };
