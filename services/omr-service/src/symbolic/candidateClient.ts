@@ -1,6 +1,8 @@
+import { basename } from 'node:path';
+
 import { assertFetchAllowed, type TextFetcher } from './http.js';
 import { discoverCandidates } from './discover.js';
-import { harvestMutopiaFtp } from './mutopia.js';
+import { harvestMutopiaFtp, isMutopiaMidiZip } from './mutopia.js';
 import { expandMutopiaMidiZips, wrapZipBytesFetcher } from './midiZip.js';
 import { pianoMidiCandidates } from './pianoMidi.js';
 import type { RankedCandidate, WorkKey } from './types.js';
@@ -43,9 +45,12 @@ export const createNetworkSymbolicClient = (
     const zipBytes = wrapZipBytesFetcher(bytes);
     return {
         discover: async (workKey, meta) => {
+            // One budget for the whole discover. The signal aborts the index and
+            // zip requests themselves; the races bound fetchers that ignore it. A
+            // zip still pending at the deadline is dropped, the rest still plays.
             const signal = AbortSignal.timeout(timeoutMs);
             const index = await Promise.race([
-                harvestMutopiaFtp((url) => text.fetchText(url), workKey),
+                harvestMutopiaFtp((url) => text.fetchText(url, signal), workKey),
                 abortError(signal, 'mutopia index'),
             ]);
             const ranked = discoverCandidates({
@@ -54,7 +59,10 @@ export const createNetworkSymbolicClient = (
                 imslpFiles: [],
                 ...(meta.imslpPageTitle !== undefined ? { imslpPageTitle: meta.imslpPageTitle } : {}),
             });
-            const expanded = await expandMutopiaMidiZips(ranked, zipBytes);
+            const expanded = await Promise.race([
+                expandMutopiaMidiZips(ranked, zipBytes, signal),
+                onAbort(signal, () => ranked.filter((c) => !isMutopiaMidiZip(basename(c.url)))),
+            ]);
             const extra = pianoMidiCandidates(workKey);
             const seen = new Set(expanded.map((c) => c.url));
             const out = [...expanded];
@@ -78,4 +86,13 @@ const abortError = (signal: AbortSignal, label: string): Promise<never> =>
             return;
         }
         signal.addEventListener('abort', fail, { once: true });
+    });
+
+const onAbort = <T>(signal: AbortSignal, value: () => T): Promise<T> =>
+    new Promise((resolve) => {
+        if (signal.aborted) {
+            resolve(value());
+            return;
+        }
+        signal.addEventListener('abort', () => resolve(value()), { once: true });
     });

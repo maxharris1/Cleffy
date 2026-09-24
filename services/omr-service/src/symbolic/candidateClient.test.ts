@@ -76,10 +76,64 @@ describe('createNetworkSymbolicClient.discover', () => {
         const client = createNetworkSymbolicClient(fetcherFor({}, seen), noBytes);
 
         await expect(client.discover(FUR_ELISE, {})).resolves.toEqual(
-            expect.arrayContaining([
-                expect.objectContaining({ url: expect.stringContaining('elise_format0.mid') }),
-            ]),
+            expect.arrayContaining([expect.objectContaining({ url: expect.stringContaining('elise_format0.mid') })]),
         );
         expect(seen).toEqual(['https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/']);
+    });
+
+    it('bounds a stalled -mids.zip download by the discover timeout and aborts the fetch', async () => {
+        const dir = 'https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/';
+        const piece = `${dir}fur_Elise/`;
+        const signals: Array<AbortSignal | undefined> = [];
+        const stalled: BytesFetcher = {
+            fetchBytes: (_url, signal) => {
+                signals.push(signal);
+                return new Promise((_, reject) => {
+                    signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+                });
+            },
+        };
+        const client = createNetworkSymbolicClient(
+            fetcherFor({ [dir]: listing(['fur_Elise/']), [piece]: listing(['fur_Elise_WoO59-mids.zip']) }, []),
+            stalled,
+            50,
+        );
+
+        const candidates = await client.discover(FUR_ELISE, {});
+
+        expect(signals).toHaveLength(1);
+        expect(signals[0]?.aborted).toBe(true);
+        expect(candidates.some((c) => c.url.includes('-mids.zip'))).toBe(false);
+        expect(candidates.some((c) => c.url.includes('elise_format0.mid'))).toBe(true);
+    });
+
+    it('drops a zip whose fetcher ignores the abort signal and still returns the rest', async () => {
+        const dir = 'https://www.mutopiaproject.org/ftp/BeethovenLv/WoO59/';
+        const piece = `${dir}fur_Elise/`;
+        const deaf: BytesFetcher = { fetchBytes: () => new Promise<Buffer>(() => undefined) };
+        const client = createNetworkSymbolicClient(
+            fetcherFor({ [dir]: listing(['fur_Elise/']), [piece]: listing(['fur_Elise_WoO59-mids.zip']) }, []),
+            deaf,
+            50,
+        );
+
+        const candidates = await client.discover(FUR_ELISE, {});
+
+        expect(candidates.some((c) => c.url.includes('-mids.zip'))).toBe(false);
+        expect(candidates.some((c) => c.url.includes('elise_format0.mid'))).toBe(true);
+    });
+
+    it('hands the Mutopia index fetches the discover signal so a timed-out harvest stops', async () => {
+        const signals: Array<AbortSignal | undefined> = [];
+        const stalled: TextFetcher = {
+            fetchText: (_url, signal) => {
+                signals.push(signal);
+                return new Promise<string>(() => undefined);
+            },
+        };
+        const client = createNetworkSymbolicClient(stalled, noBytes, 50);
+
+        await expect(client.discover(FUR_ELISE, {})).rejects.toThrow(/timeout/);
+        expect(signals[0]?.aborted).toBe(true);
     });
 });

@@ -25,9 +25,7 @@ const PIN_SLUGS = [
 ] as const;
 
 const mutopiaFixtureHtml = (): string => {
-    const rows: string[] = [
-        '<table><tr><th>Composer</th><th>Title</th><th>Instrument</th><th>Files</th></tr>',
-    ];
+    const rows: string[] = ['<table><tr><th>Composer</th><th>Title</th><th>Instrument</th><th>Files</th></tr>'];
     for (const slug of PIN_SLUGS) {
         const entry = loadCorpusEntry(slug);
         const midi = entry.reference.source === 'mutopia' ? entry.reference.url : '';
@@ -192,8 +190,7 @@ describe('identifyPdfWorkKey', () => {
 describe('identifyAndLookup', () => {
     it('looks up Mutopia MIDI from an FTP directory listing', async () => {
         const pages: Record<string, string> = {
-            'https://www.mutopiaproject.org/ftp/BachJS/BWV772/':
-                '<a href="bach-invention-01/">bach-invention-01/</a>',
+            'https://www.mutopiaproject.org/ftp/BachJS/BWV772/': '<a href="bach-invention-01/">bach-invention-01/</a>',
             'https://www.mutopiaproject.org/ftp/BachJS/BWV772/bach-invention-01/':
                 '<a href="bach-invention-01.mid">mid</a><a href="bach-invention-01.ly">ly</a>',
         };
@@ -306,6 +303,24 @@ describe('createGeminiCaller', () => {
         await caller.generateJson(Buffer.from('pdf-bytes'), 'identify');
         expect(models).toEqual(['3.1', '3.5']);
         expect(caller.lastModel?.()).toBe('gemini-3.5-flash-lite');
+    });
+
+    it('aborts a stalled Gemini POST after its timeout', async () => {
+        const signals: Array<AbortSignal | null | undefined> = [];
+        const caller = createGeminiCaller({
+            apiKey: 'test-key',
+            model: 'gemini-3.5-flash-lite',
+            timeoutMs: 30,
+            fetchImpl: ((_url, init) => {
+                signals.push(init?.signal);
+                return new Promise<Response>((_, reject) => {
+                    init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+                });
+            }) as typeof fetch,
+        });
+        await expect(caller.generateJson(Buffer.from('pdf-bytes'), 'identify')).rejects.toThrow();
+        expect(signals).toHaveLength(1);
+        expect(signals[0]?.aborted).toBe(true);
     });
 });
 

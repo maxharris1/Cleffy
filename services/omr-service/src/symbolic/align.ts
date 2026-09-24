@@ -54,6 +54,39 @@ const uniqueSrcOrder = (score: ScoreData): number[] => {
     return out;
 };
 
+/** First measure shorter than the opening meter: the candidate carries a pickup bar. */
+const hasPickupMeasure = (score: ScoreData): boolean => {
+    const first = score.measures[0];
+    const ts = score.timeSignatures[0];
+    if (first === undefined || ts === undefined || score.measures.length < 2) {
+        return false;
+    }
+    const barTicks = Math.round(((ts.num * 4) / ts.den) * score.ticksPerQuarter);
+    return first.dTicks < barTicks;
+};
+
+/**
+ * Box index minus srcOrder index. Equal counts pair from the start. With one
+ * box extra or missing, the pickup is the only start-side evidence: a flagged
+ * PDF pickup box the candidate folds into bar 1 shifts boxes by +1, and a
+ * candidate pickup the PDF did not split off shares box 0 (−1). Otherwise the
+ * start is anchored (the mismatch is later, so earlier bars still pair) —
+ * except a flagged pickup PDF that is ALSO a box short, which cannot be placed.
+ */
+const boxOffset = (boxCount: number, srcCount: number, pdfPickup: boolean, candPickup: boolean): number | null => {
+    const extra = boxCount - srcCount;
+    if (extra === 1 && pdfPickup && !candPickup) {
+        return 1;
+    }
+    if (extra === -1 && !pdfPickup && candPickup) {
+        return -1;
+    }
+    if (extra === -1 && pdfPickup && !candPickup) {
+        return null;
+    }
+    return 0;
+};
+
 /**
  * Same-source Mutopia alignment: printed bar boxes in page order map onto
  * engraved `srcIndex` values. Performed measures that share a srcIndex (repeats
@@ -73,16 +106,21 @@ export const alignMutopia = (
     if (Math.abs(layout.boxes.length - srcOrder.length) > 1) {
         return { ok: false, reason: 'alignment_failed' };
     }
-    const n = Math.min(layout.boxes.length, srcOrder.length);
+    const offset = boxOffset(layout.boxes.length, srcOrder.length, layout.pickupFlagged, hasPickupMeasure(score));
+    if (offset === null) {
+        return { ok: false, reason: 'alignment_failed' };
+    }
     const bySrcIndex: Record<number, AlignBox> = {};
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < srcOrder.length; i++) {
         const src = srcOrder[i];
-        const box = layout.boxes[i];
+        // A candidate pickup the PDF left inside its first box shares that box.
+        const box = layout.boxes[Math.max(0, i + offset)];
         if (src === undefined || box === undefined) {
             continue;
         }
         bySrcIndex[src] = asBox(box);
     }
+    const n = Math.min(layout.boxes.length, srcOrder.length);
     const entries: AlignmentEntry[] = [];
     for (let i = 0; i < score.measures.length; i++) {
         const src = score.measures[i]?.srcIndex ?? i;

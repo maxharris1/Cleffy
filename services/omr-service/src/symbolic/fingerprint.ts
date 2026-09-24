@@ -3,6 +3,7 @@ import { TICKS_PER_QUARTER } from '../scoreData.js';
 import type { BarNote } from '../eval/compare.js';
 import { defaultLyConverter, type LyConverter } from './lyConvert.js';
 import { sha256Hex } from './log.js';
+import { meterFromMidi, pickupQuartersFromMidi } from './midiMeta.js';
 import {
     candidateFromMidi,
     fifthsViaLibrary,
@@ -21,14 +22,12 @@ const openingFromMusical = (musical: MusicalScore): BarNote[][] => {
     return bars.map((measure) =>
         musical.notes
             .filter((n) => n.t >= measure.tick && n.t < measure.tick + measure.dTicks)
-            .map(
-                (n): BarNote => ({
-                    onsetQ: (n.t - measure.tick) / TICKS_PER_QUARTER,
-                    pitch: n.p,
-                    durQ: n.d / TICKS_PER_QUARTER,
-                    hand: n.h,
-                }),
-            ),
+            .map((n): BarNote => ({
+                onsetQ: (n.t - measure.tick) / TICKS_PER_QUARTER,
+                pitch: n.p,
+                durQ: n.d / TICKS_PER_QUARTER,
+                hand: n.h,
+            })),
     );
 };
 
@@ -69,20 +68,35 @@ const fromXml = (
     return out;
 };
 
-const fromMidi = (ranked: RankedCandidate, bytes: Buffer, pdf: PdfSignals): MatchCandidateInput =>
-    candidateFromMidi(bytes, {
+/**
+ * Pickup for a MIDI candidate. A known length (pin) wins; otherwise the PDF
+ * only flags that a pickup exists and the MIDI's own downbeats give its length.
+ */
+const pickupOf = (bytes: Buffer, pdf: PdfSignals, meter: Meter): number => {
+    if (pdf.pickupQuarters > 0) {
+        return pdf.pickupQuarters;
+    }
+    return pdf.pickupFlagged ? pickupQuartersFromMidi(bytes, meter) : 0;
+};
+
+const fromMidi = (ranked: RankedCandidate, bytes: Buffer, pdf: PdfSignals): MatchCandidateInput => {
+    // The MIDI's own FF 58 bars it. Copying the PDF's meter made the meter
+    // check a no-op for MIDI and barred every text-less scan in 4/4.
+    const meter: Meter = meterFromMidi(bytes) ?? pdf.meter ?? { num: 4, den: 4 };
+    return candidateFromMidi(bytes, {
         source: ranked.source,
         format: ranked.format,
         url: ranked.url,
         sha256: sha256Hex(bytes),
         workKey: ranked.workKey,
-        meter: pdf.meter ?? { num: 4, den: 4 },
+        meter,
         fifths: pdf.fifths ?? 0,
-        pickupQuarters: pdf.pickupQuarters,
+        pickupQuarters: pickupOf(bytes, pdf, meter),
         arrangement: ranked.arrangement,
         // Count bars from the MIDI. Copying pdf.printedBars made every
         // movement of an opus score identically and forced `ambiguous`.
     });
+};
 
 /**
  * Cheap fingerprint for a fetched candidate. `.mscz` and unconverted `.ly`

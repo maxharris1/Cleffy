@@ -31,6 +31,9 @@ export const GEMINI_GENERATE_URL = `https://generativelanguage.googleapis.com/v1
 
 export const VISION_CONFIDENCE_FLOOR = 0.5;
 
+/** Per Gemini request, so both fallback models fit well inside the 120 s symbolic budget. */
+export const GEMINI_TIMEOUT_MS = 30_000;
+
 export interface VisionCaller {
     generateJson: (pdfBytes: Buffer, prompt: string) => Promise<string>;
     lastModel?: () => string | undefined;
@@ -62,9 +65,7 @@ const IDENTIFY_SCHEMA = {
     required: ['title', 'composer', 'catalog', 'confidence'],
 } as const;
 
-export const geminiApiKeyFromEnv = (
-    env: NodeJS.ProcessEnv = process.env,
-): string | undefined =>
+export const geminiApiKeyFromEnv = (env: NodeJS.ProcessEnv = process.env): string | undefined =>
     env.GEMINI_API_KEY ?? env.GOOGLE_GENERATIVE_AI_API_KEY ?? env.GOOGLE_API_KEY;
 
 const KEY_NAMES = ['GEMINI_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_API_KEY'] as const;
@@ -87,10 +88,7 @@ const takeKeyFromDotenv = (contents: string, env: NodeJS.ProcessEnv): void => {
             continue;
         }
         let value = trimmed.slice(eq + 1).trim();
-        if (
-            (value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))
-        ) {
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
             value = value.slice(1, -1);
         }
         env[name] = value;
@@ -98,10 +96,7 @@ const takeKeyFromDotenv = (contents: string, env: NodeJS.ProcessEnv): void => {
 };
 
 /** Load a gitignored .env if the process has no Gemini key yet. */
-export const hydrateGeminiKeyFromFiles = (
-    cwd: string = process.cwd(),
-    env: NodeJS.ProcessEnv = process.env,
-): void => {
+export const hydrateGeminiKeyFromFiles = (cwd: string = process.cwd(), env: NodeJS.ProcessEnv = process.env): void => {
     if (geminiApiKeyFromEnv(env) !== undefined) {
         return;
     }
@@ -147,12 +142,16 @@ const generateOnce = async (
     model: string,
     pdfBytes: Buffer,
     prompt: string,
+    timeoutMs: number,
 ): Promise<{ text: string; status: number; errorText: string }> => {
     const url =
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent` +
         `?key=${encodeURIComponent(apiKey)}`;
+    // Bounds headers and body: a stalled Gemini must not hold the job past
+    // its symbolic budget (identify failure just falls back to other keys).
     const res = await fetchImpl(url, {
         method: 'POST',
+        signal: AbortSignal.timeout(timeoutMs),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             contents: [
@@ -205,18 +204,19 @@ export const createGeminiCaller = (input: {
     fetchImpl?: typeof fetch;
     model?: string;
     models?: readonly string[];
+    /** Per-model request budget. */
+    timeoutMs?: number;
 }): VisionCaller => {
     const fetchImpl = input.fetchImpl ?? fetch;
-    const models =
-        input.models ??
-        (input.model !== undefined ? [input.model] : [...VISION_MODEL_CANDIDATES]);
+    const timeoutMs = input.timeoutMs ?? GEMINI_TIMEOUT_MS;
+    const models = input.models ?? (input.model !== undefined ? [input.model] : [...VISION_MODEL_CANDIDATES]);
     let used: string | undefined;
     return {
         lastModel: () => used,
         async generateJson(pdfBytes: Buffer, prompt: string): Promise<string> {
             let lastError = 'Gemini returned no model';
             for (const model of models) {
-                const once = await generateOnce(fetchImpl, input.apiKey, model, pdfBytes, prompt);
+                const once = await generateOnce(fetchImpl, input.apiKey, model, pdfBytes, prompt, timeoutMs);
                 if (once.text !== '') {
                     used = model;
                     return once.text;
@@ -349,9 +349,7 @@ export const createVisionWorkKeyProvider = (caller: VisionCaller | null): WorkKe
             // Network / API failure → ranks 1–3 only (often empty → OMR).
         }
         return hits.sort(
-            (a, b) =>
-                WORK_KEY_SOURCE_RANK[a.source] - WORK_KEY_SOURCE_RANK[b.source] ||
-                b.confidence - a.confidence,
+            (a, b) => WORK_KEY_SOURCE_RANK[a.source] - WORK_KEY_SOURCE_RANK[b.source] || b.confidence - a.confidence,
         );
     },
 });

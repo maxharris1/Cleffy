@@ -159,8 +159,7 @@ const FILES: readonly string[] = [
     'waldstein_3_format0.mid',
 ];
 
-const aliasKey = (workKey: WorkKey): string =>
-    `${workKey.composerId}:${workKey.catalogType}:${workKey.catalogN}`;
+const aliasKey = (workKey: WorkKey): string => `${workKey.composerId}:${workKey.catalogType}:${workKey.catalogN}`;
 
 /** Whole-work nicknames. Do not filter by movementIndex — that field is often "Op. N No. M". */
 const ALIASES: Readonly<Record<string, readonly string[]>> = {
@@ -197,9 +196,24 @@ const numberedPiece = (files: readonly string[], movementIndex: number | undefin
     return hit;
 };
 
+/**
+ * Aliases whose opus holds several works: the alias is only one "No.". A
+ * work key that names a different No. is a different piece (Op. 27 No. 1 is
+ * not Moonlight). No movementIndex keeps the alias, since that field may
+ * equally be a movement number.
+ */
+const ALIAS_NO: Readonly<Record<string, number>> = {
+    'beethoven:Op:27': 2,
+};
+
 export const matchPianoMidiFiles = (workKey: WorkKey): string[] => {
-    const alias = ALIASES[aliasKey(workKey)];
-    if (alias !== undefined) {
+    const key = aliasKey(workKey);
+    const alias = ALIASES[key];
+    const no = ALIAS_NO[key];
+    if (
+        alias !== undefined &&
+        (no === undefined || workKey.movementIndex === undefined || workKey.movementIndex === no)
+    ) {
         return [...alias];
     }
     switch (workKey.composerId) {

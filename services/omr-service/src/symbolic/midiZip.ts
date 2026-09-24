@@ -101,11 +101,13 @@ export const wrapZipBytesFetcher = (inner: ZipBytesFetcher): ZipBytesFetcher => 
 
 /**
  * Replace each Mutopia `-mids.zip` candidate with one MIDI candidate per
- * member so matching can use per-movement bar counts.
+ * member so matching can use per-movement bar counts. `signal` aborts the zip
+ * downloads (an aborted zip is skipped like a failed one).
  */
 export const expandMutopiaMidiZips = async (
     ranked: readonly RankedCandidate[],
     bytes: ZipBytesFetcher,
+    signal?: AbortSignal,
 ): Promise<RankedCandidate[]> => {
     const out: RankedCandidate[] = [];
     for (const cand of ranked) {
@@ -115,7 +117,7 @@ export const expandMutopiaMidiZips = async (
         }
         let zipBytes: Buffer;
         try {
-            zipBytes = await bytes.fetchBytes(cand.url);
+            zipBytes = await bytes.fetchBytes(cand.url, signal);
         } catch {
             continue;
         }

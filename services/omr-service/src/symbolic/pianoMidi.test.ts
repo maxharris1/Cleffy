@@ -19,6 +19,15 @@ describe('matchPianoMidiFiles', () => {
         expect(pianoMidiCandidates(elise)[0]?.url).toContain('web.archive.org');
     });
 
+    it('does not serve Moonlight (Op. 27 No. 2) for Op. 27 No. 1', () => {
+        const quasi = workKeyFromText('Piano Sonata No.13, Op.27 No.1 (Beethoven, Ludwig van)')!;
+        expect(quasi.movementIndex).toBe(1);
+        expect(matchPianoMidiFiles(quasi)).toEqual([]);
+        expect(pianoMidiCandidates(quasi)).toEqual([]);
+        const bare = workKeyFromText('Sonata quasi una fantasia, Op.27 (Beethoven, Ludwig van)')!;
+        expect(matchPianoMidiFiles(bare)).toHaveLength(3);
+    });
+
     it('does not dump all 24 Chopin preludes when the work key has no piece number', () => {
         const preludes = workKeyFromText('Preludes, Op.28 (Chopin, Frédéric)')!;
         expect(matchPianoMidiFiles(preludes)).toEqual([]);

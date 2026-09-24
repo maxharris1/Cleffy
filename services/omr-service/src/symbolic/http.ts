@@ -1,7 +1,8 @@
 export const IMSLP_MIN_INTERVAL_MS = 1400;
 
 export interface TextFetcher {
-    fetchText: (url: string) => Promise<string>;
+    /** `signal` aborts the request; fetchers that cannot abort may ignore it. */
+    fetchText: (url: string, signal?: AbortSignal) => Promise<string>;
 }
 
 export interface RateLimitClock {
@@ -39,11 +40,12 @@ export const assertFetchAllowed = (url: string): void => {
 const EVAL_UA = 'cleffy-symbolic/1 (https://github.com/maxharris1/Cleffy)';
 
 export const createNetworkFetcher = (fetchImpl: typeof fetch = fetch): TextFetcher => ({
-    async fetchText(url: string): Promise<string> {
+    async fetchText(url: string, signal?: AbortSignal): Promise<string> {
         assertFetchAllowed(url);
         const res = await fetchImpl(url, {
             headers: { 'User-Agent': EVAL_UA },
             redirect: 'follow',
+            signal,
         });
         if (!res.ok) {
             throw new Error(`GET ${url} failed: ${res.status} ${res.statusText}`);
@@ -59,7 +61,7 @@ export const createNetworkFetcher = (fetchImpl: typeof fetch = fetch): TextFetch
 export const rateLimitedFetcher = (inner: TextFetcher, clock: RateLimitClock = defaultClock()): TextFetcher => {
     let lastImslpAt = Number.NEGATIVE_INFINITY;
     return {
-        async fetchText(url: string): Promise<string> {
+        async fetchText(url: string, signal?: AbortSignal): Promise<string> {
             assertFetchAllowed(url);
             if (isImslpUrl(url)) {
                 const wait = IMSLP_MIN_INTERVAL_MS - (clock.now() - lastImslpAt);
@@ -67,7 +69,7 @@ export const rateLimitedFetcher = (inner: TextFetcher, clock: RateLimitClock = d
                     await clock.sleep(wait);
                 }
             }
-            const text = await inner.fetchText(url);
+            const text = await inner.fetchText(url, signal);
             if (isImslpUrl(url)) {
                 lastImslpAt = clock.now();
             }
@@ -87,5 +89,4 @@ export const imslpWikitextUrl = (pageTitle: string): string => {
 };
 
 export const MUTOPIA_PIECE_LIST_URL = 'https://www.mutopiaproject.org/piece-list.html';
-export const MUTOPIA_PIANO_CGI_URL =
-    'https://www.mutopiaproject.org/cgibin/make-table.cgi?Instrument=Piano';
+export const MUTOPIA_PIANO_CGI_URL = 'https://www.mutopiaproject.org/cgibin/make-table.cgi?Instrument=Piano';

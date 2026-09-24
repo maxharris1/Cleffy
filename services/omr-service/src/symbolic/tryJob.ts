@@ -1,9 +1,5 @@
 import { alignMutopia } from './align.js';
-import {
-    createNetworkBytesFetcher,
-    createNetworkSymbolicClient,
-    type SymbolicJobClient,
-} from './candidateClient.js';
+import { createNetworkBytesFetcher, createNetworkSymbolicClient, type SymbolicJobClient } from './candidateClient.js';
 import { fingerprintCandidate } from './fingerprint.js';
 import { createNetworkFetcher, rateLimitedFetcher } from './http.js';
 import { ingestSymbolic } from './ingest.js';
@@ -14,11 +10,7 @@ import { isConcatUrl } from './midiConcat.js';
 import { pdfSignalsFromPdf } from './pdfRead.js';
 import type { MatchCandidateInput, PdfSignals } from './signals.js';
 import type { RankedCandidate, WorkKey } from './types.js';
-import {
-    createGeminiCallerFromEnv,
-    createVisionWorkKeyProvider,
-    hydrateGeminiKeyFromFiles,
-} from './visionId.js';
+import { createGeminiCallerFromEnv, createVisionWorkKeyProvider, hydrateGeminiKeyFromFiles } from './visionId.js';
 import { pdfTextWorkKeyProvider, pickWorkKey, type WorkKeyProvider } from './workKeyProvider.js';
 import type { CorpusHit } from '../corpus/store.js';
 
@@ -105,9 +97,12 @@ const choosePlaybackCandidate = (decision: Decision): MatchResult | null => {
     if (playable.length === 0) {
         return null;
     }
+    // The all-movements concat is only a guess for a PDF with no printed bar
+    // count (IMSLP scans). With a known count every row competes on bar error,
+    // so the single movement the PDF prints beats the whole opus.
+    const unknownPrint = playable.every((row) => row.signals.barCountPdf <= 0);
     const concat = playable.filter((row) => isConcatUrl(row.candidate.url));
-    const pool = concat.length > 0 ? concat : playable;
-    const unknownPrint = pool.every((row) => row.signals.barCountPdf <= 0);
+    const pool = unknownPrint && concat.length > 0 ? concat : playable;
     const ranked = [...pool].sort((a, b) => {
         if (unknownPrint) {
             return b.signals.barCountCand - a.signals.barCountCand || b.score - a.score;
@@ -160,9 +155,7 @@ const fallthrough = (
             band,
             reason,
             decision.best?.score,
-            decision.best
-                ? { source: decision.best.candidate.source, format: decision.best.candidate.format }
-                : null,
+            decision.best ? { source: decision.best.candidate.source, format: decision.best.candidate.format } : null,
         ),
         logLine: text,
         ...(layout !== undefined ? { layout } : {}),

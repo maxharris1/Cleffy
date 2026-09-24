@@ -31,14 +31,12 @@ const openingFromMusical = (musical: MusicalScore): BarNote[][] => {
     return bars.map((measure) =>
         musical.notes
             .filter((n) => n.t >= measure.tick && n.t < measure.tick + measure.dTicks)
-            .map(
-                (n): BarNote => ({
-                    onsetQ: (n.t - measure.tick) / TICKS_PER_QUARTER,
-                    pitch: n.p,
-                    durQ: n.d / TICKS_PER_QUARTER,
-                    hand: n.h,
-                }),
-            ),
+            .map((n): BarNote => ({
+                onsetQ: (n.t - measure.tick) / TICKS_PER_QUARTER,
+                pitch: n.p,
+                durQ: n.d / TICKS_PER_QUARTER,
+                hand: n.h,
+            })),
     );
 };
 
@@ -52,6 +50,9 @@ export const pdfSignalsFromPdf = async (pdfBytes: Uint8Array | Buffer): Promise<
         meter: meterFromPdfLayout(layout),
         fifths: fifthsFromPdfLayout(layout),
         printedBars: layout.printedBars,
+        // The page gives only `pickupFlagged` (first-box width includes the
+        // clef/key/meter, so it cannot size the pickup). MIDI candidates read the
+        // length from their own downbeats (fingerprint.ts `pickupOf`).
         pickupQuarters: 0,
         opening: null,
         workKey,

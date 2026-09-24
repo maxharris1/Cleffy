@@ -78,13 +78,17 @@ describe('trySymbolicJob', () => {
     it('accepts a matching MIDI, ingesting ScoreData + AlignmentMap + log', async () => {
         const bytes = midi();
         const logs: string[] = [];
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [mutopiaMid()],
-                fetchBytes: async () => bytes,
-            },
-            log: (line) => logs.push(line),
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [mutopiaMid()],
+                    fetchBytes: async () => bytes,
+                },
+                log: (line) => logs.push(line),
+            }),
+        );
         expect(result.kind).toBe('accept');
         if (result.kind !== 'accept') {
             return;
@@ -106,19 +110,28 @@ describe('trySymbolicJob', () => {
     it('ingests catalog-matching MIDI on ambiguous instead of waiting on OMR', async () => {
         const bytes = midi();
         let ingested = 0;
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [
-                    mutopiaMid(),
-                    mutopiaMid({ url: 'https://example.test/other.mid', source: 'imslp', format: 'mid', priority: 3 }),
-                ],
-                fetchBytes: async () => bytes,
-            },
-            ingest: (decision, buf) => {
-                ingested += 1;
-                return ingestSymbolic(decision, buf);
-            },
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [
+                        mutopiaMid(),
+                        mutopiaMid({
+                            url: 'https://example.test/other.mid',
+                            source: 'imslp',
+                            format: 'mid',
+                            priority: 3,
+                        }),
+                    ],
+                    fetchBytes: async () => bytes,
+                },
+                ingest: (decision, buf) => {
+                    ingested += 1;
+                    return ingestSymbolic(decision, buf);
+                },
+            }),
+        );
         expect(result.kind).toBe('accept');
         if (result.kind !== 'accept') {
             return;
@@ -145,16 +158,20 @@ describe('trySymbolicJob', () => {
             pitches: [60, 62, 64],
         });
         const concat = 'cleffy-concat:https://example.test/a.mid|https://example.test/b.mid';
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [
-                    mutopiaMid({ url: 'https://example.test/a.mid' }),
-                    mutopiaMid({ url: concat }),
-                ],
-                fetchBytes: async (url) => (url === concat ? full : short),
-            },
-            pdfSignals: async () => pdf({ printedBars: 0, layoutBars: 0, barBoxes: [] }),
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [
+                        mutopiaMid({ url: 'https://example.test/a.mid' }),
+                        mutopiaMid({ url: concat }),
+                    ],
+                    fetchBytes: async (url) => (url === concat ? full : short),
+                },
+                pdfSignals: async () => pdf({ printedBars: 0, layoutBars: 0, barBoxes: [] }),
+            }),
+        );
         expect(result.kind).toBe('accept');
         if (result.kind !== 'accept') {
             return;
@@ -164,15 +181,125 @@ describe('trySymbolicJob', () => {
         expect(result.score.notes.length).toBeGreaterThan(0);
     });
 
+    it('plays the single movement, not the concat, when an ambiguous tie matches the printed bars', async () => {
+        const mvt1 = midi();
+        const mvt2 = synthQuantizedMidi({
+            meter: { num: 4, den: 4 },
+            pickupQuarters: 0,
+            printedBars: 20,
+            fifths: 0,
+            pitches: [67],
+        });
+        const whole = synthQuantizedMidi({
+            meter: { num: 4, den: 4 },
+            pickupQuarters: 0,
+            printedBars: BARS + 20,
+            fifths: 0,
+            pitches: [60, 67],
+        });
+        const one = 'https://example.test/k331-mids.zip#k331-1.mid';
+        const two = 'https://example.test/k331-mids.zip#k331-2.mid';
+        const concat = `cleffy-concat:${one}|${two}`;
+        const pianoMidi = 'https://example.test/mz_331_1.mid';
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [
+                        mutopiaMid({ url: one }),
+                        mutopiaMid({ url: two }),
+                        mutopiaMid({ url: concat }),
+                        mutopiaMid({ url: pianoMidi }),
+                    ],
+                    fetchBytes: async (url) => (url === concat ? whole : url === two ? mvt2 : mvt1),
+                },
+            }),
+        );
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect([one, pianoMidi]).toContain(result.candidate?.url);
+        expect(result.score.measures).toHaveLength(BARS);
+        expect(result.alignmentMap).not.toBeNull();
+    });
+
+    it('bars a 3/4 MIDI in 3/4 when the PDF text layer has no meter', async () => {
+        const waltz = synthQuantizedMidi({
+            meter: { num: 3, den: 4 },
+            pickupQuarters: 0,
+            printedBars: 12,
+            fifths: 0,
+            pitches: [60, 64, 67],
+        });
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: { discover: async () => [mutopiaMid()], fetchBytes: async () => waltz },
+                pdfSignals: async () => pdf({ meter: null, printedBars: 12, layoutBars: 12, barBoxes: boxes(12) }),
+            }),
+        );
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        expect(result.score.timeSignatures).toEqual([{ tick: 0, num: 3, den: 4 }]);
+        expect(result.score.measures).toHaveLength(12);
+        expect(result.score.measures[1]?.tick).toBe(1440);
+        expect(result.alignmentMap).not.toBeNull();
+    });
+
+    it('puts the barlines after a flagged pickup, sized from the MIDI', async () => {
+        const minuet = synthQuantizedMidi({
+            meter: { num: 3, den: 4 },
+            pickupQuarters: 1,
+            printedBars: 13,
+            fifths: 0,
+            pitches: [60, 64, 67],
+        });
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: { discover: async () => [mutopiaMid()], fetchBytes: async () => minuet },
+                pdfSignals: async () =>
+                    pdf({
+                        meter: { num: 3, den: 4 },
+                        printedBars: 13,
+                        layoutBars: 13,
+                        barBoxes: boxes(13),
+                        pickupFlagged: true,
+                    }),
+            }),
+        );
+        expect(result.kind).toBe('accept');
+        if (result.kind !== 'accept') {
+            return;
+        }
+        const starts = result.score.measures.slice(0, 3).map((m) => [m.tick, m.dTicks]);
+        expect(starts).toEqual([
+            [0, 480],
+            [480, 1440],
+            [1920, 1440],
+        ]);
+        expect(result.alignmentMap?.bySrcIndex[0]?.x0).toBe(0);
+    });
+
     it('ingests same-work MIDI when only the bar count disagrees, with a null alignment map', async () => {
         const bytes = midi();
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [mutopiaMid()],
-                fetchBytes: async () => bytes,
-            },
-            pdfSignals: async () => pdf({ printedBars: 40, layoutBars: 40, barBoxes: boxes(40) }),
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [mutopiaMid()],
+                    fetchBytes: async () => bytes,
+                },
+                pdfSignals: async () => pdf({ printedBars: 40, layoutBars: 40, barBoxes: boxes(40) }),
+            }),
+        );
         expect(result.kind).toBe('accept');
         if (result.kind !== 'accept') {
             return;
@@ -185,12 +312,16 @@ describe('trySymbolicJob', () => {
 
     it('falls through on reject (arrangement) without ingesting', async () => {
         const bytes = midi();
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [mutopiaMid({ arrangement: true })],
-                fetchBytes: async () => bytes,
-            },
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [mutopiaMid({ arrangement: true })],
+                    fetchBytes: async () => bytes,
+                },
+            }),
+        );
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
             return;
@@ -201,15 +332,19 @@ describe('trySymbolicJob', () => {
 
     it('maps ingest throw to parser_unusable → OMR', async () => {
         const bytes = midi();
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [mutopiaMid()],
-                fetchBytes: async () => bytes,
-            },
-            ingest: () => {
-                throw new Error('boom');
-            },
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [mutopiaMid()],
+                    fetchBytes: async () => bytes,
+                },
+                ingest: () => {
+                    throw new Error('boom');
+                },
+            }),
+        );
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
             return;
@@ -221,13 +356,17 @@ describe('trySymbolicJob', () => {
 
     it('maps ingest parser_unusable to OMR', async () => {
         const bytes = midi();
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [mutopiaMid()],
-                fetchBytes: async () => bytes,
-            },
-            ingest: () => ({ ok: false, band: 'reject', reason: 'parser_unusable', score: null }),
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [mutopiaMid()],
+                    fetchBytes: async () => bytes,
+                },
+                ingest: () => ({ ok: false, band: 'reject', reason: 'parser_unusable', score: null }),
+            }),
+        );
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
             return;
@@ -236,16 +375,20 @@ describe('trySymbolicJob', () => {
     });
 
     it('maps discover network failure to no_candidate', async () => {
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => {
-                    throw new Error('timeout mutopia index');
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => {
+                        throw new Error('timeout mutopia index');
+                    },
+                    fetchBytes: async () => {
+                        throw new Error('unreachable');
+                    },
                 },
-                fetchBytes: async () => {
-                    throw new Error('unreachable');
-                },
-            },
-        }));
+            }),
+        );
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
             return;
@@ -255,14 +398,18 @@ describe('trySymbolicJob', () => {
     });
 
     it('maps fetchBytes failure of every candidate to no_candidate', async () => {
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [mutopiaMid()],
-                fetchBytes: async () => {
-                    throw new Error('GET failed');
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [mutopiaMid()],
+                    fetchBytes: async () => {
+                        throw new Error('GET failed');
+                    },
                 },
-            },
-        }));
+            }),
+        );
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
             return;
@@ -272,21 +419,25 @@ describe('trySymbolicJob', () => {
 
     it('discovers with the WorkKeyProvider hit when PDF text is unknown', async () => {
         const seen: WorkKey[] = [];
-        const result = await trySymbolicJob(Buffer.from('%PDF'), {
-            ...ctx,
-            imslpPageTitle: 'Inventions, BWV 772 (Bach, Johann Sebastian)',
-        }, depsOf({
-            pdfSignals: async () => pdf({ workKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 } }),
-            client: {
-                discover: async (key) => {
-                    seen.push(key);
-                    return [];
-                },
-                fetchBytes: async () => {
-                    throw new Error('unused');
-                },
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            {
+                ...ctx,
+                imslpPageTitle: 'Inventions, BWV 772 (Bach, Johann Sebastian)',
             },
-        }));
+            depsOf({
+                pdfSignals: async () => pdf({ workKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 } }),
+                client: {
+                    discover: async (key) => {
+                        seen.push(key);
+                        return [];
+                    },
+                    fetchBytes: async () => {
+                        throw new Error('unused');
+                    },
+                },
+            }),
+        );
         expect(seen[0]).toEqual(WORK);
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
@@ -297,21 +448,25 @@ describe('trySymbolicJob', () => {
 
     it('discovers with a filename WorkKey when PDF text is unknown', async () => {
         const seen: WorkKey[] = [];
-        const result = await trySymbolicJob(Buffer.from('%PDF'), {
-            ...ctx,
-            filename: 'bach-invention-bwv772.pdf',
-        }, depsOf({
-            pdfSignals: async () => pdf({ workKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 } }),
-            client: {
-                discover: async (key) => {
-                    seen.push(key);
-                    return [];
-                },
-                fetchBytes: async () => {
-                    throw new Error('unused');
-                },
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            {
+                ...ctx,
+                filename: 'bach-invention-bwv772.pdf',
             },
-        }));
+            depsOf({
+                pdfSignals: async () => pdf({ workKey: { composerId: 'unknown', catalogType: 'Op', catalogN: 0 } }),
+                client: {
+                    discover: async (key) => {
+                        seen.push(key);
+                        return [];
+                    },
+                    fetchBytes: async () => {
+                        throw new Error('unused');
+                    },
+                },
+            }),
+        );
         expect(seen[0]).toEqual(WORK);
         expect(result.kind).toBe('fallthrough');
     });
@@ -352,11 +507,15 @@ describe('trySymbolicJob — corpus layout lookup', () => {
         const discover = vi.fn(async () => [mutopiaMid()]);
         const corpusLayout = vi.fn(async () => corpusHit());
         const logs: string[] = [];
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: { discover, fetchBytes: async () => midi() },
-            corpusLayout,
-            log: (line) => logs.push(line),
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: { discover, fetchBytes: async () => midi() },
+                corpusLayout,
+                log: (line) => logs.push(line),
+            }),
+        );
         expect(corpusLayout).toHaveBeenCalledWith(WORK, BARS, 1);
         expect(discover).not.toHaveBeenCalled();
         expect(result.kind).toBe('accept');
@@ -378,10 +537,14 @@ describe('trySymbolicJob — corpus layout lookup', () => {
 
     it('a miss or collision (null) discovers as before, and the accept carries layout + candidate', async () => {
         const discover = vi.fn(async () => [mutopiaMid()]);
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: { discover, fetchBytes: async () => midi() },
-            corpusLayout: async () => null,
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: { discover, fetchBytes: async () => midi() },
+                corpusLayout: async () => null,
+            }),
+        );
         expect(discover).toHaveBeenCalledTimes(1);
         expect(result.kind).toBe('accept');
         if (result.kind !== 'accept') {
@@ -395,10 +558,14 @@ describe('trySymbolicJob — corpus layout lookup', () => {
 
     it('a hit whose score cannot be aligned onto this PDF discovers as before', async () => {
         const discover = vi.fn(async () => [mutopiaMid()]);
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: { discover, fetchBytes: async () => midi() },
-            corpusLayout: async () => corpusHit(BARS + 3),
-        }));
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: { discover, fetchBytes: async () => midi() },
+                corpusLayout: async () => corpusHit(BARS + 3),
+            }),
+        );
         expect(discover).toHaveBeenCalledTimes(1);
         expect(result.kind).toBe('accept');
         if (result.kind !== 'accept') {
@@ -408,14 +575,18 @@ describe('trySymbolicJob — corpus layout lookup', () => {
     });
 
     it('without an injected lookup (flag off) nothing changes and a fallthrough still carries the layout key', async () => {
-        const result = await trySymbolicJob(Buffer.from('%PDF'), ctx, depsOf({
-            client: {
-                discover: async () => [],
-                fetchBytes: async () => {
-                    throw new Error('unused');
+        const result = await trySymbolicJob(
+            Buffer.from('%PDF'),
+            ctx,
+            depsOf({
+                client: {
+                    discover: async () => [],
+                    fetchBytes: async () => {
+                        throw new Error('unused');
+                    },
                 },
-            },
-        }));
+            }),
+        );
         expect(result.kind).toBe('fallthrough');
         if (result.kind !== 'fallthrough') {
             return;

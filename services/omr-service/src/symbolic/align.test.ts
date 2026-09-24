@@ -19,6 +19,38 @@ const loadLayout = async (slug: string) => {
     return pdfLayoutFromBytes(new Uint8Array(readFileSync(fetched.pdfPath)));
 };
 
+const BAR = 4 * TICKS_PER_QUARTER;
+
+/** 4/4 score; `pickupTicks` > 0 adds a short srcIndex-0 pickup measure first. */
+const scoreOf = (bars: number, pickupTicks = 0): ScoreData => {
+    const measures: ScoreData['measures'] = [];
+    let tick = 0;
+    if (pickupTicks > 0) {
+        measures.push({ n: 0, tick, dTicks: pickupTicks, page: -1, sys: -1, x0: 0, x1: 1, srcIndex: 0 });
+        tick += pickupTicks;
+    }
+    for (let b = 0; b < bars; b++) {
+        const srcIndex = measures.length;
+        measures.push({ n: b + 1, tick, dTicks: BAR, page: -1, sys: -1, x0: 0, x1: 1, srcIndex });
+        tick += BAR;
+    }
+    return {
+        version: 3,
+        ticksPerQuarter: TICKS_PER_QUARTER,
+        defaultBpm: 80,
+        timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+        keySignatures: [],
+        totalTicks: tick,
+        notes: [{ t: 0, d: 480, p: 60, h: 0 }],
+        measures,
+        systems: [],
+        warnings: [],
+    };
+};
+
+const rowOf = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ page: 0, system: 0, x0: i / n, x1: (i + 1) / n, y0: 0.1, y1: 0.2 }));
+
 describe('alignMutopia', () => {
     it('covers every printed measure on a 1-page piece (Czerny)', async () => {
         const entry = loadCorpusEntry('czerny-op821-01');
@@ -79,5 +111,59 @@ describe('alignMutopia', () => {
             return;
         }
         expect(result.reason).toBe('alignment_failed');
+    });
+
+    it('skips a flagged PDF pickup box the candidate folds into its first bar', () => {
+        const boxes = rowOf(13);
+        const result = alignMutopia({ boxes, pickupFlagged: true, printedBars: 13 }, scoreOf(12), 'pdf', 'cand');
+        expect(result.ok).toBe(true);
+        if (!result.ok) {
+            return;
+        }
+        expect(result.map.bySrcIndex[0]).toEqual(boxes[1]);
+        expect(result.map.bySrcIndex[11]).toEqual(boxes[12]);
+    });
+
+    it('maps a candidate pickup onto the first box when the PDF did not split it off', () => {
+        const boxes = rowOf(12);
+        const result = alignMutopia(
+            { boxes, pickupFlagged: false, printedBars: 12 },
+            scoreOf(12, TICKS_PER_QUARTER),
+            'pdf',
+            'cand',
+        );
+        expect(result.ok).toBe(true);
+        if (!result.ok) {
+            return;
+        }
+        expect(result.map.bySrcIndex[0]).toEqual(boxes[0]);
+        expect(result.map.bySrcIndex[1]).toEqual(boxes[0]);
+        expect(result.map.bySrcIndex[12]).toEqual(boxes[11]);
+    });
+
+    it('keeps the start anchored when both sides agree on the pickup', () => {
+        const boxes = rowOf(14);
+        const result = alignMutopia(
+            { boxes, pickupFlagged: true, printedBars: 14 },
+            scoreOf(12, TICKS_PER_QUARTER),
+            'pdf',
+            'cand',
+        );
+        expect(result.ok).toBe(true);
+        if (!result.ok) {
+            return;
+        }
+        expect(result.map.bySrcIndex[0]).toEqual(boxes[0]);
+        expect(result.map.bySrcIndex[12]).toEqual(boxes[12]);
+    });
+
+    it('refuses when a flagged pickup PDF has one box fewer than a pickup-less candidate', () => {
+        const result = alignMutopia(
+            { boxes: rowOf(11), pickupFlagged: true, printedBars: 11 },
+            scoreOf(12),
+            'pdf',
+            'cand',
+        );
+        expect(result.ok).toBe(false);
     });
 });
