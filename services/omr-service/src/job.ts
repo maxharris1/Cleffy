@@ -16,6 +16,7 @@ import {
     corpusLookupByLayout,
     corpusPut,
     pdProvenance,
+    type CorpusHit,
     type CorpusPutInput,
     type CorpusSource,
     type PdProvenance,
@@ -401,21 +402,32 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             };
         };
 
+        const serveHashHit = async (hit: CorpusHit): Promise<boolean> => {
+            timings.corpusHit = 'hash';
+            timings.source = analysisSourceFromCorpus(hit.source);
+            if (hit.alignmentMap) {
+                timings.alignmentMap = hit.alignmentMap;
+            }
+            const ok = await adapters.onReady(hit.score, timings);
+            logJob(adapters.documentId, timings, hit.score, ok);
+            return ok;
+        };
+
         // Corpus by hash comes before symbolic and the OMR cache: the same PDF
         // bytes already analysed (Mutopia MIDI + alignment, or a seed OMR run)
-        // cost one RPC and no JVM.
+        // cost one RPC and no JVM. An OMR row stands in for Audiveris only: it
+        // may be what a transient discover failure left behind, so symbolic
+        // still gets its try first, exactly as it does ahead of the OMR cache.
+        const symbolicOn = adapters.symbolicEnabled ?? isSymbolicFirstEnabled();
+        let omrHashHit: CorpusHit | null = null;
         if (corpusOn) {
             const hitEra = await resolveEra();
             const hit = await corpusTimed(() => corpusLookupByHash(hash, ENGINE_VERSION, hitEra));
             if (hit) {
-                timings.corpusHit = 'hash';
-                timings.source = analysisSourceFromCorpus(hit.source);
-                if (hit.alignmentMap) {
-                    timings.alignmentMap = hit.alignmentMap;
+                if (!symbolicOn || hit.source.tier !== 'omr') {
+                    return serveHashHit(hit);
                 }
-                const ok = await adapters.onReady(hit.score, timings);
-                logJob(adapters.documentId, timings, hit.score, ok);
-                return ok;
+                omrHashHit = hit;
             }
         }
 
@@ -439,6 +451,7 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 return;
             }
             const title = await publishedTitle();
+            const pageCount = omrLayout?.pageCount ?? timings.pageCount;
             const source: CorpusSource = {
                 ...(timings.source ?? { tier: 'omr', band: 'reject', reason: 'no_candidate' }),
                 origin: 'omr',
@@ -452,14 +465,14 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                 score,
                 source,
                 ...(omrLayout !== undefined ? { workKey: omrLayout.workKey, printedBars: omrLayout.printedBars } : {}),
-                ...(timings.pageCount !== undefined ? { pageCount: timings.pageCount } : {}),
+                // The pdfjs count layout lookups match on, not the byte heuristic.
+                ...(pageCount !== undefined ? { pageCount } : {}),
                 symbolicSource: 'omr',
                 ...(title !== undefined ? { imslpPageTitle: title } : {}),
                 ...corpusPutProvenance(pd),
             });
         };
 
-        const symbolicOn = adapters.symbolicEnabled ?? isSymbolicFirstEnabled();
         if (symbolicOn) {
             const baseDeps = adapters.symbolicDeps ?? defaultSymbolicDeps();
             const deps: TrySymbolicDeps =
@@ -485,6 +498,16 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
             );
             timings.source = symbolic.source;
             if (symbolic.kind === 'accept') {
+                // Attribute the edition the notes came from. A layout hit is
+                // another PDF's corpus row (stored snake_case), and piano-midi.de
+                // is CC-BY-SA whatever licence this PDF carries; only notes with
+                // no provenance of their own take this PDF's.
+                const pianoMidi = symbolic.candidate !== null && isPianoMidiUrl(symbolic.candidate.url);
+                if (symbolic.corpusHit === 'layout') {
+                    timings.source = analysisSourceFromCorpus(symbolic.source as CorpusSource);
+                } else if (pianoMidi) {
+                    timings.source = { ...symbolic.source, ...PIANO_MIDI_ATTRIBUTION };
+                }
                 if (symbolic.alignmentMap) {
                     timings.alignmentMap = symbolic.alignmentMap;
                 }
@@ -499,13 +522,18 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
                         await corpusPutSymbolic(hash, symbolic, await publishedTitle(), pd);
                     }
                 }
-                await stampAttribution();
+                if (symbolic.corpusHit === undefined && !pianoMidi) {
+                    await stampAttribution();
+                }
                 const ok = await adapters.onReady(symbolic.score, timings);
                 logJob(adapters.documentId, timings, symbolic.score, ok);
                 return ok;
             }
             // Fallthrough keeps band/reason. Do not re-score after OMR.
             omrLayout = symbolic.layout;
+            if (omrHashHit !== null) {
+                return serveHashHit(omrHashHit);
+            }
             if (isSymbolicOnly()) {
                 console.log(
                     JSON.stringify({
@@ -577,6 +605,13 @@ const runPipeline = async (adapters: PipelineAdapters): Promise<boolean> => {
 /** Exported for job-level symbolic-first tests. */
 export const runOmrPipeline = runPipeline;
 
+/** What piano-midi.de's CC-BY-SA licence obliges wherever its notes are served. */
+const PIANO_MIDI_ATTRIBUTION = {
+    licence: 'CC-BY-SA',
+    editorCredit: PIANO_MIDI_CREDIT,
+    sourceUrl: PIANO_MIDI_SOURCE_URL,
+} as const;
+
 /** Provenance keys on the stored `playalong_corpus.source` jsonb. */
 const corpusProvenanceKeys = (
     pd: PdProvenance | null,
@@ -639,9 +674,7 @@ const corpusPutSymbolic = async (
             : corpusProvenanceKeys(pd)),
     };
     if (pianoMidi) {
-        source.licence = 'CC-BY-SA';
-        source.editorCredit = PIANO_MIDI_CREDIT;
-        source.sourceUrl = PIANO_MIDI_SOURCE_URL;
+        Object.assign(source, PIANO_MIDI_ATTRIBUTION);
     }
     await corpusPut({
         pdfSha256,

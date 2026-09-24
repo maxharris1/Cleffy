@@ -19,11 +19,7 @@ import {
     parseWorkPageLicenses,
 } from '../_shared/imslpLicense.ts';
 import { STORE_ROW_SELECT, loadStoreRowsForCatalogTitle } from '../_shared/catalogTitleLookup.ts';
-import {
-    matchStoreRow,
-    pdObjectPath,
-    type PdPdfStoreRow,
-} from '../_shared/pdPdfCatalog.ts';
+import { matchStoreRow, pdObjectPath, type PdPdfStoreRow } from '../_shared/pdPdfCatalog.ts';
 import { enforce, refund } from '../_shared/quota.ts';
 
 const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -131,7 +127,11 @@ Deno.serve(async (req) => {
 
     const loadStoreRows = async (): Promise<PdPdfStoreRow[]> => {
         if (pdfSha256) {
-            const { data } = await admin.from('pd_pdf_store').select(STORE_ROW_SELECT).eq('pdf_sha256', pdfSha256).limit(1);
+            const { data } = await admin
+                .from('pd_pdf_store')
+                .select(STORE_ROW_SELECT)
+                .eq('pdf_sha256', pdfSha256)
+                .limit(1);
             return (data ?? []) as PdPdfStoreRow[];
         }
         if (workTitle) {
@@ -232,17 +232,6 @@ Deno.serve(async (req) => {
         }
     }
 
-    // Deployment-wide pacing of live IMSLP fetches only. Catalog copies from
-    // pd-pdfs skip this gate. Checked before the quota so a queued caller is
-    // neither charged nor holds the invocation open: the client retries after
-    // retryAfterSec. Per-caller limiting above is unchanged.
-    if (!catalogRow) {
-        const pacing = await gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get));
-        if (!pacing.ok) {
-            return jsonResponse(pacing.body, pacing.status);
-        }
-    }
-
     // Metered as smart_imports, and gated BEFORE the IMSLP fetch / Storage copy.
     // Every failure path below refunds, so a teacher is only charged for an
     // import that actually landed in Storage.
@@ -260,6 +249,19 @@ Deno.serve(async (req) => {
             await refund(admin, doc.owner_id, 'smart_imports');
         }
     };
+
+    // Deployment-wide pacing of live IMSLP fetches only. Catalog copies from
+    // pd-pdfs skip this gate. Checked after the quota so a caller with no
+    // smart_imports left cannot take the one slot for free; a queued caller is
+    // refunded and does not hold the invocation open: the client retries after
+    // retryAfterSec. Per-caller limiting above is unchanged.
+    if (!catalogRow) {
+        const pacing = await gateGlobalImslpDownload(checkRateLimit, readGlobalDownloadGateConfig(Deno.env.get));
+        if (!pacing.ok) {
+            await giveBack();
+            return jsonResponse(pacing.body, pacing.status);
+        }
+    }
 
     const copyCatalog = async (row: PdPdfStoreRow): Promise<{ ok: true } | { ok: false; message: string }> => {
         const sourcePath = pdObjectPath(row.pdf_sha256, row.filename);

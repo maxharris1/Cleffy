@@ -8,6 +8,7 @@ import type * as jobStore from './jobStore.js';
 import { sha256Hex } from './jobStore.js';
 import type { ScoreData } from './scoreData.js';
 import { synthQuantizedMidi } from './symbolic/midiSynth.js';
+import { PIANO_MIDI_CREDIT, PIANO_MIDI_SOURCE_URL, PIANO_MIDI_WAYBACK_PREFIX } from './symbolic/pianoMidi.js';
 import type { PdfSignals } from './symbolic/signals.js';
 import type { TrySymbolicDeps } from './symbolic/tryJob.js';
 import type { RankedCandidate, WorkKey } from './symbolic/types.js';
@@ -534,6 +535,112 @@ describe('runOmrPipeline — play-along corpus', () => {
         const result = await run({ symbolicEnabled: false, corpusEnabled: true, imslpPageTitle: TITLE });
         expect(result.ready[0]?.timings.corpusGate).toEqual({ promoted: true });
         expect(corpusPut).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['a user upload', null],
+        ['seeded PD bytes', PUBLIC_PROVENANCE],
+    ] as const)(
+        'attributes a layout hit to the stored edition, not the requesting PDF (%s)',
+        async (_label, provenance) => {
+            pdProvenance.mockResolvedValue(provenance);
+            corpusLookupByLayout.mockResolvedValue(
+                corpusHit({
+                    source: {
+                        tier: 'symbolic',
+                        band: 'accept',
+                        reason: 'accept',
+                        sourceName: 'Mutopia',
+                        origin: 'mutopia',
+                        licence_tag: 'CC-BY-SA',
+                        editor_credit: 'Ed X',
+                        source_url: 'https://x.test/ed',
+                    },
+                }),
+            );
+            const result = await run({ symbolicEnabled: true, corpusEnabled: true, symbolicDeps: mutopiaDeps() });
+            expect(result.ready[0]?.timings.corpusHit).toBe('layout');
+            expect(result.ready[0]?.timings.source).toEqual({
+                tier: 'symbolic',
+                band: 'accept',
+                reason: 'accept',
+                sourceName: 'Mutopia',
+                licence: 'CC-BY-SA',
+                editorCredit: 'Ed X',
+                sourceUrl: 'https://x.test/ed',
+            });
+        },
+    );
+
+    it.each([
+        ['corpus off, a user upload', false, null],
+        ['corpus on, seeded PD bytes', true, PUBLIC_PROVENANCE],
+    ] as const)(
+        'credits piano-midi.de on the analysis it serves, whatever the PDF’s own licence (%s)',
+        async (_label, corpusEnabled, provenance) => {
+            pdProvenance.mockResolvedValue(provenance);
+            const deps = mutopiaDeps(
+                vi.fn(async () => [
+                    ranked({ source: 'imslp', url: `${PIANO_MIDI_WAYBACK_PREFIX}bach_846_format0.mid` }),
+                ]),
+            );
+            const result = await run({ symbolicEnabled: true, corpusEnabled, symbolicDeps: deps });
+            expect(result.ready[0]?.timings.source).toMatchObject({
+                tier: 'symbolic',
+                band: 'accept',
+                licence: 'CC-BY-SA',
+                editorCredit: PIANO_MIDI_CREDIT,
+                sourceUrl: PIANO_MIDI_SOURCE_URL,
+            });
+        },
+    );
+
+    it('retries symbolic before serving an OMR hash hit, and serves the symbolic accept', async () => {
+        corpusLookupByHash.mockResolvedValue(
+            corpusHit({
+                alignmentMap: null,
+                candidateSha256: null,
+                source: { tier: 'omr', band: 'reject', reason: 'no_candidate', origin: 'omr' },
+            }),
+        );
+        const deps = mutopiaDeps();
+        const result = await run({ symbolicEnabled: true, corpusEnabled: true, symbolicDeps: deps });
+        expect(deps.discover).toHaveBeenCalledTimes(1);
+        expect(result.ready[0]?.timings.corpusHit).toBeUndefined();
+        expect(result.ready[0]?.timings.source).toMatchObject({ tier: 'symbolic', band: 'accept' });
+        expect(result.ready[0]?.timings.alignmentMap?.pdfSha256).toBe(PDF_SHA);
+    });
+
+    it('falls back to the OMR hash hit, not Audiveris or the cache, when the symbolic retry falls through', async () => {
+        corpusLookupByHash.mockResolvedValue(
+            corpusHit({
+                alignmentMap: null,
+                candidateSha256: null,
+                source: { tier: 'omr', band: 'reject', reason: 'no_candidate', origin: 'omr' },
+            }),
+        );
+        const deps = mutopiaDeps(vi.fn(async () => []));
+        const result = await run({ symbolicEnabled: true, corpusEnabled: true, symbolicDeps: deps });
+        expect(deps.discover).toHaveBeenCalledTimes(1);
+        expect(cacheLookup).not.toHaveBeenCalled();
+        expect(runAudiverisTolerant).not.toHaveBeenCalled();
+        expect(corpusPut).not.toHaveBeenCalled();
+        expect(result.ready[0]?.score).toEqual(corpusScore());
+        expect(result.ready[0]?.timings.corpusHit).toBe('hash');
+        expect(result.ready[0]?.timings.source?.tier).toBe('omr');
+    });
+
+    it('stores the pdfjs page count on an OMR row, the count layout lookups match on', async () => {
+        const deps = mutopiaDeps(vi.fn(async () => [ranked({ arrangement: true })]));
+        const result = await run({
+            symbolicEnabled: true,
+            corpusEnabled: true,
+            symbolicDeps: { ...deps, pdfSignals: async () => pdfSignals({ pageCount: 2 }) },
+            createdBy: OWNER,
+        });
+        expect(result.ready[0]?.timings.pageCount).toBe(1);
+        expect(corpusPut).toHaveBeenCalledTimes(1);
+        expect(corpusPut.mock.calls[0]![0]).toMatchObject({ symbolicSource: 'omr', pageCount: 2 });
     });
 
     it('corpus on but every RPC misses: today’s path, with only corpusLookupMs added to timings', async () => {
