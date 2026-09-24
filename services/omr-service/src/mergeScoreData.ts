@@ -1,5 +1,5 @@
 import { inferAutoPedal } from './autoPedal.js';
-import { capHolds, capPedals, capTempoEvents } from './caps.js';
+import { capHolds, capPedals, capStateEvents, capTempoEvents } from './caps.js';
 import { DEFAULT_ERA, type Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import type { StructureSummary } from './repeats.js';
@@ -257,6 +257,9 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
 
     // Two parts that each fit the schema comfortably can breach it once joined,
     // and the self-check below rejects the whole score when they do.
+    const cappedTimeSignatures = capStateEvents(timeSignatures);
+    const cappedKeySignatures = capStateEvents(keySignatures);
+    const cappedClefs = capStateEvents(clefs);
     const cappedTempos = capTempoEvents(tempos);
     const cappedHolds = capHolds(holds);
     const totalTicks = Math.max(1, tickOffset);
@@ -266,9 +269,9 @@ export const mergeScoreDataParts = (parts: ScoreDataPart[], options: MergeScoreD
         version: SCORE_DATA_WRITE_VERSION,
         ticksPerQuarter: TICKS_PER_QUARTER,
         defaultBpm,
-        timeSignatures,
-        ...(keySignatures.length > 0 ? { keySignatures } : {}),
-        ...(clefs.length > 0 ? { clefs } : {}),
+        timeSignatures: cappedTimeSignatures,
+        ...(cappedKeySignatures.length > 0 ? { keySignatures: cappedKeySignatures } : {}),
+        ...(cappedClefs.length > 0 ? { clefs: cappedClefs } : {}),
         ...(cappedTempos.length > 0 ? { tempos: cappedTempos } : {}),
         ...(cappedHolds.length > 0 ? { holds: cappedHolds } : {}),
         ...(cappedPedals.length > 0 ? { pedals: cappedPedals } : {}),

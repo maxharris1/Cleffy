@@ -18,13 +18,16 @@ const note = (
     octave: number,
     duration: number,
     staff: number,
-    extra: { alter?: number; accidental?: string; type?: string; beam?: string } = {},
+    extra: { alter?: number; accidental?: string; type?: string; beam?: string; tie?: Array<'start' | 'stop'> } = {},
 ): string => {
     const alter = extra.alter !== undefined ? `<alter>${extra.alter}</alter>` : '';
     const acc = extra.accidental ? `<accidental>${extra.accidental}</accidental>` : '';
     const type = extra.type ? `<type>${extra.type}</type>` : '';
     const beam = extra.beam ? `<beam number="1">${extra.beam}</beam>` : '';
-    return `<note><pitch><step>${step}</step>${alter}<octave>${octave}</octave></pitch><duration>${duration}</duration><voice>${staff}</voice>${type}${acc}${beam}<staff>${staff}</staff></note>`;
+    const ties = extra.tie ?? [];
+    const tie = ties.map((t) => `<tie type="${t}"/>`).join('');
+    const tied = ties.length > 0 ? `<notations>${ties.map((t) => `<tied type="${t}"/>`).join('')}</notations>` : '';
+    return `<note><pitch><step>${step}</step>${alter}<octave>${octave}</octave></pitch><duration>${duration}</duration>${tie}<voice>${staff}</voice>${type}${acc}${beam}<staff>${staff}</staff>${tied}</note>`;
 };
 
 const closing = (n: number): string =>
@@ -95,6 +98,27 @@ describe('key-signature repair', () => {
         const score = parseMusicXmlString(xml);
         const bar2 = score.notes.filter((n) => n.t >= 1920 && n.t < 3840 && n.h === 1);
         expect(bar2[0]?.p).toBe(43);
+    });
+
+    it('respells a tie continuation along with the tie start it holds', () => {
+        // D major; staff 1 misread as C major from bar 2. Bar 2's F is tied
+        // into bar 3, and bar 3's F on into bar 4, past a kept whole-part key:
+        // one F♯ held across all three bars, not an F♯ re-attacked as F♮.
+        const xml = wrap(
+            `<measure number="1">${ATTRS(2)}${note('F', 4, 16, 1, { alter: 1 })}<backup><duration>16</duration></backup>${note('D', 3, 16, 2)}</measure>` +
+                `<measure number="2"><attributes><key number="1"><fifths>0</fifths></key></attributes>${note('F', 4, 16, 1, { tie: ['start'] })}<backup><duration>16</duration></backup>${note('D', 3, 16, 2)}</measure>` +
+                `<measure number="3">${note('F', 4, 16, 1, { tie: ['stop', 'start'] })}<backup><duration>16</duration></backup>${note('D', 3, 16, 2)}</measure>` +
+                `<measure number="4"><attributes><key><fifths>2</fifths></key></attributes>${note('F', 4, 16, 1, { tie: ['stop'] })}<backup><duration>16</duration></backup>${note('D', 3, 16, 2)}</measure>` +
+                `<measure number="5">${note('D', 4, 16, 1)}<backup><duration>16</duration></backup>${note('D', 3, 16, 2)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.warnings).toContain('key_signature_repaired');
+        const rh = score.notes.filter((n) => n.h === 0);
+        expect(rh.map((n) => [n.t, n.p])).toEqual([
+            [0, 66],
+            [1920, 66],
+            [7680, 62],
+        ]);
     });
 
     it('drops a whole-part key at a system start that reverts within a few bars', () => {

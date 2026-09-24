@@ -630,6 +630,30 @@ describe('unrollRepeats', () => {
         ]);
     });
 
+    it('keeps and restores each staff\u2019s own clef across a jump', () => {
+        // Both staves open with their clefs on tick 0; the left hand switches
+        // to treble in bar 1. Retaking bar 0 must restore BOTH opening clefs,
+        // not only whichever sorted last.
+        const out = unrollRepeats(
+            {
+                ...linear,
+                clefs: [
+                    { tick: 0, staff: 0 as const, sign: 'G' as const },
+                    { tick: 0, staff: 1 as const, sign: 'F' as const },
+                    { tick: 480, staff: 1 as const, sign: 'G' as const },
+                ],
+            },
+            [0, 1, 0, 1, 2],
+        );
+        expect(out.clefs).toEqual([
+            { tick: 0, staff: 0, sign: 'G' },
+            { tick: 0, staff: 1, sign: 'F' },
+            { tick: 480, staff: 1, sign: 'G' },
+            { tick: 960, staff: 1, sign: 'F' },
+            { tick: 1440, staff: 1, sign: 'G' },
+        ]);
+    });
+
     it('duplicates a fermata that falls inside a repeated bar', () => {
         const out = unrollRepeats({ ...linear, holds: [{ tick: 480, beats: 2 }] }, [0, 1, 0, 1, 2]);
         expect(out.holds).toEqual([
@@ -679,6 +703,39 @@ describe('unrollRepeats', () => {
             { tick: 960, k: 'up' },
             { tick: 960, k: 'down' },
             { tick: 1920, k: 'up' },
+        ]);
+    });
+
+    it('lifts before a re-catch on the downbeat of a bar entered by a jump', () => {
+        // Held from bar 1 through the first ending (bar 2), re-caught on the
+        // second ending's downbeat (bar 3). The bar-line 'up' closes bar 2 on
+        // the first pass, and must still lift before bar 3 on the second, whose
+        // page predecessor was skipped — or bar 1's harmony rings through it.
+        const bars = {
+            measures: [0, 1, 2, 3].map((i) => ({ tick: i * 960, dTicks: 960 })),
+            notes: [0, 1, 2, 3].map((i) => ({ t: i * 960, d: 960, p: 60 + i, h: 0 as const })),
+            timeSignatures: [{ tick: 0, num: 4, den: 4 }],
+            totalTicks: 3840,
+        };
+        const out = unrollRepeats(
+            {
+                ...bars,
+                pedals: [
+                    { tick: 960, k: 'down' as const },
+                    { tick: 2880, k: 'up' as const },
+                    { tick: 2880, k: 'down' as const },
+                    { tick: 3840, k: 'up' as const },
+                ],
+            },
+            [0, 1, 2, 0, 1, 3],
+        );
+        expect(out.pedals).toEqual([
+            { tick: 960, k: 'down' },
+            { tick: 2880, k: 'up' },
+            { tick: 3840, k: 'down' },
+            { tick: 4800, k: 'up' },
+            { tick: 4800, k: 'down' },
+            { tick: 5760, k: 'up' },
         ]);
     });
 

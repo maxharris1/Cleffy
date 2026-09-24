@@ -516,6 +516,93 @@ describe('buildScoreData structure', () => {
         expect(score.tempos!.at(-1)!.tick).toBeGreaterThan(score.totalTicks / 2);
     });
 
+    it('retakes the anacrusis straight after the short bar it completes, with no hole between', () => {
+        // 3/8 with an eighth pickup; bar 4 is a quarter short by exactly it and
+        // carries the `:|`, padded to a full bar on the page. The retake must
+        // land where the quarter ends — the two halves are one bar — not an
+        // eighth later after the pad.
+        const score = buildScoreData(
+            {
+                ...musical,
+                notes: [
+                    { t: 0, d: 216, p: 76, h: 0 },
+                    { t: 240, d: 648, p: 69, h: 0 },
+                    { t: 960, d: 648, p: 71, h: 0 },
+                    { t: 1680, d: 648, p: 72, h: 0 },
+                    { t: 2400, d: 432, p: 69, h: 0 },
+                    { t: 3120, d: 648, p: 64, h: 0 },
+                ],
+                measures: [
+                    { n: 0, tick: 0, dTicks: 240 },
+                    { n: 1, tick: 240, dTicks: 720 },
+                    { n: 2, tick: 960, dTicks: 720 },
+                    { n: 3, tick: 1680, dTicks: 720 },
+                    { n: 4, tick: 2400, dTicks: 720, pad: 240 },
+                    { n: 5, tick: 3120, dTicks: 720 },
+                ],
+                timeSignatures: [{ tick: 0, num: 3, den: 8 }],
+                repeats: [
+                    plainMarks,
+                    plainMarks,
+                    plainMarks,
+                    plainMarks,
+                    { ...plainMarks, repeatBackward: true },
+                    plainMarks,
+                ],
+                totalTicks: 3840,
+            },
+            null,
+        );
+        expect(score.measures.map((m) => [m.srcIndex, m.tick, m.dTicks])).toEqual([
+            [0, 0, 240],
+            [1, 240, 720],
+            [2, 960, 720],
+            [3, 1680, 720],
+            [4, 2400, 480],
+            [0, 2880, 240],
+            [1, 3120, 720],
+            [2, 3840, 720],
+            [3, 4560, 720],
+            [4, 5280, 720],
+            [5, 6000, 720],
+        ]);
+        // The retaken E5 follows the A4 on the downbeat's second half.
+        expect(score.notes.filter((n) => n.p === 76).map((n) => n.t)).toEqual([0, 2880]);
+        expect(score.totalTicks).toBe(6720);
+    });
+
+    it('caps the clef changes a repeat multiplied past the schema ceiling', () => {
+        // The left hand switches clef every bar for 33 bars, all repeated:
+        // 67 clefs once performed, over the 64 the schema allows, which would
+        // throw the whole score away in the self-check.
+        const bars = 33;
+        const score = buildScoreData(
+            {
+                ...musical,
+                notes: Array.from({ length: bars }, (_, i) => ({ t: i * 1920, d: 1920, p: 48, h: 1 as const })),
+                measures: Array.from({ length: bars }, (_, i) => ({ n: i + 1, tick: i * 1920, dTicks: 1920 })),
+                clefs: [
+                    { tick: 0, staff: 0, sign: 'G' },
+                    ...Array.from({ length: bars }, (_, i) => ({
+                        tick: i * 1920,
+                        staff: 1 as const,
+                        sign: i % 2 === 0 ? ('F' as const) : ('G' as const),
+                    })),
+                ],
+                repeats: Array.from({ length: bars }, (_, i) => ({
+                    ...plainMarks,
+                    repeatForward: i === 0,
+                    repeatBackward: i === bars - 1,
+                })),
+                totalTicks: bars * 1920,
+            },
+            null,
+        );
+        expect(score.warnings).toContain('repeats_unrolled');
+        expect(score.clefs!.length).toBe(64);
+        expect(score.clefs![0]).toEqual({ tick: 0, staff: 0, sign: 'G' });
+    });
+
     it('swings eighths on the linear score so unrolled copies inherit the long–short', () => {
         const score = buildScoreData(
             {

@@ -262,7 +262,10 @@ const pedalRegion = (
         let lastOnset = -1;
         let lastSet: Set<number> | null = null;
         let set = new Set<number>();
-        let lowest = Infinity;
+        // The bass of each felt beat, in order: a window coarser than a beat
+        // judges its bass beat by beat, or a multi-bar window's lowest note —
+        // almost always the tonic — would hide every move the bass makes.
+        const basses = new Map<number, number>();
         const beatSet = new Set<number>();
         for (const index of attacks) {
             const note = notes[index];
@@ -282,7 +285,8 @@ const pedalRegion = (
             }
             set.add(pitchClass(note.p));
             beatSet.add(pitchClass(note.p));
-            lowest = Math.min(lowest, note.p);
+            const slot = Math.floor((note.t - b0) / beat);
+            basses.set(slot, Math.min(basses.get(slot) ?? Infinity, note.p));
         }
         if (lastSet && hasNewPitchClass(set, lastSet)) {
             changes += 1;
@@ -297,21 +301,23 @@ const pedalRegion = (
             }
             continue;
         }
-        const beatBass = pitchClass(lowest);
+        const beatBasses = [...basses.values()].map(pitchClass);
+        // The bass left ringing when the window closes, which the next one is heard against.
+        const lastBass = beatBasses[beatBasses.length - 1] ?? -1;
         if (!down) {
             edges.push(edge(at, 'down'));
             down = true;
             ringing = new Set(beatSet);
-            bass = beatBass;
+            bass = lastBass;
             continue;
         }
         // Classical pedalling clears only when the bass moves; later styles
         // clear whenever a new pitch class would blur into what is ringing.
-        const recatch = era === 'classical' ? beatBass !== bass : hasNewPitchClass(beatSet, ringing);
+        const recatch = era === 'classical' ? beatBasses.some((pc) => pc !== bass) : hasNewPitchClass(beatSet, ringing);
         if (recatch) {
             edges.push(edge(at, 'up'), edge(at, 'down'));
             ringing = new Set(beatSet);
-            bass = beatBass;
+            bass = lastBass;
         } else {
             for (const pc of beatSet) {
                 ringing.add(pc);

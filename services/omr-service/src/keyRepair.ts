@@ -73,26 +73,52 @@ const nextKeptKeyMeasure = (raws: readonly RawMeasure[], from: number, staff: 0 
 
 /**
  * Re-spell notes on `staff` from `from` through `to` that have no printed
- * accidental and are not a tie-stop: they were read under the dropped key.
+ * accidental: they were read under the dropped key. A tie-stop keeps the
+ * pitch of the note it continues, so it follows its tie-start — respelled
+ * when that start was, even past `to`, and left alone when the start sat
+ * before the misread.
  */
 const respell = (raws: readonly RawMeasure[], drop: Drop): number => {
     let changed = 0;
-    for (let pos = drop.from; pos <= drop.to; pos++) {
+    // Respelled tie-starts still waiting for their stop, by staff and written
+    // position (voices are renumbered across systems, so not by voice): the
+    // pitch the stop was read at, and the one it must now sound.
+    let held = new Map<string, { was: number; midi: number; alter: number }>();
+    for (let pos = drop.from; pos < raws.length && (pos <= drop.to || held.size > 0); pos++) {
         const raw = raws[pos];
         if (!raw) {
             continue;
         }
+        const inRange = pos <= drop.to;
+        // A tie reaches no further than the next bar.
+        const carried = held;
+        held = new Map();
         const explicit = new Set<string>();
         for (const ev of raw.events) {
             if (!isNote(ev) || !ev.spell || !noteOnStaff(ev.staff, drop.staff)) {
                 continue;
             }
             const key = `${ev.spell.step}:${ev.spell.octave}`;
+            const tieKey = `${ev.staff}:${key}`;
             if (ev.spell.explicit) {
                 explicit.add(key);
                 continue;
             }
-            if (ev.tieStop || explicit.has(key)) {
+            if (ev.tieStop) {
+                const start = held.get(tieKey) ?? carried.get(tieKey);
+                if (start && start.was === ev.midi) {
+                    held.delete(tieKey);
+                    carried.delete(tieKey);
+                    ev.midi = start.midi;
+                    ev.spell = { ...ev.spell, alter: start.alter };
+                    changed += 1;
+                    if (ev.tieStart) {
+                        held.set(tieKey, start);
+                    }
+                }
+                continue;
+            }
+            if (!inRange || explicit.has(key)) {
                 continue;
             }
             const nextAlter = keyAlter(ev.spell.step, drop.trueFifths);
@@ -103,6 +129,9 @@ const respell = (raws: readonly RawMeasure[], drop: Drop): number => {
             const midi = ev.midi + delta;
             if (midi < 0 || midi > 127) {
                 continue;
+            }
+            if (ev.tieStart) {
+                held.set(tieKey, { was: ev.midi, midi, alter: nextAlter });
             }
             ev.midi = midi;
             ev.spell = { ...ev.spell, alter: nextAlter };

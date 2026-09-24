@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_HOLDS, MAX_TEMPO_EVENTS, capHolds, capPedals, capTempoEvents } from './caps.js';
+import { MAX_HOLDS, MAX_STATE_EVENTS, MAX_TEMPO_EVENTS, capHolds, capPedals, capTempoEvents } from './caps.js';
 import { mergeScoreDataParts, seamIsUnsafe, splitSheetRanges, splitSheetRangesOverlapping } from './mergeScoreData.js';
 import type { StructureSummary } from './repeats.js';
 import { SCORE_DATA_VERSION, SCORE_DATA_WRITE_VERSION, TICKS_PER_QUARTER } from './scoreData.js';
@@ -349,6 +349,39 @@ describe('mergeScoreDataParts tempo map and fermatas', () => {
             { tick: 0, bpm: 120, src: 'metronome' },
             { tick: 1920, bpm: 60, src: 'metronome' },
         ]);
+    });
+
+    it('caps joined time, key and clef changes to the schema ceiling', () => {
+        // Each part alternates meter, key and clef every bar for 40 bars:
+        // comfortably under 64 alone, 80 once joined.
+        const bars = 40;
+        const alternating = (): Partial<ScoreData> => ({
+            totalTicks: bars * 1920,
+            measures: Array.from({ length: bars }, (_, i) => ({
+                n: i + 1,
+                tick: i * 1920,
+                dTicks: 1920,
+                page: 0,
+                sys: 0,
+                x0: 0,
+                x1: 1,
+            })),
+            timeSignatures: Array.from({ length: bars }, (_, i) => ({ tick: i * 1920, num: 4 - (i % 2), den: 4 })),
+            keySignatures: Array.from({ length: bars }, (_, i) => ({ tick: i * 1920, fifths: i % 2 })),
+            clefs: Array.from({ length: bars }, (_, i) => ({
+                tick: i * 1920,
+                staff: 1 as const,
+                sign: i % 2 === 0 ? ('F' as const) : ('G' as const),
+            })),
+        });
+        const merged = mergeScoreDataParts([
+            { score: basePart(alternating()), sheets: { from: 1, to: 2 } },
+            { score: basePart(alternating()), sheets: { from: 3, to: 4 } },
+        ]);
+        expect(merged.timeSignatures).toHaveLength(MAX_STATE_EVENTS);
+        expect(merged.keySignatures).toHaveLength(MAX_STATE_EVENTS);
+        expect(merged.clefs).toHaveLength(MAX_STATE_EVENTS);
+        expect(merged.timeSignatures[0]).toEqual({ tick: 0, num: 4, den: 4 });
     });
 });
 

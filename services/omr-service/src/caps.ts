@@ -10,6 +10,8 @@ import type { ScoreHold, ScorePedal, ScoreTempo } from './scoreData.js';
 export const MAX_TEMPO_EVENTS = 512;
 export const MAX_HOLDS = 128;
 export const MAX_PEDAL_EDGES = 256;
+/** Each of the time-signature, key-signature and clef arrays. */
+export const MAX_STATE_EVENTS = 64;
 
 /**
  * Where a ramp arrives rather than where it passes through: the last point
@@ -86,6 +88,20 @@ export const capHolds = (holds: readonly ScoreHold[], max = MAX_HOLDS): ScoreHol
         return [...holds];
     }
     return [...holds].sort((a, b) => a.tick - b.tick).slice(0, max);
+};
+
+/**
+ * Bring a time-signature, key-signature or clef list under the ceiling by
+ * keeping the earliest, as with fermatas. Each is a change of what is in
+ * force, so there is no cheaper one to drop either; past the cut the last kept
+ * value simply stays in force, which costs the tail a detail of notation
+ * rather than costing the reader the whole score.
+ */
+export const capStateEvents = <T extends { tick: number }>(events: readonly T[], max = MAX_STATE_EVENTS): T[] => {
+    if (events.length <= max) {
+        return [...events];
+    }
+    return [...events].sort((a, b) => a.tick - b.tick).slice(0, max);
 };
 
 /**

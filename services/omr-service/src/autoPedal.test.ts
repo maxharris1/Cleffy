@@ -253,6 +253,31 @@ describe('inferAutoPedal: the ceiling', () => {
         expect(result.pedals[result.pedals.length - 1]).toEqual({ tick: bars * BAR, k: 'up', src: 'inferred' });
     });
 
+    it('still changes on a moving bass when a classical score coarsens past the bar', () => {
+        // I–IV–V–I, a chord a bar: per bar 400 edges, so the step is two bars.
+        // The lowest note of every two-bar window is the tonic C3, but the bass
+        // moves inside each one, so the pedal must still change every window
+        // rather than hold one depression over the whole movement.
+        const bars = 200;
+        const cycle = [
+            [C, 48],
+            [F, 53],
+            [G, 55],
+            [C, 48],
+        ] as const;
+        const notes = Array.from({ length: bars * 4 }, (_, i) => {
+            const [pitches, bass] = cycle[Math.floor(i / 4) % 4]!;
+            return chord(i * BEAT, [...pitches], bass);
+        }).flat();
+        const result = inferAutoPedal(score(notes, bars), 'classical');
+        expect(result.inferred).toBe(true);
+        expect(result.pedals.length).toBeLessThanOrEqual(MAX_PEDAL_EDGES);
+        expect(result.pedals.length).toBe(2 + 2 * (bars / 2 - 1));
+        for (const edge of result.pedals) {
+            expect(edge.tick % (2 * BAR)).toBe(0);
+        }
+    });
+
     /** Bar `i` sounds the triad a fifth above bar `i - 1`: every bar, and every few bars, brings new pitch classes. */
     const fifthsCycle = (bars: number): ScoreNote[] =>
         Array.from({ length: bars * 4 }, (_, i) => {

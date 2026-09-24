@@ -1,5 +1,5 @@
 import { inferAutoPedal } from './autoPedal.js';
-import { capHolds, capPedals, capTempoEvents } from './caps.js';
+import { capHolds, capPedals, capStateEvents, capTempoEvents } from './caps.js';
 import { DEFAULT_ERA, type Era } from './era.js';
 import { ERROR_CODES, JobError } from './errors.js';
 import type { MusicalScore } from './musicxml.js';
@@ -244,14 +244,10 @@ export const buildScoreData = (
     // padded, so its `dTicks` is the hole a short bar before a repeat sign has
     // to match exactly for that repeat to retake from it.
     const pickupTicks = musical.measures[0]?.n === 0 ? (musical.measures[0]?.dTicks ?? 0) : 0;
+    const completesPickup = (i: number): boolean => pickupTicks > 0 && (musical.measures[i]?.pad ?? 0) === pickupTicks;
     const plan =
         marks.length === measures.length
-            ? planRepeats(
-                  marks,
-                  { maxMeasures: MAX_MEASURES },
-                  (i) => musical.measures[i]?.n === 0,
-                  (i) => pickupTicks > 0 && (musical.measures[i]?.pad ?? 0) === pickupTicks,
-              )
+            ? planRepeats(marks, { maxMeasures: MAX_MEASURES }, (i) => musical.measures[i]?.n === 0, completesPickup)
             : null;
     // A degraded plan is never performed, so its flags describe a performance
     // that does not happen — they cannot be read without this filter.
@@ -300,11 +296,18 @@ export const buildScoreData = (
         warnings.add('swing_applied');
     }
     const performed =
-        performing && (performsRepeats || performsJumps) ? unrollRepeats(linearScore, performing.order) : linearScore;
+        performing && (performsRepeats || performsJumps)
+            ? // That pad is what a retake from the anacrusis drops: the pickup
+              // is the rest of the bar, so it follows the short bar's last note.
+              unrollRepeats(linearScore, performing.order, (i) => (completesPickup(i) ? pickupTicks : 0))
+            : linearScore;
 
     // Unrolling clones every event it sweeps, so a repeat-heavy score can breach
     // ceilings the printed page came nowhere near — and a breach fails the
     // self-check below, throwing away a score that is otherwise perfectly good.
+    const timeSignatures = capStateEvents(performed.timeSignatures);
+    const keySignatures = performed.keySignatures ? capStateEvents(performed.keySignatures) : undefined;
+    const clefs = performed.clefs ? capStateEvents(performed.clefs) : undefined;
     const tempos = performed.tempos ? capTempoEvents(performed.tempos) : undefined;
     const holds = performed.holds ? capHolds(performed.holds) : undefined;
 
@@ -335,9 +338,9 @@ export const buildScoreData = (
         version: SCORE_DATA_WRITE_VERSION,
         ticksPerQuarter: TICKS_PER_QUARTER,
         defaultBpm: musical.defaultBpm,
-        timeSignatures: performed.timeSignatures,
-        ...(performed.keySignatures ? { keySignatures: performed.keySignatures } : {}),
-        ...(performed.clefs ? { clefs: performed.clefs } : {}),
+        timeSignatures,
+        ...(keySignatures ? { keySignatures } : {}),
+        ...(clefs ? { clefs } : {}),
         ...(tempos ? { tempos } : {}),
         ...(holds ? { holds } : {}),
         ...(pedals && pedals.length > 0 ? { pedals } : {}),

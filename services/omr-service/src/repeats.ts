@@ -482,6 +482,8 @@ interface Segment {
     /** Where the printed bar sits in the original timeline. */
     srcTick: number;
     dTicks: number;
+    /** How long it lasts in the performance: `dTicks` less any padding a retake drops. */
+    span: number;
     /** Where it sits in the performed timeline. */
     destTick: number;
     /** True when the PREVIOUS segment is not this one's printed predecessor. */
@@ -492,9 +494,26 @@ interface Segment {
  * State events (time/key/clef/tempo) describe what is in force from a tick
  * onward, so they cannot simply be copied: a jump can land in the middle of a
  * span. Walk the performance and re-emit whenever the value in force at a
- * segment's start differs from what the performed timeline last said.
+ * segment's start differs from what the performed timeline last said. Events
+ * that carry a staff (clefs) are one such stream per staff: both staves' clefs
+ * sit on the same tick, and each is in force on its own staff.
  */
 const remapStateEvents = <T extends { tick: number }>(events: readonly T[], segments: readonly Segment[]): T[] => {
+    const streams = new Map<unknown, T[]>();
+    for (const e of events) {
+        const staff = 'staff' in e ? e.staff : undefined;
+        const stream = streams.get(staff) ?? [];
+        stream.push(e);
+        streams.set(staff, stream);
+    }
+    if (streams.size <= 1) {
+        return remapStream(events, segments);
+    }
+    return [...streams.values()].flatMap((stream) => remapStream(stream, segments)).sort((a, b) => a.tick - b.tick);
+};
+
+/** {@link remapStateEvents} for one stream, where the latest event is the one in force. */
+const remapStream = <T extends { tick: number }>(events: readonly T[], segments: readonly Segment[]): T[] => {
     if (events.length === 0) {
         return [];
     }
@@ -521,7 +540,7 @@ const remapStateEvents = <T extends { tick: number }>(events: readonly T[], segm
         // Anything changing strictly inside this bar keeps its offset.
         for (const e of sorted) {
             if (e.tick > seg.srcTick && e.tick < seg.srcTick + seg.dTicks) {
-                out.push({ ...e, tick: seg.destTick + (e.tick - seg.srcTick) });
+                out.push({ ...e, tick: seg.destTick + Math.min(e.tick - seg.srcTick, seg.span) });
                 emitted = e;
             }
         }
@@ -533,8 +552,17 @@ const remapStateEvents = <T extends { tick: number }>(events: readonly T[], segm
  * Rebuild a score in performance order. Measures are cloned with their geometry
  * intact and given new ticks, which is what makes the playhead sweep the same
  * printed bar twice for free.
+ *
+ * `retakePad` is the padding to drop from a bar the performance leaves straight
+ * for the head of the score: the short bar an anacrusis completes was padded to
+ * a full bar on the page, and a retake from the anacrusis must follow its last
+ * note directly, or every retake carries a rest the length of the pickup.
  */
-export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readonly number[]): S => {
+export const unrollRepeats = <S extends UnrollableScore>(
+    score: S,
+    order: readonly number[],
+    retakePad: (index: number) => number = () => 0,
+): S => {
     const segments: Segment[] = [];
     // The performance starts where the score starts, which is not necessarily
     // where its first PERFORMED bar sat (and preserves the tick offset that
@@ -546,20 +574,24 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
         if (!measure) {
             continue;
         }
+        const pad = order[s + 1] === 0 ? Math.max(0, retakePad(src)) : 0;
+        const span = Math.max(1, measure.dTicks - pad);
         segments.push({
             src,
             srcTick: measure.tick,
             dTicks: measure.dTicks,
+            span,
             destTick,
             seamBefore: s > 0 && order[s - 1] !== src - 1,
         });
-        destTick += measure.dTicks;
+        destTick += span;
     }
     const totalTicks = Math.max(1, destTick);
 
     const measures = segments.map((seg) => ({
         ...score.measures[seg.src]!,
         tick: seg.destTick,
+        dTicks: seg.span,
         srcIndex: score.measures[seg.src]!.srcIndex ?? seg.src,
     }));
 
@@ -577,7 +609,7 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
             // segment really is what follows it on the page. Clipping every
             // seam would truncate legitimately long ties inside a run.
             if (next && next.seamBefore) {
-                d = Math.min(d, seg.dTicks - offset);
+                d = Math.min(d, seg.span - offset);
             }
             notes.push({ ...note, t: seg.destTick + offset, d: Math.max(1, d) });
         }
@@ -590,23 +622,28 @@ export const unrollRepeats = <S extends UnrollableScore>(score: S, order: readon
             return undefined;
         }
         const out: T[] = [];
-        for (const seg of segments) {
+        for (const [s, seg] of segments.entries()) {
+            // Whether the bar's opening bar line was just performed as the end
+            // of its page predecessor; if not, nothing has claimed it yet.
+            const entered = s === 0 || seg.seamBefore;
             for (const e of events) {
                 // A pedal release engraved on a bar line — some engravers put
                 // the stop at the top of the next measure — damps the music
                 // before it, so an 'up' takes the left-open, right-closed bar.
                 // Handing it to the bar after would let a performed repeat
-                // replay the span with the release stranded past the jump. The
-                // one tick with no bar before it is the score's head, which
-                // bar 0 claims so an edge there (OMR losing the start of a
-                // pedal line leaves an orphan release) is not dropped.
+                // replay the span with the release stranded past the jump. A
+                // bar reached any other way than from its page predecessor
+                // claims its opening bar line too: the performance's head (OMR
+                // losing the start of a pedal line leaves an orphan release on
+                // tick 0), and a volta, coda or retake, where the release of a
+                // re-catch on the downbeat must still come before its 'down'.
                 const inSeg =
                     e.k === 'up'
-                        ? (e.tick > seg.srcTick || (e.tick === 0 && seg.srcTick === 0)) &&
+                        ? (e.tick > seg.srcTick || (e.tick === seg.srcTick && entered)) &&
                           e.tick <= seg.srcTick + seg.dTicks
                         : e.tick >= seg.srcTick && e.tick < seg.srcTick + seg.dTicks;
                 if (inSeg) {
-                    out.push({ ...e, tick: seg.destTick + (e.tick - seg.srcTick) });
+                    out.push({ ...e, tick: seg.destTick + Math.min(e.tick - seg.srcTick, seg.span) });
                 }
             }
         }
