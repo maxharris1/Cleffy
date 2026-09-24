@@ -569,7 +569,9 @@ const accidentalMarkOf = (text: string): AccidentalMark | undefined => {
     return undefined;
 };
 
-const ornamentOf = (noteEl: Elem): { kind: OrnamentKind; accidentalMark?: AccidentalMark } | undefined => {
+type OrnamentMark = { kind: OrnamentKind; accidentalMark?: AccidentalMark; lowerAccidentalMark?: AccidentalMark };
+
+const ornamentOf = (noteEl: Elem): OrnamentMark | undefined => {
     const groups = noteEl.getElementsByTagName('ornaments');
     for (let g = 0; g < groups.length; g++) {
         const group = groups.item(g) as Elem | null;
@@ -577,18 +579,33 @@ const ornamentOf = (noteEl: Elem): { kind: OrnamentKind; accidentalMark?: Accide
             continue;
         }
         let kind: OrnamentKind | undefined;
-        let accidentalMark: AccidentalMark | undefined;
+        const marks: Array<{ mark: AccidentalMark; placement: string }> = [];
         for (const mark of childElements(group)) {
             const mapped = ORNAMENT_TAGS[mark.nodeName];
             if (mapped && kind === undefined) {
                 kind = mapped;
             }
             if (mark.nodeName === 'accidental-mark') {
-                accidentalMark = accidentalMarkOf(mark.textContent ?? '') ?? accidentalMark;
+                const parsed = accidentalMarkOf(mark.textContent ?? '');
+                if (parsed) {
+                    marks.push({ mark: parsed, placement: (mark.getAttribute('placement') ?? '').toLowerCase() });
+                }
             }
         }
         if (kind) {
-            return accidentalMark ? { kind, accidentalMark } : { kind };
+            // A mark below the sign alters the lower auxiliary, one above the
+            // upper; an unplaced one belongs to the figure's only auxiliary,
+            // which for a mordent is the lower.
+            const out: OrnamentMark = { kind };
+            for (const { mark, placement } of marks) {
+                const below = placement === 'below' || (placement !== 'above' && kind === 'mordent');
+                if (below) {
+                    out.lowerAccidentalMark = mark;
+                } else {
+                    out.accidentalMark = mark;
+                }
+            }
+            return out;
         }
     }
     return undefined;
@@ -1209,7 +1226,7 @@ export type RawEvent =
           fermata: boolean;
           /** Audiveris inverted fermatas on short notes are usually false staccato/dot reads. */
           fermataInverted?: boolean;
-          ornament?: { kind: OrnamentKind; accidentalMark?: AccidentalMark };
+          ornament?: OrnamentMark;
           arpeggiate?: 'up' | 'down';
           /** Single-note tremolo strokes: the note is a measured repetition. */
           tremolo?: number;
@@ -1262,6 +1279,8 @@ export type RawEvent =
           rel: number;
           midi: number;
           staff: number;
+          /** Null when unwritten: the grace then goes to the next note on its staff. */
+          voice: string | null;
           slash: boolean;
           stealPrevious: boolean;
           stealFollowing: boolean;
@@ -1676,6 +1695,7 @@ const scanPart = (part: Elem): RawMeasure[] => {
                                 rel: cursor,
                                 midi: graceMidi,
                                 staff: childInt(child, 'staff') ?? 1,
+                                voice: childText(child, 'voice'),
                                 slash: figure.slash,
                                 stealPrevious: figure.stealPrevious,
                                 stealFollowing: figure.stealFollowing,
@@ -3046,8 +3066,14 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
     const holds: ScoreHold[] = [];
     const pedals: ScorePedal[] = [];
 
-    /** Grace notes buffered until their principal note arrives. */
-    let pendingGraces: Array<{ midi: number; hand: 0 | 1; slash: boolean }> = [];
+    /**
+     * Grace notes buffered until their principal note arrives — the next note
+     * in the same staff and voice, so one written at the end of a voice waits
+     * for that voice's next note rather than the other hand's after <backup>.
+     */
+    let pendingGraces: Array<{ midi: number; hand: 0 | 1; slash: boolean; staff: number; voice: string | null }> = [];
+    /** What an appoggiatura took from the chord head, for its <chord/> members. */
+    let chordSteal = 0;
     /** Ties still waiting for their stop, keyed by staff:voice:midi. */
     const openTies = new Map<string, GatedNote>();
     // Tie chains with a breath mark somewhere along them: the stop comes after
@@ -3250,11 +3276,13 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                     break;
                 case 'grace': {
                     // Buffer graces; they crush in just before their principal.
-                    if (pendingGraces.length < 8) {
+                    if (pendingGraces.filter((g) => g.staff === ev.staff && g.voice === ev.voice).length < 8) {
                         pendingGraces.push({
                             midi: ev.midi,
                             hand: ev.staff >= 2 ? 1 : ctx.fallbackHand,
                             slash: ev.slash,
+                            staff: ev.staff,
+                            voice: ev.voice,
                         });
                     }
                     break;
@@ -3286,6 +3314,28 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                         return crossStaff;
                     };
 
+                    // Hold on ARRIVING at the onset, so the note itself still
+                    // starts on time and everything sounding across it rings on.
+                    const holdFermata = (): void => {
+                        // Inverted fermata on a note shorter than a quarter is the
+                        // Audiveris false-positive (staccato / accent dots). A real
+                        // inverted fermata sits on a longer note; missing one is
+                        // one-sided (the gate only fails invented holds).
+                        if (ev.fermata && !(ev.fermataInverted && ev.dur < TICKS_PER_QUARTER)) {
+                            holds.push({
+                                tick: start,
+                                beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)),
+                            });
+                        }
+                    };
+
+                    if (!ev.chord) {
+                        // Before any tie-stop: a chord led by a held note is still
+                        // a new chord, and its members must not join the last roll.
+                        flushArp();
+                        chordSteal = 0;
+                    }
+
                     const openKey = ev.tieStop ? resolveOpenTie() : null;
                     if (openKey) {
                         const open = openTies.get(openKey);
@@ -3310,22 +3360,25 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                                 open.gate = ev.arts.gate;
                             }
                         }
+                        // A fermata over a held note still stops the clock.
+                        holdFermata();
                         break;
-                    }
-
-                    if (!ev.chord) {
-                        flushArp();
                     }
 
                     const vc = ev.vc ?? 0;
                     const sustained = velocityAt(curveFor(ev.staff, vc), start);
-                    let principalStart = start;
-                    let principalNotated = ev.dur;
-                    if (!ev.chord && pendingGraces.length > 0) {
+                    // The whole chord waits out an appoggiatura, not only the note
+                    // listed first — else the rest sound against the grace.
+                    let principalStart = start + chordSteal;
+                    let principalNotated = Math.max(1, ev.dur - chordSteal);
+                    const leads = (g: (typeof pendingGraces)[number]): boolean =>
+                        g.staff === ev.staff && (g.voice === null || g.voice === ev.voice);
+                    const graces = ev.chord ? [] : pendingGraces.filter(leads);
+                    if (graces.length > 0) {
                         const bpm = bpmAt(start);
                         const graceV = roundVelocity(clampVelocity((sustained ?? DEFAULT_VELOCITY) * 0.8));
-                        const accis = pendingGraces.filter((g) => g.slash);
-                        const appogs = pendingGraces.filter((g) => !g.slash);
+                        const accis = graces.filter((g) => g.slash);
+                        const appogs = graces.filter((g) => !g.slash);
                         if (accis.length > 0) {
                             // Crush acciaccaturas just before this attack, stealing
                             // time from what came before (they may reach back across
@@ -3355,8 +3408,9 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                             });
                             principalStart = start + steal;
                             principalNotated = Math.max(1, ev.dur - steal);
+                            chordSteal = steal;
                         }
-                        pendingGraces = [];
+                        pendingGraces = pendingGraces.filter((g) => !leads(g));
                     }
                     // Velocity is now a pure function of (staff, tick), so every
                     // member of a chord gets the same value for free. An sf-family
@@ -3384,10 +3438,19 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                             fifths: fifthsAt(principalStart),
                             bpm: bpmAt(principalStart),
                             accidentalMark: ev.ornament.accidentalMark,
+                            lowerAccidentalMark: ev.ornament.lowerAccidentalMark,
                             ...(ctx.options.era ? { era: ctx.options.era } : {}),
                         });
                     } else if (ev.tremolo !== undefined && untied) {
-                        emitted = realizeTremolo(note, ev.tremolo);
+                        // A measured tremolo has a fixed number of strikes: count
+                        // them on the written length, and let the marking's gate
+                        // release only the last.
+                        const strikes = realizeTremolo({ ...note, d: principalNotated }, ev.tremolo);
+                        const last = strikes[strikes.length - 1];
+                        if (strikes.length > 1 && last) {
+                            last.d = gateDuration(last.d, ev.arts.gate);
+                            emitted = strikes;
+                        }
                     }
                     if (emitted.length > 1) {
                         ctx.warnings.add('ornaments_realized');
@@ -3427,20 +3490,7 @@ const placeAndEmit = (raws: readonly RawMeasure[], ctx: PartContext): PartResult
                             pendingGlissandi.set(glissKey, note);
                         }
                     }
-                    if (ev.fermata) {
-                        // Inverted fermata on a note shorter than a quarter is the
-                        // Audiveris false-positive (staccato / accent dots). A real
-                        // inverted fermata sits on a longer note; missing one is
-                        // one-sided (the gate only fails invented holds).
-                        if (!(ev.fermataInverted && ev.dur < TICKS_PER_QUARTER)) {
-                            // Hold on ARRIVING at the onset, so the note itself still
-                            // starts on time and everything sounding across it rings on.
-                            holds.push({
-                                tick: start,
-                                beats: Math.min(4, Math.max(0.5, ev.dur / TICKS_PER_QUARTER)),
-                            });
-                        }
-                    }
+                    holdFermata();
                     if (ev.breath && !ev.chord) {
                         // A caesura or breath mark is a short stop AFTER the note —
                         // after the whole chain, for a note that starts a tie.

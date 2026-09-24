@@ -80,7 +80,9 @@ const isSymbolicOnly = (raw: string | undefined = process.env.CLEFFY_SYMBOLIC_ON
  * svc-36: parser corrections that change existing scores — a notehead two
  * voices share sounds once (whole readings merged, so an ornament or tremolo
  * on one stem is not doubled by the other), swing ordering, tied arpeggio
- * lengths. The corpus is keyed by this string, so a bump orphans every seeded
+ * lengths, tremolo strike counts, appoggiaturas before chords, ornament
+ * accidental-marks, fermatas on tie stops, grace notes kept to their voice,
+ * and the repair-pass, symbolic-path and corpus fixes landed alongside. The corpus is keyed by this string, so a bump orphans every seeded
  * row: rebuild them with `npm run corpus:seed -- --reseed-ready`.
  * svc-35: a near-blank scanned leaf is skipped like a cover instead of failing
  * the whole book export. Only PDFs that produced nothing under svc-34 change.

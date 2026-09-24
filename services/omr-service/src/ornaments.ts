@@ -28,20 +28,27 @@ const nearestScaleTone = (midi: number, scale: Set<number>, dir: 1 | -1): number
     return midi + dir;
 };
 
+/** Natural pitch classes a key signature sharpens, or flattens, in signature order. */
+const SHARPENED = [5, 0, 7, 2, 9, 4, 11];
+const FLATTENED = [11, 4, 9, 2, 7, 0, 5];
+
 /**
- * Accidental-mark on an ornament overrides the UPPER neighbour only:
- * `sharp` raises a 1-semitone neighbour to 2; `flat` lowers a 2-semitone
- * neighbour to 1; `natural` (and anything else) leaves the computed tone.
+ * An accidental-mark names the auxiliary's OWN accidental, exactly as one on
+ * its head would: it replaces whatever the key signature gave that letter, so
+ * a natural over a trill on A in F major means B natural, not the key's B-flat.
  */
-const applyAccidentalMark = (principal: number, upper: number, mark: AccidentalMark | undefined): number => {
-    const interval = upper - principal;
-    if (mark === 'sharp' && interval === 1) {
-        return upper + 1;
+const applyAccidentalMark = (neighbour: number, fifths: number, mark: AccidentalMark | undefined): number => {
+    if (!mark) {
+        return neighbour;
     }
-    if (mark === 'flat' && interval === 2) {
-        return upper - 1;
+    const pc = ((neighbour % 12) + 12) % 12;
+    let natural = neighbour;
+    if (fifths > 0 && SHARPENED.slice(0, fifths).includes((pc + 11) % 12)) {
+        natural = neighbour - 1;
+    } else if (fifths < 0 && FLATTENED.slice(0, -fifths).includes((pc + 1) % 12)) {
+        natural = neighbour + 1;
     }
-    return upper;
+    return mark === 'sharp' ? natural + 1 : mark === 'flat' ? natural - 1 : natural;
 };
 
 const clampMidi = (midi: number): number => Math.max(0, Math.min(127, midi));
@@ -49,11 +56,11 @@ const clampMidi = (midi: number): number => Math.max(0, Math.min(127, midi));
 const neighbours = (
     midi: number,
     fifths: number,
-    accidentalMark?: AccidentalMark,
+    marks: { upper?: AccidentalMark; lower?: AccidentalMark },
 ): { upper: number; lower: number } => {
     const scale = scalePitchClasses(fifths);
-    const upper = applyAccidentalMark(midi, nearestScaleTone(midi, scale, 1), accidentalMark);
-    const lower = nearestScaleTone(midi, scale, -1);
+    const upper = applyAccidentalMark(nearestScaleTone(midi, scale, 1), fifths, marks.upper);
+    const lower = applyAccidentalMark(nearestScaleTone(midi, scale, -1), fifths, marks.lower);
     return { upper: clampMidi(upper), lower: clampMidi(lower) };
 };
 
@@ -82,9 +89,19 @@ const trillVelocity = (principal: ScoreNote): number =>
 export const realizeOrnament = (
     principal: ScoreNote,
     kind: OrnamentKind,
-    opts: { fifths: number; bpm: number; accidentalMark?: AccidentalMark; era?: Era },
+    opts: {
+        fifths: number;
+        bpm: number;
+        /** Marks the upper auxiliary; `lowerAccidentalMark` the lower one. */
+        accidentalMark?: AccidentalMark;
+        lowerAccidentalMark?: AccidentalMark;
+        era?: Era;
+    },
 ): ScoreNote[] => {
-    const { upper, lower } = neighbours(principal.p, opts.fifths, opts.accidentalMark);
+    const { upper, lower } = neighbours(principal.p, opts.fifths, {
+        upper: opts.accidentalMark,
+        lower: opts.lowerAccidentalMark,
+    });
     // Before about 1800 the upper-neighbour ornaments begin ON the auxiliary
     // (Bach's Explication, C. P. E. Bach): the trill and the Pralltriller start
     // above and fall to the principal. The mordent proper is principal-first in
@@ -184,8 +201,9 @@ const realizeTurn = (principal: ScoreNote, first: number, third: number): ScoreN
 /**
  * A single-note tremolo as the measured repetition it abbreviates: `strokes`
  * beams give eighths (1), sixteenths (2), 32nds (3)…, repeated across the
- * sounding span, the last repetition taking any remainder. A note too short
- * for two strokes comes back unchanged.
+ * span given — the WRITTEN length, so no strike is lost to the gate — the last
+ * repetition taking any remainder. A note too short for two strokes comes back
+ * unchanged.
  */
 export const realizeTremolo = (principal: ScoreNote, strokes: number): ScoreNote[] => {
     const unit = Math.max(THIRTY_SECOND / 2, Math.round(480 / 2 ** strokes));

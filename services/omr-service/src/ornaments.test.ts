@@ -105,6 +105,27 @@ describe('realizeOrnament', () => {
         expect(pitches(out)).toEqual([60, 62, 60]);
     });
 
+    it("reads accidental-mark as the auxiliary's own accidental, whatever the key gave it", () => {
+        const upperOf = (p: number, fifths: number, accidentalMark: 'sharp' | 'flat' | 'natural') =>
+            pitches(realizeOrnament({ ...C4, p }, 'inverted-mordent', { fifths, bpm: 120, accidentalMark }))[1];
+        expect(upperOf(69, -1, 'natural')).toBe(71); // A in F major: B natural, not B-flat
+        expect(upperOf(67, -3, 'natural')).toBe(69); // G in C minor: A natural
+        expect(upperOf(64, 2, 'natural')).toBe(65); // E in D major: F natural, not F-sharp
+        expect(upperOf(65, 0, 'sharp')).toBe(68); // F in C major: G-sharp
+    });
+
+    it('applies a lower accidental-mark to the lower neighbour', () => {
+        const out = realizeOrnament(C4, 'mordent', { fifths: 0, bpm: 120, lowerAccidentalMark: 'flat' });
+        expect(pitches(out)).toEqual([60, 58, 60]);
+        const turn = realizeOrnament(C4, 'turn', {
+            fifths: 0,
+            bpm: 120,
+            accidentalMark: 'sharp',
+            lowerAccidentalMark: 'flat',
+        });
+        expect(pitches(turn)).toEqual([63, 60, 58, 60, 60]);
+    });
+
     it('leaves a short note unchanged', () => {
         const short = { ...C4, d: 119 };
         expect(realizeOrnament(short, 'trill', { fifths: 0, bpm: 120 })).toEqual([short]);

@@ -1572,6 +1572,25 @@ describe('ornaments, graces and swing', () => {
         expect(parseMusicXmlString(twoNote).notes).toHaveLength(2);
     });
 
+    it('counts tremolo strikes on the written length, gating only the last', () => {
+        // No tenuto: the 0.9 gate must not cost the figure its final strike.
+        const trem = (strokes: number) =>
+            `<notations><ornaments><tremolo type="single">${strokes}</tremolo></ornaments></notations>`;
+        const quarter = parseMusicXmlString(
+            wrap(`<measure number="1">${ATTRS_44}${note('G', 4, 4, trem(2))}${note('C', 4, 12)}</measure>`),
+        ).notes.filter((n) => n.p === 67);
+        expect(quarter.map((n) => [n.t, n.d])).toEqual([
+            [0, 120],
+            [120, 120],
+            [240, 120],
+            [360, plain(120)],
+        ]);
+        const half = parseMusicXmlString(
+            wrap(`<measure number="1">${ATTRS_44}${note('G', 4, 8, trem(1))}${note('C', 4, 8)}</measure>`),
+        ).notes.filter((n) => n.p === 67);
+        expect(half.map((n) => n.t)).toEqual([0, 240, 480, 720]);
+    });
+
     it('fills a glissando with the chromatic run up to its target', () => {
         const xml = wrap(
             `<measure number="1">${ATTRS_44}${note('C', 4, 8, '<notations><glissando type="start"/></notations>')}${note('F', 4, 8, '<notations><glissando type="stop"/></notations>')}</measure>`,
@@ -1651,6 +1670,20 @@ describe('ornaments, graces and swing', () => {
         expect(notes.map((n) => n.d)).toEqual([60, 60, 360]);
     });
 
+    it('applies an accidental-mark below the sign to the lower auxiliary', () => {
+        const mark = (placement: string) => `<accidental-mark placement="${placement}">sharp</accidental-mark>`;
+        const lowerOf = (tag: string, placement: string) =>
+            parseMusicXmlString(
+                wrap(
+                    `<measure number="1">${ATTRS_44}${note('D', 4, 4, orns(tag, mark(placement)))}${note('E', 4, 12)}</measure>`,
+                ),
+            ).notes.filter((n) => n.t < 480);
+        // D in C major: the turn's lower C becomes C-sharp, its upper E stays.
+        expect(lowerOf('turn', 'below').map((n) => n.p)).toEqual([64, 62, 61, 62, 62]);
+        expect(lowerOf('turn', 'above').map((n) => n.p)).toEqual([65, 62, 60, 62, 62]);
+        expect(lowerOf('mordent', 'below').map((n) => n.p)).toEqual([62, 61, 62]);
+    });
+
     it('rolls an arpeggiated chord from the bottom', () => {
         const xml = wrap(
             `<measure number="1">${ATTRS_44}
@@ -1683,6 +1716,86 @@ describe('ornaments, graces and swing', () => {
             { t: 0, d: 240, p: 62, h: 0, v: 0.6, vc: 0 },
             { t: 240, d: plain(240), p: 64, h: 0, vc: 0, gate: 0.9 },
         ]);
+    });
+
+    it('delays the whole chord behind an appoggiatura, not just its first-listed note', () => {
+        const member = (step: string) =>
+            `<note><chord/><pitch><step>${step}</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>`;
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}
+                <note><grace slash="no"/><pitch><step>A</step><octave>4</octave></pitch><voice>1</voice></note>
+                ${note('C', 4, 4)}${member('E')}${member('G')}
+                <note><rest/><duration>12</duration><voice>1</voice></note>
+            </measure>`,
+        );
+        expect(parseMusicXmlString(xml).notes.map((n) => [n.t, n.d, n.p])).toEqual([
+            [0, 240, 69],
+            [240, plain(240), 60],
+            [240, plain(240), 64],
+            [240, plain(240), 67],
+        ]);
+    });
+
+    it('still rolls a chord whose first-listed note closes a tie', () => {
+        const arp = '<arpeggiate/>';
+        const head = (step: string, octave: number, extra = '') =>
+            note(step, octave, 8, `${extra}<notations>${arp}</notations>`);
+        const member = (step: string, octave: number, extra = '') =>
+            `<note><chord/><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>8</duration><voice>1</voice>${extra}<notations>${arp}</notations></note>`;
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}` +
+                head('C', 4) +
+                member('E', 4) +
+                member('C', 5, '<tie type="start"/>') +
+                head('C', 5, '<tie type="stop"/>') +
+                member('D', 4) +
+                member('F', 4) +
+                `</measure>`,
+        );
+        const onsets = parseMusicXmlString(xml)
+            .notes.map((n) => [n.t, n.p])
+            .sort((a, b) => a[0]! - b[0]!);
+        expect(onsets).toEqual([
+            [0, 60],
+            [60, 64],
+            [120, 72],
+            [960, 62],
+            [1020, 65],
+        ]);
+    });
+
+    it('holds a fermata engraved on the note that closes a tie', () => {
+        const xml = wrap(
+            `<measure number="1">${ATTRS_44}${note('C', 4, 8)}${note('C', 5, 8, '<tie type="start"/><notations><tied type="start"/></notations>')}</measure>` +
+                `<measure number="2">${note('C', 5, 16, '<tie type="stop"/><notations><tied type="stop"/><fermata/></notations>')}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        expect(score.holds).toEqual([{ tick: 1920, beats: 4 }]);
+        expect(score.notes.map((n) => [n.t, n.p])).toEqual([
+            [0, 60],
+            [960, 72],
+        ]);
+    });
+
+    it("keeps a grace at the end of a voice off the other staff's downbeat", () => {
+        // A trill's closing grace written after the right hand's whole note,
+        // before the <backup> to the left hand: it belongs just before the
+        // right hand's next note, not crushed onto the bass in the same bar.
+        const grand = `<attributes><divisions>4</divisions><staves>2</staves><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`;
+        const sn = (step: string, octave: number, staff: number, voice: number) =>
+            `<note><pitch><step>${step}</step><octave>${octave}</octave></pitch><duration>16</duration><voice>${voice}</voice><staff>${staff}</staff></note>`;
+        const back = '<backup><duration>16</duration></backup>';
+        const xml = wrap(
+            `<measure number="1">${grand}${sn('C', 5, 1, 1)}` +
+                `<note><grace/><pitch><step>D</step><octave>5</octave></pitch><voice>1</voice><staff>1</staff></note>` +
+                `${back}${sn('C', 3, 2, 5)}</measure>` +
+                `<measure number="2">${sn('E', 5, 1, 1)}${back}${sn('C', 3, 2, 5)}</measure>`,
+        );
+        const score = parseMusicXmlString(xml);
+        const grace = score.notes.find((n) => n.p === 74);
+        expect(grace?.t).toBeGreaterThan(1800);
+        expect(grace!.t + grace!.d).toBe(1920);
+        expect(score.warnings).not.toContain('grace_notes_skipped');
     });
 
     it('sizes an acciaccatura to 77 ticks at 120 bpm and 38 at 60 bpm', () => {
