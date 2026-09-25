@@ -28,8 +28,10 @@ interface ImslpWorkPanelProps {
     /** Library is uploading the handed-off PDF. */
     busy: boolean;
     importing: boolean;
-    /** Tapping a downloadable row selects it and starts the import. */
-    onImport: (edition: ImslpEdition) => void;
+    /** Free cloud-score quota is exhausted — Add stays disabled. */
+    quotaExhausted?: boolean;
+    onSelect: (edition: ImslpEdition) => void;
+    onImportSelected: () => void;
     onImportLocalPdf: (file: File) => void;
 }
 
@@ -61,7 +63,9 @@ export const ImslpWorkPanel = ({
     download,
     busy,
     importing,
-    onImport,
+    quotaExhausted = false,
+    onSelect,
+    onImportSelected,
     onImportLocalPdf,
 }: ImslpWorkPanelProps) => {
     const parsed = displayWorkTitle(work.title);
@@ -74,8 +78,10 @@ export const ImslpWorkPanel = ({
     const noneImportable = work.editions.length > 0 && importableCount === 0;
     const noUrtext = work.editions.length > 0 && !work.editions.some((e) => e.urtext);
     const countLine = editionListSummary(work.editions);
+    const selectedImportable = selected !== null && isEditionImportable(selected);
 
-    const statusLine = download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : null;
+    const buttonLabel =
+        download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
 
     return (
         <div className="imslp-panel-view mt-4">
@@ -93,8 +99,10 @@ export const ImslpWorkPanel = ({
             {work.editions.length === 0 ? (
                 <p className="mt-4 text-sm text-stone-500">No PDF editions found for this work.</p>
             ) : (
-                <div className="mt-4">
-                    <p className="text-xs font-medium uppercase tracking-wide text-stone-500">Choose a PDF edition</p>
+                <fieldset className="mt-4">
+                    <legend className="text-xs font-medium uppercase tracking-wide text-stone-500">
+                        Choose a PDF edition
+                    </legend>
                     {countLine ? <p className="mt-1 text-xs text-stone-500">{countLine}</p> : null}
                     {noUrtext ? (
                         <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
@@ -102,7 +110,7 @@ export const ImslpWorkPanel = ({
                     {!noneImportable ? (
                         <p className="mt-3 max-w-prose text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
                     ) : null}
-                    <ul className="mt-2 max-h-[16.5rem] overflow-y-auto" aria-label="PDF editions">
+                    <ul className="mt-3 flex max-h-[22rem] flex-col gap-1.5 overflow-y-auto" aria-label="PDF editions">
                         {ranked.map((edition) => {
                             const checked = selected?.filename === edition.filename;
                             const importable = isEditionImportable(edition);
@@ -110,16 +118,11 @@ export const ImslpWorkPanel = ({
                             const publisherLabel = edition.publisher
                                 ? [edition.publisher, edition.year].filter(Boolean).join(' ')
                                 : null;
-                            const meta = [
-                                publisherLabel,
-                                edition.description,
-                                availability && availability.kind === 'downloadable' ? availability.label : null,
-                                formatBytes(edition.size) || null,
-                            ].filter(Boolean);
+                            const licenseLabel =
+                                availability && availability.kind === 'downloadable' ? availability.label : null;
+                            const sizeLabel = formatBytes(edition.size) || null;
+                            const facts = [licenseLabel, sizeLabel].filter(Boolean);
                             const name = displayEditionName(edition.filename);
-                            const rowClass = `flex items-start gap-2.5 border-b border-stone-200/80 py-2.5 ${
-                                checked ? 'bg-accent-soft' : ''
-                            }`;
                             const badge = urtextBadge(edition);
                             const showRecommended = !badge && recommended?.filename === edition.filename;
                             const showWarn = !importable && availability !== null;
@@ -141,69 +144,75 @@ export const ImslpWorkPanel = ({
                                                 {warnBadgeLabel(availability)}
                                             </Badge>
                                         ) : null}
-                                        <span
-                                            className={`min-w-0 flex-1 break-words ${importable ? '' : 'text-stone-500'}`}
-                                        >
+                                        <span className={`min-w-0 break-words ${importable ? '' : 'text-stone-500'}`}>
                                             {name}
                                         </span>
                                     </span>
-                                    {meta.length > 0 ? (
-                                        <span className="mt-0.5 block text-xs text-stone-500">{meta.join(' · ')}</span>
+                                    {publisherLabel ? (
+                                        <span className="mt-1 block text-xs leading-5 text-stone-500">
+                                            {publisherLabel}
+                                        </span>
                                     ) : null}
+                                    {edition.description ? (
+                                        <span className="mt-0.5 block text-xs leading-5 text-stone-500">
+                                            {edition.description}
+                                        </span>
+                                    ) : null}
+                                    {facts.length > 0 ? (
+                                        <span className="mt-0.5 block text-xs leading-5 text-stone-500">
+                                            {facts.join(' · ')}
+                                        </span>
+                                    ) : null}
+                                    <a
+                                        href={edition.openUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className={`mt-1 inline-block text-xs ${linkClassName}`}
+                                    >
+                                        Open on IMSLP
+                                    </a>
                                     {!importable ? (
                                         <span className="mt-0.5 block text-xs text-stone-500">
                                             {availability?.kind === 'unknown'
-                                                ? 'License unknown — '
-                                                : 'Not downloadable here — '}
-                                            <a
-                                                href={edition.openUrl}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className={`text-xs ${linkClassName}`}
-                                            >
-                                                open on IMSLP
-                                            </a>
+                                                ? 'License unknown — not importable here.'
+                                                : 'Not downloadable here — open the file on IMSLP.'}
                                         </span>
                                     ) : null}
                                 </span>
                             );
+                            const rowClass = [
+                                'flex items-start gap-3 rounded-lg px-3 py-3',
+                                checked
+                                    ? 'bg-accent-soft ring-2 ring-accent'
+                                    : importable
+                                      ? 'border border-stone-200/80 hover:bg-stone-50'
+                                      : 'border border-stone-200/60 opacity-70',
+                            ].join(' ');
                             return (
                                 <li key={edition.filename}>
                                     {importable ? (
-                                        <div className={rowClass}>
-                                            <button
-                                                type="button"
-                                                onClick={() => onImport(edition)}
+                                        <label
+                                            className={`${rowClass} ${importing ? 'cursor-default' : 'cursor-pointer'}`}
+                                        >
+                                            <input
+                                                type="radio"
+                                                name="imslp-edition"
+                                                className="mt-1 h-4 w-4 shrink-0 accent-accent"
+                                                checked={checked}
+                                                onChange={() => onSelect(edition)}
                                                 disabled={importing}
-                                                aria-label={`Download ${name}`}
-                                                className={`min-w-0 flex-1 text-left disabled:cursor-default ${
-                                                    importing ? 'opacity-70' : 'cursor-pointer hover:bg-stone-50'
-                                                }`}
-                                            >
-                                                {identity}
-                                            </button>
-                                            <a
-                                                href={edition.openUrl}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className={`mt-0.5 shrink-0 self-start text-xs ${linkClassName}`}
-                                            >
-                                                Open on IMSLP
-                                            </a>
-                                        </div>
+                                                aria-label={`Select ${name}`}
+                                            />
+                                            {identity}
+                                        </label>
                                     ) : (
-                                        <div className={`${rowClass} opacity-70`}>{identity}</div>
+                                        <div className={rowClass}>{identity}</div>
                                     )}
                                 </li>
                             );
                         })}
                     </ul>
-                    {statusLine ? (
-                        <p className="mt-2 text-xs text-stone-600" role="status">
-                            {statusLine}
-                        </p>
-                    ) : null}
-                </div>
+                </fieldset>
             )}
 
             {noneImportable ? (
@@ -226,6 +235,24 @@ export const ImslpWorkPanel = ({
                         </a>
                         <LocalPdfPicker importing={importing} onPick={onImportLocalPdf} />
                     </div>
+                </div>
+            ) : work.editions.length > 0 ? (
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={onImportSelected}
+                        disabled={!selectedImportable || importing || quotaExhausted}
+                        className={buttonClassName('primary', 'sm')}
+                    >
+                        {buttonLabel}
+                    </button>
+                    {quotaExhausted ? (
+                        <p className="text-xs text-stone-600">
+                            Cloud-score limit reached — upgrade to add this edition.
+                        </p>
+                    ) : !selectedImportable ? (
+                        <p className="text-xs text-stone-500">Select a downloadable edition to add.</p>
+                    ) : null}
                 </div>
             ) : null}
 
