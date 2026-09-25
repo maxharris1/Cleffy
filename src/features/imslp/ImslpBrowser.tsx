@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
-import { isEditionImportable, suggestedPdfName } from '@/features/imslp/imslpDisplay';
+import { isEditionImportable, recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
 import { ErrorText } from '@/ui/ErrorText';
@@ -25,6 +25,8 @@ export interface ImslpBrowserProps {
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
+    /** Free cloud-score quota is exhausted — disable the primary Add. */
+    quotaExhausted?: boolean;
     /** When false, omit the panel title (e.g. page already has a heading). */
     showHeading?: boolean;
     className?: string;
@@ -55,15 +57,17 @@ const reduce = (state: Flow, action: Action): Flow => {
             return { phase: 'search' };
         case 'loadingWork':
             return { phase: 'loadingWork' };
-        case 'workLoaded':
+        case 'workLoaded': {
+            const recommended = recommendEdition(action.work.editions);
             return {
                 phase: 'work',
                 work: action.work,
-                selected: null,
+                selected: recommended,
                 download: { kind: 'idle' },
             };
+        }
         case 'select':
-            if (state.phase !== 'work') {
+            if (state.phase !== 'work' || state.download.kind === 'downloading') {
                 return state;
             }
             return { ...state, selected: action.edition, download: { kind: 'idle' } };
@@ -83,6 +87,7 @@ export const ImslpBrowser = ({
     onImportFile,
     onImportImslp,
     busy = false,
+    quotaExhausted = false,
     showHeading = true,
     className = 'mt-6',
 }: ImslpBrowserProps) => {
@@ -133,26 +138,28 @@ export const ImslpBrowser = ({
         setSearchParams({}, { replace: true });
     };
 
-    // A row tap both selects and imports. The IMSLP disclaimer is static text
-    // above the list, so the tap is the acknowledgment the edge function's
-    // `acceptedDisclaimer` flag records.
-    const importEdition = async (edition: ImslpEdition) => {
-        if (flow.phase !== 'work') {
+    // Primary Add imports the selected edition. The IMSLP notice stays on
+    // screen as static text, so the click is the acknowledgment the edge
+    // function's `acceptedDisclaimer` flag records — no checkbox.
+    const importSelected = async () => {
+        if (flow.phase !== 'work' || !flow.selected) {
+            return;
+        }
+        if (quotaExhausted) {
             return;
         }
         if (flow.download.kind === 'downloading' || importInFlightRef.current) {
             return;
         }
-        if (!isEditionImportable(edition)) {
+        if (!isEditionImportable(flow.selected)) {
             return;
         }
         importInFlightRef.current = true;
-        const { work } = flow;
+        const { work, selected } = flow;
         setError(null);
-        dispatch({ type: 'select', edition });
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(edition.filename, work.title, true);
+            const result = await onImportImslp(selected.filename, work.title, true);
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -230,7 +237,9 @@ export const ImslpBrowser = ({
                     download={flow.download}
                     busy={busy}
                     importing={blocked}
-                    onImport={(edition) => void importEdition(edition)}
+                    quotaExhausted={quotaExhausted}
+                    onSelect={(edition) => dispatch({ type: 'select', edition })}
+                    onImportSelected={() => void importSelected()}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
             ) : null}

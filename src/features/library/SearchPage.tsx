@@ -23,7 +23,13 @@ export const SearchPage = () => {
             {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-4" /> : null}
             {uploadError ? <ErrorText className="mt-4">{uploadError}</ErrorText> : null}
 
-            <ImslpBrowser busy={uploading} onImportFile={onUpload} onImportImslp={onImportImslp} showHeading={false} />
+            <ImslpBrowser
+                busy={uploading}
+                quotaExhausted={Boolean(uploadLimit)}
+                onImportFile={onUpload}
+                onImportImslp={onImportImslp}
+                showHeading={false}
+            />
         </div>
     );
 };
