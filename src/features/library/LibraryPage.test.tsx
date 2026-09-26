@@ -831,6 +831,12 @@ describe('grid view', () => {
         expect(screen.getAllByRole('button', { name: 'Score actions' })).toHaveLength(2);
     });
 
+    it('does not set a native title tooltip on the grid card', async () => {
+        renderLibrary();
+        const link = await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+        expect(link.closest('.library-card')).not.toHaveAttribute('title');
+    });
+
     it('drops the composer suffix from cards under a composer heading', async () => {
         const user = userEvent.setup();
         renderLibrary();
