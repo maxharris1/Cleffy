@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LibraryShell } from '@/features/library/LibraryShell';
 import type { Entitlements } from '@/types/database';
@@ -37,6 +37,8 @@ vi.mock('@/features/billing/useEntitlements', () => ({
 
 vi.mock('@/features/billing/entitlementsService', () => ({
     clearCachedEntitlements: vi.fn(),
+    isUnlimited: (limit: number) => limit < 0,
+    FREE_LIMITS: { cloud_scores: 3 },
 }));
 
 const uploadDocument = vi.fn();
@@ -48,9 +50,11 @@ vi.mock('@/features/library/documentsService', () => ({
 
 const readCachedLibraryList = vi.fn();
 const prependCachedLibraryDocument = vi.fn();
+const fetchLibraryBootstrap = vi.fn();
 vi.mock('@/features/library/libraryBootstrap', () => ({
     readCachedLibraryList: (...args: unknown[]) => readCachedLibraryList(...args),
     prependCachedLibraryDocument: (...args: unknown[]) => prependCachedLibraryDocument(...args),
+    fetchLibraryBootstrap: (...args: unknown[]) => fetchLibraryBootstrap(...args),
 }));
 
 vi.mock('@/features/import/importPromptService', () => ({
@@ -94,6 +98,18 @@ afterEach(() => {
 });
 
 describe('LibraryShell', () => {
+    beforeEach(() => {
+        fetchLibraryBootstrap.mockResolvedValue({
+            documents: [],
+            hasMore: false,
+            favoriteIds: new Set(),
+            tags: [],
+            documentTags: new Map(),
+            entitlements,
+            fetchedAtEpoch: 0,
+        });
+        readCachedLibraryList.mockResolvedValue(null);
+    });
     it('puts an uploaded score at the top of the snapshot read before the upload cleared it', async () => {
         const user = userEvent.setup();
         const before = {

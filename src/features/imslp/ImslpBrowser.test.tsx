@@ -9,10 +9,13 @@ import {
     editionAvailability,
     editionListSummary,
     formatBytes,
+    friendlySearchError,
+    hasSearchableQuery,
     isEditionImportable,
     rankEditions,
     recommendEdition,
     recommendedBadge,
+    SEARCH_TIMEOUT_COPY,
     searchTokens,
     splitSearchResults,
     suggestedPdfName,
@@ -105,8 +108,26 @@ describe('imslp display helpers', () => {
         expect(displayWorkTitle('Untitled')).toEqual({ work: 'Untitled', composer: null });
     });
 
-    it('cleans edition filenames', () => {
+    it('prefers publisher or a real description over dump filenames', () => {
         expect(displayEditionName('PMLP01458-Beethoven_Moonlight.pdf')).toBe('Beethoven Moonlight');
+        expect(displayEditionName('WIMA.8c48-FESCo.pdf', { publisher: 'Breitkopf und Härtel', year: 1870 })).toBe(
+            'Breitkopf und Härtel 1870',
+        );
+        expect(displayEditionName('Btsn312.pdf', { publisher: 'G. Henle Verlag', year: 1976 })).toBe(
+            'G. Henle Verlag 1976',
+        );
+        expect(displayEditionName('Fuer_E.pdf', { description: 'Für Elise' })).toBe('Für Elise');
+        expect(displayEditionName('clean-scan.pdf', { publisher: 'Schirmer' })).toBe('clean-scan');
+    });
+
+    it('treats punctuation-only strings as not searchable', () => {
+        expect(hasSearchableQuery('%%%')).toBe(false);
+        expect(hasSearchableQuery('...')).toBe(false);
+        expect(hasSearchableQuery('beethoven')).toBe(true);
+        expect(friendlySearchError(new Error('canceling statement due to statement timeout'))).toBe(
+            SEARCH_TIMEOUT_COPY,
+        );
+        expect(friendlySearchError(new Error('IMSLP is down'))).toBe('IMSLP is down');
     });
 
     it('recommends a mid-size edition over tiny or huge files', () => {
@@ -544,6 +565,35 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('No matches')).not.toBeInTheDocument();
     });
 
+    it('shows friendly copy instead of a Postgres statement timeout', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+
+        await renderBrowser();
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'chopin');
+
+        expect(await screen.findByText(SEARCH_TIMEOUT_COPY)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+        expect(screen.queryByText(/canceling statement/)).not.toBeInTheDocument();
+    });
+
+    it('treats a punctuation-only query as no matches, not a piano browse', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+        const searchSpy = vi.spyOn(api, 'searchImslp');
+
+        await renderBrowser();
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), '%%%');
+
+        expect(await screen.findByText('No matches')).toBeInTheDocument();
+        expect(searchSpy).not.toHaveBeenCalled();
+        expect(screen.queryByRole('heading', { name: 'Popular' })).not.toBeInTheDocument();
+    });
+
     it('ignores a stale response that resolves after a newer one', async () => {
         const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
@@ -863,6 +913,26 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText(/Cloud-score limit reached/)).toBeInTheDocument();
         await userEvent.click(add);
         expect(onImportImslp).not.toHaveBeenCalled();
+    });
+
+    it('places Back next to the work title rather than as a far-right control', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('clean-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        const back = screen.getByRole('button', { name: 'Back' });
+        const title = screen.getByText('Nocturnes, Op.9');
+        expect(back.parentElement).toBe(title.parentElement);
     });
 
     it('searches when Nocturne is added and names both chips plus total', async () => {

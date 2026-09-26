@@ -27,14 +27,75 @@ export const displayWorkTitle = (title: string): { work: string; composer: strin
     return { work: match[1]?.trim() || title, composer: match[2]?.trim() || null };
 };
 
-/** Drop noisy PMLP prefixes from edition filenames for the picker. */
-export const displayEditionName = (filename: string): string => {
+export interface EditionDisplayFields {
+    publisher?: string | null;
+    description?: string | null;
+    year?: number | null;
+}
+
+/** Generic IMSLP file-block descriptions — not a human edition name. */
+const GENERIC_FILE_DESCRIPTION = /^(complete score|score|parts?|piano reduction|vocal score)\b/i;
+
+const fromFilename = (filename: string): string => {
     const withoutExt = filename.replace(/\.pdf$/i, '');
     const cleaned = withoutExt
         .replace(/^PMLP\d+-?/i, '')
         .replace(/_/g, ' ')
         .trim();
     return cleaned || filename;
+};
+
+/** Dump slugs: WIMA ids, catalog stubs like Btsn312, or a few leftover characters. */
+const looksLikeDumpName = (name: string): boolean => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+        return true;
+    }
+    if (/^WIMA\b/i.test(trimmed)) {
+        return true;
+    }
+    const compact = trimmed.replace(/[\s._-]+/g, '');
+    if (compact.length < 8) {
+        return true;
+    }
+    return /^[A-Za-z]{1,8}\d{2,}$/.test(compact);
+};
+
+/**
+ * Drop noisy PMLP prefixes from edition filenames. When the leftover still
+ * looks like a dump slug, prefer publisher / a non-generic description.
+ */
+export const displayEditionName = (filename: string, meta?: EditionDisplayFields): string => {
+    const fromFile = fromFilename(filename);
+    if (!looksLikeDumpName(fromFile)) {
+        return fromFile;
+    }
+    const description = meta?.description?.trim() ?? '';
+    if (description && !GENERIC_FILE_DESCRIPTION.test(description) && !looksLikeDumpName(description)) {
+        return description;
+    }
+    const publisher = meta?.publisher?.trim() ?? '';
+    if (publisher) {
+        return [publisher, meta?.year].filter(Boolean).join(' ');
+    }
+    return fromFile;
+};
+
+/** True when the query has a letter or digit — `%%%` is not a search. */
+export const hasSearchableQuery = (q: string): boolean => /[\p{L}\p{N}]/u.test(q);
+
+export const SEARCH_TIMEOUT_COPY = 'IMSLP took too long to answer.';
+
+/** Map Postgres statement-timeout and abort timeouts to one friendly line. */
+export const friendlySearchError = (err: unknown): string => {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+        return SEARCH_TIMEOUT_COPY;
+    }
+    const raw = err instanceof Error ? err.message : 'Search failed';
+    if (/canceling statement|statement timeout|timed? out/i.test(raw)) {
+        return SEARCH_TIMEOUT_COPY;
+    }
+    return raw;
 };
 
 interface EditionLicenseFields {

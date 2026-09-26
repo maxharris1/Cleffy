@@ -1,4 +1,5 @@
-import type { BillingTier, UsageMetric } from '@/types/database';
+import { FREE_LIMITS } from '@/features/billing/entitlementsService';
+import type { BillingTier, EffectiveTier, UsageMetric } from '@/types/database';
 
 /**
  * The one typed shape for "you have run out", however the server said it.
@@ -86,6 +87,30 @@ export const parseLimitResponse = async (response: Response): Promise<LimitReach
     }
 };
 
+const looksLikeLimitReachedMessage = (message: string | null | undefined): boolean => {
+    const text = message?.trim() ?? '';
+    if (!text || /seat_limit_reached/i.test(text)) {
+        return false;
+    }
+    return text === 'limit_reached' || /^limit reached$/i.test(text);
+};
+
+/** Client-side stock-cap check: unarchived rows vs the plan's cloud-score limit. */
+export const cloudScoreCapReached = (limit: number, documents: Array<{ archived_at: string | null }>): boolean => {
+    if (limit < 0) {
+        return false;
+    }
+    return documents.filter((row) => row.archived_at === null).length >= limit;
+};
+
+export const cloudScoresLimitError = (limit: number, tier: EffectiveTier): LimitReachedError =>
+    new LimitReachedError({
+        code: 'limit_reached',
+        metric: 'cloud_scores',
+        limit: limit < 0 ? 0 : limit,
+        tier: tier === 'student' ? 'free' : tier,
+    });
+
 /**
  * Maps a stock-cap trigger's exception. The trigger raises P0001 with the
  * payload as JSON in DETAIL, which PostgREST surfaces as `details`.
@@ -97,18 +122,38 @@ export const parsePostgrestLimitError = (
         details?: string | null;
     } | null,
 ): LimitReachedError | null => {
-    if (!error || error.message !== 'limit_reached') {
+    if (!error || !looksLikeLimitReachedMessage(error.message)) {
         return null;
     }
-    if (!error.details) {
+    if (error.details) {
+        try {
+            const payload = asPayload(JSON.parse(error.details));
+            if (payload) {
+                return new LimitReachedError(payload);
+            }
+        } catch {
+            // Fall through to the cloud-score default — DETAIL is best-effort.
+        }
+    }
+    return cloudScoresLimitError(FREE_LIMITS.cloud_scores, 'free');
+};
+
+/**
+ * Last-resort mapping when the refusal arrived as a plain Error ("Limit reached")
+ * instead of the typed PostgREST/402 payload.
+ */
+export const parseLooseLimitError = (err: unknown): LimitReachedError | null => {
+    if (isLimitReachedError(err)) {
+        return err;
+    }
+    if (!err || typeof err !== 'object' || !('message' in err)) {
         return null;
     }
-    try {
-        const payload = asPayload(JSON.parse(error.details));
-        return payload ? new LimitReachedError(payload) : null;
-    } catch {
-        return null;
+    const message = String((err as { message?: unknown }).message ?? '');
+    if (looksLikeLimitReachedMessage(message) || /could not create document:\s*limit[_ ]reached/i.test(message)) {
+        return cloudScoresLimitError(FREE_LIMITS.cloud_scores, 'free');
     }
+    return null;
 };
 
 const METRIC_COPY: Record<UsageMetric, { spent: string; upgrade: string }> = {

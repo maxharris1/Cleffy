@@ -16,7 +16,14 @@ import {
     type SearchFilters,
 } from '../_shared/searchFacetData.ts';
 import { browseFromIndex as queryBrowseIndex, type BrowseRpcClient } from '../_shared/imslpBrowse.ts';
-import { checkRateLimit, clientKey, mwFetch, parseComposerFromTitle, serviceClient, workPageUrl } from '../_shared/imslp.ts';
+import {
+    checkRateLimit,
+    clientKey,
+    mwFetch,
+    parseComposerFromTitle,
+    serviceClient,
+    workPageUrl,
+} from '../_shared/imslp.ts';
 import { POPULAR_WORKS, WORK_ALIASES } from '../_shared/popularWorks.ts';
 import {
     aliasTitlesForQuery,
@@ -84,13 +91,23 @@ const CORRECTION_VOCAB: Set<string> = (() => {
             key.split(' ').forEach(add);
         }
     }
-    for (const word of ['major', 'minor', 'piano', 'violin', 'cello', 'orchestra', 'quartet', 'quintet', 'variations']) {
+    for (const word of [
+        'major',
+        'minor',
+        'piano',
+        'violin',
+        'cello',
+        'orchestra',
+        'quartet',
+        'quintet',
+        'variations',
+    ]) {
         add(word);
     }
     return vocab;
 })();
 
-const uniq = <T,>(values: T[]): T[] => [...new Set(values)];
+const uniq = <T>(values: T[]): T[] => [...new Set(values)];
 
 /** MediaWiki caps srlimit at 50 — page with sroffset to fill larger limits. */
 const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
@@ -225,10 +242,7 @@ const toHit = (title: string, pageid: number, snippet = ''): SearchHit => ({
     imslpUrl: workPageUrl(title),
 });
 
-const periodSource = (
-    queryEras: PeriodEraId[],
-    chipEras: PeriodEraId[],
-): 'query' | 'chip' | 'both' | null => {
+const periodSource = (queryEras: PeriodEraId[], chipEras: PeriodEraId[]): 'query' | 'chip' | 'both' | null => {
     if (queryEras.length === 0 && chipEras.length === 0) {
         return null;
     }
@@ -349,8 +363,22 @@ Deno.serve(async (req) => {
 
     const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 300);
     const offset = Math.min(Math.max(Number(body.offset) || 0, 0), 10_000);
+    const hasSearchableQuery = /[\p{L}\p{N}]/u.test(q);
 
     try {
+        if (q.length >= 2 && !hasSearchableQuery) {
+            return jsonResponse({
+                results: [],
+                total: 0,
+                mode: 'search',
+                indexReady: true,
+                hasMore: false,
+                filterRelaxed: false,
+                relaxed: [],
+                period: null,
+            });
+        }
+
         if (q.length < 2 && activeFilters) {
             const browsed = await browseFromIndex(filters, limit, offset, sort);
             return jsonResponse({
@@ -460,7 +488,10 @@ Deno.serve(async (req) => {
             if (corrected) {
                 const correctedQ = corrected.join(' ');
                 try {
-                    batches.push({ variant: { q: correctedQ, weight: 0.9 }, hits: await mwSearch(correctedQ, perQuery) });
+                    batches.push({
+                        variant: { q: correctedQ, weight: 0.9 },
+                        hits: await mwSearch(correctedQ, perQuery),
+                    });
                 } catch {
                     // corrected query is best-effort
                 }
@@ -541,6 +572,8 @@ Deno.serve(async (req) => {
             period: source ? { eraIds, source } : null,
         });
     } catch (err) {
-        return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP search failed' }, 502);
+        const raw = err instanceof Error ? err.message : 'IMSLP search failed';
+        const message = /canceling statement|statement timeout/i.test(raw) ? 'IMSLP took too long to answer.' : raw;
+        return jsonResponse({ error: message }, 502);
     }
 });

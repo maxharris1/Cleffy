@@ -30,6 +30,7 @@ interface ImslpWorkPanelProps {
     importing: boolean;
     /** Free cloud-score quota is exhausted — Add stays disabled. */
     quotaExhausted?: boolean;
+    onBack: () => void;
     onSelect: (edition: ImslpEdition) => void;
     onImportSelected: () => void;
     onImportLocalPdf: (file: File) => void;
@@ -64,6 +65,7 @@ export const ImslpWorkPanel = ({
     busy,
     importing,
     quotaExhausted = false,
+    onBack,
     onSelect,
     onImportSelected,
     onImportLocalPdf,
@@ -85,7 +87,12 @@ export const ImslpWorkPanel = ({
 
     return (
         <div className="imslp-panel-view mt-4">
-            <p className="text-sm font-medium text-stone-800">{parsed.work}</p>
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <p className="text-sm font-medium text-stone-800">{parsed.work}</p>
+                <button type="button" onClick={onBack} className={buttonClassName('ghost', 'sm', 'shrink-0')}>
+                    Back
+                </button>
+            </div>
             {composer ? <p className="mt-0.5 text-xs text-stone-500">{composer}</p> : null}
             <a
                 href={work.imslpUrl}
@@ -122,7 +129,7 @@ export const ImslpWorkPanel = ({
                                 availability && availability.kind === 'downloadable' ? availability.label : null;
                             const sizeLabel = formatBytes(edition.size) || null;
                             const facts = [licenseLabel, sizeLabel].filter(Boolean);
-                            const name = displayEditionName(edition.filename);
+                            const name = displayEditionName(edition.filename, edition);
                             const badge = urtextBadge(edition);
                             const showRecommended = !badge && recommended?.filename === edition.filename;
                             const showWarn = !importable && availability !== null;

@@ -8,6 +8,7 @@ import { prescanDocument } from '@/features/import/prescan';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
+    fetchLibraryBootstrap,
     prependCachedLibraryDocument,
     readCachedLibraryList,
     type LibraryListSnapshot,
@@ -16,8 +17,14 @@ import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { PlanBadge } from '@/features/billing/PlanBadge';
-import { clearCachedEntitlements } from '@/features/billing/entitlementsService';
-import { isLimitReachedError, type LimitReachedError } from '@/features/billing/limitErrors';
+import { clearCachedEntitlements, isUnlimited } from '@/features/billing/entitlementsService';
+import {
+    cloudScoreCapReached,
+    cloudScoresLimitError,
+    isLimitReachedError,
+    parseLooseLimitError,
+    type LimitReachedError,
+} from '@/features/billing/limitErrors';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
@@ -129,8 +136,59 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             setUploadLimit(err);
             return;
         }
+        const loose = parseLooseLimitError(err);
+        if (loose) {
+            setUploadLimit(loose);
+            return;
+        }
         setUploadError(err instanceof Error ? err.message : fallback);
     };
+
+    const refuseIfCloudScoreCap = async (
+        snapshot: Promise<LibraryListSnapshot | null>,
+    ): Promise<LibraryListSnapshot | null> => {
+        const snap = await snapshot.catch(() => null);
+        const limit = entitlements?.limits.cloud_scores;
+        if (entitlements && typeof limit === 'number' && cloudScoreCapReached(limit, snap?.documents ?? [])) {
+            const err = cloudScoresLimitError(limit, entitlements.tier);
+            setUploadLimit(err);
+            throw err;
+        }
+        if (uploadLimit) {
+            throw uploadLimit;
+        }
+        return snap;
+    };
+
+    useEffect(() => {
+        if (!userId || !entitlements) {
+            return;
+        }
+        const limit = entitlements.limits.cloud_scores;
+        if (isUnlimited(limit)) {
+            return;
+        }
+        let cancelled = false;
+        const apply = (docs: Array<{ archived_at: string | null }>) => {
+            if (cancelled || !cloudScoreCapReached(limit, docs)) {
+                return;
+            }
+            setUploadLimit((prev) => prev ?? cloudScoresLimitError(limit, entitlements.tier));
+        };
+        void readCachedLibraryList(userId)
+            .then((snap) => {
+                if (snap) {
+                    apply(snap.documents);
+                }
+            })
+            .catch(() => undefined);
+        void fetchLibraryBootstrap(userId)
+            .then((boot) => apply(boot.documents))
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, [userId, entitlements]);
 
     /**
      * The library snapshot, read before the write that will clear it, so the
@@ -142,10 +200,11 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         void before.then((snapshot) => prependCachedLibraryDocument(userId, snapshot, document)).catch(() => undefined);
 
     const onUpload = async (file: File) => {
-        clearErrors();
-        setUploadPct(0);
         const before = snapshotBefore();
         try {
+            await refuseIfCloudScoreCap(before);
+            clearErrors();
+            setUploadPct(0);
             const { document } = await uploadDocument(file, userId, ({ loaded, total }) => {
                 const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
                 setUploadPct(pct);
@@ -184,12 +243,13 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     };
 
     const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
-        clearErrors();
-        // The Edge function fetches server-side, so there is no byte progress
-        // to report — show the indeterminate bar instead of a stuck 0%.
-        setImportingImslp(true);
         const before = snapshotBefore();
         try {
+            await refuseIfCloudScoreCap(before);
+            clearErrors();
+            // The Edge function fetches server-side, so there is no byte progress
+            // to report — show the indeterminate bar instead of a stuck 0%.
+            setImportingImslp(true);
             const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer);
             if (!result.ok) {
                 return {

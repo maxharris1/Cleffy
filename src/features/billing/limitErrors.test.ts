@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    cloudScoreCapReached,
+    cloudScoresLimitError,
     isLimitReachedError,
     limitAction,
     limitHeadline,
     parseLimitResponse,
+    parseLooseLimitError,
     parsePostgrestLimitError,
 } from '@/features/billing/limitErrors';
 
@@ -91,9 +94,32 @@ describe('parsePostgrestLimitError (the cloud-score cap trigger)', () => {
         expect(parsePostgrestLimitError(null)).toBeNull();
     });
 
-    it('ignores a limit_reached with no usable detail', () => {
-        expect(parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null })).toBeNull();
-        expect(parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: 'not json' })).toBeNull();
+    it('falls back to the 3-score free cap when DETAIL is missing', () => {
+        const error = parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null });
+        expect(error?.metric).toBe('cloud_scores');
+        expect(error?.limit).toBe(3);
+        expect(parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: 'not json' })?.limit).toBe(
+            3,
+        );
+        expect(parsePostgrestLimitError({ code: 'P0001', message: 'Limit reached', details: null })?.limit).toBe(3);
+    });
+});
+
+describe('client-side cloud-score cap', () => {
+    it('is reached when unarchived rows meet the limit', () => {
+        expect(cloudScoreCapReached(3, [{ archived_at: null }, { archived_at: null }, { archived_at: null }])).toBe(
+            true,
+        );
+        expect(cloudScoreCapReached(3, [{ archived_at: null }, { archived_at: '2026-01-01' }])).toBe(false);
+        expect(cloudScoreCapReached(-1, [{ archived_at: null }])).toBe(false);
+    });
+
+    it('maps a bare Limit reached Error onto the amber cloud-score payload', () => {
+        const error = parseLooseLimitError(new Error('Limit reached'));
+        expect(error?.metric).toBe('cloud_scores');
+        expect(error?.limit).toBe(3);
+        expect(isLimitReachedError(cloudScoresLimitError(3, 'free'))).toBe(true);
+        expect(parseLooseLimitError(new Error('seat_limit_reached'))).toBeNull();
     });
 });
 
