@@ -119,7 +119,7 @@ export const ImslpWorkPanel = ({
                     {noUrtext ? (
                         <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
                     ) : null}
-                    <ul className="mt-2" aria-label="PDF editions">
+                    <ul className="mt-2 max-h-[20rem] overflow-y-auto" aria-label="PDF editions">
                         {ranked.map((edition) => {
                             const checked = selected?.filename === edition.filename;
                             const importable = isEditionImportable(edition);
