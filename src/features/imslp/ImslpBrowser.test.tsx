@@ -597,6 +597,11 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('No Urtext file tagged on this IMSLP page.')).not.toBeInTheDocument();
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
 
+        const panel = screen.getByText('Choose a PDF edition').closest('.imslp-panel-view');
+        expect(panel).not.toBeNull();
+        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
+        expect(within(panel!).getByText('Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
+
         const list = screen.getByRole('list', { name: 'PDF editions' });
         const rows = within(list).getAllByRole('listitem');
         expect(rows.length).toBe(work.editions.length);
@@ -611,7 +616,7 @@ describe('ImslpBrowser', () => {
         expect(henleII.getByText(/Complete Score/)).toBeInTheDocument();
         expect(henleII.queryByRole('radio')).not.toBeInTheDocument();
         expect(henleII.getByText('Restricted')).toBeInTheDocument();
-        expect(henleII.getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        expect(henleII.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
 
         const henleI = within(rows[1]!);
         expect(henleI.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
@@ -625,7 +630,8 @@ describe('ImslpBrowser', () => {
             name: /Select .*moonlight\.wiener/i,
         });
         expect(weinerRadio).not.toBeChecked();
-        expect(within(weinerRadio.closest('li')!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        expect(within(weinerRadio.closest('li')!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: /^Open on IMSLP$/ })).not.toBeInTheDocument();
 
         await userEvent.click(within(rows[0]!).getByText(/G\. Henle Verlag 1976/));
         expect(onImportImslp).not.toHaveBeenCalled();
@@ -634,6 +640,7 @@ describe('ImslpBrowser', () => {
         await userEvent.click(weinerRadio);
         expect(weinerRadio).toBeChecked();
         expect(add).toBeEnabled();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
         await userEvent.click(add);
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledTimes(1);
@@ -679,9 +686,11 @@ describe('ImslpBrowser', () => {
         expect(within(rows[0]!).getByText('Urtext · Henle · 1976')).toBeInTheDocument();
         expect(within(rows[0]!).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
         expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
-        expect(within(rows[0]!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        expect(within(rows[0]!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
         expect(within(rows[3]!).queryByRole('radio')).not.toBeInTheDocument();
         expect(within(rows[3]!).getByText('Non-PD US')).toBeInTheDocument();
+        expect(within(rows[3]!).getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
@@ -762,7 +771,8 @@ describe('ImslpBrowser', () => {
         }
         expect(onImportImslp).toHaveBeenCalledTimes(1);
         expect(onImportImslp).toHaveBeenCalledWith('b.pdf', work.title, true);
-        expect(within(list).getAllByRole('link', { name: 'Open on IMSLP' })).toHaveLength(2);
+        expect(within(list).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
     });
 
     it('does not turn a license-unknown row into a one-tap download', async () => {

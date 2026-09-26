@@ -7,7 +7,6 @@ import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
-import { buttonClassName } from '@/ui/classNames';
 
 export interface ImslpBrowserProps {
     /** Local PDF hand-off (manual file pick / hybrid fallback upload). */
@@ -196,25 +195,12 @@ export const ImslpBrowser = ({
 
     return (
         <section className={className}>
-            {showHeading || flow.phase === 'work' ? (
-                <div className={`flex items-start gap-3 ${showHeading ? 'justify-between' : 'justify-end'}`}>
-                    {showHeading ? (
-                        <div>
-                            <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
-                            <p className="mt-0.5 text-xs text-stone-500">
-                                Search or browse popular scores, then add a PDF to your library.
-                            </p>
-                        </div>
-                    ) : null}
-                    {flow.phase === 'work' ? (
-                        <button
-                            type="button"
-                            onClick={closeWork}
-                            className={buttonClassName('ghost', 'sm', 'shrink-0')}
-                        >
-                            Back
-                        </button>
-                    ) : null}
+            {showHeading ? (
+                <div>
+                    <h2 className="text-sm font-medium text-stone-800">Find on IMSLP</h2>
+                    <p className="mt-0.5 text-xs text-stone-500">
+                        Search or browse popular scores, then add a PDF to your library.
+                    </p>
                 </div>
             ) : null}
 
@@ -241,6 +227,7 @@ export const ImslpBrowser = ({
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
                     onImportSelected={() => void importSelected()}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
+                    onBack={closeWork}
                 />
             ) : null}
         </section>
