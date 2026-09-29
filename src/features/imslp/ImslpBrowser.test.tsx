@@ -915,6 +915,36 @@ describe('ImslpBrowser', () => {
         expect(onImportImslp).not.toHaveBeenCalled();
     });
 
+    it('does not repeat the display-name fallback as a second line', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Bagatelle in A minor (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Fur_Elise',
+            editions: [
+                edition('WIMA.8c48-FESCo.pdf', {
+                    publisher: 'Breitkopf und Härtel',
+                    year: 1870,
+                    description: 'Complete Score',
+                }),
+                edition('Fuer_E.pdf', { description: 'Für Elise' }),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        expect(
+            screen.queryAllByText('Breitkopf und Härtel 1870').filter((el) => el.classList.contains('block')),
+        ).toHaveLength(0);
+        expect(screen.queryAllByText('Für Elise').filter((el) => el.classList.contains('block'))).toHaveLength(0);
+        expect(screen.getByRole('radio', { name: 'Select Breitkopf und Härtel 1870' })).toBeInTheDocument();
+        expect(screen.getByRole('radio', { name: 'Select Für Elise' })).toBeInTheDocument();
+    });
+
     it('places Back next to the work title rather than as a far-right control', async () => {
         const { screen } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');

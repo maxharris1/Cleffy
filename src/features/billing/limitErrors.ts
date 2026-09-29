@@ -95,12 +95,16 @@ const looksLikeLimitReachedMessage = (message: string | null | undefined): boole
     return text === 'limit_reached' || /^limit reached$/i.test(text);
 };
 
-/** Client-side stock-cap check: unarchived rows vs the plan's cloud-score limit. */
-export const cloudScoreCapReached = (limit: number, documents: Array<{ archived_at: string | null }>): boolean => {
+/** Client-side stock-cap check: unarchived *owned* rows vs the plan's cloud-score limit. */
+export const cloudScoreCapReached = (
+    limit: number,
+    documents: Array<{ owner_id: string; archived_at: string | null }>,
+    ownerId: string,
+): boolean => {
     if (limit < 0) {
         return false;
     }
-    return documents.filter((row) => row.archived_at === null).length >= limit;
+    return documents.filter((row) => row.archived_at === null && row.owner_id === ownerId).length >= limit;
 };
 
 export const cloudScoresLimitError = (limit: number, tier: EffectiveTier): LimitReachedError =>

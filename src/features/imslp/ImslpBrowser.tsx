@@ -26,6 +26,8 @@ export interface ImslpBrowserProps {
     busy?: boolean;
     /** Free cloud-score quota is exhausted — disable the primary Add. */
     quotaExhausted?: boolean;
+    /** False on student (limit 0): disabled copy, no upgrade CTA. */
+    quotaUpgradeHint?: boolean;
     /** When false, omit the panel title (e.g. page already has a heading). */
     showHeading?: boolean;
     className?: string;
@@ -87,6 +89,7 @@ export const ImslpBrowser = ({
     onImportImslp,
     busy = false,
     quotaExhausted = false,
+    quotaUpgradeHint = true,
     showHeading = true,
     className = 'mt-6',
 }: ImslpBrowserProps) => {
@@ -224,6 +227,7 @@ export const ImslpBrowser = ({
                     busy={busy}
                     importing={blocked}
                     quotaExhausted={quotaExhausted}
+                    quotaUpgradeHint={quotaUpgradeHint}
                     onBack={closeWork}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
                     onImportSelected={() => void importSelected()}

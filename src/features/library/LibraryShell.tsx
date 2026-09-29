@@ -20,7 +20,6 @@ import { PlanBadge } from '@/features/billing/PlanBadge';
 import { clearCachedEntitlements, isUnlimited } from '@/features/billing/entitlementsService';
 import {
     cloudScoreCapReached,
-    cloudScoresLimitError,
     isLimitReachedError,
     parseLooseLimitError,
     type LimitReachedError,
@@ -49,6 +48,13 @@ export type LibraryOutletContext = {
     clearUploadError: () => void;
     /** Set when the server refused for quota reasons rather than a real failure. */
     uploadLimit: LimitReachedError | null;
+    /**
+     * Client-side owned-score cap (or student limit 0). Disables Add/Upload
+     * without raising the upgrade notice — that stays `uploadLimit`.
+     */
+    quotaExhausted?: boolean;
+    /** False on student (limit 0): disabled copy, no upgrade CTA. */
+    quotaUpgradeHint?: boolean;
     tier: EffectiveTier;
     /**
      * Whether this plan includes a student roster at all.
@@ -105,6 +111,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const [uploadError, setUploadError] = useState<string | null>(null);
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
     const [uploadLimit, setUploadLimit] = useState<LimitReachedError | null>(null);
+    const [capReached, setCapReached] = useState(false);
     const [pricingOpen, setPricingOpen] = useState(false);
     const { entitlements } = useEntitlements(userId, { viaLibraryBootstrap: true });
     const tier = entitlements?.tier ?? 'free';
@@ -115,6 +122,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const navItems = NAV_ITEMS.filter((item) => !item.needsStudents || canManageStudents);
     const navigate = useNavigate();
     const uploading = uploadPct !== null || importingImslp;
+    const cloudScoreLimit = entitlements?.limits.cloud_scores;
+    const quotaUpgradeHint = cloudScoreLimit !== 0;
+    const quotaExhausted =
+        cloudScoreLimit === 0 ||
+        (typeof cloudScoreLimit === 'number' && !isUnlimited(cloudScoreLimit) && capReached) ||
+        Boolean(uploadLimit);
 
     const clearErrors = () => {
         setUploadError(null);
@@ -149,15 +162,39 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     ): Promise<LibraryListSnapshot | null> => {
         const snap = await snapshot.catch(() => null);
         const limit = entitlements?.limits.cloud_scores;
-        if (entitlements && typeof limit === 'number' && cloudScoreCapReached(limit, snap?.documents ?? [])) {
-            const err = cloudScoresLimitError(limit, entitlements.tier);
-            setUploadLimit(err);
-            throw err;
+        if (entitlements && typeof limit === 'number' && limit === 0) {
+            setCapReached(true);
+            throw new Error('This account cannot add cloud scores.');
         }
-        if (uploadLimit) {
-            throw uploadLimit;
+        if (entitlements && typeof limit === 'number' && cloudScoreCapReached(limit, snap?.documents ?? [], userId)) {
+            setCapReached(true);
+            throw new Error('Cloud-score limit reached.');
         }
+        setCapReached(false);
         return snap;
+    };
+
+    const refreshCap = (docs: Array<{ owner_id: string; archived_at: string | null }>) => {
+        const limit = entitlements?.limits.cloud_scores;
+        if (limit === undefined || isUnlimited(limit)) {
+            setCapReached(false);
+            return;
+        }
+        if (limit === 0) {
+            setCapReached(true);
+            return;
+        }
+        setCapReached(cloudScoreCapReached(limit, docs, userId));
+    };
+
+    const clearUploadError = () => {
+        clearErrors();
+        void readCachedLibraryList(userId)
+            .then((snap) => refreshCap(snap?.documents ?? []))
+            .catch(() => undefined);
+        void fetchLibraryBootstrap(userId)
+            .then((boot) => refreshCap(boot.documents))
+            .catch(() => undefined);
     };
 
     useEffect(() => {
@@ -165,15 +202,14 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             return;
         }
         const limit = entitlements.limits.cloud_scores;
-        if (isUnlimited(limit)) {
+        if (isUnlimited(limit) || limit === 0) {
             return;
         }
         let cancelled = false;
-        const apply = (docs: Array<{ archived_at: string | null }>) => {
-            if (cancelled || !cloudScoreCapReached(limit, docs)) {
-                return;
+        const apply = (docs: Array<{ owner_id: string; archived_at: string | null }>) => {
+            if (!cancelled) {
+                refreshCap(docs);
             }
-            setUploadLimit((prev) => prev ?? cloudScoresLimitError(limit, entitlements.tier));
         };
         void readCachedLibraryList(userId)
             .then((snap) => {
@@ -188,6 +224,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         return () => {
             cancelled = true;
         };
+        // refreshCap reads the latest entitlements/userId from this effect's closure.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [userId, entitlements]);
 
     /**
@@ -202,7 +240,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const onUpload = async (file: File) => {
         const before = snapshotBefore();
         try {
-            await refuseIfCloudScoreCap(before);
+            const beforeSnap = await refuseIfCloudScoreCap(before);
             clearErrors();
             setUploadPct(0);
             const { document } = await uploadDocument(file, userId, ({ loaded, total }) => {
@@ -210,6 +248,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 setUploadPct(pct);
             });
             rememberNewScore(before, document);
+            refreshCap([document, ...(beforeSnap?.documents ?? [])]);
             // Play-along analysis is never started here: it costs an OMR run,
             // so only the viewer's Generate button requests it.
             // Free, local prescan: does this score already carry colored-ink
@@ -245,7 +284,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
         const before = snapshotBefore();
         try {
-            await refuseIfCloudScoreCap(before);
+            const beforeSnap = await refuseIfCloudScoreCap(before);
             clearErrors();
             // The Edge function fetches server-side, so there is no byte progress
             // to report — show the indeterminate bar instead of a stuck 0%.
@@ -259,6 +298,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                 };
             }
             rememberNewScore(before, result.document);
+            refreshCap([result.document, ...(beforeSnap?.documents ?? [])]);
             navigate(`/doc/${result.document.id}`);
             return { ok: true as const };
         } catch (err) {
@@ -276,8 +316,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         onUpload,
         onImportImslp,
         uploadError,
-        clearUploadError: clearErrors,
+        clearUploadError,
         uploadLimit,
+        quotaExhausted,
+        quotaUpgradeHint,
         tier,
         canManageStudents,
         openPricing: () => setPricingOpen(true),
@@ -326,7 +368,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     </nav>
 
                     <div className="ml-auto flex shrink-0 items-center gap-2">
-                        <ShellUploadButton uploading={uploading} onUpload={onUpload} />
+                        <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
                         <AccountMenu
                             userLabel={userLabel}
                             userEmail={userEmail}
@@ -386,16 +428,18 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
  */
 const ShellUploadButton = ({
     uploading,
+    quotaExhausted,
     onUpload,
 }: {
     uploading: boolean;
+    quotaExhausted: boolean;
     onUpload: (file: File) => Promise<void>;
 }) => (
     <label
         className={buttonClassName(
             'primary',
             'sm',
-            `shell-upload${uploading ? ' pointer-events-none opacity-80' : ''}`,
+            `shell-upload${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
         )}
     >
         <UploadIcon size={16} />
@@ -404,7 +448,7 @@ const ShellUploadButton = ({
             type="file"
             accept={UPLOAD_ACCEPT}
             className="sr-only"
-            disabled={uploading}
+            disabled={uploading || quotaExhausted}
             onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {

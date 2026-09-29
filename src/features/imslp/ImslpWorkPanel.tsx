@@ -30,6 +30,8 @@ interface ImslpWorkPanelProps {
     importing: boolean;
     /** Free cloud-score quota is exhausted — Add stays disabled. */
     quotaExhausted?: boolean;
+    /** False on student (limit 0): plain copy, no upgrade CTA. */
+    quotaUpgradeHint?: boolean;
     onBack: () => void;
     onSelect: (edition: ImslpEdition) => void;
     onImportSelected: () => void;
@@ -65,6 +67,7 @@ export const ImslpWorkPanel = ({
     busy,
     importing,
     quotaExhausted = false,
+    quotaUpgradeHint = true,
     onBack,
     onSelect,
     onImportSelected,
@@ -155,12 +158,12 @@ export const ImslpWorkPanel = ({
                                             {name}
                                         </span>
                                     </span>
-                                    {publisherLabel ? (
+                                    {publisherLabel && publisherLabel !== name ? (
                                         <span className="mt-1 block text-xs leading-5 text-stone-500">
                                             {publisherLabel}
                                         </span>
                                     ) : null}
-                                    {edition.description ? (
+                                    {edition.description && edition.description !== name ? (
                                         <span className="mt-0.5 block text-xs leading-5 text-stone-500">
                                             {edition.description}
                                         </span>
@@ -255,7 +258,9 @@ export const ImslpWorkPanel = ({
                     </button>
                     {quotaExhausted ? (
                         <p className="text-xs text-stone-600">
-                            Cloud-score limit reached — upgrade to add this edition.
+                            {quotaUpgradeHint
+                                ? 'Cloud-score limit reached — upgrade to add this edition.'
+                                : 'This account cannot add cloud scores.'}
                         </p>
                     ) : !selectedImportable ? (
                         <p className="text-xs text-stone-500">Select a downloadable edition to add.</p>

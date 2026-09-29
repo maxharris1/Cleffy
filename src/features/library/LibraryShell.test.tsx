@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
+import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { LibraryShell } from '@/features/library/LibraryShell';
+import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
+import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { Entitlements } from '@/types/database';
 
 // The shell is chrome around an Outlet: everything it reaches for at import
@@ -22,17 +23,38 @@ vi.mock('@/features/auth/session', () => ({
     signOut: vi.fn(),
 }));
 
-const entitlements: Entitlements = {
+const entitlementsState = vi.hoisted(() => {
+    const unlimited: Entitlements = {
+        user_id: 'teacher-1',
+        tier: 'teacher',
+        status: 'active',
+        source: 'subscription',
+        current_period_end: null,
+        limits: { cloud_scores: -1, omr_runs: -1, vision_reads: -1, smart_imports: -1, pdf_exports: -1, students: -1 },
+    };
+    return { current: unlimited, unlimited };
+});
+
+const freeEntitlements = (): Entitlements => ({
     user_id: 'teacher-1',
-    tier: 'teacher',
+    tier: 'free',
     status: 'active',
-    source: 'subscription',
+    source: 'managed',
     current_period_end: null,
-    limits: { cloud_scores: -1, omr_runs: -1, vision_reads: -1, smart_imports: -1, pdf_exports: -1, students: -1 },
-};
+    limits: { cloud_scores: 3, omr_runs: 3, vision_reads: 3, smart_imports: 3, pdf_exports: 1, students: 0 },
+});
+
+const studentEntitlements = (): Entitlements => ({
+    user_id: 'teacher-1',
+    tier: 'student',
+    status: 'active',
+    source: 'managed',
+    current_period_end: null,
+    limits: { cloud_scores: 0, omr_runs: 0, vision_reads: 0, smart_imports: 0, pdf_exports: 0, students: 0 },
+});
 
 vi.mock('@/features/billing/useEntitlements', () => ({
-    useEntitlements: () => ({ entitlements, loading: false, refresh: vi.fn() }),
+    useEntitlements: () => ({ entitlements: entitlementsState.current, loading: false, refresh: vi.fn() }),
 }));
 
 vi.mock('@/features/billing/entitlementsService', () => ({
@@ -79,13 +101,35 @@ const Page = ({ name }: { name: string }) => {
     );
 };
 
+const ShellPage = ({ name }: { name: string }) => {
+    const { uploadLimit, openPricing } = useOutletContext<LibraryOutletContext>();
+    return (
+        <div>
+            <Page name={name} />
+            {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} /> : null}
+        </div>
+    );
+};
+
+const listSnapshot = (documents: Array<{ id: string; owner_id: string; archived_at: string | null }>) => ({
+    documents,
+    hasMore: false,
+    favoriteIds: new Set(),
+    tags: [],
+    documentTags: new Map(),
+    entitlements: entitlementsState.current,
+    fetchedAtEpoch: 0,
+});
+
+const ownedDoc = (id: string, ownerId = 'teacher-1') => ({ id, owner_id: ownerId, archived_at: null });
+
 const renderShell = () =>
     render(
         <MemoryRouter initialEntries={['/library']}>
             <Routes>
                 <Route element={<LibraryShell />}>
-                    <Route path="/library" element={<Page name="library page" />} />
-                    <Route path="/students" element={<Page name="students page" />} />
+                    <Route path="/library" element={<ShellPage name="library page" />} />
+                    <Route path="/students" element={<ShellPage name="students page" />} />
                 </Route>
                 <Route path="/doc/:id" element={<Page name="viewer page" />} />
             </Routes>
@@ -99,15 +143,8 @@ afterEach(() => {
 
 describe('LibraryShell', () => {
     beforeEach(() => {
-        fetchLibraryBootstrap.mockResolvedValue({
-            documents: [],
-            hasMore: false,
-            favoriteIds: new Set(),
-            tags: [],
-            documentTags: new Map(),
-            entitlements,
-            fetchedAtEpoch: 0,
-        });
+        entitlementsState.current = entitlementsState.unlimited;
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot([]));
         readCachedLibraryList.mockResolvedValue(null);
     });
     it('puts an uploaded score at the top of the snapshot read before the upload cleared it', async () => {
@@ -154,5 +191,61 @@ describe('LibraryShell', () => {
     it('pads the chrome for the iPhone status bar', () => {
         renderShell();
         expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');
+    });
+
+    it('refuses upload at the owned-score cap with no progress bar and no unprompted notice', async () => {
+        entitlementsState.current = freeEntitlements();
+        const docs = [ownedDoc('d1'), ownedDoc('d2'), ownedDoc('d3')];
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot(docs));
+        readCachedLibraryList.mockResolvedValue(listSnapshot(docs));
+        renderShell();
+
+        const input = await screen.findByLabelText('Upload score', { selector: 'input' });
+        await waitFor(() => expect(input).toBeDisabled());
+        expect(uploadDocument).not.toHaveBeenCalled();
+        expect(screen.queryByRole('progressbar', { name: 'Uploading score' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
+        expect(screen.queryByText(/reached your 3 free cloud scores/)).not.toBeInTheDocument();
+    });
+
+    it('does not show a limit notice below the cap', async () => {
+        entitlementsState.current = freeEntitlements();
+        const docs = [ownedDoc('d1'), ownedDoc('d2')];
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot(docs));
+        readCachedLibraryList.mockResolvedValue(listSnapshot(docs));
+        renderShell();
+
+        const input = await screen.findByLabelText('Upload score', { selector: 'input' });
+        await waitFor(() => expect(fetchLibraryBootstrap).toHaveBeenCalled());
+        expect(input).not.toBeDisabled();
+        expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
+        expect(screen.queryByText(/reached your 3 free cloud scores/)).not.toBeInTheDocument();
+    });
+
+    it('does not treat a shared-only library as at the cap', async () => {
+        entitlementsState.current = freeEntitlements();
+        const docs = [ownedDoc('s1', 'someone-else'), ownedDoc('s2', 'someone-else'), ownedDoc('s3', 'someone-else')];
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot(docs));
+        readCachedLibraryList.mockResolvedValue(listSnapshot(docs));
+        renderShell();
+
+        const input = await screen.findByLabelText('Upload score', { selector: 'input' });
+        await waitFor(() => expect(fetchLibraryBootstrap).toHaveBeenCalled());
+        expect(input).not.toBeDisabled();
+        expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
+        expect(screen.queryByText(/reached your 3 free cloud scores/)).not.toBeInTheDocument();
+    });
+
+    it('disables upload for a student without an upgrade notice', async () => {
+        entitlementsState.current = studentEntitlements();
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot([]));
+        readCachedLibraryList.mockResolvedValue(listSnapshot([]));
+        renderShell();
+
+        const input = await screen.findByLabelText('Upload score', { selector: 'input' });
+        expect(input).toBeDisabled();
+        expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
+        expect(screen.queryByText(/reached your 0 free cloud scores/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Upgrade for unlimited scores/)).not.toBeInTheDocument();
     });
 });

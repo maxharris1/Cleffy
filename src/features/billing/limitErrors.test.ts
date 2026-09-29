@@ -106,12 +106,55 @@ describe('parsePostgrestLimitError (the cloud-score cap trigger)', () => {
 });
 
 describe('client-side cloud-score cap', () => {
-    it('is reached when unarchived rows meet the limit', () => {
-        expect(cloudScoreCapReached(3, [{ archived_at: null }, { archived_at: null }, { archived_at: null }])).toBe(
-            true,
-        );
-        expect(cloudScoreCapReached(3, [{ archived_at: null }, { archived_at: '2026-01-01' }])).toBe(false);
-        expect(cloudScoreCapReached(-1, [{ archived_at: null }])).toBe(false);
+    it('is reached when unarchived owned rows meet the limit', () => {
+        const me = 'user-1';
+        expect(
+            cloudScoreCapReached(
+                3,
+                [
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                ],
+                me,
+            ),
+        ).toBe(true);
+        expect(
+            cloudScoreCapReached(
+                3,
+                [
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: '2026-01-01' },
+                ],
+                me,
+            ),
+        ).toBe(false);
+        expect(cloudScoreCapReached(-1, [{ owner_id: me, archived_at: null }], me)).toBe(false);
+    });
+
+    it('does not count shared documents toward the owner cap', () => {
+        const me = 'user-1';
+        const shared = { owner_id: 'someone-else', archived_at: null };
+        expect(cloudScoreCapReached(3, [shared, shared, shared], me)).toBe(false);
+        expect(
+            cloudScoreCapReached(
+                3,
+                [{ owner_id: me, archived_at: null }, { owner_id: me, archived_at: null }, shared],
+                me,
+            ),
+        ).toBe(false);
+        expect(
+            cloudScoreCapReached(
+                3,
+                [
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                    { owner_id: me, archived_at: null },
+                    shared,
+                ],
+                me,
+            ),
+        ).toBe(true);
     });
 
     it('maps a bare Limit reached Error onto the amber cloud-score payload', () => {

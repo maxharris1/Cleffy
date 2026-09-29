@@ -76,6 +76,8 @@ export const LibraryPage = () => {
         uploadLimit,
         clearUploadError,
         canManageStudents,
+        quotaExhausted = false,
+        quotaUpgradeHint = true,
         openPricing,
     } = useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
@@ -463,7 +465,10 @@ export const LibraryPage = () => {
     let rowIndex = 0;
 
     return (
-        <FileDropZone disabled={uploading} onFile={(file) => void onUpload(file).catch(() => undefined)}>
+        <FileDropZone
+            disabled={uploading || quotaExhausted}
+            onFile={(file) => void onUpload(file).catch(() => undefined)}
+        >
             <div>
                 <HomeScreenPromptBanner />
                 {/*
@@ -483,7 +488,12 @@ export const LibraryPage = () => {
                         <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
                     ) : null
                 ) : documents !== null ? (
-                    <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
+                    <EmptyLibrary
+                        uploading={uploading}
+                        quotaExhausted={quotaExhausted}
+                        uploadPct={uploadPct}
+                        onUpload={onUpload}
+                    />
                 ) : null}
 
                 {/*
@@ -493,7 +503,7 @@ export const LibraryPage = () => {
               failure: a delete that errored, a listDocuments that failed, the
               offline notice. Two different things, and the teacher needs both.
             */}
-                {uploadLimit ? (
+                {uploadLimit && quotaUpgradeHint ? (
                     <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" />
                 ) : null}
                 {statusError ? (
@@ -648,7 +658,11 @@ export const LibraryPage = () => {
                                                 />
                                             ))}
                                             {showAddTile ? (
-                                                <AddScoreTile uploading={uploading} onUpload={onUpload} />
+                                                <AddScoreTile
+                                                    uploading={uploading}
+                                                    quotaExhausted={quotaExhausted}
+                                                    onUpload={onUpload}
+                                                />
                                             ) : null}
                                         </div>
                                     ) : (
@@ -780,10 +794,18 @@ const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: Libra
  * only reachable with a mouse would be the one upload path a keyboard user
  * cannot take.
  */
-const AddScoreTile = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
+const AddScoreTile = ({
+    uploading,
+    quotaExhausted,
+    onUpload,
+}: {
+    uploading: boolean;
+    quotaExhausted: boolean;
+    onUpload: (file: File) => Promise<void>;
+}) => (
     <label
         className={`flex aspect-[1/1.414] cursor-pointer flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-stone-300 text-stone-500 transition hover:border-accent hover:text-accent focus-within:border-accent focus-within:text-accent ${
-            uploading ? 'pointer-events-none opacity-60' : ''
+            uploading || quotaExhausted ? 'pointer-events-none opacity-60' : ''
         }`}
     >
         <span aria-hidden="true" className="text-3xl font-light leading-none">
@@ -794,7 +816,7 @@ const AddScoreTile = ({ uploading, onUpload }: { uploading: boolean; onUpload: (
             type="file"
             accept={UPLOAD_ACCEPT}
             className="sr-only"
-            disabled={uploading}
+            disabled={uploading || quotaExhausted}
             onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
@@ -986,15 +1008,29 @@ const RenameDialog = ({
     );
 };
 
-const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
-    <label className={buttonClassName('primary', 'sm', uploading ? 'pointer-events-none opacity-80' : '')}>
+const UploadButton = ({
+    uploading,
+    quotaExhausted,
+    onUpload,
+}: {
+    uploading: boolean;
+    quotaExhausted: boolean;
+    onUpload: (file: File) => Promise<void>;
+}) => (
+    <label
+        className={buttonClassName(
+            'primary',
+            'sm',
+            uploading || quotaExhausted ? 'pointer-events-none opacity-80' : '',
+        )}
+    >
         <UploadIcon size={16} />
         {uploading ? 'Uploading…' : 'Upload score'}
         <input
             type="file"
             accept={UPLOAD_ACCEPT}
             className="hidden"
-            disabled={uploading}
+            disabled={uploading || quotaExhausted}
             onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
@@ -1008,10 +1044,12 @@ const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (
 
 const EmptyLibrary = ({
     uploading,
+    quotaExhausted,
     uploadPct,
     onUpload,
 }: {
     uploading: boolean;
+    quotaExhausted: boolean;
     uploadPct: number | null;
     onUpload: (file: File) => Promise<void>;
 }) => (
@@ -1024,7 +1062,7 @@ const EmptyLibrary = ({
             <Link to="/search" className={buttonClassName('primary', 'sm')}>
                 Find on IMSLP
             </Link>
-            <UploadButton uploading={uploading} onUpload={onUpload} />
+            <UploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
         </div>
         {uploading && uploadPct !== null ? (
             <ProgressBar value={uploadPct} label="Uploading score" className="w-full max-w-xs" />
