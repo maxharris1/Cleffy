@@ -647,6 +647,13 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('No Urtext file tagged on this IMSLP page.')).not.toBeInTheDocument();
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
 
+        // Back belongs to the panel, beside the work title — and there is only one.
+        const panel = screen.getByText('Choose a PDF edition').closest('.imslp-panel-view');
+        expect(panel).not.toBeNull();
+        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
+        expect(within(panel!).getByText('Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
+        expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
+
         const list = screen.getByRole('list', { name: 'PDF editions' });
         const rows = within(list).getAllByRole('listitem');
         expect(rows.length).toBe(work.editions.length);
@@ -659,14 +666,16 @@ describe('ImslpBrowser', () => {
         expect(henleII.getAllByText('Urtext · Henle · 1976').length).toBeGreaterThan(0);
         expect(henleII.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
         expect(henleII.getByText(/Complete Score/)).toBeInTheDocument();
-        expect(henleII.queryByRole('radio')).not.toBeInTheDocument();
+        expect(henleII.getByRole('radio')).toBeDisabled();
+        expect(henleII.getByRole('radio')).not.toBeChecked();
         expect(henleII.getByText('Restricted')).toBeInTheDocument();
-        expect(henleII.getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        expect(henleII.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
 
         const henleI = within(rows[1]!);
         expect(henleI.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
         expect(henleI.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(henleI.queryByRole('radio')).not.toBeInTheDocument();
+        expect(henleI.getByRole('radio')).toBeDisabled();
+        expect(henleI.getByRole('radio')).not.toBeChecked();
 
         expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
@@ -675,7 +684,9 @@ describe('ImslpBrowser', () => {
             name: /Select .*moonlight\.wiener/i,
         });
         expect(weinerRadio).not.toBeChecked();
-        expect(within(weinerRadio.closest('li')!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        // Importable rows carry no per-row Open; the footer link appears once selected.
+        expect(within(weinerRadio.closest('li')!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: /^Open on IMSLP$/ })).not.toBeInTheDocument();
 
         await userEvent.click(within(rows[0]!).getByText(/G\. Henle Verlag 1976/));
         expect(onImportImslp).not.toHaveBeenCalled();
@@ -684,6 +695,7 @@ describe('ImslpBrowser', () => {
         await userEvent.click(weinerRadio);
         expect(weinerRadio).toBeChecked();
         expect(add).toBeEnabled();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
         await userEvent.click(add);
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledTimes(1);
@@ -729,9 +741,12 @@ describe('ImslpBrowser', () => {
         expect(within(rows[0]!).getByText('Urtext · Henle · 1976')).toBeInTheDocument();
         expect(within(rows[0]!).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
         expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
-        expect(within(rows[0]!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
-        expect(within(rows[3]!).queryByRole('radio')).not.toBeInTheDocument();
+        expect(within(rows[0]!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
+        expect(within(rows[3]!).getByRole('radio')).toBeDisabled();
+        expect(within(rows[3]!).getByRole('radio')).not.toBeChecked();
         expect(within(rows[3]!).getByText('Non-PD US')).toBeInTheDocument();
+        expect(within(rows[3]!).getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
@@ -807,12 +822,14 @@ describe('ImslpBrowser', () => {
         fireEvent.click(within(list).getAllByRole('radio')[0]!);
 
         expect(await screen.findByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
+        expect(screen.getByRole('status')).toHaveTextContent('Downloading from IMSLP…');
         for (const radio of within(list).getAllByRole('radio')) {
             expect(radio).toBeDisabled();
         }
         expect(onImportImslp).toHaveBeenCalledTimes(1);
         expect(onImportImslp).toHaveBeenCalledWith('b.pdf', work.title, true);
-        expect(within(list).getAllByRole('link', { name: 'Open on IMSLP' })).toHaveLength(2);
+        expect(within(list).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
     });
 
     it('does not turn a license-unknown row into a one-tap download', async () => {
@@ -835,8 +852,10 @@ describe('ImslpBrowser', () => {
         await screen.findByText('Choose a PDF edition');
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
-        expect(within(list).getAllByRole('radio')).toHaveLength(1);
-        expect(within(list).getByRole('radio')).toBeChecked();
+        const radios = within(list).getAllByRole('radio');
+        expect(radios).toHaveLength(2);
+        expect(within(list).getByRole('radio', { name: /Select known/i })).toBeChecked();
+        expect(within(list).getByRole('radio', { name: /mystery/i })).toBeDisabled();
         expect(within(list).getByText('License unknown')).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
     });
@@ -945,8 +964,8 @@ describe('ImslpBrowser', () => {
         expect(screen.getByRole('radio', { name: 'Select Für Elise' })).toBeInTheDocument();
     });
 
-    it('places Back next to the work title rather than as a far-right control', async () => {
-        const { screen } = await import('@testing-library/react');
+    it('keeps a single Back inside the work panel, not in the page chrome', async () => {
+        const { screen, within } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
         const work: ImslpWorkDetail = {
@@ -960,9 +979,11 @@ describe('ImslpBrowser', () => {
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
         await screen.findByText('Choose a PDF edition');
 
-        const back = screen.getByRole('button', { name: 'Back' });
-        const title = screen.getByText('Nocturnes, Op.9');
-        expect(back.parentElement).toBe(title.parentElement);
+        // Parentage is layout detail; what matters is one Back, owned by the panel.
+        expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
+        const panel = screen.getByText('Nocturnes, Op.9').closest('.imslp-panel-view');
+        expect(panel).not.toBeNull();
+        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
     });
 
     it('searches when Nocturne is added and names both chips plus total', async () => {
