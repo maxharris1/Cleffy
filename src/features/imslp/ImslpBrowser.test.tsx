@@ -614,14 +614,16 @@ describe('ImslpBrowser', () => {
         expect(henleII.getAllByText('Urtext · Henle · 1976').length).toBeGreaterThan(0);
         expect(henleII.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
         expect(henleII.getByText(/Complete Score/)).toBeInTheDocument();
-        expect(henleII.queryByRole('radio')).not.toBeInTheDocument();
+        expect(henleII.getByRole('radio')).toBeDisabled();
+        expect(henleII.getByRole('radio')).not.toBeChecked();
         expect(henleII.getByText('Restricted')).toBeInTheDocument();
         expect(henleII.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
 
         const henleI = within(rows[1]!);
         expect(henleI.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
         expect(henleI.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(henleI.queryByRole('radio')).not.toBeInTheDocument();
+        expect(henleI.getByRole('radio')).toBeDisabled();
+        expect(henleI.getByRole('radio')).not.toBeChecked();
 
         expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
@@ -688,7 +690,8 @@ describe('ImslpBrowser', () => {
         expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
         expect(within(rows[0]!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
         expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
-        expect(within(rows[3]!).queryByRole('radio')).not.toBeInTheDocument();
+        expect(within(rows[3]!).getByRole('radio')).toBeDisabled();
+        expect(within(rows[3]!).getByRole('radio')).not.toBeChecked();
         expect(within(rows[3]!).getByText('Non-PD US')).toBeInTheDocument();
         expect(within(rows[3]!).getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
@@ -766,6 +769,7 @@ describe('ImslpBrowser', () => {
         fireEvent.click(within(list).getAllByRole('radio')[0]!);
 
         expect(await screen.findByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
+        expect(screen.getByRole('status')).toHaveTextContent('Downloading from IMSLP…');
         for (const radio of within(list).getAllByRole('radio')) {
             expect(radio).toBeDisabled();
         }
@@ -795,8 +799,10 @@ describe('ImslpBrowser', () => {
         await screen.findByText('Choose a PDF edition');
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
-        expect(within(list).getAllByRole('radio')).toHaveLength(1);
-        expect(within(list).getByRole('radio')).toBeChecked();
+        const radios = within(list).getAllByRole('radio');
+        expect(radios).toHaveLength(2);
+        expect(within(list).getByRole('radio', { name: /Select known/i })).toBeChecked();
+        expect(within(list).getByRole('radio', { name: /mystery/i })).toBeDisabled();
         expect(within(list).getByText('License unknown')).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
     });

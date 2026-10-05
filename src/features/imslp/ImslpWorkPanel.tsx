@@ -85,6 +85,7 @@ export const ImslpWorkPanel = ({
 
     const buttonLabel =
         download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
+    const statusLine = download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : null;
 
     return (
         <div className="imslp-panel-view mt-4">
@@ -119,7 +120,7 @@ export const ImslpWorkPanel = ({
                     {noUrtext ? (
                         <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
                     ) : null}
-                    <ul className="mt-2 max-h-[20rem] overflow-y-auto" aria-label="PDF editions">
+                    <ul className="mt-2 max-h-[16rem] overflow-y-auto" aria-label="PDF editions">
                         {ranked.map((edition) => {
                             const checked = selected?.filename === edition.filename;
                             const importable = isEditionImportable(edition);
@@ -176,23 +177,34 @@ export const ImslpWorkPanel = ({
                                     ) : null}
                                 </span>
                             );
+                            const radio = (
+                                <input
+                                    type="radio"
+                                    name="imslp-edition"
+                                    className="mt-1 h-4 w-4 shrink-0 accent-accent"
+                                    checked={checked}
+                                    onChange={() => {
+                                        if (importable) {
+                                            onSelect(edition);
+                                        }
+                                    }}
+                                    disabled={!importable || importing}
+                                    tabIndex={importable ? undefined : -1}
+                                    aria-label={importable ? `Select ${name}` : name}
+                                />
+                            );
                             return (
                                 <li key={edition.filename}>
                                     {importable ? (
                                         <label className={rowClass}>
-                                            <input
-                                                type="radio"
-                                                name="imslp-edition"
-                                                className="mt-1 h-4 w-4 shrink-0 accent-accent"
-                                                checked={checked}
-                                                onChange={() => onSelect(edition)}
-                                                disabled={importing}
-                                                aria-label={`Select ${name}`}
-                                            />
+                                            {radio}
                                             {identity}
                                         </label>
                                     ) : (
-                                        <div className={rowClass}>{identity}</div>
+                                        <div className={rowClass}>
+                                            {radio}
+                                            {identity}
+                                        </div>
                                     )}
                                 </li>
                             );
@@ -249,6 +261,10 @@ export const ImslpWorkPanel = ({
                     </div>
                 </>
             ) : null}
+
+            <p className="sr-only" role="status" aria-live="polite">
+                {statusLine ?? ''}
+            </p>
 
             {download.kind === 'fallback' ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
