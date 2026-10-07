@@ -23,6 +23,7 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
     ...(await importOriginal<typeof sessionModule>()),
     useSession: () => ({ session: studentSession, loading: false, lastEvent: null }),
     signOut: (...args: unknown[]) => signOut(...args),
+    syncBeforeSignOut: async () => 0,
 }));
 
 /** A provisioned student: no email, user_type set by student-provision. */

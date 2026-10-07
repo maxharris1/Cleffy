@@ -134,6 +134,58 @@ export const signInAnonymouslyWithName = async (displayName: string): Promise<vo
     }
 };
 
+/** How long sign-out waits for the outbox to upload before asking. */
+const SIGN_OUT_SYNC_TIMEOUT_MS = 8000;
+
+/**
+ * Upload what this device still owes the server, then report how many
+ * annotation changes are STILL unsynced. Sign-out clears them from the
+ * device, so a non-zero answer must be put to the user before signOut().
+ * Never throws. Reports 0 only when the outbox cannot be read at all — and
+ * then sign-out cannot clear it either.
+ */
+export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): Promise<number> => {
+    const [{ getDb }, { drainCloudOutboxes, pendingCloudOpCount }, { createSupabaseAnnotationsApi }, snapshots] =
+        await Promise.all([
+            import('@/sync/db'),
+            import('@/sync/signOutSync'),
+            import('@/sync/syncEngine'),
+            import('@/features/viewer/history/snapshotService'),
+        ]);
+    const db = getDb();
+    let pending: number;
+    try {
+        pending = await pendingCloudOpCount(db);
+    } catch {
+        return 0;
+    }
+    try {
+        const supabase = getSupabase();
+        const { data } = await supabase.auth.getSession();
+        const userId = data.session?.user.id ?? null;
+        if (!userId) {
+            return pending;
+        }
+        if (pending > 0) {
+            pending = await drainCloudOutboxes({
+                db,
+                api: createSupabaseAnnotationsApi(supabase),
+                getUserId: () => userId,
+                timeoutMs,
+            });
+        }
+        // Day snapshots are history, not marks — best effort, never a reason to ask.
+        await Promise.race([
+            snapshots.retryPendingSnapshots(db).catch(() => undefined),
+            new Promise((resolve) => setTimeout(resolve, Math.min(timeoutMs, 3000))),
+        ]);
+    } catch (err) {
+        console.warn('Could not sync before sign-out', err);
+        pending = await pendingCloudOpCount(db).catch(() => pending);
+    }
+    return pending;
+};
+
 export const signOut = async (): Promise<void> => {
     // Bump the library mutation epoch on BOTH sides of the auth round-trip.
     // The first bump outranks any response already in flight (including the
@@ -149,6 +201,7 @@ export const signOut = async (): Promise<void> => {
     rememberSession(null);
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
+    const { clearCloudAnnotationData } = await import('@/sync/signOutSync');
     const db = getDb();
     await Promise.all([
         db.scoreCache.clear().catch(() => undefined),
@@ -157,6 +210,11 @@ export const signOut = async (): Promise<void> => {
         db.assignmentsCache.clear().catch(() => undefined),
         db.pdfCache.clear().catch(() => undefined),
         db.thumbnails.clear().catch(() => undefined),
+        db.entitlements.clear().catch(() => undefined),
+        // Cloud-score marks, their outbox, watermarks and day snapshots: the
+        // next account on this browser must neither see nor push them.
+        // Callers ask first (syncBeforeSignOut) when any are unsynced.
+        clearCloudAnnotationData(db).catch((err: unknown) => console.warn('Could not clear annotation data', err)),
     ]);
 };
 

@@ -12,6 +12,7 @@ import type { EntitlementLimits, Entitlements } from '@/types/database';
 const updateDisplayName = vi.fn();
 const updatePassword = vi.fn();
 const signOut = vi.fn();
+const syncBeforeSignOut = vi.fn();
 const useSession = vi.fn();
 
 const loadUsage = vi.fn();
@@ -42,6 +43,7 @@ vi.mock('@/features/auth/session', () => ({
     updateDisplayName: (...args: unknown[]) => updateDisplayName(...args),
     updatePassword: (...args: unknown[]) => updatePassword(...args),
     signOut: (...args: unknown[]) => signOut(...args),
+    syncBeforeSignOut: () => syncBeforeSignOut(),
 }));
 
 vi.mock('@/features/billing/entitlementsService', () => ({
@@ -147,6 +149,7 @@ const renderSettled = async () => {
 beforeEach(() => {
     vi.clearAllMocks();
     useSession.mockReturnValue({ session: sessionFor(), loading: false, lastEvent: null });
+    syncBeforeSignOut.mockResolvedValue(0);
     loadEntitlements.mockResolvedValue(entitlements());
     readCachedEntitlements.mockResolvedValue(null);
     loadUsage.mockResolvedValue({ omr_runs: 2 });
@@ -291,8 +294,22 @@ describe('AccountPage', () => {
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));
 
+        await waitFor(() => expect(signOut).toHaveBeenCalledOnce());
         expect(clearCachedEntitlements).toHaveBeenCalledWith('teacher-1');
-        expect(signOut).toHaveBeenCalledOnce();
+    });
+
+    it('asks before signing out over unsynced marks, and Stay signed in keeps the session', async () => {
+        const user = userEvent.setup();
+        syncBeforeSignOut.mockResolvedValue(2);
+        await renderSettled();
+
+        await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        expect(dialog).toHaveTextContent('You have 2 unsynced changes');
+        await user.click(screen.getByRole('button', { name: 'Stay signed in' }));
+        expect(signOut).not.toHaveBeenCalled();
+        expect(clearCachedEntitlements).not.toHaveBeenCalled();
     });
 
     it('offers Add to Home Screen in Preferences', async () => {

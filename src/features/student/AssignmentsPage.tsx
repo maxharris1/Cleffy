@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router';
 
 import { RequireStudent } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
+import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { fetchMyAssignments, fetchMyRosterProfile, type AssignedScore } from '@/features/student/studentApi';
 import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
@@ -91,6 +92,8 @@ const AssignmentsView = ({ session }: { session: Session }) => {
         await signOut();
         navigate('/student', { replace: true });
     };
+    // Uploads (or asks about) unsynced marks first — sign-out clears them.
+    const { requestSignOut, checking: savingBeforeSignOut, dialog: signOutDialog } = useGuardedSignOut(handleSignOut);
 
     return (
         <main className="paper-page min-h-full">
@@ -102,10 +105,11 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     </div>
                     <button
                         type="button"
-                        onClick={() => void handleSignOut()}
+                        onClick={() => void requestSignOut()}
+                        disabled={savingBeforeSignOut}
                         className={buttonClassName('ghost', 'sm', 'shrink-0')}
                     >
-                        Sign out
+                        {savingBeforeSignOut ? 'Saving changes…' : 'Sign out'}
                     </button>
                 </header>
 
@@ -137,6 +141,7 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     />
                 ) : null}
             </div>
+            {signOutDialog}
         </main>
     );
 };

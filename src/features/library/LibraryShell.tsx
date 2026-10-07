@@ -3,6 +3,7 @@ import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
+import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
@@ -139,6 +140,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         await clearCachedEntitlements(userId).catch(() => undefined);
         await signOut();
     };
+    // Uploads (or asks about) unsynced marks first — sign-out clears them.
+    const { requestSignOut, dialog: signOutDialog } = useGuardedSignOut(handleSignOut);
 
     /**
      * A quota refusal is not a failure to report as one: it gets its own state so
@@ -373,7 +376,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                             userLabel={userLabel}
                             userEmail={userEmail}
                             tier={tier}
-                            onSignOut={() => void handleSignOut()}
+                            onSignOut={() => void requestSignOut()}
                         />
                     </div>
                 </div>
@@ -414,6 +417,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} />
                 </Suspense>
             ) : null}
+
+            {signOutDialog}
         </main>
     );
 };
