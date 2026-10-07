@@ -648,7 +648,7 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
 
         // Back belongs to the panel, beside the work title — and there is only one.
-        const panel = screen.getByText('Choose a PDF edition').closest('.imslp-panel-view');
+        const panel = screen.getByText('Choose a PDF edition').closest<HTMLElement>('.imslp-panel-view');
         expect(panel).not.toBeNull();
         expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
         expect(within(panel!).getByText('Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
@@ -981,7 +981,7 @@ describe('ImslpBrowser', () => {
 
         // Parentage is layout detail; what matters is one Back, owned by the panel.
         expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
-        const panel = screen.getByText('Nocturnes, Op.9').closest('.imslp-panel-view');
+        const panel = screen.getByText('Nocturnes, Op.9').closest<HTMLElement>('.imslp-panel-view');
         expect(panel).not.toBeNull();
         expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
     });

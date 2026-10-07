@@ -452,11 +452,11 @@ describe('HandwritingController', () => {
         await store.create(strokeAnnotation('dyn-a', 0.2));
         await store.create(strokeAnnotation('dyn-b', 0.5));
 
-        let releaseA = () => undefined;
+        let releaseA: () => void = () => undefined;
         const blockA = new Promise<void>((resolve) => {
             releaseA = resolve;
         });
-        let sawA = () => undefined;
+        let sawA: () => void = () => undefined;
         const enteredA = new Promise<void>((resolve) => {
             sawA = resolve;
         });
@@ -505,11 +505,11 @@ describe('HandwritingController', () => {
         await store.create(strokeAnnotation('keep', 0.7));
         await write(controller, strokeAnnotation('three', 0.3));
 
-        let release = () => undefined;
+        let release: () => void = () => undefined;
         const blocked = new Promise<void>((resolve) => {
             release = resolve;
         });
-        let sawThree = () => undefined;
+        let sawThree: () => void = () => undefined;
         const enteredThree = new Promise<void>((resolve) => {
             sawThree = resolve;
         });
