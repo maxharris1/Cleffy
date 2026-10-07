@@ -138,7 +138,10 @@ Deno.serve(async (req) => {
         fetchSubscription: async (subscriptionId) => {
             try {
                 return await stripe.subscriptions.retrieve(subscriptionId);
-            } catch {
+            } catch (err) {
+                // The handler turns null into a released claim and a retryable
+                // 500, so the reason only needs to reach the logs.
+                console.error(`could not retrieve subscription ${subscriptionId}:`, err);
                 return null;
             }
         },
@@ -165,6 +168,23 @@ Deno.serve(async (req) => {
             }
             console.log(`archived ${data ?? 0} score(s) past the free cap for ${userId}`);
         },
+        restorePlanArchivedScores: async (userId) => {
+            const { data, error } = await admin.rpc('restore_plan_archived_scores', { p_user: userId });
+            if (error) {
+                throw new Error(`could not restore lapse-archived scores for ${userId}: ${error.message}`);
+            }
+            if (data) {
+                console.log(`restored ${data} lapse-archived score(s) for ${userId}`);
+            }
+        },
+        releaseEvent: async (id) => {
+            const { error } = await admin.from('stripe_events').delete().eq('id', id);
+            if (error) {
+                // Nothing more to do from here: the retry will read as a
+                // duplicate. Loud, because that is a lost billing event.
+                console.error(`could not release claim on ${id}: ${error.message}`);
+            }
+        },
         log: (message) => console.log(message),
     };
 
@@ -176,15 +196,7 @@ Deno.serve(async (req) => {
         // of it would make Stripe's retry look like a duplicate and silently drop
         // the event. Release the claim first, then ask for the retry with a 500.
         // Re-running is safe: every store write is an upsert or is idempotent.
-        await admin
-            .from('stripe_events')
-            .delete()
-            .eq('id', event.id)
-            .then(({ error }) => {
-                if (error) {
-                    console.error(`could not release claim on ${event.id}: ${error.message}`);
-                }
-            });
+        await store.releaseEvent(event.id);
         console.error(`stripe-webhook failed for ${event.id} (${event.type}):`, err);
         return jsonResponse({ error: err instanceof Error ? err.message : 'Webhook handling failed' }, 500);
     }
