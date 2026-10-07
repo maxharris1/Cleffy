@@ -1,13 +1,12 @@
-import type { Session } from '@supabase/supabase-js';
 import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 
-import { isRegisteredSession, useSession, userTypeOf } from '@/features/auth/session';
+import { useSession } from '@/features/auth/session';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
-import { LimitReachedError, limitHeadline } from '@/features/billing/limitErrors';
+import { type LimitReachedError, limitHeadline } from '@/features/billing/limitErrors';
 import { isBillingConfigured } from '@/features/billing/pricing';
+import { claimPdfExport } from '@/features/export/exportClaim';
 import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { exportAnnotatedPdf } from '@/features/export/exportPdf';
-import { getSupabase } from '@/lib/supabase';
 import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
 import { useViewerStore } from '@/state/store';
 import { buttonClassName } from '@/ui/classNames';
@@ -17,45 +16,6 @@ import { buttonClassName } from '@/ui/classNames';
 const PricingDialog = lazy(() =>
     import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
 );
-
-/**
- * The PDF export counter. Returns the refusal to show, or null to go ahead.
- *
- * Deliberately NOT enforcement. The flattening runs entirely on this device, so
- * an unreachable meter must never stop the press: refusing to print because a
- * counter could not be reached would break the product to protect a number.
- * Only an explicit ok:false from the server holds an export back — every other
- * outcome (network down, Supabase unconfigured, a malformed answer) lets the
- * export run, uncounted.
- */
-const consumePdfExport = async (session: Session | null): Promise<LimitReachedError | null> => {
-    // Never gated, so never counted. A share-link guest is someone else's
-    // visitor with no plan of their own to draw down, and a provisioned student
-    // prints what their teacher assigned. consume_pdf_export() exempts both
-    // server-side too; skipping the call here just spares them the round trip.
-    if (!isRegisteredSession(session) || userTypeOf(session) !== null) {
-        return null;
-    }
-
-    try {
-        const { data, error } = await getSupabase().rpc('consume_pdf_export', {});
-        if (error || !data || data.ok) {
-            return null;
-        }
-        return new LimitReachedError({
-            code: 'limit_reached',
-            metric: 'pdf_exports',
-            limit: data.limit ?? 0,
-            // The RPC answers with the count and the limit but not the tier, and
-            // it does not need to: tier_limits gives every paid tier -1 for
-            // pdf_exports, so consume_pdf_export() returns ok:true long before it
-            // counts anything for them. A refusal is always a free account.
-            tier: 'free',
-        });
-    } catch {
-        return null;
-    }
-};
 
 interface ShareExportMenuProps {
     docId: string;
@@ -72,6 +32,8 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
+    /** Why a PDF export was held back when it was not the allowance (offline, unreachable meter). */
+    const [refusal, setRefusal] = useState<string | null>(null);
     const [pricingOpen, setPricingOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
@@ -113,22 +75,30 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
     /**
      * `metered` marks the flows that draw down the pdf_exports allowance — the
      * two that produce a PDF. Sharing the page as a photo is a PNG and is not
-     * what that counter counts.
+     * what that counter counts (the pricing promises "1 PDF export a month").
      */
     const run = async (label: string, action: (source: ArrayBuffer) => Promise<void>, metered = false) => {
         setBusy(label);
         setLimit(null);
+        setRefusal(null);
         try {
             // Bytes first — a local cache read, not the export — so a cache miss
-            // fails before the meter ticks. There is no client-side refund, and
+            // fails before the meter ticks. There is no refund for a claimed
+            // export (the build runs here, so "it failed" is unverifiable), and
             // spending a free account's one monthly export on a PDF that never
             // got built is exactly the dishonesty this counter exists to avoid.
             const source = await resolveBytes();
             if (metered) {
                 // Still ahead of any flattening: nothing is built and thrown away.
-                const refused = await consumePdfExport(session);
-                if (refused) {
-                    setLimit(refused);
+                // Fails closed — see exportClaim.ts for why, and for the one
+                // exception (an unlimited plan exporting offline).
+                const claim = await claimPdfExport(session);
+                if (!claim.ok) {
+                    if ('limit' in claim) {
+                        setLimit(claim.limit);
+                    } else {
+                        setRefusal(claim.message);
+                    }
                     return;
                 }
             }
@@ -153,6 +123,7 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                 title="Share or save annotated page"
                 onClick={() => {
                     setLimit(null);
+                    setRefusal(null);
                     setOpen((v) => !v);
                 }}
                 className={buttonClassName('ghost', 'sm')}
@@ -162,7 +133,7 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
             {open ? (
                 <div
                     className={`absolute right-0 z-30 mt-1 rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
-                        limit ? 'w-80' : 'w-64'
+                        limit || refusal ? 'w-80' : 'w-64'
                     }`}
                 >
                     {/* The notice is a sibling of the menu, not an item in it. */}
@@ -210,6 +181,14 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                             }
                             className="m-2"
                         />
+                    ) : null}
+                    {refusal ? (
+                        <p
+                            role="status"
+                            className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
+                        >
+                            {refusal}
+                        </p>
                     ) : null}
                 </div>
             ) : null}
