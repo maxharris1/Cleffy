@@ -9,10 +9,13 @@ import {
     editionAvailability,
     editionListSummary,
     formatBytes,
+    friendlySearchError,
+    hasSearchableQuery,
     isEditionImportable,
     rankEditions,
     recommendEdition,
     recommendedBadge,
+    SEARCH_TIMEOUT_COPY,
     searchTokens,
     splitSearchResults,
     suggestedPdfName,
@@ -105,8 +108,26 @@ describe('imslp display helpers', () => {
         expect(displayWorkTitle('Untitled')).toEqual({ work: 'Untitled', composer: null });
     });
 
-    it('cleans edition filenames', () => {
+    it('prefers publisher or a real description over dump filenames', () => {
         expect(displayEditionName('PMLP01458-Beethoven_Moonlight.pdf')).toBe('Beethoven Moonlight');
+        expect(displayEditionName('WIMA.8c48-FESCo.pdf', { publisher: 'Breitkopf und Härtel', year: 1870 })).toBe(
+            'Breitkopf und Härtel 1870',
+        );
+        expect(displayEditionName('Btsn312.pdf', { publisher: 'G. Henle Verlag', year: 1976 })).toBe(
+            'G. Henle Verlag 1976',
+        );
+        expect(displayEditionName('Fuer_E.pdf', { description: 'Für Elise' })).toBe('Für Elise');
+        expect(displayEditionName('clean-scan.pdf', { publisher: 'Schirmer' })).toBe('clean-scan');
+    });
+
+    it('treats punctuation-only strings as not searchable', () => {
+        expect(hasSearchableQuery('%%%')).toBe(false);
+        expect(hasSearchableQuery('...')).toBe(false);
+        expect(hasSearchableQuery('beethoven')).toBe(true);
+        expect(friendlySearchError(new Error('canceling statement due to statement timeout'))).toBe(
+            SEARCH_TIMEOUT_COPY,
+        );
+        expect(friendlySearchError(new Error('IMSLP is down'))).toBe('IMSLP is down');
     });
 
     it('recommends a mid-size edition over tiny or huge files', () => {
@@ -544,6 +565,35 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('No matches')).not.toBeInTheDocument();
     });
 
+    it('shows friendly copy instead of a Postgres statement timeout', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+
+        await renderBrowser();
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), 'chopin');
+
+        expect(await screen.findByText(SEARCH_TIMEOUT_COPY)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+        expect(screen.queryByText(/canceling statement/)).not.toBeInTheDocument();
+    });
+
+    it('treats a punctuation-only query as no matches, not a piano browse', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+        const searchSpy = vi.spyOn(api, 'searchImslp');
+
+        await renderBrowser();
+        await userEvent.type(screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'), '%%%');
+
+        expect(await screen.findByText('No matches')).toBeInTheDocument();
+        expect(searchSpy).not.toHaveBeenCalled();
+        expect(screen.queryByRole('heading', { name: 'Popular' })).not.toBeInTheDocument();
+    });
+
     it('ignores a stale response that resolves after a newer one', async () => {
         const { screen, waitFor } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
@@ -579,7 +629,8 @@ describe('ImslpBrowser', () => {
     });
 
     it('opens Moonlight with restricted Henle first, unlabeled Weiner, and no auto-import', async () => {
-        const { screen, waitFor, within, fireEvent } = await import('@testing-library/react');
+        const { screen, waitFor, within } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
 
         const work = moonlightWorkDetail();
@@ -596,47 +647,63 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText('No Urtext file tagged on this IMSLP page.')).not.toBeInTheDocument();
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
 
+        // Back belongs to the panel, beside the work title — and there is only one.
+        const panel = screen.getByText('Choose a PDF edition').closest('.imslp-panel-view');
+        expect(panel).not.toBeNull();
+        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
+        expect(within(panel!).getByText('Piano Sonata No.14, Op.27 No.2')).toBeInTheDocument();
+        expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
+
         const list = screen.getByRole('list', { name: 'PDF editions' });
         const rows = within(list).getAllByRole('listitem');
         expect(rows.length).toBe(work.editions.length);
-        expect(screen.queryByRole('radio')).not.toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /Show all/ })).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
+        const add = screen.getByRole('button', { name: 'Add to my library' });
+        expect(add).toBeDisabled();
 
         const henleII = within(rows[0]!);
         expect(henleII.getAllByText('Urtext · Henle · 1976').length).toBeGreaterThan(0);
         expect(henleII.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
         expect(henleII.getByText(/Complete Score/)).toBeInTheDocument();
-        expect(henleII.queryByRole('button')).not.toBeInTheDocument();
+        expect(henleII.getByRole('radio')).toBeDisabled();
+        expect(henleII.getByRole('radio')).not.toBeChecked();
         expect(henleII.getByText('Restricted')).toBeInTheDocument();
+        expect(henleII.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
 
         const henleI = within(rows[1]!);
         expect(henleI.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
         expect(henleI.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(henleI.queryByRole('button')).not.toBeInTheDocument();
+        expect(henleI.getByRole('radio')).toBeDisabled();
+        expect(henleI.getByRole('radio')).not.toBeChecked();
 
         expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
-        const weinerButton = screen.getByRole('button', {
-            name: /Download .*moonlight\.wiener/i,
+        const weinerRadio = screen.getByRole('radio', {
+            name: /Select .*moonlight\.wiener/i,
         });
-        expect(weinerButton).not.toHaveAttribute('aria-pressed');
-        expect(within(weinerButton.closest('li')!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
+        expect(weinerRadio).not.toBeChecked();
+        // Importable rows carry no per-row Open; the footer link appears once selected.
+        expect(within(weinerRadio.closest('li')!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: /^Open on IMSLP$/ })).not.toBeInTheDocument();
 
-        fireEvent.click(within(rows[0]!).getByText(/G\. Henle Verlag 1976/));
+        await userEvent.click(within(rows[0]!).getByText(/G\. Henle Verlag 1976/));
         expect(onImportImslp).not.toHaveBeenCalled();
+        expect(add).toBeDisabled();
 
-        fireEvent.click(weinerButton);
-        fireEvent.click(weinerButton);
+        await userEvent.click(weinerRadio);
+        expect(weinerRadio).toBeChecked();
+        expect(add).toBeEnabled();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
+        await userEvent.click(add);
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledTimes(1);
         });
         expect(onImportImslp).toHaveBeenCalledWith(names.weiner, work.title, true);
     });
 
-    it('opens a work from ?work=, ranks downloadable Urtext first, and imports on tap', async () => {
+    it('opens a work from ?work=, ranks downloadable Urtext first, and imports the selection', async () => {
         const { screen, waitFor, within } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
@@ -669,19 +736,26 @@ describe('ImslpBrowser', () => {
         const rows = within(list).getAllByRole('listitem');
         expect(rows).toHaveLength(4);
 
-        const henleRow = within(rows[0]!).getByRole('button');
-        expect(henleRow).not.toHaveAttribute('aria-pressed');
-        expect(within(henleRow).getByText('Urtext · Henle · 1976')).toBeInTheDocument();
-        expect(within(henleRow).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(within(henleRow).getByText(/Complete Score/)).toBeInTheDocument();
-        expect(within(rows[0]!).getByRole('link', { name: 'Open on IMSLP' })).toBeInTheDocument();
-        expect(within(rows[3]!).queryByRole('button')).not.toBeInTheDocument();
+        const henleRadio = within(rows[0]!).getByRole('radio');
+        expect(henleRadio).toBeChecked();
+        expect(within(rows[0]!).getByText('Urtext · Henle · 1976')).toBeInTheDocument();
+        expect(within(rows[0]!).getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
+        expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
+        expect(within(rows[0]!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
+        expect(within(rows[3]!).getByRole('radio')).toBeDisabled();
+        expect(within(rows[3]!).getByRole('radio')).not.toBeChecked();
         expect(within(rows[3]!).getByText('Non-PD US')).toBeInTheDocument();
+        expect(within(rows[3]!).getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
-        await userEvent.click(within(rows[2]!).getByRole('button'));
+        await userEvent.click(within(rows[2]!).getByRole('radio'));
+        expect(within(rows[2]!).getByRole('radio')).toBeChecked();
+        expect(henleRadio).not.toBeChecked();
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true);
         });
@@ -689,7 +763,7 @@ describe('ImslpBrowser', () => {
     });
 
     it('says when no Urtext is tagged and falls back to a Recommended badge', async () => {
-        const { screen } = await import('@testing-library/react');
+        const { screen, within } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');
 
         const work: ImslpWorkDetail = {
@@ -712,7 +786,10 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByText(/Urtext first/)).not.toBeInTheDocument();
         expect(screen.getByText('No Urtext file tagged on this IMSLP page.')).toBeInTheDocument();
         const badge = screen.getByText('Recommended');
-        expect(badge.closest('button')).toHaveTextContent('clean-scan');
+        const recommendedRow = badge.closest('li');
+        expect(recommendedRow).toHaveTextContent('clean-scan');
+        expect(within(recommendedRow!).getByRole('radio')).toBeChecked();
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeEnabled();
         expect(screen.queryByText(/Urtext ·/)).not.toBeInTheDocument();
     });
 
@@ -733,21 +810,26 @@ describe('ImslpBrowser', () => {
         await screen.findByText('Choose a PDF edition');
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
-        const downloadButtons = within(list).getAllByRole('button');
-        expect(downloadButtons).toHaveLength(2);
-        fireEvent.click(downloadButtons[1]!);
-        fireEvent.click(downloadButtons[0]!);
-        fireEvent.click(downloadButtons[1]!);
+        const radios = within(list).getAllByRole('radio');
+        expect(radios).toHaveLength(2);
+        expect(radios[0]).toBeChecked();
+        fireEvent.click(radios[1]!);
+        expect(radios[1]).toBeChecked();
 
-        expect(await screen.findByText('Downloading from IMSLP…')).toBeInTheDocument();
-        for (const row of within(list).getAllByRole('button')) {
-            expect(row).toBeDisabled();
+        const add = screen.getByRole('button', { name: 'Add to my library' });
+        fireEvent.click(add);
+        fireEvent.click(add);
+        fireEvent.click(within(list).getAllByRole('radio')[0]!);
+
+        expect(await screen.findByRole('button', { name: 'Downloading from IMSLP…' })).toBeDisabled();
+        expect(screen.getByRole('status')).toHaveTextContent('Downloading from IMSLP…');
+        for (const radio of within(list).getAllByRole('radio')) {
+            expect(radio).toBeDisabled();
         }
-        expect(downloadButtons[0]).not.toHaveAttribute('aria-pressed');
-        expect(downloadButtons[1]).not.toHaveAttribute('aria-pressed');
         expect(onImportImslp).toHaveBeenCalledTimes(1);
         expect(onImportImslp).toHaveBeenCalledWith('b.pdf', work.title, true);
-        expect(within(list).getAllByRole('link', { name: 'Open on IMSLP' })).toHaveLength(2);
+        expect(within(list).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
     });
 
     it('does not turn a license-unknown row into a one-tap download', async () => {
@@ -770,7 +852,10 @@ describe('ImslpBrowser', () => {
         await screen.findByText('Choose a PDF edition');
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
-        expect(within(list).getAllByRole('button')).toHaveLength(1);
+        const radios = within(list).getAllByRole('radio');
+        expect(radios).toHaveLength(2);
+        expect(within(list).getByRole('radio', { name: /Select known/i })).toBeChecked();
+        expect(within(list).getByRole('radio', { name: /mystery/i })).toBeDisabled();
         expect(within(list).getByText('License unknown')).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
     });
@@ -798,6 +883,107 @@ describe('ImslpBrowser', () => {
         // No import button, no consent checkbox — there is nothing to import.
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    });
+
+    it('imports the pre-selected recommended edition from Add without a disclaimer checkbox', async () => {
+        const { screen, waitFor } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('tiny.pdf', { size: 12_000 }), edition('clean-scan.pdf'), edition('other-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        expect(screen.getByRole('radio', { name: /Select clean-scan/i })).toBeChecked();
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+        await waitFor(() => {
+            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true);
+        });
+    });
+
+    it('disables Add with a reason when cloud-score quota is exhausted', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('clean-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+
+        await renderBrowser({ onImportImslp, quotaExhausted: true }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        const add = screen.getByRole('button', { name: 'Add to my library' });
+        expect(add).toBeDisabled();
+        expect(screen.getByText(/Cloud-score limit reached/)).toBeInTheDocument();
+        await userEvent.click(add);
+        expect(onImportImslp).not.toHaveBeenCalled();
+    });
+
+    it('does not repeat the display-name fallback as a second line', async () => {
+        const { screen } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Bagatelle in A minor (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Fur_Elise',
+            editions: [
+                edition('WIMA.8c48-FESCo.pdf', {
+                    publisher: 'Breitkopf und Härtel',
+                    year: 1870,
+                    description: 'Complete Score',
+                }),
+                edition('Fuer_E.pdf', { description: 'Für Elise' }),
+            ],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        expect(
+            screen.queryAllByText('Breitkopf und Härtel 1870').filter((el) => el.classList.contains('block')),
+        ).toHaveLength(0);
+        expect(screen.queryAllByText('Für Elise').filter((el) => el.classList.contains('block'))).toHaveLength(0);
+        expect(screen.getByRole('radio', { name: 'Select Breitkopf und Härtel 1870' })).toBeInTheDocument();
+        expect(screen.getByRole('radio', { name: 'Select Für Elise' })).toBeInTheDocument();
+    });
+
+    it('keeps a single Back inside the work panel, not in the page chrome', async () => {
+        const { screen, within } = await import('@testing-library/react');
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('clean-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+
+        await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        // Parentage is layout detail; what matters is one Back, owned by the panel.
+        expect(screen.getAllByRole('button', { name: 'Back' })).toHaveLength(1);
+        const panel = screen.getByText('Nocturnes, Op.9').closest('.imslp-panel-view');
+        expect(panel).not.toBeNull();
+        expect(within(panel!).getByRole('button', { name: 'Back' })).toBeInTheDocument();
     });
 
     it('searches when Nocturne is added and names both chips plus total', async () => {

@@ -1,6 +1,12 @@
 import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 
-import { displayWorkTitle, searchTokens, splitSearchResults } from '@/features/imslp/imslpDisplay';
+import {
+    displayWorkTitle,
+    friendlySearchError,
+    hasSearchableQuery,
+    searchTokens,
+    splitSearchResults,
+} from '@/features/imslp/imslpDisplay';
 import { searchImslp, type ImslpPeriod, type ImslpSearchHit } from '@/features/imslp/imslpApi';
 import { ImslpScoreCard } from '@/features/imslp/ImslpScoreCard';
 import { readImslpView, writeImslpView, type ImslpView } from '@/features/imslp/imslpPrefs';
@@ -146,16 +152,13 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
     const isDefaultState = isDefaultFilterState && sort === 'relevance' && query.trim() === '';
 
     const q = query.trim();
+    const punctuationOnly = q.length >= 2 && !hasSearchableQuery(q);
     const isLiveQuery = q.length >= 2 || (categoryBackedFilters(filters) && !isDefaultFilterState);
     const requestKey = (nextQ: string, nextFilters: unknown, nextSort: SearchSort) =>
         `${nextQ}\0${JSON.stringify(nextFilters)}\0${nextSort}`;
     const liveError = searchError && errorKey === requestKey(q, filters, sort) ? searchError : null;
 
-    const applyResponse = (
-        response: Awaited<ReturnType<typeof searchImslp>>,
-        append: boolean,
-        seq: number,
-    ) => {
+    const applyResponse = (response: Awaited<ReturnType<typeof searchImslp>>, append: boolean, seq: number) => {
         if (seq !== seqRef.current) {
             return;
         }
@@ -211,13 +214,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
                 if (err instanceof DOMException && err.name === 'AbortError') {
                     return;
                 }
-                setSearchError(
-                    err instanceof DOMException && err.name === 'TimeoutError'
-                        ? 'IMSLP took too long to answer.'
-                        : err instanceof Error
-                          ? err.message
-                          : 'Search failed',
-                );
+                setSearchError(friendlySearchError(err));
                 setErrorKey(requestKey(trimmed, nextFilters, nextSort));
             } finally {
                 if (seq === seqRef.current) {
@@ -231,6 +228,23 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
         const delay = immediateRef.current ? 0 : 280;
         immediateRef.current = false;
         const handle = window.setTimeout(() => {
+            if (punctuationOnly) {
+                seqRef.current++;
+                abortRef.current?.abort();
+                setResults([]);
+                setSearching(false);
+                setSearchError(null);
+                setFilterRelaxed(false);
+                setRelaxed([]);
+                setTotal(0);
+                setHasMore(false);
+                setIndexReady(true);
+                setNotReady([]);
+                setPeriod(null);
+                setSearchMode('search');
+                setErrorKey(null);
+                return;
+            }
             if (!isLiveQuery) {
                 seqRef.current++;
                 abortRef.current?.abort();
@@ -251,7 +265,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
             void runSearch(q, filters, sort, { limit: DEFAULT_SEARCH_LIMIT, offset: 0 });
         }, delay);
         return () => window.clearTimeout(handle);
-    }, [q, filters, sort, isLiveQuery, searchTick]);
+    }, [q, filters, sort, isLiveQuery, punctuationOnly, searchTick]);
 
     useEffect(() => {
         moreRef.current = null;
@@ -332,9 +346,7 @@ export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearc
 
     const relaxedHint = (() => {
         if (relaxed.length === 0) {
-            return filterRelaxed
-                ? 'Showing close matches — few matching scores were found for this search.'
-                : null;
+            return filterRelaxed ? 'Showing close matches — few matching scores were found for this search.' : null;
         }
         const names = relaxed.map((constraint) => {
             switch (constraint) {

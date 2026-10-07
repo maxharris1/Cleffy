@@ -33,14 +33,14 @@ const REVEAL =
  * explicit `z-10`.
  *
  * Tags are deliberately not shown — five to six cards per row cannot carry chip
- * rows without turning into noise. They survive in the card's tooltip, and the
- * list view remains the place to see and filter them.
+ * rows without turning into noise. The list view remains the place to see and
+ * filter them; the visible title (line-clamp-2) is the card's name.
  */
 export const ScoreCard = ({
     doc,
     index,
     stripComposer,
-    assignedTags,
+    assignedTags: _assignedTags,
     isFavorite,
     isOwner,
     onToggleFavorite,
@@ -71,16 +71,12 @@ export const ScoreCard = ({
     // "(Chopin)" — printing both turns every card into an echo.
     const title = stripComposer || composer ? displayTitleOf(doc.title) : doc.title;
     const pages = doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : '';
-    const tagNames = assignedTags.map((t) => t.name);
 
     return (
         <div
             ref={rootRef}
             className="library-card group relative has-[[aria-expanded=true]]:z-20"
             style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
-            // Titles clamp to two lines and tags have no room on a cover, so the
-            // tooltip carries the parts the card had to drop.
-            title={tagNames.length > 0 ? `${doc.title} · ${tagNames.join(' · ')}` : doc.title}
         >
             {/*
               The clipped cover and the controls are siblings on purpose: the
