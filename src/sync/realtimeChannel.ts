@@ -60,13 +60,32 @@ export interface DocRealtimeChannelOptions {
     onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
 }
 
+/** Private topic for presence and live ink — members may send on it. */
+export const docTopic = (docId: string): string => `doc:${docId}`;
+
 /**
- * The per-document realtime channel: presence, live ink, and committed
- * annotation fan-out, all multiplexed on the private topic `doc:{id}`.
+ * Private topic for server-authored events: committed annotation rows, PDF
+ * replacement and play-along status, all written by database triggers. RLS lets
+ * members receive on it and no client send on it (migration
+ * 20261007120101_realtime_db_topic). It is separate from doc:{id} because
+ * Realtime authorizes a channel's sends for every event name at once, so on a
+ * shared topic any editor could broadcast a hand-made 'INSERT' that peers
+ * would apply as a committed row (forged author, forged seq).
+ */
+export const docDbTopic = (docId: string): string => `doc-db:${docId}`;
+
+type ChannelKey = 'live' | 'db';
+
+/**
+ * The per-document realtime connection: presence and live ink on the private
+ * topic `doc:{id}`, and committed-row fan-out on the receive-only `doc-db:{id}`.
  */
 export class DocRealtimeChannel {
     private channel: RealtimeChannel | null = null;
-    private everSubscribed = false;
+    private dbChannel: RealtimeChannel | null = null;
+    private readonly joined: Record<ChannelKey, boolean> = { live: false, db: false };
+    private readonly everJoined: Record<ChannelKey, boolean> = { live: false, db: false };
+    private reconnectPending = false;
     private stopped = false;
 
     // Live-ink batching state.
@@ -86,7 +105,7 @@ export class DocRealtimeChannel {
 
     start(): void {
         const { supabase, docId, self } = this.opts;
-        const channel = supabase.channel(`doc:${docId}`, {
+        const channel = supabase.channel(docTopic(docId), {
             config: {
                 private: true,
                 broadcast: { self: false, ack: false },
@@ -94,31 +113,12 @@ export class DocRealtimeChannel {
             },
         });
 
+        // Only live ink is accepted here. Committed rows are never read off this
+        // topic: every member who may send on it could have written them.
         channel.on('broadcast', { event: INK_PROGRESS_EVENT }, ({ payload }) => {
             const msg = parseInkProgress(payload);
             if (msg && msg.userId !== self.userId) {
                 this.opts.onRemoteInk(msg);
-            }
-        });
-        const onDb = ({ payload }: { payload: unknown }) => {
-            // The topic multiplexes two tables: documents (bytes replaced) and annotations.
-            const docChange = parseDocumentChange(payload);
-            if (docChange) {
-                this.opts.onDocReplaced?.(docChange.content_rev);
-                return;
-            }
-            const row = parseDbChange(payload);
-            if (row) {
-                this.opts.onDbChange(row);
-            }
-        };
-        channel.on('broadcast', { event: 'INSERT' }, onDb);
-        channel.on('broadcast', { event: 'UPDATE' }, onDb);
-
-        channel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
-            const msg = parseScoreAnalysisBroadcast(payload);
-            if (msg && msg.document_id === docId) {
-                this.opts.onScoreAnalysis?.(msg);
             }
         });
 
@@ -141,12 +141,63 @@ export class DocRealtimeChannel {
             if (status === 'SUBSCRIBED') {
                 // Only write path for track() — force so join/reconnect always announce.
                 this.trackPresence({ force: true });
-                if (this.everSubscribed) {
-                    this.opts.onReconnect();
-                }
-                this.everSubscribed = true;
+            }
+            this.onChannelStatus('live', status);
+        });
+
+        // Receive-only: no presence, and nothing is ever sent on it.
+        const dbChannel = supabase.channel(docDbTopic(docId), {
+            config: { private: true, broadcast: { self: false, ack: false } },
+        });
+        const onDb = ({ payload }: { payload: unknown }) => {
+            // The topic multiplexes two tables: documents (bytes replaced) and annotations.
+            const docChange = parseDocumentChange(payload);
+            if (docChange) {
+                this.opts.onDocReplaced?.(docChange.content_rev);
+                return;
+            }
+            const row = parseDbChange(payload);
+            if (row) {
+                this.opts.onDbChange(row);
+            }
+        };
+        dbChannel.on('broadcast', { event: 'INSERT' }, onDb);
+        dbChannel.on('broadcast', { event: 'UPDATE' }, onDb);
+        dbChannel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
+            const msg = parseScoreAnalysisBroadcast(payload);
+            if (msg && msg.document_id === docId) {
+                this.opts.onScoreAnalysis?.(msg);
             }
         });
+        this.dbChannel = dbChannel;
+        dbChannel.subscribe((status) => this.onChannelStatus('db', status));
+    }
+
+    /**
+     * Re-join bookkeeping across the two channels. A drop usually takes both
+     * (they share one socket), and the gap-fill pull must start only once the
+     * committed-row channel is live again — otherwise a row committed between
+     * the pull and the db channel's re-join would be missed by both. So
+     * onReconnect fires once both are joined after either re-joined; the first
+     * join of each is not a reconnect.
+     */
+    private onChannelStatus(key: ChannelKey, status: string): void {
+        if (this.stopped) {
+            return;
+        }
+        if (status !== 'SUBSCRIBED') {
+            this.joined[key] = false;
+            return;
+        }
+        this.joined[key] = true;
+        if (this.everJoined[key]) {
+            this.reconnectPending = true;
+        }
+        this.everJoined[key] = true;
+        if (this.reconnectPending && this.joined.live && this.joined.db) {
+            this.reconnectPending = false;
+            this.opts.onReconnect();
+        }
     }
 
     stop(): void {
@@ -162,6 +213,10 @@ export class DocRealtimeChannel {
         if (this.channel) {
             void this.opts.supabase.removeChannel(this.channel);
             this.channel = null;
+        }
+        if (this.dbChannel) {
+            void this.opts.supabase.removeChannel(this.dbChannel);
+            this.dbChannel = null;
         }
     }
 
