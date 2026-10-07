@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as ImslpApiModule from '@/features/imslp/imslpApi';
 
 import { getDb } from '@/sync/db';
 import type { CachedPdf } from '@/sync/db';
@@ -16,6 +17,9 @@ vi.mock('@/lib/storageUpload', () => ({
 // layer is replaced by an in-memory map that keeps real Blobs readable.
 const memCache = vi.hoisted(() => new Map<string, unknown>());
 const memThumbs = vi.hoisted(() => new Map<string, unknown>());
+// userId -> { entitlements }: the cached plan the cap refusal's wording falls back on.
+const memEntitlements = vi.hoisted(() => new Map<string, unknown>());
+const importImslpPdfToStorage = vi.hoisted(() => vi.fn());
 const libraryListClear = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 // Flipped on to simulate WebKit refusing an IndexedDB write (private browsing).
 const cacheFailure = vi.hoisted(() => ({ put: null as Error | null, get: null as Error | null }));
@@ -67,17 +71,25 @@ vi.mock('@/sync/db', () => {
                 },
             }),
             libraryList: table({ clear: libraryListClear }),
+            entitlements: table({ get: (id: string) => Promise.resolve(memEntitlements.get(id)) }),
             transaction: (_mode: string, _table: unknown, fn: () => unknown) => Promise.resolve(fn()),
         }),
     };
 });
+vi.mock('@/features/imslp/imslpApi', async (importOriginal) => ({
+    ...(await importOriginal<typeof ImslpApiModule>()),
+    importImslpPdfToStorage: (...args: unknown[]) => importImslpPdfToStorage(...args),
+}));
 vi.mock('@/features/import/prepareUpload', () => ({
     prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
     UPLOAD_ACCEPT: '',
 }));
 
+import { FREE_LIMITS } from '@/features/billing/entitlementsService';
+import { isLimitReachedError } from '@/features/billing/limitErrors';
 import {
     deleteDocument,
+    importDocumentFromImslp,
     loadDocumentBytes,
     loadDocumentOffline,
     prefetchDocumentBytes,
@@ -116,7 +128,11 @@ interface StubOptions {
     updatedRow?: DocumentRow;
     insertedRow?: DocumentRow;
     insertError?: string;
+    /** PostgREST `details` on the insert error (the cap trigger's JSON DETAIL). */
+    insertDetails?: string | null;
     deleteError?: string;
+    /** What every supabase.rpc() call answers (or rejects with, if an Error). */
+    rpcResult?: { data: unknown; error: { message: string } | null } | Error;
 }
 
 const makeStub = (options: StubOptions = {}) => {
@@ -130,6 +146,7 @@ const makeStub = (options: StubOptions = {}) => {
         upsert: vi.fn(),
         insert: vi.fn(),
         delete: vi.fn(),
+        rpc: vi.fn(),
     };
     const storageApi = (bucket: string) => ({
         download: (path: string) => {
@@ -169,6 +186,11 @@ const makeStub = (options: StubOptions = {}) => {
         },
     });
     const supabase = {
+        rpc: (fn: string, args: unknown) => {
+            calls.rpc(fn, args);
+            const result = options.rpcResult ?? { data: null, error: null };
+            return result instanceof Error ? Promise.reject(result) : Promise.resolve(result);
+        },
         storage: { from: (bucket: string) => storageApi(bucket) },
         from: (table: string) => ({
             insert: (row: Record<string, unknown>) => {
@@ -186,7 +208,9 @@ const makeStub = (options: StubOptions = {}) => {
                                           title: String(row.title),
                                           storage_path: String(row.storage_path),
                                       })),
-                                error: options.insertError ? { message: options.insertError } : null,
+                                error: options.insertError
+                                    ? { message: options.insertError, details: options.insertDetails ?? null }
+                                    : null,
                             }),
                     }),
                 };
@@ -226,6 +250,8 @@ beforeEach(async () => {
     libraryListClear.mockClear();
     cacheFailure.put = null;
     cacheFailure.get = null;
+    memEntitlements.clear();
+    importImslpPdfToStorage.mockReset();
     await getDb().pdfCache.clear();
 });
 
@@ -554,6 +580,102 @@ describe('uploadDocument commit edge', () => {
         expect(calls.delete).toHaveBeenCalledWith('documents');
         expect(libraryMutationEpoch()).toBe(before + 2);
         expect(libraryListClear).not.toHaveBeenCalled();
+    });
+});
+
+describe('cloud-score cap refusal wording', () => {
+    const pdf = () => new File(['%PDF-1.4'], 'sonata.pdf', { type: 'application/pdf' });
+
+    it('quotes the owner’s own finite cap when the trigger’s DETAIL is missing', async () => {
+        memEntitlements.set('user-1', {
+            userId: 'user-1',
+            entitlements: {
+                user_id: 'user-1',
+                tier: 'free',
+                status: null,
+                source: 'none',
+                current_period_end: null,
+                limits: FREE_LIMITS,
+            },
+        });
+        makeStub({ insertError: 'limit_reached', insertDetails: null });
+        const err = await uploadDocument(pdf(), 'user-1').catch((e: unknown) => e);
+        expect(isLimitReachedError(err)).toBe(true);
+        expect(isLimitReachedError(err) ? err.limit : 'n/a').toBe(FREE_LIMITS.cloud_scores);
+    });
+
+    it('does not claim the free cap for a paying owner when DETAIL is missing', async () => {
+        memEntitlements.set('user-1', {
+            userId: 'user-1',
+            entitlements: {
+                user_id: 'user-1',
+                tier: 'teacher',
+                status: 'active',
+                source: 'subscription',
+                current_period_end: '2999-01-01T00:00:00Z',
+                limits: { ...FREE_LIMITS, cloud_scores: -1 },
+            },
+        });
+        makeStub({ insertError: 'limit_reached', insertDetails: null });
+        const err = await uploadDocument(pdf(), 'user-1').catch((e: unknown) => e);
+        expect(isLimitReachedError(err) ? err.limit : 'n/a').toBeNull();
+        expect(isLimitReachedError(err) ? err.tier : 'n/a').toBe('teacher');
+        expect((err as Error).message).not.toMatch(/free cloud scores/);
+    });
+});
+
+describe('importDocumentFromImslp rollback refunds the smart import', () => {
+    const stored = { ok: true, filename: 'Sonata.pdf', byteLength: 10, storagePath: 'x/original.pdf' } as const;
+
+    it('asks for the credit back after deleting a score whose bytes never reached the device', async () => {
+        // The function stored the PDF (and spent the credit); the download back
+        // to this device is what failed.
+        importImslpPdfToStorage.mockResolvedValue(stored);
+        const calls = makeStub({ downloadError: 'network down' });
+
+        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow();
+
+        expect(calls.delete).toHaveBeenCalledWith('documents');
+        const inserted = calls.insert.mock.calls[0]?.[1] as { id: string };
+        expect(calls.rpc).toHaveBeenCalledWith('refund_smart_import', { p_document: inserted.id });
+        expect(calls.delete.mock.invocationCallOrder[0]).toBeLessThan(calls.rpc.mock.invocationCallOrder[0] ?? 0);
+    });
+
+    it('asks for the credit back when the function’s answer was lost in transit', async () => {
+        importImslpPdfToStorage.mockRejectedValue(new TypeError('Failed to fetch'));
+        const calls = makeStub();
+
+        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow(
+            'Failed to fetch',
+        );
+        expect(calls.rpc).toHaveBeenCalledWith('refund_smart_import', expect.anything());
+    });
+
+    it('does not ask while the score still exists — the refund would be refused anyway', async () => {
+        importImslpPdfToStorage.mockResolvedValue(stored);
+        const calls = makeStub({ downloadError: 'network down', deleteError: 'offline' });
+
+        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow();
+        expect(calls.rpc).not.toHaveBeenCalledWith('refund_smart_import', expect.anything());
+    });
+
+    it('reports the original failure even when the refund itself fails', async () => {
+        importImslpPdfToStorage.mockRejectedValue(new Error('import exploded'));
+        makeStub({ rpcResult: new Error('refund unreachable') });
+
+        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow(
+            'import exploded',
+        );
+    });
+
+    it('does not refund a successful import', async () => {
+        importImslpPdfToStorage.mockResolvedValue(stored);
+        const calls = makeStub({ downloadBytes: 'not-a-pdf' });
+
+        const result = await importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true);
+        expect(result.ok).toBe(true);
+        expect(calls.delete).not.toHaveBeenCalled();
+        expect(calls.rpc).not.toHaveBeenCalledWith('refund_smart_import', expect.anything());
     });
 });
 
