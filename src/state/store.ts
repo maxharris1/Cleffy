@@ -9,6 +9,7 @@ import {
     writePrintHandwriting,
     writeSpreadCover,
 } from '@/features/viewer/viewerPrefs';
+import { features } from '@/lib/features';
 import type { PinchPreview, StrokeWidthKey, Tool, ViewState } from '@/types/models';
 
 /** Ink palette (StyleGuide equivalent): black, red, blue, green, yellow, orange, purple. */
@@ -139,7 +140,8 @@ export const useViewerStore = create<ViewerStore>((set) => ({
     widthKey: 'medium',
     focusedPageIndex: 0,
     fingerDraws: false,
-    printHandwriting: readPrintHandwriting(),
+    // Off unless the feature ships: with no toolbar toggle a stored "on" would be stuck on.
+    printHandwriting: features.printHandwriting && readPrintHandwriting(),
     pageColumns: readPageColumns(),
     spreadCover: readSpreadCover(),
     setView: (view) => set({ view }),
