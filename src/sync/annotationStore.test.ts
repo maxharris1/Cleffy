@@ -308,4 +308,109 @@ describe('AnnotationStore', () => {
         expect(store.get('new')?.id).toBe('new');
         spy.mockRestore();
     });
+
+    describe('undo/redo after a collaborator deleted the mark', () => {
+        /** The broadcast of a peer's erase: same row, tombstoned, newer seq. */
+        const remoteDelete = async (id: string) => {
+            const live = store.get(id)!;
+            await store.applyRemoteBatch(
+                [{ ...live, deletedAt: '2026-02-01T00:00:00.000Z', seq: live.seq + 10 }],
+                new Set(),
+            );
+        };
+
+        it('undo of an edit does not resurrect a mark a collaborator deleted', async () => {
+            await store.create(makeStroke('a1'));
+            await store.update('a1', { color: '#ff0000' });
+            await remoteDelete('a1');
+            const opsBefore = await db.ops.count();
+
+            await store.undoLast(); // the color change — target is gone
+
+            expect(store.get('a1')?.deletedAt).not.toBeNull();
+            expect(store.getPage(0).has('a1')).toBe(false);
+            // Nothing queued that could undelete it on the server.
+            expect(await db.ops.count()).toBe(opsBefore);
+        });
+
+        it('drops the dead entry and undoes the next one in the same press', async () => {
+            await store.create(makeStroke('keep'));
+            await store.create(makeStroke('a1'));
+            await store.update('a1', { color: '#ff0000' });
+            await remoteDelete('a1');
+
+            // Entries, newest first: update a1 (dead), create a1 (dead), create keep.
+            await store.undoLast();
+
+            expect(store.get('a1')?.deletedAt).not.toBeNull();
+            expect(store.getPage(0).has('keep')).toBe(false); // the press reached a live entry
+            expect(store.canUndo).toBe(false);
+
+            // Redo brings back only what undo actually did.
+            await store.redoLast();
+            expect(store.getPage(0).has('keep')).toBe(true);
+            expect(store.get('a1')?.deletedAt).not.toBeNull();
+        });
+
+        it('redo of an edit is skipped when the mark was deleted after the undo', async () => {
+            await store.create(makeStroke('a1'));
+            await store.update('a1', { color: '#ff0000' });
+            await store.undoLast(); // back to #111111; redo = set #ff0000
+            await remoteDelete('a1');
+
+            await store.redoLast();
+
+            expect(store.get('a1')?.deletedAt).not.toBeNull();
+            expect(store.canRedo).toBe(false);
+        });
+    });
+
+    describe('load ordering', () => {
+        it('load is shared: concurrent callers get one hydration', async () => {
+            await store.create(makeStroke('a1'));
+            const fresh = new AnnotationStore(db, DOC);
+            const spy = vi.spyOn(db.annotations, 'where');
+            await Promise.all([fresh.load(), fresh.load(), fresh.load()]);
+            expect(spy).toHaveBeenCalledTimes(1);
+            expect(fresh.get('a1')).toBeDefined();
+        });
+
+        it('hydration merges with marks drawn while it was reading', async () => {
+            await store.create(makeStroke('old'));
+            const fresh = new AnnotationStore(db, DOC);
+            const loading = fresh.load();
+            await fresh.create(makeStroke('drawn-during-load'));
+            await loading;
+
+            expect(fresh.getPage(0).has('old')).toBe(true);
+            expect(fresh.getPage(0).has('drawn-during-load')).toBe(true);
+        });
+
+        it('a remote row arriving before hydration is merged against the mirror, not an empty map', async () => {
+            await db.annotations.put({ ...makeStroke('a1'), color: '#aaaaaa', seq: 10, pending: 0 });
+            const fresh = new AnnotationStore(db, DOC);
+            // No load() yet — the broadcast path can land first.
+            await fresh.applyRemoteBatch([{ ...makeStroke('a1'), color: '#bbbbbb', seq: 5 }], new Set());
+
+            expect(fresh.get('a1')?.color).toBe('#aaaaaa');
+            expect((await db.annotations.get('a1'))?.color).toBe('#aaaaaa');
+        });
+    });
+
+    it('adoptServerRow overwrites a local edit regardless of seq', async () => {
+        await store.applyRemoteBatch([{ ...makeStroke('a1'), seq: 4 }], new Set());
+        await store.update('a1', { color: '#ff0000' });
+        await store.adoptServerRow({ ...makeStroke('a1'), seq: 4 });
+
+        expect(store.get('a1')?.color).toBe('#111111');
+        expect((await db.annotations.get('a1'))?.pending).toBe(0);
+    });
+
+    it('discardLocal removes the mirror row even before hydration', async () => {
+        await db.annotations.put({ ...makeStroke('a1'), pending: 1 });
+        const fresh = new AnnotationStore(db, DOC);
+        await fresh.discardLocal('a1');
+        expect(await db.annotations.get('a1')).toBeUndefined();
+        expect(fresh.get('a1')).toBeUndefined();
+    });
 });

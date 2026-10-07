@@ -536,9 +536,12 @@ export type Database = {
                 Args: { p_rows: AnnotationInsert[] };
                 Returns: undefined;
             };
+            // Ids of the rows actually updated — a patch RLS filtered out (or
+            // whose row does not exist) is missing. Null only from the void
+            // function that predates 20261007120200.
             patch_annotations_batch: {
                 Args: { p_patches: Array<{ id: string; document_id: string } & AnnotationUpdate> };
-                Returns: undefined;
+                Returns: string[] | null;
             };
             check_edge_rate_limit: {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };

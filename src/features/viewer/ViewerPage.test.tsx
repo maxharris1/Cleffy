@@ -38,15 +38,21 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
     PdfProvider: ({ children }: { children: ReactNode }) => <div data-testid="pdf-provider">{children}</div>,
 }));
 
+/** The sync props the viewer last handed the viewport (to drive its callbacks). */
+const lastSync = vi.hoisted(() => ({ current: null as null | { onRejected?: (r: unknown) => void } }));
+
 vi.mock('@/features/viewer/PdfViewport', () => ({
-    PdfViewport: ({ readOnly, sync, playback }: { readOnly?: boolean; sync?: unknown; playback?: unknown }) => (
-        <div
-            data-testid="pdf-viewport"
-            data-readonly={String(Boolean(readOnly))}
-            data-sync={sync ? 'on' : 'off'}
-            data-playback={playback ? 'on' : 'off'}
-        />
-    ),
+    PdfViewport: ({ readOnly, sync, playback }: { readOnly?: boolean; sync?: unknown; playback?: unknown }) => {
+        lastSync.current = (sync as typeof lastSync.current) ?? null;
+        return (
+            <div
+                data-testid="pdf-viewport"
+                data-readonly={String(Boolean(readOnly))}
+                data-sync={sync ? 'on' : 'off'}
+                data-playback={playback ? 'on' : 'off'}
+            />
+        );
+    },
 }));
 
 vi.mock('@/features/viewer/ViewerHeader', () => ({
@@ -334,5 +340,30 @@ describe('CloudViewer warm open', () => {
         expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
         expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer refused changes', () => {
+    it('tells the user once per refused mark and can be dismissed', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+
+        act(() => {
+            lastSync.current?.onRejected?.({ annotationId: 'a1', opType: 'update', reason: 'rls' });
+            lastSync.current?.onRejected?.({ annotationId: 'a1', opType: 'delete', reason: 'rls' });
+            lastSync.current?.onRejected?.({ annotationId: 'a2', opType: 'create', reason: 'rls' });
+        });
+
+        expect(screen.getByText(/2 of your changes could not be saved/)).toBeInTheDocument();
+        // Non-blocking: the score is still there and still editable.
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+
+        await user.click(screen.getByRole('button', { name: 'Dismiss' }));
+        expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
     });
 });

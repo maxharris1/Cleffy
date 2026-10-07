@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import { createAuthStorage } from '@/features/auth/authStorage';
+import { fetchNotingRetryAfter } from '@/lib/retryAfter';
 import type { Database } from '@/types/database';
 
 export type TypedSupabaseClient = SupabaseClient<Database>;
@@ -92,6 +93,9 @@ export const getSupabase = (): TypedSupabaseClient => {
             // recover a Safari session. See authStorage.ts.
             storage: createAuthStorage(),
         },
+        // Keeps the Retry-After of a throttled response for the sync engine's
+        // backoff; supabase-js does not surface response headers itself.
+        global: { fetch: fetchNotingRetryAfter },
         realtime: {
             // Live ink streams at up to ~20 events/s per writer; the realtime-js
             // default client-side throttle (10/s) would silently degrade it.
