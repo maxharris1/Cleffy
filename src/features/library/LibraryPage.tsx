@@ -5,6 +5,7 @@ import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
 import {
     deleteDocument,
+    leaveSharedDocument,
     listDocuments,
     listFavoriteDocumentIds,
     renameDocument,
@@ -32,7 +33,7 @@ import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { perfLogIfDev, perfMark } from '@/lib/perf';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
-import { RowMenu } from '@/features/library/RowMenu';
+import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
 import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
@@ -98,6 +99,7 @@ export const LibraryPage = () => {
     const [activeTagId, setActiveTagId] = useState<string | null>(null);
     const [renameTarget, setRenameTarget] = useState<DocumentRow | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<DocumentRow | null>(null);
+    const [leaveTarget, setLeaveTarget] = useState<DocumentRow | null>(null);
     const [shareTarget, setShareTarget] = useState<DocumentRow | null>(null);
     const [assignTarget, setAssignTarget] = useState<DocumentRow | null>(null);
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
@@ -457,6 +459,46 @@ export const LibraryPage = () => {
         }
     };
 
+    /** Drop a score from every piece of list state, after it left the library. */
+    const forgetLocally = (docId: string) => {
+        setDocuments((docs) => docs?.filter((d) => d.id !== docId) ?? docs);
+        setFavorites((prev) => {
+            if (!prev.has(docId)) {
+                return prev;
+            }
+            const next = new Set(prev);
+            next.delete(docId);
+            return next;
+        });
+        setAssignments((prev) => {
+            if (!prev.has(docId)) {
+                return prev;
+            }
+            const next = new Map(prev);
+            next.delete(docId);
+            return next;
+        });
+    };
+
+    const confirmLeave = async () => {
+        if (!leaveTarget) {
+            return;
+        }
+        const target = leaveTarget;
+        setBusyAction(true);
+        setActionError(null);
+        try {
+            await leaveSharedDocument(target.id);
+            forgetLocally(target.id);
+            persistSnapshot();
+        } catch (err) {
+            setActionError(err instanceof Error ? err.message : 'Could not remove the score from your library.');
+        } finally {
+            setBusyAction(false);
+            setLeaveTarget(null);
+        }
+    };
+
     const docTags = (docId: string): LibraryTagRow[] => {
         const ids = assignments.get(docId) ?? [];
         return ids.map((id) => tagsById.get(id)).filter((t): t is LibraryTagRow => t !== undefined);
@@ -655,6 +697,7 @@ export const LibraryPage = () => {
                                                         canManageStudents ? () => setAssignTarget(doc) : undefined
                                                     }
                                                     onDelete={() => setDeleteTarget(doc)}
+                                                    onLeave={() => setLeaveTarget(doc)}
                                                 />
                                             ))}
                                             {showAddTile ? (
@@ -687,6 +730,7 @@ export const LibraryPage = () => {
                                                         canManageStudents ? () => setAssignTarget(doc) : undefined
                                                     }
                                                     onDelete={() => setDeleteTarget(doc)}
+                                                    onLeave={() => setLeaveTarget(doc)}
                                                 />
                                             ))}
                                         </ul>
@@ -716,8 +760,24 @@ export const LibraryPage = () => {
                         onCancel={() => setDeleteTarget(null)}
                     />
                 ) : null}
+                {leaveTarget ? (
+                    <ConfirmDialog
+                        title="Remove from your library?"
+                        body={`“${leaveTarget.title}” was shared with you. Removing it ends your access on every device — you'd need a new link from its owner to get it back. Marks you made stay on the score for everyone else.`}
+                        confirmLabel="Remove"
+                        danger
+                        busy={busyAction}
+                        onConfirm={() => void confirmLeave()}
+                        onCancel={() => setLeaveTarget(null)}
+                    />
+                ) : null}
                 {shareTarget ? (
-                    <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
+                    <ShareDialog
+                        docId={shareTarget.id}
+                        userId={userId}
+                        role="owner"
+                        onClose={() => setShareTarget(null)}
+                    />
                 ) : null}
                 {assignTarget ? (
                     <AssignDialog
@@ -842,6 +902,7 @@ const ScoreRow = ({
     onShare,
     onAssign,
     onDelete,
+    onLeave,
 }: {
     doc: DocumentRow;
     index: number;
@@ -856,6 +917,8 @@ const ScoreRow = ({
     onShare: () => void;
     onAssign?: () => void;
     onDelete: () => void;
+    /** A score shared with you: its menu offers to take it out of your library. */
+    onLeave: () => void;
 }) => {
     const hasTags = assignedTags.length > 0;
     const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
@@ -948,7 +1011,9 @@ const ScoreRow = ({
                 </button>
                 {isOwner ? (
                     <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
-                ) : null}
+                ) : (
+                    <SharedScoreMenu onLeave={onLeave} />
+                )}
             </div>
         </li>
     );

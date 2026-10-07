@@ -128,6 +128,8 @@ export interface PdfViewportProps {
         onDocReplaced?: (contentRev: number) => void;
         /** Play-along analysis status changed. */
         onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
+        /** This user's access may have changed — re-read the role. */
+        onMembershipChanged?: () => void;
     };
 }
 
@@ -207,6 +209,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
     const syncOnScoreAnalysis = sync?.onScoreAnalysis;
+    const syncOnMembershipChanged = sync?.onMembershipChanged;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
     // Track viewport size.
@@ -459,9 +462,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 onReconnect: () => {
                     ink.clearRemoteInk();
                     void engine?.sync();
+                    // A role change made while the connection was down sent
+                    // its broadcast to nobody.
+                    syncOnMembershipChanged?.();
                 },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
                 onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
+                onMembershipChanged: () => syncOnMembershipChanged?.(),
             });
             if (syncCanWrite) {
                 ink.setLivePublisher(channel.publisher);
@@ -493,6 +500,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncOnPeers,
         syncOnDocReplaced,
         syncOnScoreAnalysis,
+        syncOnMembershipChanged,
     ]);
 
     // Playhead: imperative rAF controller over the two overlay divs below.

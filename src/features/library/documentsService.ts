@@ -5,6 +5,7 @@ import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
+import { leaveDocument } from '@/features/share/shareService';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
 import type { DocumentRow, MemberRole } from '@/types/database';
@@ -377,16 +378,46 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
         throw new Error(`Could not delete: ${error.message}`);
     }
     noteLibraryMutationCommitted();
+    await purgeLocalDocument(doc.id);
+};
+
+/**
+ * Forget everything this device holds for one score: the PDF, the annotation
+ * mirror and its sync watermark, queued writes, lesson snapshots, play-along
+ * cache and cover. For a score that is gone (deleted) or no longer this
+ * account's to see (left, removed, link revoked) — a cached PDF the owner
+ * has taken back must not stay readable offline, and queued writes for it
+ * would only ever be refused.
+ *
+ * Callers stop anything still syncing the score first (unmount the viewer),
+ * or the engine can write a watermark straight back.
+ */
+export const purgeLocalDocument = async (docId: string): Promise<void> => {
     const db = getDb();
     await Promise.all([
-        db.pdfCache.delete(doc.id),
-        db.syncState.delete(doc.id),
-        db.annotations.where('docId').equals(doc.id).delete(),
-        db.ops.where('docId').equals(doc.id).delete(),
-        db.annotationSnapshots.where('docId').equals(doc.id).delete(),
-        db.scoreCache.delete(doc.id),
-        db.thumbnails.delete(doc.id),
+        db.pdfCache.delete(docId),
+        db.syncState.delete(docId),
+        db.annotations.where('docId').equals(docId).delete(),
+        db.ops.where('docId').equals(docId).delete(),
+        db.annotationSnapshots.where('docId').equals(docId).delete(),
+        db.scoreCache.delete(docId),
+        db.thumbnails.delete(docId),
     ]);
+};
+
+/**
+ * "Remove from my library" for a score someone else owns: leave it on the
+ * server, then purge it locally. The owner's score and everyone's marks on
+ * it are untouched; only this account's access goes. The library snapshot is
+ * the mounted page's to persist, as for every other library mutation.
+ */
+export const leaveSharedDocument = async (docId: string): Promise<void> => {
+    noteLibraryMutation();
+    await leaveDocument(docId);
+    noteLibraryMutationCommitted();
+    // Best effort from here: access is already gone server-side, which is the
+    // part that matters, and a refused IndexedDB must not report it as failed.
+    await purgeLocalDocument(docId).catch(() => undefined);
 };
 
 /**
@@ -461,8 +492,7 @@ export const loadDocumentBytes = async (
     // Prefetch left before the row was known. Honour it only for an
     // unreplaced score (content_rev 0): a replace that raced the download
     // would otherwise be cached under the new revision and never re-fetched.
-    const prefetched =
-        prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
+    const prefetched = prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
     let bytes: ArrayBuffer;
     if (prefetched) {
         bytes = prefetched;

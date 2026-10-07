@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useParams, useSearchParams } from 'react-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 
-import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
+import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
@@ -16,7 +16,9 @@ import {
     loadDocumentBytes,
     loadDocumentOffline,
     prefetchDocumentBytes,
+    purgeLocalDocument,
 } from '@/features/library/documentsService';
+import { removeCachedLibraryDocument } from '@/features/library/libraryBootstrap';
 import { TransportBar } from '@/features/playback/TransportBar';
 import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
@@ -76,8 +78,21 @@ const isTransportFailure = (err: unknown): boolean => {
     return err instanceof Error && /failed to fetch/i.test(err.message);
 };
 
+/** Shown when the server says this account can no longer see the score. */
+const ACCESS_REVOKED_MESSAGE =
+    'You no longer have access to this score — its owner removed you, or the link you joined with was revoked.';
+
+/**
+ * Why this account just lost the score in the open viewer, which decides what
+ * happens once the viewport (and its sync engine) has unmounted:
+ *  - 'removed' / 'denied': the server says no — purge, then explain.
+ *  - 'left': the user chose to leave — purge, then go back to the library.
+ */
+type AccessLoss = 'removed' | 'denied' | 'left';
+
 const CloudViewer = ({ docId }: { docId: string }) => {
     const { session, loading } = useSession();
+    const navigate = useNavigate();
     const [state, setState] = useState<CloudDocState | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
@@ -90,8 +105,93 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [peers, setPeers] = useState<PresencePeer[]>([]);
     const [annotationStore, setAnnotationStore] = useState<AnnotationStore | null>(null);
     const [staleBytes, setStaleBytes] = useState(false);
+    const [accessLoss, setAccessLoss] = useState<AccessLoss | null>(null);
+    /** "Your access changed" banner after a live role change. */
+    const [accessNotice, setAccessNotice] = useState<string | null>(null);
+    const accessCheckInFlight = useRef(false);
+    /** Latest state for the access re-check, which runs outside render. */
+    const stateRef = useRef(state);
+    useEffect(() => {
+        stateRef.current = state;
+    }, [state]);
 
     const userId = session?.user.id;
+
+    /**
+     * Re-read this account's role after the server said it may have changed
+     * (membership broadcast, refused channel join, reconnect). The broadcast
+     * payload is only a hint; PostgREST is checked per request, so its answer
+     * is the truth. A transport failure changes nothing — the next event or
+     * reconnect asks again.
+     */
+    const recheckAccess = useCallback(() => {
+        if (!userId || accessCheckInFlight.current) {
+            return;
+        }
+        accessCheckInFlight.current = true;
+        void (async () => {
+            try {
+                const [docResult, roleResult] = await Promise.allSettled([
+                    fetchDocument(docId),
+                    fetchMyRole(docId, userId),
+                ]);
+                if (docResult.status !== 'fulfilled') {
+                    return;
+                }
+                const doc = docResult.value;
+                if (!doc) {
+                    setState(null);
+                    setShareOpen(false);
+                    setLoadError(ACCESS_REVOKED_MESSAGE);
+                    setAccessLoss('removed');
+                    return;
+                }
+                if (roleResult.status !== 'fulfilled') {
+                    return;
+                }
+                const role = roleResult.value;
+                const current = stateRef.current;
+                // A provisional paint is confirmed by the load effect, not here.
+                if (!current || current.provisional || current.role === role) {
+                    return;
+                }
+                // Read-only follows from the new role, and the viewport restarts
+                // sync with it — rejoining the channel, which is when Realtime
+                // re-evaluates what this account may send.
+                setState((prev) =>
+                    prev ? { ...prev, role, doc: { ...prev.doc, archived_at: doc.archived_at } } : prev,
+                );
+                setAccessNotice(
+                    role === 'editor' || role === 'owner'
+                        ? 'Your access changed: you can now edit this score.'
+                        : 'Your access changed: you can now only view this score.',
+                );
+            } finally {
+                accessCheckInFlight.current = false;
+            }
+        })();
+    }, [docId, userId]);
+
+    // Runs after the commit that dropped the viewport, so the sync engine has
+    // already been stopped and cannot write a watermark back over the purge.
+    useEffect(() => {
+        if (!accessLoss || !userId) {
+            return;
+        }
+        let cancelled = false;
+        void (async () => {
+            await purgeLocalDocument(docId).catch(() => undefined);
+            await removeCachedLibraryDocument(userId, docId).catch(() => undefined);
+            if (!cancelled && accessLoss === 'left') {
+                navigate(isRegisteredSession(session) ? '/library' : '/', { replace: true });
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+        // Once per loss: the session object changing identity must not re-run it.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [accessLoss, docId, userId]);
 
     const onStoreReady = useCallback((store: AnnotationStore) => setAnnotationStore(store), []);
 
@@ -170,6 +270,13 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     // keep another account's PDF on a shared device.
                     setState(null);
                     setLoadError('Score not found — it may have been deleted, or your access was revoked.');
+                    // This account's own cached copy goes too: an owner who took
+                    // the score back must not leave it readable offline. Only
+                    // when the cache row was this account's — another account's
+                    // copy on a shared device is not ours to throw away.
+                    if (offline) {
+                        setAccessLoss('denied');
+                    }
                     return;
                 }
                 const confirmedRole = roleResult.status === 'fulfilled' ? roleResult.value : null;
@@ -313,6 +420,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         state.provisional === true;
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
+    // A roster student's scores are their teacher's to assign and withdraw
+    // (leave_document refuses an assigned score), so they get no Leave.
+    const canLeave = userTypeOf(session) !== 'student';
 
     return (
         <div className="fixed inset-0 flex flex-col">
@@ -390,9 +500,31 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     <Button size="sm" onClick={() => setShareOpen(true)}>
                         Invite
                     </Button>
+                ) : !state.provisional && state.role && canLeave ? (
+                    // Members get the same dialog, minus the owner's controls:
+                    // who else is here (editors) and a way to leave.
+                    <button
+                        type="button"
+                        title="Who this score is shared with, and leaving it"
+                        onClick={() => setShareOpen(true)}
+                        className={buttonClassName('ghost', 'sm')}
+                    >
+                        Sharing
+                    </button>
                 ) : null}
             </ViewerHeader>
             {session?.user.is_anonymous ? <UpgradeBanner /> : null}
+            {accessNotice ? (
+                <div
+                    className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
+                    role="status"
+                >
+                    <p className="flex-1 text-sm text-amber-900">{accessNotice}</p>
+                    <Button size="sm" variant="ghost" onClick={() => setAccessNotice(null)}>
+                        Dismiss
+                    </Button>
+                </div>
+            ) : null}
             {staleBytes ? (
                 <div
                     className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
@@ -431,6 +563,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                       onPeers,
                                       onDocReplaced,
                                       onScoreAnalysis: applyBroadcast,
+                                      onMembershipChanged: recheckAccess,
                                   }
                                 : undefined
                         }
@@ -450,8 +583,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     />
                 </div>
             ) : null}
-            {shareOpen && resolvedUserId ? (
-                <ShareDialog docId={docId} userId={resolvedUserId} onClose={() => setShareOpen(false)} />
+            {shareOpen && resolvedUserId && state.role ? (
+                <ShareDialog
+                    docId={docId}
+                    userId={resolvedUserId}
+                    role={state.role}
+                    canLeave={canLeave}
+                    onClose={() => setShareOpen(false)}
+                    onLeft={() => {
+                        setShareOpen(false);
+                        setState(null);
+                        setAccessLoss('left');
+                    }}
+                />
             ) : null}
             {notesOpen ? (
                 <NotesPanel

@@ -14,6 +14,7 @@ const listFavoriteDocumentIds = vi.fn();
 const setDocumentFavorite = vi.fn();
 const renameDocument = vi.fn();
 const deleteDocument = vi.fn();
+const leaveSharedDocument = vi.fn();
 const listLibraryTags = vi.fn();
 const listDocumentTagMap = vi.fn();
 const createLibraryTag = vi.fn();
@@ -30,6 +31,7 @@ vi.mock('@/features/library/documentsService', () => ({
     setDocumentFavorite: (...args: unknown[]) => setDocumentFavorite(...args),
     renameDocument: (...args: unknown[]) => renameDocument(...args),
     deleteDocument: (...args: unknown[]) => deleteDocument(...args),
+    leaveSharedDocument: (...args: unknown[]) => leaveSharedDocument(...args),
 }));
 
 vi.mock('@/features/library/libraryBootstrap', () => ({
@@ -708,6 +710,84 @@ describe('LibraryPage', () => {
             expect(await screen.findByText('offline')).toBeInTheDocument();
             expect(screen.queryByText('Someone else’s score')).not.toBeInTheDocument();
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('scores shared with you', () => {
+        const shared = { ...doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)'), owner_id: 'someone-else' };
+
+        beforeEach(() => {
+            mockBootstrap({
+                documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)'), shared],
+                favoriteIds: new Set(['d2']),
+                documentTags: new Map([['d2', ['t1']]]),
+                tags: [tag('t1', 'Recital')],
+            });
+        });
+
+        it('offers only “Remove from my library” in a shared score’s menu', async () => {
+            const user = userEvent.setup();
+            renderLibrary();
+            await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+            await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+            expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Remove from my library']);
+        });
+
+        it('leaves after confirmation, then drops the score and persists the list without it', async () => {
+            const user = userEvent.setup();
+            leaveSharedDocument.mockResolvedValue(undefined);
+            renderLibrary();
+            await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+            await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+            await user.click(screen.getByRole('menuitem', { name: 'Remove from my library' }));
+            const dialog = screen.getByRole('dialog', { name: 'Remove from your library?' });
+            expect(dialog).toHaveTextContent('was shared with you');
+            expect(leaveSharedDocument).not.toHaveBeenCalled();
+            await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
+
+            await waitFor(() => expect(leaveSharedDocument).toHaveBeenCalledWith('d2'));
+            await waitFor(() =>
+                expect(screen.queryByText('An Chloe (Mozart, Wolfgang Amadeus)')).not.toBeInTheDocument(),
+            );
+            await waitFor(() => expect(writeCachedLibraryList).toHaveBeenCalledTimes(1));
+            const [, snapshot] = writeCachedLibraryList.mock.calls[0] as [
+                string,
+                { documents: DocumentRow[]; favoriteIds: Set<string>; documentTags: Map<string, string[]> },
+            ];
+            expect(snapshot.documents.map((d) => d.id)).toEqual(['d1']);
+            expect([...snapshot.favoriteIds]).toEqual([]);
+            expect(snapshot.documentTags.has('d2')).toBe(false);
+        });
+
+        it('keeps the score and shows why when leaving fails', async () => {
+            const user = userEvent.setup();
+            leaveSharedDocument.mockRejectedValue(new Error('Could not leave this score: offline'));
+            renderLibrary();
+            await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+            await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+            await user.click(screen.getByRole('menuitem', { name: 'Remove from my library' }));
+            await user.click(screen.getByRole('button', { name: 'Remove' }));
+
+            expect(await screen.findByText('Could not leave this score: offline')).toBeInTheDocument();
+            expect(screen.getByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' })).toBeInTheDocument();
+            expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
+
+        it('offers the same action from a shelf card', async () => {
+            const user = userEvent.setup();
+            window.localStorage.setItem('cleffy:library-view', 'grid');
+            leaveSharedDocument.mockResolvedValue(undefined);
+            renderLibrary();
+            await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' });
+
+            await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+            await user.click(screen.getByRole('menuitem', { name: 'Remove from my library' }));
+            await user.click(screen.getByRole('button', { name: 'Remove' }));
+
+            await waitFor(() => expect(leaveSharedDocument).toHaveBeenCalledWith('d2'));
         });
     });
 

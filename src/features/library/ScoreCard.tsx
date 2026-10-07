@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 
 import { composerOf, displayTitleOf } from '@/features/library/libraryView';
 import { formatUpdated } from '@/features/library/libraryFormat';
-import { RowMenu } from '@/features/library/RowMenu';
+import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { useNearViewport, useScoreThumbnail } from '@/features/library/useScoreThumbnail';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
@@ -48,6 +48,7 @@ export const ScoreCard = ({
     onShare,
     onAssign,
     onDelete,
+    onLeave,
 }: {
     doc: DocumentRow;
     index: number;
@@ -60,6 +61,8 @@ export const ScoreCard = ({
     onShare: () => void;
     onAssign?: () => void;
     onDelete: () => void;
+    /** A score shared with you: its menu offers to take it out of your library. */
+    onLeave?: () => void;
 }) => {
     const rootRef = useRef<HTMLDivElement | null>(null);
     const near = useNearViewport(rootRef);
@@ -113,14 +116,18 @@ export const ScoreCard = ({
                     </button>
                 </div>
 
-                {isOwner ? (
+                {isOwner || onLeave ? (
                     // `has-[[aria-expanded=true]]` keeps the pill lit while its
                     // own menu is open — otherwise moving the pointer onto the
                     // menu fades out the menu with it.
                     <div
                         className={`absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/85 backdrop-blur has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
                     >
-                        <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                        {isOwner ? (
+                            <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                        ) : onLeave ? (
+                            <SharedScoreMenu onLeave={onLeave} />
+                        ) : null}
                     </div>
                 ) : null}
 

@@ -124,6 +124,24 @@ export type ShareLinkRow = {
     revoked_at: string | null;
 };
 
+/**
+ * One row of list_document_members(). Labels are resolved server-side because
+ * auth.users is not client-readable; `email` and `joined_via_link` are only
+ * ever filled for the score's owner (an editor may be a link guest).
+ */
+export type DocumentMemberListing = {
+    user_id: string;
+    role: MemberRole;
+    /** Roster name for a student, else the account's display_name; null when neither is set. */
+    display_name: string | null;
+    email: string | null;
+    is_anonymous: boolean;
+    is_student: boolean;
+    /** Token of the share link that granted this access, when one did. */
+    joined_via_link: string | null;
+    joined_at: string;
+};
+
 export type ShareLinkInsert = {
     document_id: string;
     role: ShareRole;
@@ -531,6 +549,32 @@ export type Database = {
             redeem_share_link: {
                 Args: { p_token: string };
                 Returns: Array<{ document_id: string; granted_role: MemberRole }>;
+            };
+            // Owners and editors only; see DocumentMemberListing for what each sees.
+            list_document_members: {
+                Args: { p_document: string };
+                Returns: DocumentMemberListing[];
+            };
+            // Owner only. The owner's own row can be neither changed nor removed.
+            set_document_member_role: {
+                Args: { p_document: string; p_user: string; p_role: ShareRole };
+                Returns: undefined;
+            };
+            remove_document_member: {
+                Args: { p_document: string; p_user: string };
+                Returns: undefined;
+            };
+            // Any non-owner, for themselves. Refused for a score assigned to a
+            // roster student (detail code 'assigned_score').
+            leave_document: {
+                Args: { p_document: string };
+                Returns: undefined;
+            };
+            // Owner only. Returns how many members' link-granted access was
+            // withdrawn (always 0 unless p_remove_members).
+            revoke_share_link: {
+                Args: { p_token: string; p_remove_members?: boolean };
+                Returns: number;
             };
             insert_annotations_batch: {
                 Args: { p_rows: AnnotationInsert[] };
