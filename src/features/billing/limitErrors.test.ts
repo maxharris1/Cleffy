@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { FREE_LIMITS } from '@/features/billing/entitlementsService';
+import type { Entitlements } from '@/types/database';
+
 import {
     cloudScoreCapReached,
     cloudScoresLimitError,
@@ -10,6 +13,15 @@ import {
     parseLooseLimitError,
     parsePostgrestLimitError,
 } from '@/features/billing/limitErrors';
+
+const entitlementsOf = (tier: Entitlements['tier'], cloudScores: number): Entitlements => ({
+    user_id: 'user-1',
+    tier,
+    status: tier === 'free' ? null : 'active',
+    source: tier === 'free' ? 'none' : 'subscription',
+    current_period_end: null,
+    limits: { ...FREE_LIMITS, cloud_scores: cloudScores },
+});
 
 const jsonResponse = (body: unknown, status: number): Response =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -94,14 +106,52 @@ describe('parsePostgrestLimitError (the cloud-score cap trigger)', () => {
         expect(parsePostgrestLimitError(null)).toBeNull();
     });
 
-    it('falls back to the 3-score free cap when DETAIL is missing', () => {
-        const error = parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null });
+    it('uses the caller’s own finite cap when DETAIL is missing', () => {
+        const free = entitlementsOf('free', 3);
+        const error = parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null }, free);
         expect(error?.metric).toBe('cloud_scores');
         expect(error?.limit).toBe(3);
-        expect(parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: 'not json' })?.limit).toBe(
+        expect(error?.tier).toBe('free');
+        expect(
+            parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: 'not json' }, free)?.limit,
+        ).toBe(3);
+        expect(parsePostgrestLimitError({ code: 'P0001', message: 'Limit reached', details: null }, free)?.limit).toBe(
             3,
         );
-        expect(parsePostgrestLimitError({ code: 'P0001', message: 'Limit reached', details: null })?.limit).toBe(3);
+    });
+
+    it('never tells a paying teacher about the free 3-score cap when DETAIL is missing', () => {
+        // The cached plan says unlimited and the server refused anyway, so the
+        // cache is stale and nobody can vouch for the number: neutral copy, on
+        // the plan the teacher last knew they were on.
+        const error = parsePostgrestLimitError(
+            { code: 'P0001', message: 'limit_reached', details: null },
+            entitlementsOf('teacher', -1),
+        );
+        expect(error?.metric).toBe('cloud_scores');
+        expect(error?.limit).toBeNull();
+        expect(error?.tier).toBe('teacher');
+        expect(error && limitHeadline(error)).toBe('You have reached your plan’s cloud-score limit');
+        expect(error?.message).not.toMatch(/\b3\b|free/i);
+    });
+
+    it('uses neutral copy when the caller’s plan is not known at all', () => {
+        const error = parsePostgrestLimitError({ code: 'P0001', message: 'limit_reached', details: null });
+        expect(error?.limit).toBeNull();
+        expect(error?.message).not.toMatch(/\b3\b|free cloud/i);
+        // A provisioned student's 0 is not a cap worth quoting either.
+        expect(
+            parsePostgrestLimitError(
+                { code: 'P0001', message: 'limit_reached', details: null },
+                entitlementsOf('student', 0),
+            )?.limit,
+        ).toBeNull();
+    });
+
+    it('still prefers DETAIL over anything the caller knows', () => {
+        const error = parsePostgrestLimitError(triggerError, entitlementsOf('teacher', -1));
+        expect(error?.limit).toBe(3);
+        expect(error?.tier).toBe('free');
     });
 });
 
@@ -158,9 +208,11 @@ describe('client-side cloud-score cap', () => {
     });
 
     it('maps a bare Limit reached Error onto the amber cloud-score payload', () => {
-        const error = parseLooseLimitError(new Error('Limit reached'));
+        const error = parseLooseLimitError(new Error('Limit reached'), entitlementsOf('free', 3));
         expect(error?.metric).toBe('cloud_scores');
         expect(error?.limit).toBe(3);
+        expect(parseLooseLimitError(new Error('Limit reached'), entitlementsOf('personal', -1))?.limit).toBeNull();
+        expect(parseLooseLimitError(new Error('Limit reached'))?.limit).toBeNull();
         expect(isLimitReachedError(cloudScoresLimitError(3, 'free'))).toBe(true);
         expect(parseLooseLimitError(new Error('seat_limit_reached'))).toBeNull();
     });
@@ -178,6 +230,12 @@ describe('limit copy', () => {
         const payload = { code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'teacher' } as const;
         expect(limitAction(payload)).not.toContain('Upgrade');
         expect(limitAction(payload)).toContain('get in touch');
+    });
+
+    it('words a refusal of unknown size without a number', () => {
+        expect(limitHeadline({ code: 'limit_reached', metric: 'pdf_exports', limit: null, tier: 'free' })).toBe(
+            'You have used this month’s PDF exports',
+        );
     });
 
     it('suggests archiving as well as upgrading for the score cap', () => {

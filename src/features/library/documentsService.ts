@@ -4,7 +4,8 @@ import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
-import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
+import { readCachedEntitlements } from '@/features/billing/entitlementsService';
+import { parsePostgrestLimitError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
 import type { DocumentRow, MemberRole } from '@/types/database';
@@ -160,6 +161,20 @@ export const ensureDocumentPageCount = async (doc: DocumentRow, bytes: ArrayBuff
     return { ...doc, page_count: pageCount };
 };
 
+/**
+ * The cloud-score cap arrives as a trigger exception. Its DETAIL names the cap,
+ * but if that payload is ever missing the wording falls back to the owner's
+ * last-known plan -- read only on this error path, and a miss just means the
+ * neutral "your plan's limit" rather than a guessed free-tier number.
+ */
+const cloudScoreCapRefusal = async (
+    error: { code?: string | null; message?: string | null; details?: string | null },
+    ownerId: string,
+): Promise<LimitReachedError | null> => {
+    const entitlements = await readCachedEntitlements(ownerId).catch(() => null);
+    return parsePostgrestLimitError(error, entitlements);
+};
+
 export interface UploadResult {
     document: DocumentRow;
 }
@@ -194,7 +209,7 @@ export const uploadDocument = async (
     if (insertError) {
         // The free-tier cap is a database trigger, so it arrives here rather
         // than as an HTTP 402 — normalize it to the same typed error.
-        const limit = parsePostgrestLimitError(insertError);
+        const limit = await cloudScoreCapRefusal(insertError, ownerId);
         if (limit) {
             throw limit;
         }
@@ -258,7 +273,7 @@ export const importDocumentFromImslp = async (
     if (insertError) {
         // The free-tier cap is a database trigger, so it arrives here rather
         // than as an HTTP 402 — normalize it to the same typed error.
-        const limit = parsePostgrestLimitError(insertError);
+        const limit = await cloudScoreCapRefusal(insertError, ownerId);
         if (limit) {
             throw limit;
         }
