@@ -45,6 +45,15 @@ export type DocumentInsert = {
     archived_at?: string | null;
 };
 
+/**
+ * What an owner may change on a score. id, owner_id, storage_path and
+ * created_at are immutable for clients (documents_guard_columns, migration
+ * 20261007120100); updated_at is stamped by documents_touch.
+ */
+export type DocumentUpdate = Partial<
+    Pick<DocumentRow, 'title' | 'page_count' | 'content_rev' | 'thumb_rev' | 'archived_at'>
+>;
+
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
 
 export type DocumentImportRow = {
@@ -57,19 +66,22 @@ export type DocumentImportRow = {
     updated_at: string;
 };
 
+/**
+ * created_by / created_at / updated_at are stamped by the server
+ * (document_imports_guard_columns); backup_path may only be null or
+ * '{document_id}/pre-import-original.pdf' (CHECK constraint).
+ */
 export type DocumentImportInsert = {
     document_id: string;
     status: ImportStatusValue;
     backup_path?: string | null;
     pages_cleaned?: number[];
-    created_by?: string | null;
 };
 
 export type DocumentImportUpdate = {
     status?: ImportStatusValue;
     backup_path?: string | null;
     pages_cleaned?: number[];
-    updated_at?: string;
 };
 
 export type DocumentMemberRow = {
@@ -124,6 +136,7 @@ export type ShareLinkRow = {
     revoked_at: string | null;
 };
 
+/** The token is always minted by the server (share_links_guard_columns). */
 export type ShareLinkInsert = {
     document_id: string;
     role: ShareRole;
@@ -145,6 +158,10 @@ export type AnnotationRow = {
     seq: number;
 };
 
+/**
+ * created_by must be the caller (annotations_insert); a created_at later than
+ * the server clock is clamped to it. seq / updated_at are server-stamped.
+ */
 export type AnnotationInsert = {
     id: string;
     document_id: string;
@@ -157,6 +174,10 @@ export type AnnotationInsert = {
     deleted_at?: string | null;
 };
 
+/**
+ * Everything an editor may change on a mark. id, document_id, page, kind,
+ * created_by and created_at are refused by annotations_guard_columns.
+ */
 export type AnnotationUpdate = {
     color?: string;
     payload?: AnnotationPayload;
@@ -179,6 +200,10 @@ export type AnnotationSnapshotInsert = {
     captured_on: string;
     label?: string | null;
     payload: Annotation[];
+    /**
+     * Ignored: the server stamps the caller (annotation_snapshots_guard_columns),
+     * so whatever is sent here — the client sends null — never becomes the author.
+     */
     created_by?: string | null;
 };
 
@@ -399,7 +424,7 @@ export type Database = {
             documents: {
                 Row: DocumentRow;
                 Insert: DocumentInsert;
-                Update: Partial<DocumentInsert>;
+                Update: DocumentUpdate;
                 Relationships: [];
             };
             document_members: {
