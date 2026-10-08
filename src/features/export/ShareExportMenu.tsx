@@ -22,13 +22,19 @@ interface ShareExportMenuProps {
     /** When omitted, bytes are loaded from the Dexie PDF cache (preferred after parse). */
     bytes?: ArrayBuffer;
     title: string;
+    /**
+     * True for a score that exists only on this device (no cloud row). A guest's
+     * PDF export of a cloud score is billed to its owner, which needs the
+     * score's id; a local score has no owner to bill.
+     */
+    localOnly?: boolean;
 }
 
 /**
  * Share/export menu: this page as photo or PDF (Web Share → Messages on iOS),
  * or the whole annotated score as PDF.
  */
-export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) => {
+export const ShareExportMenu = ({ docId, bytes, title, localOnly = false }: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
@@ -92,7 +98,7 @@ export const ShareExportMenu = ({ docId, bytes, title }: ShareExportMenuProps) =
                 // Still ahead of any flattening: nothing is built and thrown away.
                 // Fails closed — see exportClaim.ts for why, and for the one
                 // exception (an unlimited plan exporting offline).
-                const claim = await claimPdfExport(session);
+                const claim = await claimPdfExport(session, localOnly ? null : docId);
                 if (!claim.ok) {
                     if ('limit' in claim) {
                         setLimit(claim.limit);

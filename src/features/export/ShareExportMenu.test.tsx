@@ -41,11 +41,20 @@ vi.mock('@/features/billing/PricingDialog', () => ({
     PricingDialog: () => <div role="dialog">plans</div>,
 }));
 
-import { EXPORT_CLAIM_FAILED_MESSAGE, EXPORT_OFFLINE_MESSAGE } from '@/features/export/exportClaim';
+import {
+    EXPORT_CLAIM_FAILED_MESSAGE,
+    EXPORT_GUEST_LIMIT_MESSAGE,
+    EXPORT_GUEST_OFFLINE_MESSAGE,
+    EXPORT_OFFLINE_MESSAGE,
+} from '@/features/export/exportClaim';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 
 const teacher = {
     user: { id: 'teacher-1', is_anonymous: false, app_metadata: {} },
+} as unknown as Session;
+
+const guest = {
+    user: { id: 'guest-1', is_anonymous: true, app_metadata: {} },
 } as unknown as Session;
 
 const plan = (tier: Entitlements['tier'], pdfExports: number): Entitlements => ({
@@ -59,9 +68,9 @@ const plan = (tier: Entitlements['tier'], pdfExports: number): Entitlements => (
 
 const bytes = new Uint8Array([37, 80, 68, 70]).buffer;
 
-const openMenu = async () => {
+const openMenu = async (props: { localOnly?: boolean } = {}) => {
     const user = userEvent.setup();
-    render(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" />);
+    render(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" {...props} />);
     await user.click(screen.getByRole('button', { name: 'Share' }));
     return user;
 };
@@ -142,5 +151,52 @@ describe('ShareExportMenu export allowance', () => {
 
         await waitFor(() => expect(exportAnnotatedPageImage).toHaveBeenCalledTimes(1));
         expect(rpc).not.toHaveBeenCalled();
+    });
+
+    describe('as a share-link guest', () => {
+        beforeEach(() => {
+            useSession.mockReturnValue({ session: guest, loading: false, lastEvent: null });
+        });
+
+        it('claims against this score, billed to its owner, before building', async () => {
+            rpc.mockResolvedValue({ data: { ok: true, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
+            const user = await openMenu();
+
+            await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+            await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledTimes(1));
+            expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_document: 'doc-1' });
+        });
+
+        it("says the owner's allowance is spent, offers no plans, and builds nothing", async () => {
+            rpc.mockResolvedValue({ data: { ok: false, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
+            const user = await openMenu();
+
+            await user.click(screen.getByRole('menuitem', { name: 'Share page 1 as PDF' }));
+
+            expect(await screen.findByText(EXPORT_GUEST_LIMIT_MESSAGE)).toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
+            expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        });
+
+        it('needs a connection for a shared score', async () => {
+            vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+            const user = await openMenu();
+
+            await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+            expect(await screen.findByText(EXPORT_GUEST_OFFLINE_MESSAGE)).toBeInTheDocument();
+            expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        });
+
+        it('exports a score that lives only on this device without a claim', async () => {
+            vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+            const user = await openMenu({ localOnly: true });
+
+            await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+            await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledTimes(1));
+            expect(rpc).not.toHaveBeenCalled();
+        });
     });
 });

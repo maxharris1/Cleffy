@@ -234,7 +234,10 @@ export type PdfExportClaim = {
     /** True when nothing was counted: an unlimited plan, or an exempt caller. */
     unlimited?: boolean;
     tier?: EffectiveTier;
+    /** 'anonymous' only from servers predating the guest metering; kept so their answer still types. */
     exempt?: 'anonymous' | 'student';
+    /** Set on a share-link guest's claim: the unit, if any, came from the score owner's allowance. */
+    billed_to?: 'owner';
 };
 
 export type Entitlements = {
@@ -593,8 +596,10 @@ export type Database = {
             // Claims one pdf_exports unit before the on-device export is built:
             // check and increment in one statement. The client builds nothing
             // unless this answers ok:true (see features/export/exportClaim.ts).
+            // A share-link guest must pass p_document: their export is drawn from
+            // that score's owner's allowance. Ignored for a signed-in account.
             claim_pdf_export: {
-                Args: Record<string, never>;
+                Args: { p_document?: string };
                 Returns: PdfExportClaim;
             };
             // Legacy name for claim_pdf_export, kept for bundles already in the
