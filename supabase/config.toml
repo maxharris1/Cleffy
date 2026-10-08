@@ -474,6 +474,12 @@ verify_jwt = false
 [functions.student-login]
 verify_jwt = false
 
+# Self-serve account deletion. The caller's own JWT is the only identity it
+# acts for, and the function additionally re-verifies the account password and
+# a typed confirmation before cancelling billing and deleting anything.
+[functions.delete-account]
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54427

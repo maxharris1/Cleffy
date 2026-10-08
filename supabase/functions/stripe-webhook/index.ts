@@ -133,6 +133,14 @@ Deno.serve(async (req) => {
                     { onConflict: 'stripe_subscription_id' },
                 );
             if (error) {
+                // 23503 on the only FK here (user_id → auth.users): the account was
+                // deleted (delete-account cancels its subscriptions first, and
+                // Stripe then reports the cancellation). There is nobody left to
+                // apply it to; a 500 would only have Stripe retry it for days.
+                if (error.code === '23503') {
+                    console.log(`subscription ${row.stripe_subscription_id} belongs to a deleted account; ignored`);
+                    return;
+                }
                 throw new Error(`could not upsert subscription ${row.stripe_subscription_id}: ${error.message}`);
             }
         },
