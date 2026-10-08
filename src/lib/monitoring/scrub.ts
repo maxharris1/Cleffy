@@ -17,6 +17,10 @@
  *    PostgREST filters and the auth callback's `#access_token=` all live there.
  *  * Console breadcrumbs are dropped entirely: they carry arbitrary arguments,
  *    and the app logs malformed realtime payloads (annotation bodies) there.
+ *  * UI breadcrumbs (ui.click, ui.input, …) keep that something was clicked
+ *    or typed into, and when, but lose their message: it is a CSS selector
+ *    built from the element, which can carry an aria-label or title such as
+ *    a score's title or a student's name.
  *  * The user is reduced to their account id.
  *
  * No imports, and plain structural types rather than Sentry's, so this file is
@@ -100,14 +104,20 @@ export const redactLocation = (value: string): string => {
 /**
  * One breadcrumb, or null to drop it. Console breadcrumbs always go: their
  * arguments are whatever a `console.*` call happened to pass, including
- * annotation payloads from the realtime parser's warnings.
+ * annotation payloads from the realtime parser's warnings. A UI breadcrumb's
+ * message is the clicked element's selector — attribute text and all, a score
+ * title in an aria-label, a student's name on a roster button — so it goes
+ * too; redacting emails out of it would leave the names.
  */
 export const scrubBreadcrumb = <T extends Scrubbable>(crumb: T): T | null => {
-    if (crumb['category'] === 'console') {
+    const category = crumb['category'];
+    if (category === 'console') {
         return null;
     }
     const next: Scrubbable = { ...crumb };
-    if (typeof next['message'] === 'string') {
+    if (typeof category === 'string' && (category === 'ui' || category.startsWith('ui.'))) {
+        delete next['message'];
+    } else if (typeof next['message'] === 'string') {
         next['message'] = redactString(next['message']);
     }
     const data = crumb['data'];

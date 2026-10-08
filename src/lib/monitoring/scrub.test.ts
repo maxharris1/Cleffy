@@ -87,6 +87,25 @@ describe('scrubBreadcrumb', () => {
         expect(scrubBreadcrumb({ category: 'console', message: 'Ignoring malformed annotation broadcast' })).toBeNull();
     });
 
+    it('keeps a UI breadcrumb but drops its selector, which can carry names and titles', () => {
+        for (const category of ['ui.click', 'ui.input']) {
+            expect(
+                scrubBreadcrumb({
+                    category,
+                    timestamp: 1,
+                    message: 'button.roster-row[aria-label="Open Ada Lovelace’s assignments"]',
+                }),
+            ).toEqual({ category, timestamp: 1 });
+        }
+    });
+
+    it('still redacts the message of other breadcrumbs', () => {
+        expect(scrubBreadcrumb({ category: 'auth', message: 'signed in as a@b.co' })).toEqual({
+            category: 'auth',
+            message: 'signed in as [email]',
+        });
+    });
+
     it('keeps only safe data fields of a fetch breadcrumb, redacted', () => {
         const crumb = scrubBreadcrumb({
             category: 'fetch',
