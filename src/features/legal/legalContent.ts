@@ -1,3 +1,4 @@
+import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { features } from '@/lib/features';
 
 /**
@@ -16,23 +17,11 @@ import { features } from '@/lib/features';
  * are omitted rather than described: the policy covers what this release does.
  */
 
-/** Business details. Change these here and both documents follow. */
-export const LEGAL_ENTITY = {
-    /** The operator's name as it appears to customers. See LEGAL_REVIEW.md §1. */
-    name: 'Cleffy',
-    /** The address that reaches a human (supabase/functions/resend-inbound). */
-    contactEmail: 'support@cleffy.io',
-    website: 'cleffy.io',
-    /**
-     * Where the database and file storage are hosted, as Supabase reports it
-     * (Project Settings → General → Region). Null until confirmed: the policy
-     * then names the provider without a region. See LEGAL_REVIEW.md §3.
-     */
-    dataRegion: null as string | null,
-} as const;
-
-/** Shown at the top of both documents; update whenever either changes. */
-export const LEGAL_LAST_UPDATED = '8 October 2026';
+// The business details live in their own tiny module so the app shell, the
+// footer links and the Account page can name the support address without
+// pulling the full text of both documents into the main bundle; they are
+// re-exported here so this stays the one place a reader looks.
+export { LEGAL_ENTITY, LEGAL_LAST_UPDATED } from '@/features/legal/legalEntity';
 
 /** A sub-heading, a paragraph, or a bulleted list. Email addresses render as mailto links. */
 export type LegalBlock = { kind: 'h'; text: string } | { kind: 'p'; text: string } | { kind: 'list'; items: string[] };
@@ -175,7 +164,7 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'Anyone who has a share link can open the score with the access that link grants, until you revoke it. Treat share links like a key.',
                     // Presence uses displayNameOf(): display name, else email.
                     'While a score is open, the people viewing it see each other’s names — your display name, or your email address if you have not set one.',
-                    'If you are removed from a score, or delete your account, the markings you made on someone else’s score stay on that score, no longer attributed to you.',
+                    'If you are removed from a score, the markings you made on it stay there. If you delete your account, the markings you made on other people’s scores stay on those scores, no longer attributed to you.',
                     // practice_notes.shared.
                     'Teachers see their students’ work on the scores they assign. A teacher’s practice notes are private to the teacher unless they choose to share them with the student.',
                 ),

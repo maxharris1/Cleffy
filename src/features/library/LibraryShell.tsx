@@ -5,7 +5,7 @@ import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
-import { LEGAL_ENTITY } from '@/features/legal/legalContent';
+import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {

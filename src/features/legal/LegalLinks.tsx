@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 
-import { LEGAL_ENTITY } from '@/features/legal/legalContent';
+import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 
 interface LegalLinksProps {
     className?: string;
