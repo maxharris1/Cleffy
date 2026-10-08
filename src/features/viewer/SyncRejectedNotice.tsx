@@ -33,3 +33,31 @@ export const SyncRejectedNotice = ({ count, onDismiss }: SyncRejectedNoticeProps
         </div>
     );
 };
+
+interface SyncHeldNoticeProps {
+    /** Marks with changes kept on this device that the archived score refuses. */
+    count: number;
+}
+
+/**
+ * The score was archived (over the plan's score cap) while changes to it were
+ * still waiting to upload. The sync engine keeps them rather than undoing
+ * them — resubscribing restores the score and they upload then — but until
+ * that happens they exist only on this device, which the musician needs to
+ * know before clearing site data or signing out. Not dismissible: it is the
+ * standing state of the score, like the Archived badge.
+ */
+export const SyncHeldNotice = ({ count }: SyncHeldNoticeProps) => {
+    if (count <= 0) {
+        return null;
+    }
+    return (
+        <div className="border-b border-amber-200 bg-amber-50 px-3 py-2" role="status">
+            <p className="text-sm text-amber-900">
+                This score is archived and read-only, so {count === 1 ? '1 change' : `${count} changes`} you made to it{' '}
+                {count === 1 ? 'is' : 'are'} saved only on this device. {count === 1 ? 'It uploads' : 'They upload'}{' '}
+                automatically once the score is restored, for example when its owner renews their plan.
+            </p>
+        </div>
+    );
+};

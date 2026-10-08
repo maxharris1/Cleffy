@@ -38,7 +38,13 @@ import { peerColor } from '@/lib/colors';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel } from '@/sync/realtimeChannel';
-import { createSupabaseAnnotationsApi, SyncEngine, type SyncRejection, type SyncStatus } from '@/sync/syncEngine';
+import {
+    createSupabaseAnnotationsApi,
+    SyncEngine,
+    type SyncHold,
+    type SyncRejection,
+    type SyncStatus,
+} from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
@@ -126,6 +132,8 @@ export interface PdfViewportProps {
         onStatus?: (status: SyncStatus) => void;
         /** The server permanently refused a local change; it was rolled back. */
         onRejected?: (rejection: SyncRejection) => void;
+        /** The server refuses the outbox but it is being kept (archived score). */
+        onHeld?: (hold: SyncHold) => void;
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
         onDocReplaced?: (contentRev: number) => void;
@@ -210,6 +218,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
     const syncOnRejected = sync?.onRejected;
+    const syncOnHeld = sync?.onHeld;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
     const syncOnScoreAnalysis = sync?.onScoreAnalysis;
@@ -446,6 +455,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 getUserId: () => syncUserId,
                 onStatus: syncOnStatus,
                 onRejected: syncOnRejected,
+                onHeld: syncOnHeld,
             });
             channel = new DocRealtimeChannel({
                 supabase: getSupabase(),
@@ -502,6 +512,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncCanWrite,
         syncOnStatus,
         syncOnRejected,
+        syncOnHeld,
         syncOnPeers,
         syncOnDocReplaced,
         syncOnScoreAnalysis,

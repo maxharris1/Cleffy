@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ViewerPage } from '@/features/viewer/ViewerPage';
@@ -39,7 +39,9 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
 }));
 
 /** The sync props the viewer last handed the viewport (to drive its callbacks). */
-const lastSync = vi.hoisted(() => ({ current: null as null | { onRejected?: (r: unknown) => void } }));
+const lastSync = vi.hoisted(() => ({
+    current: null as null | { onRejected?: (r: unknown) => void; onHeld?: (h: unknown) => void },
+}));
 
 vi.mock('@/features/viewer/PdfViewport', () => ({
     PdfViewport: ({ readOnly, sync, playback }: { readOnly?: boolean; sync?: unknown; playback?: unknown }) => {
@@ -365,5 +367,45 @@ describe('CloudViewer refused changes', () => {
 
         await user.click(screen.getByRole('button', { name: 'Dismiss' }));
         expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer refused changes across scores', () => {
+    const OTHER_DOC_ID = '66666666-7777-4888-8999-aaaaaaaaaaaa';
+    const GoToOther = () => {
+        const navigate = useNavigate();
+        return (
+            <button type="button" onClick={() => navigate(`/doc/${OTHER_DOC_ID}`)}>
+                open other score
+            </button>
+        );
+    };
+
+    it('does not carry one score’s notices over to the next score opened in place', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        render(
+            <MemoryRouter initialEntries={[`/doc/${DOC_ID}`]}>
+                <GoToOther />
+                <Routes>
+                    <Route path="/doc/:documentId" element={<ViewerPage />} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        act(() => {
+            lastSync.current?.onRejected?.({ annotationId: 'a1', opType: 'update', reason: 'rls' });
+            lastSync.current?.onHeld?.({ reason: 'archived', pendingMarks: 2 });
+        });
+        expect(screen.getByText(/One of your changes could not be saved/)).toBeInTheDocument();
+        expect(screen.getByText(/2 changes you made to it are saved only on this device/)).toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc({ id: OTHER_DOC_ID }));
+        await user.click(screen.getByRole('button', { name: 'open other score' }));
+
+        expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/saved only on this device/)).not.toBeInTheDocument();
     });
 });

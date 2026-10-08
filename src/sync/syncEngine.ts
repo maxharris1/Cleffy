@@ -30,6 +30,11 @@ export interface AnnotationsApi {
     /** Multi-row patch; each entry is { id, document_id, ...AnnotationUpdate }. */
     updateMany(patches: AnnotationPatchRow[]): Promise<PatchResult>;
     fetchOne(id: string): Promise<{ data: AnnotationRow | null; error: ApiError | null }>;
+    /**
+     * Whether the document is archived (read-only past the plan's score cap).
+     * False when it is not, or when this account can no longer see it at all.
+     */
+    fetchDocumentArchived(docId: string): Promise<{ archived: boolean; error: ApiError | null }>;
     fetchSince(
         docId: string,
         afterSeq: number,
@@ -75,6 +80,17 @@ export interface SyncRejection {
     annotationId: string;
     opType: PendingOpType;
     reason: string;
+}
+
+/**
+ * The outbox is refused because the score is archived (a lapsed plan), and is
+ * being kept rather than dropped: an archive is undone by resubscribing, and
+ * the marks then upload as if nothing happened.
+ */
+export interface SyncHold {
+    reason: 'archived';
+    /** Distinct marks with changes waiting on this document. */
+    pendingMarks: number;
 }
 
 /**
@@ -127,6 +143,21 @@ const activeEngines = new Map<string, SyncEngine>();
 
 export const activeEngineFor = (docId: string): SyncEngine | undefined => activeEngines.get(docId);
 
+type RejectionObserver = (rejection: SyncRejection & { docId: string }) => void;
+const rejectionObservers = new Set<RejectionObserver>();
+
+/**
+ * Hear about every refusal from every engine (the open viewer's and headless
+ * ones alike) until the returned function is called. Sign-out uses this so a
+ * change refused while it drains is reported, not just logged.
+ */
+export const observeRejections = (observer: RejectionObserver): (() => void) => {
+    rejectionObservers.add(observer);
+    return () => {
+        rejectionObservers.delete(observer);
+    };
+};
+
 /**
  * Drains the Dexie outbox to Supabase and pulls remote changes by watermark.
  * One instance per open cloud document. Local-first: the UI never waits on
@@ -160,6 +191,8 @@ export class SyncEngine {
             onStatus?: (status: SyncStatus) => void;
             /** A local change was refused for good and rolled back to server truth. */
             onRejected?: (rejection: SyncRejection) => void;
+            /** The outbox is refused but kept (archived score) — see SyncHold. */
+            onHeld?: (hold: SyncHold) => void;
         },
     ) {}
 
@@ -316,10 +349,32 @@ export class SyncEngine {
                     continue;
                 }
 
-                // An error covers the whole batch; settling the head is enough
-                // to either stop (retry later) or reject the single op it was.
-                for (const op of result.error ? batch.slice(0, 1) : batch) {
-                    if (!(await this.settle(op, result))) {
+                if (result.error) {
+                    // An error covers the whole batch; settling the head is enough
+                    // to either stop (retry later) or reject the single op it was.
+                    const head = batch[0];
+                    if (head && !(await this.settle(head, result))) {
+                        return;
+                    }
+                    continue;
+                }
+
+                // The server applied the batch. Ack everything it reports as
+                // updated BEFORE repairing the ids it missed: a repair whose
+                // fetch fails stops the drain, and an applied op left queued
+                // behind it would be pushed again on retry — re-sending an
+                // update over a collaborator's newer edit, or a restore over
+                // their delete.
+                const missed: PendingOp[] = [];
+                for (const op of batch) {
+                    if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
+                        missed.push(op);
+                    } else {
+                        await this.ackOp(op);
+                    }
+                }
+                for (const op of missed) {
+                    if (!(await this.reject(op, 'the change matched no row this account may edit'))) {
                         return;
                     }
                 }
@@ -372,9 +427,24 @@ export class SyncEngine {
      * if that fails the op stays queued (false) and the whole thing is retried,
      * so a refusal never costs the local copy without a server copy to adopt.
      * Then drop the op, repair local state, and tell the user.
+     *
+     * Except on an archived score. RLS refuses every write there, but the
+     * archive is a billing state the owner undoes by resubscribing — and marks
+     * drawn offline before the archive landed would otherwise be discarded
+     * for good, a whole lesson's work lost to a failed card. Those ops are kept
+     * and the drain stops (false) until the score is writable again.
      */
     private async reject(op: PendingOp, reason: string): Promise<boolean> {
         const { api, db, store, docId } = this.deps;
+        const archive = await this.withAuth(() => api.fetchDocumentArchived(docId));
+        if (archive.error) {
+            this.deferRetry(archive.error.kind === 'reject' ? { ...archive.error, kind: 'retry' } : archive.error);
+            return false;
+        }
+        if (archive.archived) {
+            await this.holdForArchive();
+            return false;
+        }
         const { data, error } = await this.withAuth(() => api.fetchOne(op.annotationId));
         if (error) {
             this.deferRetry(error.kind === 'reject' ? { ...error, kind: 'retry' } : error);
@@ -401,8 +471,28 @@ export class SyncEngine {
                 .delete();
             await store.discardLocal(op.annotationId);
         }
-        this.deps.onRejected?.({ annotationId: op.annotationId, opType: op.type, reason });
+        const rejection: SyncRejection = { annotationId: op.annotationId, opType: op.type, reason };
+        this.deps.onRejected?.(rejection);
+        for (const observer of rejectionObservers) {
+            observer({ ...rejection, docId });
+        }
         return true;
+    }
+
+    /**
+     * Keep the outbox of an archived score and say so. Retried at the slowest
+     * backoff: nothing changes until the plan does, but when it does (a
+     * resubscribe in another tab) the marks should upload without a reload.
+     */
+    private async holdForArchive(): Promise<void> {
+        if (this.stopped) {
+            return;
+        }
+        const { db, docId } = this.deps;
+        const queued = await db.ops.where('docId').equals(docId).toArray();
+        this.setStatus('error');
+        this.deps.onHeld?.({ reason: 'archived', pendingMarks: new Set(queued.map((o) => o.annotationId)).size });
+        this.scheduleRetry(MAX_BACKOFF_MS);
     }
 
     private async push(ops: PendingOp[]): Promise<PushResult> {
@@ -577,6 +667,14 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
         async fetchOne(id) {
             const { data, error, status } = await supabase.from('annotations').select('*').eq('id', id).maybeSingle();
             return { data, error: fail(error, status) };
+        },
+        async fetchDocumentArchived(docId) {
+            const { data, error, status } = await supabase
+                .from('documents')
+                .select('archived_at')
+                .eq('id', docId)
+                .maybeSingle();
+            return { archived: !error && data !== null && data.archived_at !== null, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase

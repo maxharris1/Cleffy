@@ -6,11 +6,13 @@ import { ScribblerDb } from '@/sync/db';
 import {
     classifyFailure,
     fromServerRow,
+    observeRejections,
     SyncEngine,
     type AnnotationPatchRow,
     type AnnotationsApi,
     type ApiError,
     type PatchResult,
+    type SyncHold,
     type SyncRejection,
 } from '@/sync/syncEngine';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
@@ -151,6 +153,21 @@ class FakeApi implements AnnotationsApi {
     }
 
     fetchOneError: ApiError | null = null;
+    /** documents.archived_at is set (plan lapsed): RLS refuses every write. */
+    archived = false;
+    archiveCheckError: ApiError | null = null;
+    archiveChecks = 0;
+
+    async fetchDocumentArchived(_docId: string) {
+        this.archiveChecks += 1;
+        if (this.offline) {
+            return { archived: false, error: this.err() };
+        }
+        if (this.archiveCheckError) {
+            return { archived: false, error: this.archiveCheckError };
+        }
+        return { archived: this.archived, error: null };
+    }
 
     async fetchOne(id: string) {
         this.fetchOnes += 1;
@@ -180,6 +197,7 @@ let store: AnnotationStore;
 let api: FakeApi;
 let engine: SyncEngine;
 let rejections: SyncRejection[];
+let holds: SyncHold[];
 
 beforeEach(async () => {
     db = new ScribblerDb(`test-${crypto.randomUUID()}`);
@@ -187,6 +205,7 @@ beforeEach(async () => {
     await store.load();
     api = new FakeApi();
     rejections = [];
+    holds = [];
     engine = new SyncEngine({
         db,
         store,
@@ -194,6 +213,7 @@ beforeEach(async () => {
         docId: DOC,
         getUserId: () => USER,
         onRejected: (r) => rejections.push(r),
+        onHeld: (h) => holds.push(h),
     });
 });
 
@@ -489,6 +509,38 @@ describe('SyncEngine zero-row updates', () => {
         expect(rejections.map((r) => r.annotationId)).toEqual(['a2']);
     });
 
+    it('acks applied rows even when the repair of an earlier missed one cannot be fetched', async () => {
+        for (const id of ['a1', 'a2', 'a3']) {
+            api.rows.set(id, serverRow(id, { color: '#00ff00', seq: 3 }));
+            await store.applyRemoteBatch([fromServerRow(serverRow(id, { color: '#00ff00', seq: 3 }))], new Set());
+            await store.update(id, { color: '#ff0000' });
+        }
+        // The FIRST op is the one the server missed, and its repair fetch fails.
+        api.invisibleToUpdate.add('a1');
+        api.fetchOneError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        // a2 and a3 were applied by the RPC: acked, not left to be re-pushed
+        // over a collaborator's later edit on retry.
+        const queued = await db.ops.toArray();
+        expect(queued.map((o) => o.annotationId)).toEqual(['a1']);
+        expect((await db.annotations.get('a2'))?.pending).toBe(0);
+        expect((await db.annotations.get('a3'))?.pending).toBe(0);
+        // a1 is untouched until the server can be read.
+        expect(store.get('a1')?.color).toBe('#ff0000');
+        expect(rejections).toEqual([]);
+
+        // A collaborator now edits a2; the retry must not overwrite it.
+        api.rows.set('a2', serverRow('a2', { color: '#abcdef', seq: 50 }));
+        api.fetchOneError = null;
+        await engine.flush();
+
+        expect(api.rows.get('a2')?.color).toBe('#abcdef');
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
+    });
+
     it('discards a mark whose row the server no longer has', async () => {
         await store.applyRemoteBatch([fromServerRow(serverRow('gone', { seq: 3 }))], new Set());
         await store.update('gone', { color: '#ff0000' });
@@ -527,6 +579,105 @@ describe('SyncEngine zero-row updates', () => {
         await engine.sync();
 
         expect(api.rows.get('a1')?.deleted_at).toBe('2026-01-02T00:00:00Z');
+    });
+});
+
+describe('SyncEngine archived score', () => {
+    const refuseWrites = () => {
+        const forbidden: ApiError = { message: 'new row violates row-level security policy', kind: 'reject' };
+        api.insertIgnoreDuplicates = async () => ({ error: forbidden });
+        api.insertMany = async () => ({ error: forbidden });
+        api.update = async () => ({ error: forbidden });
+        api.updateMany = async () => ({ error: forbidden });
+    };
+
+    it('keeps marks drawn offline on a score archived meanwhile, and says so', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+        await store.update('a2', { color: '#222222' });
+        api.archived = true;
+        const realInsertMany = api.insertMany.bind(api);
+        refuseWrites();
+
+        await engine.flush();
+
+        // Nothing discarded, nobody told their work was undone.
+        expect(await db.ops.count()).toBe(3);
+        expect(store.get('a1')).toBeDefined();
+        expect(store.get('a2')?.color).toBe('#222222');
+        expect(await db.annotations.get('a1')).toBeDefined();
+        expect(rejections).toEqual([]);
+        expect(holds).toEqual([{ reason: 'archived', pendingMarks: 2 }]);
+        // Retried slowly: nothing changes until the plan does.
+        expect(engine.pendingRetryDelayMs).toBeGreaterThanOrEqual(60_000);
+
+        // The owner resubscribes and the score is unarchived: the marks upload.
+        api.archived = false;
+        api.insertMany = realInsertMany;
+        api.insertIgnoreDuplicates = FakeApi.prototype.insertIgnoreDuplicates.bind(api);
+        api.update = FakeApi.prototype.update.bind(api);
+        api.updateMany = FakeApi.prototype.updateMany.bind(api);
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(api.rows.get('a1')).toBeDefined();
+        expect(api.rows.get('a2')?.color).toBe('#222222');
+    });
+
+    it('keeps an edit to an existing mark instead of reverting it', async () => {
+        api.rows.set('a1', serverRow('a1', { seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a1', { seq: 3 }))], new Set());
+        await store.update('a1', { color: '#ff0000' });
+        api.archived = true;
+        refuseWrites();
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')?.color).toBe('#ff0000');
+        expect(rejections).toEqual([]);
+        expect(holds).toHaveLength(1);
+    });
+
+    it('keeps the op when whether the score is archived cannot be read', async () => {
+        await store.create(makeStroke('a1'));
+        refuseWrites();
+        api.archiveCheckError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')).toBeDefined();
+        expect(rejections).toEqual([]);
+        expect(api.fetchOnes).toBe(0);
+    });
+
+    it('still rejects (and reports) when the score is not archived', async () => {
+        await store.create(makeStroke('a1'));
+        refuseWrites();
+
+        await engine.flush();
+
+        expect(api.archiveChecks).toBeGreaterThan(0);
+        expect(await db.ops.count()).toBe(0);
+        expect(store.get('a1')).toBeUndefined();
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
+        expect(holds).toEqual([]);
+    });
+});
+
+describe('observeRejections', () => {
+    it('reports every engine’s refusals, with the document, until unsubscribed', async () => {
+        const seen: { docId: string; annotationId: string }[] = [];
+        const stop = observeRejections(({ docId, annotationId }) => seen.push({ docId, annotationId }));
+        api.insertIgnoreDuplicates = async () => ({ error: { message: 'rls rejection', kind: 'reject' } });
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        stop();
+        await store.create(makeStroke('a2'));
+        await engine.flush();
+
+        expect(seen).toEqual([{ docId: DOC, annotationId: 'a1' }]);
     });
 });
 
