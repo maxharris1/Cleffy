@@ -131,6 +131,8 @@ interface StubOptions {
     removeRefused?: boolean;
     /** Storage list() fails. */
     listError?: string;
+    /** Storage list() never answers (a hung request on a bad connection). */
+    listHangs?: boolean;
     tombstoneDeleteError?: string;
     /** Rows document_storage_cleanup returns to the sweep. */
     tombstones?: Array<{ document_id: string; storage_path: string; thumb_rev: number | null }>;
@@ -201,6 +203,9 @@ const makeStub = (options: StubOptions = {}) => {
         },
         list: (prefix: string) => {
             calls.list(prefix);
+            if (options.listHangs) {
+                return new Promise(() => undefined);
+            }
             if (options.listError) {
                 return Promise.resolve({ data: null, error: { message: options.listError } });
             }
@@ -544,7 +549,9 @@ describe('deleteDocument', () => {
     it('removes every object in the folder (import backups included)', async () => {
         const calls = makeStub({ listNames: ['original.pdf', 'pre-import-original.pdf'] });
         const d = doc();
-        await deleteDocument(d);
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
         expect(calls.removeFrom).toHaveBeenCalledWith('scores', [
             `${d.id}/original.pdf`,
             `${d.id}/pre-import-original.pdf`,
@@ -554,20 +561,26 @@ describe('deleteDocument', () => {
     it('removes the published covers along with the PDF', async () => {
         const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg', '2.jpg'] });
         const d = doc();
-        await deleteDocument(d);
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
         expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', [`${d.id}/0.jpg`, `${d.id}/2.jpg`]);
     });
 
     it('does not touch the thumbnails bucket when nothing was ever published', async () => {
         const calls = makeStub({ listNames: ['original.pdf'] });
-        await deleteDocument(doc());
+        await (
+            await deleteDocument(doc())
+        ).storageCleanup;
         expect(calls.removeFrom).not.toHaveBeenCalledWith('thumbnails', expect.anything());
     });
 
     it('removes the stamped cover when list returns empty', async () => {
         const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: [] });
         const d = doc({ thumb_rev: 2 });
-        await deleteDocument(d);
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
         expect(calls.removeFrom).toHaveBeenCalledWith('thumbnails', [`${d.id}/2.jpg`]);
     });
 
@@ -581,7 +594,9 @@ describe('deleteDocument', () => {
     it('bumps the epoch on both edges of a successful delete', async () => {
         makeStub();
         const before = libraryMutationEpoch();
-        await deleteDocument(doc());
+        await (
+            await deleteDocument(doc())
+        ).storageCleanup;
         expect(libraryMutationEpoch()).toBe(before + 2);
         expect(libraryListClear).not.toHaveBeenCalled();
     });
@@ -606,7 +621,9 @@ describe('deleteDocument', () => {
             height: 256,
             createdAt: '2026-08-01T00:00:00Z',
         });
-        await deleteDocument(d);
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
         expect(memThumbs.has(d.id)).toBe(false);
     });
 });
@@ -614,7 +631,9 @@ describe('deleteDocument', () => {
 describe('deleteDocument ordering (row first, bytes after)', () => {
     it('deletes the row before any stored file is touched, then clears the tombstone', async () => {
         const calls = makeStub({ listNames: ['original.pdf'], thumbListNames: ['0.jpg'] });
-        await deleteDocument(doc());
+        await (
+            await deleteDocument(doc())
+        ).storageCleanup;
         expect(calls.events).toEqual([
             'row:delete',
             'storage:remove:scores',
@@ -641,7 +660,9 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
         const calls = makeStub({ listNames: ['original.pdf'], deletedRows: 0, stillVisible: false });
         const d = doc();
         await putCache({ docId: d.id, bytes: new ArrayBuffer(4), title: 'Sonata', cachedAt: 'x' });
-        await deleteDocument(d);
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
         expect(calls.removeFrom).toHaveBeenCalledWith('scores', [`${d.id}/original.pdf`]);
         expect(memCache.has(d.id)).toBe(false);
     });
@@ -650,7 +671,8 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const calls = makeStub({ listNames: ['original.pdf'], removeError: 'storage unavailable' });
         const before = libraryMutationEpoch();
-        await expect(deleteDocument(doc())).resolves.toBeUndefined();
+        const { storageCleanup } = await deleteDocument(doc());
+        await expect(storageCleanup).resolves.toBe(false);
         expect(libraryMutationEpoch()).toBe(before + 2);
         expect(calls.events).not.toContain('tombstone:delete');
         expect(warn).toHaveBeenCalled();
@@ -660,7 +682,9 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
     it('keeps the tombstone when Storage silently removed nothing', async () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const calls = makeStub({ listNames: ['original.pdf'], removeRefused: true });
-        await deleteDocument(doc());
+        await (
+            await deleteDocument(doc())
+        ).storageCleanup;
         expect(calls.events).not.toContain('tombstone:delete');
         warn.mockRestore();
     });
@@ -669,7 +693,9 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const calls = makeStub({ listError: 'refused' });
         const d = doc();
-        await deleteDocument(d);
+        await (
+            await deleteDocument(d)
+        ).storageCleanup;
         // The stamped path is still removed even though the listing failed.
         expect(calls.removeFrom).toHaveBeenCalledWith('scores', [d.storage_path]);
         expect(calls.events).not.toContain('tombstone:delete');
@@ -677,9 +703,63 @@ describe('deleteDocument ordering (row first, bytes after)', () => {
     });
 });
 
+describe('deleteDocument does not wait on Storage', () => {
+    it('resolves once the row is gone even while the storage cleanup hangs', async () => {
+        const calls = makeStub({ listHangs: true });
+        const d = doc();
+        await putCache({ docId: d.id, bytes: new ArrayBuffer(4), title: 'Sonata', cachedAt: 'x' });
+        const result = await deleteDocument(d);
+        expect(calls.events).toEqual(['row:delete']);
+        // The local half is finished before the dialog is told the delete is done.
+        expect(memCache.has(d.id)).toBe(false);
+        let settled = false;
+        void result.storageCleanup.then(() => {
+            settled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(settled).toBe(false);
+        expect(calls.events).not.toContain('tombstone:delete');
+    });
+});
+
+describe('purge of a re-created id', () => {
+    beforeEach(() => {
+        resetStorageCleanupSweep();
+    });
+
+    it('leaves a live score’s files alone and just drops the obsolete tombstone', async () => {
+        const calls = makeStub({
+            stillVisible: true,
+            listNames: ['original.pdf'],
+            tombstones: [{ document_id: 'doc-a', storage_path: 'doc-a/original.pdf', thumb_rev: 1 }],
+        });
+        await sweepPendingStorageCleanup('user-1');
+        expect(calls.remove).not.toHaveBeenCalled();
+        expect(calls.events).toEqual(['tombstone:delete']);
+    });
+});
+
 describe('sweepPendingStorageCleanup', () => {
     beforeEach(() => {
         resetStorageCleanupSweep();
+    });
+
+    it('retries a bounded batch drawn from the candidates, not always the same oldest few', async () => {
+        const tombstones = Array.from({ length: 30 }, (_, i) => ({
+            document_id: `doc-${i}`,
+            storage_path: `doc-${i}/original.pdf`,
+            thumb_rev: null,
+        }));
+        const calls = makeStub({ tombstones });
+        const random = vi.spyOn(Math, 'random');
+        // Newest first: the draw, not the age order, picks the batch.
+        tombstones.forEach((_, i) => random.mockReturnValueOnce(1 - i / 30));
+        await sweepPendingStorageCleanup('user-1');
+        random.mockRestore();
+        const purged = calls.removeFrom.mock.calls.filter(([bucket]) => bucket === 'scores');
+        expect(purged).toHaveLength(20);
+        expect(purged[0]?.[1]).toEqual(['doc-29/original.pdf']);
+        expect(purged.map(([, paths]) => paths)).not.toContainEqual(['doc-0/original.pdf']);
     });
 
     it('purges every leftover folder once per account per page load', async () => {
@@ -798,6 +878,23 @@ describe('loadDocumentBytes with progress', () => {
         expect(progress).toContainEqual({ loaded: 3, total: 7 });
         expect(progress[progress.length - 1]).toEqual({ loaded: 7, total: 7 });
         expect(memCache.has(d.id)).toBe(true);
+        fetchSpy.mockRestore();
+    });
+
+    it('still returns every byte when Content-Length understates the body', async () => {
+        makeStub();
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(streamResponse(['abc', 'defg'], 2));
+        const bytes = await loadDocumentBytes(doc(), { onProgress: () => undefined });
+        expect(new TextDecoder().decode(bytes)).toBe('abcdefg');
+        expect(bytes.byteLength).toBe(7);
+        fetchSpy.mockRestore();
+    });
+
+    it('trims the buffer to the bytes received when the length is unknown', async () => {
+        makeStub();
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(streamResponse(['abc'], null));
+        const bytes = await loadDocumentBytes(doc(), { onProgress: () => undefined });
+        expect(bytes.byteLength).toBe(3);
         fetchSpy.mockRestore();
     });
 

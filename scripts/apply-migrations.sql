@@ -4686,6 +4686,11 @@ create table if not exists public.document_storage_cleanup (
 create index if not exists document_storage_cleanup_owner_idx
     on public.document_storage_cleanup (owner_id);
 
+comment on table public.document_storage_cleanup is
+    'Storage folders ({document_id}/ in the scores and thumbnails buckets) of deleted scores whose bytes may still exist. '
+    'The former owner''s client clears its own rows after purging; rows whose owner no longer exists in auth.users '
+    '(account deletion) can only be purged by a service-role job, which should remove both folders and then the row.';
+
 alter table public.document_storage_cleanup enable row level security;
 
 -- Owners read their pending cleanups and delete them once done. No insert or
@@ -4747,6 +4752,12 @@ for each row execute function public.documents_record_storage_cleanup ();
 -- owner's cleanup ran, any bytes still in the folder — the pre-import backup,
 -- say — would become readable through the new row's membership. The app
 -- always mints a fresh uuid, so refusing the reuse costs no legitimate flow.
+--
+-- The former owner re-creating their own id is allowed, and retires the
+-- tombstone in the same statement: the folder belongs to a live score again,
+-- and a cleanup still pending for it must not go on to remove that score's
+-- files (the owner's ordinary storage policies would let it). If the insert
+-- fails afterwards, the delete rolls back with it.
 create or replace function public.documents_refuse_tombstoned_id ()
 returns trigger
 language plpgsql
@@ -4762,6 +4773,9 @@ begin
     ) then
         raise exception 'document id is not available' using errcode = '23505';
     end if;
+    delete from public.document_storage_cleanup c
+    where c.document_id = new.id
+      and c.owner_id = new.owner_id;
     return new;
 end;
 $$;

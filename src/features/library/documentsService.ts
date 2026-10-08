@@ -442,6 +442,23 @@ export const purgeDocumentStorage = async (
     const docId = target.document_id;
     try {
         const supabase = getSupabase();
+        // Ids are client-chosen, and the database lets an owner re-create a
+        // score under an id of their own that was deleted. If that happened,
+        // the folder belongs to a live score again — the owner's normal
+        // storage policies would happily let this remove its PDF — so the
+        // tombstone is simply obsolete.
+        const { data: live, error: liveError } = await supabase
+            .from('documents')
+            .select('id')
+            .eq('id', docId)
+            .maybeSingle();
+        if (liveError) {
+            throw new Error(liveError.message);
+        }
+        if (live) {
+            await supabase.from('document_storage_cleanup').delete().eq('document_id', docId);
+            return true;
+        }
         // The whole folder, so import backups go too; the stamped path is
         // added in case the listing was refused.
         const listed = (await listFolder('scores', docId)) ?? [];
@@ -487,10 +504,18 @@ export const purgeDocumentStorage = async (
 /** Once per account per page load is plenty: leftovers are rare and invisible. */
 let sweptForUser: string | null = null;
 
+/** Tombstones looked at per sweep, and how many of those are retried. */
+const SWEEP_CANDIDATES = 100;
+const SWEEP_BATCH = 20;
+
 /**
  * Finish storage cleanups an earlier delete could not (offline, a refused
  * request, a tab closed mid-way). Detached and best-effort: the caller never
  * waits on it and nothing the user sees depends on it.
+ *
+ * The batch is a random draw from the oldest candidates rather than the
+ * oldest few: a handful of folders Storage keeps refusing would otherwise
+ * take every slot on every visit, and nothing newer would ever be retried.
  */
 export const sweepPendingStorageCleanup = async (userId: string): Promise<void> => {
     if (sweptForUser === userId) {
@@ -503,11 +528,16 @@ export const sweepPendingStorageCleanup = async (userId: string): Promise<void> 
             .select('document_id, storage_path, thumb_rev')
             .eq('owner_id', userId)
             .order('deleted_at', { ascending: true })
-            .limit(20);
+            .limit(SWEEP_CANDIDATES);
         if (error || !data) {
             return;
         }
-        for (const row of data) {
+        const batch = data
+            .map((row) => ({ row, draw: Math.random() }))
+            .sort((a, b) => a.draw - b.draw)
+            .slice(0, SWEEP_BATCH)
+            .map(({ row }) => row);
+        for (const row of batch) {
             await purgeDocumentStorage(row);
         }
     } catch {
@@ -538,6 +568,15 @@ const clearLocalDocumentCaches = async (docId: string): Promise<void> => {
     }
 };
 
+export interface DeleteDocumentResult {
+    /**
+     * The detached Storage cleanup — resolves to whether the folder is now
+     * provably empty, never rejects. Nobody has to wait on it; it is exposed
+     * so tests (and anything that cares) can.
+     */
+    storageCleanup: Promise<boolean>;
+}
+
 /**
  * Delete a score everywhere. The documents row goes FIRST: one statement
  * takes the score away from every member atomically (members, links,
@@ -545,11 +584,15 @@ const clearLocalDocumentCaches = async (docId: string): Promise<void> => {
  * library lists a score whose PDF is already gone. Removing the bytes first —
  * the old order — left exactly that behind whenever the row delete failed.
  *
- * The bytes follow (purgeDocumentStorage). If that cleanup fails the delete
- * has still succeeded from the teacher's point of view: the folder is
- * unreachable, and its tombstone is retried on a later library visit.
+ * The bytes follow (purgeDocumentStorage), detached: the delete is complete
+ * from the teacher's point of view as soon as the row is gone, and the
+ * cleanup is half a dozen Storage round trips with no timeout of their own —
+ * on a slow phone connection the dialog would otherwise sit on "Deleting…"
+ * long after the score was deleted, or forever if Storage hung. A cleanup
+ * that fails or never finishes leaves its tombstone, which a later library
+ * visit retries.
  */
-export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
+export const deleteDocument = async (doc: DocumentRow): Promise<DeleteDocumentResult> => {
     noteLibraryMutation();
     const supabase = getSupabase();
     const { data: deleted, error } = await supabase.from('documents').delete().eq('id', doc.id).select('id');
@@ -574,7 +617,12 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     }
     noteLibraryMutationCommitted();
     await clearLocalDocumentCaches(doc.id);
-    await purgeDocumentStorage({ document_id: doc.id, storage_path: doc.storage_path, thumb_rev: doc.thumb_rev });
+    const storageCleanup = purgeDocumentStorage({
+        document_id: doc.id,
+        storage_path: doc.storage_path,
+        thumb_rev: doc.thumb_rev,
+    });
+    return { storageCleanup };
 };
 
 /**
@@ -648,7 +696,12 @@ const downloadScoreWithProgress = async (
         return whole;
     }
     const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
+    // Written straight into one buffer sized from Content-Length when the
+    // server sends it: collecting chunks and joining them at the end holds
+    // the PDF twice at the peak, which a large score on iPad Safari can pay
+    // for with a reloaded tab. The buffer grows (doubling) only when the
+    // length was missing or understated.
+    let out = new Uint8Array(total > 0 ? total : 1 << 20);
     let loaded = 0;
     onProgress({ loaded, total });
     for (;;) {
@@ -656,18 +709,17 @@ const downloadScoreWithProgress = async (
         if (done) {
             break;
         }
-        chunks.push(value);
+        if (loaded + value.byteLength > out.byteLength) {
+            const grown = new Uint8Array(Math.max(out.byteLength * 2, loaded + value.byteLength));
+            grown.set(out.subarray(0, loaded));
+            out = grown;
+        }
+        out.set(value, loaded);
         loaded += value.byteLength;
         onProgress({ loaded, total: total >= loaded ? total : 0 });
     }
-    const out = new Uint8Array(loaded);
-    let offset = 0;
-    for (const chunk of chunks) {
-        out.set(chunk, offset);
-        offset += chunk.byteLength;
-    }
     onProgress({ loaded, total: loaded });
-    return out.buffer;
+    return loaded === out.byteLength ? out.buffer : out.slice(0, loaded).buffer;
 };
 
 export const loadDocumentBytes = async (
