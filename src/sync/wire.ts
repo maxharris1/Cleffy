@@ -76,7 +76,8 @@ const annotationRowSchema = z.object({
     kind: z.enum(['stroke', 'highlight', 'text']),
     color: z.string(),
     payload: z.union([strokePayloadSchema, textPayloadSchema]),
-    created_by: z.string(),
+    // Null after the author deleted their account; the mark itself stays.
+    created_by: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
     deleted_at: z.string().nullable(),
