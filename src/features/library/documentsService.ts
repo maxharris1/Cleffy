@@ -389,8 +389,9 @@ export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
  * has taken back must not stay readable offline, and queued writes for it
  * would only ever be refused.
  *
- * Callers stop anything still syncing the score first (unmount the viewer),
- * or the engine can write a watermark straight back.
+ * Callers stop anything still syncing the score first (unmount the viewer):
+ * a stopped SyncEngine re-checks after every await and writes nothing more,
+ * but a running one would put rows and a watermark straight back.
  */
 export const purgeLocalDocument = async (docId: string): Promise<void> => {
     const db = getDb();
@@ -492,7 +493,8 @@ export const loadDocumentBytes = async (
     // Prefetch left before the row was known. Honour it only for an
     // unreplaced score (content_rev 0): a replace that raced the download
     // would otherwise be cached under the new revision and never re-fetched.
-    const prefetched = prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
+    const prefetched =
+        prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
     let bytes: ArrayBuffer;
     if (prefetched) {
         bytes = prefetched;
