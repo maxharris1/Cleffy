@@ -34,7 +34,8 @@ export type DocumentRow = {
     archived_at: string | null;
     /**
      * Why it is archived: 'plan_lapse' (apply_free_tier_archival, undone by
-     * restore_plan_archived_scores on resubscribe) or 'owner'. Null exactly when
+     * restore_plan_archived_scores on resubscribe or an Academy seat) or
+     * 'owner'. Null exactly when
      * archived_at is. Server-stamped by the documents_archived_reason trigger --
      * a client value is overwritten -- and optional here because the client's
      * column lists do not select it.
@@ -604,8 +605,10 @@ export type Database = {
             };
             // Gives back the smart_imports credit for an IMSLP import the client
             // rolled back: only for a charge imslp-download recorded against this
-            // document, once, within 15 minutes, and only once the row is gone.
-            // Returns the number of credits refunded (0 when nothing applied).
+            // document, once, within 15 minutes, at most twice a month, and only
+            // once the row AND its PDF in Storage are gone -- after which the id
+            // can never hold a score again. Returns the number of credits
+            // refunded (0 when nothing applied).
             refund_smart_import: {
                 Args: { p_document: string };
                 Returns: number;

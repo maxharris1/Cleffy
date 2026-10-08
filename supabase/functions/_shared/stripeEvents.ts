@@ -195,7 +195,9 @@ const resolveUserId = async (
  * a no-op when nothing was archived by a lapse, and keying it to transitions
  * would need the previous status, which a late or retried event cannot be
  * trusted to carry. Unpaid -> active, a new checkout after a cancellation, and a
- * trial all land here.
+ * trial all land here. A teacher entitled by someone else's subscription (an
+ * Academy seat) gets no webhook of their own; the seat insert restores them in
+ * the database (studio_members_restore_plan_archived).
  */
 const applySubscription = async (
     store: WebhookStore,

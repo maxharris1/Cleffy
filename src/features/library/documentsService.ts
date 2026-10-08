@@ -286,10 +286,13 @@ export const importDocumentFromImslp = async (
      * of its answer (the response lost in transit, the download from Storage
      * failing) happens after the credit was spent. refund_smart_import only pays
      * out for a charge the function recorded against this id, once, and only
-     * while the row is gone -- so it is skipped when the delete did not land, and
-     * it answers 0 when there was nothing to give back (a fallback the function
-     * already refunded, an unlimited plan). Best effort: a failed refund costs
-     * the teacher one credit, and must not mask the error being reported.
+     * once both the PDF and the row are gone (which is why the PDF goes first,
+     * while this session still owns its folder) -- so it is skipped when the
+     * delete did not land, and it answers 0 when there was nothing to give back
+     * (a fallback the function already refunded, an unlimited plan, a PDF that
+     * would not delete). A refunded id is retired for good server-side; this
+     * flow never reuses one. Best effort: a failed refund costs the teacher one
+     * credit, and must not mask the error being reported.
      */
     const rollback = async () => {
         await supabase.storage

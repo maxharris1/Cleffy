@@ -16,6 +16,13 @@
 --    on the same per-owner advisory lock, taking row locks first, in the order
 --    the cap trigger's own callers do (row, then advisory), so the three cannot
 --    deadlock against each other or count past one another.
+--  * Entitlement resolution moves behind get_entitlements() into the
+--    service-only resolve_entitlements(), so server bookkeeping can ask about a
+--    user other than the JWT's (a seat invite restores the seated teacher's
+--    scores while the request is the Academy owner's).
+--  * A refunded smart import's document id is spent for good, and a refund
+--    needs the score's bytes gone as well as its row, so a refund can never be
+--    taken while keeping the score.
 
 -- ---------------------------------------------------------------------------
 -- Why a score is archived
@@ -104,6 +111,184 @@ create index documents_owner_plan_lapse on public.documents (owner_id)
 where archived_reason = 'plan_lapse';
 
 -- ---------------------------------------------------------------------------
+-- Entitlements, resolved for a user the caller has already vouched for
+-- ---------------------------------------------------------------------------
+-- get_entitlements() refuses to answer about anyone but the signed-in caller,
+-- which is right for the RPC and wrong for the server's own bookkeeping: when an
+-- Academy owner seats a teacher, the restore below has to ask about the TEACHER
+-- while the request's JWT still names the owner. So the resolution moves here,
+-- unchanged, and get_entitlements() becomes the caller check in front of it.
+-- Service-only: callers are definer code that has already decided p_user is
+-- the user it may act for. The body is the 20260828180000_billing_stripe_mode.sql
+-- definition verbatim, entitling_billing_modes() filter included, so the
+-- production narrowing in DEPLOY.md §0 still governs both entry points.
+create or replace function public.resolve_entitlements (p_user uuid) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_user uuid := p_user;
+    v_tier text := 'free';
+    v_status text;
+    v_source text := 'none';
+    v_period_end timestamptz;
+    v_sub record;
+begin
+    if v_user is null then
+        raise exception 'resolve_entitlements requires p_user' using errcode = '22023';
+    end if;
+
+    -- A provisioned student short-circuits everything below. The flag is set by
+    -- the provisioning function through the admin API, so it is not something the
+    -- account itself can write, and a student has no subscription, no seat and no
+    -- upgrade path to resolve.
+    perform 1
+    from auth.users u
+    where u.id = v_user
+      and u.raw_app_meta_data ->> 'user_type' = 'student';
+
+    if found then
+        return jsonb_build_object(
+            'user_id', v_user,
+            'tier', 'student',
+            'status', null::text,
+            'source', 'managed',
+            'current_period_end', null::timestamptz,
+            'limits', public.tier_limits ('student')
+        );
+    end if;
+
+    -- Own subscription first. Highest tier wins if somehow more than one is live.
+    select s.tier, s.status, s.current_period_end
+    into v_sub
+    from public.subscriptions s
+    where s.user_id = v_user
+      and s.mode = any (public.entitling_billing_modes ())
+      and s.status in ('active', 'trialing')
+      and (s.current_period_end is null or s.current_period_end > now())
+    order by case s.tier when 'academy' then 3 when 'teacher' then 2 when 'personal' then 1 else 0 end desc,
+             s.current_period_end desc nulls last
+    limit 1;
+
+    if found then
+        v_tier := v_sub.tier;
+        v_status := v_sub.status;
+        v_period_end := v_sub.current_period_end;
+        v_source := 'subscription';
+    else
+        -- Otherwise: a seat in an academy whose owner is paying.
+        select s.status, s.current_period_end
+        into v_sub
+        from public.studio_members sm
+        join public.studios st on st.id = sm.studio_id
+        join public.subscriptions s on s.user_id = st.owner_id
+        where sm.user_id = v_user
+          and s.tier = 'academy'
+          and s.mode = any (public.entitling_billing_modes ())
+          and s.status in ('active', 'trialing')
+          and (s.current_period_end is null or s.current_period_end > now())
+        order by s.current_period_end desc nulls last
+        limit 1;
+
+        if found then
+            v_tier := 'academy';
+            v_status := v_sub.status;
+            v_period_end := v_sub.current_period_end;
+            v_source := 'studio_member';
+        end if;
+    end if;
+
+    return jsonb_build_object(
+        'user_id', v_user,
+        'tier', v_tier,
+        'status', v_status,
+        'source', v_source,
+        'current_period_end', v_period_end,
+        'limits', public.tier_limits (v_tier)
+    );
+end;
+$$;
+
+revoke all on function public.resolve_entitlements (uuid) from public;
+revoke all on function public.resolve_entitlements (uuid) from anon;
+revoke all on function public.resolve_entitlements (uuid) from authenticated;
+grant execute on function public.resolve_entitlements (uuid) to service_role;
+
+-- The RPC keeps its signature, its grants and its caller check; only the
+-- resolution behind it moved.
+create or replace function public.get_entitlements (p_user uuid default null) returns jsonb language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_caller uuid := auth.uid();
+begin
+    if v_caller is null then
+        if p_user is null then
+            raise exception 'get_entitlements requires p_user when unauthenticated' using errcode = '22023';
+        end if;
+        return public.resolve_entitlements (p_user);
+    end if;
+
+    if p_user is not null and p_user <> v_caller then
+        raise exception 'cannot read another user''s entitlements' using errcode = '42501';
+    end if;
+    return public.resolve_entitlements (v_caller);
+end;
+$$;
+
+-- The score cap asks about the row's OWNER, who is not always the JWT's user:
+-- a restore run inside an Academy owner's seat invite un-archives the seated
+-- teacher's scores, and get_entitlements() would refuse that question outright
+-- and abort the invite. Redefined verbatim from 20260826193902_billing.sql
+-- except for that one call; its trigger and grants are unchanged.
+create or replace function public.documents_enforce_score_cap () returns trigger language plpgsql security definer
+set search_path = public as $$
+declare
+    v_ent jsonb;
+    v_tier text;
+    v_limit int;
+    v_count int;
+begin
+    -- Only a row that is (or becomes) active claims a slot.
+    if new.archived_at is not null then
+        return null;
+    end if;
+    if tg_op = 'UPDATE' and old.archived_at is null then
+        return null; -- already active; nothing new is being claimed
+    end if;
+
+    v_ent := public.resolve_entitlements (new.owner_id);
+    v_tier := v_ent ->> 'tier';
+    v_limit := (v_ent -> 'limits' ->> 'cloud_scores')::int;
+
+    if v_limit < 0 then
+        return null;
+    end if;
+
+    -- Taken only on a capped tier, and only once the cheap exits are past: an
+    -- unlimited plan never serializes against itself. Released at commit.
+    perform pg_advisory_xact_lock (hashtext('cleffy.documents_score_cap'), hashtext(new.owner_id::text));
+
+    -- The new row is already in, so it counts itself: the test is `>`, not `>=`.
+    select count(*)::int into v_count
+    from public.documents d
+    where d.owner_id = new.owner_id
+      and d.archived_at is null;
+
+    if v_count > v_limit then
+        raise exception 'limit_reached'
+            using errcode = 'P0001',
+                  detail = json_build_object(
+                      'code', 'limit_reached',
+                      'metric', 'cloud_scores',
+                      'limit', v_limit,
+                      'tier', v_tier
+                  )::text,
+                  hint = 'Upgrade for unlimited cloud scores.';
+    end if;
+
+    return null;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Lapse: archive past the free cap (redefined to stamp the reason and lock)
 -- ---------------------------------------------------------------------------
 -- Row locks on the active set first, then the cap's advisory lock, then the
@@ -128,7 +313,7 @@ begin
 
     perform pg_advisory_xact_lock (hashtext('cleffy.documents_score_cap'), hashtext(p_user::text));
 
-    v_limit := (public.get_entitlements (p_user) -> 'limits' ->> 'cloud_scores')::int;
+    v_limit := (public.resolve_entitlements (p_user) -> 'limits' ->> 'cloud_scores')::int;
     if v_limit < 0 then
         return 0;
     end if;
@@ -156,7 +341,9 @@ $$;
 -- Resubscribe: restore what the lapse archived, up to the plan's cap
 -- ---------------------------------------------------------------------------
 -- Called by the webhook whenever a subscription is applied in an entitling
--- status (a new checkout, a trial, unpaid -> active). Every paid tier is
+-- status (a new checkout, a trial, unpaid -> active), and by the seat trigger
+-- below when an Academy owner seats a teacher (an Academy seat is unlimited
+-- even when the teacher's own plan lapsed). Every paid tier is
 -- unlimited on cloud_scores, so in practice this restores everything; the cap
 -- arithmetic is for an entitling row that still resolves to a finite plan (an
 -- unrecognised price stores tier 'free'), which must restore no further than
@@ -193,7 +380,7 @@ begin
 
     perform pg_advisory_xact_lock (hashtext('cleffy.documents_score_cap'), hashtext(p_user::text));
 
-    v_limit := (public.get_entitlements (p_user) -> 'limits' ->> 'cloud_scores')::int;
+    v_limit := (public.resolve_entitlements (p_user) -> 'limits' ->> 'cloud_scores')::int;
     if v_limit < 0 then
         v_slots := null; -- LIMIT NULL is LIMIT ALL
     else
@@ -227,6 +414,51 @@ revoke all on function public.restore_plan_archived_scores (uuid) from public;
 revoke all on function public.restore_plan_archived_scores (uuid) from anon;
 revoke all on function public.restore_plan_archived_scores (uuid) from authenticated;
 grant execute on function public.restore_plan_archived_scores (uuid) to service_role;
+
+-- An Academy seat entitles without any webhook for the seated teacher: the
+-- subscription that pays for it is the owner's. Without this, a teacher whose
+-- own plan lapsed and who is then given a seat would resolve to an unlimited
+-- plan and still find everything past the free cap read-only -- and there is
+-- no client surface that un-archives. The restore re-reads the teacher's own
+-- entitlements, so a seat in an academy that is not paying restores nothing
+-- past the cap. Seats are written only by studio_invite_member (owner- and
+-- Academy-checked) and the service role; clients have no insert grant.
+create or replace function public.studio_members_restore_plan_archived () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    perform public.restore_plan_archived_scores (new.user_id);
+    return null;
+end;
+$$;
+
+revoke all on function public.studio_members_restore_plan_archived () from public;
+revoke all on function public.studio_members_restore_plan_archived () from anon;
+revoke all on function public.studio_members_restore_plan_archived () from authenticated;
+
+create trigger studio_members_restore_plan_archived after insert on public.studio_members
+for each row execute function public.studio_members_restore_plan_archived ();
+
+-- Owners who are ALREADY entitled again when this ships would otherwise wait
+-- for their next entitling webhook -- up to a year on an annual plan -- for the
+-- fix this migration is. Only owners whose plan is unlimited now: a free owner
+-- with lapse archives gets nothing back that they did not ask for. (Production
+-- held no archived scores at the time of writing, so this is expected to be a
+-- no-op there; it is here for every other database built from these files.)
+do $$
+declare
+    v_owner uuid;
+begin
+    for v_owner in
+        select distinct d.owner_id
+        from public.documents d
+        where d.archived_reason = 'plan_lapse'
+    loop
+        if (public.resolve_entitlements (v_owner) -> 'limits' ->> 'cloud_scores')::int < 0 then
+            perform public.restore_plan_archived_scores (v_owner);
+        end if;
+    end loop;
+end;
+$$;
 
 -- Same grants as before; restated because create or replace keeps them, but a
 -- reader of this file should not have to go looking.
@@ -329,8 +561,9 @@ create table public.smart_import_charges (
     refunded_at timestamptz
 );
 
-create index smart_import_charges_document on public.smart_import_charges (document_id)
-where refunded_at is null;
+-- Not partial: the refund looks up open charges by document, and the insert
+-- guard below looks up REFUNDED ones on every new score.
+create index smart_import_charges_document on public.smart_import_charges (document_id);
 
 create index smart_import_charges_user_month on public.smart_import_charges (user_id, month);
 
@@ -392,17 +625,29 @@ grant execute on function public.record_smart_import_charge (uuid, uuid) to serv
 --  * it only refunds charges the server recorded, each at most once (the
 --    refunded_at stamp is set in the same statement that selects it);
 --  * only the caller's own charges, so nobody refunds into someone else's month;
---  * only while the document the import created no longer exists -- the
---    teacher gives the score up to get the credit back;
+--  * only once the import is really gone -- the documents row AND every object
+--    under its folder in the scores bucket. Deleting only the row would leave
+--    the PDF in Storage, and since document ids are client-chosen the owner
+--    could re-create the row under the same id and be its owner again;
+--  * and the id is spent for good: documents_refuse_refunded_import below
+--    refuses any score under an id whose import was refunded, so the row (and
+--    with it access to that folder) can never come back;
 --  * only in the month it was charged, and only within 15 minutes of the
 --    charge: a rollback follows its import immediately, so anything later is a
---    score that was used and then deleted, which is not a failed import.
+--    score that was used and then deleted, which is not a failed import;
+--  * at most twice in a calendar month (the free plan's whole smart-import
+--    allowance; no paid plan meters imports). A modified client could still
+--    keep bytes it downloaded and re-upload them as an ordinary score -- an
+--    upload any account may make, counted against the cloud-score cap -- and
+--    this bounds how far that can stretch the allowance. A genuine third
+--    rollback in one month is rare enough to cost the credit.
 -- Returns the number of credits given back (0 when there was nothing to give).
 create or replace function public.refund_smart_import (p_document uuid) returns int language plpgsql security definer
 set search_path = public as $$
 declare
     v_user uuid := auth.uid();
     v_month date := date_trunc('month', now())::date;
+    v_monthly_refunds constant int := 2;
     v_refunded int;
 begin
     if v_user is null then
@@ -412,9 +657,34 @@ begin
         raise exception 'refund_smart_import requires p_document' using errcode = '22023';
     end if;
 
+    -- This user's charges and refunds, then this id: the insert guard takes the
+    -- id's lock too, so a score re-created under the id either commits before
+    -- the existence check below (and is seen) or waits for this refund to commit
+    -- (and is refused). Only this function takes both, in this order.
     perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_charges'), hashtext(v_user::text));
+    perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_refund'), hashtext(p_document::text));
 
     if exists (select 1 from public.documents d where d.id = p_document) then
+        return 0;
+    end if;
+
+    -- The bytes must be gone too. A prefix match on the folder, not
+    -- storage.foldername(): it uses the bucket/name index, and a uuid's text
+    -- holds no LIKE wildcards.
+    if exists (
+        select 1
+        from storage.objects o
+        where o.bucket_id = 'scores'
+          and o.name like p_document::text || '/%'
+    ) then
+        return 0;
+    end if;
+
+    if (
+        select count(*)
+        from public.smart_import_charges c
+        where c.user_id = v_user and c.month = v_month and c.refunded_at is not null
+    ) >= v_monthly_refunds then
         return 0;
     end if;
 
@@ -445,3 +715,42 @@ $$;
 revoke all on function public.refund_smart_import (uuid) from public;
 revoke all on function public.refund_smart_import (uuid) from anon;
 grant execute on function public.refund_smart_import (uuid) to authenticated;
+
+-- A refunded import's id is spent. Without this the refund is a loan: delete
+-- the row, take the credit back, re-create the row under the same id (ids are
+-- client-chosen) and the owner-membership trigger makes the caller owner of
+-- that folder again. The app always mints a fresh uuid, so no legitimate flow
+-- reuses one. UPDATE OF id is covered too, although the document_members
+-- foreign key already keeps a score's id from changing under it.
+--
+-- SECURITY DEFINER to read the ledger, which no client role can. Takes the
+-- refund's per-id lock so the check cannot interleave with a refund in flight
+-- (see refund_smart_import); an uncontended advisory lock is cheap next to the
+-- insert it guards.
+create or replace function public.documents_refuse_refunded_import () returns trigger language plpgsql security definer
+set search_path = public as $$
+begin
+    if tg_op = 'UPDATE' and new.id is not distinct from old.id then
+        return new;
+    end if;
+
+    perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_refund'), hashtext(new.id::text));
+
+    if exists (
+        select 1
+        from public.smart_import_charges c
+        where c.document_id = new.id
+          and c.refunded_at is not null
+    ) then
+        raise exception 'document id is not available' using errcode = '23505';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.documents_refuse_refunded_import () from public;
+revoke all on function public.documents_refuse_refunded_import () from anon;
+revoke all on function public.documents_refuse_refunded_import () from authenticated;
+
+create trigger documents_refuse_refunded_import before insert or update of id on public.documents
+for each row execute function public.documents_refuse_refunded_import ();
