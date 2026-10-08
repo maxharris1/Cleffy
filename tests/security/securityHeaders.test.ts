@@ -110,6 +110,33 @@ describe('other security headers', () => {
             expect(permissions).toContain(`${feature}=()`);
         }
     });
+
+    it('names only Permissions-Policy features Chromium recognizes', () => {
+        // An unknown feature is not ignored quietly: Chromium logs "Error with
+        // Permissions-Policy header: Unrecognized feature" on EVERY page load
+        // ('bluetooth' was one), which buries real console errors. Check a new
+        // name against chromium's permissions_policy_features.json5 first.
+        const KNOWN = new Set([
+            'accelerometer',
+            'browsing-topics',
+            'camera',
+            'geolocation',
+            'gyroscope',
+            'hid',
+            'magnetometer',
+            'microphone',
+            'midi',
+            'payment',
+            'serial',
+            'usb',
+        ]);
+        const features = (globalHeaders().get('permissions-policy') ?? '')
+            .split(',')
+            .map((entry) => entry.trim().split('=')[0] ?? '');
+        for (const feature of features) {
+            expect(KNOWN, feature).toContain(feature);
+        }
+    });
 });
 
 describe('nothing the policy would silently block', () => {

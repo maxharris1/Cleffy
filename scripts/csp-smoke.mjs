@@ -232,11 +232,16 @@ context.on('requestfinished', async (request) => {
 
 const page = await context.newPage();
 const violations = [];
+// Chromium logs a header it cannot parse (e.g. an unknown Permissions-Policy
+// feature) as a console error on every page load; that is a broken header too.
+const headerErrors = [];
 const consoleErrors = [];
 page.on('console', (msg) => {
     const text = msg.text();
     if (/Content[- ]Security[- ]Policy|Refused to/i.test(text)) {
         violations.push(`[console] ${text}`);
+    } else if (/^Error with [\w-]+ header/.test(text)) {
+        headerErrors.push(text);
     } else if (msg.type() === 'error') {
         consoleErrors.push(text);
     }
@@ -345,6 +350,7 @@ await visit('/library', () =>
 check('library cover rendered (pdf.js thumbnail, blob: image)', true);
 
 check('zero CSP violations', violations.length === 0, violations.join('\n    '));
+check('every header parses', headerErrors.length === 0, [...new Set(headerErrors)].join('\n    '));
 
 await browser.close();
 server.close();
