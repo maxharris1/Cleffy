@@ -1,6 +1,7 @@
+import { takeRetryAfterHint } from '@/lib/retryAfter';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import type { PendingOp, ScribblerDb } from '@/sync/db';
+import type { PendingOp, PendingOpType, ScribblerDb } from '@/sync/db';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
@@ -10,9 +11,12 @@ export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'error';
  * after N+1 was pulled while broadcast was down (plan §sync). */
 const PULL_OVERLAP = 50;
 const PULL_PAGE_SIZE = 500;
+const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 /** Outbox ops drained per round-trip (creates / patches). */
 const FLUSH_BATCH_SIZE = 40;
+
+export type AnnotationPatchRow = { id: string; document_id: string } & AnnotationUpdate;
 
 /**
  * The slice of the Supabase client the engine needs — injected so tests can
@@ -22,24 +26,97 @@ export interface AnnotationsApi {
     insertIgnoreDuplicates(row: AnnotationInsert): Promise<{ error: ApiError | null }>;
     /** Multi-row create; same semantics as insertIgnoreDuplicates per row. */
     insertMany(rows: AnnotationInsert[]): Promise<{ error: ApiError | null }>;
-    update(id: string, docId: string, patch: AnnotationUpdate): Promise<{ error: ApiError | null }>;
+    update(id: string, docId: string, patch: AnnotationUpdate): Promise<PatchResult>;
     /** Multi-row patch; each entry is { id, document_id, ...AnnotationUpdate }. */
-    updateMany(
-        patches: Array<{ id: string; document_id: string } & AnnotationUpdate>,
-    ): Promise<{ error: ApiError | null }>;
+    updateMany(patches: AnnotationPatchRow[]): Promise<PatchResult>;
     fetchOne(id: string): Promise<{ data: AnnotationRow | null; error: ApiError | null }>;
+    /**
+     * Whether the document is archived (read-only past the plan's score cap).
+     * False when it is not, or when this account can no longer see it at all.
+     */
+    fetchDocumentArchived(docId: string): Promise<{ archived: boolean; error: ApiError | null }>;
     fetchSince(
         docId: string,
         afterSeq: number,
         limit: number,
     ): Promise<{ data: AnnotationRow[] | null; error: ApiError | null }>;
+    /**
+     * Get a fresh access token after a 401. True when one is now in place.
+     * A tab that slept past its JWT's expiry wakes before the auth client's
+     * refresh timer does, and its first flush would otherwise be refused.
+     */
+    refreshAuth?(): Promise<boolean>;
 }
+
+export interface PatchResult {
+    error: ApiError | null;
+    /**
+     * Ids of the rows the server actually updated. A patch RLS filtered out
+     * (or whose row does not exist) succeeds with zero rows and no error, so
+     * an id missing here is a refusal, not a success. Null/undefined means the
+     * server could not say (the pre-20261007120200 void RPC) — treated as
+     * applied, the old behaviour.
+     */
+    updatedIds?: string[] | null;
+}
+
+/**
+ * - retry: connectivity, timeouts, throttling, server faults — keep the op and back off.
+ * - auth: the access token was refused (401) — refresh it, then retry; never drop.
+ * - reject: the server refused this op for good (RLS 403, check/invalid-input 400,
+ *   conflict 409) — drop it, adopt server truth, tell the user.
+ */
+export type ApiErrorKind = 'retry' | 'auth' | 'reject';
 
 export interface ApiError {
     message: string;
-    /** True for connectivity failures (retry); false for rejections (drop+repair). */
-    transient: boolean;
+    kind: ApiErrorKind;
+    /** Server-requested wait before retrying (Retry-After), when it sent one. */
+    retryAfterMs?: number;
 }
+
+/** A local change the server permanently refused; local state has been repaired. */
+export interface SyncRejection {
+    annotationId: string;
+    opType: PendingOpType;
+    reason: string;
+}
+
+/**
+ * The outbox is refused because the score is archived (a lapsed plan), and is
+ * being kept rather than dropped: an archive is undone by resubscribing, and
+ * the marks then upload as if nothing happened.
+ */
+export interface SyncHold {
+    reason: 'archived';
+    /** Distinct marks with changes waiting on this document. */
+    pendingMarks: number;
+}
+
+/**
+ * Classify a failed PostgREST/RPC response by HTTP status.
+ *
+ * Only statuses that cannot change on retry may lose a user's edit, so the
+ * default for anything ambiguous is to keep the op. 404 is retried too: from
+ * PostgREST it means a missing table or function — a deploy in progress, not
+ * a verdict on this row.
+ */
+export const classifyFailure = (message: string, status?: number): ApiError => {
+    if (status === undefined || status === 0) {
+        return { message, kind: 'retry' };
+    }
+    if (status === 401) {
+        return { message, kind: 'auth' };
+    }
+    if (status === 429 || status === 503) {
+        const retryAfterMs = takeRetryAfterHint();
+        return retryAfterMs === undefined ? { message, kind: 'retry' } : { message, kind: 'retry', retryAfterMs };
+    }
+    if (status === 404 || status === 408 || status === 425 || status >= 500) {
+        return { message, kind: 'retry' };
+    }
+    return { message, kind: 'reject' };
+};
 
 export const fromServerRow = (row: AnnotationRow): Annotation => ({
     id: row.id,
@@ -55,18 +132,51 @@ export const fromServerRow = (row: AnnotationRow): Annotation => ({
     seq: row.seq,
 });
 
+interface PushResult {
+    error: ApiError | null;
+    /** Set when the server reported which rows a patch batch touched. */
+    updatedIds: ReadonlySet<string> | null;
+}
+
+/** Engines currently running, by document — sign-out drains through these. */
+const activeEngines = new Map<string, SyncEngine>();
+
+export const activeEngineFor = (docId: string): SyncEngine | undefined => activeEngines.get(docId);
+
+type RejectionObserver = (rejection: SyncRejection & { docId: string }) => void;
+const rejectionObservers = new Set<RejectionObserver>();
+
+/**
+ * Hear about every refusal from every engine (the open viewer's and headless
+ * ones alike) until the returned function is called. Sign-out uses this so a
+ * change refused while it drains is reported, not just logged.
+ */
+export const observeRejections = (observer: RejectionObserver): (() => void) => {
+    rejectionObservers.add(observer);
+    return () => {
+        rejectionObservers.delete(observer);
+    };
+};
+
 /**
  * Drains the Dexie outbox to Supabase and pulls remote changes by watermark.
  * One instance per open cloud document. Local-first: the UI never waits on
  * this — it reacts to AnnotationStore, which this engine feeds via
  * applyRemoteBatch (plan §sync).
+ *
+ * An op leaves the outbox only when the server accepted it, or refused it for
+ * good AND the row's server state has been fetched to repair local state
+ * from. Everything else — offline, timeouts, throttling, an expired token,
+ * a server fault — keeps the op and retries with backoff.
  */
 export class SyncEngine {
     private flushing = false;
     private pulling = false;
     private stopped = false;
-    private backoffMs = 1000;
+    private backoffMs = INITIAL_BACKOFF_MS;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
+    private retryAt = 0;
+    private lastRetryDelay: number | null = null;
     private onlineListener = () => this.onOnline();
     private offlineListener = () => this.setStatus('offline');
     private status: SyncStatus = 'syncing';
@@ -79,6 +189,10 @@ export class SyncEngine {
             docId: string;
             getUserId: () => string | null;
             onStatus?: (status: SyncStatus) => void;
+            /** A local change was refused for good and rolled back to server truth. */
+            onRejected?: (rejection: SyncRejection) => void;
+            /** The outbox is refused but kept (archived score) — see SyncHold. */
+            onHeld?: (hold: SyncHold) => void;
         },
     ) {}
 
@@ -86,6 +200,7 @@ export class SyncEngine {
         this.deps.store.setDirtyHook(() => this.requestFlush());
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
+        activeEngines.set(this.deps.docId, this);
         if (navigator.onLine === false) {
             this.setStatus('offline');
         }
@@ -97,23 +212,43 @@ export class SyncEngine {
         this.deps.store.setDirtyHook(null);
         window.removeEventListener('online', this.onlineListener);
         window.removeEventListener('offline', this.offlineListener);
-        if (this.retryTimer) {
-            clearTimeout(this.retryTimer);
+        if (activeEngines.get(this.deps.docId) === this) {
+            activeEngines.delete(this.deps.docId);
         }
+        this.clearRetry();
     }
 
-    /** Full cycle: pull remote changes, then push local ops. */
+    /** Delay of the currently scheduled retry (ms), or null when none is pending. */
+    get pendingRetryDelayMs(): number | null {
+        return this.retryTimer ? this.lastRetryDelay : null;
+    }
+
+    /**
+     * Full cycle: pull remote changes, then push local ops. Waits for the
+     * store to hydrate from Dexie first, so pulled rows merge against the
+     * mirror instead of racing the load that would otherwise replace them.
+     */
     async sync(): Promise<void> {
+        await this.deps.store.load();
         await this.pullSince();
         await this.flush();
     }
 
+    /**
+     * Wake the flush after a local edit. While a retry is scheduled the edit
+     * just queues: the timer drains everything, and a throttled server is not
+     * hit again early because someone drew another stroke.
+     */
     requestFlush(): void {
+        if (this.retryTimer) {
+            return;
+        }
         queueMicrotask(() => void this.flush());
     }
 
     private onOnline(): void {
-        this.backoffMs = 1000;
+        this.backoffMs = INITIAL_BACKOFF_MS;
+        this.clearRetry();
         void this.sync();
     }
 
@@ -124,15 +259,63 @@ export class SyncEngine {
         }
     }
 
-    private scheduleRetry(): void {
-        if (this.stopped || this.retryTimer) {
+    private clearRetry(): void {
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = null;
+        }
+    }
+
+    /**
+     * Exponential backoff with jitter (half fixed, half random, so devices that
+     * lost the same server together do not come back in lockstep). A server
+     * Retry-After is a floor, and it may push an already-scheduled retry later.
+     */
+    private scheduleRetry(retryAfterMs?: number): void {
+        if (this.stopped) {
             return;
         }
+        const base = this.backoffMs;
+        const delay = Math.max(Math.round(base / 2 + Math.random() * (base / 2)), retryAfterMs ?? 0);
+        const at = Date.now() + delay;
+        if (this.retryTimer) {
+            if (retryAfterMs === undefined || at <= this.retryAt) {
+                return;
+            }
+            this.clearRetry();
+        }
+        this.backoffMs = Math.min(base * 2, MAX_BACKOFF_MS);
+        this.retryAt = at;
+        this.lastRetryDelay = delay;
         this.retryTimer = setTimeout(() => {
             this.retryTimer = null;
             void this.sync();
-        }, this.backoffMs);
-        this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
+        }, delay);
+    }
+
+    /** Keep the outbox as it is and come back later. */
+    private deferRetry(error: ApiError): void {
+        this.setStatus(navigator.onLine === false ? 'offline' : 'error');
+        this.scheduleRetry(error.retryAfterMs);
+    }
+
+    /**
+     * Run a request; on a 401, refresh the session once and run it again. A
+     * 401 that survives the refresh (or a refresh that failed — offline, or
+     * the refresh token itself expired) is reported as retryable: the op is
+     * kept, never treated as a refusal of its content.
+     */
+    private async withAuth<T extends { error: ApiError | null }>(call: () => Promise<T>): Promise<T> {
+        const first = await call();
+        if (first.error?.kind !== 'auth') {
+            return first;
+        }
+        const refreshed = this.deps.api.refreshAuth ? await this.deps.api.refreshAuth().catch(() => false) : false;
+        const second = refreshed ? await call() : first;
+        if (second.error?.kind === 'auth') {
+            return { ...second, error: { ...second.error, kind: 'retry' } };
+        }
+        return second;
     }
 
     async flush(): Promise<void> {
@@ -143,6 +326,9 @@ export class SyncEngine {
         try {
             const { db, docId } = this.deps;
             for (;;) {
+                if (this.stopped) {
+                    return;
+                }
                 const ops = await db.ops.where('docId').equals(docId).sortBy('opId');
                 if (ops.length === 0) {
                     break;
@@ -150,76 +336,174 @@ export class SyncEngine {
                 this.setStatus('syncing');
 
                 const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
-                const error = await this.pushBatch(batch);
+                const result = await this.push(batch);
 
-                // Non-transient batch reject: RPC is transactional (nothing applied).
-                // Peel one-by-one so an innocent head is not discarded for a sibling fault.
-                if (error && !error.transient && batch.length > 1) {
+                if (result.error?.kind === 'reject' && batch.length > 1) {
+                    // Non-transient batch reject: RPC is transactional (nothing applied).
+                    // Peel one-by-one so an innocent head is not discarded for a sibling fault.
                     for (const op of batch) {
-                        const single = await this.pushBatch([op]);
-                        if (single?.transient) {
-                            this.setStatus(navigator.onLine === false ? 'offline' : 'error');
-                            this.scheduleRetry();
+                        if (this.stopped || !(await this.settle(op, await this.push([op])))) {
                             return;
                         }
-                        if (single) {
-                            console.warn(`Sync op ${op.type} rejected for ${op.annotationId}: ${single.message}`);
-                            await db.ops.delete(op.opId as number);
-                            await this.repair(op.annotationId);
-                            continue;
-                        }
-                        await this.ackOp(op);
                     }
                     continue;
                 }
 
-                if (error?.transient) {
-                    this.setStatus(navigator.onLine === false ? 'offline' : 'error');
-                    this.scheduleRetry();
-                    return;
-                }
-                if (error) {
-                    const head = batch[0]!;
-                    console.warn(`Sync op ${head.type} rejected for ${head.annotationId}: ${error.message}`);
-                    await db.ops.delete(head.opId as number);
-                    await this.repair(head.annotationId);
+                if (result.error) {
+                    // An error covers the whole batch; settling the head is enough
+                    // to either stop (retry later) or reject the single op it was.
+                    const head = batch[0];
+                    if (head && !(await this.settle(head, result))) {
+                        return;
+                    }
                     continue;
                 }
 
+                // The server applied the batch. Ack everything it reports as
+                // updated BEFORE repairing the ids it missed: a repair whose
+                // fetch fails stops the drain, and an applied op left queued
+                // behind it would be pushed again on retry — re-sending an
+                // update over a collaborator's newer edit, or a restore over
+                // their delete.
+                const missed: PendingOp[] = [];
                 for (const op of batch) {
-                    await this.ackOp(op);
+                    if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
+                        missed.push(op);
+                    } else {
+                        await this.ackOp(op);
+                    }
+                }
+                for (const op of missed) {
+                    if (!(await this.reject(op, 'the change matched no row this account may edit'))) {
+                        return;
+                    }
                 }
             }
-            this.backoffMs = 1000;
+            this.backoffMs = INITIAL_BACKOFF_MS;
             this.setStatus('synced');
         } finally {
             this.flushing = false;
         }
     }
 
+    /**
+     * Resolve one op against the response that covered it: ack, reject +
+     * repair, or (false) stop draining and retry later.
+     */
+    private async settle(op: PendingOp, result: PushResult): Promise<boolean> {
+        if (result.error) {
+            if (result.error.kind !== 'reject') {
+                this.deferRetry(result.error);
+                return false;
+            }
+            return this.reject(op, result.error.message);
+        }
+        if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
+            return this.reject(op, 'the change matched no row this account may edit');
+        }
+        await this.ackOp(op);
+        return true;
+    }
+
     private async ackOp(op: PendingOp): Promise<void> {
-        const { db, docId } = this.deps;
-        await db.ops.delete(op.opId as number);
-        const remaining = await db.ops
-            .where('docId')
-            .equals(docId)
-            .filter((o) => o.annotationId === op.annotationId)
-            .count();
-        if (remaining === 0) {
+        await this.deps.db.ops.delete(op.opId as number);
+        if ((await this.queuedFor(op.annotationId)) === 0) {
             const createdBy = op.type === 'create' ? this.deps.getUserId() : null;
             await this.deps.store.markSynced(op.annotationId, createdBy);
         }
     }
 
-    private async pushBatch(ops: PendingOp[]): Promise<ApiError | null> {
+    private queuedFor(annotationId: string): Promise<number> {
+        const { db, docId } = this.deps;
+        return db.ops
+            .where('docId')
+            .equals(docId)
+            .filter((o) => o.annotationId === annotationId)
+            .count();
+    }
+
+    /**
+     * The server refused `op` for good. Fetch the row's server state FIRST —
+     * if that fails the op stays queued (false) and the whole thing is retried,
+     * so a refusal never costs the local copy without a server copy to adopt.
+     * Then drop the op, repair local state, and tell the user.
+     *
+     * Except on an archived score. RLS refuses every write there, but the
+     * archive is a billing state the owner undoes by resubscribing — and marks
+     * drawn offline before the archive landed would otherwise be discarded
+     * for good, a whole lesson's work lost to a failed card. Those ops are kept
+     * and the drain stops (false) until the score is writable again.
+     */
+    private async reject(op: PendingOp, reason: string): Promise<boolean> {
+        const { api, db, store, docId } = this.deps;
+        const archive = await this.withAuth(() => api.fetchDocumentArchived(docId));
+        if (archive.error) {
+            this.deferRetry(archive.error.kind === 'reject' ? { ...archive.error, kind: 'retry' } : archive.error);
+            return false;
+        }
+        if (archive.archived) {
+            await this.holdForArchive();
+            return false;
+        }
+        const { data, error } = await this.withAuth(() => api.fetchOne(op.annotationId));
+        if (error) {
+            this.deferRetry(error.kind === 'reject' ? { ...error, kind: 'retry' } : error);
+            return false;
+        }
+        if (this.stopped) {
+            return false;
+        }
+        console.warn(`Sync op ${op.type} rejected for ${op.annotationId}: ${reason}`);
+        if (data) {
+            await db.ops.delete(op.opId as number);
+            // Later ops for the row are still queued: they are the user's newer
+            // intent and get their own verdict. Only adopt the server row when
+            // nothing local is left to apply on top of it.
+            if ((await this.queuedFor(op.annotationId)) === 0) {
+                await store.adoptServerRow(fromServerRow(data));
+            }
+        } else {
+            // No row this account can see: nothing queued for it can apply.
+            await db.ops
+                .where('docId')
+                .equals(docId)
+                .filter((o) => o.annotationId === op.annotationId)
+                .delete();
+            await store.discardLocal(op.annotationId);
+        }
+        const rejection: SyncRejection = { annotationId: op.annotationId, opType: op.type, reason };
+        this.deps.onRejected?.(rejection);
+        for (const observer of rejectionObservers) {
+            observer({ ...rejection, docId });
+        }
+        return true;
+    }
+
+    /**
+     * Keep the outbox of an archived score and say so. Retried at the slowest
+     * backoff: nothing changes until the plan does, but when it does (a
+     * resubscribe in another tab) the marks should upload without a reload.
+     */
+    private async holdForArchive(): Promise<void> {
+        if (this.stopped) {
+            return;
+        }
+        const { db, docId } = this.deps;
+        const queued = await db.ops.where('docId').equals(docId).toArray();
+        this.setStatus('error');
+        this.deps.onHeld?.({ reason: 'archived', pendingMarks: new Set(queued.map((o) => o.annotationId)).size });
+        this.scheduleRetry(MAX_BACKOFF_MS);
+    }
+
+    private async push(ops: PendingOp[]): Promise<PushResult> {
         const head = ops[0];
         if (!head) {
-            return null;
+            return { error: null, updatedIds: null };
         }
         if (head.type === 'create') {
             const userId = this.deps.getUserId();
             if (!userId) {
-                return { message: 'not signed in', transient: true };
+                return { error: { message: 'not signed in', kind: 'retry' }, updatedIds: null };
             }
             const rows: AnnotationInsert[] = ops.map((op) => {
                 const a = op.annotation;
@@ -235,19 +519,22 @@ export class SyncEngine {
                     deleted_at: a.deletedAt,
                 };
             });
-            return (await this.deps.api.insertMany(rows)).error;
+            const { error } = await this.withAuth(() => this.deps.api.insertMany(rows));
+            return { error, updatedIds: null };
         }
 
-        const patches = ops.map((op) => {
+        const patches = ops.map((op): AnnotationPatchRow => {
             const a = op.annotation;
             switch (op.type) {
                 case 'update':
+                    // No deleted_at: an edit is not a statement about whether the
+                    // mark exists. Sending the snapshot's `null` would undelete a
+                    // mark a collaborator erased while this edit sat in the outbox.
                     return {
                         id: a.id,
                         document_id: op.docId,
                         color: a.color,
                         payload: a.payload,
-                        deleted_at: a.deletedAt,
                     };
                 case 'delete':
                     return {
@@ -271,21 +558,8 @@ export class SyncEngine {
                 }
             }
         });
-        return (await this.deps.api.updateMany(patches)).error;
-    }
-
-    /** After a rejected op: adopt server truth for the annotation (or discard it). */
-    private async repair(annotationId: string): Promise<void> {
-        const { api, store } = this.deps;
-        const { data, error } = await api.fetchOne(annotationId);
-        if (error) {
-            return; // transient — next sync cycle repairs
-        }
-        if (data) {
-            await store.applyRemoteBatch([fromServerRow(data)], new Set());
-        } else {
-            await store.discardLocal(annotationId);
-        }
+        const { error, updatedIds } = await this.withAuth(() => this.deps.api.updateMany(patches));
+        return { error, updatedIds: updatedIds ? new Set(updatedIds) : null };
     }
 
     /** Apply one row fanned out via broadcast-from-database (M4). */
@@ -323,7 +597,7 @@ export class SyncEngine {
             let after = Math.max(0, watermark - PULL_OVERLAP);
 
             for (;;) {
-                const { data, error } = await api.fetchSince(docId, after, PULL_PAGE_SIZE);
+                const { data, error } = await this.withAuth(() => api.fetchSince(docId, after, PULL_PAGE_SIZE));
                 // stop() can land during any await below (the account lost
                 // the score and its local copy is being purged): a pull that
                 // was already in flight must not write rows or a watermark
@@ -332,9 +606,10 @@ export class SyncEngine {
                     return;
                 }
                 if (error) {
-                    this.setStatus(error.transient && navigator.onLine === false ? 'offline' : 'error');
-                    if (error.transient) {
-                        this.scheduleRetry();
+                    if (error.kind === 'reject') {
+                        this.setStatus('error');
+                    } else {
+                        this.deferRetry(error);
                     }
                     return;
                 }
@@ -370,17 +645,14 @@ export class SyncEngine {
 
 /** Production AnnotationsApi backed by the shared Supabase client. */
 export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): AnnotationsApi => {
-    const classify = (message: string, status?: number): ApiError => ({
-        message,
-        // PostgREST/HTTP failures with no status (network) are transient.
-        transient: status === undefined || status === 0 || status >= 500,
-    });
+    const fail = (error: { message: string } | null, status: number): ApiError | null =>
+        error ? classifyFailure(error.message, status) : null;
     return {
         async insertIgnoreDuplicates(row) {
             const { error, status } = await supabase
                 .from('annotations')
                 .upsert(row, { onConflict: 'id', ignoreDuplicates: true });
-            return { error: error ? classify(error.message, status) : null };
+            return { error: fail(error, status) };
         },
         async insertMany(rows) {
             if (rows.length === 0) {
@@ -390,34 +662,41 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
                 return this.insertIgnoreDuplicates(rows[0]!);
             }
             const { error, status } = await supabase.rpc('insert_annotations_batch', { p_rows: rows });
-            return { error: error ? classify(error.message, status) : null };
+            return { error: fail(error, status) };
         },
         async update(id, docId, patch) {
-            const { error, status } = await supabase
+            // .select('id') makes PostgREST return the rows it updated, so a
+            // patch RLS filtered out shows up as an empty list, not a success.
+            const { data, error, status } = await supabase
                 .from('annotations')
                 .update(patch)
                 .eq('id', id)
-                .eq('document_id', docId);
-            return { error: error ? classify(error.message, status) : null };
+                .eq('document_id', docId)
+                .select('id');
+            return { error: fail(error, status), updatedIds: error ? null : (data ?? []).map((row) => row.id) };
         },
         async updateMany(patches) {
             if (patches.length === 0) {
-                return { error: null };
+                return { error: null, updatedIds: [] };
             }
             if (patches.length === 1) {
-                const p = patches[0]!;
-                return this.update(p.id, p.document_id, {
-                    color: p.color,
-                    payload: p.payload,
-                    deleted_at: p.deleted_at,
-                });
+                const { id, document_id, ...patch } = patches[0]!;
+                return this.update(id, document_id, patch);
             }
-            const { error, status } = await supabase.rpc('patch_annotations_batch', { p_patches: patches });
-            return { error: error ? classify(error.message, status) : null };
+            const { data, error, status } = await supabase.rpc('patch_annotations_batch', { p_patches: patches });
+            return { error: fail(error, status), updatedIds: error ? null : (data ?? null) };
         },
         async fetchOne(id) {
             const { data, error, status } = await supabase.from('annotations').select('*').eq('id', id).maybeSingle();
-            return { data, error: error ? classify(error.message, status) : null };
+            return { data, error: fail(error, status) };
+        },
+        async fetchDocumentArchived(docId) {
+            const { data, error, status } = await supabase
+                .from('documents')
+                .select('archived_at')
+                .eq('id', docId)
+                .maybeSingle();
+            return { archived: !error && data !== null && data.archived_at !== null, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase
@@ -427,7 +706,13 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
                 .gt('seq', afterSeq)
                 .order('seq', { ascending: true })
                 .limit(limit);
-            return { data, error: error ? classify(error.message, status) : null };
+            return { data, error: fail(error, status) };
+        },
+        async refreshAuth() {
+            // The auth client serializes refreshes behind its own lock, so a
+            // refresh already in flight from its timer is shared, not doubled.
+            const { data, error } = await supabase.auth.refreshSession();
+            return !error && data.session !== null;
         },
     };
 };

@@ -21,6 +21,7 @@ import {
     type DocumentLayout,
     type PageColumns,
 } from '@/features/viewer/geometry';
+import { installSnapshotRetry } from '@/features/viewer/history/snapshotService';
 import { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
 import { GestureController } from '@/features/viewer/ink/GestureController';
 import { HandwritingController } from '@/features/viewer/ink/handwriting/handwritingController';
@@ -37,7 +38,13 @@ import { peerColor } from '@/lib/colors';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel } from '@/sync/realtimeChannel';
-import { createSupabaseAnnotationsApi, SyncEngine, type SyncStatus } from '@/sync/syncEngine';
+import {
+    createSupabaseAnnotationsApi,
+    SyncEngine,
+    type SyncHold,
+    type SyncRejection,
+    type SyncStatus,
+} from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
 import { isTextPayload } from '@/types/models';
@@ -123,6 +130,10 @@ export interface PdfViewportProps {
         /** Only the document owner may fire the metered text-note transcribe. */
         isOwner?: boolean;
         onStatus?: (status: SyncStatus) => void;
+        /** The server permanently refused a local change; it was rolled back. */
+        onRejected?: (rejection: SyncRejection) => void;
+        /** The server refuses the outbox but it is being kept (archived score). */
+        onHeld?: (hold: SyncHold) => void;
         onPeers?: (peers: PresencePeer[]) => void;
         /** Another member replaced the PDF bytes (smart-import cleanup). */
         onDocReplaced?: (contentRev: number) => void;
@@ -193,6 +204,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const [measureHighlightEl, setMeasureHighlightEl] = useState<HTMLDivElement | null>(null);
     const playheadControllerRef = useRef<PlayheadController | null>(null);
 
+    // Hydration is shared and merges: the sync engine started below awaits
+    // this same load before it pulls, so remote rows never race it.
     useEffect(() => {
         void annotationStore.load();
     }, [annotationStore]);
@@ -206,6 +219,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncIsAnonymous = sync?.isAnonymous ?? false;
     const syncCanWrite = sync?.canWrite ?? false;
     const syncOnStatus = sync?.onStatus;
+    const syncOnRejected = sync?.onRejected;
+    const syncOnHeld = sync?.onHeld;
     const syncOnPeers = sync?.onPeers;
     const syncOnDocReplaced = sync?.onDocReplaced;
     const syncOnScoreAnalysis = sync?.onScoreAnalysis;
@@ -442,6 +457,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 docId,
                 getUserId: () => syncUserId,
                 onStatus: syncOnStatus,
+                onRejected: syncOnRejected,
+                onHeld: syncOnHeld,
             });
             channel = new DocRealtimeChannel({
                 supabase: getSupabase(),
@@ -462,6 +479,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 onReconnect: () => {
                     ink.clearRemoteInk();
                     void engine?.sync();
+                    installSnapshotRetry();
                     // A role change made while the connection was down sent
                     // its broadcast to nobody.
                     syncOnMembershipChanged?.();
@@ -478,6 +496,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             }
             engine.start();
             channel.start();
+            // Lesson-history snapshots whose upload failed earlier (offline,
+            // a closed tab) go up now, and again whenever the browser is back online.
+            installSnapshotRetry();
             channelRef.current = channel;
         }
 
@@ -500,6 +521,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         syncIsAnonymous,
         syncCanWrite,
         syncOnStatus,
+        syncOnRejected,
+        syncOnHeld,
         syncOnPeers,
         syncOnDocReplaced,
         syncOnScoreAnalysis,

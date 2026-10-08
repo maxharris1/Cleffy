@@ -2,7 +2,21 @@ import { isCloudDocId } from '@/features/library/documentsService';
 import { localDateString, type LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
 import { getSupabase } from '@/lib/supabase';
 import { getDb, type ScribblerDb } from '@/sync/db';
+import type { AnnotationSnapshotRow } from '@/types/database';
 import type { Annotation } from '@/types/models';
+
+/**
+ * Bumped at sign-out. Every server round-trip below captures it first and
+ * writes nothing to Dexie once it has moved on: a response that lands after
+ * signOut() cleared this account's snapshots must not put one back for the
+ * next account on the device to find (or push under its own JWT).
+ */
+let writeEpoch = 0;
+
+/** Stop every snapshot upload/pull in flight from writing locally (sign-out). */
+export const stopSnapshotWrites = (): void => {
+    writeEpoch += 1;
+};
 
 /**
  * Capture today's starting-point snapshot if one does not already exist.
@@ -15,11 +29,6 @@ export const ensureDayStartingSnapshot = async (
     createdBy: string | null = null,
 ): Promise<LocalAnnotationSnapshot | null> => {
     const capturedOn = localDateString();
-    const existing = await db.annotationSnapshots.where('[docId+capturedOn]').equals([docId, capturedOn]).first();
-    if (existing) {
-        return null;
-    }
-
     const snapshot: LocalAnnotationSnapshot = {
         id: crypto.randomUUID(),
         docId,
@@ -31,11 +40,42 @@ export const ensureDayStartingSnapshot = async (
         pending: isCloudDocId(docId) ? 1 : 0,
     };
 
-    await db.annotationSnapshots.put(snapshot);
+    // Check-and-add in one rw transaction: two edits in the same tick (a
+    // create applies to memory before this yields) would otherwise both see
+    // "no snapshot yet", and the second add would trip the unique
+    // [docId+capturedOn] index and fail the edit that called us.
+    let added: boolean;
+    try {
+        added = await db.transaction('rw', db.annotationSnapshots, async () => {
+            const existing = await db.annotationSnapshots
+                .where('[docId+capturedOn]')
+                .equals([docId, capturedOn])
+                .first();
+            if (existing) {
+                return false;
+            }
+            await db.annotationSnapshots.add(snapshot);
+            return true;
+        });
+    } catch (err) {
+        // The day already has its starting point (another tab won the race).
+        // The edit must still go through.
+        if (isConstraintError(err)) {
+            return null;
+        }
+        throw err;
+    }
+    if (!added) {
+        return null;
+    }
 
     if (isCloudDocId(docId)) {
+        // Not awaited — the edit that triggered the capture must not wait on
+        // the network. A failed upload leaves the row pending, and
+        // retryPendingSnapshots picks it up on reconnect, on the next open,
+        // when history is listed and before sign-out.
         void pushSnapshotRemote(db, snapshot).catch((err: unknown) => {
-            console.warn('Snapshot sync failed', err);
+            console.warn('Snapshot sync failed; will retry', err);
         });
     }
 
@@ -45,6 +85,9 @@ export const ensureDayStartingSnapshot = async (
 export const listSnapshots = async (docId: string): Promise<LocalAnnotationSnapshot[]> => {
     const db = getDb();
     if (isCloudDocId(docId)) {
+        // Upload first so the pull below reconciles this device's own
+        // starting point against the server's choice for the day.
+        await retryPendingSnapshots(db, docId).catch(() => undefined);
         await pullSnapshotsRemote(db, docId).catch(() => undefined);
     }
     const rows = await db.annotationSnapshots.where('docId').equals(docId).toArray();
@@ -59,28 +102,168 @@ export const getSnapshot = async (docId: string, snapshotId: string): Promise<Lo
     return row;
 };
 
-const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotationSnapshot): Promise<void> => {
-    const { error } = await getSupabase().from('annotation_snapshots').upsert(
-        {
-            id: snapshot.id,
-            document_id: snapshot.docId,
-            captured_on: snapshot.capturedOn,
-            label: snapshot.label,
-            payload: snapshot.payload,
-            created_by: snapshot.createdBy,
-        },
-        { onConflict: 'document_id,captured_on', ignoreDuplicates: true },
-    );
+/** PostgREST statuses that will not change on retry (RLS, invalid input). */
+const isPermanentRejection = (status: number): boolean =>
+    status >= 400 && status < 500 && ![401, 404, 408, 425, 429].includes(status);
+
+const toLocal = (row: AnnotationSnapshotRow): LocalAnnotationSnapshot => ({
+    id: row.id,
+    docId: row.document_id,
+    capturedOn: row.captured_on,
+    label: row.label,
+    payload: row.payload as Annotation[],
+    createdAt: row.created_at,
+    createdBy: row.created_by,
+    pending: 0,
+});
+
+/**
+ * Replace whatever this device holds for `row`'s day with the server's row.
+ * The server keeps one snapshot per (document, day); when another device got
+ * there first, its row is the day's starting point everywhere.
+ */
+const adoptServerSnapshot = async (db: ScribblerDb, row: LocalAnnotationSnapshot, epoch: number): Promise<void> => {
+    await db.transaction('rw', db.annotationSnapshots, async () => {
+        // Checked inside the transaction: sign-out's clear is an rw
+        // transaction on this table too, so it either ran first (and the
+        // epoch had already moved) or runs after and removes this write.
+        if (epoch !== writeEpoch) {
+            return;
+        }
+        await db.annotationSnapshots
+            .where('[docId+capturedOn]')
+            .equals([row.docId, row.capturedOn])
+            .filter((local) => local.id !== row.id)
+            .delete();
+        await db.annotationSnapshots.put(row);
+    });
+};
+
+/**
+ * Upload one local snapshot. Throws on a failure worth retrying (the row
+ * stays pending); resolves once the day's row on the server is known and
+ * mirrored locally.
+ */
+export const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotationSnapshot): Promise<void> => {
+    const epoch = writeEpoch;
+    const supabase = getSupabase();
+    const { data, error, status } = await supabase
+        .from('annotation_snapshots')
+        .upsert(
+            {
+                id: snapshot.id,
+                document_id: snapshot.docId,
+                captured_on: snapshot.capturedOn,
+                label: snapshot.label,
+                payload: snapshot.payload,
+                created_by: snapshot.createdBy,
+            },
+            { onConflict: 'document_id,captured_on', ignoreDuplicates: true },
+        )
+        .select('id');
+    if (epoch !== writeEpoch) {
+        return;
+    }
     if (error) {
+        if (isPermanentRejection(status)) {
+            // RLS refused (no longer an editor) or the payload is invalid —
+            // retrying cannot help. The snapshot stays on this device as
+            // history; it just stops asking to be uploaded.
+            console.warn(`Snapshot ${snapshot.id} refused by the server: ${error.message}`);
+            await db.annotationSnapshots.update(snapshot.id, { pending: 0 });
+            return;
+        }
         throw new Error(error.message);
     }
-    await db.annotationSnapshots.update(snapshot.id, { pending: 0 });
+    if (data && data.length > 0) {
+        await db.annotationSnapshots.update(snapshot.id, { pending: 0 });
+        return;
+    }
+
+    // Nothing inserted: the day already has a row on the server — ours, from
+    // an upload whose response was lost, or another device's. Mirror it.
+    const existing = await supabase
+        .from('annotation_snapshots')
+        .select('*')
+        .eq('document_id', snapshot.docId)
+        .eq('captured_on', snapshot.capturedOn)
+        .maybeSingle();
+    if (epoch !== writeEpoch) {
+        return;
+    }
+    if (existing.error) {
+        throw new Error(existing.error.message);
+    }
+    if (!existing.data) {
+        // Conflict reported but the row is not visible to us: leave pending.
+        throw new Error('day snapshot conflict without a visible server row');
+    }
+    await adoptServerSnapshot(db, toLocal(existing.data), epoch);
 };
+
+let retryInFlight: Promise<void> | null = null;
+
+/**
+ * Upload every snapshot still waiting (optionally only one document's).
+ * Single-flight: overlapping triggers (reconnect + open + history) share one
+ * pass instead of racing duplicate uploads of the same row.
+ */
+export const retryPendingSnapshots = (db: ScribblerDb = getDb(), docId?: string): Promise<void> => {
+    if (retryInFlight) {
+        return retryInFlight;
+    }
+    const epoch = writeEpoch;
+    retryInFlight = (async () => {
+        try {
+            // No pending index — the table holds one row per document-day and
+            // is small; a filtered scan is cheaper than a schema version.
+            const pending = await db.annotationSnapshots
+                .filter((row) => row.pending === 1 && isCloudDocId(row.docId) && (!docId || row.docId === docId))
+                .toArray();
+            for (const snapshot of pending) {
+                if (epoch !== writeEpoch) {
+                    return;
+                }
+                try {
+                    await pushSnapshotRemote(db, snapshot);
+                } catch (err) {
+                    console.warn('Snapshot retry failed; will try again', err);
+                }
+            }
+        } finally {
+            retryInFlight = null;
+        }
+    })();
+    return retryInFlight;
+};
+
+let retryInstalled = false;
+
+/**
+ * Retry pending snapshot uploads now and whenever the browser comes back
+ * online. Idempotent; the viewer calls it when a cloud document opens with a
+ * signed-in user, which is the earliest point an upload can succeed.
+ */
+export const installSnapshotRetry = (db: ScribblerDb = getDb()): void => {
+    void retryPendingSnapshots(db).catch(() => undefined);
+    if (retryInstalled || typeof window === 'undefined') {
+        return;
+    }
+    retryInstalled = true;
+    window.addEventListener('online', () => {
+        void retryPendingSnapshots(db).catch(() => undefined);
+    });
+};
+
+/** Pending day snapshots for cloud documents (sign-out counts these). */
+export const countPendingSnapshots = async (db: ScribblerDb = getDb()): Promise<number> =>
+    db.annotationSnapshots.filter((row) => row.pending === 1 && isCloudDocId(row.docId)).count();
 
 /** Cap remote snapshot pull — lesson history UI is recent-first. */
 export const SNAPSHOT_PULL_LIMIT = 30;
 
 const pullSnapshotsRemote = async (db: ScribblerDb, docId: string): Promise<void> => {
+    const epoch = writeEpoch;
     const { data, error } = await getSupabase()
         .from('annotation_snapshots')
         .select('*')
@@ -90,18 +273,17 @@ const pullSnapshotsRemote = async (db: ScribblerDb, docId: string): Promise<void
     if (error) {
         throw new Error(error.message);
     }
-    if (!data || data.length === 0) {
-        return;
+    for (const row of data ?? []) {
+        // Per row, replacing any local snapshot for the same day: a blind
+        // bulkPut would now trip the unique index (and used to keep both).
+        await adoptServerSnapshot(db, toLocal(row), epoch);
     }
-    const rows: LocalAnnotationSnapshot[] = data.map((row) => ({
-        id: row.id,
-        docId: row.document_id,
-        capturedOn: row.captured_on,
-        label: row.label,
-        payload: row.payload as Annotation[],
-        createdAt: row.created_at,
-        createdBy: row.created_by,
-        pending: 0,
-    }));
-    await db.annotationSnapshots.bulkPut(rows);
+};
+
+const isConstraintError = (err: unknown): boolean => {
+    if (!err || typeof err !== 'object') {
+        return false;
+    }
+    const e = err as { name?: string; inner?: { name?: string } };
+    return e.name === 'ConstraintError' || e.inner?.name === 'ConstraintError';
 };

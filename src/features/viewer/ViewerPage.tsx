@@ -28,11 +28,12 @@ import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButt
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
+import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import type { SyncStatus } from '@/sync/syncEngine';
+import type { SyncHold, SyncRejection, SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
 import type { DocumentRow, MemberRole } from '@/types/database';
 import { Badge } from '@/ui/Badge';
@@ -100,6 +101,17 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [state, setState] = useState<CloudDocState | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
+    /**
+     * Marks whose change the server refused for good (rolled back) since the
+     * last dismiss, tagged with the score they belong to: CloudViewer is not
+     * keyed by docId, so a client-side switch to another score must not carry
+     * this one's notice over.
+     */
+    const [rejected, setRejected] = useState<{ docId: string; ids: ReadonlySet<string> } | null>(null);
+    const rejectedCount = rejected?.docId === docId ? rejected.ids.size : 0;
+    /** Changes kept on this device because the score is archived (see SyncHold). */
+    const [held, setHeld] = useState<{ docId: string; pendingMarks: number } | null>(null);
+    const heldCount = held?.docId === docId ? held.pendingMarks : 0;
     const [shareOpen, setShareOpen] = useState(false);
     const [notesOpen, setNotesOpen] = useState(false);
     // Play-along transport: hidden until the reader asks for it. Nothing about
@@ -396,6 +408,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [docId, userId]);
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
+    const onRejected = useCallback(
+        (rejection: SyncRejection) =>
+            setRejected((prev) => ({
+                docId,
+                ids: new Set(prev?.docId === docId ? prev.ids : []).add(rejection.annotationId),
+            })),
+        [docId],
+    );
+    const onHeld = useCallback((hold: SyncHold) => setHeld({ docId, pendingMarks: hold.pendingMarks }), [docId]);
     const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
     // Referentially stable — the review panel's scan effect depends on it.
     const classify = useMemo(() => makeCloudClassifyFn(docId), [docId]);
@@ -557,6 +578,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </Button>
                 </div>
             ) : null}
+            <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
+            <SyncHeldNotice count={heldCount} />
             {staleBytes ? (
                 <div
                     className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
@@ -592,6 +615,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                       canWrite: !readOnly,
                                       isOwner: state.role === 'owner',
                                       onStatus,
+                                      onRejected,
+                                      onHeld,
                                       onPeers,
                                       onDocReplaced,
                                       onScoreAnalysis: applyBroadcast,

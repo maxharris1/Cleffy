@@ -255,8 +255,89 @@ export class ScribblerDb extends Dexie {
             rosterCache: 'userId',
             assignmentsCache: 'userId',
         });
+        // v8 + v9 make the day snapshot unique per [docId+capturedOn], as the
+        // server's unique (document_id, captured_on) already is. Two devices
+        // (or a local capture racing a pull) could each keep their own row for
+        // the same day, so history listed the day twice and the local copy
+        // that lost the server race was never reconciled.
+        //
+        // Two versions because IndexedDB refuses to build a unique index over
+        // rows that violate it — that would abort the upgrade and leave the
+        // database unopenable. v8 keeps the schema and removes the duplicates;
+        // v9 then builds the unique index over rows that satisfy it. Dexie
+        // runs each version's upgrade before applying the next version's
+        // schema, inside the one versionchange transaction.
+        this.version(8)
+            .stores({
+                annotations: 'id, docId, [docId+page], [docId+seq]',
+                ops: '++opId, docId',
+                syncState: 'docId',
+                pdfCache: 'docId',
+                annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+                scoreCache: 'docId',
+                fingeringRegions: 'id, docId, createdAt',
+                entitlements: 'userId',
+                thumbnails: 'docId',
+                libraryList: 'userId',
+                rosterCache: 'userId',
+                assignmentsCache: 'userId',
+            })
+            .upgrade(async (tx) => {
+                const rows = (await tx.table('annotationSnapshots').toArray()) as LocalAnnotationSnapshot[];
+                const losers = pickDuplicateSnapshots(rows).map((row) => row.id);
+                if (losers.length > 0) {
+                    await tx.table('annotationSnapshots').bulkDelete(losers);
+                }
+            });
+        this.version(9).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, &[docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
+        });
     }
 }
+
+/**
+ * The rows to delete so each [docId+capturedOn] keeps one snapshot.
+ *
+ * The keeper is the one most likely to be the server's: a row the server
+ * acknowledged (pending 0) beats one still waiting to upload, then the
+ * earliest capture wins (the server keeps the first insert of the day). A
+ * wrong guess is corrected on the next history pull, which replaces the local
+ * row for a day with the server's.
+ */
+export const pickDuplicateSnapshots = (rows: LocalAnnotationSnapshot[]): LocalAnnotationSnapshot[] => {
+    const groups = new Map<string, LocalAnnotationSnapshot[]>();
+    for (const row of rows) {
+        const key = `${row.docId}\u0000${row.capturedOn}`;
+        const group = groups.get(key);
+        if (group) {
+            group.push(row);
+        } else {
+            groups.set(key, [row]);
+        }
+    }
+    const losers: LocalAnnotationSnapshot[] = [];
+    for (const group of groups.values()) {
+        if (group.length < 2) {
+            continue;
+        }
+        const ranked = [...group].sort(
+            (a, b) => a.pending - b.pending || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+        );
+        losers.push(...ranked.slice(1));
+    }
+    return losers;
+};
 
 let instance: ScribblerDb | null = null;
 

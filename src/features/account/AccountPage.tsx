@@ -5,6 +5,7 @@ import { useOutletContext, useSearchParams } from 'react-router';
 import { initialsOf } from '@/features/account/initials';
 import type { OfflineStorageUsage } from '@/features/account/offlineStorage';
 import { clearOfflineStorage, formatMegabytes, readOfflineStorage } from '@/features/account/offlineStorage';
+import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { HomeScreenPreferences } from '@/features/install/HomeScreenPreferences';
 import {
     displayNameOf,
@@ -277,6 +278,8 @@ export const AccountPage = () => {
             setSigningOut(false);
         }
     };
+    // Uploads (or asks about) unsynced marks first — sign-out clears them.
+    const guardedSignOut = useGuardedSignOut(handleSignOut);
 
     if (!session || (loading && !entitlements)) {
         return <LoadingText className="mt-10">Loading your account…</LoadingText>;
@@ -542,20 +545,22 @@ export const AccountPage = () => {
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Sign out</h2>
                 <p className="mt-2 text-sm text-stone-600">
-                    Signing out clears your cached plan on this device. Downloaded scores stay behind — remove them
-                    above if you share this computer.
+                    Signing out removes your cached plan, downloaded scores and the offline copy of your marks from this
+                    device. Everything stays in your account; changes not yet saved to it are uploaded first.
                 </p>
                 <Button
                     size="sm"
                     variant="secondary"
                     className="mt-3"
-                    disabled={signingOut}
-                    onClick={() => void handleSignOut()}
+                    disabled={signingOut || guardedSignOut.checking}
+                    onClick={() => void guardedSignOut.requestSignOut()}
                 >
-                    {signingOut ? 'Signing out…' : 'Sign out'}
+                    {guardedSignOut.checking ? 'Saving changes…' : signingOut ? 'Signing out…' : 'Sign out'}
                 </Button>
                 {signOutError ? <ErrorText className="mt-2">{signOutError}</ErrorText> : null}
             </section>
+
+            {guardedSignOut.dialog}
 
             {clearOpen ? (
                 <ConfirmDialog

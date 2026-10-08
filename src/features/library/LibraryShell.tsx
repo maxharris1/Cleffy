@@ -3,6 +3,7 @@ import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
+import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
@@ -139,6 +140,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         await clearCachedEntitlements(userId).catch(() => undefined);
         await signOut();
     };
+    // Uploads (or asks about) unsynced marks first — sign-out clears them.
+    const { requestSignOut, checking: savingBeforeSignOut, dialog: signOutDialog } = useGuardedSignOut(handleSignOut);
 
     /**
      * A quota refusal is not a failure to report as one: it gets its own state so
@@ -369,11 +372,20 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
                     <div className="ml-auto flex shrink-0 items-center gap-2">
                         <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
+                        {/* The menu closes on click, and the upload before sign-out can
+                            take seconds on a slow connection: say what is happening
+                            where the menu was, or the click looks like it did nothing. */}
+                        {savingBeforeSignOut ? (
+                            <span role="status" className="text-sm text-stone-600">
+                                Saving changes…
+                            </span>
+                        ) : null}
                         <AccountMenu
                             userLabel={userLabel}
                             userEmail={userEmail}
                             tier={tier}
-                            onSignOut={() => void handleSignOut()}
+                            signingOut={savingBeforeSignOut}
+                            onSignOut={() => void requestSignOut()}
                         />
                     </div>
                 </div>
@@ -387,6 +399,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <ProgressBar
                         indeterminate
                         label="Importing from IMSLP"
+                        className="shell-progress absolute inset-x-0 bottom-0"
+                    />
+                ) : savingBeforeSignOut ? (
+                    <ProgressBar
+                        indeterminate
+                        label="Saving changes before signing out"
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />
                 ) : null}
@@ -414,6 +432,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} />
                 </Suspense>
             ) : null}
+
+            {signOutDialog}
         </main>
     );
 };
@@ -485,11 +505,14 @@ const AccountMenu = ({
     userLabel,
     userEmail,
     tier,
+    signingOut = false,
     onSignOut,
 }: {
     userLabel: string;
     userEmail: string;
     tier: EffectiveTier;
+    /** The pre-sign-out upload is running; a second click would only queue another. */
+    signingOut?: boolean;
     onSignOut: () => void;
 }) => {
     // The route the menu was opened from, rather than a plain boolean: navigating
@@ -576,13 +599,14 @@ const AccountMenu = ({
                     <button
                         type="button"
                         role="menuitem"
+                        disabled={signingOut}
                         onClick={() => {
                             close();
                             onSignOut();
                         }}
-                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5"
+                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5 disabled:cursor-default disabled:text-stone-400 disabled:hover:bg-transparent"
                     >
-                        Sign out
+                        {signingOut ? 'Saving changes…' : 'Sign out'}
                     </button>
                 </div>
             ) : null}

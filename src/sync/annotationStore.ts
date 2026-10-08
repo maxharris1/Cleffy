@@ -38,28 +38,64 @@ export class AnnotationStore {
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
     private onDirty: (() => void) | null = null;
+    private loading: Promise<void> | null = null;
+    private loaded = false;
 
     constructor(
         private db: ScribblerDb,
         readonly docId: string,
     ) {}
 
-    /** Hydrate the in-memory map from the Dexie mirror. Call once on document open. */
-    async load(): Promise<void> {
+    /**
+     * Hydrate the in-memory map from the Dexie mirror. Idempotent: every caller
+     * (the viewport, the sync engine, a remote apply) shares one read.
+     *
+     * The read is async, and the viewport opens the document and starts the
+     * sync engine in the same tick. Hydration therefore MERGES instead of
+     * replacing: a row already in memory was put there after the read began —
+     * a stroke drawn while the mirror was still loading — and is newer than
+     * what the read returned. Remote rows never race it: applyRemoteBatch,
+     * adoptServerRow and discardLocal wait for hydration first, so their LWW
+     * checks see the mirror's seq rather than an empty map (which used to let
+     * a pull-overlap row older than the mirror overwrite it in Dexie).
+     */
+    load(): Promise<void> {
+        if (!this.loading) {
+            this.loading = this.hydrate().catch((err: unknown) => {
+                // Let the next caller try again instead of caching the failure.
+                this.loading = null;
+                throw err;
+            });
+        }
+        return this.loading;
+    }
+
+    private async hydrate(): Promise<void> {
         const rows = await this.db.annotations.where('docId').equals(this.docId).toArray();
-        this.pages.clear();
-        this.byId.clear();
+        const touched = new Set<number>();
         for (const row of rows) {
+            if (this.byId.has(row.id)) {
+                continue;
+            }
             const { pending: _pending, ...annotation } = row;
             this.byId.set(annotation.id, annotation);
             if (!annotation.deletedAt) {
                 this.pageMap(annotation.page).set(annotation.id, annotation);
+                touched.add(annotation.page);
             }
         }
-        for (const page of this.pages.keys()) {
+        this.loaded = true;
+        for (const page of touched) {
             this.notifyPage(page);
         }
         this.notifyMeta();
+    }
+
+    /** Resolve once the mirror is in memory; no extra yield once it is. */
+    private async ensureLoaded(): Promise<void> {
+        if (!this.loaded) {
+            await this.load();
+        }
     }
 
     /** Live (non-deleted) annotations on a page. Do not mutate. */
@@ -289,6 +325,7 @@ export class AnnotationStore {
      * flush acks, at which point the server re-broadcasts a newer seq.
      */
     async applyRemoteBatch(remotes: Annotation[], pendingIds: ReadonlySet<string>): Promise<void> {
+        await this.ensureLoaded();
         const touchedPages = new Set<number>();
         const rows: LocalAnnotation[] = [];
         for (const remote of remotes) {
@@ -323,6 +360,7 @@ export class AnnotationStore {
      * theirs, and treats another account's marks as its own.
      */
     async markSynced(id: string, createdBy: string | null): Promise<void> {
+        await this.ensureLoaded();
         const current = this.byId.get(id);
         if (current && createdBy && !current.createdBy) {
             this.applyMemory({ ...current, createdBy });
@@ -341,14 +379,36 @@ export class AnnotationStore {
 
     /** Remove an annotation the server rejected/never had (sync repair path). */
     async discardLocal(id: string): Promise<void> {
+        await this.ensureLoaded();
         const existing = this.byId.get(id);
-        if (!existing) {
-            return;
+        if (existing) {
+            this.byId.delete(id);
+            this.pageMap(existing.page).delete(id);
         }
-        this.byId.delete(id);
-        this.pageMap(existing.page).delete(id);
+        // The mirror row goes even when memory never had it, or it would
+        // come back on the next open.
         await this.db.annotations.delete(id);
-        this.notifyPage(existing.page);
+        if (existing) {
+            this.notifyPage(existing.page);
+        }
+    }
+
+    /**
+     * Sync repair: the server refused a local op, so its row is the truth.
+     * Unlike applyRemoteBatch this ignores the seq comparison — a refused
+     * local edit keeps the seq it started from, which equals the server's,
+     * and LWW would otherwise keep the edit the server just refused.
+     */
+    async adoptServerRow(remote: Annotation): Promise<void> {
+        await this.ensureLoaded();
+        const prev = this.byId.get(remote.id);
+        if (prev && prev.page !== remote.page) {
+            this.pageMap(prev.page).delete(remote.id);
+            this.notifyPage(prev.page);
+        }
+        this.applyMemory(remote);
+        await this.db.annotations.put({ ...remote, pending: 0 });
+        this.notifyPage(remote.page);
     }
 
     /** Group several ops (e.g. an eraser drag) into one undo entry. Nests. */
@@ -379,13 +439,26 @@ export class AnnotationStore {
         );
     }
 
+    /**
+     * Undo the newest entry that still has something to undo. An entry whose
+     * every op targets a mark a collaborator has since deleted is dropped and
+     * the next one is tried, so one press always does something visible
+     * instead of silently spending itself on a mark that is already gone.
+     */
     async undoLast(): Promise<void> {
         if (this.historyOverlay) {
             return; // read-only while an overlay is shown — don't consume the entry
         }
-        const inverses = await this.replayEntry(this.undo.popUndo());
-        if (inverses) {
-            this.undo.pushRedoEntry(inverses);
+        for (;;) {
+            const entry = this.undo.popUndo();
+            if (!entry) {
+                break;
+            }
+            const inverses = await this.replayEntry(entry);
+            if (inverses) {
+                this.undo.pushRedoEntry(inverses);
+                break;
+            }
         }
         this.notifyMeta();
     }
@@ -394,9 +467,16 @@ export class AnnotationStore {
         if (this.historyOverlay) {
             return;
         }
-        const inverses = await this.replayEntry(this.undo.popRedo());
-        if (inverses) {
-            this.undo.pushUndoEntryRaw(inverses);
+        for (;;) {
+            const entry = this.undo.popRedo();
+            if (!entry) {
+                break;
+            }
+            const inverses = await this.replayEntry(entry);
+            if (inverses) {
+                this.undo.pushUndoEntryRaw(inverses);
+                break;
+            }
         }
         this.notifyMeta();
     }
@@ -467,8 +547,13 @@ export class AnnotationStore {
                 return { commit: { type: 'restore', annotation }, inverse: { type: 'delete', id: op.id } };
             }
             case 'update': {
+                // A tombstone here means a collaborator deleted the mark after
+                // this entry was recorded (a local delete would have pushed its
+                // own restore, replayed before this op). Replaying the old
+                // fields — deletedAt null among them — would resurrect a mark
+                // someone else removed, so the op is skipped and dropped.
                 const prev = this.byId.get(op.id);
-                if (!prev) {
+                if (!prev || prev.deletedAt) {
                     return null;
                 }
                 const annotation = { ...op.annotation, updatedAt: nowIso() };
