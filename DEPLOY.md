@@ -695,6 +695,77 @@ The signature gate was checked against the deployed endpoint, not only in tests:
 unsigned → `missing_header`, forged → `signature_mismatch`, stale timestamp →
 `timestamp_out_of_tolerance`, and no row was written by any of them.
 
+## 8. Auth password policy — must be set on both projects
+
+Every new password is checked in the browser (and in `student-claim`) against
+`supabase/functions/_shared/passwordPolicy.ts`: at least 8 characters, at least
+one ASCII letter and one digit, at most 72 bytes. GoTrue is the authority, and
+`config.toml` only configures the local stack (and the `dev` branch, if its
+deploy applies config). Set the hosted projects explicitly, production AND the
+`dev` branch, with a Management API token:
+
+```bash
+for ref in jibgwgosihadbjgxdsfe qdbnlrgylelelvwbkvnm; do
+  curl -sS -X PATCH "https://api.supabase.com/v1/projects/$ref/config/auth" \
+    -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"password_min_length": 8, "password_required_characters": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789"}'
+done
+```
+
+`password_required_characters` takes the character SETS, colon-separated: the
+string above is the API's enum value for "letters and digits" (one set of
+letters, one of digits) — the same value the CLI writes for
+`password_requirements = "letters_digits"`. Check it with a `GET` on the same
+path before and after; the dashboard (Authentication → Policies → Password
+strength) shows it as "Letters and digits". Existing accounts keep working:
+GoTrue checks strength only where a password is set, never at sign-in, and the
+app does the same.
+
+Leaked-password protection (`"password_hibp_enabled": true` in the same
+payload) is flagged by the security advisor on both projects. It needs a paid
+plan; when it is on, a breached password is refused with
+`weak_password`/`reasons: ["pwned"]`, which `mapAuthError` already words.
+
+## 9. Student sign-in limiter — migration BEFORE the functions
+
+`student-login` now limits attempts per username
+(`supabase/functions/_shared/loginThrottle.ts`) through the
+`begin_login_attempt` / `clear_login_attempts` / `clear_login_account` RPCs
+created by `20261007120501_student_login_throttle.sql`. Two limits:
+
+- **Per username + address**: 5 tries, then locks of 30 s doubling to 15 min
+  for that address only. Someone hammering a classmate's username locks out
+  their own address, not the classmate signing in from elsewhere.
+- **Per username, all addresses**: 30 attempts per hour, to cap guessing from
+  many addresses. No real student gets near it.
+
+The limiter fails CLOSED: if the RPCs are missing, every username sign-in is
+refused with "Too many sign-in attempts". So on each project, apply the
+migration first, then deploy all three functions that use it
+(`student-provision` and `student-claim` clear a username's limits on a
+teacher's reset and on a successful claim):
+
+```bash
+supabase functions deploy student-login --no-verify-jwt
+supabase functions deploy student-claim --no-verify-jwt
+supabase functions deploy student-provision
+```
+
+Keys are HMAC-SHA-256 of the username (and of the client address) under
+`LOGIN_THROTTLE_SECRET` if that function secret is set, otherwise under the
+service-role key, so the table holds neither names nor addresses. A dedicated
+secret is optional and recommended
+(`supabase secrets set LOGIN_THROTTLE_SECRET=$(openssl rand -hex 32)`); setting
+or rotating it, or rotating the service-role key while it is unset, simply
+resets all counters.
+
+A student locked out at the account ceiling waits for the hour to end, or the
+teacher issues a fresh setup card ('reset'), which clears every limit on that
+username; claiming the card clears them again for the name the student picks.
+Because the keys are HMAC'd, a lock cannot be lifted by hand from the table
+without the secret; use the reset.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from

@@ -1,9 +1,17 @@
+import { PASSWORD_HINT } from '../../../supabase/functions/_shared/passwordPolicy';
+
 /** Friendly copy for common Supabase Auth failures. */
 
 const INVALID_CREDENTIALS = 'Email or password is incorrect.';
 const USER_EXISTS = 'An account with this email already exists. Try signing in.';
 const RATE_LIMITED = 'Too many attempts. Try again later.';
 const LINK_EXPIRED = 'This link has expired. Request a new one.';
+// The server's refusal of a password the form let through — which should only
+// happen when the hosted policy and passwordPolicy.ts have drifted apart, or
+// the password is in a breach corpus (see weakPasswordMessage).
+const WEAK_PASSWORD = `That password is too weak. ${PASSWORD_HINT}`;
+const PWNED_PASSWORD = 'That password has appeared in a data breach. Choose a different one.';
+const SAME_PASSWORD = 'Choose a password different from your current one.';
 
 /** Closed map of Auth API `error.code` → product copy. */
 const BY_CODE: Readonly<Record<string, string>> = {
@@ -12,6 +20,7 @@ const BY_CODE: Readonly<Record<string, string>> = {
     over_email_send_rate_limit: RATE_LIMITED,
     over_request_rate_limit: RATE_LIMITED,
     otp_expired: LINK_EXPIRED,
+    same_password: SAME_PASSWORD,
 };
 
 /**
@@ -55,8 +64,21 @@ const readAuthFields = (err: unknown): { code: string; message: string } => {
  * Map a thrown Auth error or auth-redirect `error_description` string to
  * user-facing text. Unknown errors use `fallback` (no raw vendor passthrough).
  */
+/**
+ * AuthWeakPasswordError carries WHY in `reasons` ('length', 'characters',
+ * 'pwned'). A breached password meets every rule the hint states, so repeating
+ * the hint at it would be a refusal nobody can act on.
+ */
+const weakPasswordMessage = (err: unknown): string | null => {
+    const reasons = err && typeof err === 'object' ? (err as { reasons?: unknown }).reasons : undefined;
+    return Array.isArray(reasons) && reasons.includes('pwned') ? PWNED_PASSWORD : null;
+};
+
 export const mapAuthError = (err: unknown, fallback = 'Something went wrong.'): string => {
     const { code, message } = readAuthFields(err);
+    if (code === 'weak_password') {
+        return weakPasswordMessage(err) ?? WEAK_PASSWORD;
+    }
     if (code && BY_CODE[code]) {
         return BY_CODE[code];
     }

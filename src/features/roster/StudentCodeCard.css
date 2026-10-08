@@ -1,0 +1,50 @@
+/*
+ * Print rules for the setup card (see StudentCodeCard.tsx).
+ *
+ * A stylesheet rather than the inline <style> element they used to be: the
+ * production Content-Security-Policy (vercel.json) allows style-src 'self' and
+ * no inline style blocks, so an inline <style> would simply not apply and the
+ * whole roster page would print.
+ *
+ * Once loaded, this file stays in the document for the rest of the session, so
+ * the one rule that reaches outside the card is gated on the card being on the
+ * page: printing anything else afterwards must not come out blank.
+ */
+@media print {
+    @page {
+        margin: 16mm;
+    }
+
+    body:has(.student-code-card) > #root {
+        visibility: hidden;
+    }
+
+    .student-code-card,
+    .student-code-card * {
+        visibility: visible;
+    }
+
+    .student-code-card {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 100%;
+        margin: 0;
+        padding: 14mm 10mm;
+        background: #fff;
+        border: 1px solid #1c1917;
+        box-shadow: none;
+    }
+
+    /* Ink on white: the on-screen stone greys are too light to print, and no
+       printer is asked to render a background. */
+    .student-code-card-name,
+    .student-code-card-code {
+        color: #000;
+    }
+
+    .student-code-card-label,
+    .student-code-card-hint {
+        color: #3f3f46;
+    }
+}

@@ -195,10 +195,14 @@ enable_anonymous_sign_ins = true
 # Allow/disallow testing manual linking of accounts
 enable_manual_linking = false
 # Passwords shorter than this value will be rejected as weak. Minimum 6, recommended 8 or more.
-minimum_password_length = 6
+# Mirrored by supabase/functions/_shared/passwordPolicy.ts, which every new-password
+# form and student-claim validate against first (tests/auth/passwordPolicy.test.ts
+# holds the two together). The hosted projects are set through the Management API —
+# see DEPLOY.md "Auth password policy"; this file only configures the local stack.
+minimum_password_length = 8
 # Passwords that do not meet the following requirements will be rejected as weak. Supported values
 # are: `letters_digits`, `lower_upper_letters_digits`, `lower_upper_letters_digits_symbols`
-password_requirements = ""
+password_requirements = "letters_digits"
 
 # Configure passkey sign-ins.
 # [auth.passkey]
@@ -463,8 +467,10 @@ verify_jwt = true
 # set a username and a password of the student's own, and student-login takes
 # those from then on. Open is not the same as an oracle — both are hard
 # rate-limited (60/min per IP; student-claim guards ~59-bit codes, student-login
-# a user-chosen password behind GoTrue's own per-account throttling) and both
-# answer every failure a guess can reach with one indistinguishable 401. Deploy
+# a user-chosen password behind per-username limits — a backoff per username
+# and address plus a ceiling per username — since GoTrue's own throttling only
+# ever sees the function's IP) and both answer every
+# failure a guess can reach with one indistinguishable 401. Deploy
 # with the flag, as with stripe-webhook above:
 # `supabase functions deploy student-claim --no-verify-jwt`
 # `supabase functions deploy student-login --no-verify-jwt`

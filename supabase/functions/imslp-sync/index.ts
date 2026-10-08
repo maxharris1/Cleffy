@@ -9,6 +9,7 @@ import {
     type CategorySyncRow,
 } from '../_shared/categorySync.ts';
 import { mwFetch, serviceClient } from '../_shared/imslp.ts';
+import { secretsEqual } from '../_shared/secretCompare.ts';
 import {
     ALL_TAXONOMY_CATEGORIES,
     COMPOSER_FACETS,
@@ -49,18 +50,20 @@ const SYNC_CATEGORIES = categoriesToSync(
     INSTRUMENT_BY_ID['piano']?.category,
 );
 
-const authorized = (req: Request): boolean => {
-    const syncSecret = Deno.env.get('IMSLP_SYNC_SECRET');
-    const headerSecret = req.headers.get('x-imslp-sync-secret');
-    if (syncSecret && headerSecret && headerSecret === syncSecret) {
-        return true;
-    }
-    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+/**
+ * Either credential, each compared in constant time (secretCompare.ts): this
+ * endpoint is open to the internet with verify_jwt off, so the comparison is
+ * the whole gate, and `===` would let a caller recover the secret from timing.
+ * Both are always evaluated, so which one matched is not observable either.
+ */
+const authorized = async (req: Request): Promise<boolean> => {
     const auth = req.headers.get('authorization') ?? '';
-    if (serviceKey && auth === `Bearer ${serviceKey}`) {
-        return true;
-    }
-    return false;
+    const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : null;
+    const [secretOk, serviceOk] = await Promise.all([
+        secretsEqual(req.headers.get('x-imslp-sync-secret'), Deno.env.get('IMSLP_SYNC_SECRET')),
+        secretsEqual(bearer, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')),
+    ]);
+    return secretOk || serviceOk;
 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,7 +75,7 @@ Deno.serve(async (req) => {
     if (req.method !== 'POST') {
         return jsonResponse({ error: 'Method not allowed' }, 405);
     }
-    if (!authorized(req)) {
+    if (!(await authorized(req))) {
         return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 

@@ -1,5 +1,4 @@
-import { z } from 'zod';
-
+import { z } from '@/lib/zod';
 import { encodeCropJpeg, encodePageJpeg } from '@/features/import/pageRaster';
 import { getSupabase, requireSupabaseConfig } from '@/lib/supabase';
 import type { ClassifyFn, ClassifyResult } from '@/features/import/importTypes';

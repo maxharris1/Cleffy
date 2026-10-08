@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '@/lib/zod';
 
 /**
  * ScoreData — the derived musical model of a chart, produced by the OMR

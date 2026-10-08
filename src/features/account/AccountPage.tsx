@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useOutletContext, useSearchParams } from 'react-router';
 
 import { initialsOf } from '@/features/account/initials';
+import { mapAuthError } from '@/features/auth/authErrors';
 import type { OfflineStorageUsage } from '@/features/account/offlineStorage';
 import { clearOfflineStorage, formatMegabytes, readOfflineStorage } from '@/features/account/offlineStorage';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
@@ -31,15 +32,18 @@ import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { TextField } from '@/ui/TextField';
 
+import {
+    PASSWORD_HINT,
+    passwordProblem,
+    passwordProblemMessage,
+} from '../../../supabase/functions/_shared/passwordPolicy';
+
 const METERED: Array<{ metric: UsageMetric; label: string }> = [
     { metric: 'omr_runs', label: 'Play-along analyses' },
     { metric: 'vision_reads', label: 'AI fingering reads' },
     { metric: 'smart_imports', label: 'Smart imports' },
     { metric: 'pdf_exports', label: 'PDF exports' },
 ];
-
-/** Shortest password Supabase will accept by default; stated, not silently enforced. */
-const MIN_PASSWORD_LENGTH = 8;
 
 const SECTION = 'mt-8 border-t border-stone-300/50 pt-6';
 const SECTION_HEADING = 'text-sm font-medium uppercase tracking-[0.08em] text-stone-600';
@@ -226,8 +230,11 @@ export const AccountPage = () => {
             setPasswordError('Enter a new password.');
             return;
         }
-        if (password.length < MIN_PASSWORD_LENGTH) {
-            setPasswordError(`Use at least ${MIN_PASSWORD_LENGTH} characters.`);
+        // The same policy GoTrue enforces (passwordPolicy.ts), checked first so
+        // the refusal names the rule instead of arriving as a server error.
+        const problem = passwordProblem(password);
+        if (problem) {
+            setPasswordError(passwordProblemMessage(problem));
             return;
         }
         if (password !== confirmPassword) {
@@ -242,7 +249,7 @@ export const AccountPage = () => {
             setConfirmPassword('');
             setPasswordSaved(true);
         } catch (err) {
-            setPasswordError(err instanceof Error ? err.message : 'Could not change your password.');
+            setPasswordError(mapAuthError(err, 'Could not change your password.'));
         } finally {
             setPasswordBusy(false);
         }
@@ -379,9 +386,7 @@ export const AccountPage = () => {
                     onSubmit={(event) => void changePassword(event)}
                 >
                     <h3 className={SUB_HEADING}>Change password</h3>
-                    <p className="mt-1 text-xs text-stone-500">
-                        At least {MIN_PASSWORD_LENGTH} characters. You stay signed in on this device.
-                    </p>
+                    <p className="mt-1 text-xs text-stone-500">{PASSWORD_HINT} You stay signed in on this device.</p>
                     <div className="mt-3 max-w-sm">
                         <TextField
                             id="account-new-password"
