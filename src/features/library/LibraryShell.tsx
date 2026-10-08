@@ -5,6 +5,7 @@ import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
+import { LEGAL_ENTITY } from '@/features/legal/legalContent';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
@@ -573,6 +574,14 @@ const AccountMenu = ({
                     >
                         Account
                     </Link>
+                    <a
+                        role="menuitem"
+                        href={`mailto:${LEGAL_ENTITY.contactEmail}`}
+                        onClick={close}
+                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
+                    >
+                        Help &amp; support
+                    </a>
                     <button
                         type="button"
                         role="menuitem"
@@ -584,6 +593,25 @@ const AccountMenu = ({
                     >
                         Sign out
                     </button>
+                    <div className="my-1 border-t border-stone-200" />
+                    <div className="flex gap-1 px-1.5 pb-0.5">
+                        <Link
+                            role="menuitem"
+                            to="/privacy"
+                            onClick={close}
+                            className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
+                        >
+                            Privacy
+                        </Link>
+                        <Link
+                            role="menuitem"
+                            to="/terms"
+                            onClick={close}
+                            className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
+                        >
+                            Terms
+                        </Link>
+                    </div>
                 </div>
             ) : null}
         </div>

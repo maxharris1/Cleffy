@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 
 import { RequireGuest } from '@/features/auth/AuthGates';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { HeroDemo } from '@/features/marketing/HeroDemo';
 import { ProductShowcase } from '@/features/marketing/ProductShowcase';
@@ -46,6 +47,7 @@ const Footer = () => (
             </p>
             <LocalOpenControl label="Open a score locally" subtle />
         </div>
+        <LegalLinks withContact className="mt-4 justify-center sm:justify-start" />
     </footer>
 );
 

@@ -48,6 +48,10 @@ const AssignmentsPage = lazy(() =>
     import('@/features/student/AssignmentsPage').then((m) => ({ default: m.AssignmentsPage })),
 );
 
+// Lazy: the legal pages are long, rarely read, and reached from links only.
+const PrivacyPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.PrivacyPage })));
+const TermsPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.TermsPage })));
+
 // Lazy: the roster is a Teacher/Academy-only surface — personal accounts never open it.
 const RosterPage = lazy(() => import('@/features/roster/RosterPage').then((m) => ({ default: m.RosterPage })));
 
@@ -203,6 +207,24 @@ export const AppRoutes = () => {
                 }
             />
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
+            {/* Public and ungated: linked from the sign-up form, the pricing
+                dialog and the app's menus, so they render with or without a session. */}
+            <Route
+                path="/privacy"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <PrivacyPage />
+                    </Suspense>
+                }
+            />
+            <Route
+                path="/terms"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <TermsPage />
+                    </Suspense>
+                }
+            />
             <Route path="*" element={<NotFoundPage />} />
         </Routes>
     );

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import { loginStudent } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -114,6 +115,7 @@ const CredentialEntry = () => {
                     I am a teacher
                 </Link>
             </p>
+            <LegalLinks className="mt-6 justify-center" />
         </BrandShell>
     );
 };

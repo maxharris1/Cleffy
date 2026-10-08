@@ -151,3 +151,21 @@ describe('PricingDialog', () => {
         expect(screen.getByText(/Students never pay/)).toBeInTheDocument();
     });
 });
+
+describe('PricingDialog terms', () => {
+    beforeEach(configurePrices);
+
+    afterEach(() => {
+        cleanup();
+        vi.unstubAllEnvs();
+    });
+
+    it('links the Terms and Privacy Policy in a new tab and says plans renew', () => {
+        render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
+        expect(screen.getByText(/renew automatically until you cancel/)).toBeInTheDocument();
+        const terms = screen.getByRole('link', { name: 'Terms of Service' });
+        expect(terms).toHaveAttribute('href', '/terms');
+        expect(terms).toHaveAttribute('target', '_blank');
+        expect(screen.getByRole('link', { name: 'Privacy Policy' })).toHaveAttribute('href', '/privacy');
+    });
+});

@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router';
 
 import { RequireStudent } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import { fetchMyAssignments, fetchMyRosterProfile, type AssignedScore } from '@/features/student/studentApi';
 import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
@@ -136,6 +137,15 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                         body="Your teacher will assign your pieces."
                     />
                 ) : null}
+
+                {/* delete-account refuses a provisioned student (their teacher
+                    created and controls the account), so say where to go instead. */}
+                <footer className="mt-16 border-t border-stone-300/50 pt-4">
+                    <p className="text-xs text-stone-500">
+                        Your teacher looks after this account. To have it deleted, ask your teacher.
+                    </p>
+                    <LegalLinks withContact className="mt-2" />
+                </footer>
             </div>
         </main>
     );

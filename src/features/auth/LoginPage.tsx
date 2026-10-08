@@ -4,6 +4,7 @@ import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { parseAuthNext } from '@/features/auth/authRedirect';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { signInWithPassword } from '@/features/auth/session';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -36,12 +37,15 @@ const LoginForm = () => {
                     </div>
                 }
                 footer={
-                    <p className="mt-6 text-center text-sm text-stone-600">
-                        No account yet?{' '}
-                        <Link to="/register" className={linkClassName}>
-                            Create one
-                        </Link>
-                    </p>
+                    <>
+                        <p className="mt-6 text-center text-sm text-stone-600">
+                            No account yet?{' '}
+                            <Link to="/register" className={linkClassName}>
+                                Create one
+                            </Link>
+                        </p>
+                        <LegalLinks className="mt-6 justify-center" />
+                    </>
                 }
                 onSubmit={async ({ email, password }) => {
                     await signInWithPassword(email, password);

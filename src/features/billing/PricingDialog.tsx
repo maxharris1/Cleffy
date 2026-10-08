@@ -8,6 +8,7 @@ import {
     priceFor,
     type BillingInterval,
 } from '@/features/billing/pricing';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import type { EffectiveTier } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -171,6 +172,11 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                 </div>
 
                 {error ? <ErrorText className="mt-4">{error}</ErrorText> : null}
+
+                <p className="mt-4 text-xs text-stone-500">
+                    Plans renew automatically until you cancel, which you can do at any time from your Account page.
+                </p>
+                <AgreementNote action="subscribing" className="mt-1" />
 
                 <p className="mt-4 text-xs text-stone-500">
                     Students never pay and never need an account — share links keep working on every plan.
