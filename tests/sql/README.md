@@ -12,7 +12,11 @@ and the realtime topic split from
   `storage_path`, rewriting a share link's token / score / author, pointing an
   import's `backup_path` at another score, handing a tag to another user,
   moving a play-along analysis, and broadcasting on the receive-only
-  `doc-db:{id}` realtime topic.
+  `doc-db:{id}` realtime topic. Client-supplied timestamps are shown replaced
+  or clamped: an annotation's `created_at` is kept inside the score's lifetime,
+  and `created_at` (plus `updated_at` where the table has one) is the server
+  clock on documents, share links, imports, snapshots, tags, practice notes and
+  play-along requests.
 - **Client paths** — every write the app makes still succeeds: create score,
   rename, page count, content/thumbnail revisions, share link create / redeem /
   revoke, annotation create (upsert and `insert_annotations_batch`), patch

@@ -159,8 +159,9 @@ export type AnnotationRow = {
 };
 
 /**
- * created_by must be the caller (annotations_insert); a created_at later than
- * the server clock is clamped to it. seq / updated_at are server-stamped.
+ * created_by must be the caller (annotations_insert); created_at is clamped
+ * into [the score's created_at, server clock] (annotations_guard_columns).
+ * seq / updated_at are server-stamped.
  */
 export type AnnotationInsert = {
     id: string;

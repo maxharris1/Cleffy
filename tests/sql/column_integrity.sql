@@ -390,6 +390,14 @@ select pg_temp.allowed (
 -- ===========================================================================
 -- annotations — create / batch create / patch / batch patch / tombstone
 -- ===========================================================================
+-- now() is fixed for the whole transaction, so D1 was "created" at now(). Age
+-- it a day (as postgres) so a mark drawn offline an hour ago is legitimately
+-- inside the score's lifetime, which is the annotation created_at floor.
+select pg_temp.act_as_server ();
+
+update public.documents set created_at = now() - interval '1 day'
+where id = 'c1ef0000-0000-4000-8000-0000000000d1';
+
 select pg_temp.act_as ('c1ef0000-0000-4000-8000-0000000000a2');
 
 select pg_temp.allowed (
@@ -414,6 +422,21 @@ select pg_temp.holds (
     'annotations: an offline created_at in the past is kept',
     $q$select created_at = now() - interval '1 hour' from public.annotations
        where id = 'c1ef0000-0000-4000-8000-0000000000b1'$q$
+);
+
+select pg_temp.allowed (
+    'annotations: a mark dated before its score existed is accepted ...',
+    $q$insert into public.annotations (id, document_id, page, kind, color, payload, created_by, created_at)
+       values ('c1ef0000-0000-4000-8000-0000000000b9', 'c1ef0000-0000-4000-8000-0000000000d1', 0, 'stroke',
+               '#000', '{"pts":[0,0,1],"w":0.01}', 'c1ef0000-0000-4000-8000-0000000000a2', '1970-01-01')
+       on conflict (id) do nothing$q$,
+    1
+);
+
+select pg_temp.holds (
+    'annotations: ... with created_at clamped up to the score''s created_at',
+    $q$select created_at = now() - interval '1 day' from public.annotations
+       where id = 'c1ef0000-0000-4000-8000-0000000000b9'$q$
 );
 
 select pg_temp.allowed (
@@ -747,6 +770,19 @@ select pg_temp.allowed (
 );
 
 select pg_temp.allowed (
+    'tags: a forged created_at on insert is accepted ...',
+    $q$insert into public.library_tags (id, user_id, name, created_at)
+       values ('c1ef0000-0000-4000-8000-0000000000e3', 'c1ef0000-0000-4000-8000-0000000000a2', 'Backdated',
+               '2001-01-01')$q$,
+    1
+);
+
+select pg_temp.holds (
+    'tags: ... and replaced by the server clock',
+    $q$select created_at = now() from public.library_tags where id = 'c1ef0000-0000-4000-8000-0000000000e3'$q$
+);
+
+select pg_temp.allowed (
     'tags: renames it (renameTag)',
     $q$update public.library_tags set name = 'Lessons 2' where id = 'c1ef0000-0000-4000-8000-0000000000e1'$q$,
     1
@@ -850,6 +886,20 @@ select pg_temp.allowed (
 );
 
 select pg_temp.allowed (
+    'notes: forged created_at/updated_at on insert are accepted ...',
+    $q$insert into public.practice_notes (id, document_id, author_id, body, created_at, updated_at)
+       values ('c1ef0000-0000-4000-8000-0000000000f2', 'c1ef0000-0000-4000-8000-0000000000d1',
+               'c1ef0000-0000-4000-8000-0000000000a1', 'Dated note', '2001-01-01', '2999-01-01')$q$,
+    1
+);
+
+select pg_temp.holds (
+    'notes: ... and replaced by the server clock',
+    $q$select created_at = now() and updated_at = now() from public.practice_notes
+       where id = 'c1ef0000-0000-4000-8000-0000000000f2'$q$
+);
+
+select pg_temp.allowed (
     'notes: edits its body',
     $q$update public.practice_notes set body = 'Bars 1-16' where id = 'c1ef0000-0000-4000-8000-0000000000f1'$q$,
     1
@@ -875,8 +925,23 @@ select pg_temp.act_as ('c1ef0000-0000-4000-8000-0000000000a2');
 
 select pg_temp.allowed (
     'analyses: editor requests an analysis (score-analyze upsert)',
+    $q$insert into public.score_analyses (document_id, status, created_by, created_at, updated_at)
+       values ('c1ef0000-0000-4000-8000-0000000000d1', 'pending', 'c1ef0000-0000-4000-8000-0000000000a2',
+               '2001-01-01', '2999-01-01')
+       on conflict (document_id) do update set status = excluded.status$q$,
+    1
+);
+
+select pg_temp.holds (
+    'analyses: a client-dated request is stamped with the server clock',
+    $q$select created_at = now() and updated_at = now() from public.score_analyses
+       where document_id = 'c1ef0000-0000-4000-8000-0000000000d1'$q$
+);
+
+select pg_temp.allowed (
+    'analyses: a retry upsert onto the existing row still works',
     $q$insert into public.score_analyses (document_id, status, created_by)
-       values ('c1ef0000-0000-4000-8000-0000000000d1', 'pending', 'c1ef0000-0000-4000-8000-0000000000a2')
+       values ('c1ef0000-0000-4000-8000-0000000000d1', 'failed', 'c1ef0000-0000-4000-8000-0000000000a2')
        on conflict (document_id) do update set status = excluded.status$q$,
     1
 );

@@ -4459,13 +4459,16 @@ grant execute on function public.imslp_sync_tick () to service_role;
 --
 -- On INSERT, created_by is already pinned by annotations_insert. created_at is
 -- client-supplied on purpose (an offline mark keeps the time it was drawn), but
--- never later than the server clock: a future timestamp is clamped rather than
--- refused, because a device whose clock runs fast is not an attacker and a
--- refused create would be discarded by the outbox.
+-- kept between the score's own created_at and the server clock: nobody drew on
+-- a score before it existed or in the future. Out-of-range values are clamped
+-- rather than refused, because a device whose clock is wrong is not an attacker
+-- and a refused create would be discarded by the outbox. (created_at only
+-- orders marks for hit-testing, so the clamp is about sanity, not access.)
 create or replace function public.annotations_guard_columns () returns trigger language plpgsql
 set search_path = public as $$
 declare
     v_col text;
+    v_floor timestamptz;
 begin
     if current_user not in ('authenticated', 'anon') then
         return new;
@@ -4474,6 +4477,13 @@ begin
     if tg_op = 'INSERT' then
         if new.created_at > now() then
             new.created_at := now();
+        else
+            -- Read as the caller: annotations_insert only admits members, who
+            -- can see the score. Not visible means the insert is refused anyway.
+            select d.created_at into v_floor from public.documents d where d.id = new.document_id;
+            if new.created_at < v_floor then
+                new.created_at := v_floor;
+            end if;
         end if;
         return new;
     end if;
@@ -4518,6 +4528,13 @@ for each row execute function public.annotations_guard_columns ();
 -- anything later is a forgery. Refusing it matters: one row per (document, day)
 -- and the client upserts ON CONFLICT DO NOTHING, so a squatted future day would
 -- silently replace that day's real starting point.
+--
+-- Past days are deliberately not limited: a snapshot captured offline is pushed
+-- whenever the device is back, possibly days later. So an editor can still fill
+-- an EMPTY past day (or today, before anyone edits) with a made-up starting
+-- point. That is no more than an editor can already do to the marks themselves,
+-- the row is stamped with their id, and a day that already has its real
+-- starting point cannot be replaced (no update path, one row per day).
 --
 -- Snapshots are immutable starting points (no update policy exists); the guard
 -- also refuses client updates outright so a future policy cannot reopen it.
@@ -4723,13 +4740,19 @@ for each row execute function public.document_imports_guard_columns ();
 -- library_tags
 -- ---------------------------------------------------------------------------
 -- library_tags_update already pins user_id to the caller on both sides; only
--- the name is meant to change (renameTag).
+-- the name is meant to change (renameTag). created_at is the server clock, as
+-- on every table here.
 create or replace function public.library_tags_guard_columns () returns trigger language plpgsql
 set search_path = public as $$
 declare
     v_col text;
 begin
     if current_user not in ('authenticated', 'anon') then
+        return new;
+    end if;
+
+    if tg_op = 'INSERT' then
+        new.created_at := now();
         return new;
     end if;
 
@@ -4750,8 +4773,33 @@ $$;
 
 drop trigger if exists library_tags_guard_columns on public.library_tags;
 
-create trigger library_tags_guard_columns before update on public.library_tags
+create trigger library_tags_guard_columns before insert or update on public.library_tags
 for each row execute function public.library_tags_guard_columns ();
+
+-- ---------------------------------------------------------------------------
+-- practice_notes
+-- ---------------------------------------------------------------------------
+-- Updates are already confined by a column-level grant (body, shared,
+-- noted_on — 20260826194426_roster), and practice_notes_insert vets author,
+-- score and student. What was left is the insert-time clock: created_at orders
+-- notes within a lesson day, so it is the server's, like everywhere else.
+create or replace function public.practice_notes_guard_columns () returns trigger language plpgsql
+set search_path = public as $$
+begin
+    if current_user not in ('authenticated', 'anon') then
+        return new;
+    end if;
+
+    new.created_at := now();
+    new.updated_at := now();
+    return new;
+end;
+$$;
+
+drop trigger if exists practice_notes_guard_columns on public.practice_notes;
+
+create trigger practice_notes_guard_columns before insert on public.practice_notes
+for each row execute function public.practice_notes_guard_columns ();
 
 -- ---------------------------------------------------------------------------
 -- score_analyses
@@ -4812,13 +4860,21 @@ $$;
 
 -- The guard above keeps the lifecycle fields and created_by; this adds the
 -- row's identity, so an editor cannot move one score's analysis request onto
--- another score.
+-- another score. On insert both timestamps are the server clock: updated_at is
+-- what score-analyze's staleness check reads, so a client-dated request could
+-- otherwise look stale (and be re-run) or fresh (and never be retried).
 create or replace function public.score_analyses_guard_columns () returns trigger language plpgsql
 set search_path = public as $$
 declare
     v_col text;
 begin
     if current_user not in ('authenticated', 'anon') then
+        return new;
+    end if;
+
+    if tg_op = 'INSERT' then
+        new.created_at := now();
+        new.updated_at := now();
         return new;
     end if;
 
@@ -4837,7 +4893,7 @@ $$;
 
 drop trigger if exists score_analyses_guard_columns on public.score_analyses;
 
-create trigger score_analyses_guard_columns before update on public.score_analyses
+create trigger score_analyses_guard_columns before insert or update on public.score_analyses
 for each row execute function public.score_analyses_guard_columns ();
 
 -- Trigger functions are never called directly.
@@ -4847,6 +4903,7 @@ revoke all on function public.documents_guard_columns () from public, anon, auth
 revoke all on function public.share_links_guard_columns () from public, anon, authenticated;
 revoke all on function public.document_imports_guard_columns () from public, anon, authenticated;
 revoke all on function public.library_tags_guard_columns () from public, anon, authenticated;
+revoke all on function public.practice_notes_guard_columns () from public, anon, authenticated;
 revoke all on function public.score_analyses_guard_columns () from public, anon, authenticated;
 revoke all on function public.guard_score_analyses_client_write () from public, anon, authenticated;
 
@@ -4873,7 +4930,9 @@ revoke all on function public.guard_score_analyses_client_write () from public, 
 --
 -- Deploy with the frontend that joins doc-db:{id}: a tab still running the old
 -- bundle stops receiving committed rows live (it still converges through its
--- pull on reconnect / coming online) until it reloads.
+-- pull on reconnect / coming online) until it reloads. A new bundle running
+-- before this migration is refused on doc-db:{id} and falls back to polling
+-- until the join succeeds (DEPLOY.md, "Release note — realtime topic split").
 --
 -- tests/sql/column_integrity.sql proves receive and send on both topics; see
 -- tests/sql/README.md.
