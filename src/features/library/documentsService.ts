@@ -239,65 +239,62 @@ export const uploadDocument = async (
 };
 
 /**
- * IMSLP import: create the documents row, let Edge fetch+store the PDF, then
- * hydrate Dexie from Storage (one download leg — no Edge→browser PDF proxy).
+ * IMSLP import: Edge fetches the PDF, creates the documents row and stores
+ * the PDF; then hydrate Dexie from Storage (one download leg — no Edge→browser
+ * PDF proxy).
+ *
+ * The row is created server-side, after the PDF is in hand, rather than here
+ * first: an import can wait in the deployment-wide IMSLP queue for up to a
+ * minute and a half, and a row inserted up front would sit in the library as
+ * an empty score — counting against the free cap and visible on every device
+ * — whenever the tab closed or the network dropped before a rollback could
+ * run. Now nothing exists until the import has succeeded, and an import that
+ * finishes after the browser stopped waiting lands complete.
  */
 export const importDocumentFromImslp = async (
     imslpFilename: string,
     workTitle: string,
     ownerId: string,
     acceptedDisclaimer: boolean,
-    onStage?: (stage: ImslpDownloadStage) => void,
+    options: { onStage?: (stage: ImslpDownloadStage) => void; signal?: AbortSignal } = {},
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
     noteLibraryMutation();
-    const supabase = getSupabase();
     const id = crypto.randomUUID();
-    const storagePath = `${id}/original.pdf`;
     const title = workTitle.replace(/\.pdf$/i, '').trim() || imslpFilename.replace(/\.pdf$/i, '');
 
-    const { data: document, error: insertError } = await supabase
-        .from('documents')
-        .insert({ id, owner_id: ownerId, title, storage_path: storagePath })
-        .select()
-        .single();
-    if (insertError) {
-        // The free-tier cap is a database trigger, so it arrives here rather
-        // than as an HTTP 402 — normalize it to the same typed error.
-        const limit = parsePostgrestLimitError(insertError);
-        if (limit) {
-            throw limit;
-        }
-        throw new Error(`Could not create document: ${insertError.message}`);
+    const result = await importImslpPdfToStorage({
+        filename: imslpFilename,
+        documentId: id,
+        title,
+        acceptedDisclaimer,
+        workTitle,
+        onStage: options.onStage,
+        signal: options.signal,
+    });
+    if (!result.ok) {
+        return { ok: false, fallback: result };
+    }
+    noteLibraryMutationCommitted();
+
+    const document = await fetchDocument(id).catch(() => null);
+    if (!document) {
+        throw new Error('The score was added, but could not be opened yet — refresh your library to see it.');
     }
 
-    const rollback = async () => {
-        await supabase.storage
-            .from('scores')
-            .remove([storagePath])
-            .catch(() => undefined);
-        await supabase.from('documents').delete().eq('id', id);
-        noteLibraryMutationCommitted();
-    };
-
+    // Page count and the offline copy are conveniences: the score is already
+    // stored, so a slow or failed read here must not undo a paid import.
+    let pageCount: number | null = document.page_count;
     try {
-        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle, onStage);
-        if (!result.ok) {
-            await rollback();
-            return { ok: false, fallback: result };
-        }
-        noteLibraryMutationCommitted();
-
-        const bytes = await loadDocumentBytes({ ...document, page_count: null }, { userId: ownerId });
-        const pageCount = await countPdfPages(bytes);
+        const bytes = await loadDocumentBytes(document, { userId: ownerId });
+        pageCount = await countPdfPages(bytes);
         if (pageCount !== null) {
-            await supabase.from('documents').update({ page_count: pageCount }).eq('id', id);
+            await getSupabase().from('documents').update({ page_count: pageCount }).eq('id', id);
         }
-
-        return { ok: true, document: { ...document, page_count: pageCount } };
-    } catch (err) {
-        await rollback();
-        throw err;
+    } catch {
+        // the viewer loads the PDF (and counts its pages) on open
     }
+
+    return { ok: true, document: { ...document, page_count: pageCount } };
 };
 
 /** Ids of the caller's favorited documents (favorites are per-user, RLS-scoped). */

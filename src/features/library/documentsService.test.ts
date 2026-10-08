@@ -71,6 +71,11 @@ vi.mock('@/sync/db', () => {
         }),
     };
 });
+// The Edge call is the unit under the IMSLP import; its own behaviour is
+// pinned in imslpApi.test.ts.
+vi.mock('@/features/imslp/imslpApi', () => ({
+    importImslpPdfToStorage: vi.fn(),
+}));
 vi.mock('@/features/import/prepareUpload', () => ({
     prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
     UPLOAD_ACCEPT: '',
@@ -78,6 +83,7 @@ vi.mock('@/features/import/prepareUpload', () => ({
 
 import {
     deleteDocument,
+    importDocumentFromImslp,
     loadDocumentBytes,
     loadDocumentOffline,
     prefetchDocumentBytes,
@@ -85,6 +91,7 @@ import {
     uploadDocument,
 } from '@/features/library/documentsService';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
+import { importImslpPdfToStorage } from '@/features/imslp/imslpApi';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 
@@ -117,6 +124,8 @@ interface StubOptions {
     insertedRow?: DocumentRow;
     insertError?: string;
     deleteError?: string;
+    /** What a `select().eq('id', id).maybeSingle()` read of the row returns. */
+    selectedRow?: DocumentRow | null | ((id: string) => DocumentRow | null);
 }
 
 const makeStub = (options: StubOptions = {}) => {
@@ -171,6 +180,18 @@ const makeStub = (options: StubOptions = {}) => {
     const supabase = {
         storage: { from: (bucket: string) => storageApi(bucket) },
         from: (table: string) => ({
+            select: () => ({
+                eq: (_column: string, value: string) => ({
+                    maybeSingle: () =>
+                        Promise.resolve({
+                            data:
+                                typeof options.selectedRow === 'function'
+                                    ? options.selectedRow(value)
+                                    : (options.selectedRow ?? null),
+                            error: null,
+                        }),
+                }),
+            }),
             insert: (row: Record<string, unknown>) => {
                 calls.insert(table, row);
                 return {
@@ -554,6 +575,79 @@ describe('uploadDocument commit edge', () => {
         expect(calls.delete).toHaveBeenCalledWith('documents');
         expect(libraryMutationEpoch()).toBe(before + 2);
         expect(libraryListClear).not.toHaveBeenCalled();
+    });
+});
+
+describe('importDocumentFromImslp', () => {
+    const fallback = {
+        ok: false as const,
+        code: 'bot_check' as const,
+        message: 'IMSLP requires a browser verification',
+        openUrl: 'https://imslp.org/wiki/Special:ImagefromIndex/a.pdf',
+        filename: 'a.pdf',
+    };
+
+    beforeEach(() => {
+        vi.mocked(importImslpPdfToStorage).mockReset();
+    });
+
+    it('creates no row itself: the function creates the score once the PDF is stored', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(async (req) => ({
+            ok: true,
+            filename: 'a.pdf',
+            byteLength: 10,
+            storagePath: `${req.documentId}/original.pdf`,
+        }));
+        // The read-back returns the row the function created.
+        const calls = makeStub({
+            selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }),
+        });
+
+        const result = await importDocumentFromImslp('a.pdf', 'Sonata (Composer)', 'user-1', true);
+
+        expect(calls.insert).not.toHaveBeenCalled();
+        const sent = vi.mocked(importImslpPdfToStorage).mock.calls[0]?.[0];
+        expect(sent).toMatchObject({ filename: 'a.pdf', title: 'Sonata (Composer)', workTitle: 'Sonata (Composer)' });
+        expect(result).toMatchObject({ ok: true, document: { id: sent?.documentId } });
+    });
+
+    it('hands a refused download to the fallback with nothing to roll back', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue(fallback);
+        const calls = makeStub();
+        const before = libraryMutationEpoch();
+        const result = await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+        expect(result).toEqual({ ok: false, fallback });
+        expect(calls.insert).not.toHaveBeenCalled();
+        expect(calls.delete).not.toHaveBeenCalled();
+        expect(calls.remove).not.toHaveBeenCalled();
+        // Nothing committed: only the opening edge moved.
+        expect(libraryMutationEpoch()).toBe(before + 1);
+    });
+
+    it('never deletes a score that was imported, even if reading it back fails', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue({
+            ok: true,
+            filename: 'a.pdf',
+            byteLength: 10,
+            storagePath: 'x/original.pdf',
+        });
+        const calls = makeStub({ selectedRow: null });
+        await expect(importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true)).rejects.toThrow(
+            /refresh your library/i,
+        );
+        expect(calls.delete).not.toHaveBeenCalled();
+        expect(calls.remove).not.toHaveBeenCalled();
+    });
+
+    it('passes the stage callback and the cancel signal through to the Edge call', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue(fallback);
+        makeStub();
+        const controller = new AbortController();
+        const onStage = vi.fn();
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true, { onStage, signal: controller.signal });
+        expect(importImslpPdfToStorage).toHaveBeenCalledWith(
+            expect.objectContaining({ onStage, signal: controller.signal, acceptedDisclaimer: true }),
+        );
     });
 });
 

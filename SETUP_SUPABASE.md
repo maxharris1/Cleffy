@@ -460,10 +460,29 @@ already refused.
 (defaults `2` and `1000` — two a second). A caller that finds the window full
 gets `429 { code: 'download_queued', retryAfterSec }` at once and the client
 waits and retries (up to 90 s), showing "Queued for IMSLP…". When IMSLP itself
-answers 429 the function closes the same key for IMSLP's `Retry-After` (60 s
-when absent, 900 s at most), so every import backs off together. The
-per-caller limiter (10/min) is unchanged. Tune with
+answers 429 — on the file servers or on the API (license parse, imageinfo) —
+the function closes the same key for IMSLP's `Retry-After` (60 s when absent,
+900 s at most), so every import backs off together. The slot is taken before
+the invocation's first live IMSLP request, the license parse included, so
+nothing reaches IMSLP while the key is closed; a cached license refusal spends
+no slot. Tune with
 `npx supabase secrets set IMSLP_DOWNLOAD_GLOBAL_MAX=1 IMSLP_DOWNLOAD_GLOBAL_SPACING_MS=2000`.
+
+Per-caller limits: 60 requests a minute per client address (a school's NAT
+shares one), then 10 a minute per signed-in user, answered as
+`429 { code: 'caller_rate_limited', retryAfterSec }`, which current clients wait
+out like the queue.
+
+**`imslp-download` now creates the score itself.** Current clients send
+`create: true` and a `title` with a fresh `documentId`; the function inserts the
+`documents` row (as the caller, so RLS and the score-cap trigger apply) only once
+the PDF is fetched, so a queued or abandoned import never leaves an empty score
+behind. **Deploy the function before the web app**: a new client talking to the
+old function is refused (403, "Only the document owner…") because the row it
+names does not exist yet. Clients from before this change still create the row
+first and are served as before (owner-checked), but they do not understand
+`download_queued`/`caller_rate_limited`: while the queue is busy they show the
+message as an error and roll their row back, until the PWA updates.
 
 **Deploy the three student functions together**, after applying
 `20260827150000_student_credentials.sql`. They are one change: `student-claim` is

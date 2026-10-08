@@ -47,6 +47,8 @@ interface ImslpWorkPanelProps {
     onSelect: (edition: ImslpEdition) => void;
     onImportSelected: () => void;
     onImportLocalPdf: (file: File) => void;
+    /** Stops an import waiting in the pacing queue. Nothing has been created or charged yet. */
+    onCancelQueued?: () => void;
 }
 
 const URTEXT_COPYRIGHT_NOTE = /copyright status for urtext/i;
@@ -83,6 +85,7 @@ export const ImslpWorkPanel = ({
     onSelect,
     onImportSelected,
     onImportLocalPdf,
+    onCancelQueued,
 }: ImslpWorkPanelProps) => {
     const parsed = displayWorkTitle(work.title);
     const composer = work.composer ?? parsed.composer;
@@ -321,9 +324,16 @@ export const ImslpWorkPanel = ({
             ) : null}
 
             {download.kind === 'queued' ? (
-                <p className="mt-2 text-xs text-stone-600" aria-hidden="true">
-                    {QUEUED_COPY}
-                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <p className="text-xs text-stone-600" aria-hidden="true">
+                        {QUEUED_COPY}
+                    </p>
+                    {onCancelQueued ? (
+                        <button type="button" onClick={onCancelQueued} className={buttonClassName('ghost', 'sm')}>
+                            Cancel import
+                        </button>
+                    ) : null}
+                </div>
             ) : null}
 
             <p className="sr-only" role="status" aria-live="polite">

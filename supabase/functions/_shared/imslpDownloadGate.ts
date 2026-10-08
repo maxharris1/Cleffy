@@ -4,8 +4,11 @@
  * Every Edge invocation leaves from the same small set of egress IPs, so to
  * IMSLP all of Cleffy is one client — and a client that bursts gets banned for
  * everyone. The per-caller limit in imslp-download stops one user hammering;
- * this gate caps the whole deployment at `max` fetches per `spacingMs` window,
+ * this gate caps the whole deployment at `max` imports per `spacingMs` window,
  * on one shared edge_rate_buckets key (cross-isolate, via check_edge_rate_limit).
+ * The slot is taken before the invocation's FIRST live IMSLP request — the
+ * license parse on a cache miss included (imslpImportFlow.ts) — so while the
+ * key is closed nothing reaches IMSLP at all.
  *
  * A full window does not hold the invocation open waiting for a slot: the
  * function answers 429 `download_queued` with `retryAfterSec` at once, and the
@@ -22,10 +25,12 @@
 export const IMSLP_GLOBAL_DOWNLOAD_KEY = 'imslp:download:global';
 
 /**
- * Two live fetches a second across the deployment. One import is two IMSLP
- * requests (wait page, then CDN), so this keeps Cleffy to a handful of
- * requests a second at peak — polite for a donation-funded library — while a
- * paying user importing alongside others waits a second or two, not minutes.
+ * Two imports a second across the deployment. One import is two file-server
+ * requests (wait page, then CDN) and one API call for the file's credits, plus
+ * the work page parse when the license cache misses — so this keeps Cleffy to
+ * a handful of requests a second at peak, polite for a donation-funded
+ * library, while a paying user importing alongside others waits a second or
+ * two, not minutes.
  */
 export const DEFAULT_GLOBAL_DOWNLOAD_MAX = 2;
 export const DEFAULT_GLOBAL_DOWNLOAD_SPACING_MS = 1_000;

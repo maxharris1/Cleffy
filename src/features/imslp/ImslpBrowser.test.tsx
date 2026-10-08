@@ -720,7 +720,13 @@ describe('ImslpBrowser', () => {
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledTimes(1);
         });
-        expect(onImportImslp).toHaveBeenCalledWith(names.weiner, work.title, true, expect.any(Function));
+        expect(onImportImslp).toHaveBeenCalledWith(
+            names.weiner,
+            work.title,
+            true,
+            expect.any(Function),
+            expect.any(AbortSignal),
+        );
     });
 
     it('opens a work from ?work=, ranks downloadable Urtext first, and imports the selection', async () => {
@@ -777,7 +783,13 @@ describe('ImslpBrowser', () => {
         expect(henleRadio).not.toBeChecked();
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         await waitFor(() => {
-            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true, expect.any(Function));
+            expect(onImportImslp).toHaveBeenCalledWith(
+                'clean-scan.pdf',
+                work.title,
+                true,
+                expect.any(Function),
+                expect.any(AbortSignal),
+            );
         });
         expect(onImportImslp).toHaveBeenCalledTimes(1);
     });
@@ -847,7 +859,13 @@ describe('ImslpBrowser', () => {
             expect(radio).toBeDisabled();
         }
         expect(onImportImslp).toHaveBeenCalledTimes(1);
-        expect(onImportImslp).toHaveBeenCalledWith('b.pdf', work.title, true, expect.any(Function));
+        expect(onImportImslp).toHaveBeenCalledWith(
+            'b.pdf',
+            work.title,
+            true,
+            expect.any(Function),
+            expect.any(AbortSignal),
+        );
         expect(within(list).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
         expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
     });
@@ -892,6 +910,83 @@ describe('ImslpBrowser', () => {
         await act(async () => finish?.());
         expect(await screen.findByRole('button', { name: 'Add to my library' })).toBeEnabled();
         expect(onImportImslp).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels a queued import from the panel, back to an idle Add with no error', async () => {
+        const { screen, act } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('a.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        let signal: AbortSignal | undefined;
+        let report: ((stage: 'queued' | 'downloading') => void) | undefined;
+        const onImportImslp = vi.fn().mockImplementation(
+            (
+                _f: string,
+                _t: string,
+                _a: boolean,
+                onStage: (stage: 'queued' | 'downloading') => void,
+                abort: AbortSignal,
+            ) =>
+                new Promise((_resolve, reject) => {
+                    report = onStage;
+                    signal = abort;
+                    // What imslpApi does when a queued wait is cancelled.
+                    abort.addEventListener('abort', () => reject(new api.ImslpImportCancelledError()));
+                }),
+        );
+
+        await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+        // No cancel while a request is out: the function would finish regardless.
+        expect(screen.queryByRole('button', { name: 'Cancel import' })).not.toBeInTheDocument();
+
+        act(() => report?.('queued'));
+        await userEvent.click(screen.getByRole('button', { name: 'Cancel import' }));
+
+        expect(signal?.aborted).toBe(true);
+        expect(await screen.findByRole('button', { name: 'Add to my library' })).toBeEnabled();
+        expect(screen.queryByText(/Queued/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('cancels a queued import when the panel unmounts', async () => {
+        const { screen, act } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('a.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        let signal: AbortSignal | undefined;
+        const onImportImslp = vi
+            .fn()
+            .mockImplementation(
+                (_f: string, _t: string, _a: boolean, onStage: (stage: 'queued') => void, abort: AbortSignal) => {
+                    signal = abort;
+                    onStage('queued');
+                    return new Promise(() => undefined);
+                },
+            );
+
+        const { unmount } = await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+        await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
+        expect(signal?.aborted).toBe(false);
+
+        act(() => unmount());
+        expect(signal?.aborted).toBe(true);
     });
 
     it('says "check on IMSLP" when the license lookup itself was unavailable', async () => {
@@ -1001,7 +1096,13 @@ describe('ImslpBrowser', () => {
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
         await userEvent.click(screen.getByRole('button', { name: 'Add to my library' }));
         await waitFor(() => {
-            expect(onImportImslp).toHaveBeenCalledWith('clean-scan.pdf', work.title, true, expect.any(Function));
+            expect(onImportImslp).toHaveBeenCalledWith(
+                'clean-scan.pdf',
+                work.title,
+                true,
+                expect.any(Function),
+                expect.any(AbortSignal),
+            );
         });
     });
 

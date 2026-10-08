@@ -275,9 +275,9 @@ const DOWNLOAD_QUEUE_FALLBACK_RETRY_SEC = 5;
 /**
  * Floor under each successive queued retry: 1 s, 2 s, 4 s, 8 s, then 15 s.
  * The server's retryAfterSec for a full one-second pacing window is 1, and
- * imslp-download also limits each caller to 10 requests a minute — retrying
- * every second through a busy spell would trip that limit and turn a queue
- * into an error. This keeps a 90 s wait to about eight requests a minute.
+ * imslp-download also limits each user to 10 requests a minute — retrying
+ * every second through a busy spell would trip that limit. This keeps a 90 s
+ * wait to about eight requests a minute.
  */
 const queuedRetryFloorMs = (retriesSoFar: number): number => Math.min(15_000, 1_000 * 2 ** retriesSoFar);
 
@@ -290,12 +290,55 @@ export const IMSLP_DOWNLOAD_TIMEOUT_MS = 150_000;
 
 export const IMSLP_DOWNLOAD_BUSY_MESSAGE =
     'IMSLP downloads are busy right now. Wait a minute, then press Add again — or open the file on IMSLP and add the PDF yourself.';
+/**
+ * The function may still finish after the browser stops waiting, and then the
+ * score lands in the library on its own — so the copy says so rather than
+ * inviting a duplicate import straight away.
+ */
 export const IMSLP_DOWNLOAD_TIMEOUT_MESSAGE =
-    'IMSLP took too long to send this score. Try again in a minute — or open the file on IMSLP and add the PDF yourself.';
+    'IMSLP took too long to send this score. If it arrives it will appear in your library; otherwise try again in a minute — or open the file on IMSLP and add the PDF yourself.';
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * The import was cancelled while it waited in the pacing queue (the user
+ * pressed Cancel or left the page). Nothing was created and nothing charged.
+ */
+export class ImslpImportCancelledError extends Error {
+    constructor() {
+        super('IMSLP import cancelled');
+        this.name = 'ImslpImportCancelledError';
+    }
+}
 
-/** retryAfterSec of a pacing refusal (429 download_queued); null for any other answer. */
+export const isImslpImportCancelled = (err: unknown): err is ImslpImportCancelledError =>
+    err instanceof ImslpImportCancelledError;
+
+/** Sleep that a cancelled import cuts short. */
+const waitFor = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
+    new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new ImslpImportCancelledError());
+            return;
+        }
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(new ImslpImportCancelledError());
+        };
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
+
+/**
+ * Answers the client waits out and retries: the deployment-wide pacing queue
+ * (`download_queued`) and the per-user request limit (`caller_rate_limited`),
+ * which a school's teachers queued together can reach — both are "not yet",
+ * neither is a failure.
+ */
+const RETRY_LATER_CODES = new Set(['download_queued', 'caller_rate_limited']);
+
+/** retryAfterSec of a 429 the client should wait out; null for any other answer. */
 const queuedRetrySec = async (response: Response): Promise<number | null> => {
     if (response.status !== 429) {
         return null;
@@ -308,7 +351,7 @@ const queuedRetrySec = async (response: Response): Promise<number | null> => {
         return null;
     }
     const record = body as { code?: unknown; retryAfterSec?: unknown };
-    if (record.code !== 'download_queued') {
+    if (typeof record.code !== 'string' || !RETRY_LATER_CODES.has(record.code)) {
         return null;
     }
     return typeof record.retryAfterSec === 'number' && record.retryAfterSec > 0
@@ -319,24 +362,54 @@ const queuedRetrySec = async (response: Response): Promise<number | null> => {
 const isTimeout = (err: unknown): boolean =>
     (err instanceof DOMException || err instanceof Error) && (err.name === 'TimeoutError' || err.name === 'AbortError');
 
+export interface ImslpImportRequest {
+    /** IMSLP file name, e.g. "IMSLP51037-PMLP01458-Op.27-2.pdf". */
+    filename: string;
+    /** Id for the new score. The function creates the row once the PDF is fetched. */
+    documentId: string;
+    /** Title for the new score. */
+    title: string;
+    acceptedDisclaimer: boolean;
+    /** The IMSLP work the file belongs to (license check + provenance). */
+    workTitle?: string;
+    onStage?: (stage: ImslpDownloadStage) => void;
+    /**
+     * Cancels a queued import. It takes effect between requests — while the
+     * import waits for a pacing slot — and never aborts a request already
+     * sent: the function would carry on regardless, and the score it stores
+     * should then simply appear in the library rather than be orphaned.
+     */
+    signal?: AbortSignal;
+    maxWaitMs?: number;
+}
+
 /**
- * Ask the Edge Function to fetch an IMSLP PDF and write it into the private
- * `scores` bucket for an already-created document. Returns JSON only — never
- * proxies PDF bytes through the browser (Free-plan egress).
+ * Ask the Edge Function to fetch an IMSLP PDF, create the score and write the
+ * PDF into the private `scores` bucket. Returns JSON only — never proxies PDF
+ * bytes through the browser (Free-plan egress).
  *
- * IMSLP fetches are paced deployment-wide (imslpDownloadGate.ts): a full slot
- * answers 429 download_queued with retryAfterSec, and this waits it out and
- * retries — up to DOWNLOAD_QUEUE_MAX_WAIT_MS — reporting `queued` through
- * onStage rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS.
+ * The score row is created server-side only once the PDF is in hand, so a
+ * queued wait, a closed tab or a lost connection never leaves an empty score
+ * behind. IMSLP fetches are paced deployment-wide (imslpDownloadGate.ts): a
+ * full slot answers 429 download_queued with retryAfterSec, and this waits it
+ * out and retries — up to maxWaitMs — reporting `queued` through onStage
+ * rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS.
  */
-export const importImslpPdfToStorage = async (
-    filename: string,
-    documentId: string,
-    acceptedDisclaimer: boolean,
-    workTitle?: string,
-    onStage?: (stage: ImslpDownloadStage) => void,
+export const importImslpPdfToStorage = async ({
+    filename,
+    documentId,
+    title,
+    acceptedDisclaimer,
+    workTitle,
+    onStage,
+    signal,
     maxWaitMs = DOWNLOAD_QUEUE_MAX_WAIT_MS,
-): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
+}: ImslpImportRequest): Promise<
+    { ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback
+> => {
+    if (signal?.aborted) {
+        throw new ImslpImportCancelledError();
+    }
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
     const accessToken = sessionData.session?.access_token;
@@ -354,7 +427,14 @@ export const importImslpPdfToStorage = async (
                     apikey: anonKey,
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
+                body: JSON.stringify({
+                    filename,
+                    documentId,
+                    acceptedDisclaimer,
+                    workTitle,
+                    create: true,
+                    title,
+                }),
                 signal: AbortSignal.timeout(IMSLP_DOWNLOAD_TIMEOUT_MS),
             });
         } catch (err) {
@@ -383,12 +463,12 @@ export const importImslpPdfToStorage = async (
             // Announce only once a real wait is under way: a one-second pacing
             // blip should read as "downloading", not as a queue.
             const head = Math.max(0, DOWNLOAD_QUEUE_SIGNAL_MS - waitedMs);
-            await sleep(head);
+            await waitFor(head, signal);
             queuedReported = true;
             onStage?.('queued');
-            await sleep(retryMs - head);
+            await waitFor(retryMs - head, signal);
         } else {
-            await sleep(retryMs);
+            await waitFor(retryMs, signal);
         }
         waitedMs += retryMs;
         if (queuedReported) {
@@ -397,8 +477,9 @@ export const importImslpPdfToStorage = async (
         response = await request();
     }
 
-    // Smart-import quota exhausted. Surfaced as the same typed error the other
-    // metered features raise, so one notice component renders all of them.
+    // Smart-import quota exhausted, or the cloud-score cap full. Surfaced as
+    // the same typed error the other metered features raise, so one notice
+    // component renders all of them.
     const limit = await parseLimitResponse(response);
     if (limit) {
         throw limit;
