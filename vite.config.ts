@@ -1,5 +1,5 @@
 /// <reference types="vitest/config" />
-import { createReadStream, cpSync, existsSync } from 'node:fs';
+import { createReadStream, cpSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
 
 import tailwindcss from '@tailwindcss/vite';
@@ -69,12 +69,41 @@ const supabasePreconnectPlugin = (): Plugin => {
     };
 };
 
+/**
+ * Build-time constants for error monitoring (see src/lib/monitoring/index.ts).
+ *
+ * `__SENTRY_DSN__` is a define rather than an import.meta.env read so that an
+ * unset DSN is the literal '' and the minifier drops the SDK import entirely.
+ * `__APP_RELEASE__` tags every report with the commit that built it: Vercel
+ * provides VERCEL_GIT_COMMIT_SHA to every build, and VITE_SENTRY_RELEASE wins
+ * when a release name has to match one uploaded elsewhere (source maps).
+ *
+ * The test run always compiles monitoring out, whatever a developer's .env
+ * holds: vitest must never post a report, and the suite asserts the no-op.
+ */
+const buildConstantsPlugin = (): Plugin => ({
+    name: 'build-constants',
+    config(_config, { mode }) {
+        const env = loadEnv(mode, process.cwd(), '');
+        const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
+        const commit = env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12);
+        const release = env.VITE_SENTRY_RELEASE || `cleffy@${commit || pkg.version}`;
+        return {
+            define: {
+                __SENTRY_DSN__: JSON.stringify(mode === 'test' ? '' : (env.VITE_SENTRY_DSN ?? '').trim()),
+                __APP_RELEASE__: JSON.stringify(release),
+            },
+        };
+    },
+});
+
 export default defineConfig({
     plugins: [
         react(),
         tailwindcss(),
         pdfjsWasmPlugin(),
         supabasePreconnectPlugin(),
+        buildConstantsPlugin(),
         VitePWA({
             registerType: 'autoUpdate',
             includeAssets: ['icons/apple-touch-icon.png', 'favicon.svg'],
