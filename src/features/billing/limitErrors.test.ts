@@ -174,6 +174,18 @@ describe('limit copy', () => {
         expect(limitAction({ code: 'limit_reached', metric: 'omr_runs', limit: 3, tier: 'free' })).toContain('Upgrade');
     });
 
+    it('names the IMSLP import and AI page-read budgets for what spends them', () => {
+        // smart_imports is spent by an IMSLP import and vision_reads by Import
+        // marks' AI pass — neither may read as a fingering feature this release
+        // does not ship.
+        const imports = { code: 'limit_reached', metric: 'smart_imports', limit: 2, tier: 'free' } as const;
+        expect(limitHeadline(imports)).toContain('2 free IMSLP imports');
+        expect(limitAction(imports)).toContain('Upgrade for unlimited IMSLP imports');
+        const reads = { code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' } as const;
+        expect(limitHeadline(reads)).toContain('5 free AI page reads');
+        expect(`${limitHeadline(reads)} ${limitAction(reads)}`).not.toMatch(/fingering/i);
+    });
+
     it('points a paying teacher at support rather than at an upsell', () => {
         const payload = { code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'teacher' } as const;
         expect(limitAction(payload)).not.toContain('Upgrade');

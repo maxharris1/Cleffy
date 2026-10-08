@@ -39,12 +39,21 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
 }));
 
 vi.mock('@/features/viewer/PdfViewport', () => ({
-    PdfViewport: ({ readOnly, sync, playback }: { readOnly?: boolean; sync?: unknown; playback?: unknown }) => (
+    PdfViewport: ({
+        readOnly,
+        sync,
+        playback,
+    }: {
+        readOnly?: boolean;
+        sync?: { onScoreAnalysis?: unknown };
+        playback?: unknown;
+    }) => (
         <div
             data-testid="pdf-viewport"
             data-readonly={String(Boolean(readOnly))}
             data-sync={sync ? 'on' : 'off'}
             data-playback={playback ? 'on' : 'off'}
+            data-analysis-broadcasts={sync?.onScoreAnalysis ? 'on' : 'off'}
         />
     ),
 }));
@@ -85,9 +94,17 @@ vi.mock('@/features/playback/usePlayback', () => ({
     }),
 }));
 const analysis: { state: { kind: string } } = { state: { kind: 'none' } };
-vi.mock('@/features/playback/useScoreAnalysis', () => ({
-    useScoreAnalysis: () => ({ state: analysis.state, generate: vi.fn(), applyBroadcast: vi.fn() }),
+const useScoreAnalysis = vi.fn((_docId: string, _enabled: boolean) => ({
+    state: analysis.state,
+    generate: vi.fn(),
+    applyBroadcast: vi.fn(),
 }));
+vi.mock('@/features/playback/useScoreAnalysis', () => ({
+    useScoreAnalysis: (docId: string, enabled: boolean) => useScoreAnalysis(docId, enabled),
+}));
+/** Release flags (src/lib/features.ts), flipped per test; read at render. */
+const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
 
 const DOC_ID = '11111111-2222-4333-8444-555555555555';
 
@@ -137,6 +154,7 @@ const viewport = () => screen.getByTestId('pdf-viewport');
 beforeEach(() => {
     vi.clearAllMocks();
     analysis.state = { kind: 'none' };
+    flags.playalong = false;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
     fetchMyRole.mockResolvedValue('owner');
@@ -285,7 +303,27 @@ describe('CloudViewer warm open', () => {
         expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
     });
 
+    it('ships no play-along with the feature switched off: no control, no analysis, no broadcasts', async () => {
+        // A ready analysis on the server must not surface either — the flag, not
+        // the analysis state, decides whether the feature exists in this build.
+        analysis.state = { kind: 'ready' };
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByRole('button', { name: 'Play-along' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+        expect(viewport()).toHaveAttribute('data-analysis-broadcasts', 'off');
+        // Disabled analysis is what keeps status reads, polling and OMR runs off.
+        expect(useScoreAnalysis).toHaveBeenCalled();
+        expect(useScoreAnalysis.mock.calls.every(([, enabled]) => enabled === false)).toBe(true);
+    });
+
     it('keeps the play-along panel and playhead hidden until asked for, and pauses on close', async () => {
+        flags.playalong = true;
         const user = userEvent.setup();
         loadDocumentOffline.mockResolvedValue(null);
         fetchDocument.mockResolvedValue(serverDoc());
@@ -298,8 +336,11 @@ describe('CloudViewer warm open', () => {
 
         const toggle = screen.getByRole('button', { name: 'Play-along' });
         expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(viewport()).toHaveAttribute('data-analysis-broadcasts', 'on');
+        expect(useScoreAnalysis).toHaveBeenLastCalledWith(DOC_ID, true);
         await user.click(toggle);
-        expect(screen.getByTestId('transport-bar')).toBeInTheDocument();
+        // The transport is a lazy chunk, fetched on first open.
+        expect(await screen.findByTestId('transport-bar')).toBeInTheDocument();
         expect(toggle).toHaveAttribute('aria-expanded', 'true');
         expect(viewport()).toHaveAttribute('data-playback', 'on');
         expect(engine.pause).not.toHaveBeenCalled();
@@ -311,6 +352,7 @@ describe('CloudViewer warm open', () => {
     });
 
     it('offers no play-along control when analysis is unavailable', async () => {
+        flags.playalong = true;
         analysis.state = { kind: 'unavailable' };
         loadDocumentOffline.mockResolvedValue(null);
         fetchDocument.mockResolvedValue(serverDoc());

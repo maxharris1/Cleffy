@@ -142,6 +142,11 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
     }, [inFlight, enabled, docId, applyStatus]);
 
     const generate = useCallback(async () => {
+        // A disabled analysis (local doc, or play-along switched off for the
+        // release) never asks for an OMR run, whoever calls this.
+        if (!enabled) {
+            return;
+        }
         setState({ kind: 'pending' });
         const result = await requestScoreAnalysis(docId);
         if (!aliveRef.current) {
@@ -158,16 +163,18 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
         if (!result.ok) {
             setState({ kind: 'failed', code: result.code ?? 'internal' });
         }
-    }, [docId]);
+    }, [docId, enabled]);
 
     const refresh = useCallback(() => {
-        void applyStatus(docId);
-    }, [applyStatus, docId]);
+        if (enabled) {
+            void applyStatus(docId);
+        }
+    }, [applyStatus, docId, enabled]);
 
     /** Apply trimmed realtime payload; only fetch full ScoreData on ready. */
     const applyBroadcast = useCallback(
         (msg: ScoreAnalysisBroadcast) => {
-            if (msg.document_id !== docId || !aliveRef.current) {
+            if (!enabled || msg.document_id !== docId || !aliveRef.current) {
                 return;
             }
             switch (msg.status) {
@@ -189,7 +196,7 @@ export const useScoreAnalysis = (docId: string, enabled: boolean) => {
                 }
             }
         },
-        [docId, applyStatus],
+        [docId, enabled, applyStatus],
     );
 
     return { state, generate, refresh, applyBroadcast };

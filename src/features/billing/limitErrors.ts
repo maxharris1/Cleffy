@@ -169,13 +169,16 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; upgrade: string }> = {
         spent: 'You have used your {limit} free play-alongs this month',
         upgrade: 'Upgrade for unlimited play-along analysis.',
     },
+    // Named for what spends them, not the internal metric: the AI pass of
+    // Import marks (and fingering note reads, where that ships) draws on
+    // vision_reads, and an IMSLP import on smart_imports.
     vision_reads: {
-        spent: 'You have used your {limit} free fingering reads this month',
-        upgrade: 'Upgrade for unlimited AI fingering reads.',
+        spent: 'You have used your {limit} free AI page reads this month',
+        upgrade: 'Upgrade for unlimited AI page reads.',
     },
     smart_imports: {
-        spent: 'You have used your {limit} free smart imports this month',
-        upgrade: 'Upgrade for unlimited smart imports.',
+        spent: 'You have used your {limit} free IMSLP imports this month',
+        upgrade: 'Upgrade for unlimited IMSLP imports.',
     },
     pdf_exports: {
         spent: 'You have used your {limit} free PDF export this month',

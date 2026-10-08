@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useParams, useSearchParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, useSession } from '@/features/auth/session';
@@ -17,7 +17,6 @@ import {
     loadDocumentOffline,
     prefetchDocumentBytes,
 } from '@/features/library/documentsService';
-import { TransportBar } from '@/features/playback/TransportBar';
 import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { NotesPanel } from '@/features/notes/NotesPanel';
@@ -27,6 +26,7 @@ import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
+import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
 import type { AnnotationStore } from '@/sync/annotationStore';
@@ -40,6 +40,12 @@ import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 import { MusicIcon } from '@/ui/icons';
+
+/**
+ * Play-along's transport loads on first open, and only in a build that ships
+ * the feature — with VITE_FEATURE_PLAYALONG off the chunk is never requested.
+ */
+const TransportBar = lazy(() => import('@/features/playback/TransportBar').then((m) => ({ default: m.TransportBar })));
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
@@ -116,7 +122,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [docId, userId]);
 
     // Play-along: analysis lifecycle + the audio engine for this document.
-    const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, true);
+    // Switched off for this release (src/lib/features.ts): a disabled analysis
+    // stays 'unavailable' and never reads a status, polls, or requests an OMR
+    // run, so usePlayback never has a score to build an engine (or fetch
+    // samples) for.
+    const playAlongEnabled = features.playalong;
+    const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, playAlongEnabled);
     const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
     const analysisInFlight = analysisState.kind === 'pending' || analysisState.kind === 'processing';
 
@@ -355,7 +366,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 >
                     Notes
                 </button>
-                {analysisState.kind !== 'unavailable' ? (
+                {playAlongEnabled && analysisState.kind !== 'unavailable' ? (
                     <button
                         type="button"
                         title={
@@ -415,7 +426,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         onStoreReady={onStoreReady}
                         // Playhead, loop tint and tap-to-seek live only while
                         // the transport is on screen to drive them.
-                        playback={playAlongOpen ? playbackFeature : undefined}
+                        playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
                         sync={
                             // Not while provisional: the engine would start,
                             // then tear down and restart when the confirmed
@@ -430,24 +441,29 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                       onStatus,
                                       onPeers,
                                       onDocReplaced,
-                                      onScoreAnalysis: applyBroadcast,
+                                      // A broadcast from a build with play-along on
+                                      // must not wake the analysis (a 'ready'
+                                      // would fetch the ScoreData) in this one.
+                                      onScoreAnalysis: playAlongEnabled ? applyBroadcast : undefined,
                                   }
                                 : undefined
                         }
                     />
                 </PdfProvider>
             </div>
-            {playAlongOpen ? (
+            {playAlongEnabled && playAlongOpen ? (
                 <div id="play-along-bar" className="flex-none">
-                    <TransportBar
-                        state={analysisState}
-                        role={state.role}
-                        onGenerate={() => void generate()}
-                        getEngine={getEngine}
-                        pageCount={state.doc.page_count}
-                        warning={warning}
-                        onDismissWarning={dismissWarning}
-                    />
+                    <Suspense fallback={null}>
+                        <TransportBar
+                            state={analysisState}
+                            role={state.role}
+                            onGenerate={() => void generate()}
+                            getEngine={getEngine}
+                            pageCount={state.doc.page_count}
+                            warning={warning}
+                            onDismissWarning={dismissWarning}
+                        />
+                    </Suspense>
                 </div>
             ) : null}
             {shareOpen && resolvedUserId ? (

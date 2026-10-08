@@ -9,6 +9,20 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 import { collectSupabasePreconnectOrigins } from './src/lib/supabasePreconnectOrigins';
 
+/**
+ * Lazy chunks of features switched off for this release (src/lib/features.ts).
+ * The service worker precaches every JS chunk, so a gated feature's chunk must
+ * also stay out of the precache — otherwise every install downloads code that
+ * nothing in the build can reach. Flags are read the way the client build reads
+ * them (process env over `.env.production`); only a production build registers
+ * the service worker, so that is the env that matters here.
+ */
+const releaseFlags = loadEnv('production', process.cwd(), 'VITE_FEATURE_');
+const GATED_CHUNK_IGNORES = [
+    ...(releaseFlags['VITE_FEATURE_PLAYALONG'] === '1' ? [] : ['**/assets/TransportBar-*.js']),
+    ...(releaseFlags['VITE_FEATURE_FINGERING'] === '1' ? [] : ['**/assets/FingeringFlow-*.js']),
+];
+
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
 
@@ -106,7 +120,7 @@ export default defineConfig({
                 // The SMuFL music-text face (~450 KB) serves only the opt-in
                 // handwriting → print feature; like the piano samples it is
                 // fetched on first use and then kept, not precached.
-                globIgnores: ['**/fonts/BravuraText.woff2'],
+                globIgnores: ['**/fonts/BravuraText.woff2', ...GATED_CHUNK_IGNORES],
                 navigateFallback: '/index.html',
                 navigateFallbackDenylist: [/^\/auth\/callback/],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,

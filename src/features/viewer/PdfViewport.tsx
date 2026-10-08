@@ -32,6 +32,7 @@ import { TextEditorOverlay } from '@/features/viewer/ink/TextEditorOverlay';
 import { PageView } from '@/features/viewer/pdf/PageView';
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
+import { features } from '@/lib/features';
 import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
 import { AnnotationStore } from '@/sync/annotationStore';
@@ -46,7 +47,11 @@ import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, CoverPageIcon, ZoomInIcon, ZoomOutIcon } from '@/ui/icons';
 
-/** Fingering feature loads on first use — keeps it out of the viewer bundle. */
+/**
+ * Fingering feature loads on first use — keeps it out of the viewer bundle.
+ * With VITE_FEATURE_FINGERING off (this release) nothing can select a region,
+ * so the chunk is never requested.
+ */
 const FingeringFlow = lazy(() =>
     import('@/features/fingering/FingeringFlow').then((m) => ({ default: m.FingeringFlow })),
 );
@@ -357,7 +362,14 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 textIntentHandled.current = false;
                 setTextIntent(intent);
             },
-            onFingeringSelect: (selection) => setFingeringSel(selection),
+            // The fingering tool is unreachable with the feature off (no toolbar
+            // button, no view-only pill); dropping the callback too means a stray
+            // 'fingering' tool state still can't open the flow.
+            onFingeringSelect: (selection) => {
+                if (features.fingering) {
+                    setFingeringSel(selection);
+                }
+            },
             onStrokeCommitted: (annotation) => handwriting.onStrokeCommitted(annotation),
         });
         inkRef.current = ink;
@@ -694,7 +706,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         </div>
                     ) : null}
                     {effectiveReadOnly ? null : <Toolbar store={annotationStore} />}
-                    {readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
+                    {features.fingering && readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
                     {!effectiveReadOnly && textIntent && textIntentLayout ? (
                         <TextEditorOverlay
                             intent={textIntent}
@@ -708,7 +720,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             }}
                         />
                     ) : null}
-                    {fingeringSel && fingeringLayout ? (
+                    {features.fingering && fingeringSel && fingeringLayout ? (
                         <Suspense fallback={null}>
                             <FingeringFlow
                                 key={`${fingeringSel.pageIndex}:${fingeringSel.rect.x.toFixed(4)}:${fingeringSel.rect.y.toFixed(4)}`}

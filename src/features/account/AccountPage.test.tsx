@@ -26,6 +26,10 @@ const readOfflineStorage = vi.fn();
 const clearOfflineStorage = vi.fn();
 const resolveInstallSurface = vi.fn((_canPromptInstall = false): InstallSurfaceModule.InstallSurface => 'other');
 
+/** Release flags, flipped per test; the page reads them at render. */
+const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
+
 // The real session module reaches for a Supabase client at import time of its
 // callers; only the pieces this page uses are stubbed, with displayNameOf and
 // storedDisplayNameOf kept faithful so the avatar/initials assertions are real.
@@ -238,25 +242,52 @@ describe('AccountPage', () => {
     });
 
     it('meters a capped allowance and writes "unlimited" with no bar for an uncapped one', async () => {
-        loadEntitlements.mockResolvedValue(entitlements({ omr_runs: -1 }));
+        loadEntitlements.mockResolvedValue(entitlements({ smart_imports: -1 }));
+        loadUsage.mockResolvedValue({ pdf_exports: 1 });
         await renderSettled();
 
         expect(await screen.findByText('unlimited')).toBeInTheDocument();
-        // Three capped metered rows remain; the unlimited one contributes no bar.
-        await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(3));
-        expect(
-            screen.queryByRole('progressbar', { name: 'Play-along analyses used this month' }),
-        ).not.toBeInTheDocument();
-        expect(screen.getByRole('progressbar', { name: 'AI fingering reads used this month' })).toBeInTheDocument();
+        // Two capped metered rows remain; the unlimited one contributes no bar.
+        await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(2));
+        expect(screen.queryByRole('progressbar', { name: 'IMSLP imports used this month' })).not.toBeInTheDocument();
+        expect(screen.getByRole('progressbar', { name: 'PDF exports used this month' })).toBeInTheDocument();
+        expect(screen.getByRole('progressbar', { name: 'AI page reads used this month' })).toBeInTheDocument();
     });
 
     it('fills a meter in proportion to what was used', async () => {
+        loadUsage.mockResolvedValue({ smart_imports: 1 });
         await renderSettled();
 
-        // omr_runs: 2 of 3.
-        const bar = await screen.findByRole('progressbar', { name: 'Play-along analyses used this month' });
-        expect(bar).toHaveAttribute('aria-valuenow', '67');
-        expect(screen.getByText('2 of 3 used this month')).toBeInTheDocument();
+        // smart_imports (IMSLP imports): 1 of 2.
+        const bar = await screen.findByRole('progressbar', { name: 'IMSLP imports used this month' });
+        expect(bar).toHaveAttribute('aria-valuenow', '50');
+        expect(screen.getByText('1 of 2 used this month')).toBeInTheDocument();
+    });
+
+    it('shows no allowance for play-along or fingering while those features are switched off', async () => {
+        await renderSettled();
+
+        await waitFor(() => expect(screen.getAllByRole('progressbar')).toHaveLength(3));
+        expect(screen.queryByText('Play-along analyses')).not.toBeInTheDocument();
+        expect(screen.queryByText(/play-along|fingering/i)).not.toBeInTheDocument();
+        expect(screen.getByText(/Annotation is unlimited on every plan/)).toBeInTheDocument();
+    });
+
+    it('meters play-along again, and names the fingering optimizer, in a build that ships them', async () => {
+        flags.playalong = true;
+        flags.fingering = true;
+        try {
+            await renderSettled();
+
+            // omr_runs: 2 of 3.
+            const bar = await screen.findByRole('progressbar', { name: 'Play-along analyses used this month' });
+            expect(bar).toHaveAttribute('aria-valuenow', '67');
+            expect(screen.getAllByRole('progressbar')).toHaveLength(4);
+            expect(screen.getByText(/fingering optimizer are unlimited/)).toBeInTheDocument();
+        } finally {
+            flags.playalong = false;
+            flags.fingering = false;
+        }
     });
 
     it('reports what this device is holding', async () => {
