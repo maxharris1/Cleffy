@@ -6,6 +6,19 @@ import type { AnnotationSnapshotRow } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
 /**
+ * Bumped at sign-out. Every server round-trip below captures it first and
+ * writes nothing to Dexie once it has moved on: a response that lands after
+ * signOut() cleared this account's snapshots must not put one back for the
+ * next account on the device to find (or push under its own JWT).
+ */
+let writeEpoch = 0;
+
+/** Stop every snapshot upload/pull in flight from writing locally (sign-out). */
+export const stopSnapshotWrites = (): void => {
+    writeEpoch += 1;
+};
+
+/**
  * Capture today's starting-point snapshot if one does not already exist.
  * `preEdit` must be the live annotation set *before* the triggering edit.
  */
@@ -109,8 +122,14 @@ const toLocal = (row: AnnotationSnapshotRow): LocalAnnotationSnapshot => ({
  * The server keeps one snapshot per (document, day); when another device got
  * there first, its row is the day's starting point everywhere.
  */
-const adoptServerSnapshot = async (db: ScribblerDb, row: LocalAnnotationSnapshot): Promise<void> => {
+const adoptServerSnapshot = async (db: ScribblerDb, row: LocalAnnotationSnapshot, epoch: number): Promise<void> => {
     await db.transaction('rw', db.annotationSnapshots, async () => {
+        // Checked inside the transaction: sign-out's clear is an rw
+        // transaction on this table too, so it either ran first (and the
+        // epoch had already moved) or runs after and removes this write.
+        if (epoch !== writeEpoch) {
+            return;
+        }
         await db.annotationSnapshots
             .where('[docId+capturedOn]')
             .equals([row.docId, row.capturedOn])
@@ -126,6 +145,7 @@ const adoptServerSnapshot = async (db: ScribblerDb, row: LocalAnnotationSnapshot
  * mirrored locally.
  */
 export const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotationSnapshot): Promise<void> => {
+    const epoch = writeEpoch;
     const supabase = getSupabase();
     const { data, error, status } = await supabase
         .from('annotation_snapshots')
@@ -141,6 +161,9 @@ export const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotat
             { onConflict: 'document_id,captured_on', ignoreDuplicates: true },
         )
         .select('id');
+    if (epoch !== writeEpoch) {
+        return;
+    }
     if (error) {
         if (isPermanentRejection(status)) {
             // RLS refused (no longer an editor) or the payload is invalid —
@@ -165,6 +188,9 @@ export const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotat
         .eq('document_id', snapshot.docId)
         .eq('captured_on', snapshot.capturedOn)
         .maybeSingle();
+    if (epoch !== writeEpoch) {
+        return;
+    }
     if (existing.error) {
         throw new Error(existing.error.message);
     }
@@ -172,7 +198,7 @@ export const pushSnapshotRemote = async (db: ScribblerDb, snapshot: LocalAnnotat
         // Conflict reported but the row is not visible to us: leave pending.
         throw new Error('day snapshot conflict without a visible server row');
     }
-    await adoptServerSnapshot(db, toLocal(existing.data));
+    await adoptServerSnapshot(db, toLocal(existing.data), epoch);
 };
 
 let retryInFlight: Promise<void> | null = null;
@@ -186,6 +212,7 @@ export const retryPendingSnapshots = (db: ScribblerDb = getDb(), docId?: string)
     if (retryInFlight) {
         return retryInFlight;
     }
+    const epoch = writeEpoch;
     retryInFlight = (async () => {
         try {
             // No pending index — the table holds one row per document-day and
@@ -194,6 +221,9 @@ export const retryPendingSnapshots = (db: ScribblerDb = getDb(), docId?: string)
                 .filter((row) => row.pending === 1 && isCloudDocId(row.docId) && (!docId || row.docId === docId))
                 .toArray();
             for (const snapshot of pending) {
+                if (epoch !== writeEpoch) {
+                    return;
+                }
                 try {
                     await pushSnapshotRemote(db, snapshot);
                 } catch (err) {
@@ -233,6 +263,7 @@ export const countPendingSnapshots = async (db: ScribblerDb = getDb()): Promise<
 export const SNAPSHOT_PULL_LIMIT = 30;
 
 const pullSnapshotsRemote = async (db: ScribblerDb, docId: string): Promise<void> => {
+    const epoch = writeEpoch;
     const { data, error } = await getSupabase()
         .from('annotation_snapshots')
         .select('*')
@@ -245,7 +276,7 @@ const pullSnapshotsRemote = async (db: ScribblerDb, docId: string): Promise<void
     for (const row of data ?? []) {
         // Per row, replacing any local snapshot for the same day: a blind
         // bulkPut would now trip the unique index (and used to keep both).
-        await adoptServerSnapshot(db, toLocal(row));
+        await adoptServerSnapshot(db, toLocal(row), epoch);
     }
 };
 

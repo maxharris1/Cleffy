@@ -157,13 +157,13 @@ describe('syncBeforeSignOut', () => {
             annotation: mark('local-1', LOCAL_DOC),
             queuedAt: 'x',
         });
-        expect(await syncBeforeSignOut(50)).toBe(0);
+        expect(await syncBeforeSignOut(50)).toEqual({ pending: 0, refused: 0 });
     });
 
     it('reports the unsynced cloud changes it could not upload', async () => {
         await seedAnnotationData();
         // No session to upload with (already expired): nothing can go up.
-        expect(await syncBeforeSignOut(50)).toBe(1);
+        expect(await syncBeforeSignOut(50)).toEqual({ pending: 1, refused: 0 });
         // Nothing was cleared by asking.
         expect(await getDb().ops.count()).toBe(2);
     });

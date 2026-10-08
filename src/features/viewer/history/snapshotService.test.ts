@@ -12,6 +12,8 @@ const server = vi.hoisted(() => ({
     /** Next upserts fail this way: 'network' (status 0) or 'forbidden' (403). */
     upsertFailure: null as null | 'network' | 'forbidden',
     upserts: 0,
+    /** When set, upserts wait for it — a response still on the wire. */
+    gate: null as null | Promise<void>,
 }));
 
 vi.mock('@/lib/supabase', () => {
@@ -39,7 +41,10 @@ vi.mock('@/lib/supabase', () => {
         return {
             select: () => query,
             upsert: (row: Omit<AnnotationSnapshotRow, 'created_at'>) => ({
-                select: () => {
+                select: async () => {
+                    if (server.gate) {
+                        await server.gate;
+                    }
                     server.upserts += 1;
                     if (server.upsertFailure === 'network') {
                         return Promise.resolve({ data: null, error: { message: 'Failed to fetch' }, status: 0 });
@@ -67,6 +72,7 @@ import {
     ensureDayStartingSnapshot,
     listSnapshots,
     retryPendingSnapshots,
+    stopSnapshotWrites,
 } from '@/features/viewer/history/snapshotService';
 import { localDateString } from '@/features/viewer/history/snapshotTypes';
 import { getDb } from '@/sync/db';
@@ -81,10 +87,48 @@ beforeEach(async () => {
     server.rows = [];
     server.upsertFailure = null;
     server.upserts = 0;
+    server.gate = null;
     await getDb().annotationSnapshots.clear();
 });
 
 describe('day snapshot upload', () => {
+    it('an upload still in flight at sign-out does not write the snapshot back after the clear', async () => {
+        server.upsertFailure = 'network';
+        await ensureDayStartingSnapshot(getDb(), DOC, []);
+        await settle();
+        server.upsertFailure = null;
+        // Another device already has the day: the response would make this
+        // device adopt (put) the server row.
+        server.rows.push({
+            id: 'theirs-0000-4000-8000-000000000001',
+            document_id: DOC,
+            captured_on: today,
+            label: null,
+            payload: [],
+            created_by: null,
+            created_at: '2026-10-07T00:00:00Z',
+        });
+        let release: () => void = () => undefined;
+        server.gate = new Promise((resolve) => (release = resolve));
+
+        const inFlight = retryPendingSnapshots(getDb());
+        await settle();
+        // signOut(): stop snapshot writes, then clear this account's rows.
+        stopSnapshotWrites();
+        await getDb().annotationSnapshots.clear();
+        release();
+        await inFlight;
+
+        expect(await getDb().annotationSnapshots.count()).toBe(0);
+
+        // A later account's uploads still work.
+        server.gate = null;
+        server.rows = [];
+        const next = await ensureDayStartingSnapshot(getDb(), DOC, []);
+        await settle();
+        expect((await getDb().annotationSnapshots.get(next!.id))?.pending).toBe(0);
+    });
+
     it('uploads the day snapshot and marks it synced', async () => {
         const snap = await ensureDayStartingSnapshot(getDb(), DOC, []);
         await settle();

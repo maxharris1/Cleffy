@@ -57,6 +57,9 @@ const makeApi = (online: { value: boolean }): AnnotationsApi & { inserted: strin
         async fetchSince() {
             return { data: [], error: online.value ? null : down };
         },
+        async fetchDocumentArchived() {
+            return { archived: false, error: online.value ? null : down };
+        },
     };
 };
 
@@ -77,9 +80,9 @@ describe('drainCloudOutboxes', () => {
         await queue(LOCAL, 'l1');
         const api = makeApi({ value: true });
 
-        const remaining = await drainCloudOutboxes({ db, api, getUserId: () => 'user-1', timeoutMs: 2000 });
+        const result = await drainCloudOutboxes({ db, api, getUserId: () => 'user-1', timeoutMs: 2000 });
 
-        expect(remaining).toBe(0);
+        expect(result).toEqual({ pending: 0, refused: 0 });
         expect(api.inserted.sort()).toEqual(['a1', 'b1']);
         // Local scores are never uploaded and never counted.
         expect(await db.ops.where('docId').equals(LOCAL).count()).toBe(1);
@@ -89,14 +92,14 @@ describe('drainCloudOutboxes', () => {
         await queue(DOC_A, 'a1');
         await queue(DOC_A, 'a2');
 
-        const remaining = await drainCloudOutboxes({
+        const result = await drainCloudOutboxes({
             db,
             api: makeApi({ value: false }),
             getUserId: () => 'user-1',
             timeoutMs: 2000,
         });
 
-        expect(remaining).toBe(2);
+        expect(result).toEqual({ pending: 2, refused: 0 });
         expect(await pendingCloudOpCount(db)).toBe(2);
     });
 
@@ -114,6 +117,59 @@ describe('drainCloudOutboxes', () => {
         engine.stop();
     });
 
+    it('counts changes the server refused during the drain, though nothing is left pending', async () => {
+        await queue(DOC_A, 'a1');
+        await queue(DOC_A, 'a2');
+        await queue(DOC_B, 'b1');
+        const base = makeApi({ value: true });
+        // e.g. this account lost edit access to score A while offline.
+        const refuse = { message: 'new row violates row-level security policy', kind: 'reject' as const };
+        const api: AnnotationsApi = {
+            ...base,
+            insertIgnoreDuplicates: (row) =>
+                row.document_id === DOC_A ? Promise.resolve({ error: refuse }) : base.insertIgnoreDuplicates(row),
+            insertMany: (rows) =>
+                rows.some((r) => r.document_id === DOC_A)
+                    ? Promise.resolve({ error: refuse })
+                    : base.insertMany.call(api, rows),
+        };
+
+        const result = await drainCloudOutboxes({ db, api, getUserId: () => 'user-1', timeoutMs: 2000 });
+
+        // The refused ops are gone (and the marks rolled back), so pending is
+        // 0 — the refusal count is what makes sign-out tell the user.
+        expect(result).toEqual({ pending: 0, refused: 2 });
+        expect(await db.annotations.get('a1')).toBeUndefined();
+    });
+
+    it('counts a refusal that lands in the open viewer engine too', async () => {
+        await queue(DOC_A, 'a1');
+        const base = makeApi({ value: true });
+        const api: AnnotationsApi = {
+            ...base,
+            insertIgnoreDuplicates: async () => ({ error: { message: 'forbidden', kind: 'reject' } }),
+            insertMany: async () => ({ error: { message: 'forbidden', kind: 'reject' } }),
+        };
+        const viewerRejections: string[] = [];
+        const engine = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC_A),
+            api,
+            docId: DOC_A,
+            getUserId: () => 'user-1',
+            onRejected: (r) => viewerRejections.push(r.annotationId),
+        });
+        // Registered as the open viewer's engine without its own first sync.
+        vi.spyOn(engine, 'sync').mockResolvedValue(undefined);
+        engine.start();
+
+        const result = await drainCloudOutboxes({ db, api, getUserId: () => 'user-1', timeoutMs: 2000 });
+
+        expect(result).toEqual({ pending: 0, refused: 1 });
+        expect(viewerRejections).toEqual(['a1']);
+        engine.stop();
+    });
+
     it('gives up at the timeout instead of holding sign-out hostage', async () => {
         await queue(DOC_A, 'a1');
         const hanging: AnnotationsApi = {
@@ -122,8 +178,8 @@ describe('drainCloudOutboxes', () => {
             insertIgnoreDuplicates: () => new Promise(() => undefined),
         };
         const started = Date.now();
-        const remaining = await drainCloudOutboxes({ db, api: hanging, getUserId: () => 'user-1', timeoutMs: 50 });
-        expect(remaining).toBe(1);
+        const result = await drainCloudOutboxes({ db, api: hanging, getUserId: () => 'user-1', timeoutMs: 50 });
+        expect(result.pending).toBe(1);
         expect(Date.now() - started).toBeLessThan(1500);
     });
 });

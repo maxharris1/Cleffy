@@ -18,9 +18,14 @@ vi.mock('@/features/auth/AuthGates', () => ({
         children({ user: { id: 'teacher-1', email: 'teacher@example.com' } }),
 }));
 
+const sessionMocks = vi.hoisted(() => ({
+    signOut: vi.fn(async () => undefined),
+    syncBeforeSignOut: vi.fn(async () => ({ pending: 0, refused: 0 })),
+}));
 vi.mock('@/features/auth/session', () => ({
     displayNameOf: () => 'Ada Teacher',
-    signOut: vi.fn(),
+    signOut: () => sessionMocks.signOut(),
+    syncBeforeSignOut: () => sessionMocks.syncBeforeSignOut(),
 }));
 
 const entitlementsState = vi.hoisted(() => {
@@ -58,7 +63,7 @@ vi.mock('@/features/billing/useEntitlements', () => ({
 }));
 
 vi.mock('@/features/billing/entitlementsService', () => ({
-    clearCachedEntitlements: vi.fn(),
+    clearCachedEntitlements: vi.fn(async () => undefined),
     isUnlimited: (limit: number) => limit < 0,
     FREE_LIMITS: { cloud_scores: 3 },
 }));
@@ -186,6 +191,28 @@ describe('LibraryShell', () => {
         await user.click(screen.getByRole('button', { name: 'go back' }));
         expect(await screen.findByText('library page')).toBeInTheDocument();
         expect(screen.queryByRole('menu', { name: 'Account' })).not.toBeInTheDocument();
+    });
+
+    it('says it is saving changes while the upload before sign-out runs', async () => {
+        const user = userEvent.setup();
+        let finish: (r: { pending: number; refused: number }) => void = () => undefined;
+        sessionMocks.syncBeforeSignOut.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+        renderShell();
+
+        await user.click(await screen.findByRole('button', { name: /Account menu/ }));
+        await user.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+
+        // The menu closed on click; the wait must still be visible.
+        expect(screen.getByRole('status')).toHaveTextContent('Saving changes…');
+        expect(screen.getByRole('progressbar', { name: 'Saving changes before signing out' })).toBeInTheDocument();
+        // Reopening the menu does not offer a second sign-out meanwhile.
+        await user.click(screen.getByRole('button', { name: /Account menu/ }));
+        expect(screen.getByRole('menuitem', { name: 'Saving changes…' })).toBeDisabled();
+        expect(sessionMocks.signOut).not.toHaveBeenCalled();
+
+        finish({ pending: 0, refused: 0 });
+        await waitFor(() => expect(sessionMocks.signOut).toHaveBeenCalledTimes(1));
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
     it('pads the chrome for the iPhone status bar', () => {

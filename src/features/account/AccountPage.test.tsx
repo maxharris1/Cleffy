@@ -149,7 +149,7 @@ const renderSettled = async () => {
 beforeEach(() => {
     vi.clearAllMocks();
     useSession.mockReturnValue({ session: sessionFor(), loading: false, lastEvent: null });
-    syncBeforeSignOut.mockResolvedValue(0);
+    syncBeforeSignOut.mockResolvedValue({ pending: 0, refused: 0 });
     loadEntitlements.mockResolvedValue(entitlements());
     readCachedEntitlements.mockResolvedValue(null);
     loadUsage.mockResolvedValue({ omr_runs: 2 });
@@ -300,7 +300,7 @@ describe('AccountPage', () => {
 
     it('asks before signing out over unsynced marks, and Stay signed in keeps the session', async () => {
         const user = userEvent.setup();
-        syncBeforeSignOut.mockResolvedValue(2);
+        syncBeforeSignOut.mockResolvedValue({ pending: 2, refused: 0 });
         await renderSettled();
 
         await user.click(screen.getByRole('button', { name: 'Sign out' }));

@@ -1,7 +1,7 @@
 import { isCloudDocId } from '@/features/library/documentsService';
 import { AnnotationStore } from '@/sync/annotationStore';
 import type { ScribblerDb } from '@/sync/db';
-import { activeEngineFor, SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
+import { activeEngineFor, observeRejections, SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
 
 /**
  * Sign-out support for the annotation outbox.
@@ -22,20 +22,40 @@ import { activeEngineFor, SyncEngine, type AnnotationsApi } from '@/sync/syncEng
 export const pendingCloudOpCount = (db: ScribblerDb): Promise<number> =>
     db.ops.filter((op) => isCloudDocId(op.docId)).count();
 
+export interface DrainResult {
+    /** Outbox ops for cloud scores still not accepted by the server. */
+    pending: number;
+    /**
+     * Distinct marks whose change the server refused for good during the
+     * drain (lost edit access, invalid mark). Those ops are gone and the marks
+     * rolled back to the server's version — the user must still be told.
+     */
+    refused: number;
+}
+
 /**
  * Try to upload every cloud score's outbox before sign-out. Uses the open
  * viewer's engine for its document when there is one (so the same ops are
  * not pushed twice), and a short-lived headless engine for the rest. Gives up
- * after `timeoutMs` and returns how many ops are still pending.
+ * after `timeoutMs` and returns how many ops are still pending, and how many
+ * marks the server refused along the way.
  */
 export const drainCloudOutboxes = async (deps: {
     db: ScribblerDb;
     api: AnnotationsApi;
     getUserId: () => string | null;
     timeoutMs: number;
-}): Promise<number> => {
+}): Promise<DrainResult> => {
     const { db, api, getUserId, timeoutMs } = deps;
     const docIds = [...new Set((await db.ops.toArray()).map((op) => op.docId).filter(isCloudDocId))];
+    // Observed across engines rather than via onRejected, so a refusal that
+    // lands in the open viewer's engine during the drain counts too.
+    const refused = new Set<string>();
+    const stopObserving = observeRejections((rejection) => {
+        if (docIds.includes(rejection.docId)) {
+            refused.add(`${rejection.docId}:${rejection.annotationId}`);
+        }
+    });
     const headless: SyncEngine[] = [];
     let timedOut = false;
     const work = (async () => {
@@ -64,13 +84,14 @@ export const drainCloudOutboxes = async (deps: {
         await Promise.race([work.catch((err: unknown) => console.warn('Sign-out sync failed', err)), timeout]);
     } finally {
         clearTimeout(timer);
+        stopObserving();
         // Stopping cancels their retry timers and makes an in-flight flush
         // bail before writing again — the tables are about to be cleared.
         for (const engine of headless) {
             engine.stop();
         }
     }
-    return pendingCloudOpCount(db);
+    return { pending: await pendingCloudOpCount(db), refused: refused.size };
 };
 
 /** Remove this account's cloud-score annotation data from the device. */
