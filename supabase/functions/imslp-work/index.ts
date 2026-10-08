@@ -31,6 +31,8 @@ interface Edition extends ImslpFileMeta {
     licenseLabel: string | null;
     restriction: string | null;
     downloadable: boolean;
+    /** Present when the license lookup itself failed (IMSLP unreachable), not when IMSLP withheld clearance. */
+    licenseCheck?: 'unavailable';
 }
 
 interface LicenseRow {
@@ -45,9 +47,9 @@ interface LicenseRow {
  * Per-file licenses for the work's PDFs: fresh cache rows, plus one
  * action=parse of the rendered page (then cached) when they don't cover
  * every file.
- * `source` distinguishes "IMSLP was parsed and this file wasn't cleared"
- * (conservative: not downloadable) from "license lookup unavailable"
- * (fail-open: downloadable, but never recommended).
+ * `source` distinguishes "IMSLP was parsed and this file wasn't cleared" from
+ * "license lookup unavailable". Neither is downloadable (imslp-download fails
+ * closed on both); the second is reported so the picker can say why.
  */
 const resolveLicenses = async (
     workTitle: string,
@@ -182,7 +184,7 @@ Deno.serve(async (req) => {
         const { licenses, source: licenseSource } = await resolveLicenses(page.title ?? title, pdfTitles);
         const licenseFields = (
             filename: string,
-        ): Pick<Edition, 'license' | 'licenseLabel' | 'restriction' | 'downloadable'> => {
+        ): Pick<Edition, 'license' | 'licenseLabel' | 'restriction' | 'downloadable' | 'licenseCheck'> => {
             const license = licenses.get(filename);
             if (license) {
                 return {
@@ -192,13 +194,17 @@ Deno.serve(async (req) => {
                     downloadable: isDownloadable(license),
                 };
             }
+            // Not cleared either way. A parsed page without this file means
+            // IMSLP's own listing didn't clear it; a failed lookup means nobody
+            // checked. imslp-download refuses both (license_unknown), so the
+            // picker must not offer a one-tap import it would then refuse —
+            // `licenseCheck` lets it say "check on IMSLP" for the transient case.
             return {
                 license: 'unknown',
                 licenseLabel: null,
                 restriction: null,
-                // Parsed page without this file = not cleared; lookup failure
-                // fails open so an IMSLP hiccup can't lock the import feature.
-                downloadable: licenseSource !== 'live',
+                downloadable: false,
+                ...(licenseSource === 'unavailable' ? { licenseCheck: 'unavailable' as const } : {}),
             };
         };
 

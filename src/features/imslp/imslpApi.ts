@@ -52,6 +52,8 @@ export interface ImslpEdition {
     restriction?: string | null;
     /** Server verdict: Cleffy can fetch this file directly. */
     downloadable?: boolean;
+    /** The license lookup itself failed (IMSLP unreachable) — not importable, check on IMSLP. */
+    licenseCheck?: 'unavailable';
     /** Official IMSLP publisher name from the work page's `{{P}}` template. */
     publisher?: string | null;
     /** Publication year when the publisher template states one. */
@@ -79,6 +81,8 @@ const FALLBACK_CODES = [
     'not_pdf',
     'too_large',
     'upstream',
+    'forbidden',
+    'timeout',
     'non_pd',
     'license_unknown',
 ] as const;
@@ -256,15 +260,82 @@ export const fetchImslpWork = async (title: string): Promise<ImslpWorkDetail> =>
 };
 
 /**
+ * Where a live IMSLP download is, as the panel shows it. `queued` is reported
+ * only after the server actually turned a request away for pacing and a real
+ * wait is under way; `downloading` when the retry goes out. A first-try
+ * success reports neither.
+ */
+export type ImslpDownloadStage = 'queued' | 'downloading';
+
+/** Total time a client waits behind the deployment-wide IMSLP pacing before giving up. */
+export const DOWNLOAD_QUEUE_MAX_WAIT_MS = 90_000;
+/** A queued wait shorter than this is not worth announcing. */
+export const DOWNLOAD_QUEUE_SIGNAL_MS = 2_000;
+const DOWNLOAD_QUEUE_FALLBACK_RETRY_SEC = 5;
+/**
+ * Floor under each successive queued retry: 1 s, 2 s, 4 s, 8 s, then 15 s.
+ * The server's retryAfterSec for a full one-second pacing window is 1, and
+ * imslp-download also limits each caller to 10 requests a minute — retrying
+ * every second through a busy spell would trip that limit and turn a queue
+ * into an error. This keeps a 90 s wait to about eight requests a minute.
+ */
+const queuedRetryFloorMs = (retriesSoFar: number): number => Math.min(15_000, 1_000 * 2 ** retriesSoFar);
+
+/**
+ * One imslp-download call. The function's own IMSLP budget is 90 s plus the
+ * license check and the Storage write; past this the platform has killed it
+ * or the network has, and waiting longer only leaves the panel spinning.
+ */
+export const IMSLP_DOWNLOAD_TIMEOUT_MS = 150_000;
+
+export const IMSLP_DOWNLOAD_BUSY_MESSAGE =
+    'IMSLP downloads are busy right now. Wait a minute, then press Add again — or open the file on IMSLP and add the PDF yourself.';
+export const IMSLP_DOWNLOAD_TIMEOUT_MESSAGE =
+    'IMSLP took too long to send this score. Try again in a minute — or open the file on IMSLP and add the PDF yourself.';
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** retryAfterSec of a pacing refusal (429 download_queued); null for any other answer. */
+const queuedRetrySec = async (response: Response): Promise<number | null> => {
+    if (response.status !== 429) {
+        return null;
+    }
+    const body: unknown = await response
+        .clone()
+        .json()
+        .catch(() => null);
+    if (!body || typeof body !== 'object') {
+        return null;
+    }
+    const record = body as { code?: unknown; retryAfterSec?: unknown };
+    if (record.code !== 'download_queued') {
+        return null;
+    }
+    return typeof record.retryAfterSec === 'number' && record.retryAfterSec > 0
+        ? record.retryAfterSec
+        : DOWNLOAD_QUEUE_FALLBACK_RETRY_SEC;
+};
+
+const isTimeout = (err: unknown): boolean =>
+    (err instanceof DOMException || err instanceof Error) && (err.name === 'TimeoutError' || err.name === 'AbortError');
+
+/**
  * Ask the Edge Function to fetch an IMSLP PDF and write it into the private
  * `scores` bucket for an already-created document. Returns JSON only — never
  * proxies PDF bytes through the browser (Free-plan egress).
+ *
+ * IMSLP fetches are paced deployment-wide (imslpDownloadGate.ts): a full slot
+ * answers 429 download_queued with retryAfterSec, and this waits it out and
+ * retries — up to DOWNLOAD_QUEUE_MAX_WAIT_MS — reporting `queued` through
+ * onStage rather than failing. Each call is bounded by IMSLP_DOWNLOAD_TIMEOUT_MS.
  */
 export const importImslpPdfToStorage = async (
     filename: string,
     documentId: string,
     acceptedDisclaimer: boolean,
     workTitle?: string,
+    onStage?: (stage: ImslpDownloadStage) => void,
+    maxWaitMs = DOWNLOAD_QUEUE_MAX_WAIT_MS,
 ): Promise<{ ok: true; filename: string; byteLength: number; storagePath: string } | ImslpDownloadFallback> => {
     const supabase = getSupabase();
     const { data: sessionData } = await supabase.auth.getSession();
@@ -274,15 +345,57 @@ export const importImslpPdfToStorage = async (
     }
 
     const { url: projectUrl, anonKey } = requireSupabaseConfig();
-    const response = await fetch(`${projectUrl}/functions/v1/imslp-download`, {
-        method: 'POST',
-        headers: {
-            Authorization: `Bearer ${accessToken}`,
-            apikey: anonKey,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
-    });
+    const request = async (): Promise<Response> => {
+        try {
+            return await fetch(`${projectUrl}/functions/v1/imslp-download`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    apikey: anonKey,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ filename, documentId, acceptedDisclaimer, workTitle }),
+                signal: AbortSignal.timeout(IMSLP_DOWNLOAD_TIMEOUT_MS),
+            });
+        } catch (err) {
+            if (isTimeout(err)) {
+                throw new Error(IMSLP_DOWNLOAD_TIMEOUT_MESSAGE, { cause: err });
+            }
+            throw err;
+        }
+    };
+
+    let response = await request();
+    let waitedMs = 0;
+    let retries = 0;
+    let queuedReported = false;
+    for (;;) {
+        const retrySec = await queuedRetrySec(response);
+        if (retrySec === null) {
+            break;
+        }
+        const retryMs = Math.max(retrySec * 1000, queuedRetryFloorMs(retries));
+        retries += 1;
+        if (waitedMs + retryMs > maxWaitMs) {
+            throw new Error(IMSLP_DOWNLOAD_BUSY_MESSAGE);
+        }
+        if (!queuedReported && waitedMs + retryMs >= DOWNLOAD_QUEUE_SIGNAL_MS) {
+            // Announce only once a real wait is under way: a one-second pacing
+            // blip should read as "downloading", not as a queue.
+            const head = Math.max(0, DOWNLOAD_QUEUE_SIGNAL_MS - waitedMs);
+            await sleep(head);
+            queuedReported = true;
+            onStage?.('queued');
+            await sleep(retryMs - head);
+        } else {
+            await sleep(retryMs);
+        }
+        waitedMs += retryMs;
+        if (queuedReported) {
+            onStage?.('downloading');
+        }
+        response = await request();
+    }
 
     // Smart-import quota exhausted. Surfaced as the same typed error the other
     // metered features raise, so one notice component renders all of them.

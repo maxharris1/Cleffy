@@ -6,6 +6,7 @@ import { displayNameOf, signOut } from '@/features/auth/session';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
+import type { ImslpDownloadStage } from '@/features/imslp/imslpApi';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
     fetchLibraryBootstrap,
@@ -43,6 +44,7 @@ export type LibraryOutletContext = {
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
@@ -281,7 +283,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
-    const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
+    const onImportImslp = async (
+        filename: string,
+        workTitle: string,
+        acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+    ) => {
         const before = snapshotBefore();
         try {
             const beforeSnap = await refuseIfCloudScoreCap(before);
@@ -289,7 +296,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             // The Edge function fetches server-side, so there is no byte progress
             // to report — show the indeterminate bar instead of a stuck 0%.
             setImportingImslp(true);
-            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer);
+            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer, onStage);
             if (!result.ok) {
                 return {
                     ok: false as const,

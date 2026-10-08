@@ -1,7 +1,12 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
-import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
+import {
+    fetchImslpWork,
+    type ImslpDownloadStage,
+    type ImslpEdition,
+    type ImslpWorkDetail,
+} from '@/features/imslp/imslpApi';
 import { isEditionImportable, recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
@@ -16,11 +21,14 @@ export interface ImslpBrowserProps {
      * the proxy cannot fetch (bot check / disclaimer / restricted license).
      * Real failures are recorded by the shell (captureFailure) before the
      * rethrow, so this component reports only its own load errors.
+     * `onStage` reports a pacing queue (IMSLP downloads are paced
+     * deployment-wide) and the retry that ends it.
      */
     onImportImslp: (
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
@@ -68,7 +76,7 @@ const reduce = (state: Flow, action: Action): Flow => {
             };
         }
         case 'select':
-            if (state.phase !== 'work' || state.download.kind === 'downloading') {
+            if (state.phase !== 'work' || state.download.kind === 'downloading' || state.download.kind === 'queued') {
                 return state;
             }
             return { ...state, selected: action.edition, download: { kind: 'idle' } };
@@ -150,7 +158,7 @@ export const ImslpBrowser = ({
         if (quotaExhausted) {
             return;
         }
-        if (flow.download.kind === 'downloading' || importInFlightRef.current) {
+        if (flow.download.kind === 'downloading' || flow.download.kind === 'queued' || importInFlightRef.current) {
             return;
         }
         if (!isEditionImportable(flow.selected)) {
@@ -161,7 +169,9 @@ export const ImslpBrowser = ({
         setError(null);
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(selected.filename, work.title, true);
+            const result = await onImportImslp(selected.filename, work.title, true, (stage) =>
+                dispatch({ type: 'download', download: { kind: stage } }),
+            );
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -194,7 +204,9 @@ export const ImslpBrowser = ({
     };
 
     const blocked =
-        busy || flow.phase === 'loadingWork' || (flow.phase === 'work' && flow.download.kind === 'downloading');
+        busy ||
+        flow.phase === 'loadingWork' ||
+        (flow.phase === 'work' && (flow.download.kind === 'downloading' || flow.download.kind === 'queued'));
 
     return (
         <section className={className}>
