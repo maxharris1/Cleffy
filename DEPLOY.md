@@ -676,6 +676,38 @@ The signature gate was checked against the deployed endpoint, not only in tests:
 unsigned → `missing_header`, forged → `signature_mismatch`, stale timestamp →
 `timestamp_out_of_tolerance`, and no row was written by any of them.
 
+## 8. Auth password policy — must be set on both projects
+
+Every new password is checked in the browser (and in `student-claim`) against
+`supabase/functions/_shared/passwordPolicy.ts`: at least 8 characters, at least
+one ASCII letter and one digit, at most 72 bytes. GoTrue is the authority, and
+`config.toml` only configures the local stack (and the `dev` branch, if its
+deploy applies config). Set the hosted projects explicitly, production AND the
+`dev` branch, with a Management API token:
+
+```bash
+for ref in jibgwgosihadbjgxdsfe qdbnlrgylelelvwbkvnm; do
+  curl -sS -X PATCH "https://api.supabase.com/v1/projects/$ref/config/auth" \
+    -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"password_min_length": 8, "password_required_characters": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789"}'
+done
+```
+
+`password_required_characters` takes the character SETS, colon-separated: the
+string above is the API's enum value for "letters and digits" (one set of
+letters, one of digits) — the same value the CLI writes for
+`password_requirements = "letters_digits"`. Check it with a `GET` on the same
+path before and after; the dashboard (Authentication → Policies → Password
+strength) shows it as "Letters and digits". Existing accounts keep working:
+GoTrue checks strength only where a password is set, never at sign-in, and the
+app does the same.
+
+Leaked-password protection (`"password_hibp_enabled": true` in the same
+payload) is flagged by the security advisor on both projects. It needs a paid
+plan; when it is on, a breached password is refused with
+`weak_password`/`reasons: ["pwned"]`, which `mapAuthError` already words.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from

@@ -201,8 +201,8 @@ describe('AccountPage', () => {
         const user = userEvent.setup();
         await renderSettled();
 
-        await user.type(screen.getByLabelText('New password'), 'correct-horse');
-        await user.type(screen.getByLabelText('Confirm new password'), 'correct-hoarse');
+        await user.type(screen.getByLabelText('New password'), 'correct-horse-1');
+        await user.type(screen.getByLabelText('Confirm new password'), 'correct-hoarse-1');
         await user.click(screen.getByRole('button', { name: 'Change password' }));
 
         expect(await screen.findByText('Those two passwords do not match.')).toBeInTheDocument();
@@ -217,8 +217,38 @@ describe('AccountPage', () => {
         await user.type(screen.getByLabelText('Confirm new password'), 'short');
         await user.click(screen.getByRole('button', { name: 'Change password' }));
 
-        expect(await screen.findByText('Use at least 8 characters.')).toBeInTheDocument();
+        expect(await screen.findByText('Password must be at least 8 characters.')).toBeInTheDocument();
         expect(updatePassword).not.toHaveBeenCalled();
+    });
+
+    it('refuses a password without both a letter and a number, as Supabase Auth would', async () => {
+        const user = userEvent.setup();
+        await renderSettled();
+
+        await user.type(screen.getByLabelText('New password'), 'correct-horse');
+        await user.type(screen.getByLabelText('Confirm new password'), 'correct-horse');
+        await user.click(screen.getByRole('button', { name: 'Change password' }));
+
+        expect(
+            await screen.findByText('Password must include at least one letter and one number.'),
+        ).toBeInTheDocument();
+        expect(updatePassword).not.toHaveBeenCalled();
+    });
+
+    it('words a server refusal instead of passing the raw Auth message through', async () => {
+        const user = userEvent.setup();
+        updatePassword.mockRejectedValueOnce(
+            Object.assign(new Error('New password should be different from the old password.'), {
+                code: 'same_password',
+            }),
+        );
+        await renderSettled();
+
+        await user.type(screen.getByLabelText('New password'), 'correct-horse-1');
+        await user.type(screen.getByLabelText('Confirm new password'), 'correct-horse-1');
+        await user.click(screen.getByRole('button', { name: 'Change password' }));
+
+        expect(await screen.findByText('Choose a password different from your current one.')).toBeInTheDocument();
     });
 
     it('changes the password once and clears both fields', async () => {
@@ -227,11 +257,11 @@ describe('AccountPage', () => {
 
         const next = screen.getByLabelText('New password');
         const confirm = screen.getByLabelText('Confirm new password');
-        await user.type(next, 'correct-horse');
-        await user.type(confirm, 'correct-horse');
+        await user.type(next, 'correct-horse-1');
+        await user.type(confirm, 'correct-horse-1');
         await user.click(screen.getByRole('button', { name: 'Change password' }));
 
-        expect(updatePassword).toHaveBeenCalledExactlyOnceWith('correct-horse');
+        expect(updatePassword).toHaveBeenCalledExactlyOnceWith('correct-horse-1');
         expect(await screen.findByText('Password changed.')).toBeInTheDocument();
         expect(next).toHaveValue('');
         expect(confirm).toHaveValue('');

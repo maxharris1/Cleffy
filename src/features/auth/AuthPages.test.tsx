@@ -7,18 +7,30 @@ import { LoginPage } from '@/features/auth/LoginPage';
 import { RegisterPage } from '@/features/auth/RegisterPage';
 
 const signInWithPassword = vi.hoisted(() => vi.fn());
+const signUpWithPassword = vi.hoisted(() => vi.fn());
 
 vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: null, loading: false }),
     isRegisteredSession: () => false,
     signInWithPassword: (...args: unknown[]) => signInWithPassword(...args),
-    signUpWithPassword: vi.fn(),
+    signUpWithPassword: (...args: unknown[]) => signUpWithPassword(...args),
 }));
 
 afterEach(() => {
     cleanup();
     signInWithPassword.mockReset();
+    signUpWithPassword.mockReset();
 });
+
+const renderRegister = () =>
+    render(
+        <MemoryRouter initialEntries={['/register']}>
+            <Routes>
+                <Route path="/register" element={<RegisterPage />} />
+                <Route path="/library" element={<p>library</p>} />
+            </Routes>
+        </MemoryRouter>,
+    );
 
 describe('Auth pages', () => {
     it('renders login form with links to register and forgot password', () => {
@@ -100,5 +112,53 @@ describe('Auth pages', () => {
         expect(screen.getByRole('button', { name: 'Create account' })).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
         expect(screen.getByRole('main')).toHaveClass('safe-brand-shell');
+    });
+
+    it('holds a new password to the account policy before calling sign-up', async () => {
+        const user = userEvent.setup();
+        renderRegister();
+        expect(screen.getByText('At least 8 characters, with a letter and a number.')).toBeInTheDocument();
+
+        await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
+        await user.type(screen.getByLabelText('Password'), 'sixsix');
+        await user.type(screen.getByLabelText('Confirm password'), 'sixsix');
+        await user.click(screen.getByRole('button', { name: 'Create account' }));
+        expect(await screen.findByText('Password must be at least 8 characters.')).toBeInTheDocument();
+
+        await user.clear(screen.getByLabelText('Password'));
+        await user.clear(screen.getByLabelText('Confirm password'));
+        await user.type(screen.getByLabelText('Password'), 'lettersonly');
+        await user.type(screen.getByLabelText('Confirm password'), 'lettersonly');
+        await user.click(screen.getByRole('button', { name: 'Create account' }));
+        expect(
+            await screen.findByText('Password must include at least one letter and one number.'),
+        ).toBeInTheDocument();
+        expect(signUpWithPassword).not.toHaveBeenCalled();
+
+        await user.clear(screen.getByLabelText('Password'));
+        await user.clear(screen.getByLabelText('Confirm password'));
+        await user.type(screen.getByLabelText('Password'), 'letters4ever');
+        await user.type(screen.getByLabelText('Confirm password'), 'letters4ever');
+        signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: false });
+        await user.click(screen.getByRole('button', { name: 'Create account' }));
+        expect(signUpWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'letters4ever');
+    });
+
+    it('never applies the new-password policy at sign-in, so older short passwords still log in', async () => {
+        signInWithPassword.mockResolvedValue(undefined);
+        const user = userEvent.setup();
+        render(
+            <MemoryRouter initialEntries={['/login']}>
+                <Routes>
+                    <Route path="/login" element={<LoginPage />} />
+                    <Route path="/library" element={<p>library</p>} />
+                </Routes>
+            </MemoryRouter>,
+        );
+        expect(screen.queryByText('At least 8 characters, with a letter and a number.')).not.toBeInTheDocument();
+        await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
+        await user.type(screen.getByLabelText('Password'), 'abcdef');
+        await user.click(screen.getByRole('button', { name: 'Log in' }));
+        expect(signInWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'abcdef');
     });
 });
