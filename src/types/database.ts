@@ -544,6 +544,24 @@ export type Database = {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
             };
+            // Service role only (student-login's per-account limiter, see
+            // supabase/functions/_shared/loginThrottle.ts); clients get no EXECUTE.
+            // Its table, edge_login_attempts, is service-only like edge_rate_buckets
+            // and so not listed under Tables.
+            begin_login_attempt: {
+                Args: {
+                    p_key: string;
+                    p_free_attempts: number;
+                    p_base_lock_ms: number;
+                    p_max_lock_ms: number;
+                    p_decay_ms: number;
+                };
+                Returns: { ok: true; attempts: number } | { ok: false; retryAfterSec: number };
+            };
+            clear_login_attempts: {
+                Args: { p_key: string };
+                Returns: undefined;
+            };
             // p_user is omitted by clients — the function resolves auth.uid() and
             // rejects any attempt to read another user's entitlements.
             get_entitlements: {

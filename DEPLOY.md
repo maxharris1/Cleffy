@@ -708,6 +708,26 @@ payload) is flagged by the security advisor on both projects. It needs a paid
 plan; when it is on, a breached password is refused with
 `weak_password`/`reasons: ["pwned"]`, which `mapAuthError` already words.
 
+## 9. Student sign-in limiter — migration BEFORE the function
+
+`student-login` now counts failed attempts per username
+(`supabase/functions/_shared/loginThrottle.ts`) through the
+`begin_login_attempt` / `clear_login_attempts` RPCs created by
+`20261007120501_student_login_throttle.sql`. The limiter fails CLOSED: if the
+RPC is missing, every username sign-in is refused with "Too many sign-in
+attempts". So on each project, apply the migration first, then deploy the
+function (still `--no-verify-jwt`):
+
+```bash
+supabase functions deploy student-login --no-verify-jwt
+```
+
+A student locked out by someone hammering their username waits at most 15
+minutes, or the teacher issues a fresh setup card (student-claim does not go
+through this limiter). To lift a lock by hand, delete the student's row from
+`public.edge_login_attempts`; the key is `student-login:` + the SHA-256 hex of
+the lowercase username.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from
