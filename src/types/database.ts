@@ -32,6 +32,30 @@ export type DocumentRow = {
     updated_at: string;
     /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
     archived_at: string | null;
+    // Provenance of an imported score (IMSLP), written only by imslp-download
+    // under the service role — clients can neither set nor change it
+    // (documents_guard_provenance). Present on a full-row read (`select('*')`,
+    // fetchDocument); optional because the library list, library_bootstrap and
+    // a cache-synthesized offline row don't carry it. Null for an uploaded PDF
+    // and for imports made before provenance was recorded.
+    /** The IMSLP work page, e.g. https://imslp.org/wiki/Piano_Sonata_No.14… */
+    source_url?: string | null;
+    /** The IMSLP file the PDF came from. */
+    source_filename?: string | null;
+    /** IMSLP's license tag, verbatim, e.g. "Creative Commons Attribution 4.0". */
+    source_license?: string | null;
+    source_attribution?: DocumentSourceAttribution | null;
+};
+
+/** documents.source_attribution — who IMSLP credits for the file (mirrors _shared/imslpProvenance.ts). */
+export type DocumentSourceAttribution = {
+    source: 'imslp';
+    work: string;
+    composer: string | null;
+    editor: string | null;
+    arranger: string | null;
+    publisher: string | null;
+    year: number | null;
 };
 
 export type DocumentInsert = {
@@ -543,6 +567,12 @@ export type Database = {
             check_edge_rate_limit: {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
+            };
+            // Service role only: imslp-download closes the shared IMSLP pacing
+            // key for IMSLP's Retry-After after a 429.
+            edge_rate_block: {
+                Args: { p_key: string; p_seconds: number };
+                Returns: undefined;
             };
             // p_user is omitted by clients — the function resolves auth.uid() and
             // rejects any attempt to read another user's entitlements.

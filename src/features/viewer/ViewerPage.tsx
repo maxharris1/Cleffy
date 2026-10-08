@@ -25,6 +25,7 @@ import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButt
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
+import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
@@ -46,6 +47,19 @@ import { MusicIcon } from '@/ui/icons';
  * the feature — with VITE_FEATURE_PLAYALONG off the chunk is never requested.
  */
 const TransportBar = lazy(() => import('@/features/playback/TransportBar').then((m) => ({ default: m.TransportBar })));
+
+/**
+ * What a confirmed row contributes to a cache-painted one before (or instead
+ * of) the full swap: the archive state, and the provenance the offline row
+ * cannot carry (the viewer's Source button reads it).
+ */
+const confirmedMeta = (doc: DocumentRow) => ({
+    archived_at: doc.archived_at,
+    source_url: doc.source_url ?? null,
+    source_filename: doc.source_filename ?? null,
+    source_license: doc.source_license ?? null,
+    source_attribution: doc.source_attribution ?? null,
+});
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
@@ -189,7 +203,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         prev?.provisional
                             ? {
                                   ...prev,
-                                  doc: { ...prev.doc, archived_at: confirmedDoc.archived_at },
+                                  doc: { ...prev.doc, ...confirmedMeta(confirmedDoc) },
                                   role: confirmedRole,
                                   provisional: false,
                               }
@@ -230,7 +244,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     }
                     if (offline) {
                         setState({
-                            doc: { ...offline.doc, archived_at: confirmedDoc.archived_at },
+                            doc: { ...offline.doc, ...confirmedMeta(confirmedDoc) },
                             role: confirmedRole ?? offline.role,
                             bytes: offline.bytes,
                             provisional: roleResult.status !== 'fulfilled' ? true : undefined,
@@ -395,6 +409,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         ) : null}
                     </button>
                 ) : null}
+                {/* IMSLP source, license and credits — for everyone on the score (CC-BY). */}
+                <ScoreSourceButton doc={state.doc} />
                 {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
                 {!state.provisional ? <ShareExportMenu docId={docId} title={state.doc.title} /> : null}
                 {!state.provisional && state.role === 'owner' ? (

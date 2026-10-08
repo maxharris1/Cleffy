@@ -251,6 +251,43 @@ describe('CloudViewer warm open', () => {
         expect(viewport()).toHaveAttribute('data-readonly', 'true');
     });
 
+    it('shows the IMSLP source to a view-only member, carried onto a warm paint even if the bytes reload fails', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('viewer'));
+        fetchMyRole.mockResolvedValue('viewer');
+        fetchDocument.mockResolvedValue(
+            serverDoc({
+                source_url: 'https://imslp.org/wiki/Nocturnes%2C_Op.9_(Chopin%2C_Fr%C3%A9d%C3%A9ric)',
+                source_filename: 'nocturnes.pdf',
+                source_license: 'Creative Commons Attribution 4.0',
+                source_attribution: {
+                    source: 'imslp',
+                    work: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+                    composer: 'Chopin, Frédéric',
+                    editor: 'A. Engraver',
+                    arranger: null,
+                    publisher: null,
+                    year: null,
+                },
+            }),
+        );
+        loadDocumentBytes.mockRejectedValue(new Error('offline'));
+
+        renderViewer();
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Source' }));
+        expect(screen.getByRole('dialog', { name: 'About this score' })).toHaveTextContent('A. Engraver');
+    });
+
+    it('offers no Source control for an uploaded score', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Source' })).not.toBeInTheDocument();
+    });
+
     it('hands the warm paint’s buffer to the bytes load and never prefetches over it', async () => {
         const cached = cachedOpen();
         loadDocumentOffline.mockResolvedValue(cached);
