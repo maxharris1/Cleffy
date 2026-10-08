@@ -15,16 +15,23 @@ const musicFontBytes = (): ArrayBuffer => {
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
 };
 
-/** Inflate every PDF content stream so we can assert the painted glyphs. */
+/**
+ * Inflate every PDF content stream so we can assert the painted glyphs.
+ *
+ * Node's Buffer 'latin1' is a true byte-to-code-unit mapping. TextDecoder('latin1')
+ * is not: the Encoding Standard aliases that label to windows-1252, which turns
+ * 0x80–0x9F (zlib's 0x9C header byte among them) into code points above 0xFF, so
+ * rebuilding bytes from it corrupts every stream wherever that decoder is in use.
+ */
 const decodedContent = (bytes: Uint8Array): string => {
-    const raw = new TextDecoder('latin1').decode(bytes);
+    const raw = Buffer.from(bytes).toString('latin1');
     const parts: string[] = [];
     const re = /stream\r?\n([\s\S]*?)\nendstream/g;
     let match: RegExpExecArray | null = re.exec(raw);
     while (match) {
-        const payload = Uint8Array.from(match[1] ?? '', (c) => c.charCodeAt(0));
+        const payload = Buffer.from(match[1] ?? '', 'latin1');
         try {
-            parts.push(new TextDecoder('latin1').decode(inflateSync(payload)));
+            parts.push(inflateSync(payload).toString('latin1'));
         } catch {
             parts.push(match[1] ?? '');
         }
