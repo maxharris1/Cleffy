@@ -87,6 +87,15 @@ describe('Content-Security-Policy', () => {
         expect(connect).toContain("'self'");
     });
 
+    it('lets opt-in Sentry reports leave the page, whichever region the DSN names', () => {
+        // src/lib/monitoring posts to the DSN's ingest host; a refused
+        // connect-src would drop every report silently.
+        const connect = csp().get('connect-src') ?? [];
+        for (const host of ['*.ingest.sentry.io', '*.ingest.us.sentry.io', '*.ingest.de.sentry.io']) {
+            expect(connect).toContain(`https://${host}`);
+        }
+    });
+
     it('locks down plugins, framing, base and form targets', () => {
         const policy = csp();
         expect(policy.get('object-src')).toEqual(["'none'"]);

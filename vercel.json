@@ -7,7 +7,7 @@
             "headers": [
                 {
                     "key": "Content-Security-Policy",
-                    "value": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://jibgwgosihadbjgxdsfe.supabase.co wss://jibgwgosihadbjgxdsfe.supabase.co https://qdbnlrgylelelvwbkvnm.supabase.co wss://qdbnlrgylelelvwbkvnm.supabase.co https://*.ingest.sentry.io https://*.ingest.us.sentry.io; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests"
+                    "value": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://jibgwgosihadbjgxdsfe.supabase.co wss://jibgwgosihadbjgxdsfe.supabase.co https://qdbnlrgylelelvwbkvnm.supabase.co wss://qdbnlrgylelelvwbkvnm.supabase.co https://*.ingest.sentry.io https://*.ingest.us.sentry.io https://*.ingest.de.sentry.io; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests"
                 },
                 { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains" },
                 { "key": "X-Content-Type-Options", "value": "nosniff" },

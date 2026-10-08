@@ -13,8 +13,18 @@
 // non-embedded Symbol (standardFontDataUrl; pdf.js substitutes system fonts for
 // Helvetica and friends in a browser, but always fetches Symbol/ZapfDingbats).
 //
+// Also covered: the legal pages (/privacy, /terms, /account-deleted), the
+// Account page and its delete-account dialog, the IMSLP "Source" dialog on an
+// imported score, the fail-closed PDF export claim (claim_pdf_export) and the
+// keyset library (library_documents).
+//
 // Run: npm run build && node scripts/csp-smoke.mjs
 // Env: CSP_SMOKE_PDF (default e2e-fixtures/csp-jpx-standard-font.pdf),
+//      CSP_SMOKE_DIST (default dist),
+//      CSP_SMOKE_SENTRY=1 — the build was made with VITE_SENTRY_DSN pointing at
+//      an *.ingest.us.sentry.io host: throw an uncaught error on the score and
+//      require the SDK's report to leave the page (connect-src) with no
+//      violation. The ingest request is answered locally, never sent.
 //      CSP_SMOKE_SHOT_DIR (default: no screenshots),
 //      CHROMIUM_PATH (default: Playwright's own browser),
 //      CSP_SMOKE_OLD_BROWSER=1 — delete, in the page AND in the pdf.js worker,
@@ -26,12 +36,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
-const ROOT = path.resolve('dist');
+const ROOT = path.resolve(process.env.CSP_SMOKE_DIST ?? 'dist');
 const PDF = process.env.CSP_SMOKE_PDF ?? 'e2e-fixtures/csp-jpx-standard-font.pdf';
 const SHOT_DIR = process.env.CSP_SMOKE_SHOT_DIR ?? '';
 const vercel = JSON.parse(fs.readFileSync('vercel.json', 'utf8'));
 
 const OLD_BROWSER = process.env.CSP_SMOKE_OLD_BROWSER === '1';
+const SENTRY = process.env.CSP_SMOKE_SENTRY === '1';
 
 /**
  * Removes what an older Safari does not have. Kept in step with
@@ -168,6 +179,19 @@ const docRow = {
     created_at: now,
     updated_at: now,
     archived_at: null,
+    // An IMSLP import, so the viewer offers its "Source" dialog.
+    source_url: 'https://imslp.org/wiki/Piano_Sonata_No.14_(Beethoven,_Ludwig_van)',
+    source_filename: 'PMLP01458-Beethoven_Sonata_14.pdf',
+    source_license: 'Public Domain',
+    source_attribution: {
+        source: 'imslp',
+        work: 'Piano Sonata No.14 (Beethoven, Ludwig van)',
+        composer: 'Beethoven, Ludwig van',
+        editor: null,
+        arranger: null,
+        publisher: null,
+        year: null,
+    },
 };
 const entitlements = {
     user_id: USER_ID,
@@ -196,8 +220,12 @@ const restAnswer = (url, single) => {
         rows = [{ document_id: DOC_ID, user_id: USER_ID, role: 'owner', created_at: now }];
     } else if (table === 'rpc/get_entitlements') {
         return entitlements;
-    } else if (table === 'rpc/consume_pdf_export') {
-        return { ok: true, count: 1, limit: 10 };
+    } else if (table === 'rpc/claim_pdf_export' || table === 'rpc/consume_pdf_export') {
+        // The export is claimed before it is built and fails closed, so the
+        // smoke must answer the claim or the PDF export never runs.
+        return { ok: true, count: 1, limit: 10, tier: 'free', unlimited: false };
+    } else if (table === 'rpc/library_documents') {
+        return { documents: [docRow], has_more: false };
     } else if (table === 'rpc/library_bootstrap') {
         return { documents: [docRow], has_more: false, favorite_ids: [], tags: [], document_tags: [], entitlements };
     } else if (table.startsWith('rpc/')) {
@@ -275,6 +303,15 @@ await context.route(`${SUPABASE}/**`, async (route) => {
 // Realtime: accept the socket and say nothing — the viewer must still render.
 await context.routeWebSocket(/\/realtime\/v1\/websocket/, () => {});
 
+// Sentry's ingest, answered here. The browser checks connect-src before a
+// request reaches a route handler, so a refused report still shows up as a
+// violation; an allowed one is counted.
+const sentryReports = [];
+await context.route(/^https:\/\/[\w.-]+\.ingest(\.[a-z]+)?\.sentry\.io\//, (route) => {
+    sentryReports.push(new URL(route.request().url()).hostname);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+});
+
 // Worker fetches (wasm, fonts) are context requests too. The service worker's
 // precache also downloads the wasm, so its requests must not count as pdf.js's.
 const pdfjsData = new Map();
@@ -331,6 +368,9 @@ await visit('/', () => page.waitForSelector('main, #root > *', { timeout: 15_000
 await visit('/login', () => page.waitForSelector('#login-email', { timeout: 15_000 }));
 await visit('/register', () => page.waitForSelector('#register-email', { timeout: 15_000 }));
 await visit('/student', () => page.waitForSelector('input', { timeout: 15_000 }));
+await visit('/privacy', () => page.getByRole('heading', { name: 'Privacy Policy' }).waitFor({ timeout: 15_000 }));
+await visit('/terms', () => page.getByRole('heading', { name: 'Terms of Service' }).waitFor({ timeout: 15_000 }));
+await visit('/account-deleted', () => page.waitForSelector('main, #root > *', { timeout: 15_000 }));
 
 // Signed in: the session the app would have persisted, then the score.
 await page.evaluate(
@@ -393,6 +433,26 @@ const exportVia = async (item) => {
     const file = await download.path();
     return fs.readFileSync(file);
 };
+// The imported score's provenance dialog (scope-imslp), for everyone on it.
+await page.getByRole('button', { name: 'Source', exact: true }).click();
+const sourceDialog = page.getByRole('dialog', { name: 'About this score' });
+await sourceDialog.waitFor({ timeout: 10_000 });
+check('IMSLP source dialog opens', (await sourceDialog.textContent())?.includes('Public Domain') ?? false);
+await page.keyboard.press('Escape');
+await sourceDialog.waitFor({ state: 'detached', timeout: 10_000 });
+
+if (SENTRY) {
+    // Thrown outside React and outside any handler: Sentry's global handler
+    // reports it, which is an envelope POST to the DSN's ingest host.
+    await page.evaluate(() =>
+        setTimeout(() => {
+            throw new Error('csp-smoke: deliberate uncaught error for the Sentry report');
+        }, 0),
+    );
+    await page.waitForTimeout(3000);
+    check('Sentry report reached the ingest host (connect-src)', sentryReports.length > 0, sentryReports.join(', '));
+}
+
 const png = await exportVia(/Share page 1 as photo/);
 check('page photo export (pdf.js)', png.subarray(1, 4).toString() === 'PNG', `${png.length} bytes`);
 const pdf = await exportVia(/Export whole score as PDF/);
@@ -407,6 +467,14 @@ await visit('/library', () =>
 );
 check('library cover rendered (pdf.js thumbnail, blob: image)', true);
 
+// Account page (compliance): the delete-account dialog and its legal links.
+await visit('/account', () => page.getByRole('button', { name: 'Delete account…' }).waitFor({ timeout: 15_000 }));
+await page.getByRole('button', { name: 'Delete account…' }).click();
+const deleteDialog = page.getByRole('dialog', { name: 'Delete your account?' });
+await deleteDialog.waitFor({ timeout: 10_000 });
+check('delete-account dialog opens', await deleteDialog.isVisible());
+await page.keyboard.press('Escape');
+
 if (OLD_BROWSER) {
     check('old-browser shim reached the pdf.js worker', workerShimmed > 0, `${workerShimmed} worker(s)`);
 }
@@ -416,7 +484,9 @@ check('every header parses', headerErrors.length === 0, [...new Set(headerErrors
 await browser.close();
 server.close();
 
-console.log(`${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${results.join('\n')}`);
+console.log(
+    `${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${SENTRY ? '(Sentry build)\n' : ''}${results.join('\n')}`,
+);
 if (consoleErrors.length) {
     console.log(`\n(non-CSP console errors, informational — Supabase is stubbed)\n  ${consoleErrors.join('\n  ')}`);
 }

@@ -27,6 +27,24 @@ and the realtime topic split from
 - **Server paths** — `service_role` and `postgres` are not guarded, and deleting
   an account still cascades through the `ON DELETE SET NULL` foreign keys.
 
+`cross_branch_integration.sql` (same harness, same reading) proves the
+20261007 fixes hold together where one writes what another guards: billing's
+archive and restore through the documents column guard, IMSLP provenance
+(service-role only) beside the owner's own edits, library's row-first delete
+tombstones and the storage-cleanup policies, sync's `patch_annotations_batch`
+answer under the annotation guard, sharing's role RPC, and an account deletion
+firing every user-keyed foreign key (authorship cleared through the role-keyed
+guards, the change fanned out on `doc-db:{id}`, the membership event on
+`doc:{id}`, and the deleted owner's scores left as tombstones for
+delete-account to drain). It sets `storage.allow_delete_query` before removing
+`storage.objects` rows, as the Storage API does, so hosted Storage's
+`protect_delete` lets the RLS policies decide.
+
+The sharing RPC proof lives beside the migrations, in
+`supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
+on its last line instead. Its broadcast checks (80-82, 85, 87) need today's
+`realtime.messages` partition, which an idle hosted project does not have.
+
 Everything runs inside one transaction that ends in `ROLLBACK`. It creates
 throwaway `auth.users`, scores, marks and links, acts as each user the way
 PostgREST does (`set role authenticated` plus `request.jwt.claims`), and leaves
