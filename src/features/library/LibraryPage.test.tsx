@@ -977,6 +977,147 @@ describe('pagination and server search', () => {
         expect(snapshot.hasMore).toBe(true);
     });
 
+    it('continues A–Z from the row the server sent, even after that row was renamed', async () => {
+        const user = userEvent.setup();
+        renameDocument.mockResolvedValue(undefined);
+        mockBootstrap({ documents: firstPage, hasMore: true });
+        const page = [doc('d7', 'Mazurka'), doc('d8', 'Nocturne')];
+        fetchLibraryPage.mockResolvedValueOnce({ documents: page, hasMore: true });
+        renderLibrary();
+        await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+        await user.click(screen.getByRole('button', { name: 'A–Z' }));
+        await screen.findByText('Nocturne');
+
+        // Rename the last loaded row to something that sorts first.
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[1] as HTMLElement);
+        await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
+        const field = screen.getByLabelText('Title');
+        await user.clear(field);
+        await user.type(field, 'Aaa');
+        await user.click(screen.getByRole('button', { name: 'Save changes' }));
+        await screen.findByText('Aaa');
+
+        fetchLibraryPage.mockResolvedValueOnce({ documents: [doc('d9', 'Polonaise')], hasMore: false });
+        await user.click(screen.getByRole('button', { name: 'Load more scores' }));
+        await screen.findByText('Polonaise');
+        const lastCall = fetchLibraryPage.mock.calls.at(-1)?.[0] as { after: DocumentRow };
+        expect(lastCall.after).toMatchObject({ id: 'd8', title: 'Nocturne' });
+    });
+
+    it('drops an old failure banner once the same search succeeds', async () => {
+        const user = userEvent.setup();
+        mockBootstrap({ documents: firstPage, hasMore: true });
+        fetchLibraryPage
+            .mockRejectedValueOnce(new Error('Could not load scores: offline'))
+            .mockResolvedValueOnce({ documents: [olderScore], hasMore: false });
+        renderLibrary();
+        await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+        const box = screen.getByLabelText('Search scores');
+        await user.type(box, 'gymno');
+        expect(await screen.findByText(/Couldn’t search all of your scores/)).toBeInTheDocument();
+        await user.clear(box);
+        await user.type(box, 'gymno');
+        expect(await screen.findByText('Gymnopédie (Satie, Erik)')).toBeInTheDocument();
+        expect(screen.queryByText(/Couldn’t search all of your scores/)).not.toBeInTheDocument();
+        expect(screen.getByText('1 found')).toBeInTheDocument();
+    });
+
+    it('keeps a delete made while the next page was loading', async () => {
+        const user = userEvent.setup();
+        deleteDocument.mockResolvedValue({ storageCleanup: Promise.resolve(true) });
+        mockBootstrap({ documents: firstPage, hasMore: true });
+        let release: (value: unknown) => void = () => undefined;
+        fetchLibraryPage.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    release = resolve;
+                }),
+        );
+        renderLibrary();
+        await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+        await user.click(screen.getByRole('button', { name: 'Load more scores' }));
+        await user.click(screen.getAllByRole('button', { name: 'Score actions' })[0] as HTMLElement);
+        await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+        await user.click(screen.getByRole('button', { name: 'Delete' }));
+        await waitFor(() =>
+            expect(screen.queryByText('Prelude and Fugue (Bach, Johann Sebastian)')).not.toBeInTheDocument(),
+        );
+        await act(async () => {
+            release({ documents: [olderScore], hasMore: false });
+        });
+        expect(await screen.findByText('Gymnopédie (Satie, Erik)')).toBeInTheDocument();
+        expect(screen.queryByText('Prelude and Fugue (Bach, Johann Sebastian)')).not.toBeInTheDocument();
+        expect(fetchLibraryPage).toHaveBeenCalledWith({ sort: 'recent', after: firstPage[1] });
+    });
+
+    it('stops scrolling into pages that add nothing new and leaves the button to the teacher', async () => {
+        const observers: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = [];
+        class FakeObserver {
+            constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) {
+                observers.push(callback);
+            }
+            observe() {
+                // A sentinel already in view reports at once, as browsers do.
+                queueMicrotask(() => observers.at(-1)?.([{ isIntersecting: true }]));
+            }
+            disconnect() {}
+        }
+        vi.stubGlobal('IntersectionObserver', FakeObserver);
+        try {
+            mockBootstrap({ documents: firstPage, hasMore: true });
+            // Only rows already on screen, while still claiming more.
+            fetchLibraryPage.mockResolvedValue({ documents: [firstPage[1]], hasMore: true });
+            renderLibrary();
+            await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+            await waitFor(() => expect(fetchLibraryPage).toHaveBeenCalledTimes(1));
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            expect(fetchLibraryPage).toHaveBeenCalledTimes(1);
+            expect(screen.getByRole('button', { name: 'Load more scores' })).toBeEnabled();
+        } finally {
+            vi.unstubAllGlobals();
+            vi.stubGlobal('localStorage', memoryStorage());
+            window.localStorage.setItem('cleffy:library-view', 'list');
+        }
+    });
+
+    it('searches and sorts the loaded rows offline instead of asking the server', async () => {
+        const user = userEvent.setup();
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        try {
+            mockBootstrap({ documents: firstPage, hasMore: true });
+            renderLibrary();
+            await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+            await user.click(screen.getByRole('button', { name: 'A–Z' }));
+            expect(screen.getByText('2 loaded, A–Z')).toBeInTheDocument();
+            expect(
+                screen.getByText(/You’re offline, so only the 2 scores loaded here are sorted A–Z/),
+            ).toBeInTheDocument();
+            expect(screen.queryByText(/Couldn’t/)).not.toBeInTheDocument();
+            const links = screen.getAllByRole('link').map((a) => a.textContent);
+            expect(links.indexOf('An Chloe (Mozart, Wolfgang Amadeus)')).toBeLessThan(
+                links.indexOf('Prelude and Fugue (Bach, Johann Sebastian)'),
+            );
+            await user.type(screen.getByLabelText('Search scores'), 'chloe');
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            expect(screen.getByText('1 of 2 loaded')).toBeInTheDocument();
+            expect(fetchLibraryPage).not.toHaveBeenCalled();
+        } finally {
+            onLine.mockRestore();
+        }
+    });
+
+    it('says why the A–Z list is partial when the server could not sort it', async () => {
+        const user = userEvent.setup();
+        mockBootstrap({ documents: firstPage, hasMore: true });
+        fetchLibraryPage.mockRejectedValueOnce(new Error('Could not load scores: timeout'));
+        renderLibrary();
+        await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
+        await user.click(screen.getByRole('button', { name: 'A–Z' }));
+        expect(await screen.findByText(/Couldn’t sort all of your scores A–Z/)).toBeInTheDocument();
+        expect(screen.queryByText(/Couldn’t search/)).not.toBeInTheDocument();
+        expect(screen.getByText('2 loaded, A–Z')).toBeInTheDocument();
+    });
+
     it('starts the leftover-file sweep once the library is on screen', async () => {
         renderLibrary();
         await screen.findByText('Prelude and Fugue (Bach, Johann Sebastian)');
