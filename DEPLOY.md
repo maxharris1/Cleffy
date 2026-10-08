@@ -38,7 +38,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Billing migration `20260828180000` applied to production               | ✅ applied and recorded                                                 |
 | `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
 | Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
-| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29; repo and production now have zero drift          |
+| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1) |
 
 ---
 
@@ -97,10 +97,22 @@ to refund (comment at the end of `20261007120300`).
    files are not in `scripts/apply-migrations.sql`; only `db push` / the
    integration applies them. Expect the migration step to take minutes, and
    confirm the Supabase check on the merge commit is green before announcing.
-   The `dev` branch also carries five migrations this repo does not
-   (`20260921141103` … `20260921141127`, `playalong_corpus*`, from another
-   branch) — `npm run supabase:drift` reports them; they do not touch any table
-   these fixes change.
+   **Migration-history repairs, 2026-10-08.** Both projects carried history
+   rows the repo has no file for, which made `db push` and the integration
+   refuse. Only the history rows were removed; no schema changed.
+    - Production: `20260918042925_tmp_ledger_cleanup`, a hand-run statement
+      whose only effect was to delete other history rows. Newer than every
+      pending `dev` migration, it made all ten "out of order".
+    - `dev` branch: the five `20260921141103` … `20260921141127`
+      `playalong_corpus*` rows, applied by hand from
+      `mh/playalong-on-dev-ab47`, which made Supabase Preview fail with
+      "Remote migration versions not found in local migrations directory".
+
+    The `playalong_corpus*` tables, the `pd_pdf_store` table and the `pd-pdfs`
+    bucket remain on both projects without history rows; no fix here touches
+    them, and that branch's migrations guard their creates so they re-apply
+    over the existing objects when it merges.
+
 2. **Prove the set on the `dev` branch first.** Push `dev` (unpause the branch
    first, §5), then run, against `qdbnlrgylelelvwbkvnm` only, each rolled-back
    proof: `tests/sql/column_integrity.sql`, `tests/sql/cross_branch_integration.sql`
