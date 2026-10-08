@@ -22,6 +22,13 @@
  * - Promise.try: the worker's message handler wraps every action in it.
  * - Uint8Array.prototype.toHex: the document fingerprint, computed on every
  *   open.
+ * - URL.parse (Safari 18.0): getDocument resolves the data URLs below through
+ *   it on the main thread, and the worker validates link targets with it.
+ *   Missing, getDocument throws before a single page renders.
+ * - Promise.withResolvers (Safari 17.4): dozens of unguarded calls on both
+ *   threads — the loading task, every page render, every worker message.
+ * - ArrayBuffer.prototype.transferToFixedLength (Safari 17.4): the worker
+ *   serializes every font it hands the main thread through it.
  *
  * These are deliberately minimal — the behavior pdf.js relies on, written to
  * the spec's observable results for those calls — not general-purpose
@@ -208,6 +215,52 @@ defineMissing(Uint8Array.prototype, 'toHex', function (this: Uint8Array): string
     }
     return hex;
 });
+
+// --- URL.parse ----------------------------------------------------------------------
+
+// `new URL` that answers an unparsable input with null instead of throwing.
+defineMissing(URL, 'parse', (url: string | URL, base?: string | URL): URL | null => {
+    try {
+        return new URL(url, base);
+    } catch {
+        return null;
+    }
+});
+
+// --- Promise.withResolvers ------------------------------------------------------------
+
+defineMissing(Promise, 'withResolvers', function <T>(this: PromiseConstructor) {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    // `this`, like the native: a subclass gets an instance of itself.
+    const promise = new this<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+});
+
+// --- ArrayBuffer.prototype.transferToFixedLength ---------------------------------------
+
+/**
+ * A copy truncated (or zero-padded) to `newLength`. The one observable
+ * difference from the native is that the source is not detached — a polyfill
+ * cannot detach a buffer — which pdf.js never notices: it returns the result
+ * and drops the source.
+ */
+defineMissing(
+    ArrayBuffer.prototype,
+    'transferToFixedLength',
+    function (this: ArrayBuffer, newLength?: number): ArrayBuffer {
+        const length = newLength === undefined ? this.byteLength : Math.trunc(Number(newLength)) || 0;
+        if (length < 0 || length > Number.MAX_SAFE_INTEGER) {
+            throw new RangeError('ArrayBuffer.prototype.transferToFixedLength: invalid length');
+        }
+        const out = new ArrayBuffer(length);
+        new Uint8Array(out).set(new Uint8Array(this, 0, Math.min(length, this.byteLength)));
+        return out;
+    },
+);
 
 // Side effects only; the export makes this a module for TypeScript.
 export {};

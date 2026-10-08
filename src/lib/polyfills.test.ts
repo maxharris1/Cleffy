@@ -31,6 +31,9 @@ const SLOTS: [object, string][] = [
     [Map.prototype, 'getOrInsertComputed'],
     [WeakMap.prototype, 'getOrInsert'],
     [WeakMap.prototype, 'getOrInsertComputed'],
+    [URL, 'parse'],
+    [Promise, 'withResolvers'],
+    [ArrayBuffer.prototype, 'transferToFixedLength'],
 ];
 
 let saved: Slot[] = [];
@@ -208,5 +211,61 @@ describe('Map / WeakMap upsert', () => {
         const key = {};
         expect(weak.getOrInsertComputed(key, () => 7)).toBe(7);
         expect(weak.getOrInsertComputed(key, () => 8)).toBe(7);
+    });
+});
+
+describe('URL.parse', () => {
+    const parse = (url: string, base?: string): URL | null =>
+        (URL as unknown as { parse(url: string, base?: string): URL | null }).parse(url, base);
+
+    it('resolves against a base the way pdf.js passes document.baseURI', () => {
+        expect(parse('/pdfjs-cmaps/', 'https://cleffy.app/doc/1')?.href).toBe('https://cleffy.app/pdfjs-cmaps/');
+        expect(parse('https://imslp.org/x')?.protocol).toBe('https:');
+    });
+
+    it('answers an unparsable input with null instead of throwing', () => {
+        expect(parse('not a url')).toBeNull();
+        expect(parse('/relative')).toBeNull();
+    });
+});
+
+describe('Promise.withResolvers', () => {
+    type WithResolvers = <T>() => {
+        promise: Promise<T>;
+        resolve: (value: T) => void;
+        reject: (reason?: unknown) => void;
+    };
+    const withResolvers = (Promise as unknown as { withResolvers: WithResolvers }).withResolvers.bind(Promise);
+
+    it('hands out a promise and the functions that settle it', async () => {
+        const resolved = withResolvers<number>();
+        resolved.resolve(7);
+        await expect(resolved.promise).resolves.toBe(7);
+
+        const rejected = withResolvers<number>();
+        rejected.reject(new Error('nope'));
+        await expect(rejected.promise).rejects.toThrow('nope');
+    });
+});
+
+describe('ArrayBuffer.prototype.transferToFixedLength', () => {
+    const transfer = (buffer: ArrayBuffer, length?: number): ArrayBuffer =>
+        (buffer as unknown as { transferToFixedLength(length?: number): ArrayBuffer }).transferToFixedLength(length);
+
+    it('truncates to the written length, as pdf.js font serialization uses it', () => {
+        const source = new Uint8Array([1, 2, 3, 4, 5]).buffer;
+        const out = transfer(source, 3);
+        expect(out.byteLength).toBe(3);
+        expect([...new Uint8Array(out)]).toEqual([1, 2, 3]);
+    });
+
+    it('keeps the length when none is given and zero-pads when it grows', () => {
+        const source = new Uint8Array([9, 8]).buffer;
+        expect([...new Uint8Array(transfer(source))]).toEqual([9, 8]);
+        expect([...new Uint8Array(transfer(source, 4))]).toEqual([9, 8, 0, 0]);
+    });
+
+    it('refuses a negative length', () => {
+        expect(() => transfer(new ArrayBuffer(2), -1)).toThrow(RangeError);
     });
 });

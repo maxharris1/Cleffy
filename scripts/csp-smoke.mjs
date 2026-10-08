@@ -16,7 +16,11 @@
 // Run: npm run build && node scripts/csp-smoke.mjs
 // Env: CSP_SMOKE_PDF (default e2e-fixtures/csp-jpx-standard-font.pdf),
 //      CSP_SMOKE_SHOT_DIR (default: no screenshots),
-//      CHROMIUM_PATH (default: Playwright's own browser).
+//      CHROMIUM_PATH (default: Playwright's own browser),
+//      CSP_SMOKE_OLD_BROWSER=1 — delete, in the page AND in the pdf.js worker,
+//      every built-in src/lib/polyfills.ts provides, before any app code runs,
+//      so the same run proves the polyfills carry a browser that lacks them
+//      (Safari 17.x / iPadOS 17 is the oldest such target).
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -26,6 +30,41 @@ const ROOT = path.resolve('dist');
 const PDF = process.env.CSP_SMOKE_PDF ?? 'e2e-fixtures/csp-jpx-standard-font.pdf';
 const SHOT_DIR = process.env.CSP_SMOKE_SHOT_DIR ?? '';
 const vercel = JSON.parse(fs.readFileSync('vercel.json', 'utf8'));
+
+const OLD_BROWSER = process.env.CSP_SMOKE_OLD_BROWSER === '1';
+
+/**
+ * Removes what an older Safari does not have. Kept in step with
+ * src/lib/polyfills.ts: anything polyfilled there belongs here, or the
+ * simulation proves less than it claims.
+ */
+const OLD_BROWSER_SHIM = `(() => {
+    const iteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+    const slots = [
+        [globalThis, 'Iterator'],
+        [iteratorPrototype, 'some'],
+        [iteratorPrototype, 'find'],
+        [iteratorPrototype, 'filter'],
+        [iteratorPrototype, 'toArray'],
+        [Math, 'sumPrecise'],
+        [Promise, 'try'],
+        [Promise, 'withResolvers'],
+        [Uint8Array.prototype, 'toHex'],
+        [Map.prototype, 'getOrInsert'],
+        [Map.prototype, 'getOrInsertComputed'],
+        [WeakMap.prototype, 'getOrInsert'],
+        [WeakMap.prototype, 'getOrInsertComputed'],
+        [URL, 'parse'],
+        [ArrayBuffer.prototype, 'transferToFixedLength'],
+    ];
+    for (const [target, name] of slots) {
+        delete target[name];
+        if (name in target) {
+            throw new Error('old-browser simulation could not remove ' + name);
+        }
+    }
+})();
+`;
 
 if (!fs.existsSync(path.join(ROOT, 'index.html'))) {
     throw new Error('dist/index.html is missing — run `npm run build` first');
@@ -176,7 +215,26 @@ const check = (name, ok, detail = '') => {
 };
 
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
-const context = await browser.newContext({ serviceWorkers: 'allow', acceptDownloads: true });
+// The old-browser run blocks the service worker so the pdf.js worker script is
+// always fetched through the route below rather than from the precache.
+const context = await browser.newContext({ serviceWorkers: OLD_BROWSER ? 'block' : 'allow', acceptDownloads: true });
+
+let workerShimmed = 0;
+if (OLD_BROWSER) {
+    // Runs before any page script. The pdf.js worker is its own global scope,
+    // which init scripts never reach, so its bundle gets the same shim prepended
+    // (it is an IIFE, so the shim runs before the polyfill import inside it).
+    await context.addInitScript(OLD_BROWSER_SHIM);
+    await context.route(/\/assets\/pdfWorkerEntry-[\w-]+\.js$/, async (route) => {
+        const response = await route.fetch();
+        const body = await response.text();
+        if (!body.startsWith('(function(){')) {
+            throw new Error('pdf.js worker bundle is no longer an IIFE; prepending the shim would not run first');
+        }
+        workerShimmed += 1;
+        await route.fulfill({ response, body: `${OLD_BROWSER_SHIM}${body}` });
+    });
+}
 
 await context.route(`${SUPABASE}/**`, async (route) => {
     const request = route.request();
@@ -349,13 +407,16 @@ await visit('/library', () =>
 );
 check('library cover rendered (pdf.js thumbnail, blob: image)', true);
 
+if (OLD_BROWSER) {
+    check('old-browser shim reached the pdf.js worker', workerShimmed > 0, `${workerShimmed} worker(s)`);
+}
 check('zero CSP violations', violations.length === 0, violations.join('\n    '));
 check('every header parses', headerErrors.length === 0, [...new Set(headerErrors)].join('\n    '));
 
 await browser.close();
 server.close();
 
-console.log(results.join('\n'));
+console.log(`${OLD_BROWSER ? '(old-browser simulation)\n' : ''}${results.join('\n')}`);
 if (consoleErrors.length) {
     console.log(`\n(non-CSP console errors, informational — Supabase is stubbed)\n  ${consoleErrors.join('\n  ')}`);
 }

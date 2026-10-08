@@ -23,6 +23,10 @@ describe('pdfDocumentOptions', () => {
         expect(pdfDocumentOptions.cMapPacked).toBe(true);
     });
 
+    it('has the worker fetch its own data, without the URL.parse probe pdf.js would otherwise run', () => {
+        expect(pdfDocumentOptions.useWorkerFetch).toBe(true);
+    });
+
     it('keeps XFA form rendering off', () => {
         expect(pdfDocumentOptions.enableXfa).toBe(false);
     });

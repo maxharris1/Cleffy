@@ -9,6 +9,11 @@ import { PDFJS_ASSET_DIRS } from '@/features/viewer/pdf/pdfjsAssets';
  *   without this, pages render as blank white canvases.
  * - cMapUrl / standardFontDataUrl / iccUrl: non-embedded CID fonts, the 14
  *   standard fonts, and the CMYK profile.
+ * - useWorkerFetch: true — the worker fetches those files itself. It is what
+ *   pdf.js would decide anyway for same-origin http(s) URLs, but left unset it
+ *   decides by probing each URL with URL.parse at getDocument time, which is
+ *   one more place an older browser can fail before the first page (the
+ *   polyfill in src/lib/polyfills.ts covers it too; this skips the probe).
  *
  * Hardening. Every PDF this app opens is untrusted input — uploaded by any user,
  * or fetched from IMSLP — and the viewer only ever paints pages to a canvas:
@@ -33,4 +38,5 @@ export const pdfDocumentOptions = {
     standardFontDataUrl: PDFJS_ASSET_DIRS.standardFonts.publicPath,
     iccUrl: PDFJS_ASSET_DIRS.iccs.publicPath,
     enableXfa: false,
+    useWorkerFetch: true,
 } as const;
