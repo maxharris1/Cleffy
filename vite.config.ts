@@ -45,16 +45,26 @@ const pdfjsAssetsPlugin = (): Plugin => {
                     next();
                     return;
                 }
+                const notFound = () => {
+                    res.statusCode = 404;
+                    res.end('Not found');
+                };
                 // Strip query string (cache busters) and map onto node_modules/pdfjs-dist/<dir>.
-                const rel = decodeURIComponent(req.url.slice(dir.publicPath.length).split('?')[0] ?? '');
+                // A malformed escape (`%E0`) is a missing file, not a server error.
+                let rel: string;
+                try {
+                    rel = decodeURIComponent(req.url.slice(dir.publicPath.length).split('?')[0] ?? '');
+                } catch {
+                    notFound();
+                    return;
+                }
                 const filePath = path.resolve(dir.root, rel);
                 if (
                     !filePath.startsWith(dir.root + path.sep) ||
                     dir.exclude.includes(path.basename(filePath)) ||
                     !existsSync(filePath)
                 ) {
-                    res.statusCode = 404;
-                    res.end('Not found');
+                    notFound();
                     return;
                 }
                 const type = CONTENT_TYPES[path.extname(filePath)];
