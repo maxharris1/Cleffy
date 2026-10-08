@@ -28,6 +28,21 @@ export default tseslint.config(
         },
     },
     {
+        // zod must be configured jitless before any schema parses, or the
+        // production CSP reports an eval violation — see src/lib/zod.ts.
+        files: ['src/**/*.{ts,tsx}'],
+        ignores: ['src/lib/zod.ts'],
+        rules: {
+            'no-restricted-imports': [
+                'error',
+                {
+                    paths: [{ name: 'zod', message: "Import { z } from '@/lib/zod' (jitless, CSP-safe)." }],
+                    patterns: [{ group: ['zod/*'], message: "Import { z } from '@/lib/zod' (jitless, CSP-safe)." }],
+                },
+            ],
+        },
+    },
+    {
         files: ['**/*.js', '**/*.mjs'],
         extends: [js.configs.recommended],
         languageOptions: {
