@@ -32,7 +32,7 @@
         "dexie": "^4.4.4",
         "lucide-react": "^1.28.0",
         "pdf-lib": "^1.17.1",
-        "pdfjs-dist": "^5.7.284",
+        "pdfjs-dist": "^6.4.299",
         "perfect-freehand": "^1.2.3",
         "react": "^19.2.8",
         "react-dom": "^19.2.8",

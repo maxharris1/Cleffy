@@ -1,5 +1,6 @@
 /// <reference types="vitest/config" />
 import { createReadStream, cpSync, existsSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 
 import tailwindcss from '@tailwindcss/vite';
@@ -7,44 +8,73 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import { PDFJS_ASSET_DIRS, type PdfjsAssetDir } from './src/features/viewer/pdf/pdfjsAssets';
 import { collectSupabasePreconnectOrigins } from './src/lib/supabasePreconnectOrigins';
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
 
-const PDFJS_WASM_SRC = fileURLToPath(new URL('./node_modules/pdfjs-dist/wasm', import.meta.url));
-const PDFJS_WASM_PUBLIC = '/pdfjs-wasm';
+const PDFJS_DIST = fileURLToPath(new URL('./node_modules/pdfjs-dist', import.meta.url));
 
-/** Serve / copy pdf.js WASM decoders (JBIG2 / OpenJPEG) required by pdf.js 5.x. */
-const pdfjsWasmPlugin = (): Plugin => ({
-    name: 'pdfjs-wasm',
-    configureServer(server) {
-        server.middlewares.use((req, res, next) => {
-            if (!req.url?.startsWith(`${PDFJS_WASM_PUBLIC}/`)) {
-                next();
-                return;
+const CONTENT_TYPES: Record<string, string> = {
+    '.wasm': 'application/wasm',
+    '.js': 'application/javascript',
+    '.bcmap': 'application/octet-stream',
+    '.pfb': 'application/octet-stream',
+    '.ttf': 'font/ttf',
+    '.icc': 'application/vnd.iccprofile',
+};
+
+/**
+ * Serve (dev) and copy (build) the pdf.js data directories listed in
+ * pdfjsAssets.ts — WASM decoders, CMaps, standard fonts, ICC profile — so the
+ * worker fetches them from our own origin. Excluded files (the unused
+ * document-JS interpreter) are neither served nor copied.
+ */
+const pdfjsAssetsPlugin = (): Plugin => {
+    const dirs = Object.values(PDFJS_ASSET_DIRS).map((dir: PdfjsAssetDir) => ({
+        ...dir,
+        root: path.join(PDFJS_DIST, dir.source),
+    }));
+    return {
+        name: 'pdfjs-assets',
+        configureServer(server) {
+            server.middlewares.use((req, res, next) => {
+                const dir = dirs.find((d) => req.url?.startsWith(d.publicPath));
+                if (!req.url || !dir) {
+                    next();
+                    return;
+                }
+                // Strip query string (cache busters) and map onto node_modules/pdfjs-dist/<dir>.
+                const rel = decodeURIComponent(req.url.slice(dir.publicPath.length).split('?')[0] ?? '');
+                const filePath = path.resolve(dir.root, rel);
+                if (
+                    !filePath.startsWith(dir.root + path.sep) ||
+                    dir.exclude.includes(path.basename(filePath)) ||
+                    !existsSync(filePath)
+                ) {
+                    res.statusCode = 404;
+                    res.end('Not found');
+                    return;
+                }
+                const type = CONTENT_TYPES[path.extname(filePath)];
+                if (type) {
+                    res.setHeader('Content-Type', type);
+                }
+                createReadStream(filePath).pipe(res);
+            });
+        },
+        writeBundle(outputOptions) {
+            const outDir = outputOptions.dir ?? 'dist';
+            for (const dir of dirs) {
+                cpSync(dir.root, path.join(outDir, dir.publicPath), {
+                    recursive: true,
+                    filter: (source) => !dir.exclude.includes(path.basename(source)),
+                });
             }
-            // Strip query string (cache busters) and map onto node_modules/pdfjs-dist/wasm.
-            const rel = req.url.slice(PDFJS_WASM_PUBLIC.length + 1).split('?')[0] ?? '';
-            const filePath = fileURLToPath(new URL(rel, `file://${PDFJS_WASM_SRC}/`));
-            if (!filePath.startsWith(PDFJS_WASM_SRC) || !existsSync(filePath)) {
-                res.statusCode = 404;
-                res.end('Not found');
-                return;
-            }
-            if (filePath.endsWith('.wasm')) {
-                res.setHeader('Content-Type', 'application/wasm');
-            } else if (filePath.endsWith('.js')) {
-                res.setHeader('Content-Type', 'application/javascript');
-            }
-            createReadStream(filePath).pipe(res);
-        });
-    },
-    writeBundle(outputOptions) {
-        const outDir = outputOptions.dir ?? 'dist';
-        cpSync(PDFJS_WASM_SRC, `${outDir}${PDFJS_WASM_PUBLIC}`, { recursive: true });
-    },
-});
+        },
+    };
+};
 
 /**
  * `<link rel="preconnect">` for every known Supabase HTTPS origin. Runtime
@@ -73,7 +103,7 @@ export default defineConfig({
     plugins: [
         react(),
         tailwindcss(),
-        pdfjsWasmPlugin(),
+        pdfjsAssetsPlugin(),
         supabasePreconnectPlugin(),
         VitePWA({
             registerType: 'autoUpdate',
@@ -119,6 +149,17 @@ export default defineConfig({
                         options: {
                             cacheName: 'piano-samples',
                             expiration: { maxEntries: 40 },
+                        },
+                    },
+                    {
+                        // pdf.js CMaps / standard fonts / ICC profile: fetched by the
+                        // worker only for PDFs that need them, so not precached —
+                        // kept after first use so those scores still render offline.
+                        urlPattern: /\/pdfjs-(cmaps|standard-fonts|iccs)\//,
+                        handler: 'CacheFirst',
+                        options: {
+                            cacheName: 'pdfjs-data',
+                            expiration: { maxEntries: 80 },
                         },
                     },
                     {
