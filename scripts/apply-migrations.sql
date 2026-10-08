@@ -4432,22 +4432,60 @@ grant execute on function public.imslp_sync_tick () to service_role;
 -- this: those go with the score, through documents.id's own cascade, and the
 -- delete-account function deletes owned scores before the auth user.
 --
--- Nothing here widens what a client may write: annotations_insert still
--- requires created_by = auth.uid(), so a new row can never be authorless, and
--- the update policy and grants are untouched. Null arises only from this FK
--- action (verified on the dev branch: an authenticated insert with a null
--- author is rejected by RLS). A trigger that freezes created_by on UPDATE must let
--- this one transition (a non-null author becoming null) through, or deleting
--- any account that ever marked a shared score will fail.
+-- An ON DELETE SET NULL is an UPDATE, so a BEFORE UPDATE trigger can still
+-- refuse it and with it the whole auth delete. score_analyses.created_by does:
+-- guard_score_analyses_client_write (20260803120000) treats any write without
+-- a service_role JWT as a client's, and GoTrue's delete carries no JWT. That
+-- is left to delete-account, which clears score_analyses.created_by as the
+-- service role just before the auth delete (releaseAuthorship), so deletion
+-- works whatever that guard looks like. The trigger added below cannot cause
+-- the same problem: it keys on the writing role, not the JWT.
+--
+-- Dropping NOT NULL would on its own widen what a client may write: the
+-- annotations_update policy has no column restriction and `authenticated`
+-- holds UPDATE on created_by, so NOT NULL was the only thing stopping an
+-- editor from blanking the author of any mark on a shared score. Inserts are
+-- still safe — annotations_insert requires created_by = auth.uid(), so a new
+-- row can never be authorless — and annotations_freeze_created_by below closes
+-- the UPDATE path: a client may not change created_by at all, to null or to
+-- anyone. Who counts as a client is the role doing the write
+-- (current_user in authenticated/anon), not the JWT: the FK's own SET NULL
+-- runs as the table's owner — not as GoTrue's role, and with no JWT — so it
+-- passes, and deleting an account that marked a shared score still works.
+-- (fix/integrity's annotations_guard_columns pins the same column for the
+-- same clients; the two agree and either alone is enough.)
 
 alter table public.annotations alter column created_by drop not null;
 
+-- SECURITY INVOKER (the default), so current_user is the writer rather than
+-- this function's owner. Fires only when created_by is in the SET list, so
+-- ordinary edits, which never send it, pay nothing.
+create or replace function public.annotations_freeze_created_by () returns trigger language plpgsql
+set search_path = ''
+as $$
+begin
+    if current_user in ('authenticated', 'anon') and new.created_by is distinct from old.created_by then
+        raise exception 'annotations.created_by cannot be changed'
+            using errcode = '42501';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.annotations_freeze_created_by () from public, anon, authenticated;
+
+drop trigger if exists annotations_freeze_created_by on public.annotations;
+
+create trigger annotations_freeze_created_by before update of created_by on public.annotations
+for each row execute function public.annotations_freeze_created_by ();
+
 alter table public.annotations drop constraint if exists annotations_created_by_fkey;
 
--- NOT VALID, then VALIDATE: adding a validated FK takes a lock that blocks
--- annotation writes for the whole scan of a live, write-heavy table. Splitting
--- it lets VALIDATE run under SHARE UPDATE EXCLUSIVE, which writers do not wait on.
+-- Every statement here runs in the migration's one transaction, and the
+-- ALTERs above already hold ACCESS EXCLUSIVE on annotations until it commits,
+-- so annotation writes wait for the whole migration, FK scan included. That is
+-- brief at the table's current size (tens of rows in production); a much
+-- larger table would want this FK added NOT VALID and validated in a separate
+-- migration.
 alter table public.annotations
-    add constraint annotations_created_by_fkey foreign key (created_by) references auth.users (id) on delete set null not valid;
-
-alter table public.annotations validate constraint annotations_created_by_fkey;
+    add constraint annotations_created_by_fkey foreign key (created_by) references auth.users (id) on delete set null;
