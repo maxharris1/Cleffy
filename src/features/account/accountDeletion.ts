@@ -78,13 +78,14 @@ const APP_KEY_PREFIX = 'cleffy:';
 /**
  * Everything Cleffy keeps in this browser, gone — after the account is.
  *
- * Wider than sign-out on purpose. Sign-out keeps the annotation mirror and the
- * outbox so marks made offline are not lost; here the account those marks
- * belonged to no longer exists, its scores are deleted, and nothing in the
- * outbox can ever be accepted again, so keeping it would only leave the
- * deleted account's content on the device. Every Dexie table is cleared, every
- * app preference key and stored session removed, and the restore cookie
- * expired.
+ * Wider than sign-out on purpose. Sign-out (session.ts signOut) clears the
+ * account's cloud-score data -- marks, outbox, watermarks, day snapshots --
+ * after syncBeforeSignOut has uploaded what it could and the user has been
+ * warned about the rest, but it keeps what is not the account's: marks on
+ * device-only (`local-…`) scores, and the app's display preferences. Here the
+ * account is gone, and nothing on the device should outlive it, so every
+ * Dexie table is cleared -- device-only scores' marks included -- every app
+ * preference key and stored session removed, and the restore cookie expired.
  *
  * Each step is best-effort and independent: the server-side deletion has
  * already happened, and one store failing to clear must not stop the others.

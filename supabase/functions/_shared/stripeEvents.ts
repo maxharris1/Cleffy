@@ -94,10 +94,13 @@ export interface WebhookStore {
     linkCustomer: (customerId: string, userId: string) => Promise<void>;
     upsertSubscription: (row: SubscriptionUpsert) => Promise<void>;
     /**
-     * checkout.session.completed carries only a subscription id, so it must be
-     * fetched. `null` means Stripe could not be read right now (network, rate
-     * limit, a 5xx) and a retry may succeed; SUBSCRIPTION_MISSING means Stripe
-     * answered that the subscription does not exist, which no retry will change.
+     * The subscription as Stripe holds it NOW. Every event that changes a
+     * subscription's entitlements except `deleted` is applied from this rather
+     * than from the copy embedded in the event, which is only as fresh as the
+     * event and may arrive after a newer one. `null` means Stripe could not be
+     * read right now (network, rate limit, a 5xx) and a retry may succeed;
+     * SUBSCRIPTION_MISSING means Stripe answered that the subscription does not
+     * exist, which no retry will change.
      */
     fetchSubscription: (subscriptionId: string) => Promise<StripeSubscriptionLike | typeof SUBSCRIPTION_MISSING | null>;
     userIdForSubscription: (subscriptionId: string) => Promise<string | null>;
@@ -311,38 +314,70 @@ export const handleStripeEvent = async (
         case 'customer.subscription.created':
         case 'customer.subscription.updated':
         case 'customer.subscription.deleted': {
-            const sub = event.data.object as StripeSubscriptionLike;
-            const customerId = idOf(sub.customer);
+            const embedded = event.data.object as StripeSubscriptionLike;
+            const customerId = idOf(embedded.customer);
             const userId =
-                (await resolveUserId(store, customerId, sub.metadata)) ?? (await store.userIdForSubscription(sub.id));
+                (await resolveUserId(store, customerId, embedded.metadata)) ??
+                (await store.userIdForSubscription(embedded.id));
             if (!userId) {
                 store.log(`${event.type} ${event.id}: no user could be resolved`);
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
             }
 
-            // A delete event's object can still read `active`; the row must not.
-            const normalized: StripeSubscriptionLike =
-                event.type === 'customer.subscription.deleted' ? { ...sub, status: 'canceled' } : sub;
+            // Stripe guarantees delivery, never ORDER -- and a retry after a 500
+            // (every transient failure here releases the claim and asks for one)
+            // makes a late arrival the normal case rather than an exotic one. The
+            // object embedded in the event is the subscription as it was when the
+            // event was CREATED, so applying it would let any older copy overwrite
+            // a newer state: a late `unpaid` after `active` drops a customer who
+            // has paid to free limits and archives their scores until the next
+            // event (a month away, or a year on an annual plan); a late `active`
+            // after `unpaid` restores paid entitlements Stripe has not been paid
+            // for. Idempotency cannot catch either -- each is a different event id.
+            //
+            // So `created` and `updated` are treated as a notice that the
+            // subscription changed, and what is applied is its CURRENT state,
+            // read back from Stripe -- as checkout.session.completed and
+            // invoice.payment_failed already do. However late a delivery, it
+            // can only ever write the latest state. A failed read is retried
+            // rather than falling back to the embedded copy: falling back is
+            // exactly the stale write this exists to prevent.
+            //
+            // `deleted` needs no read: a cancellation is final, so its event can
+            // never be older than anything it overwrites. Its object can still
+            // read `active`; the row must not.
+            let current: StripeSubscriptionLike;
+            if (event.type === 'customer.subscription.deleted') {
+                current = { ...embedded, status: 'canceled' };
+            } else {
+                const live = await store.fetchSubscription(embedded.id);
+                if (live === SUBSCRIPTION_MISSING) {
+                    return subscriptionMissing(store, event, embedded.id);
+                }
+                if (!live) {
+                    store.log(`${event.type} ${event.id}: subscription ${embedded.id} not retrievable`);
+                    return retryLater(store, event, 'subscription_unavailable');
+                }
+                current = live;
+            }
 
-            // Stripe guarantees delivery, never ORDER — and a retry after a 500
-            // makes a late arrival near-certain rather than exotic. These three
-            // event types are the only ones applied from the object Stripe
-            // embedded rather than from a live re-read, so they are the only ones
-            // that can carry a snapshot older than what is already recorded: an
-            // `updated` still reading `active`, landing after the `deleted` that
-            // cancelled the same subscription, would hand back paid entitlements
-            // for the rest of the period on a subscription that no longer exists.
-            // Idempotency cannot catch it — it is a different event id.
-            const stored = await store.storedStatusOf(sub.id);
-            if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(normalized.status)) {
+            // Belt and braces for the one window the live read leaves: two
+            // deliveries for the same subscription in flight at once, the older
+            // read landing second. A subscription Stripe has ended never comes
+            // back, so nothing may reopen a row already recorded as ended.
+            // Keyed on the status being APPLIED, not the one embedded: the retry
+            // of an event whose archival threw after its upsert landed reads the
+            // ended status back from Stripe and must re-run that archival.
+            const stored = await store.storedStatusOf(embedded.id);
+            if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(current.status)) {
                 store.log(
-                    `${event.type} ${event.id}: ${sub.id} is already ${stored}; ` +
-                        `refusing to reopen it as ${normalized.status}`,
+                    `${event.type} ${event.id}: ${embedded.id} is already ${stored}; ` +
+                        `refusing to reopen it as ${current.status}`,
                 );
                 return { status: 200, body: { received: true, ignored: 'terminal_status' } };
             }
 
-            await applySubscription(store, normalized, userId, priceTiers);
+            await applySubscription(store, current, userId, priceTiers);
             return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
         }
 

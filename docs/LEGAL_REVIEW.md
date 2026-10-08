@@ -94,7 +94,18 @@ abuse prevention and error monitoring; legal obligation for billing records).
 - Account deletion cancels immediately (by design — the account stops existing).
   The deletion dialog says so; confirm no pro-rata refund is owed.
 - Downgrade: scores over the new plan's limit become read-only (archived), never
-  deleted (`apply_free_tier_archival`). The Terms say this; confirm the wording.
+  deleted (`apply_free_tier_archival`), and come back only when the user is on a
+  paid plan again (`restore_plan_archived_scores`, run by the Stripe webhook, or
+  an Academy owner seating them). **Changed
+  2026-10-08:** an earlier draft of the Terms said "until you upgrade again or
+  remove others", but the app has no way to make an archived score editable
+  short of upgrading — deleting other scores frees room for new uploads, not
+  for the archived ones. The Terms now say "until you upgrade again" (and the
+  in-app cap notice now says "delete one to make room" instead of suggesting an
+  archive action that does not exist). If the business wants "remove others"
+  to work, that is a product change (an owner "make editable" action; the
+  database already refuses one past the cap), not a wording one. Confirm the
+  wording.
 
 ## 8. Auto-renewal disclosures
 
@@ -187,6 +198,17 @@ preference keys, and the service-worker app cache. No analytics or advertising
 cookies, fonts are self-hosted. **Assumed:** this is all "strictly necessary"
 and needs no consent banner under ePrivacy/PECR. Confirm, including for Sentry
 when enabled (the browser SDK sets no cookies).
+
+**Sign-out — changed 2026-10-08.** An earlier draft of the Privacy Policy said
+markings and changes not yet synced are kept on the device at sign-out. That
+was the behaviour before the sync fixes and is no longer true: sign-out now
+uploads pending changes first, warns the user about any it could not upload
+("Signing out now deletes them from this device for good"), and then removes
+the account's markings, unsynced changes, sync watermarks and lesson-history
+copies from the device, so the next person on a shared device can neither see
+nor upload them. Markings on files opened from the device without uploading
+them, and display preferences, stay. The policy's "What Cleffy stores on your
+device" section now says this; confirm the wording.
 
 ## 16. Security and breach notification
 

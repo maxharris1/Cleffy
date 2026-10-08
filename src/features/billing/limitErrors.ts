@@ -201,7 +201,10 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; spentUnknown: string; up
     cloud_scores: {
         spent: 'You have reached your {limit} free cloud scores',
         spentUnknown: 'You have reached your plan’s cloud-score limit',
-        upgrade: 'Upgrade for unlimited scores, or archive one to make room.',
+        // Delete, not archive: the library offers no archive action, and the cap
+        // (documents_enforce_score_cap) counts the owner's unarchived scores, so
+        // deleting one is what makes room.
+        upgrade: 'Upgrade for unlimited scores, or delete one to make room.',
     },
     omr_runs: {
         spent: 'You have used your {limit} free play-alongs this month',

@@ -72,6 +72,16 @@ Functions changed: `delete-account` (new), `imslp-download`, `imslp-work`,
 `analyze-annotations`, and `_shared/` (so redeploy every function that imports
 it — the merge deploys all of them).
 
+`stripe-webhook` now applies `customer.subscription.created` / `.updated` from
+the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
+the copy embedded in the event: Stripe does not deliver in order, and a retried
+older event (every transient failure here is a 500 that Stripe retries) would
+otherwise overwrite a newer state — a late `unpaid` after the customer paid
+archived their scores, a late `active` after `unpaid` restored them unpaid.
+`.deleted` still applies as `canceled` without a read. One Stripe API call per
+subscription event; a failed read is a released claim and a 500, which Stripe
+retries.
+
 The smart-import refund ledger that fix/billing first proposed
 (`smart_import_charges`, `refund_smart_import`) was dropped in integration and
 never applied anywhere: `imslp-download` now creates the score itself and
@@ -100,13 +110,24 @@ to refund (comment at the end of `20261007120300`).
    on an idle project. (Run on 2026-10-08 before merge, as one rolled-back
    transaction per file with every 20261007 migration applied first: 113/113,
    37/37 and 89/94 with exactly those five.)
+   Then the out-of-order webhook check, in the Stripe sandbox against the dev
+   endpoint (Workbench → Events): make any two `customer.subscription.updated`
+   events on a test subscription (e.g. turn cancel-at-period-end on, then
+   off), then **Resend** the older one. The `subscriptions` row must keep the
+   newer state (there: `cancel_at_period_end = false`), and the function log
+   must show the resent event applied, not refused and not a 500.
 3. **Auth password policy on both projects** — 8+ characters, letters and
    digits, via the Management API (§8). `config.toml` only covers the local
    stack. Existing passwords keep working.
 4. **Edge secrets.**
     - `STRIPE_SECRET_KEY_LIVE` must be set on production (it is, since
       2026-08-28): `delete-account` refuses with `503 billing_unavailable` and
-      deletes nothing for any live customer it cannot reach (§2).
+      deletes nothing for any live customer it cannot reach (§2), and
+      `stripe-webhook` reads every subscription event back from Stripe, so
+      without the key each one is a 500 until it is set (Stripe keeps retrying
+      for three days; nothing is lost if it is set within that window). The
+      dev branch needs its sandbox key the same way (`STRIPE_SECRET_KEY_TEST`,
+      or the older `STRIPE_SECRET_KEY`; set 2026-08-29).
     - `LOGIN_THROTTLE_SECRET` (recommended, optional): HMAC key for the
       student-login limiter (§9); unset falls back to the service-role key.
     - Optional: `SENTRY_DSN` (+ `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`) for edge
@@ -122,7 +143,13 @@ to refund (comment at the end of `20261007120300`).
    `*.ingest.sentry.io`, `*.ingest.us.sentry.io`, `*.ingest.de.sentry.io`.
 6. **Legal.** `/privacy` and `/terms` go live with this merge. Settle every open
    item in `docs/LEGAL_REVIEW.md` (operator entity, hosting region, refunds,
-   governing law, processors including Sentry) with counsel first.
+   governing law, processors including Sentry) with counsel first. Two
+   statements changed on 2026-10-08 to match the integrated code, flagged for
+   counsel in §7 and §15: the Terms now say scores past a smaller plan's limits
+   stay read-only "until you upgrade again" (there is no owner unarchive), and
+   the Privacy Policy now says sign-out uploads pending changes, warns about
+   any it could not upload, then removes the account's markings from the
+   device (it used to say unsynced markings were kept).
 7. **CI is green**, including the new `npm audit --omit=dev --audit-level=high`
    step (pdf.js 6.4.299 fixes GHSA-hq66-cqwq-w95j).
 

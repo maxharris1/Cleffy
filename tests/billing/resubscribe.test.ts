@@ -88,11 +88,25 @@ const subEvent = (id: string, type: string, overrides: Partial<StripeSubscriptio
     },
 });
 
+/**
+ * Stripe sending `event` right after the change it reports: the embedded
+ * object is the subscription's current state, which is what the handler's
+ * live re-read answers (a deleted subscription reads back as canceled).
+ */
+const deliver = (store: BillingBackedStore, event: StripeEventLike) => {
+    const object = event.data.object as StripeSubscriptionLike;
+    store.remote.set(
+        object.id,
+        event.type === 'customer.subscription.deleted' ? { ...object, status: 'canceled' } : object,
+    );
+    return handleStripeEvent(event, store, PRICE_TIERS);
+};
+
 /** A paying teacher with `count` scores, score-0 the least recently touched. */
 const payingTeacherWith = async (count: number) => {
     const billing = new FakeBilling();
     const store = new BillingBackedStore(billing);
-    await handleStripeEvent(subEvent('evt_start', 'customer.subscription.created'), store, PRICE_TIERS);
+    await deliver(store, subEvent('evt_start', 'customer.subscription.created'));
     for (let i = 0; i < count; i += 1) {
         await billing.insertScore('teacher', `score-${i}`);
     }
@@ -105,7 +119,7 @@ describe('lapse and resubscribe', () => {
     it('archives past the free cap on cancellation, keeping the most recently used scores', async () => {
         const { billing, store } = await payingTeacherWith(6);
 
-        await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
 
         expect(store.archivedCounts).toEqual([6 - FREE_SCORES]);
         expect(active(billing)).toEqual(['score-3', 'score-4', 'score-5']);
@@ -114,7 +128,7 @@ describe('lapse and resubscribe', () => {
 
     it('restores every lapse-archived score on a new checkout', async () => {
         const { billing, store } = await payingTeacherWith(6);
-        await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
 
         store.remote.set('sub_2', {
             id: 'sub_2',
@@ -139,31 +153,38 @@ describe('lapse and resubscribe', () => {
 
     it('restores when an unpaid subscription is paid', async () => {
         const { billing, store } = await payingTeacherWith(5);
-        await handleStripeEvent(
-            subEvent('evt_unpaid', 'customer.subscription.updated', { status: 'unpaid' }),
-            store,
-            PRICE_TIERS,
-        );
+        await deliver(store, subEvent('evt_unpaid', 'customer.subscription.updated', { status: 'unpaid' }));
         expect(active(billing)).toHaveLength(FREE_SCORES);
 
-        await handleStripeEvent(
-            subEvent('evt_paid', 'customer.subscription.updated', { status: 'active' }),
-            store,
-            PRICE_TIERS,
-        );
+        await deliver(store, subEvent('evt_paid', 'customer.subscription.updated', { status: 'active' }));
         expect(active(billing)).toHaveLength(5);
+    });
+
+    it('archives nothing when an unpaid event is retried after the customer has paid', async () => {
+        // The unpaid event's first delivery failed (Stripe could not be read,
+        // so the claim was released and a retry requested); the customer paid
+        // before Stripe retried it. Applied from its embedded copy, the retry
+        // would archive two of a paying teacher's scores until the next event.
+        const { billing, store } = await payingTeacherWith(5);
+        const unpaid = subEvent('evt_unpaid_retried', 'customer.subscription.updated', { status: 'unpaid' });
+        store.remote.delete('sub_1');
+        expect((await handleStripeEvent(unpaid, store, PRICE_TIERS)).status).toBeGreaterThanOrEqual(500);
+
+        await deliver(store, subEvent('evt_paid_first', 'customer.subscription.updated'));
+        const retried = await handleStripeEvent(unpaid, store, PRICE_TIERS);
+
+        expect(retried.status).toBe(200);
+        expect(store.archivedCounts).toEqual([]);
+        expect(active(billing)).toHaveLength(5);
+        expect(store.rows.get('sub_1')).toMatchObject({ status: 'active', tier: 'teacher' });
     });
 
     it('never restores a score the owner archived themselves', async () => {
         const { billing, store } = await payingTeacherWith(5);
         billing.archiveScore('teacher', 'score-4');
 
-        await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
-        await handleStripeEvent(
-            subEvent('evt_back', 'customer.subscription.created', { id: 'sub_2' }),
-            store,
-            PRICE_TIERS,
-        );
+        await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
+        await deliver(store, subEvent('evt_back', 'customer.subscription.created', { id: 'sub_2' }));
 
         expect(active(billing)).toEqual(['score-0', 'score-1', 'score-2', 'score-3']);
         expect(billing.archivedScores.get('teacher')).toEqual([{ id: 'score-4', reason: 'owner' }]);
@@ -171,16 +192,15 @@ describe('lapse and resubscribe', () => {
 
     it('archives nothing when another plan is still live', async () => {
         const { billing, store } = await payingTeacherWith(5);
-        await handleStripeEvent(
+        await deliver(
+            store,
             subEvent('evt_second', 'customer.subscription.created', {
                 id: 'sub_personal',
                 items: { data: [{ price: { id: 'price_personal_monthly' } }] },
             }),
-            store,
-            PRICE_TIERS,
         );
 
-        await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
 
         expect(store.archivedCounts).toEqual([0]);
         expect(active(billing)).toHaveLength(5);
@@ -191,17 +211,16 @@ describe('lapse and resubscribe', () => {
         // free. The restore must stop where the owner could have unarchived by
         // hand, and the cap must still hold afterwards.
         const { billing, store } = await payingTeacherWith(6);
-        await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
         // The teacher deleted one of the three kept while on Free.
         billing.activeScores.set('teacher', ['score-4', 'score-5']);
 
-        await handleStripeEvent(
+        await deliver(
+            store,
             subEvent('evt_mystery', 'customer.subscription.created', {
                 id: 'sub_mystery',
                 items: { data: [{ price: { id: 'price_retired' } }] },
             }),
-            store,
-            PRICE_TIERS,
         );
 
         expect(store.restoredCounts.at(-1)).toBe(1);
@@ -229,13 +248,9 @@ describe('lapse and resubscribe', () => {
         const lapsedSeatHolder = async () => {
             const { billing, store } = await payingTeacherWith(5);
             billing.seatIn('teacher', 'owner');
-            await handleStripeEvent(academyEvent('evt_academy', 'customer.subscription.created'), store, PRICE_TIERS);
-            await handleStripeEvent(
-                academyEvent('evt_academy_cancel', 'customer.subscription.deleted'),
-                store,
-                PRICE_TIERS,
-            );
-            await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+            await deliver(store, academyEvent('evt_academy', 'customer.subscription.created'));
+            await deliver(store, academyEvent('evt_academy_cancel', 'customer.subscription.deleted'));
+            await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
             expect(active(billing)).toHaveLength(FREE_SCORES);
             return { billing, store };
         };
@@ -243,10 +258,9 @@ describe('lapse and resubscribe', () => {
         it('restores the seated teacher when the Academy owner resubscribes', async () => {
             const { billing, store } = await lapsedSeatHolder();
 
-            await handleStripeEvent(
-                academyEvent('evt_academy_back', 'customer.subscription.created', { id: 'sub_academy_2' }),
+            await deliver(
                 store,
-                PRICE_TIERS,
+                academyEvent('evt_academy_back', 'customer.subscription.created', { id: 'sub_academy_2' }),
             );
 
             expect(store.restoredCounts.at(-1)).toBe(5 - FREE_SCORES);
@@ -257,20 +271,18 @@ describe('lapse and resubscribe', () => {
         it('restores the seated teacher when the owner pays an unpaid Academy invoice', async () => {
             const { billing, store } = await lapsedSeatHolder();
 
-            await handleStripeEvent(
+            await deliver(
+                store,
                 academyEvent('evt_academy_unpaid', 'customer.subscription.updated', {
                     id: 'sub_academy_2',
                     status: 'unpaid',
                 }),
-                store,
-                PRICE_TIERS,
             );
             expect(active(billing)).toHaveLength(FREE_SCORES);
 
-            await handleStripeEvent(
-                academyEvent('evt_academy_paid', 'customer.subscription.updated', { id: 'sub_academy_2' }),
+            await deliver(
                 store,
-                PRICE_TIERS,
+                academyEvent('evt_academy_paid', 'customer.subscription.updated', { id: 'sub_academy_2' }),
             );
             expect(active(billing)).toHaveLength(5);
         });
@@ -280,13 +292,12 @@ describe('lapse and resubscribe', () => {
             // returning on Teacher leaves the seated teacher on Free.
             const { billing, store } = await lapsedSeatHolder();
 
-            await handleStripeEvent(
+            await deliver(
+                store,
                 subEvent('evt_owner_teacher', 'customer.subscription.created', {
                     id: 'sub_owner_teacher',
                     metadata: { user_id: 'owner' },
                 }),
-                store,
-                PRICE_TIERS,
             );
 
             expect(active(billing)).toHaveLength(FREE_SCORES);
@@ -298,10 +309,10 @@ describe('lapse and resubscribe', () => {
 
     it('does nothing more on a replayed reactivation', async () => {
         const { billing, store } = await payingTeacherWith(5);
-        await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        await deliver(store, subEvent('evt_cancel', 'customer.subscription.deleted'));
         const back = subEvent('evt_back', 'customer.subscription.created', { id: 'sub_2' });
 
-        await handleStripeEvent(back, store, PRICE_TIERS);
+        await deliver(store, back);
         const replay = await handleStripeEvent(back, store, PRICE_TIERS);
 
         expect(replay.body).toMatchObject({ duplicate: true });

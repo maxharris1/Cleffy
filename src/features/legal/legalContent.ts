@@ -228,8 +228,12 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'The app itself, cached so it can start without a connection.',
                 ),
                 p(
-                    // session.ts signOut(): the ops queue and annotation mirror are kept on purpose.
-                    'Signing out removes your sign-in, your cached plan and library, and the downloaded copies of your scores from that device. Markings and changes that have not finished syncing are kept, so no work is lost. You can remove downloaded scores at any time from the Account page. Deleting your account removes everything Cleffy has stored in that browser.',
+                    // useGuardedSignOut.tsx + session.ts syncBeforeSignOut(): upload first, ask if anything is left.
+                    'Signing out first uploads any markings and changes that have not finished syncing. If some cannot be uploaded — for example because you are offline — Cleffy tells you before going ahead, and if you sign out anyway they are lost.',
+                ),
+                p(
+                    // session.ts signOut() + signOutSync.ts clearCloudAnnotationData(): local-… scores are kept.
+                    'Signing out then removes from that device your sign-in, your cached plan and library, the downloaded copies of your scores, and the device’s copy of your markings on them and of their history; everything already uploaded stays in your account. Markings on files you opened from your device without uploading them stay on that device, as do your display preferences. You can remove downloaded scores at any time from the Account page. Deleting your account removes everything Cleffy has stored in that browser.',
                 ),
             ],
         },
@@ -406,7 +410,10 @@ export const TERMS_OF_SERVICE: LegalDocument = {
                 list(
                     'Paid plans are billed in advance, monthly or annually, through Stripe, and renew automatically until cancelled. The price and any tax are shown before you pay.',
                     'You can change or cancel your plan at any time from Manage subscription on the Account page. A cancelled plan stays active until the end of the period you have paid for.',
-                    'If your plan ends or you move to a smaller one, nothing is deleted: scores beyond the new plan’s limits become read-only until you upgrade again or remove others.',
+                    // apply_free_tier_archival / restore_plan_archived_scores (20261007120300). Only a new
+                    // entitlement un-archives (the Stripe webhook, or an Academy seat via
+                    // studio_members_restore_plan_archived); the app has no owner unarchive action.
+                    'If your plan ends or you move to a smaller one, nothing is deleted: scores beyond the new plan’s limits become read-only — you can still open them — until you upgrade again.',
                     'Deleting your account cancels your subscription immediately.',
                     // Placeholder — see LEGAL_REVIEW.md §6. Not invented: deliberately general.
                     `Except where the law gives you a right to one, payments are not refundable. If you think you were charged in error, write to ${contactEmail} and we will put it right.`,

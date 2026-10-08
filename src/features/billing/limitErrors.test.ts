@@ -250,10 +250,12 @@ describe('limit copy', () => {
         );
     });
 
-    it('suggests archiving as well as upgrading for the score cap', () => {
-        expect(limitAction({ code: 'limit_reached', metric: 'cloud_scores', limit: 3, tier: 'free' })).toContain(
-            'archive',
-        );
+    it('suggests deleting as well as upgrading for the score cap', () => {
+        // Deleting is the action the library offers (RowMenu); there is no
+        // archive action, so suggesting one sent people looking for nothing.
+        const action = limitAction({ code: 'limit_reached', metric: 'cloud_scores', limit: 3, tier: 'free' });
+        expect(action).toContain('delete one to make room');
+        expect(action).not.toMatch(/archive/i);
     });
 
     it('names the roster and points at Teacher when the plan has none', () => {

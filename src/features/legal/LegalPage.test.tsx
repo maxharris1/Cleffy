@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { LEGAL_ENTITY, PRIVACY_POLICY, TERMS_OF_SERVICE, type LegalDocument } from '@/features/legal/legalContent';
 import { PrivacyPage, TermsPage } from '@/features/legal/LegalPage';
+import { AnnotationStore } from '@/sync/annotationStore';
+import { ScribblerDb } from '@/sync/db';
+import { clearCloudAnnotationData } from '@/sync/signOutSync';
+import type { Annotation } from '@/types/models';
 
 const allText = (doc: LegalDocument): string =>
     doc.sections
@@ -12,6 +16,23 @@ const allText = (doc: LegalDocument): string =>
             ...section.blocks.flatMap((block) => (block.kind === 'list' ? block.items : [block.text])),
         ])
         .join('\n');
+
+const CLOUD_DOC = 'c0ffee00-0000-4000-8000-0000000000aa';
+const DEVICE_DOC = 'local-0123456789abcdef';
+
+const unsyncedMark = (id: string, docId: string): Annotation => ({
+    id,
+    docId,
+    page: 0,
+    kind: 'stroke',
+    color: '#111111',
+    payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+    createdBy: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    deletedAt: null,
+    seq: 0,
+});
 
 describe('legal content', () => {
     it.each([
@@ -46,6 +67,30 @@ describe('legal content', () => {
     it('does not claim a hosting region nobody has confirmed', () => {
         expect(LEGAL_ENTITY.dataRegion).toBeNull();
         expect(allText(PRIVACY_POLICY)).not.toMatch(/hosted on Amazon Web Services in /);
+    });
+
+    it('describes sign-out as session.ts and signOutSync.ts do it', async () => {
+        // The behaviour the paragraph must describe, run for real: an unsynced
+        // change on a cloud score does not survive sign-out's clear; one on a
+        // file opened from the device does.
+        const db = new ScribblerDb(`legal-sign-out-${crypto.randomUUID()}`);
+        await new AnnotationStore(db, CLOUD_DOC).create(unsyncedMark('cloud-mark', CLOUD_DOC));
+        await new AnnotationStore(db, DEVICE_DOC).create(unsyncedMark('device-mark', DEVICE_DOC));
+        await clearCloudAnnotationData(db);
+        expect((await db.ops.toArray()).map((op) => op.annotationId)).toEqual(['device-mark']);
+        expect((await db.annotations.toArray()).map((row) => row.id)).toEqual(['device-mark']);
+        db.close();
+
+        // So the policy must not promise unsynced work survives: signOut()
+        // clears it after syncBeforeSignOut uploads what it can and
+        // useGuardedSignOut warns about the rest.
+        const storage = PRIVACY_POLICY.sections.find((section) => section.id === 'device-storage');
+        const text = storage ? allText({ ...PRIVACY_POLICY, sections: [storage] }) : '';
+        expect(text).toMatch(/Signing out first uploads any markings and changes that have not finished syncing/);
+        expect(text).toMatch(/tells you before going ahead, and if you sign out anyway they are lost/);
+        expect(text).toMatch(/the device’s copy of your markings/);
+        expect(text).toMatch(/Markings on files you opened from your device without uploading them stay/);
+        expect(text).not.toMatch(/are kept, so no work is lost/);
     });
 
     it('explains what account deletion does, matching delete-account', () => {
