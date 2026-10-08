@@ -27,6 +27,22 @@ const FLUSH_MAX_POINTS = 45;
 /** Min gap between presence `track` calls — avoids ClientPresenceRateLimitReached. */
 const PRESENCE_TRACK_MIN_MS = 1000;
 
+/**
+ * How long doc-db:{id} may lag behind a joined doc:{id} before we stop waiting
+ * for it. Both topics share one socket, so a healthy re-join lands within a
+ * round-trip of the other; anything slower means the join is being refused or
+ * retried (e.g. the frontend is live before migration 20261007120101).
+ */
+export const DB_JOIN_GRACE_MS = 4000;
+/** Pull cadence while committed rows cannot arrive live (fallback mode). */
+export const DB_FALLBACK_POLL_MS = 15_000;
+/**
+ * In fallback mode a peer's finished live stroke is pulled this long after its
+ * last batch — long enough for their outbox flush to commit, well inside the
+ * 10 s live-preview TTL so the mark never visibly disappears.
+ */
+export const DB_FALLBACK_INK_PULL_MS = 1500;
+
 export interface StrokeMeta {
     strokeId: string;
     page: number;
@@ -54,6 +70,12 @@ export interface DocRealtimeChannelOptions {
     onPeers: (peers: PresencePeer[]) => void;
     /** Fired on re-join after a drop: clear live buffers + gap-fill pull. */
     onReconnect: () => void;
+    /**
+     * Pull committed rows without touching live buffers. Used while
+     * doc-db:{id} cannot be joined, when committed rows can only come from
+     * pulls, and once it finally joins (to cover the gap until then).
+     */
+    onResync: () => void;
     /** Another member replaced the document's PDF bytes (smart-import cleanup). */
     onDocReplaced?: (contentRev: number) => void;
     /** Play-along analysis lifecycle changed (trimmed broadcast). */
@@ -88,6 +110,13 @@ export class DocRealtimeChannel {
     private reconnectPending = false;
     private stopped = false;
 
+    // Fallback when doc-db:{id} will not join (see armDbFallback).
+    private dbGraceTimer: ReturnType<typeof setTimeout> | null = null;
+    private dbPollTimer: ReturnType<typeof setInterval> | null = null;
+    private dbInkPullTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Committed rows have had no live path since this was set; a db join must pull. */
+    private dbFallback = false;
+
     // Live-ink batching state.
     private meta: StrokeMeta | null = null;
     private pending: number[] = [];
@@ -119,6 +148,9 @@ export class DocRealtimeChannel {
             const msg = parseInkProgress(payload);
             if (msg && msg.userId !== self.userId) {
                 this.opts.onRemoteInk(msg);
+                if (msg.done && this.dbFallback) {
+                    this.scheduleInkPull();
+                }
             }
         });
 
@@ -180,6 +212,11 @@ export class DocRealtimeChannel {
      * the pull and the db channel's re-join would be missed by both. So
      * onReconnect fires once both are joined after either re-joined; the first
      * join of each is not a reconnect.
+     *
+     * Waiting on doc-db:{id} is bounded, though: if it stays unjoined
+     * DB_JOIN_GRACE_MS after doc:{id} joined, the channel degrades to pulling
+     * (see armDbFallback) instead of leaving the score with no committed-row
+     * path at all.
      */
     private onChannelStatus(key: ChannelKey, status: string): void {
         if (this.stopped) {
@@ -187,6 +224,7 @@ export class DocRealtimeChannel {
         }
         if (status !== 'SUBSCRIBED') {
             this.joined[key] = false;
+            this.updateDbFallback();
             return;
         }
         this.joined[key] = true;
@@ -194,14 +232,95 @@ export class DocRealtimeChannel {
             this.reconnectPending = true;
         }
         this.everJoined[key] = true;
-        if (this.reconnectPending && this.joined.live && this.joined.db) {
+        if (this.joined.live && this.joined.db) {
+            const missedRows = this.reconnectPending || this.dbFallback;
+            const clearLive = this.reconnectPending;
             this.reconnectPending = false;
-            this.opts.onReconnect();
+            this.leaveDbFallback();
+            if (clearLive) {
+                this.opts.onReconnect();
+            } else if (missedRows) {
+                // First db join after running without it: rows committed since
+                // the last fallback pull reached nobody. Live ink was intact.
+                this.opts.onResync();
+            }
+            return;
+        }
+        this.updateDbFallback();
+    }
+
+    /** Start or stop waiting on doc-db:{id} as the two join states change. */
+    private updateDbFallback(): void {
+        if (this.joined.live && !this.joined.db) {
+            this.armDbFallback();
+        } else {
+            // Socket down (live not joined): pulls would only fail; the next
+            // live join re-arms. Or db is joined: onChannelStatus handled it.
+            this.clearDbFallbackTimers();
+        }
+    }
+
+    /**
+     * doc:{id} is joined but doc-db:{id} is not. Give it DB_JOIN_GRACE_MS, then
+     * run whatever gap-fill was waiting on it and keep pulling every
+     * DB_FALLBACK_POLL_MS (plus shortly after each peer stroke ends) until it
+     * joins. realtime-js keeps retrying the refused join on its own.
+     */
+    private armDbFallback(): void {
+        if (this.dbGraceTimer || this.dbPollTimer) {
+            return;
+        }
+        this.dbGraceTimer = setTimeout(() => {
+            this.dbGraceTimer = null;
+            if (this.stopped || !this.joined.live || this.joined.db) {
+                return;
+            }
+            this.dbFallback = true;
+            if (this.reconnectPending) {
+                this.reconnectPending = false;
+                this.opts.onReconnect();
+            } else {
+                this.opts.onResync();
+            }
+            this.dbPollTimer = setInterval(() => this.opts.onResync(), DB_FALLBACK_POLL_MS);
+        }, DB_JOIN_GRACE_MS);
+    }
+
+    private scheduleInkPull(): void {
+        if (this.dbInkPullTimer) {
+            clearTimeout(this.dbInkPullTimer);
+        }
+        this.dbInkPullTimer = setTimeout(() => {
+            this.dbInkPullTimer = null;
+            if (!this.stopped && this.dbFallback && !this.joined.db) {
+                this.opts.onResync();
+            }
+        }, DB_FALLBACK_INK_PULL_MS);
+    }
+
+    private leaveDbFallback(): void {
+        this.dbFallback = false;
+        this.clearDbFallbackTimers();
+        if (this.dbInkPullTimer) {
+            clearTimeout(this.dbInkPullTimer);
+            this.dbInkPullTimer = null;
+        }
+    }
+
+    private clearDbFallbackTimers(): void {
+        if (this.dbGraceTimer) {
+            clearTimeout(this.dbGraceTimer);
+            this.dbGraceTimer = null;
+        }
+        if (this.dbPollTimer) {
+            clearInterval(this.dbPollTimer);
+            this.dbPollTimer = null;
         }
     }
 
     stop(): void {
         this.stopped = true;
+        this.leaveDbFallback();
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;

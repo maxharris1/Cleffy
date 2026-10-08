@@ -20,7 +20,9 @@
 --
 -- Deploy with the frontend that joins doc-db:{id}: a tab still running the old
 -- bundle stops receiving committed rows live (it still converges through its
--- pull on reconnect / coming online) until it reloads.
+-- pull on reconnect / coming online) until it reloads. A new bundle running
+-- before this migration is refused on doc-db:{id} and falls back to polling
+-- until the join succeeds (DEPLOY.md, "Release note — realtime topic split").
 --
 -- tests/sql/column_integrity.sql proves receive and send on both topics; see
 -- tests/sql/README.md.

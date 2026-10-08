@@ -1,7 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TypedSupabaseClient } from '@/lib/supabase';
-import { DocRealtimeChannel, docDbTopic, docTopic, type DocRealtimeChannelOptions } from '@/sync/realtimeChannel';
+import {
+    DB_FALLBACK_INK_PULL_MS,
+    DB_FALLBACK_POLL_MS,
+    DB_JOIN_GRACE_MS,
+    DocRealtimeChannel,
+    docDbTopic,
+    docTopic,
+    type DocRealtimeChannelOptions,
+} from '@/sync/realtimeChannel';
 import { INK_PROGRESS_EVENT, SCORE_ANALYSIS_EVENT } from '@/sync/wire';
 import type { AnnotationRow } from '@/types/database';
 
@@ -100,6 +108,7 @@ const setup = (overrides: Partial<DocRealtimeChannelOptions> = {}) => {
         onDbChange: vi.fn(),
         onPeers: vi.fn(),
         onReconnect: vi.fn(),
+        onResync: vi.fn(),
         onDocReplaced: vi.fn(),
         onScoreAnalysis: vi.fn(),
         ...overrides,
@@ -222,5 +231,136 @@ describe('DocRealtimeChannel reconnect', () => {
         live.status('SUBSCRIBED');
         db.status('SUBSCRIBED');
         expect(opts.onReconnect).not.toHaveBeenCalled();
+    });
+});
+
+const peerStroke = (extra: Record<string, unknown> = {}) => ({
+    strokeId: 's1',
+    userId: PEER,
+    page: 0,
+    kind: 'stroke',
+    color: '#000000',
+    w: 0.01,
+    pts: [0, 0, 1],
+    ...extra,
+});
+
+describe('DocRealtimeChannel when doc-db:{id} will not join', () => {
+    // E.g. the frontend went live before migration 20261007120101: the
+    // receive policy still refuses doc-db: topics and realtime-js keeps
+    // retrying the join with CHANNEL_ERROR in between.
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('does nothing while doc-db:{id} joins within the grace period', () => {
+        const { opts, live, db } = setup();
+        live.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS - 1);
+        db.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 3);
+        expect(opts.onResync).not.toHaveBeenCalled();
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+    });
+
+    it('still gap-fills when the live channel reconnects and doc-db:{id} never joins', () => {
+        const { opts, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('CHANNEL_ERROR');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+
+        live.status('CHANNEL_ERROR');
+        live.status('SUBSCRIBED');
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+        db.status('CHANNEL_ERROR');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('gap-fills a reconnect whose doc-db:{id} re-join is refused', () => {
+        const { opts, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        live.status('CHANNEL_ERROR');
+        db.status('CHANNEL_ERROR');
+        live.status('SUBSCRIBED');
+        db.status('CHANNEL_ERROR');
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+        expect(opts.onResync).not.toHaveBeenCalled();
+    });
+
+    it('polls while doc-db:{id} is missing, and stops once it joins', () => {
+        const { opts, live, db } = setup();
+        live.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 2);
+        expect(opts.onResync).toHaveBeenCalledTimes(3);
+
+        // The join finally succeeds: one pull covers the rows committed since
+        // the last poll, and polling stops.
+        db.status('SUBSCRIBED');
+        expect(opts.onResync).toHaveBeenCalledTimes(4);
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 3);
+        expect(opts.onResync).toHaveBeenCalledTimes(4);
+    });
+
+    it('pulls shortly after a peer finishes a stroke, before its live preview expires', () => {
+        const { opts, live } = setup();
+        live.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+
+        live.broadcast(INK_PROGRESS_EVENT, peerStroke());
+        vi.advanceTimersByTime(DB_FALLBACK_INK_PULL_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+
+        live.broadcast(INK_PROGRESS_EVENT, peerStroke({ pts: [], done: true }));
+        vi.advanceTimersByTime(DB_FALLBACK_INK_PULL_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not pull on finished strokes while doc-db:{id} is healthy', () => {
+        const { opts, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        live.broadcast(INK_PROGRESS_EVENT, peerStroke({ done: true }));
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS);
+        expect(opts.onResync).not.toHaveBeenCalled();
+    });
+
+    it('stops polling while the socket is down and resumes after the live re-join', () => {
+        const { opts, live } = setup();
+        live.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+
+        live.status('CHANNEL_ERROR');
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 3);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+
+        live.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears every fallback timer on stop', () => {
+        const { rt, opts, live } = setup();
+        live.status('SUBSCRIBED');
+        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
+        live.broadcast(INK_PROGRESS_EVENT, peerStroke({ done: true }));
+        rt.stop();
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 3);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
     });
 });
