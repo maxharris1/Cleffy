@@ -330,8 +330,8 @@ Unlimited is unlimited except for AI fingering reads, which carry a silent
 
 Annotation, the on-device fingering optimizer and manual fingering are unlimited
 on every plan, including Free. PDF export is the one on-device feature that is
-metered — 1/mo on Free, unlimited everywhere else, and never counted for guests
-or students (§6e).
+metered — 1/mo on Free, unlimited everywhere else, never counted for students,
+and a share-link guest's export is drawn from the score owner's allowance (§6e).
 
 ### 6a. Create the products and prices
 
@@ -504,15 +504,15 @@ the Stripe dashboard is a no-op (the handler reports `duplicate: true`).
 
 Client-side checks are UX only. Every limit is enforced server-side:
 
-| Limit                                   | Enforced by                                                                                                                                                                    |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                  |
-| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                              |
-| PDF export                              | `consume_pdf_export()` — the export runs on-device, so this is an honest-UI counter, not a hard gate. It exempts anonymous share-link guests and provisioned students outright |
-| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                     |
-| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                       |
-| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                  |
-| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                         |
+| Limit                                   | Enforced by                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                                                                                                                                                                                                       |
+| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                                                                                                                                                                                                                   |
+| PDF export                              | `claim_pdf_export()` — check and increment in one statement, called before the on-device export is built; the client builds nothing without `ok: true` and fails closed on any error (offline is allowed only on an unlimited plan). A share-link guest names the score and is billed to its owner; students are exempt. `consume_pdf_export()` is the legacy alias |
+| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                                                                                                                                                                                                          |
+| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                                                                                                                                                                                                            |
+| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                                                                                                                                                                                                       |
+| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                                                                                                                                                                                                              |
 
 `students` and `cloud_scores` are **stocks** — a live count of rows, checked
 where the row is written — so neither ever reaches `usage_counters`. Everything

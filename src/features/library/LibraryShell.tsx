@@ -152,7 +152,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             setUploadLimit(err);
             return;
         }
-        const loose = parseLooseLimitError(err);
+        const loose = parseLooseLimitError(err, entitlements);
         if (loose) {
             setUploadLimit(loose);
             return;

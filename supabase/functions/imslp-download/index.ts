@@ -221,6 +221,21 @@ Deno.serve(async (req) => {
             return jsonResponse({ error: `Storage upload failed: ${uploadError.message}` }, 502);
         }
 
+        // The import is only finished once the client has the bytes, and the
+        // client rolls the score back if that fails. Recording the spent credit
+        // against this document is what lets refund_smart_import give it back
+        // then -- once, and only after the score is gone. Best effort: a missing
+        // ledger row costs the teacher a refund, never grants one.
+        if (gate.consumed) {
+            const { error: chargeError } = await admin.rpc('record_smart_import_charge', {
+                p_user: doc.owner_id,
+                p_document: documentId,
+            });
+            if (chargeError) {
+                console.error(`could not record smart_imports charge for ${documentId}: ${chargeError.message}`);
+            }
+        }
+
         // Intentionally JSON-only — never proxy PDF bytes through the Edge
         // response (saves egress + keeps worker memory to one buffer).
         return jsonResponse({

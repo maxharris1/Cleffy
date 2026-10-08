@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
     handleStripeEvent,
+    SUBSCRIPTION_MISSING,
     subscriptionRowFrom,
     type StripeEventLike,
     type StripeSubscriptionLike,
@@ -39,8 +40,12 @@ class FakeStore implements WebhookStore {
     customers = new Map<string, string>();
     subscriptions = new Map<string, SubscriptionUpsert>();
     archived: string[] = [];
+    restored: string[] = [];
+    released: string[] = [];
     logs: string[] = [];
     remote = new Map<string, StripeSubscriptionLike>();
+    /** Ids Stripe answers resource_missing for, as opposed to merely not answering. */
+    missing = new Set<string>();
 
     claimEvent = async (id: string): Promise<boolean> => {
         if (this.events.includes(id)) {
@@ -56,11 +61,20 @@ class FakeStore implements WebhookStore {
     upsertSubscription = async (row: SubscriptionUpsert) => {
         this.subscriptions.set(row.stripe_subscription_id, row);
     };
-    fetchSubscription = async (id: string) => this.remote.get(id) ?? null;
+    fetchSubscription = async (id: string) =>
+        this.missing.has(id) ? SUBSCRIPTION_MISSING : (this.remote.get(id) ?? null);
     userIdForSubscription = async (id: string) => this.subscriptions.get(id)?.user_id ?? null;
     storedStatusOf = async (id: string) => this.subscriptions.get(id)?.status ?? null;
     applyFreeTierArchival = async (userId: string) => {
         this.archived.push(userId);
+    };
+    restorePlanArchivedScores = async (userId: string) => {
+        this.restored.push(userId);
+    };
+    /** Mirrors the real store: the id is forgotten, so a redelivery is fresh. */
+    releaseEvent = async (id: string) => {
+        this.released.push(id);
+        this.events = this.events.filter((event) => event !== id);
     };
     log = (message: string) => {
         this.logs.push(message);
@@ -198,6 +212,88 @@ describe('stripe event handling', () => {
         expect(store.customers.get('cus_9')).toBe('teacher-9');
         expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', tier: 'academy' });
         expect(store.archived).toEqual([]);
+        // A checkout is how a lapsed teacher comes back, so it restores too.
+        expect(store.restored).toEqual(['teacher-9']);
+    });
+
+    it('releases the claim and asks for a retry when checkout cannot read the subscription', async () => {
+        // The purchase is in this event. Answering 200 while keeping the claim
+        // would acknowledge it to Stripe and drop it: the retry would read as a
+        // duplicate, and a paying customer would be left on Free.
+        const checkout: StripeEventLike = {
+            id: 'evt_checkout_flaky',
+            type: 'checkout.session.completed',
+            data: { object: { customer: 'cus_9', subscription: 'sub_9', client_reference_id: 'teacher-9' } },
+        };
+
+        const first = await handleStripeEvent(checkout, store, PRICE_TIERS);
+        expect(first.status).toBeGreaterThanOrEqual(500);
+        expect(first.body).toMatchObject({ retry: true });
+        expect(store.released).toEqual(['evt_checkout_flaky']);
+        expect(store.subscriptions.size).toBe(0);
+
+        // Stripe's retry, once its API answers again, is processed, not skipped.
+        store.remote.set('sub_9', {
+            id: 'sub_9',
+            status: 'active',
+            customer: 'cus_9',
+            items: { data: [{ price: { id: 'price_teacher_monthly' } }] },
+        });
+        const retry = await handleStripeEvent(checkout, store, PRICE_TIERS);
+        expect(retry.status).toBe(200);
+        expect(retry.body).toMatchObject({ applied: 'subscription_upserted' });
+        expect(store.subscriptions.get('sub_9')).toMatchObject({ user_id: 'teacher-9', tier: 'teacher' });
+    });
+
+    it('releases the claim and asks for a retry when a failed invoice cannot read the subscription', async () => {
+        const event: StripeEventLike = {
+            id: 'evt_inv_flaky',
+            type: 'invoice.payment_failed',
+            data: { object: { customer: 'cus_1', subscription: 'sub_1' } },
+        };
+        const result = await handleStripeEvent(event, store, PRICE_TIERS);
+        expect(result.status).toBeGreaterThanOrEqual(500);
+        expect(store.released).toEqual(['evt_inv_flaky']);
+        expect(store.events).not.toContain('evt_inv_flaky');
+    });
+
+    it.each([
+        [
+            'checkout.session.completed',
+            { customer: 'cus_9', subscription: 'sub_gone', client_reference_id: 'teacher-9' },
+        ],
+        ['invoice.payment_failed', { customer: 'cus_1', subscription: 'sub_gone' }],
+    ])('acknowledges %s for a subscription Stripe says does not exist', async (type, object) => {
+        // resource_missing is Stripe answering, not Stripe failing: three days
+        // of 500s would fail identically and only trip endpoint alerts. The
+        // claim is kept, so a redelivery is a duplicate, and the log is loud.
+        store.missing.add('sub_gone');
+        const event: StripeEventLike = { id: `evt_gone_${type}`, type, data: { object } };
+
+        const result = await handleStripeEvent(event, store, PRICE_TIERS);
+
+        expect(result.status).toBe(200);
+        expect(result.body).toMatchObject({ ignored: 'subscription_missing' });
+        expect(store.released).toEqual([]);
+        expect(store.subscriptions.size).toBe(0);
+        expect(store.logs.some((line) => line.startsWith('ALERT') && line.includes('sub_gone'))).toBe(true);
+        const replay = await handleStripeEvent(event, store, PRICE_TIERS);
+        expect(replay.body).toMatchObject({ duplicate: true });
+    });
+
+    it('does not release the claim for a checkout it deliberately ignores', async () => {
+        const result = await handleStripeEvent(
+            {
+                id: 'evt_one_off',
+                type: 'checkout.session.completed',
+                data: { object: { customer: 'cus_9', client_reference_id: 'teacher-9' } },
+            },
+            store,
+            PRICE_TIERS,
+        );
+        expect(result.status).toBe(200);
+        expect(result.body).toMatchObject({ ignored: 'no_subscription' });
+        expect(store.released).toEqual([]);
     });
 
     it('archives past the free cap when a subscription is deleted', async () => {
@@ -227,6 +323,67 @@ describe('stripe event handling', () => {
         expect(store.subscriptions.get('sub_1')).toMatchObject({ status: 'canceled', tier: 'free' });
         // Refusing is not re-archiving: the deleted event already did that.
         expect(store.archived).toEqual(['teacher-1']);
+    });
+
+    it('restores lapse-archived scores when an unpaid subscription is paid', async () => {
+        await handleStripeEvent(
+            subscriptionEvent('evt_unpaid_r', 'customer.subscription.updated', { status: 'unpaid' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.archived).toEqual(['teacher-1']);
+        expect(store.restored).toEqual([]);
+
+        await handleStripeEvent(
+            subscriptionEvent('evt_paid_r', 'customer.subscription.updated', { status: 'active' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.restored).toEqual(['teacher-1']);
+        // Restoring is not archiving again.
+        expect(store.archived).toEqual(['teacher-1']);
+    });
+
+    it('restores on a trial, and on a brand-new subscription after a cancellation', async () => {
+        await handleStripeEvent(
+            subscriptionEvent('evt_trial', 'customer.subscription.created', { id: 'sub_t', status: 'trialing' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.restored).toEqual(['teacher-1']);
+
+        await handleStripeEvent(
+            subscriptionEvent('evt_del_t', 'customer.subscription.deleted', { id: 'sub_t' }),
+            store,
+            PRICE_TIERS,
+        );
+        await handleStripeEvent(
+            subscriptionEvent('evt_new', 'customer.subscription.created', { id: 'sub_new', status: 'active' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.archived).toEqual(['teacher-1']);
+        expect(store.restored).toEqual(['teacher-1', 'teacher-1']);
+    });
+
+    it('neither archives nor restores while a payment is past due', async () => {
+        await handleStripeEvent(
+            subscriptionEvent('evt_pd_r', 'customer.subscription.updated', { status: 'past_due' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.archived).toEqual([]);
+        expect(store.restored).toEqual([]);
+    });
+
+    it('does not restore from a late event refused against a cancelled subscription', async () => {
+        await handleStripeEvent(subscriptionEvent('evt_del_l', 'customer.subscription.deleted'), store, PRICE_TIERS);
+        await handleStripeEvent(
+            subscriptionEvent('evt_late_l', 'customer.subscription.updated', { status: 'active' }),
+            store,
+            PRICE_TIERS,
+        );
+        expect(store.restored).toEqual([]);
     });
 
     it('still lets an unpaid subscription come back, because paying the invoice can revive it', async () => {

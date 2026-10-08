@@ -79,18 +79,44 @@ export interface StripeEventLike {
     livemode?: boolean;
 }
 
+/**
+ * What fetchSubscription answers when Stripe says the id does not exist
+ * (resource_missing): a subscription from the other mode's account, or a test
+ * object since deleted. Distinct from `null` because the right answer differs --
+ * a transient failure is retried, a missing object never will be found.
+ */
+export const SUBSCRIPTION_MISSING = 'missing' as const;
+
 export interface WebhookStore {
     /** Records the event id. `false` means it was already recorded — a replay. */
     claimEvent: (id: string, type: string) => Promise<boolean>;
     userIdForCustomer: (customerId: string) => Promise<string | null>;
     linkCustomer: (customerId: string, userId: string) => Promise<void>;
     upsertSubscription: (row: SubscriptionUpsert) => Promise<void>;
-    /** checkout.session.completed carries only a subscription id, so it must be fetched. */
-    fetchSubscription: (subscriptionId: string) => Promise<StripeSubscriptionLike | null>;
+    /**
+     * checkout.session.completed carries only a subscription id, so it must be
+     * fetched. `null` means Stripe could not be read right now (network, rate
+     * limit, a 5xx) and a retry may succeed; SUBSCRIPTION_MISSING means Stripe
+     * answered that the subscription does not exist, which no retry will change.
+     */
+    fetchSubscription: (subscriptionId: string) => Promise<StripeSubscriptionLike | typeof SUBSCRIPTION_MISSING | null>;
     userIdForSubscription: (subscriptionId: string) => Promise<string | null>;
     /** The status already recorded for a subscription; null when there is no row yet. */
     storedStatusOf: (subscriptionId: string) => Promise<string | null>;
     applyFreeTierArchival: (userId: string) => Promise<void>;
+    /**
+     * Un-archives the scores a lapse archived, up to the cap of the plan the user
+     * now resolves to (restore_plan_archived_scores) -- the user's own, then
+     * those of every teacher seated in a studio the user owns who now resolves
+     * to an unlimited plan. An owner's own archive is never touched.
+     */
+    restorePlanArchivedScores: (userId: string) => Promise<void>;
+    /**
+     * Forgets a claimed event id, so Stripe's retry of it is processed rather
+     * than skipped as a duplicate. Must be called before answering with a
+     * retryable status.
+     */
+    releaseEvent: (id: string) => Promise<void>;
     log: (message: string) => void;
 }
 
@@ -172,6 +198,22 @@ const resolveUserId = async (
     return null;
 };
 
+/**
+ * Writes the row, then brings the score archive in line with it. Both halves
+ * read the user's entitlements AFTER the upsert, so they act on every
+ * subscription the user holds, not just this one: a lapse while another plan is
+ * live archives nothing, and a restore on a plan that still resolves to a
+ * finite cap restores no further than that cap.
+ *
+ * The restore runs on every entitling write, not only on a status change: it is
+ * a no-op when nothing was archived by a lapse, and keying it to transitions
+ * would need the previous status, which a late or retried event cannot be
+ * trusted to carry. Unpaid -> active, a new checkout after a cancellation, and a
+ * trial all land here. A teacher entitled by someone else's subscription (an
+ * Academy seat) gets no webhook of their own: restore_plan_archived_scores also
+ * restores the teachers seated in the subscriber's studios, and a new seat
+ * restores its teacher in the database (studio_members_restore_plan_archived).
+ */
 const applySubscription = async (
     store: WebhookStore,
     sub: StripeSubscriptionLike,
@@ -181,12 +223,42 @@ const applySubscription = async (
     await store.upsertSubscription(subscriptionRowFrom(sub, userId, priceTiers));
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
+    } else if (isEntitlingStatus(sub.status)) {
+        await store.restorePlanArchivedScores(userId);
     }
 };
 
 /**
+ * The answer for an event we could not finish because Stripe itself could not
+ * be read. The claim is released first: keeping it would make the retry this
+ * status asks for look like a duplicate, and the event -- for a checkout, the
+ * customer's whole purchase -- would be acknowledged and lost.
+ */
+const retryLater = async (store: WebhookStore, event: StripeEventLike, reason: string): Promise<WebhookResult> => {
+    await store.releaseEvent(event.id);
+    return { status: 500, body: { error: reason, retry: true } };
+};
+
+/**
+ * The answer for an event whose subscription Stripe says does not exist. The
+ * claim is KEPT and the answer is a 200: retrying for Stripe's three days would
+ * fail identically every time and trip its endpoint-failure alerts, burying the
+ * failures that matter. Logged loudly, because a checkout landing here is a
+ * purchase nobody applied and someone has to look at it.
+ */
+const subscriptionMissing = (store: WebhookStore, event: StripeEventLike, subscriptionId: string): WebhookResult => {
+    store.log(
+        `ALERT ${event.type} ${event.id}: Stripe says subscription ${subscriptionId} does not exist; ` +
+            'acknowledged without applying it',
+    );
+    return { status: 200, body: { received: true, ignored: 'subscription_missing' } };
+};
+
+/**
  * Returns 200 for anything it understands OR deliberately ignores — a non-2xx
- * makes Stripe retry, which is only useful when we genuinely failed.
+ * makes Stripe retry, which is only useful when we genuinely failed. Every
+ * non-2xx it returns has already released the event's claim (see retryLater);
+ * a THROWN error leaves that to the caller, which releases it the same way.
  */
 export const handleStripeEvent = async (
     event: StripeEventLike,
@@ -219,10 +291,17 @@ export const handleStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'no_subscription' } };
             }
 
+            // Not retrievable is not "nothing to do": this event is the purchase.
+            // Stripe retries a 5xx with backoff for days, so a transient API
+            // failure heals itself; a 200 here would have dropped it for good.
+            // Only a subscription Stripe says does not exist is acknowledged.
             const sub = await store.fetchSubscription(subscriptionId);
+            if (sub === SUBSCRIPTION_MISSING) {
+                return subscriptionMissing(store, event, subscriptionId);
+            }
             if (!sub) {
                 store.log(`checkout.session.completed ${event.id}: subscription ${subscriptionId} not retrievable`);
-                return { status: 200, body: { received: true, ignored: 'subscription_missing' } };
+                return retryLater(store, event, 'subscription_unavailable');
             }
 
             await applySubscription(store, sub, userId, priceTiers);
@@ -277,9 +356,14 @@ export const handleStripeEvent = async (
 
             // Re-read from Stripe rather than trusting the invoice: Stripe decides
             // whether this failure means past_due, unpaid, or nothing yet.
+            // Same as checkout: a failed read must be retried, not acknowledged.
             const sub = await store.fetchSubscription(subscriptionId);
+            if (sub === SUBSCRIPTION_MISSING) {
+                return subscriptionMissing(store, event, subscriptionId);
+            }
             if (!sub) {
-                return { status: 200, body: { received: true, ignored: 'subscription_missing' } };
+                store.log(`invoice.payment_failed ${event.id}: subscription ${subscriptionId} not retrievable`);
+                return retryLater(store, event, 'subscription_unavailable');
             }
             const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
             const userId =

@@ -1,5 +1,4 @@
-import { FREE_LIMITS } from '@/features/billing/entitlementsService';
-import type { BillingTier, EffectiveTier, UsageMetric } from '@/types/database';
+import type { BillingTier, EffectiveTier, Entitlements, UsageMetric } from '@/types/database';
 
 /**
  * The one typed shape for "you have run out", however the server said it.
@@ -18,14 +17,20 @@ export type LimitCode = 'limit_reached' | 'fair_use_cap';
 export interface LimitReachedPayload {
     code: LimitCode;
     metric: UsageMetric;
-    limit: number;
+    /**
+     * The cap that was hit, or null when the refusal did not say and the caller
+     * could not vouch for it either. Null is worded without a number rather than
+     * guessed: telling a paying teacher they hit "3 free scores" is worse than
+     * telling them they hit their plan's limit.
+     */
+    limit: number | null;
     tier: BillingTier;
 }
 
 export class LimitReachedError extends Error {
     readonly code: LimitCode;
     readonly metric: UsageMetric;
-    readonly limit: number;
+    readonly limit: number | null;
     readonly tier: BillingTier;
 
     constructor(payload: LimitReachedPayload) {
@@ -49,7 +54,7 @@ const KNOWN_METRICS: UsageMetric[] = [
     'students',
 ];
 
-const isBillingTier = (value: unknown): value is BillingTier =>
+export const isBillingTier = (value: unknown): value is BillingTier =>
     value === 'free' || value === 'personal' || value === 'teacher' || value === 'academy';
 
 const asPayload = (value: unknown): LimitReachedPayload | null => {
@@ -69,7 +74,7 @@ const asPayload = (value: unknown): LimitReachedPayload | null => {
     return {
         code,
         metric: metric as UsageMetric,
-        limit: typeof record.limit === 'number' ? record.limit : 0,
+        limit: typeof record.limit === 'number' ? record.limit : null,
         tier: isBillingTier(tier) ? tier : 'free',
     };
 };
@@ -116,8 +121,32 @@ export const cloudScoresLimitError = (limit: number, tier: EffectiveTier): Limit
     });
 
 /**
+ * A cloud-score refusal that arrived without its payload. Only the caller's own
+ * entitlements can put a number on it, and only when they name a finite,
+ * positive cap -- the plan the server must have refused against. Anything else
+ * (no entitlements, or a cached plan that says unlimited, which the refusal
+ * itself just contradicted) gets the neutral wording rather than the free tier's
+ * "3 free cloud scores", which would be a lie to anyone on a paid plan.
+ */
+const cloudScoresFallback = (entitlements: Entitlements | null | undefined): LimitReachedError => {
+    const limit = entitlements?.limits.cloud_scores;
+    if (entitlements && typeof limit === 'number' && limit > 0) {
+        return cloudScoresLimitError(limit, entitlements.tier);
+    }
+    return new LimitReachedError({
+        code: 'limit_reached',
+        metric: 'cloud_scores',
+        limit: null,
+        tier: entitlements && entitlements.tier !== 'student' ? entitlements.tier : 'free',
+    });
+};
+
+/**
  * Maps a stock-cap trigger's exception. The trigger raises P0001 with the
  * payload as JSON in DETAIL, which PostgREST surfaces as `details`.
+ *
+ * `entitlements` is the caller's last-known plan, used only when DETAIL is
+ * missing or unreadable (see cloudScoresFallback).
  */
 export const parsePostgrestLimitError = (
     error: {
@@ -125,6 +154,7 @@ export const parsePostgrestLimitError = (
         message?: string | null;
         details?: string | null;
     } | null,
+    entitlements?: Entitlements | null,
 ): LimitReachedError | null => {
     if (!error || !looksLikeLimitReachedMessage(error.message)) {
         return null;
@@ -136,17 +166,18 @@ export const parsePostgrestLimitError = (
                 return new LimitReachedError(payload);
             }
         } catch {
-            // Fall through to the cloud-score default — DETAIL is best-effort.
+            // Fall through to the cloud-score fallback — DETAIL is best-effort.
         }
     }
-    return cloudScoresLimitError(FREE_LIMITS.cloud_scores, 'free');
+    return cloudScoresFallback(entitlements);
 };
 
 /**
  * Last-resort mapping when the refusal arrived as a plain Error ("Limit reached")
- * instead of the typed PostgREST/402 payload.
+ * instead of the typed PostgREST/402 payload. Same `entitlements` fallback as
+ * parsePostgrestLimitError.
  */
-export const parseLooseLimitError = (err: unknown): LimitReachedError | null => {
+export const parseLooseLimitError = (err: unknown, entitlements?: Entitlements | null): LimitReachedError | null => {
     if (isLimitReachedError(err)) {
         return err;
     }
@@ -155,30 +186,40 @@ export const parseLooseLimitError = (err: unknown): LimitReachedError | null => 
     }
     const message = String((err as { message?: unknown }).message ?? '');
     if (looksLikeLimitReachedMessage(message) || /could not create document:\s*limit[_ ]reached/i.test(message)) {
-        return cloudScoresLimitError(FREE_LIMITS.cloud_scores, 'free');
+        return cloudScoresFallback(entitlements);
     }
     return null;
 };
 
-const METRIC_COPY: Record<UsageMetric, { spent: string; upgrade: string }> = {
+/**
+ * `spent` carries the number; `spentUnknown` is the same sentence for a refusal
+ * whose cap nobody could vouch for (limit: null), worded so it is true on any
+ * plan.
+ */
+const METRIC_COPY: Record<UsageMetric, { spent: string; spentUnknown: string; upgrade: string }> = {
     cloud_scores: {
         spent: 'You have reached your {limit} free cloud scores',
+        spentUnknown: 'You have reached your plan’s cloud-score limit',
         upgrade: 'Upgrade for unlimited scores, or archive one to make room.',
     },
     omr_runs: {
         spent: 'You have used your {limit} free play-alongs this month',
+        spentUnknown: 'You have used this month’s play-alongs',
         upgrade: 'Upgrade for unlimited play-along analysis.',
     },
     vision_reads: {
         spent: 'You have used your {limit} free fingering reads this month',
+        spentUnknown: 'You have used this month’s fingering reads',
         upgrade: 'Upgrade for unlimited AI fingering reads.',
     },
     smart_imports: {
         spent: 'You have used your {limit} free smart imports this month',
+        spentUnknown: 'You have used this month’s smart imports',
         upgrade: 'Upgrade for unlimited smart imports.',
     },
     pdf_exports: {
         spent: 'You have used your {limit} free PDF export this month',
+        spentUnknown: 'You have used this month’s PDF exports',
         upgrade: 'Upgrade for unlimited PDF exports.',
     },
     students: {
@@ -187,6 +228,7 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; upgrade: string }> = {
         // this is a plan with no roster at all. "Filled your 0 seats" was the
         // sentence that fell out of the old {limit} template.
         spent: 'Your plan doesn’t include a student roster',
+        spentUnknown: 'Your plan doesn’t include a student roster',
         upgrade: 'Upgrade to Teacher to add students.',
     },
 };
@@ -195,7 +237,11 @@ export const limitHeadline = (payload: LimitReachedPayload): string => {
     if (payload.code === 'fair_use_cap') {
         return 'You have hit this month’s fair-use ceiling';
     }
-    return METRIC_COPY[payload.metric].spent.replace('{limit}', String(payload.limit));
+    const copy = METRIC_COPY[payload.metric];
+    if (payload.limit === null) {
+        return copy.spentUnknown;
+    }
+    return copy.spent.replace('{limit}', String(payload.limit));
 };
 
 export const limitAction = (payload: LimitReachedPayload): string => {

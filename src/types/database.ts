@@ -32,7 +32,18 @@ export type DocumentRow = {
     updated_at: string;
     /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
     archived_at: string | null;
+    /**
+     * Why it is archived: 'plan_lapse' (apply_free_tier_archival, undone by
+     * restore_plan_archived_scores on resubscribe or an Academy seat) or
+     * 'owner'. Null exactly when
+     * archived_at is. Server-stamped by the documents_archived_reason trigger --
+     * a client value is overwritten -- and optional here because the client's
+     * column lists do not select it.
+     */
+    archived_reason?: ArchivedReason | null;
 };
+
+export type ArchivedReason = 'plan_lapse' | 'owner';
 
 export type DocumentInsert = {
     id: string;
@@ -262,6 +273,21 @@ export type EntitlementLimits = Record<UsageMetric, number>;
  * keeps the SQL table's name — 'studio' in the database is 'Academy' in the UI.
  */
 export type EntitlementSource = 'subscription' | 'studio_member' | 'managed' | 'none';
+
+/** What claim_pdf_export() answers. */
+export type PdfExportClaim = {
+    ok: boolean;
+    count?: number;
+    /** -1 on an unlimited plan; absent for an exempt caller. */
+    limit?: number;
+    /** True when nothing was counted: an unlimited plan, or an exempt caller. */
+    unlimited?: boolean;
+    tier?: EffectiveTier;
+    /** 'anonymous' only from servers predating the guest metering; kept so their answer still types. */
+    exempt?: 'anonymous' | 'student';
+    /** Set on a share-link guest's claim: the unit, if any, came from the score owner's allowance. */
+    billed_to?: 'owner';
+};
 
 export type Entitlements = {
     user_id: string;
@@ -645,11 +671,30 @@ export type Database = {
                 Args: { p_tier: EffectiveTier };
                 Returns: EntitlementLimits;
             };
-            // The honest-UI export counter. The export runs on-device, so this is
-            // called before it starts and never blocks anything by itself.
+            // Claims one pdf_exports unit before the on-device export is built:
+            // check and increment in one statement. The client builds nothing
+            // unless this answers ok:true (see features/export/exportClaim.ts).
+            // A share-link guest must pass p_document: their export is drawn from
+            // that score's owner's allowance. Ignored for a signed-in account.
+            claim_pdf_export: {
+                Args: { p_document?: string };
+                Returns: PdfExportClaim;
+            };
+            // Legacy name for claim_pdf_export, kept for bundles already in the
+            // field; same body, same answer.
             consume_pdf_export: {
                 Args: Record<string, never>;
-                Returns: { ok: boolean; count?: number; limit?: number; exempt?: 'anonymous' | 'student' };
+                Returns: PdfExportClaim;
+            };
+            // Gives back the smart_imports credit for an IMSLP import the client
+            // rolled back: only for a charge imslp-download recorded against this
+            // document, once, within 15 minutes, at most twice a month, and only
+            // once the row AND its PDF in Storage are gone -- after which the id
+            // can never hold a score again. Returns the number of credits
+            // refunded (0 when nothing applied).
+            refund_smart_import: {
+                Args: { p_document: string };
+                Returns: number;
             };
             // Upserts the assignment AND the document_members row that carries the
             // access, returning the assignment id.

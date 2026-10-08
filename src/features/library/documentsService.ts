@@ -4,7 +4,8 @@ import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/library/libraryCache';
-import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
+import { readCachedEntitlements } from '@/features/billing/entitlementsService';
+import { parsePostgrestLimitError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { leaveDocument } from '@/features/share/shareService';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -161,6 +162,20 @@ export const ensureDocumentPageCount = async (doc: DocumentRow, bytes: ArrayBuff
     return { ...doc, page_count: pageCount };
 };
 
+/**
+ * The cloud-score cap arrives as a trigger exception. Its DETAIL names the cap,
+ * but if that payload is ever missing the wording falls back to the owner's
+ * last-known plan -- read only on this error path, and a miss just means the
+ * neutral "your plan's limit" rather than a guessed free-tier number.
+ */
+const cloudScoreCapRefusal = async (
+    error: { code?: string | null; message?: string | null; details?: string | null },
+    ownerId: string,
+): Promise<LimitReachedError | null> => {
+    const entitlements = await readCachedEntitlements(ownerId).catch(() => null);
+    return parsePostgrestLimitError(error, entitlements);
+};
+
 export interface UploadResult {
     document: DocumentRow;
 }
@@ -195,7 +210,7 @@ export const uploadDocument = async (
     if (insertError) {
         // The free-tier cap is a database trigger, so it arrives here rather
         // than as an HTTP 402 — normalize it to the same typed error.
-        const limit = parsePostgrestLimitError(insertError);
+        const limit = await cloudScoreCapRefusal(insertError, ownerId);
         if (limit) {
             throw limit;
         }
@@ -259,20 +274,45 @@ export const importDocumentFromImslp = async (
     if (insertError) {
         // The free-tier cap is a database trigger, so it arrives here rather
         // than as an HTTP 402 — normalize it to the same typed error.
-        const limit = parsePostgrestLimitError(insertError);
+        const limit = await cloudScoreCapRefusal(insertError, ownerId);
         if (limit) {
             throw limit;
         }
         throw new Error(`Could not create document: ${insertError.message}`);
     }
 
+    /**
+     * Undo the import. Once the score is gone, ask for the smart_imports credit
+     * back: imslp-download refunds its own failures, but a failure on THIS side
+     * of its answer (the response lost in transit, the download from Storage
+     * failing) happens after the credit was spent. refund_smart_import only pays
+     * out for a charge the function recorded against this id, once, and only
+     * once both the PDF and the row are gone (which is why the PDF goes first,
+     * while this session still owns its folder) -- so it is skipped when the
+     * delete did not land, and it answers 0 when there was nothing to give back
+     * (a fallback the function already refunded, an unlimited plan, a PDF that
+     * would not delete). A refunded id is retired for good server-side; this
+     * flow never reuses one. Best effort: a failed refund costs the teacher one
+     * credit, and must not mask the error being reported.
+     */
     const rollback = async () => {
         await supabase.storage
             .from('scores')
             .remove([storagePath])
             .catch(() => undefined);
-        await supabase.from('documents').delete().eq('id', id);
+        const { error: deleteError } = await supabase.from('documents').delete().eq('id', id);
         noteLibraryMutationCommitted();
+        if (deleteError) {
+            return;
+        }
+        try {
+            const { error: refundError } = await supabase.rpc('refund_smart_import', { p_document: id });
+            if (refundError) {
+                console.warn('Could not refund the smart import', refundError.message);
+            }
+        } catch (err) {
+            console.warn('Could not refund the smart import', err);
+        }
     };
 
     try {

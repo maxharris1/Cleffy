@@ -760,7 +760,7 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                     />
                 ) : null}
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
-                <ShareExportMenu docId={docId} bytes={bytes} title="Score" />
+                <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly />
             </ViewerHeader>
             <div className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
