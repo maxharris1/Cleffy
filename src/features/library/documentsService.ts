@@ -7,7 +7,8 @@ import { noteLibraryMutationCommitted, noteLibraryMutation } from '@/features/li
 import { parsePostgrestLimitError } from '@/features/billing/limitErrors';
 import { getDb } from '@/sync/db';
 import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
-import type { DocumentRow, MemberRole } from '@/types/database';
+import type { LibrarySort } from '@/features/library/libraryView';
+import type { DocumentRow, DocumentStorageCleanupRow, MemberRole } from '@/types/database';
 
 /** Cloud document ids are plain UUIDs; local-only docs use the 'local-' prefix. */
 export const isCloudDocId = (docId: string): boolean => {
@@ -16,19 +17,92 @@ export const isCloudDocId = (docId: string): boolean => {
 
 export const LIBRARY_PAGE_SIZE = 100;
 
-export const listDocuments = async (): Promise<{ documents: DocumentRow[]; hasMore: boolean }> => {
-    const { data, error } = await getSupabase()
-        .from('documents')
-        .select(
-            'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at',
-        )
+const DOCUMENT_COLUMNS =
+    'id, owner_id, title, storage_path, page_count, content_rev, thumb_rev, created_at, updated_at, archived_at';
+
+/**
+ * The last row a page ended on; the next page starts strictly after it. The
+ * row's own values are passed back untouched — updated_at in particular keeps
+ * its microseconds, or rows sharing the truncated millisecond would be skipped.
+ */
+export type LibraryCursor = Pick<DocumentRow, 'id' | 'title' | 'updated_at'>;
+
+export interface LibraryPage {
+    documents: DocumentRow[];
+    hasMore: boolean;
+}
+
+export interface LibraryPageRequest {
+    sort?: LibrarySort;
+    /** Title substring (case-insensitive); blank means no title filter. */
+    query?: string;
+    /** One of the caller's own tags. */
+    tagId?: string | null;
+    favoritesOnly?: boolean;
+    after?: LibraryCursor | null;
+    limit?: number;
+}
+
+/** PostgREST quoting for a filter value that carries `.`, `:` or `+`. */
+const quoted = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+/**
+ * Plain REST listing in the library's recent order — the fallback when the
+ * bootstrap RPC is unavailable. Ordered by (updated_at, id), both descending:
+ * the id breaks ties, so a bulk update that stamps many rows with one
+ * timestamp cannot make a page boundary skip or repeat a score.
+ */
+export const listDocuments = async (after: LibraryCursor | null = null): Promise<LibraryPage> => {
+    let request = getSupabase().from('documents').select(DOCUMENT_COLUMNS);
+    if (after) {
+        const ts = quoted(after.updated_at);
+        request = request.or(`updated_at.lt.${ts},and(updated_at.eq.${ts},id.lt.${after.id})`);
+    }
+    const { data, error } = await request
         .order('updated_at', { ascending: false })
+        .order('id', { ascending: false })
         .limit(LIBRARY_PAGE_SIZE + 1);
     if (error) {
         throw new Error(`Could not load documents: ${error.message}`);
     }
     const hasMore = data.length > LIBRARY_PAGE_SIZE;
     return { documents: hasMore ? data.slice(0, LIBRARY_PAGE_SIZE) : data, hasMore };
+};
+
+/** PostgREST's "no such function" (schema cache) and Postgres's own. */
+const isMissingFunction = (error: { code?: string } | null): boolean =>
+    error?.code === 'PGRST202' || error?.code === '42883';
+
+/**
+ * One keyset page of the caller's library from library_documents(): the
+ * rows after `after` in the requested order, optionally narrowed by title,
+ * tag or favorites. Membership is enforced server-side, so a search reaches
+ * every score the caller can open — not just the rows this page has loaded.
+ */
+export const fetchLibraryPage = async (request: LibraryPageRequest = {}): Promise<LibraryPage> => {
+    const sort = request.sort ?? 'recent';
+    const query = request.query?.trim() ?? '';
+    const after = request.after ?? null;
+    const plain = sort === 'recent' && !query && !request.tagId && !request.favoritesOnly;
+    const { data, error } = await getSupabase().rpc('library_documents', {
+        p_sort: sort,
+        p_after_updated_at: after && sort === 'recent' ? after.updated_at : null,
+        p_after_title: after && sort === 'title' ? after.title : null,
+        p_after_id: after?.id ?? null,
+        p_query: query || null,
+        p_tag_id: request.tagId ?? null,
+        p_favorites_only: request.favoritesOnly ?? false,
+        p_limit: request.limit ?? LIBRARY_PAGE_SIZE,
+    });
+    if (error || !data) {
+        // A database still without 20261007120400 has no library_documents;
+        // the unfiltered recent listing can still page over plain REST.
+        if (plain && isMissingFunction(error)) {
+            return listDocuments(after);
+        }
+        throw new Error(`Could not load scores: ${error?.message ?? 'no response'}`);
+    }
+    return { documents: data.documents ?? [], hasMore: Boolean(data.has_more) };
 };
 
 export const fetchDocument = async (docId: string): Promise<DocumentRow | null> => {
@@ -340,53 +414,167 @@ export const renameDocument = async (docId: string, title: string): Promise<void
     }
 };
 
+/** Objects under `{docId}/` in one bucket, or null when Storage would not say. */
+const listFolder = async (bucket: 'scores' | 'thumbnails', docId: string): Promise<string[] | null> => {
+    const { data, error } = await getSupabase().storage.from(bucket).list(docId, { limit: 1000 });
+    if (error || !data) {
+        return null;
+    }
+    return data.map((o) => `${docId}/${o.name}`);
+};
+
 /**
- * Delete a score everywhere. Storage objects FIRST — their RLS needs the
- * owner membership that dies with the documents row (FK cascade) — then the
- * row (members/links/annotations/snapshots cascade), then every local cache.
- * The whole `{id}/` folder is listed so import backups don't leak.
+ * Remove a deleted score's bytes from both buckets, then drop its tombstone.
+ * Returns whether the folder is now provably empty.
+ *
+ * Runs AFTER the documents row is gone: the storage policies that normally
+ * key off membership no longer apply, and the scores_cleanup_* /
+ * thumbnails_cleanup_* policies (20261007120401) let the former owner list
+ * and remove a folder whose document_storage_cleanup tombstone they hold.
+ *
+ * Never throws. A folder left behind is invisible — no row points at it —
+ * and the tombstone stays for sweepPendingStorageCleanup to retry, so a
+ * failure here is logged and nothing more.
+ */
+export const purgeDocumentStorage = async (
+    target: Pick<DocumentStorageCleanupRow, 'document_id' | 'storage_path' | 'thumb_rev'>,
+): Promise<boolean> => {
+    const docId = target.document_id;
+    try {
+        const supabase = getSupabase();
+        // The whole folder, so import backups go too; the stamped path is
+        // added in case the listing was refused.
+        const listed = (await listFolder('scores', docId)) ?? [];
+        const { error: removeError } = await supabase.storage
+            .from('scores')
+            .remove([...new Set([target.storage_path, ...listed])]);
+        if (removeError) {
+            throw new Error(removeError.message);
+        }
+        const knownCover = target.thumb_rev != null ? [`${docId}/${target.thumb_rev}.jpg`] : [];
+        const covers = [...new Set([...knownCover, ...((await listFolder('thumbnails', docId)) ?? [])])];
+        if (covers.length > 0) {
+            const { error: coverError } = await supabase.storage.from('thumbnails').remove(covers);
+            if (coverError) {
+                throw new Error(coverError.message);
+            }
+        }
+        // Storage answers a delete its policies refuse with an empty result,
+        // not an error — only an empty re-listing proves the bytes are gone.
+        const [scoresLeft, coversLeft] = await Promise.all([
+            listFolder('scores', docId),
+            listFolder('thumbnails', docId),
+        ]);
+        if (scoresLeft === null || coversLeft === null || scoresLeft.length > 0 || coversLeft.length > 0) {
+            console.warn('Deleted score still has stored files; will retry', docId);
+            return false;
+        }
+        const { error: tombstoneError } = await supabase
+            .from('document_storage_cleanup')
+            .delete()
+            .eq('document_id', docId);
+        if (tombstoneError) {
+            console.warn('Could not clear the storage cleanup marker', tombstoneError.message);
+            return false;
+        }
+        return true;
+    } catch (err) {
+        console.warn('Could not remove a deleted score’s files; will retry', err);
+        return false;
+    }
+};
+
+/** Once per account per page load is plenty: leftovers are rare and invisible. */
+let sweptForUser: string | null = null;
+
+/**
+ * Finish storage cleanups an earlier delete could not (offline, a refused
+ * request, a tab closed mid-way). Detached and best-effort: the caller never
+ * waits on it and nothing the user sees depends on it.
+ */
+export const sweepPendingStorageCleanup = async (userId: string): Promise<void> => {
+    if (sweptForUser === userId) {
+        return;
+    }
+    sweptForUser = userId;
+    try {
+        const { data, error } = await getSupabase()
+            .from('document_storage_cleanup')
+            .select('document_id, storage_path, thumb_rev')
+            .eq('owner_id', userId)
+            .order('deleted_at', { ascending: true })
+            .limit(20);
+        if (error || !data) {
+            return;
+        }
+        for (const row of data) {
+            await purgeDocumentStorage(row);
+        }
+    } catch {
+        // Next page load tries again.
+    }
+};
+
+/** Test hook: forget which account was swept. */
+export const resetStorageCleanupSweep = (): void => {
+    sweptForUser = null;
+};
+
+/** Every local copy of a score — best effort, the server delete already happened. */
+const clearLocalDocumentCaches = async (docId: string): Promise<void> => {
+    try {
+        const db = getDb();
+        await Promise.all([
+            db.pdfCache.delete(docId),
+            db.syncState.delete(docId),
+            db.annotations.where('docId').equals(docId).delete(),
+            db.ops.where('docId').equals(docId).delete(),
+            db.annotationSnapshots.where('docId').equals(docId).delete(),
+            db.scoreCache.delete(docId),
+            db.thumbnails.delete(docId),
+        ]);
+    } catch (err) {
+        console.warn('Could not clear the deleted score from this device', err);
+    }
+};
+
+/**
+ * Delete a score everywhere. The documents row goes FIRST: one statement
+ * takes the score away from every member atomically (members, links,
+ * annotations and snapshots cascade), so there is never a moment where the
+ * library lists a score whose PDF is already gone. Removing the bytes first —
+ * the old order — left exactly that behind whenever the row delete failed.
+ *
+ * The bytes follow (purgeDocumentStorage). If that cleanup fails the delete
+ * has still succeeded from the teacher's point of view: the folder is
+ * unreachable, and its tombstone is retried on a later library visit.
  */
 export const deleteDocument = async (doc: DocumentRow): Promise<void> => {
     noteLibraryMutation();
     const supabase = getSupabase();
-    const { data: objects } = await supabase.storage.from('scores').list(doc.id);
-    const paths = (objects ?? []).map((o) => `${doc.id}/${o.name}`);
-    const { error: storageError } = await supabase.storage
-        .from('scores')
-        .remove(paths.length > 0 ? paths : [doc.storage_path]);
-    if (storageError) {
-        throw new Error(`Could not delete the PDF: ${storageError.message}`);
-    }
-    // Published covers live in their own bucket under the same folder. Best
-    // effort: an orphaned 40 KB image must not stop the delete, and the row's
-    // cascade already makes it unreachable. list() can be refused — still
-    // remove the stamped revision, same as scores falling back to storage_path.
-    try {
-        const knownCover = doc.thumb_rev != null ? [`${doc.id}/${doc.thumb_rev}.jpg`] : [];
-        const { data: covers } = await supabase.storage.from('thumbnails').list(doc.id);
-        const listed = (covers ?? []).map((o) => `${doc.id}/${o.name}`);
-        const coverPaths = [...new Set([...knownCover, ...listed])];
-        if (coverPaths.length > 0) {
-            await supabase.storage.from('thumbnails').remove(coverPaths);
-        }
-    } catch {
-        // See above.
-    }
-    const { error } = await supabase.from('documents').delete().eq('id', doc.id);
+    const { data: deleted, error } = await supabase.from('documents').delete().eq('id', doc.id).select('id');
     if (error) {
         throw new Error(`Could not delete: ${error.message}`);
     }
+    if (!deleted || deleted.length === 0) {
+        // RLS turns a refused delete into zero rows, not an error. Still
+        // visible means refused; gone means another device got there first,
+        // and the local half below is still ours to finish.
+        const { data: still, error: checkError } = await supabase
+            .from('documents')
+            .select('id')
+            .eq('id', doc.id)
+            .maybeSingle();
+        if (checkError) {
+            throw new Error(`Could not delete: ${checkError.message}`);
+        }
+        if (still) {
+            throw new Error('Could not delete: only the score’s owner can delete it.');
+        }
+    }
     noteLibraryMutationCommitted();
-    const db = getDb();
-    await Promise.all([
-        db.pdfCache.delete(doc.id),
-        db.syncState.delete(doc.id),
-        db.annotations.where('docId').equals(doc.id).delete(),
-        db.ops.where('docId').equals(doc.id).delete(),
-        db.annotationSnapshots.where('docId').equals(doc.id).delete(),
-        db.scoreCache.delete(doc.id),
-        db.thumbnails.delete(doc.id),
-    ]);
+    await clearLocalDocumentCaches(doc.id);
+    await purgeDocumentStorage({ document_id: doc.id, storage_path: doc.storage_path, thumb_rev: doc.thumb_rev });
 };
 
 /**
@@ -432,12 +620,68 @@ export const prefetchDocumentBytes = (docId: string): BytesPrefetch => {
     return { path, bytes };
 };
 
+/**
+ * Download a stored score while reporting progress. supabase-js's download()
+ * hands back a finished Blob with no progress events, so this reads a
+ * short-lived signed URL as a stream instead — the same Storage policies
+ * decide whether the URL can be minted at all. `total` is 0 when the server
+ * sends no usable Content-Length (compressed responses), which the caller
+ * shows as indeterminate.
+ */
+const downloadScoreWithProgress = async (
+    path: string,
+    onProgress: (progress: UploadProgress) => void,
+): Promise<ArrayBuffer> => {
+    const { data, error } = await getSupabase().storage.from('scores').createSignedUrl(path, 60);
+    if (error || !data) {
+        throw new Error(`Could not download score: ${error?.message ?? 'unknown error'}`);
+    }
+    const response = await fetch(data.signedUrl);
+    if (!response.ok) {
+        throw new Error(`Could not download score: HTTP ${response.status}`);
+    }
+    const declared = Number(response.headers.get('content-length'));
+    const total = Number.isFinite(declared) && declared > 0 ? declared : 0;
+    if (!response.body) {
+        const whole = await response.arrayBuffer();
+        onProgress({ loaded: whole.byteLength, total: whole.byteLength });
+        return whole;
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+    onProgress({ loaded, total });
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+            break;
+        }
+        chunks.push(value);
+        loaded += value.byteLength;
+        onProgress({ loaded, total: total >= loaded ? total : 0 });
+    }
+    const out = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    onProgress({ loaded, total: loaded });
+    return out.buffer;
+};
+
 export const loadDocumentBytes = async (
     doc: DocumentRow,
-    options: { preloaded?: PreloadedBytes; prefetch?: BytesPrefetch; userId?: string } = {},
+    options: {
+        preloaded?: PreloadedBytes;
+        prefetch?: BytesPrefetch;
+        userId?: string;
+        /** Asked for by callers with a progress UI; switches the download to a streamed read. */
+        onProgress?: (progress: UploadProgress) => void;
+    } = {},
 ): Promise<ArrayBuffer> => {
     const wantRev = doc.content_rev ?? 0;
-    const { preloaded, prefetch, userId } = options;
+    const { preloaded, prefetch, userId, onProgress } = options;
     if (preloaded && preloaded.contentRev >= wantRev) {
         // The warm open already read and materialised these bytes; a second
         // Dexie read would hold a second multi-megabyte copy for nothing.
@@ -461,11 +705,20 @@ export const loadDocumentBytes = async (
     // Prefetch left before the row was known. Honour it only for an
     // unreplaced score (content_rev 0): a replace that raced the download
     // would otherwise be cached under the new revision and never re-fetched.
-    const prefetched =
-        prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
+    const prefetched = prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
     let bytes: ArrayBuffer;
     if (prefetched) {
         bytes = prefetched;
+    } else if (onProgress) {
+        try {
+            bytes = await downloadScoreWithProgress(doc.storage_path, onProgress);
+        } catch (err) {
+            if (cached) {
+                // Same rule as below: a stale copy beats no score at all.
+                return readCachedPdfBytes(cached.bytes);
+            }
+            throw err;
+        }
     } else {
         const { data, error } = await getSupabase().storage.from('scores').download(doc.storage_path);
         if (error || !data) {
