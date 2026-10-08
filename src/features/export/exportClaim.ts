@@ -44,6 +44,33 @@ const looksLikeTransportFailure = (message: string | undefined): boolean =>
 
 const ALLOWED: ExportClaim = { ok: true };
 
+type ClaimAnswer = { data: PdfExportClaim | null; error: { message: string; code?: string } | null };
+
+/**
+ * PostgREST's "no such function" (PGRST202, from its schema cache) or
+ * Postgres's own (42883). Only possible while this bundle is live ahead of the
+ * migration that adds claim_pdf_export -- a deploy-order slip that would
+ * otherwise block every metered export.
+ */
+const isMissingFunction = (error: { message: string; code?: string } | null): boolean =>
+    error !== null && (error.code === 'PGRST202' || error.code === '42883');
+
+/**
+ * claim_pdf_export, falling back to consume_pdf_export when the server does not
+ * have the new name yet. The fallback is not a weaker check: consume_pdf_export
+ * has always counted and refused in the same single statement, so on an older
+ * database it is the same decision under the old name. It only lacks `tier`,
+ * which the refusal below then words as free -- the only tier it can refuse.
+ */
+const requestClaim = async (): Promise<ClaimAnswer> => {
+    const supabase = getSupabase();
+    const answer: ClaimAnswer = await supabase.rpc('claim_pdf_export', {});
+    if (!isMissingFunction(answer.error)) {
+        return answer;
+    }
+    return supabase.rpc('consume_pdf_export', {});
+};
+
 export const claimPdfExport = async (session: Session | null): Promise<ExportClaim> => {
     // Never gated, so never claimed. A share-link guest is someone else's
     // visitor with no plan of their own to draw down, a provisioned student
@@ -68,9 +95,9 @@ export const claimPdfExport = async (session: Session | null): Promise<ExportCla
         return unreachable(true);
     }
 
-    let answer: { data: PdfExportClaim | null; error: { message: string } | null };
+    let answer: ClaimAnswer;
     try {
-        answer = await getSupabase().rpc('claim_pdf_export', {});
+        answer = await requestClaim();
     } catch (err) {
         return unreachable(err instanceof TypeError || looksLikeTransportFailure((err as Error | null)?.message));
     }

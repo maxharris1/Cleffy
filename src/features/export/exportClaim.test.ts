@@ -85,6 +85,50 @@ describe('claimPdfExport', () => {
         expect(messageOf(claim)).toBe(EXPORT_CLAIM_FAILED_MESSAGE);
     });
 
+    it('falls back to consume_pdf_export while the server predates claim_pdf_export', async () => {
+        // A bundle live ahead of its migration: the old name still counts and
+        // refuses in one statement, so it decides in the new name's place.
+        rpc.mockImplementation((fn: string) =>
+            Promise.resolve(
+                fn === 'claim_pdf_export'
+                    ? { data: null, error: { code: 'PGRST202', message: 'Could not find the function' } }
+                    : { data: { ok: true, count: 1, limit: 1 }, error: null },
+            ),
+        );
+        await expect(claimPdfExport(sessionOf())).resolves.toEqual({ ok: true });
+        expect(rpc).toHaveBeenNthCalledWith(1, 'claim_pdf_export', {});
+        expect(rpc).toHaveBeenNthCalledWith(2, 'consume_pdf_export', {});
+    });
+
+    it('keeps the fallback refusal a refusal, worded for the free plan', async () => {
+        rpc.mockImplementation((fn: string) =>
+            Promise.resolve(
+                fn === 'claim_pdf_export'
+                    ? {
+                          data: null,
+                          error: { code: '42883', message: 'function public.claim_pdf_export() does not exist' },
+                      }
+                    : { data: { ok: false, count: 1, limit: 1 }, error: null },
+            ),
+        );
+        const claim = await claimPdfExport(sessionOf());
+        expect(!claim.ok && 'limit' in claim ? claim.limit : null).toMatchObject({
+            metric: 'pdf_exports',
+            limit: 1,
+            tier: 'free',
+        });
+    });
+
+    it('fails closed when the fallback errors too, and never falls back on other errors', async () => {
+        rpc.mockResolvedValue({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } });
+        expect(messageOf(await claimPdfExport(sessionOf()))).toBe(EXPORT_CLAIM_FAILED_MESSAGE);
+
+        rpc.mockReset();
+        rpc.mockResolvedValue({ data: null, error: { code: 'P0001', message: 'internal error' } });
+        expect(messageOf(await claimPdfExport(sessionOf()))).toBe(EXPORT_CLAIM_FAILED_MESSAGE);
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
     it('fails closed on a malformed answer', async () => {
         rpc.mockResolvedValue({ data: { count: 1 }, error: null });
         expect((await claimPdfExport(sessionOf())).ok).toBe(false);
