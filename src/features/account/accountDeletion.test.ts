@@ -60,9 +60,14 @@ describe('requestAccountDeletion', () => {
         await expect(requestAccountDeletion('pw')).rejects.toMatchObject({ code: null, status: 502 });
     });
 
-    it('says nothing was deleted when the request never left', async () => {
+    it('does not claim nothing was deleted when the connection failed', async () => {
+        // The request may have reached the server before the connection dropped,
+        // so the outcome is unknown; a retry finishes it (the endpoint is idempotent).
         callEdgeFunction.mockRejectedValue(new TypeError('Failed to fetch'));
-        await expect(requestAccountDeletion('pw')).rejects.toThrow(/nothing has been deleted/);
+        const failure = requestAccountDeletion('pw');
+        await expect(failure).rejects.toThrow(/could not confirm whether your account was deleted/);
+        await expect(failure).rejects.not.toThrow(/nothing has been deleted/);
+        await expect(failure).rejects.toThrow(/try again to finish/);
     });
 });
 

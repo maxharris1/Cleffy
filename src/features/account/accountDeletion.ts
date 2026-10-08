@@ -45,7 +45,11 @@ export const requestAccountDeletion = async (password: string): Promise<void> =>
         throw new AccountDeletionError(
             err instanceof Error && err.message === 'Not signed in'
                 ? 'Your session has ended. Sign in again to delete your account.'
-                : 'Could not reach Cleffy. Check your connection and try again — nothing has been deleted.',
+                : // The request may have gone out before the connection dropped (a
+                  // long deletion, a network switch on a phone), so the server may
+                  // have finished. Retrying is safe: the endpoint is idempotent and
+                  // answers an already-deleted account with success.
+                  'We could not confirm whether your account was deleted. Check your connection and try again to finish.',
             null,
             0,
         );

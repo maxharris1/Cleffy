@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
 import { useState, type FormEvent } from 'react';
+import { Link } from 'react-router';
 
 import {
     ACCOUNT_DELETED_PATH,
@@ -9,7 +10,7 @@ import {
     requestAccountDeletion,
 } from '@/features/account/accountDeletion';
 import { userTypeOf } from '@/features/auth/session';
-import { LEGAL_ENTITY } from '@/features/legal/legalContent';
+import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
@@ -32,6 +33,21 @@ const CONSEQUENCES = [
 /** Full page load: nothing of the deleted account may survive in memory. */
 const leaveForDeletedPage = () => window.location.replace(ACCOUNT_DELETED_PATH);
 
+/**
+ * Not every permanent account has a password: a share-link guest who upgrades
+ * through UpgradeBanner only ever confirms an email. The reset flow sets a
+ * first password just as well as it replaces a forgotten one.
+ */
+const ResetPasswordHint = () => (
+    <p className="mt-2 text-xs text-stone-600">
+        Never set a password, or forgotten it?{' '}
+        <Link to="/forgot-password" className={linkClassName}>
+            Reset it
+        </Link>{' '}
+        first, then come back here.
+    </p>
+);
+
 interface DeleteAccountSectionProps {
     session: Session;
     /** Called once the account is deleted and local data cleared. Tests replace the navigation. */
@@ -52,6 +68,7 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
     const [password, setPassword] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [errorCode, setErrorCode] = useState<string | null>(null);
 
     // delete-account refuses a provisioned student: their teacher created, pays
     // for and controls the account. Say so instead of offering a button that fails.
@@ -81,6 +98,7 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
         setTyped('');
         setPassword('');
         setError(null);
+        setErrorCode(null);
     };
 
     const submit = async (event: FormEvent) => {
@@ -89,6 +107,7 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
             return;
         }
         setError(null);
+        setErrorCode(null);
         setBusy(true);
         try {
             await requestAccountDeletion(password);
@@ -98,6 +117,7 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
                     ? err.message
                     : 'Account deletion did not finish. Please try again.',
             );
+            setErrorCode(err instanceof AccountDeletionError ? err.code : null);
             setBusy(false);
             return;
         }
@@ -148,9 +168,12 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
                                 disabled={busy}
                                 onChange={(event) => setPassword(event.target.value)}
                             />
+                            {errorCode === 'reauthentication_failed' ? null : <ResetPasswordHint />}
                         </div>
 
                         {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
+                        {/* Repeated beside the error, where someone who never had a password will be looking. */}
+                        {errorCode === 'reauthentication_failed' ? <ResetPasswordHint /> : null}
 
                         <div className="mt-5 flex justify-end gap-2">
                             <Button type="button" variant="ghost" size="sm" onClick={close} disabled={busy}>
