@@ -23,10 +23,25 @@ exception when others then insert into t_results values (p_name, false, sqlerrm)
 create function pg_temp.err(p_name text, p_sql text) returns void language plpgsql as $f$
 begin execute p_sql; insert into t_results values (p_name, false, 'no error raised');
 exception when others then insert into t_results values (p_name, true, sqlstate || ' ' || sqlerrm); end $f$;
+-- A client write RLS turns away: refused outright (no grant) or, where the
+-- role holds the table grant but no policy admits the row, zero rows changed.
+create function pg_temp.refused(p_name text, p_sql text) returns void language plpgsql as $f$
+declare n bigint;
+begin execute p_sql; get diagnostics n = row_count;
+insert into t_results values (p_name, n = 0, case when n = 0 then 'no rows changed' else n || ' rows changed' end);
+exception when others then insert into t_results values (p_name, true, sqlstate || ' ' || sqlerrm); end $f$;
 create function pg_temp.chk(p_name text, p_sql text) returns void language plpgsql as $f$
 declare v boolean;
 begin execute p_sql into v; insert into t_results values (p_name, coalesce(v, false), null);
 exception when others then insert into t_results values (p_name, false, sqlerrm); end $f$;
+-- A check whose side effects are undone (a subtransaction rolled back), for a
+-- positive control that must not disturb the scenario that follows.
+create function pg_temp.chk_undone(p_name text, p_sql text) returns void language plpgsql as $f$
+declare v boolean; e text;
+begin
+begin execute p_sql into v; raise exception 'undo-probe';
+exception when others then if sqlerrm <> 'undo-probe' then e := sqlerrm; v := false; end if; end;
+insert into t_results values (p_name, coalesce(v, false), e); end $f$;
 create function pg_temp.as_user(n int) returns void language plpgsql as $f$
 begin
 perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.u(n), 'role', 'authenticated')::text, true);
@@ -34,7 +49,8 @@ perform set_config('role', 'authenticated', true);
 end $f$;
 
 -- 1 owner, 2 editor, 3 viewer, 4 outsider, 5 anonymous guest via edit link,
--- 6 via view link, 7 roster student (assigned view-only) who also opens the edit link
+-- 6 via view link, 7 roster student (assigned view-only) who also opens the edit link,
+-- 8 another teacher, 9 that teacher's student, who joins by the view link (not assigned here)
 insert into auth.users (id, email, raw_user_meta_data, is_anonymous) values
 (pg_temp.u(1),'owner@sharetest.test','{"display_name":"Olive Owner"}',false),
 (pg_temp.u(2),'editor@sharetest.test','{"display_name":"Ed Editor"}',false),
@@ -42,10 +58,12 @@ insert into auth.users (id, email, raw_user_meta_data, is_anonymous) values
 (pg_temp.u(4),'outsider@sharetest.test','{}',false),
 (pg_temp.u(5),null,'{"display_name":"Guest One"}',true),
 (pg_temp.u(6),'l2@sharetest.test','{}',false),
-(pg_temp.u(7),'student@sharetest.test','{}',false);
+(pg_temp.u(7),'student@sharetest.test','{"display_name":"Stu"}',false),
+(pg_temp.u(8),'teacher2@sharetest.test','{}',false),
+(pg_temp.u(9),'student2@sharetest.test','{"display_name":"Kid Two"}',false);
 insert into public.documents (id, owner_id, title, storage_path) values (pg_temp.d(), pg_temp.u(1), 'T', 'x/original.pdf');
 insert into public.document_members (document_id, user_id, role) values (pg_temp.d(), pg_temp.u(2), 'editor'), (pg_temp.d(), pg_temp.u(3), 'viewer'), (pg_temp.d(), pg_temp.u(7), 'viewer');
-insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash) values (gen_random_uuid(), pg_temp.u(1), pg_temp.u(7), 'Stu Dent', 'x');
+insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash) values (gen_random_uuid(), pg_temp.u(1), pg_temp.u(7), 'Stu Dent', 'x'), (gen_random_uuid(), pg_temp.u(8), pg_temp.u(9), 'Roster Secret', 'y');
 insert into public.assignments (id, document_id, student_user_id, assigned_by, access) values (gen_random_uuid(), pg_temp.d(), pg_temp.u(7), pg_temp.u(1), 'view');
 insert into public.share_links (token, document_id, role, created_by, expires_at) values
 ('c5tokEDIT', pg_temp.d(), 'editor', pg_temp.u(1), null),
@@ -66,6 +84,8 @@ select pg_temp.as_user(6);
 select pg_temp.chk('02 L2 redeems view link', $q$select granted_role = 'viewer' from public.redeem_share_link('c5tokVIEW')$q$);
 select pg_temp.as_user(7);
 select pg_temp.chk('03 student redeems edit link -> editor', $q$select granted_role = 'editor' from public.redeem_share_link('c5tokEDIT')$q$);
+select pg_temp.as_user(9);
+select pg_temp.chk('03b another teacher''s student redeems view link', $q$select granted_role = 'viewer' from public.redeem_share_link('c5tokVIEW')$q$);
 select pg_temp.as_user(3);
 select pg_temp.err('04 expired link refused', $q$select * from public.redeem_share_link('c5tokEXPIRED')$q$);
 select pg_temp.as_user(2);
@@ -75,19 +95,27 @@ select pg_temp.chk('07 select * on document_members still works', $q$select coun
 select pg_temp.as_user(1);
 select pg_temp.chk('07b owner redeeming own link stays owner, no provenance', $q$select granted_role = 'owner' from public.redeem_share_link('c5tokEDIT')$q$);
 reset role;
-select pg_temp.chk('08 provenance recorded only where the link granted access', $q$select array_agg(right(user_id::text,1) || ':' || token order by user_id) = array['5:c5tokEDIT','6:c5tokVIEW','7:c5tokEDIT'] from public.share_link_redemptions where document_id = pg_temp.d()$q$);
+select pg_temp.chk('08 provenance recorded only where the link granted access', $q$select array_agg(right(user_id::text,1) || ':' || token order by user_id) = array['5:c5tokEDIT','6:c5tokVIEW','7:c5tokEDIT','9:c5tokVIEW'] from public.share_link_redemptions where document_id = pg_temp.d()$q$);
 
 select pg_temp.as_user(1);
-select pg_temp.chk('10 owner lists all members', $q$select count(*) = 6 from public.list_document_members(pg_temp.d())$q$);
+select pg_temp.chk('10 owner lists all members', $q$select count(*) = 7 from public.list_document_members(pg_temp.d())$q$);
 select pg_temp.chk('11 owner sees emails, link provenance, labels', $q$select bool_and(case right(user_id::text,1)
 when '2' then email = 'editor@sharetest.test' and display_name = 'Ed Editor' and joined_via_link is null
 when '5' then is_anonymous and joined_via_link = 'c5tokEDIT' and display_name = 'Guest One'
-when '7' then is_student and display_name = 'Stu Dent'
+when '7' then is_assigned and display_name = 'Stu Dent'
+when '9' then not is_assigned and display_name = 'Kid Two'
 when '3' then display_name is null and email = 'viewer@sharetest.test'
 when '1' then role = 'owner' else true end) from public.list_document_members(pg_temp.d())$q$);
 select pg_temp.chk('11b owner is listed first', $q$select (array_agg(role))[1] = 'owner' from public.list_document_members(pg_temp.d())$q$);
 select pg_temp.as_user(2);
-select pg_temp.chk('12 editor lists without emails or tokens', $q$select count(*) = 6 and bool_and(email is null and joined_via_link is null) from public.list_document_members(pg_temp.d())$q$);
+select pg_temp.chk('12 editor lists without emails or tokens', $q$select count(*) = 7 and bool_and(email is null and joined_via_link is null) from public.list_document_members(pg_temp.d())$q$);
+select pg_temp.chk('12b editor sees presence names, no roster names or assignments', $q$select bool_and(not is_assigned and display_name is distinct from 'Stu Dent' and display_name is distinct from 'Roster Secret') and bool_or(display_name = 'Stu') from public.list_document_members(pg_temp.d())$q$);
+select pg_temp.as_user(5);
+select pg_temp.chk('12c link guest (editor) gets no roster names either', $q$select count(*) = 7 and bool_and(not is_assigned and email is null and display_name is distinct from 'Stu Dent') from public.list_document_members(pg_temp.d())$q$);
+select pg_temp.as_user(8);
+select pg_temp.err('12d a teacher who is not on the score cannot list it', $q$select * from public.list_document_members(pg_temp.d())$q$);
+select pg_temp.as_user(9);
+select pg_temp.ok('12e another teacher''s student (no assignment here) may leave', $q$select public.leave_document(pg_temp.d())$q$);
 select pg_temp.as_user(3);
 select pg_temp.err('13 viewer cannot list', $q$select * from public.list_document_members(pg_temp.d())$q$);
 select pg_temp.as_user(4);
@@ -107,8 +135,10 @@ select pg_temp.err('25 outsider cannot remove', $q$select public.remove_document
 select pg_temp.err('26 outsider cannot revoke', $q$select public.revoke_share_link('c5tokVIEW', true)$q$);
 select pg_temp.err('27 outsider cannot revoke an unknown token', $q$select public.revoke_share_link('nope', true)$q$);
 select pg_temp.as_user(2);
-select pg_temp.err('28a no direct membership update', $q$update public.document_members set role = 'editor' where user_id = pg_temp.u(3)$q$);
-select pg_temp.err('28b no direct membership delete', $q$delete from public.document_members where user_id = pg_temp.u(3)$q$);
+select pg_temp.refused('28a no direct membership update', $q$update public.document_members set role = 'editor' where user_id = pg_temp.u(3)$q$);
+select pg_temp.refused('28b no direct membership delete', $q$delete from public.document_members where user_id = pg_temp.u(3)$q$);
+reset role;
+select pg_temp.chk('28c ...and the viewer is still exactly a viewer', $q$select role = 'viewer' from public.document_members where document_id = pg_temp.d() and user_id = pg_temp.u(3)$q$);
 
 select pg_temp.as_user(1);
 select pg_temp.err('30 owner cannot demote self', $q$select public.set_document_member_role(pg_temp.d(), pg_temp.u(1), 'viewer')$q$);
@@ -119,6 +149,17 @@ select pg_temp.err('34 role change for a non-member refused', $q$select public.s
 select pg_temp.err('35 removing a non-member refused', $q$select public.remove_document_member(pg_temp.d(), pg_temp.u(4))$q$);
 
 select pg_temp.ok('40 owner demotes the editor', $q$select public.set_document_member_role(pg_temp.d(), pg_temp.u(2), 'viewer')$q$);
+select pg_temp.ok('40a owner demotes the edit-link guest', $q$select public.set_document_member_role(pg_temp.d(), pg_temp.u(5), 'viewer')$q$);
+select pg_temp.as_user(5);
+select pg_temp.chk('40b demoted guest re-opening the edit link stays viewer', $q$select granted_role = 'viewer' from public.redeem_share_link('c5tokEDIT')$q$);
+select pg_temp.chk('40c ...and really is a viewer', $q$select public.document_role(pg_temp.d()) = 'viewer'$q$);
+select pg_temp.as_user(2);
+select pg_temp.chk('40d demoted direct editor opening the edit link stays viewer', $q$select granted_role = 'viewer' from public.redeem_share_link('c5tokEDIT')$q$);
+select pg_temp.err('40e client cannot read role locks', $q$select count(*) from public.document_member_role_locks$q$);
+reset role;
+select pg_temp.chk('40f guest provenance unchanged; the locked redeem recorded none for the editor', $q$select (select token from public.share_link_redemptions where user_id = pg_temp.u(5)) = 'c5tokEDIT' and not exists (select 1 from public.share_link_redemptions where user_id = pg_temp.u(2))$q$);
+select pg_temp.as_user(6);
+select pg_temp.chk_undone('40g control: a view-link member the owner never touched is still lifted by the edit link', $q$select granted_role = 'editor' from public.redeem_share_link('c5tokEDIT')$q$);
 select pg_temp.as_user(2);
 select pg_temp.chk('41 demoted editor now reads viewer', $q$select public.document_role(pg_temp.d()) = 'viewer'$q$);
 select pg_temp.err('42 demoted editor cannot annotate', $q$insert into public.annotations (id, document_id, page, kind, color, payload, created_by) values (gen_random_uuid(), pg_temp.d(), 0, 'stroke', '#000', '{"pts":[0,0,1],"w":0.01}', pg_temp.u(2))$q$);
@@ -127,6 +168,7 @@ select pg_temp.as_user(1);
 select pg_temp.chk('43 revoke edit link + remove withdraws 2', $q$select public.revoke_share_link('c5tokEDIT', true) = 2$q$);
 reset role;
 select pg_temp.chk('44 link guest membership gone', $q$select not exists (select 1 from public.document_members where user_id = pg_temp.u(5))$q$);
+select pg_temp.chk('44b the role lock went with the membership', $q$select not exists (select 1 from public.document_member_role_locks where user_id = pg_temp.u(5)) and exists (select 1 from public.document_member_role_locks where user_id = pg_temp.u(2))$q$);
 select pg_temp.chk('45 student restored to the assignment role', $q$select role = 'viewer' from public.document_members where user_id = pg_temp.u(7)$q$);
 select pg_temp.chk('45b student provenance cleared', $q$select not exists (select 1 from public.share_link_redemptions where user_id = pg_temp.u(7))$q$);
 select pg_temp.chk('46 link revoked', $q$select revoked_at is not null from public.share_links where token = 'c5tokEDIT'$q$);
@@ -169,6 +211,10 @@ reset role;
 select pg_temp.chk('73 student assignment withdrawn with the membership', $q$select count(*) = 0 from public.assignments where student_user_id = pg_temp.u(7)$q$);
 
 -- Broadcasts: one per role change / removal, private, on the doc topic.
+-- (realtime.send swallows its own failures as a WARNING, so a broadcast can
+-- never abort a membership change -- and on a database whose Realtime service
+-- has not created today's realtime.messages partition, these rows are simply
+-- absent.)
 select pg_temp.chk('80 membership broadcasts emitted', $q$select count(*) >= 7 from realtime.messages where topic = 'doc:' || pg_temp.d() and event = 'membership'$q$);
 select pg_temp.chk('81 removal broadcast carries a null role', $q$select bool_or(payload ->> 'user_id' = pg_temp.u(3)::text and payload -> 'role' = 'null'::jsonb and private) from realtime.messages where event = 'membership'$q$);
 select pg_temp.chk('82 demotion broadcast carries the new role', $q$select bool_or(payload ->> 'user_id' = pg_temp.u(2)::text and payload ->> 'role' = 'viewer') from realtime.messages where event = 'membership'$q$);

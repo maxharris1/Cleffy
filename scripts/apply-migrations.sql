@@ -4432,6 +4432,10 @@ grant execute on function public.imslp_sync_tick () to service_role;
 --     scoped to the caller's role), change a member's role, remove a member,
 --     revoke a link with optional removal. A self-serve leave_document for
 --     non-owners.
+--     A role the owner set by hand sticks (document_member_role_locks): opening
+--     an edit link again -- which a member does innocently, by re-clicking the
+--     link in their email to get back to the score -- must not quietly undo a
+--     downgrade the owner just made.
 --  3. A trigger on document_members broadcasts a `membership` event on the
 --     score's realtime topic whenever a role changes or a row disappears, so
 --     an open viewer re-checks its access instead of discovering the change as
@@ -4466,6 +4470,35 @@ create table public.share_link_redemptions (
 );
 
 create index share_link_redemptions_token on public.share_link_redemptions (token);
+
+-- ---------------------------------------------------------------------------
+-- Roles the owner set by hand
+-- ---------------------------------------------------------------------------
+-- redeem_share_link lifts a viewer to editor when they open an edit link. That
+-- is right for someone a link let in, and wrong for someone the owner has just
+-- turned into a viewer: without this, the owner's change would last until the
+-- member next opened the link they joined with. A row here means "the owner
+-- decided this member's role; links no longer change it". It goes with the
+-- membership (removal, leave, document delete), so somebody who is removed and
+-- later let back in by a link starts again as a link member.
+--
+-- Private for the same reason as share_link_redemptions: members_select shows
+-- every member every row, and which collaborators the owner downgraded is not
+-- theirs to read.
+create table public.document_member_role_locks (
+    document_id uuid not null,
+    user_id uuid not null,
+    locked_at timestamptz not null default now(),
+    primary key (document_id, user_id),
+    foreign key (document_id, user_id) references public.document_members (document_id, user_id) on delete cascade
+);
+
+alter table public.document_member_role_locks enable row level security;
+
+revoke all on table public.document_member_role_locks from public;
+revoke all on table public.document_member_role_locks from anon;
+revoke all on table public.document_member_role_locks from authenticated;
+grant all on table public.document_member_role_locks to service_role;
 
 alter table public.share_link_redemptions enable row level security;
 
@@ -4512,7 +4545,19 @@ begin
 
     select dm.role into v_prev_role
     from public.document_members dm
-    where dm.document_id = link.document_id and dm.user_id = v_uid;
+    where dm.document_id = link.document_id and dm.user_id = v_uid
+    for update;
+
+    -- The owner set this member's role by hand (set_document_member_role):
+    -- the link opens the score for them, and changes nothing else -- not the
+    -- role, and not where their access is recorded as coming from.
+    if v_prev_role is not null and exists (
+        select 1 from public.document_member_role_locks l
+        where l.document_id = link.document_id and l.user_id = v_uid
+    ) then
+        return query select link.document_id, v_prev_role;
+        return;
+    end if;
 
     insert into public.document_members (document_id, user_id, role)
     values (link.document_id, v_uid, link.role)
@@ -4581,16 +4626,24 @@ revoke all on function public.forget_document_for_user (uuid, uuid) from authent
 --
 -- What each caller sees is deliberately different. An editor may be a guest
 -- who joined through a link the owner posted somewhere, so editors get the
--- names collaborators already show each other in presence, and never an email
--- address or a link token. The owner gets both: they are deciding who keeps
--- access to their score and need to recognise the account.
+-- names collaborators already show each other in presence (the account's own
+-- display_name, which is also what a student account shows), and never an
+-- email address, a link token, a roster name or whether someone is on an
+-- assignment. The owner gets all of it: they are deciding who keeps access to
+-- their score and need to recognise the account.
+--
+-- A roster name (managed_students.display_name) is the caller's own data only
+-- when the student is on the CALLER's roster: another teacher's student who
+-- joined by link shows the name their account shows everyone, and is not
+-- "assigned" -- is_assigned is about assignments on this score, which is what
+-- remove_document_member and revoke_share_link act on.
 create or replace function public.list_document_members (p_document uuid) returns table (
     user_id uuid,
     role text,
     display_name text,
     email text,
     is_anonymous boolean,
-    is_student boolean,
+    is_assigned boolean,
     joined_via_link text,
     joined_at timestamptz
 ) language plpgsql stable security definer
@@ -4623,12 +4676,18 @@ begin
             ),
             case when v_is_owner then u.email::text end,
             coalesce(u.is_anonymous, false),
-            ms.student_user_id is not null,
+            v_is_owner and exists (
+                select 1 from public.assignments a
+                where a.document_id = dm.document_id
+                  and a.student_user_id = dm.user_id
+            ),
             case when v_is_owner then r.token end,
             dm.created_at
         from public.document_members dm
         join auth.users u on u.id = dm.user_id
-        left join public.managed_students ms on ms.student_user_id = dm.user_id
+        left join public.managed_students ms
+            on ms.student_user_id = dm.user_id
+           and ms.teacher_id = v_caller
         left join public.share_link_redemptions r
             on r.document_id = dm.document_id
            and r.user_id = dm.user_id
@@ -4680,6 +4739,14 @@ begin
     ) then
         raise exception 'the owner''s access cannot be changed' using errcode = '42501';
     end if;
+
+    -- Recorded even when the role is unchanged: the owner looked at this
+    -- member and chose this role, and a link opened later must not change it
+    -- (see document_member_role_locks).
+    insert into public.document_member_role_locks (document_id, user_id)
+    values (p_document, p_user)
+    on conflict (document_id, user_id) do update
+        set locked_at = now();
 
     if v_current = p_role then
         return;

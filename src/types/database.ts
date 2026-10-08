@@ -126,17 +126,22 @@ export type ShareLinkRow = {
 
 /**
  * One row of list_document_members(). Labels are resolved server-side because
- * auth.users is not client-readable; `email` and `joined_via_link` are only
- * ever filled for the score's owner (an editor may be a link guest).
+ * auth.users is not client-readable; `email`, `joined_via_link` and
+ * `is_assigned` are only ever filled for the score's owner (an editor may be a
+ * link guest).
  */
 export type DocumentMemberListing = {
     user_id: string;
     role: MemberRole;
-    /** Roster name for a student, else the account's display_name; null when neither is set. */
+    /**
+     * The caller's own roster name for a student on their roster, else the
+     * account's display_name (what presence shows); null when neither is set.
+     */
     display_name: string | null;
     email: string | null;
     is_anonymous: boolean;
-    is_student: boolean;
+    /** The member has an assignment on THIS score (owner only; false for everyone else). */
+    is_assigned: boolean;
     /** Token of the share link that granted this access, when one did. */
     joined_via_link: string | null;
     joined_at: string;

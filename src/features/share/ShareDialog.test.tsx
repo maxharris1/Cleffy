@@ -47,7 +47,7 @@ const member = (userId: string, overrides: Partial<DocumentMemberListing> = {}):
     display_name: null,
     email: null,
     is_anonymous: false,
-    is_student: false,
+    is_assigned: false,
     joined_via_link: null,
     joined_at: '2026-10-01T00:00:00Z',
     ...overrides,
@@ -202,7 +202,7 @@ describe('ShareDialog for the owner', () => {
         await waitFor(() => expect(revokeShareLink).toHaveBeenCalledWith('tok-edit', { removeMembers: false }));
     });
 
-    it('offers no removal choice for a link nobody joined through', async () => {
+    it('still removes late joiners when the list showed nobody joined through the link', async () => {
         const user = userEvent.setup();
         revokeShareLink.mockResolvedValue(0);
         renderOwner();
@@ -212,9 +212,88 @@ describe('ShareDialog for the owner', () => {
         await user.click(within(oldLink).getByRole('button', { name: 'Revoke' }));
         const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
         expect(within(confirm).queryByRole('checkbox')).not.toBeInTheDocument();
+        expect(confirm).toHaveTextContent('Anyone who has joined with it loses access too.');
         await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
 
-        await waitFor(() => expect(revokeShareLink).toHaveBeenCalledWith('tok-old', { removeMembers: false }));
+        // The server removes by its own provenance: someone who joined after
+        // the list loaded goes too, which is what revoking means by default.
+        await waitFor(() => expect(revokeShareLink).toHaveBeenCalledWith('tok-old', { removeMembers: true }));
+    });
+
+    it('keeps links visible and revocable when the member list fails to load', async () => {
+        const user = userEvent.setup();
+        listDocumentMembers.mockRejectedValue(new Error('Could not load collaborators: function does not exist'));
+        revokeShareLink.mockResolvedValue(1);
+        renderOwner();
+
+        expect(await screen.findByText('Could not load collaborators: function does not exist')).toBeInTheDocument();
+        const items = await screen.findAllByRole('listitem');
+        const editLink = items.find((li) => li.textContent?.includes('/join/tok-edit')) as HTMLElement;
+        expect(editLink).toBeDefined();
+        expect(screen.queryByText('No links yet.')).not.toBeInTheDocument();
+
+        await user.click(within(editLink).getByRole('button', { name: 'Revoke' }));
+        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
+
+        // Nobody is known to have joined, and the owner made no choice to keep
+        // anyone: the conservative default reaches the server.
+        await waitFor(() => expect(revokeShareLink).toHaveBeenCalledWith('tok-edit', { removeMembers: true }));
+    });
+
+    it('keeps the member list when only the links fail to load', async () => {
+        listShareLinks.mockRejectedValue(new Error('Could not load share links: timeout'));
+        renderOwner();
+
+        expect(await screen.findByText('Ed')).toBeInTheDocument();
+        expect(await screen.findByText('Could not load share links: timeout')).toBeInTheDocument();
+        expect(screen.queryByText('No links yet.')).not.toBeInTheDocument();
+    });
+
+    it('shows and copies a new link even when the reload after creating it fails', async () => {
+        const user = userEvent.setup();
+        createShareLink.mockResolvedValue(link('tok-new'));
+        renderOwner();
+        await screen.findByText('Ed');
+
+        listShareLinks.mockRejectedValue(new Error('Could not load share links: timeout'));
+        await user.click(screen.getByRole('button', { name: 'Create link & copy' }));
+
+        await waitFor(() => expect(screen.getByText(/\/join\/tok-new/)).toBeInTheDocument());
+        expect(await navigator.clipboard.readText()).toContain('/join/tok-new');
+        expect(screen.getByRole('button', { name: 'Copied!' })).toBeInTheDocument();
+        expect(screen.queryByText(/Could not create the link/)).not.toBeInTheDocument();
+    });
+
+    it('warns, and offers to revoke, when a demoted member’s edit link still works', async () => {
+        const user = userEvent.setup();
+        setMemberRole.mockResolvedValue(undefined);
+        revokeShareLink.mockResolvedValue(2);
+        renderOwner();
+        await screen.findByText('Guest One');
+
+        await user.selectOptions(screen.getByRole('combobox', { name: 'Access for Guest One' }), 'viewer');
+
+        const notice = await screen.findByRole('status');
+        expect(notice).toHaveTextContent('Guest One can only view now, but the edit link they joined with still works');
+        await user.click(within(notice).getByRole('button', { name: 'Revoke that link…' }));
+        const confirm = screen.getByRole('dialog', { name: 'Revoke this link?' });
+        await user.click(within(confirm).getByRole('button', { name: 'Revoke link' }));
+
+        await waitFor(() => expect(revokeShareLink).toHaveBeenCalledWith('tok-edit', { removeMembers: true }));
+        await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    });
+
+    it('says nothing extra when a demoted member joined some other way', async () => {
+        const user = userEvent.setup();
+        setMemberRole.mockResolvedValue(undefined);
+        renderOwner();
+        await screen.findByText('Ed');
+
+        await user.selectOptions(screen.getByRole('combobox', { name: 'Access for Ed' }), 'viewer');
+
+        await waitFor(() => expect(setMemberRole).toHaveBeenCalledWith('doc-1', 'ed', 'viewer'));
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
     it('never offers the owner a way to leave their own score', async () => {

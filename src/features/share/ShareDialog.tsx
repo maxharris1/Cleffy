@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import {
     DEFAULT_LINK_EXPIRY,
@@ -68,39 +68,59 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [copiedToken, setCopiedToken] = useState<string | null>(null);
+    const [linksError, setLinksError] = useState<string | null>(null);
+    const [membersError, setMembersError] = useState<string | null>(null);
     const [revokeTarget, setRevokeTarget] = useState<ShareLinkRow | null>(null);
     const [removeTarget, setRemoveTarget] = useState<DocumentMemberListing | null>(null);
+    /** After a downgrade whose edit link still works: what to tell the owner, and the link to offer revoking. */
+    const [demotionNotice, setDemotionNotice] = useState<{ text: string; token: string } | null>(null);
 
-    const refresh = async () => {
-        try {
-            const [nextLinks, nextMembers] = await Promise.all([listShareLinks(docId), listDocumentMembers(docId)]);
-            setLinks(nextLinks);
-            setMembers(nextMembers);
-        } catch (err) {
-            setError(errorText(err, 'Could not load sharing.'));
-        }
-    };
+    /**
+     * Links and people load independently and never throw: one failing (a
+     * blip, or a frontend that reached users before its migration) must not
+     * hide the other — an owner who cannot see their links cannot revoke
+     * them. A failed reload keeps the last good list and says it may be stale.
+     */
+    const applyLoaded = useCallback(
+        ([linksResult, membersResult]: [
+            PromiseSettledResult<ShareLinkRow[]>,
+            PromiseSettledResult<DocumentMemberListing[]>,
+        ]) => {
+            if (linksResult.status === 'fulfilled') {
+                setLinks(linksResult.value);
+                setLinksError(null);
+            } else {
+                setLinksError(errorText(linksResult.reason, 'Could not load links.'));
+            }
+            if (membersResult.status === 'fulfilled') {
+                setMembers(membersResult.value);
+                setMembersError(null);
+            } else {
+                setMembersError(errorText(membersResult.reason, 'Could not load collaborators.'));
+            }
+        },
+        [],
+    );
+
+    const fetchSharing = useCallback(
+        () => Promise.allSettled([listShareLinks(docId), listDocumentMembers(docId)] as const),
+        [docId],
+    );
+
+    /** Reload after a change. Never throws (see above). */
+    const load = async () => applyLoaded(await fetchSharing());
 
     useEffect(() => {
-        let cancelled = false;
-        Promise.all([listShareLinks(docId), listDocumentMembers(docId)])
-            .then(([nextLinks, nextMembers]) => {
-                if (!cancelled) {
-                    setLinks(nextLinks);
-                    setMembers(nextMembers);
-                }
-            })
-            .catch((err: unknown) => {
-                if (!cancelled) {
-                    setError(errorText(err, 'Could not load sharing.'));
-                    setLinks((prev) => prev ?? []);
-                    setMembers((prev) => prev ?? []);
-                }
-            });
+        let current = true;
+        void fetchSharing().then((results) => {
+            if (current) {
+                applyLoaded(results);
+            }
+        });
         return () => {
-            cancelled = true;
+            current = false;
         };
-    }, [docId]);
+    }, [fetchSharing, applyLoaded]);
 
     const joinedVia = (token: string) => (members ?? []).filter((m) => m.joined_via_link === token);
 
@@ -119,8 +139,12 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
         setError(null);
         try {
             const link = await createShareLink(docId, linkRole, userId, expiry);
-            await refresh();
+            // Show and copy the link the server just made before anything
+            // else: the reload below is only a refresh, and its failing must
+            // not cost the owner the link they asked for.
+            setLinks((prev) => [link, ...(prev ?? []).filter((l) => l.token !== link.token)]);
             await copy(link.token);
+            await load();
         } catch (err) {
             setError(errorText(err, 'Could not create the link.'));
         } finally {
@@ -130,10 +154,20 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
 
     const changeRole = async (member: DocumentMemberListing, next: ShareRole) => {
         setError(null);
+        setDemotionNotice(null);
         const previous = member.role;
         setMembers((prev) => prev?.map((m) => (m.user_id === member.user_id ? { ...m, role: next } : m)) ?? prev);
         try {
             await setMemberRole(docId, member.user_id, next);
+            // The server keeps this choice even if they open the edit link
+            // again, but the link itself still lets anyone holding it edit —
+            // them included, if they leave and come back through it.
+            if (next === 'viewer' && previous === 'editor' && activeEditLink(member.joined_via_link)) {
+                setDemotionNotice({
+                    text: `${memberLabel(member)} can only view now, but the edit link they joined with still works: anyone who has it can still join as an editor. Revoke it if it should stop.`,
+                    token: member.joined_via_link as string,
+                });
+            }
         } catch (err) {
             setMembers(
                 (prev) => prev?.map((m) => (m.user_id === member.user_id ? { ...m, role: previous } : m)) ?? prev,
@@ -169,7 +203,8 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
         setError(null);
         try {
             await revokeShareLink(target.token, { removeMembers });
-            await refresh();
+            setDemotionNotice((prev) => (prev?.token === target.token ? null : prev));
+            await load();
         } catch (err) {
             setError(errorText(err, 'Could not revoke the link.'));
         } finally {
@@ -180,6 +215,8 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
 
     const activeLink = (token: string | null) =>
         token !== null && (links ?? []).some((l) => l.token === token && !isLinkExpired(l));
+    const activeEditLink = (token: string | null) =>
+        token !== null && (links ?? []).some((l) => l.token === token && l.role === 'editor' && !isLinkExpired(l));
 
     return (
         <>
@@ -223,8 +260,11 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
 
             <section className="mt-4">
                 <h3 className="text-sm font-medium text-stone-600">Links</h3>
+                {linksError ? <ErrorText className="mt-2">{linksError}</ErrorText> : null}
                 {links === null ? (
-                    <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
+                    linksError ? null : (
+                        <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
+                    )
                 ) : links.length === 0 ? (
                     <p className="mt-2 text-sm text-stone-500">No links yet.</p>
                 ) : (
@@ -270,8 +310,11 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
 
             <section className="mt-5">
                 <h3 className="text-sm font-medium text-stone-600">People with access</h3>
+                {membersError ? <ErrorText className="mt-2">{membersError}</ErrorText> : null}
                 {members === null ? (
-                    <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
+                    membersError ? null : (
+                        <LoadingText className="mt-2 text-sm">Loading…</LoadingText>
+                    )
                 ) : (
                     <ul className="mt-2 divide-y divide-stone-100">
                         {members.map((member) => {
@@ -280,8 +323,8 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                             const detail =
                                 member.email && member.email !== label
                                     ? member.email
-                                    : member.is_student
-                                      ? 'Student'
+                                    : member.is_assigned
+                                      ? 'Assigned student'
                                       : member.is_anonymous
                                         ? 'Guest'
                                         : null;
@@ -324,6 +367,26 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                         })}
                     </ul>
                 )}
+                {demotionNotice ? (
+                    <div
+                        role="status"
+                        className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"
+                    >
+                        <p className="min-w-0 flex-1 text-xs text-amber-900">{demotionNotice.text}</p>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const target = (links ?? []).find((l) => l.token === demotionNotice.token);
+                                if (target) {
+                                    setRevokeTarget(target);
+                                }
+                            }}
+                            className="rounded px-2 py-1 text-xs text-danger transition hover:bg-red-50"
+                        >
+                            Revoke that link…
+                        </button>
+                    </div>
+                ) : null}
             </section>
 
             {revokeTarget ? (
@@ -340,7 +403,7 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
                     title={`Remove ${memberLabel(removeTarget)}?`}
                     body={[
                         'They lose access to this score on every device right away. Marks they made stay on the score.',
-                        removeTarget.is_student ? 'This also withdraws the score from their assignments.' : '',
+                        removeTarget.is_assigned ? 'This also withdraws the score from their assignments.' : '',
                         activeLink(removeTarget.joined_via_link)
                             ? 'The link they joined with still works — revoke it too if they should not come back.'
                             : '',
@@ -363,6 +426,12 @@ const OwnerSharing = ({ docId, userId }: { docId: string; userId: string }) => {
  * already joined through the link keep the score. It starts ticked: someone
  * revoking a link is usually taking access back, and leaving everyone it let
  * in is the surprising outcome.
+ *
+ * `joined` is the dialog's view of the member list, which can be stale (a
+ * join since it loaded) or empty because it failed to load. With no checkbox
+ * shown the owner has made no choice to keep anyone, so the conservative
+ * default goes to the server: revoke_share_link removes by the server's own
+ * provenance, which catches the late joiner the list never showed.
  */
 const RevokeLinkDialog = ({
     link,
@@ -378,11 +447,12 @@ const RevokeLinkDialog = ({
     onCancel: () => void;
 }) => {
     const [removeMembers, setRemoveMembers] = useState(true);
-    const students = joined.filter((m) => m.is_student).length;
+    const students = joined.filter((m) => m.is_assigned).length;
     return (
         <Dialog label="Revoke this link?" onClose={onCancel}>
             <p className="text-sm leading-relaxed text-stone-600">
                 Nobody new can join with this {link.role === 'editor' ? 'edit' : 'view'} link once it is revoked.
+                {joined.length === 0 ? ' Anyone who has joined with it loses access too.' : ''}
             </p>
             {joined.length > 0 ? (
                 <label className="mt-3 flex items-start gap-2 text-sm text-stone-700">
@@ -405,7 +475,7 @@ const RevokeLinkDialog = ({
                 <Button
                     variant="danger"
                     size="sm"
-                    onClick={() => onConfirm(joined.length > 0 && removeMembers)}
+                    onClick={() => onConfirm(joined.length === 0 ? true : removeMembers)}
                     disabled={busy}
                 >
                     Revoke link
