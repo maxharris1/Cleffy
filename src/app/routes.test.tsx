@@ -49,6 +49,7 @@ describe('AppRoutes public pages', () => {
     it.each([
         ['/privacy', 'Privacy Policy'],
         ['/terms', 'Terms of Service'],
+        ['/account-deleted', 'Your account is deleted'],
     ])('renders %s whatever the session', async (path, heading) => {
         render(
             <MemoryRouter initialEntries={[path]}>

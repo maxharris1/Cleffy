@@ -5,6 +5,7 @@ import {
     compactAuthSession,
     cookieAttributeSuffix,
     createAuthStorage,
+    forgetStoredSessions,
     isAuthSessionKey,
     readNamedCookie,
     type AuthStorageIo,
@@ -172,5 +173,24 @@ describe('createAuthStorage', () => {
         expect(readNamedCookie(document.cookie, AUTH_RESTORE_COOKIE)).toBe(compact);
         storage.removeItem(SESSION_KEY);
         expect(readNamedCookie(document.cookie, AUTH_RESTORE_COOKIE)).toBeNull();
+    });
+});
+
+describe('forgetStoredSessions', () => {
+    it('drops every stored session and the restore cookie, and nothing else', () => {
+        const io = memoryIo();
+        const storage = createAuthStorage(io);
+        storage.setItem(SESSION_KEY, FULL_SESSION);
+        io.setLocal('sb-other-project-auth-token', FULL_SESSION);
+        io.setLocal('cleffy:library-view', 'grid');
+        expect(io.cookies).toContain(`${AUTH_RESTORE_COOKIE}=`);
+
+        forgetStoredSessions(io, [...io.local.keys()]);
+
+        expect(io.local.has(SESSION_KEY)).toBe(false);
+        expect(io.local.has('sb-other-project-auth-token')).toBe(false);
+        expect(io.local.get('cleffy:library-view')).toBe('grid');
+        expect(io.cookies).not.toContain(`${AUTH_RESTORE_COOKIE}=`);
+        expect(storage.getItem(SESSION_KEY)).toBeNull();
     });
 });

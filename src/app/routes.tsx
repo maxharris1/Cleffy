@@ -51,6 +51,9 @@ const AssignmentsPage = lazy(() =>
 // Lazy: the legal pages are long, rarely read, and reached from links only.
 const PrivacyPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.PrivacyPage })));
 const TermsPage = lazy(() => import('@/features/legal/LegalPage').then((m) => ({ default: m.TermsPage })));
+const AccountDeletedPage = lazy(() =>
+    import('@/features/account/AccountDeletedPage').then((m) => ({ default: m.AccountDeletedPage })),
+);
 
 // Lazy: the roster is a Teacher/Academy-only surface — personal accounts never open it.
 const RosterPage = lazy(() => import('@/features/roster/RosterPage').then((m) => ({ default: m.RosterPage })));
@@ -222,6 +225,15 @@ export const AppRoutes = () => {
                 element={
                     <Suspense fallback={<PageFallback label="Loading…" />}>
                         <TermsPage />
+                    </Suspense>
+                }
+            />
+            {/* Public: the session it would gate on was just deleted. */}
+            <Route
+                path="/account-deleted"
+                element={
+                    <Suspense fallback={<PageFallback label="Loading…" />}>
+                        <AccountDeletedPage />
                     </Suspense>
                 }
             />

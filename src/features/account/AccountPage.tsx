@@ -2,6 +2,7 @@ import type { FormEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { useOutletContext, useSearchParams } from 'react-router';
 
+import { DeleteAccountSection } from '@/features/account/DeleteAccountSection';
 import { initialsOf } from '@/features/account/initials';
 import type { OfflineStorageUsage } from '@/features/account/offlineStorage';
 import { clearOfflineStorage, formatMegabytes, readOfflineStorage } from '@/features/account/offlineStorage';
@@ -21,6 +22,7 @@ import { StudioSeats } from '@/features/billing/StudioSeats';
 import { clearCachedEntitlements, loadUsage } from '@/features/billing/entitlementsService';
 import { TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import type { UsageMetric } from '@/types/database';
 import { Button } from '@/ui/Button';
@@ -556,6 +558,10 @@ export const AccountPage = () => {
                 </Button>
                 {signOutError ? <ErrorText className="mt-2">{signOutError}</ErrorText> : null}
             </section>
+
+            <DeleteAccountSection session={session} />
+
+            <LegalLinks withContact className="mt-10" />
 
             {clearOpen ? (
                 <ConfirmDialog
