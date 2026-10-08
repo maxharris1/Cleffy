@@ -78,9 +78,13 @@ const isTransportFailure = (err: unknown): boolean => {
     return err instanceof Error && /failed to fetch/i.test(err.message);
 };
 
-/** Shown when the server says this account can no longer see the score. */
-const ACCESS_REVOKED_MESSAGE =
-    'You no longer have access to this score — its owner removed you, or the link you joined with was revoked.';
+/**
+ * Shown when the server says this account can no longer see the score. Neutral
+ * on purpose: deleting a score ends every membership too (the same broadcast
+ * reaches members and the owner's own other tabs), and the client cannot tell
+ * which happened.
+ */
+const ACCESS_REVOKED_MESSAGE = 'This score is no longer available to you — it was deleted, or your access was removed.';
 
 /**
  * Why this account just lost the score in the open viewer, which decides what
@@ -109,6 +113,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     /** "Your access changed" banner after a live role change. */
     const [accessNotice, setAccessNotice] = useState<string | null>(null);
     const accessCheckInFlight = useRef(false);
+    /** A change arrived while a check was running; that check may have read the role before it. */
+    const accessRecheckPending = useRef(false);
     /** Latest state for the access re-check, which runs outside render. */
     const stateRef = useRef(state);
     useEffect(() => {
@@ -123,57 +129,83 @@ const CloudViewer = ({ docId }: { docId: string }) => {
      * payload is only a hint; PostgREST is checked per request, so its answer
      * is the truth. A transport failure changes nothing — the next event or
      * reconnect asks again.
+     *
+     * One check at a time, but an event that lands mid-check is never dropped:
+     * the running check may have read the role just before that change
+     * committed (editor, then viewer, in quick succession), so it is followed
+     * by exactly one more.
      */
     const recheckAccess = useCallback(() => {
-        if (!userId || accessCheckInFlight.current) {
+        if (!userId) {
+            return;
+        }
+        if (accessCheckInFlight.current) {
+            accessRecheckPending.current = true;
             return;
         }
         accessCheckInFlight.current = true;
+
+        /** One read of the server's answer. Resolves true once access is gone (nothing left to re-check). */
+        const checkOnce = async (): Promise<boolean> => {
+            const [docResult, roleResult] = await Promise.allSettled([
+                fetchDocument(docId),
+                fetchMyRole(docId, userId),
+            ]);
+            if (docResult.status !== 'fulfilled') {
+                return false;
+            }
+            const doc = docResult.value;
+            if (!doc) {
+                setState(null);
+                setShareOpen(false);
+                setLoadError(ACCESS_REVOKED_MESSAGE);
+                setAccessLoss('removed');
+                return true;
+            }
+            if (roleResult.status !== 'fulfilled') {
+                return false;
+            }
+            const role = roleResult.value;
+            const current = stateRef.current;
+            // A provisional paint is confirmed by the load effect, not here.
+            if (!current || current.provisional || current.role === role) {
+                return false;
+            }
+            // Read-only follows from the new role, and the viewport restarts
+            // sync with it — rejoining the channel, which is when Realtime
+            // re-evaluates what this account may send.
+            setState((prev) => (prev ? { ...prev, role, doc: { ...prev.doc, archived_at: doc.archived_at } } : prev));
+            // A follow-up check compares against this role, not the one the
+            // ref holds until the next commit.
+            stateRef.current = { ...current, role };
+            setAccessNotice(
+                role === 'editor' || role === 'owner'
+                    ? 'Your access changed: you can now edit this score.'
+                    : 'Your access changed: you can now only view this score.',
+            );
+            return false;
+        };
+
         void (async () => {
             try {
-                const [docResult, roleResult] = await Promise.allSettled([
-                    fetchDocument(docId),
-                    fetchMyRole(docId, userId),
-                ]);
-                if (docResult.status !== 'fulfilled') {
-                    return;
+                for (;;) {
+                    accessRecheckPending.current = false;
+                    const gone = await checkOnce();
+                    if (gone || !accessRecheckPending.current) {
+                        break;
+                    }
                 }
-                const doc = docResult.value;
-                if (!doc) {
-                    setState(null);
-                    setShareOpen(false);
-                    setLoadError(ACCESS_REVOKED_MESSAGE);
-                    setAccessLoss('removed');
-                    return;
-                }
-                if (roleResult.status !== 'fulfilled') {
-                    return;
-                }
-                const role = roleResult.value;
-                const current = stateRef.current;
-                // A provisional paint is confirmed by the load effect, not here.
-                if (!current || current.provisional || current.role === role) {
-                    return;
-                }
-                // Read-only follows from the new role, and the viewport restarts
-                // sync with it — rejoining the channel, which is when Realtime
-                // re-evaluates what this account may send.
-                setState((prev) =>
-                    prev ? { ...prev, role, doc: { ...prev.doc, archived_at: doc.archived_at } } : prev,
-                );
-                setAccessNotice(
-                    role === 'editor' || role === 'owner'
-                        ? 'Your access changed: you can now edit this score.'
-                        : 'Your access changed: you can now only view this score.',
-                );
             } finally {
                 accessCheckInFlight.current = false;
+                accessRecheckPending.current = false;
             }
         })();
     }, [docId, userId]);
 
     // Runs after the commit that dropped the viewport, so the sync engine has
-    // already been stopped and cannot write a watermark back over the purge.
+    // already been stopped — and a stopped engine re-checks after each await,
+    // so a pull that was mid-flight cannot write rows or a watermark back over
+    // the purge.
     useEffect(() => {
         if (!accessLoss || !userId) {
             return;

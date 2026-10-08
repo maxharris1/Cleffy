@@ -424,10 +424,69 @@ describe('CloudViewer membership changes', () => {
         fetchMyRole.mockResolvedValue(null);
         await membershipChanged();
 
-        expect(await screen.findByText(/no longer have access to this score/)).toBeInTheDocument();
+        expect(
+            await screen.findByText(/no longer available to you — it was deleted, or your access was removed/),
+        ).toBeInTheDocument();
         expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
         await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
         expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('does not drop a change that arrives while a re-check is still running', async () => {
+        await openAs('editor');
+
+        // The first check reads the role before the owner's second change
+        // commits (editor, then viewer, in quick succession).
+        let answerFirst: (role: string) => void = () => undefined;
+        fetchMyRole.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    answerFirst = resolve;
+                }),
+        );
+        await membershipChanged();
+        fetchMyRole.mockResolvedValue('viewer');
+        await membershipChanged();
+        expect(fetchMyRole).toHaveBeenCalledTimes(2); // load + the first check only
+
+        await act(async () => {
+            answerFirst('editor');
+            await Promise.resolve();
+        });
+
+        // The second event was queued, not ignored: one more read, and the
+        // viewer lands on the latest role.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(fetchMyRole).toHaveBeenCalledTimes(3);
+        expect(screen.getByRole('status')).toHaveTextContent('you can now only view this score');
+    });
+
+    it('follows a role change and then a removal in quick succession to the end', async () => {
+        await openAs('editor');
+
+        let answerFirst: (role: string) => void = () => undefined;
+        fetchMyRole.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    answerFirst = resolve;
+                }),
+        );
+        await membershipChanged();
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+        await membershipChanged();
+
+        await act(async () => {
+            answerFirst('viewer');
+            await Promise.resolve();
+        });
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        // Two events mid-check still mean one follow-up, not two.
+        expect(fetchMyRole).toHaveBeenCalledTimes(3);
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
     });
 
     it('changes nothing when the re-check cannot reach the server', async () => {
