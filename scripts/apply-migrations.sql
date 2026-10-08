@@ -4404,3 +4404,441 @@ grant execute on function public.imslp_promote_anchor (text, int) to service_rol
 
 revoke all on function public.imslp_sync_tick () from public, anon, authenticated;
 grant execute on function public.imslp_sync_tick () to service_role;
+
+-- ===== supabase/migrations/20261007120400_library_pagination.sql =====
+-- Library pagination and server-side search.
+--
+-- The library used to stop at 100 scores: library_bootstrap() and the
+-- client's fallback listDocuments() both returned the newest 100 and a
+-- has_more flag, and the page could only say "showing latest 100". Search,
+-- tag and favorite filters ran over those loaded rows only, so a teacher with
+-- 101 scores could not find the oldest one at all.
+--
+--  1. library_documents() — one keyset page of the caller's visible scores,
+--     optionally filtered by title (ilike), one of the caller's own tags, or
+--     the caller's favorites, ordered either by recency or by title. Keyset
+--     rather than offset so a page boundary stays put while scores are
+--     uploaded or touched in between "load more" taps.
+--  2. library_bootstrap() keeps its signature and payload (cached older
+--     clients call it with no arguments and read the same keys) but now takes
+--     its first page from library_documents(), so the bootstrap page and the
+--     pages after it share one total order: updated_at desc, id desc. The old
+--     order had no tiebreak, and a bulk update (archiving on a downgrade
+--     stamps every row with the same now()) made the boundary row ambiguous —
+--     a keyset continuation from it could skip or repeat scores.
+
+-- ---------------------------------------------------------------------------
+-- library_documents
+-- ---------------------------------------------------------------------------
+-- SECURITY DEFINER for the same reason as library_bootstrap: the visible set
+-- is assembled from the caller's memberships in one indexed pass instead of
+-- evaluating documents_select per row of the whole table. Every predicate is
+-- therefore scoped to auth.uid() explicitly, mirroring documents_select
+-- (owner, or any document_members row), favorites_select (own rows) and
+-- library_tags (own tags — another user's tag id matches nothing).
+--
+-- Cursor: the sort key of the last row the client holds, plus its id.
+--   recent: (p_after_updated_at, p_after_id) — rows strictly older.
+--   title:  (p_after_title, p_after_id) — rows strictly after, compared on
+--           lower(title) so A–Z is case-insensitive.
+-- The client passes back the exact updated_at string it was given; a
+-- truncated timestamp would skip rows that share the millisecond.
+create or replace function public.library_documents (
+    p_sort text default 'recent',
+    p_after_updated_at timestamptz default null,
+    p_after_title text default null,
+    p_after_id uuid default null,
+    p_query text default null,
+    p_tag_id uuid default null,
+    p_favorites_only boolean default false,
+    p_limit integer default 100
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := (select auth.uid());
+    v_sort text := coalesce(p_sort, 'recent');
+    v_limit int := least(greatest(coalesce(p_limit, 100), 1), 200);
+    v_query text := nullif(btrim(coalesce(p_query, '')), '');
+    v_pattern text;
+    v_rows jsonb;
+    v_count int;
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '42501';
+    end if;
+    if v_sort not in ('recent', 'title') then
+        raise exception 'unknown library sort: %', v_sort using errcode = '22023';
+    end if;
+    -- A half cursor would compare against null and silently return nothing.
+    if p_after_id is not null
+       and ((v_sort = 'recent' and p_after_updated_at is null)
+            or (v_sort = 'title' and p_after_title is null)) then
+        raise exception 'library cursor is incomplete' using errcode = '22023';
+    end if;
+
+    if v_query is not null then
+        -- Titles are short; a pasted paragraph is not a search worth running.
+        -- Escape ilike's own wildcards so "50%" or "op_1" match literally.
+        v_pattern := '%'
+            || replace(replace(replace(left(v_query, 200), '\', '\\'), '%', '\%'), '_', '\_')
+            || '%';
+    end if;
+
+    with visible as (
+        select
+            d.id,
+            d.owner_id,
+            d.title,
+            d.storage_path,
+            d.page_count,
+            d.content_rev,
+            d.thumb_rev,
+            d.created_at,
+            d.updated_at,
+            d.archived_at
+        from public.documents d
+        where (
+                d.owner_id = v_uid
+                or exists (
+                    select 1
+                    from public.document_members m
+                    where m.document_id = d.id
+                      and m.user_id = v_uid
+                )
+            )
+          and (v_pattern is null or d.title ilike v_pattern)
+          and (
+                p_tag_id is null
+                or exists (
+                    select 1
+                    from public.document_tags dt
+                    join public.library_tags t on t.id = dt.tag_id
+                    where dt.document_id = d.id
+                      and dt.tag_id = p_tag_id
+                      and t.user_id = v_uid
+                )
+            )
+          and (
+                not coalesce(p_favorites_only, false)
+                or exists (
+                    select 1
+                    from public.document_favorites f
+                    where f.document_id = d.id
+                      and f.user_id = v_uid
+                )
+            )
+          and (
+                p_after_id is null
+                or (v_sort = 'recent' and (d.updated_at, d.id) < (p_after_updated_at, p_after_id))
+                or (v_sort = 'title' and (lower(d.title), d.id) > (lower(p_after_title), p_after_id))
+            )
+    ),
+    ordered as (
+        select
+            v.*,
+            row_number() over (
+                order by
+                    case when v_sort = 'title' then lower(v.title) end asc,
+                    case when v_sort = 'title' then v.id end asc,
+                    case when v_sort = 'recent' then v.updated_at end desc,
+                    case when v_sort = 'recent' then v.id end desc
+            ) as rn
+        from visible v
+    ),
+    page as (
+        select * from ordered where rn <= v_limit + 1
+    )
+    select
+        coalesce(
+            (select jsonb_agg(to_jsonb(p) - 'rn' order by p.rn) from page p where p.rn <= v_limit),
+            '[]'::jsonb
+        ),
+        (select count(*)::int from page)
+    into v_rows, v_count;
+
+    return jsonb_build_object(
+        'documents', v_rows,
+        'has_more', v_count > v_limit
+    );
+end;
+$$;
+
+revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from public;
+revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from anon;
+grant execute on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- library_bootstrap — same payload as 20260902130000; the first page now
+-- comes from library_documents() so it shares the keyset order above.
+-- ---------------------------------------------------------------------------
+create or replace function public.library_bootstrap ()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := (select auth.uid());
+    v_page jsonb;
+    v_favorites jsonb;
+    v_tags jsonb;
+    v_document_tags jsonb;
+    v_entitlements jsonb;
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '42501';
+    end if;
+
+    v_page := public.library_documents (p_sort => 'recent', p_limit => 100);
+
+    select coalesce(jsonb_agg(f.document_id), '[]'::jsonb)
+    into v_favorites
+    from public.document_favorites f
+    where f.user_id = v_uid;
+
+    select coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'id', t.id,
+                'user_id', t.user_id,
+                'name', t.name,
+                'created_at', t.created_at
+            )
+            order by t.name asc
+        ),
+        '[]'::jsonb
+    )
+    into v_tags
+    from public.library_tags t
+    where t.user_id = v_uid;
+
+    select coalesce(
+        jsonb_agg(
+            jsonb_build_object(
+                'document_id', dt.document_id,
+                'tag_id', dt.tag_id
+            )
+        ),
+        '[]'::jsonb
+    )
+    into v_document_tags
+    from public.document_tags dt
+    join public.library_tags t on t.id = dt.tag_id
+    where t.user_id = v_uid;
+
+    v_entitlements := public.get_entitlements ();
+
+    return jsonb_build_object(
+        'documents', v_page -> 'documents',
+        'has_more', (v_page ->> 'has_more')::boolean,
+        'favorite_ids', v_favorites,
+        'tags', v_tags,
+        'document_tags', v_document_tags,
+        'entitlements', v_entitlements
+    );
+end;
+$$;
+
+revoke all on function public.library_bootstrap () from public;
+revoke all on function public.library_bootstrap () from anon;
+grant execute on function public.library_bootstrap () to authenticated;
+
+-- ===== supabase/migrations/20261007120401_document_storage_cleanup.sql =====
+-- Delete the score first, clean its storage after.
+--
+-- deleteDocument() used to remove the PDF from Storage FIRST and the
+-- documents row second, because every storage policy keys off
+-- document_role() — membership that dies with the row (FK cascade). When the
+-- row delete then failed (network drop, timeout, a trigger error) the teacher
+-- was left with a score in the library whose PDF was gone: visible, shared
+-- with students, and unopenable.
+--
+-- The safe order is the reverse — the row goes first, atomically taking the
+-- score away from every member, and the bytes are cleaned up afterwards. To
+-- let the former owner's own session still remove objects after the
+-- membership is gone, an AFTER DELETE trigger records a tombstone, and the
+-- storage policies below grant select/delete on a tombstoned folder to the
+-- user who owned it. Cleanup that fails (offline, refused) leaves the
+-- tombstone in place; the client retries from it on a later library visit,
+-- and the table doubles as a server-side ledger of folders still to purge.
+--
+-- Storage objects cannot be removed from SQL here (storage.protect_delete
+-- blocks direct deletes from storage.objects; the Storage API has to delete
+-- the bytes), which is why the cleanup itself stays client-driven.
+
+create table if not exists public.document_storage_cleanup (
+    document_id uuid primary key,
+    -- No FK to auth.users: an account deletion cascades through documents,
+    -- and this trigger runs after the users row is already gone — a foreign
+    -- key here would make deleting an account fail.
+    owner_id uuid not null,
+    storage_path text not null,
+    thumb_rev integer,
+    deleted_at timestamptz not null default now()
+);
+
+create index if not exists document_storage_cleanup_owner_idx
+    on public.document_storage_cleanup (owner_id);
+
+alter table public.document_storage_cleanup enable row level security;
+
+-- Owners read their pending cleanups and delete them once done. No insert or
+-- update policy: rows are written only by the trigger below, so a user cannot
+-- tombstone someone else's live score to gain delete rights on its folder.
+drop policy if exists document_storage_cleanup_select on public.document_storage_cleanup;
+create policy document_storage_cleanup_select on public.document_storage_cleanup for select to authenticated
+using (owner_id = (select auth.uid()));
+
+drop policy if exists document_storage_cleanup_delete on public.document_storage_cleanup;
+create policy document_storage_cleanup_delete on public.document_storage_cleanup for delete to authenticated
+using (owner_id = (select auth.uid()));
+
+-- Grants mirror the policies one-for-one (see 20260827140000_core_table_grants).
+revoke all on table public.document_storage_cleanup from anon, authenticated;
+grant select, delete on table public.document_storage_cleanup to authenticated;
+grant all on table public.document_storage_cleanup to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Tombstone trigger
+-- ---------------------------------------------------------------------------
+-- SECURITY DEFINER: the deleting user has no insert grant on the table, by
+-- design. Fires for every delete path — the library's delete, an upload or
+-- IMSLP import rolling back its row, an account deletion cascading — so no
+-- caller has to remember to record what it orphaned.
+create or replace function public.documents_record_storage_cleanup ()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    insert into public.document_storage_cleanup (document_id, owner_id, storage_path, thumb_rev)
+    values (old.id, old.owner_id, old.storage_path, old.thumb_rev)
+    -- An id can come back (ids are client-chosen) and be deleted again; the
+    -- latest owner is the one whose folder it is now.
+    on conflict (document_id) do update
+        set owner_id = excluded.owner_id,
+            storage_path = excluded.storage_path,
+            thumb_rev = excluded.thumb_rev,
+            deleted_at = now();
+    return old;
+end;
+$$;
+
+revoke all on function public.documents_record_storage_cleanup () from public;
+revoke all on function public.documents_record_storage_cleanup () from anon;
+revoke all on function public.documents_record_storage_cleanup () from authenticated;
+
+drop trigger if exists documents_record_storage_cleanup on public.documents;
+create trigger documents_record_storage_cleanup after delete on public.documents
+for each row execute function public.documents_record_storage_cleanup ();
+
+-- ---------------------------------------------------------------------------
+-- A tombstoned id is not handed to someone else
+-- ---------------------------------------------------------------------------
+-- Document ids are chosen by the client. If a former member of a deleted
+-- score (who knows its id) created a new score under that id before the
+-- owner's cleanup ran, any bytes still in the folder — the pre-import backup,
+-- say — would become readable through the new row's membership. The app
+-- always mints a fresh uuid, so refusing the reuse costs no legitimate flow.
+create or replace function public.documents_refuse_tombstoned_id ()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    if exists (
+        select 1
+        from public.document_storage_cleanup c
+        where c.document_id = new.id
+          and c.owner_id <> new.owner_id
+    ) then
+        raise exception 'document id is not available' using errcode = '23505';
+    end if;
+    return new;
+end;
+$$;
+
+revoke all on function public.documents_refuse_tombstoned_id () from public;
+revoke all on function public.documents_refuse_tombstoned_id () from anon;
+revoke all on function public.documents_refuse_tombstoned_id () from authenticated;
+
+drop trigger if exists documents_refuse_tombstoned_id on public.documents;
+create trigger documents_refuse_tombstoned_id before insert on public.documents
+for each row execute function public.documents_refuse_tombstoned_id ();
+
+-- ---------------------------------------------------------------------------
+-- Storage access to a tombstoned folder
+-- ---------------------------------------------------------------------------
+-- True when `folder` names a deleted score the caller owned and has not
+-- finished cleaning up. SECURITY DEFINER so it can also confirm the score is
+-- really gone: document ids are chosen client-side, and if anyone has since
+-- created a new score under the same id, that folder is theirs now and the
+-- former owner's tombstone must not reach it. The CASE guards the uuid cast —
+-- a stray non-uuid folder name must read as "no", not abort every storage
+-- query that evaluates these policies.
+create or replace function public.document_storage_cleanup_pending (folder text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+    select case
+        when folder ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (
+            exists (
+                select 1
+                from public.document_storage_cleanup c
+                where c.document_id = folder::uuid
+                  and c.owner_id = (select auth.uid())
+            )
+            and not exists (
+                select 1
+                from public.documents d
+                where d.id = folder::uuid
+            )
+        )
+        else false
+    end;
+$$;
+
+revoke all on function public.document_storage_cleanup_pending (text) from public;
+revoke all on function public.document_storage_cleanup_pending (text) from anon;
+grant execute on function public.document_storage_cleanup_pending (text) to authenticated;
+
+-- Select as well as delete: the Storage API lists the folder before removing
+-- it, and its delete returns the removed rows, both of which need SELECT.
+drop policy if exists scores_cleanup_read on storage.objects;
+create policy scores_cleanup_read on storage.objects for select to authenticated
+using (
+    bucket_id = 'scores'
+    and public.document_storage_cleanup_pending ((storage.foldername (name))[1])
+);
+
+drop policy if exists scores_cleanup_delete on storage.objects;
+create policy scores_cleanup_delete on storage.objects for delete to authenticated
+using (
+    bucket_id = 'scores'
+    and public.document_storage_cleanup_pending ((storage.foldername (name))[1])
+);
+
+drop policy if exists thumbnails_cleanup_read on storage.objects;
+create policy thumbnails_cleanup_read on storage.objects for select to authenticated
+using (
+    bucket_id = 'thumbnails'
+    and public.document_storage_cleanup_pending ((storage.foldername (name))[1])
+);
+
+drop policy if exists thumbnails_cleanup_delete on storage.objects;
+create policy thumbnails_cleanup_delete on storage.objects for delete to authenticated
+using (
+    bucket_id = 'thumbnails'
+    and public.document_storage_cleanup_pending ((storage.foldername (name))[1])
+);

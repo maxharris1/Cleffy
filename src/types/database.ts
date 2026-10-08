@@ -45,6 +45,19 @@ export type DocumentInsert = {
     archived_at?: string | null;
 };
 
+/**
+ * A deleted score whose Storage folder may still hold bytes. Written only by
+ * the documents AFTER DELETE trigger; the former owner reads it to finish the
+ * cleanup and deletes it once the folder is empty.
+ */
+export type DocumentStorageCleanupRow = {
+    document_id: string;
+    owner_id: string;
+    storage_path: string;
+    thumb_rev: number | null;
+    deleted_at: string;
+};
+
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
 
 export type DocumentImportRow = {
@@ -429,6 +442,13 @@ export type Database = {
                 Update: never;
                 Relationships: [];
             };
+            document_storage_cleanup: {
+                // Trigger-written tombstones; clients only read and delete them.
+                Row: DocumentStorageCleanupRow;
+                Insert: never;
+                Update: never;
+                Relationships: [];
+            };
             document_imports: {
                 // Smart-import offer/decision + backup pointer, one row per doc.
                 Row: DocumentImportRow;
@@ -528,6 +548,12 @@ export type Database = {
                 Args: { doc: string };
                 Returns: MemberRole | null;
             };
+            // Storage-policy helper: the caller owned this deleted score's folder
+            // and has not finished cleaning it up.
+            document_storage_cleanup_pending: {
+                Args: { folder: string };
+                Returns: boolean;
+            };
             redeem_share_link: {
                 Args: { p_token: string };
                 Returns: Array<{ document_id: string; granted_role: MemberRole }>;
@@ -560,6 +586,27 @@ export type Database = {
                     tags: LibraryTagRow[];
                     document_tags: Array<{ document_id: string; tag_id: string }>;
                     entitlements: Entitlements;
+                };
+            };
+            /**
+             * One keyset page of the caller's visible scores. The cursor is the
+             * last row the client holds: (updated_at, id) for 'recent',
+             * (title, id) for 'title' — passed back exactly as received.
+             */
+            library_documents: {
+                Args: {
+                    p_sort?: 'recent' | 'title';
+                    p_after_updated_at?: string | null;
+                    p_after_title?: string | null;
+                    p_after_id?: string | null;
+                    p_query?: string | null;
+                    p_tag_id?: string | null;
+                    p_favorites_only?: boolean;
+                    p_limit?: number;
+                };
+                Returns: {
+                    documents: DocumentRow[];
+                    has_more: boolean;
                 };
             };
             tier_limits: {
