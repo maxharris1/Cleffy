@@ -4,21 +4,48 @@
 // re-exported so existing function imports keep working unchanged.
 export { checkRateLimit, clientKey, serviceClient } from './rateLimit.ts';
 
-export const IMSLP_ORIGIN = 'https://imslp.org';
+export {
+    IMSLP_ORIGIN,
+    MAX_PDF_BYTES,
+    USER_AGENT,
+    classifyDownloadBody,
+    extractCdnUrlFromWaitPage,
+    imagefromIndexUrl,
+    looksLikeHtml,
+    looksLikePdf,
+    type DownloadFailureCode,
+    type DownloadResult,
+} from './imslpDownload.ts';
+import {
+    IMSLP_ORIGIN,
+    ImslpFetchError,
+    USER_AGENT,
+    parseRetryAfterSec,
+    readBodyCapped,
+    tryDownloadPdfWith,
+    type DownloadResult,
+    type MwFetchOptions,
+} from './imslpDownload.ts';
+
 export const IMSLP_API = `${IMSLP_ORIGIN}/api.php`;
-/** Browser-like UA — IMSLP's friendly-redirect gate is stricter with bare bot UAs. */
-export const USER_AGENT =
-    'Mozilla/5.0 (compatible; Cleffy/1.0; +https://cleffy.app) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-
-/** Soft size cap — matches the private `scores` bucket limit. */
-export const MAX_PDF_BYTES = 50 * 1024 * 1024;
-
-/** Cookies that skip IMSLP's JS redirect interstitial + disclaimer confirm. */
-const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSelectorLanguage=en; redirectPassed=1';
 
 /** Bound every MW call — a slow IMSLP must not hang the invocation to the worker wall-clock. */
 const MW_TIMEOUT_MS = 10_000;
 const MW_429_ATTEMPTS = 3;
+/**
+ * Largest API answer read. action=parse of the biggest work pages runs to a
+ * few MB; anything past this is not a work page, and buffering it unbounded
+ * would put the worker's memory at IMSLP's mercy.
+ */
+const MW_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * attempts: tries on timeout / 429 (default 3) — one for best-effort lookups
+ * that must not stall a request, and for anything on the import path, where a
+ * 429 must reach the caller (as ImslpFetchError 'rate_limited') rather than be
+ * retried against a host that is throttling us.
+ */
+export type { MwFetchOptions };
 
 const retryAfterMs = (res: Response): number => {
     const raw = res.headers.get('Retry-After');
@@ -32,7 +59,9 @@ const retryAfterMs = (res: Response): number => {
     return 2000;
 };
 
-export const mwFetch = async (params: Record<string, string>): Promise<unknown> => {
+export const mwFetch = async (params: Record<string, string>, options: MwFetchOptions = {}): Promise<unknown> => {
+    const attempts = Math.max(1, options.attempts ?? MW_429_ATTEMPTS);
+    const timeoutMs = options.timeoutMs ?? MW_TIMEOUT_MS;
     const url = new URL(IMSLP_API);
     for (const [k, v] of Object.entries(params)) {
         url.searchParams.set(k, v);
@@ -40,7 +69,7 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
     url.searchParams.set('format', 'json');
 
     let lastError: unknown;
-    for (let attempt = 1; attempt <= MW_429_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
         let res: Response;
         try {
             res = await fetch(url.toString(), {
@@ -48,12 +77,12 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
                     'User-Agent': USER_AGENT,
                     Accept: 'application/json',
                 },
-                signal: AbortSignal.timeout(MW_TIMEOUT_MS),
+                signal: AbortSignal.timeout(timeoutMs),
             });
         } catch (err) {
             if (err instanceof DOMException && err.name === 'TimeoutError') {
                 lastError = new Error('IMSLP API timeout', { cause: err });
-                if (attempt < MW_429_ATTEMPTS) {
+                if (attempt < attempts) {
                     await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
                     continue;
                 }
@@ -61,19 +90,40 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
             }
             throw err;
         }
-        if (res.status === 429 && attempt < MW_429_ATTEMPTS) {
-            await new Promise((resolve) => setTimeout(resolve, retryAfterMs(res)));
-            continue;
+        if (res.status === 429) {
+            if (attempt < attempts) {
+                await res.body?.cancel().catch(() => undefined);
+                await new Promise((resolve) => setTimeout(resolve, retryAfterMs(res)));
+                continue;
+            }
+            // Typed, so the download path can back the deployment off for as
+            // long as IMSLP asked instead of reading this as a plain failure.
+            await res.body?.cancel().catch(() => undefined);
+            // The message is unchanged from the untyped error it replaces:
+            // categorySync retries on /HTTP 429/ and records it as lastError.
+            throw new ImslpFetchError('rate_limited', 'IMSLP API HTTP 429', {
+                status: 429,
+                retryAfterSec: parseRetryAfterSec(res.headers.get('Retry-After')),
+            });
         }
         if (!res.ok) {
+            await res.body?.cancel().catch(() => undefined);
             throw new Error(`IMSLP API HTTP ${res.status}`);
         }
-        const payload: unknown = await res.json();
+        const declared = Number(res.headers.get('content-length') ?? '');
+        if (Number.isFinite(declared) && declared > MW_MAX_BYTES) {
+            await res.body?.cancel().catch(() => undefined);
+            throw new Error('IMSLP API answer too large');
+        }
+        const payload: unknown = JSON.parse(new TextDecoder().decode(await readBodyCapped(res, MW_MAX_BYTES)));
         if (payload && typeof payload === 'object' && 'error' in payload) {
             const err = (payload as { error: unknown }).error;
             if (err) {
                 const info =
-                    typeof err === 'object' && err && 'info' in err && typeof (err as { info: unknown }).info === 'string'
+                    typeof err === 'object' &&
+                    err &&
+                    'info' in err &&
+                    typeof (err as { info: unknown }).info === 'string'
                         ? (err as { info: string }).info
                         : 'IMSLP API error';
                 throw new Error(info);
@@ -87,24 +137,42 @@ export const mwFetch = async (params: Record<string, string>): Promise<unknown> 
 export const workPageUrl = (title: string): string =>
     `${IMSLP_ORIGIN}/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`;
 
+export type WorkPageFetch =
+    | { ok: true; html: string }
+    /** IMSLP answered 429: it is throttling this egress IP. */
+    | { ok: false; reason: 'rate_limited'; retryAfterSec: number | null }
+    /** Timeout, API error, or no rendered text — the license is simply unknown. */
+    | { ok: false; reason: 'unavailable' };
+
 /**
  * Rendered work page HTML via action=parse — the only place IMSLP exposes
- * per-file license tags with their regional Non-PD flags. Null on any failure
- * so callers degrade to license-unknown instead of failing the lookup.
+ * per-file license tags with their regional Non-PD flags. Never throws: a
+ * throttled API is reported as such (the import path backs off on it), any
+ * other failure as unavailable.
  */
-export const fetchWorkPageHtml = async (title: string): Promise<string | null> => {
+export const fetchWorkPage = async (title: string, options: MwFetchOptions = {}): Promise<WorkPageFetch> => {
     try {
-        const data = (await mwFetch({ action: 'parse', page: title, prop: 'text' })) as {
+        const data = (await mwFetch({ action: 'parse', page: title, prop: 'text' }, options)) as {
             parse?: { text?: { '*'?: string } };
         };
-        return data.parse?.text?.['*'] ?? null;
-    } catch {
-        return null;
+        const html = data.parse?.text?.['*'];
+        return typeof html === 'string' ? { ok: true, html } : { ok: false, reason: 'unavailable' };
+    } catch (err) {
+        if (err instanceof ImslpFetchError && err.code === 'rate_limited') {
+            return { ok: false, reason: 'rate_limited', retryAfterSec: err.retryAfterSec };
+        }
+        return { ok: false, reason: 'unavailable' };
     }
 };
 
-export const imagefromIndexUrl = (filename: string): string =>
-    `${IMSLP_ORIGIN}/wiki/Special:ImagefromIndex/${encodeURIComponent(filename)}`;
+/**
+ * Work page HTML, or null on any failure so callers degrade to
+ * license-unknown instead of failing the lookup.
+ */
+export const fetchWorkPageHtml = async (title: string, options: MwFetchOptions = {}): Promise<string | null> => {
+    const page = await fetchWorkPage(title, options);
+    return page.ok ? page.html : null;
+};
 
 export const parseComposerFromTitle = (title: string): string | null => {
     const match = title.match(/\(([^)]+)\)\s*$/);
@@ -115,198 +183,9 @@ export const stripFilePrefix = (title: string): string => title.replace(/^File:/
 
 export const isPdfFileTitle = (title: string): boolean => stripFilePrefix(title).toLowerCase().endsWith('.pdf');
 
-export const looksLikePdf = (bytes: Uint8Array): boolean => {
-    if (bytes.length < 5) {
-        return false;
-    }
-    // %PDF-
-    return bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
-};
-
-export const looksLikeHtml = (bytes: Uint8Array): boolean => {
-    const sample = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 512)).toLowerCase();
-    return (
-        sample.includes('<!doctype html') ||
-        sample.includes('<html') ||
-        sample.includes('bot check') ||
-        sample.includes('friendlytest') ||
-        sample.includes('disclaimer')
-    );
-};
-
-export type DownloadFailureCode = 'bot_check' | 'disclaimer' | 'not_pdf' | 'too_large' | 'upstream';
-
-export const classifyDownloadBody = (
-    bytes: Uint8Array,
-    contentType: string | null,
-): { ok: true } | { ok: false; code: DownloadFailureCode } => {
-    if (bytes.length > MAX_PDF_BYTES) {
-        return { ok: false, code: 'too_large' };
-    }
-    if (looksLikePdf(bytes)) {
-        return { ok: true };
-    }
-    const type = (contentType ?? '').toLowerCase();
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(0, 2000)).toLowerCase();
-    if (text.includes('bot check') || text.includes('friendlytest') || text.includes('mtcaptcha')) {
-        return { ok: false, code: 'bot_check' };
-    }
-    if (text.includes('disclaimer') || text.includes('imslpdisclaimer')) {
-        return { ok: false, code: 'disclaimer' };
-    }
-    if (type.includes('html') || looksLikeHtml(bytes)) {
-        return { ok: false, code: 'bot_check' };
-    }
-    return { ok: false, code: 'not_pdf' };
-};
-
-const decodeHtmlEntities = (value: string): string =>
-    value
-        .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-        .replace(/&#(\d+);/g, (_, dec: string) => String.fromCharCode(Number(dec)))
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-
 /**
- * IMSLP's free-user "wait 15 seconds" page already embeds the real CDN URL in
- * `#sm_dl_wait[data-id]` — the timer only delays revealing it in the browser.
+ * Fetch one IMSLP PDF (wait page → CDN, legacy fallbacks) under the bounds in
+ * imslpDownload.ts. The pipeline lives there, import-free, so vitest can drive
+ * it with a fake fetch.
  */
-export const extractCdnUrlFromWaitPage = (html: string): string | null => {
-    const patterns = [
-        /id=["']sm_dl_wait["'][^>]*data-id=["']([^"']+)["']/i,
-        /data-id=["']([^"']+)["'][^>]*id=["']sm_dl_wait["']/i,
-    ];
-    for (const pattern of patterns) {
-        const match = html.match(pattern);
-        if (match?.[1]) {
-            const url = decodeHtmlEntities(match[1]).trim();
-            if (/^https?:\/\//i.test(url) && /\.pdf(\?|#|$)/i.test(url)) {
-                return url;
-            }
-        }
-    }
-    return null;
-};
-
-const fetchBytes = async (
-    url: string,
-    accept: string,
-): Promise<{ bytes: Uint8Array; contentType: string | null; finalUrl: string }> => {
-    const res = await fetch(url, {
-        redirect: 'follow',
-        headers: {
-            'User-Agent': USER_AGENT,
-            Accept: accept,
-            Cookie: IMSLP_SESSION_COOKIES,
-            Referer: `${IMSLP_ORIGIN}/`,
-        },
-    });
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    return {
-        bytes,
-        contentType: res.headers.get('content-type'),
-        finalUrl: res.url,
-    };
-};
-
-/**
- * Fully automated PDF fetch:
- * 1. Hit ImagefromIndex with disclaimer + redirectPassed cookies
- * 2. Parse the CDN URL from the wait page (no need to actually wait 15s)
- * 3. Download from the CDN mirror
- *
- * Falls back to imageinfo / ImagefromIndex direct URLs when the wait page isn't served.
- */
-export const tryDownloadPdf = async (
-    filename: string,
-): Promise<
-    | { ok: true; bytes: Uint8Array; filename: string }
-    | { ok: false; code: DownloadFailureCode; openUrl: string; filename: string; message: string }
-> => {
-    const openUrl = imagefromIndexUrl(filename);
-    const fail = (code: DownloadFailureCode, message: string) => ({
-        ok: false as const,
-        code,
-        openUrl,
-        filename,
-        message,
-    });
-
-    const messages: Record<DownloadFailureCode, string> = {
-        bot_check: 'IMSLP requires a browser verification before this file can download.',
-        disclaimer: 'IMSLP showed a copyright disclaimer page instead of the PDF.',
-        not_pdf: 'IMSLP did not return a PDF for this file.',
-        too_large: `File is larger than ${MAX_PDF_BYTES / (1024 * 1024)} MB.`,
-        upstream: 'Could not reach IMSLP to download this file.',
-    };
-
-    // Primary path: wait-page HTML → CDN URL (skips the cosmetic 15s timer).
-    try {
-        const page = await fetchBytes(openUrl, 'text/html,application/xhtml+xml,application/pdf,*/*');
-        const direct = classifyDownloadBody(page.bytes, page.contentType);
-        if (direct.ok) {
-            return { ok: true, bytes: page.bytes, filename };
-        }
-
-        const html = new TextDecoder('utf-8', { fatal: false }).decode(page.bytes);
-        if (html.toLowerCase().includes('bot check') || html.toLowerCase().includes('mtcaptcha')) {
-            return fail('bot_check', messages.bot_check);
-        }
-
-        const cdnUrl = extractCdnUrlFromWaitPage(html);
-        if (cdnUrl) {
-            const pdf = await fetchBytes(cdnUrl, 'application/pdf,*/*');
-            const classified = classifyDownloadBody(pdf.bytes, pdf.contentType);
-            if (classified.ok) {
-                return { ok: true, bytes: pdf.bytes, filename };
-            }
-            return fail(classified.code, messages[classified.code]);
-        }
-    } catch {
-        // Fall through to legacy candidates.
-    }
-
-    // Legacy: MediaWiki imageinfo URL + ImagefromIndex (often blocked / disclaimer HTML).
-    let imageUrl: string | null = null;
-    try {
-        const data = (await mwFetch({
-            action: 'query',
-            titles: `File:${filename}`,
-            prop: 'imageinfo',
-            iiprop: 'url|size|mime',
-        })) as {
-            query?: {
-                pages?: Record<string, { imageinfo?: Array<{ url?: string; size?: number; mime?: string }> }>;
-            };
-        };
-        const page = Object.values(data.query?.pages ?? {})[0];
-        const info = page?.imageinfo?.[0];
-        if (info?.size && info.size > MAX_PDF_BYTES) {
-            return fail('too_large', messages.too_large);
-        }
-        if (info?.url) {
-            imageUrl = info.url.startsWith('//') ? `https:${info.url}` : info.url;
-        }
-    } catch {
-        // ignore
-    }
-
-    const candidates = [imageUrl, openUrl].filter((u): u is string => Boolean(u));
-    let lastCode: DownloadFailureCode = 'upstream';
-    for (const url of candidates) {
-        try {
-            const got = await fetchBytes(url, 'application/pdf,*/*');
-            const classified = classifyDownloadBody(got.bytes, got.contentType);
-            if (classified.ok) {
-                return { ok: true, bytes: got.bytes, filename };
-            }
-            lastCode = classified.code;
-        } catch {
-            lastCode = 'upstream';
-        }
-    }
-
-    return fail(lastCode, messages[lastCode]);
-};
+export const tryDownloadPdf = (filename: string): Promise<DownloadResult> => tryDownloadPdfWith(filename, { mwFetch });

@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type * as ImslpApiModule from '@/features/imslp/imslpApi';
 
 import { getDb } from '@/sync/db';
 import type { CachedPdf } from '@/sync/db';
@@ -19,7 +18,6 @@ const memCache = vi.hoisted(() => new Map<string, unknown>());
 const memThumbs = vi.hoisted(() => new Map<string, unknown>());
 // userId -> { entitlements }: the cached plan the cap refusal's wording falls back on.
 const memEntitlements = vi.hoisted(() => new Map<string, unknown>());
-const importImslpPdfToStorage = vi.hoisted(() => vi.fn());
 const libraryListClear = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 // Flipped on to simulate WebKit refusing an IndexedDB write (private browsing).
 const cacheFailure = vi.hoisted(() => ({ put: null as Error | null, get: null as Error | null }));
@@ -76,9 +74,10 @@ vi.mock('@/sync/db', () => {
         }),
     };
 });
-vi.mock('@/features/imslp/imslpApi', async (importOriginal) => ({
-    ...(await importOriginal<typeof ImslpApiModule>()),
-    importImslpPdfToStorage: (...args: unknown[]) => importImslpPdfToStorage(...args),
+// The Edge call is the unit under the IMSLP import; its own behaviour is
+// pinned in imslpApi.test.ts.
+vi.mock('@/features/imslp/imslpApi', () => ({
+    importImslpPdfToStorage: vi.fn(),
 }));
 vi.mock('@/features/import/prepareUpload', () => ({
     prepareUploadFile: vi.fn(async (file: File) => ({ file, convertedFromImage: false })),
@@ -102,6 +101,7 @@ import {
     uploadDocument,
 } from '@/features/library/documentsService';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
+import { importImslpPdfToStorage } from '@/features/imslp/imslpApi';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
 
@@ -157,6 +157,8 @@ interface StubOptions {
     /** What every other supabase.rpc() call answers (or rejects with, if an Error). */
     rpcAnswer?: { data: unknown; error: { message: string } | null } | Error;
     restRows?: DocumentRow[];
+    /** What a `select().eq('id', id).maybeSingle()` read of the row returns. */
+    selectedRow?: DocumentRow | null | ((id: string) => DocumentRow | null);
 }
 
 /** A query-builder stand-in that can be awaited directly or chained further. */
@@ -250,20 +252,35 @@ const makeStub = (options: StubOptions = {}) => {
         },
         from: (table: string) => ({
             select: () => {
-                // documents REST listing (listDocuments) and the visibility
-                // re-check after a zero-row delete; tombstones for the sweep.
+                // documents REST listing (listDocuments), the visibility
+                // re-check after a zero-row delete and the IMSLP import's
+                // read-back of its row; tombstones for the sweep.
                 const rows =
                     table === 'document_storage_cleanup' ? (options.tombstones ?? []) : (options.restRows ?? []);
+                let eqValue = '';
                 const builder = {
                     order: () => builder,
-                    eq: () => builder,
+                    eq: (_column: string, value: string) => {
+                        eqValue = value;
+                        return builder;
+                    },
                     or: (filter: string) => {
                         calls.or(filter);
                         return builder;
                     },
                     limit: () => Promise.resolve({ data: rows, error: null }),
                     maybeSingle: () =>
-                        Promise.resolve({ data: options.stillVisible ? { id: 'x' } : null, error: null }),
+                        Promise.resolve({
+                            data:
+                                options.selectedRow !== undefined
+                                    ? typeof options.selectedRow === 'function'
+                                        ? options.selectedRow(eqValue)
+                                        : options.selectedRow
+                                    : options.stillVisible
+                                      ? { id: 'x' }
+                                      : null,
+                            error: null,
+                        }),
                 };
                 return builder;
             },
@@ -339,7 +356,6 @@ beforeEach(async () => {
     cacheFailure.put = null;
     cacheFailure.get = null;
     memEntitlements.clear();
-    importImslpPdfToStorage.mockReset();
     await getDb().pdfCache.clear();
 });
 
@@ -1046,58 +1062,90 @@ describe('cloud-score cap refusal wording', () => {
     });
 });
 
-describe('importDocumentFromImslp rollback refunds the smart import', () => {
-    const stored = { ok: true, filename: 'Sonata.pdf', byteLength: 10, storagePath: 'x/original.pdf' } as const;
+describe('importDocumentFromImslp', () => {
+    const fallback = {
+        ok: false as const,
+        code: 'bot_check' as const,
+        message: 'IMSLP requires a browser verification',
+        openUrl: 'https://imslp.org/wiki/Special:ImagefromIndex/a.pdf',
+        filename: 'a.pdf',
+    };
 
-    it('asks for the credit back after deleting a score whose bytes never reached the device', async () => {
-        // The function stored the PDF (and spent the credit); the download back
-        // to this device is what failed.
-        importImslpPdfToStorage.mockResolvedValue(stored);
-        const calls = makeStub({ downloadError: 'network down' });
-
-        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow();
-
-        expect(calls.delete).toHaveBeenCalledWith('documents');
-        const inserted = calls.insert.mock.calls[0]?.[1] as { id: string };
-        expect(calls.rpc).toHaveBeenCalledWith('refund_smart_import', { p_document: inserted.id });
-        expect(calls.delete.mock.invocationCallOrder[0]).toBeLessThan(calls.rpc.mock.invocationCallOrder[0] ?? 0);
+    beforeEach(() => {
+        vi.mocked(importImslpPdfToStorage).mockReset();
     });
 
-    it('asks for the credit back when the function’s answer was lost in transit', async () => {
-        importImslpPdfToStorage.mockRejectedValue(new TypeError('Failed to fetch'));
+    it('creates no row itself: the function creates the score once the PDF is stored', async () => {
+        vi.mocked(importImslpPdfToStorage).mockImplementation(async (req) => ({
+            ok: true,
+            filename: 'a.pdf',
+            byteLength: 10,
+            storagePath: `${req.documentId}/original.pdf`,
+        }));
+        // The read-back returns the row the function created.
+        const calls = makeStub({
+            selectedRow: (id) => doc({ id, storage_path: `${id}/original.pdf`, page_count: null }),
+        });
+
+        const result = await importDocumentFromImslp('a.pdf', 'Sonata (Composer)', 'user-1', true);
+
+        expect(calls.insert).not.toHaveBeenCalled();
+        const sent = vi.mocked(importImslpPdfToStorage).mock.calls[0]?.[0];
+        expect(sent).toMatchObject({ filename: 'a.pdf', title: 'Sonata (Composer)', workTitle: 'Sonata (Composer)' });
+        expect(result).toMatchObject({ ok: true, document: { id: sent?.documentId } });
+    });
+
+    it('hands a refused download to the fallback with nothing to roll back', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue(fallback);
         const calls = makeStub();
-
-        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow(
-            'Failed to fetch',
-        );
-        expect(calls.rpc).toHaveBeenCalledWith('refund_smart_import', expect.anything());
-    });
-
-    it('does not ask while the score still exists — the refund would be refused anyway', async () => {
-        importImslpPdfToStorage.mockResolvedValue(stored);
-        const calls = makeStub({ downloadError: 'network down', deleteError: 'offline' });
-
-        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow();
-        expect(calls.rpc).not.toHaveBeenCalledWith('refund_smart_import', expect.anything());
-    });
-
-    it('reports the original failure even when the refund itself fails', async () => {
-        importImslpPdfToStorage.mockRejectedValue(new Error('import exploded'));
-        makeStub({ rpcAnswer: new Error('refund unreachable') });
-
-        await expect(importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true)).rejects.toThrow(
-            'import exploded',
-        );
-    });
-
-    it('does not refund a successful import', async () => {
-        importImslpPdfToStorage.mockResolvedValue(stored);
-        const calls = makeStub({ downloadBytes: 'not-a-pdf' });
-
-        const result = await importDocumentFromImslp('Sonata.pdf', 'Sonata', 'user-1', true);
-        expect(result.ok).toBe(true);
+        const before = libraryMutationEpoch();
+        const result = await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+        expect(result).toEqual({ ok: false, fallback });
+        expect(calls.insert).not.toHaveBeenCalled();
         expect(calls.delete).not.toHaveBeenCalled();
-        expect(calls.rpc).not.toHaveBeenCalledWith('refund_smart_import', expect.anything());
+        expect(calls.remove).not.toHaveBeenCalled();
+        // Nothing committed: only the opening edge moved.
+        expect(libraryMutationEpoch()).toBe(before + 1);
+    });
+
+    it('never deletes a score that was imported, even if reading it back fails', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue({
+            ok: true,
+            filename: 'a.pdf',
+            byteLength: 10,
+            storagePath: 'x/original.pdf',
+        });
+        const calls = makeStub({ selectedRow: null });
+        await expect(importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true)).rejects.toThrow(
+            /refresh your library/i,
+        );
+        expect(calls.delete).not.toHaveBeenCalled();
+        expect(calls.remove).not.toHaveBeenCalled();
+    });
+
+    it('never asks for a smart-import refund: the function refunds its own failures', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue(fallback);
+        const calls = makeStub();
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true);
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue({
+            ok: true,
+            filename: 'a.pdf',
+            byteLength: 10,
+            storagePath: 'x/original.pdf',
+        });
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true).catch(() => undefined);
+        expect(calls.rpc).not.toHaveBeenCalled();
+    });
+
+    it('passes the stage callback and the cancel signal through to the Edge call', async () => {
+        vi.mocked(importImslpPdfToStorage).mockResolvedValue(fallback);
+        makeStub();
+        const controller = new AbortController();
+        const onStage = vi.fn();
+        await importDocumentFromImslp('a.pdf', 'Sonata', 'user-1', true, { onStage, signal: controller.signal });
+        expect(importImslpPdfToStorage).toHaveBeenCalledWith(
+            expect.objectContaining({ onStage, signal: controller.signal, acceptedDisclaimer: true }),
+        );
     });
 });
 

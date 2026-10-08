@@ -69,8 +69,9 @@ vi.mock('@/features/billing/entitlementsService', () => ({
 }));
 
 const uploadDocument = vi.fn();
+const importDocumentFromImslp = vi.fn();
 vi.mock('@/features/library/documentsService', () => ({
-    importDocumentFromImslp: vi.fn(),
+    importDocumentFromImslp: (...args: unknown[]) => importDocumentFromImslp(...args),
     loadDocumentBytes: vi.fn(),
     uploadDocument: (...args: unknown[]) => uploadDocument(...args),
 }));
@@ -116,6 +117,29 @@ const ShellPage = ({ name }: { name: string }) => {
     );
 };
 
+/** Drives onImportImslp the way ImslpBrowser does, with a cancel handle. */
+const importControl = { controller: new AbortController() };
+const ImportPage = () => {
+    const { onImportImslp, uploadError } = useOutletContext<LibraryOutletContext>();
+    return (
+        <div>
+            <p>search page</p>
+            <button
+                type="button"
+                onClick={() => {
+                    importControl.controller = new AbortController();
+                    void onImportImslp('a.pdf', 'Sonata', true, undefined, importControl.controller.signal).catch(
+                        () => undefined,
+                    );
+                }}
+            >
+                import
+            </button>
+            {uploadError ? <p>error: {uploadError}</p> : null}
+        </div>
+    );
+};
+
 const listSnapshot = (documents: Array<{ id: string; owner_id: string; archived_at: string | null }>) => ({
     documents,
     hasMore: false,
@@ -128,13 +152,14 @@ const listSnapshot = (documents: Array<{ id: string; owner_id: string; archived_
 
 const ownedDoc = (id: string, ownerId = 'teacher-1') => ({ id, owner_id: ownerId, archived_at: null });
 
-const renderShell = () =>
+const renderShell = (initialEntry = '/library') =>
     render(
-        <MemoryRouter initialEntries={['/library']}>
+        <MemoryRouter initialEntries={[initialEntry]}>
             <Routes>
                 <Route element={<LibraryShell />}>
                     <Route path="/library" element={<ShellPage name="library page" />} />
                     <Route path="/students" element={<ShellPage name="students page" />} />
+                    <Route path="/search" element={<ImportPage />} />
                 </Route>
                 <Route path="/doc/:id" element={<Page name="viewer page" />} />
             </Routes>
@@ -173,6 +198,57 @@ describe('LibraryShell', () => {
         expect(await screen.findByText('viewer page')).toBeInTheDocument();
         expect(readCachedLibraryList).toHaveBeenCalledWith('teacher-1');
         expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', before, document);
+    });
+
+    it('opens an imported IMSLP score', async () => {
+        const user = userEvent.setup();
+        importDocumentFromImslp.mockResolvedValue({ ok: true, document: { id: 'd3', title: 'Sonata' } });
+        renderShell('/search');
+
+        await user.click(screen.getByRole('button', { name: 'import' }));
+
+        expect(await screen.findByText('viewer page')).toBeInTheDocument();
+        expect(importDocumentFromImslp).toHaveBeenCalledWith('a.pdf', 'Sonata', 'teacher-1', true, {
+            onStage: undefined,
+            signal: importControl.controller.signal,
+        });
+    });
+
+    it('keeps a score that lands after the user cancelled, without pulling them back to it', async () => {
+        const user = userEvent.setup();
+        let land: ((value: unknown) => void) | undefined;
+        importDocumentFromImslp.mockReturnValue(
+            new Promise((resolve) => {
+                land = resolve;
+            }),
+        );
+        prependCachedLibraryDocument.mockResolvedValue(undefined);
+        renderShell('/search');
+
+        await user.click(screen.getByRole('button', { name: 'import' }));
+        await waitFor(() => expect(importDocumentFromImslp).toHaveBeenCalled());
+        importControl.controller.abort();
+        const document = { id: 'd4', title: 'Sonata', owner_id: 'teacher-1', archived_at: null };
+        land?.({ ok: true, document });
+
+        await waitFor(() => expect(prependCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', null, document));
+        expect(screen.getByText('search page')).toBeInTheDocument();
+        expect(screen.queryByText('viewer page')).not.toBeInTheDocument();
+    });
+
+    it('reports a failed IMSLP import, but not one the user cancelled while queued', async () => {
+        const user = userEvent.setup();
+        const { ImslpImportCancelledError } = await import('@/features/imslp/imslpApi');
+        importDocumentFromImslp.mockRejectedValueOnce(new ImslpImportCancelledError());
+        renderShell('/search');
+
+        await user.click(screen.getByRole('button', { name: 'import' }));
+        await waitFor(() => expect(importDocumentFromImslp).toHaveBeenCalledTimes(1));
+        expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
+
+        importDocumentFromImslp.mockRejectedValueOnce(new Error('IMSLP is down'));
+        await user.click(screen.getByRole('button', { name: 'import' }));
+        expect(await screen.findByText('error: IMSLP is down')).toBeInTheDocument();
     });
 
     it('keeps the account menu closed after coming back to the route it was opened on', async () => {

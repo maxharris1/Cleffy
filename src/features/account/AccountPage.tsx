@@ -26,6 +26,7 @@ import { TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { features } from '@/lib/features';
 import type { UsageMetric } from '@/types/database';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -40,10 +41,18 @@ import {
     passwordProblemMessage,
 } from '../../../supabase/functions/_shared/passwordPolicy';
 
-const METERED: Array<{ metric: UsageMetric; label: string }> = [
-    { metric: 'omr_runs', label: 'Play-along analyses' },
-    { metric: 'vision_reads', label: 'AI fingering reads' },
-    { metric: 'smart_imports', label: 'Smart imports' },
+/**
+ * Meters for the features this build ships, named for what actually spends
+ * them: an IMSLP import draws on `smart_imports`, and the AI pass of Import
+ * marks on `vision_reads` (fingering note reads too, where that ships). Play-
+ * along analyses are still metered server-side, but a release with play-along
+ * switched off (src/lib/features.ts) must not show an allowance for something
+ * the reader cannot use.
+ */
+const meteredRows = (): Array<{ metric: UsageMetric; label: string }> => [
+    ...(features.playalong ? [{ metric: 'omr_runs' as const, label: 'Play-along analyses' }] : []),
+    { metric: 'vision_reads', label: 'AI page reads' },
+    { metric: 'smart_imports', label: 'IMSLP imports' },
     { metric: 'pdf_exports', label: 'PDF exports' },
 ];
 
@@ -468,7 +477,7 @@ export const AccountPage = () => {
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Usage this month</h2>
                 <ul className="mt-4 flex flex-col gap-4">
-                    {METERED.map(({ metric, label: metricLabel }) => {
+                    {meteredRows().map(({ metric, label: metricLabel }) => {
                         const limit = entitlements?.limits[metric] ?? 0;
                         const used = usage[metric] ?? 0;
                         // A bar for an unlimited allowance can only lie: full says
@@ -508,7 +517,9 @@ export const AccountPage = () => {
                   that really are ungated everywhere.
                 */}
                 <p className="mt-4 text-xs text-stone-500">
-                    Annotation and the fingering optimizer are unlimited on every plan, including {TIER_LABELS.free}.
+                    {features.fingering
+                        ? `Annotation and the fingering optimizer are unlimited on every plan, including ${TIER_LABELS.free}.`
+                        : `Annotation is unlimited on every plan, including ${TIER_LABELS.free}.`}
                 </p>
             </section>
 

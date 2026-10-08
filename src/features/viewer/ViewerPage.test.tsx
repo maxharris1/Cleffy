@@ -63,7 +63,7 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
         playback,
     }: {
         readOnly?: boolean;
-        sync?: { onMembershipChanged?: () => void } & NonNullable<typeof lastSync.current>;
+        sync?: { onMembershipChanged?: () => void; onScoreAnalysis?: unknown } & NonNullable<typeof lastSync.current>;
         playback?: unknown;
     }) => {
         viewportSync.current = sync;
@@ -74,6 +74,7 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
                 data-readonly={String(Boolean(readOnly))}
                 data-sync={sync ? 'on' : 'off'}
                 data-playback={playback ? 'on' : 'off'}
+                data-analysis-broadcasts={sync?.onScoreAnalysis ? 'on' : 'off'}
             />
         );
     },
@@ -123,9 +124,17 @@ vi.mock('@/features/playback/usePlayback', () => ({
     }),
 }));
 const analysis: { state: { kind: string } } = { state: { kind: 'none' } };
-vi.mock('@/features/playback/useScoreAnalysis', () => ({
-    useScoreAnalysis: () => ({ state: analysis.state, generate: vi.fn(), applyBroadcast: vi.fn() }),
+const useScoreAnalysis = vi.fn((_docId: string, _enabled: boolean) => ({
+    state: analysis.state,
+    generate: vi.fn(),
+    applyBroadcast: vi.fn(),
 }));
+vi.mock('@/features/playback/useScoreAnalysis', () => ({
+    useScoreAnalysis: (docId: string, enabled: boolean) => useScoreAnalysis(docId, enabled),
+}));
+/** Release flags (src/lib/features.ts), flipped per test; read at render. */
+const flags = vi.hoisted(() => ({ playalong: false, fingering: false, printHandwriting: false }));
+vi.mock('@/lib/features', () => ({ features: flags }));
 
 const DOC_ID = '11111111-2222-4333-8444-555555555555';
 
@@ -180,6 +189,7 @@ beforeEach(() => {
     viewportSync.current = undefined;
     purgeLocalDocument.mockResolvedValue(undefined);
     removeCachedLibraryDocument.mockResolvedValue(undefined);
+    flags.playalong = false;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
     fetchMyRole.mockResolvedValue('owner');
@@ -279,6 +289,43 @@ describe('CloudViewer warm open', () => {
         expect(viewport()).toHaveAttribute('data-readonly', 'true');
     });
 
+    it('shows the IMSLP source to a view-only member, carried onto a warm paint even if the bytes reload fails', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('viewer'));
+        fetchMyRole.mockResolvedValue('viewer');
+        fetchDocument.mockResolvedValue(
+            serverDoc({
+                source_url: 'https://imslp.org/wiki/Nocturnes%2C_Op.9_(Chopin%2C_Fr%C3%A9d%C3%A9ric)',
+                source_filename: 'nocturnes.pdf',
+                source_license: 'Creative Commons Attribution 4.0',
+                source_attribution: {
+                    source: 'imslp',
+                    work: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+                    composer: 'Chopin, Frédéric',
+                    editor: 'A. Engraver',
+                    arranger: null,
+                    publisher: null,
+                    year: null,
+                },
+            }),
+        );
+        loadDocumentBytes.mockRejectedValue(new Error('offline'));
+
+        renderViewer();
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Source' }));
+        expect(screen.getByRole('dialog', { name: 'About this score' })).toHaveTextContent('A. Engraver');
+    });
+
+    it('offers no Source control for an uploaded score', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Source' })).not.toBeInTheDocument();
+    });
+
     it('hands the warm paint’s buffer to the bytes load and never prefetches over it', async () => {
         const cached = cachedOpen();
         loadDocumentOffline.mockResolvedValue(cached);
@@ -331,7 +378,27 @@ describe('CloudViewer warm open', () => {
         expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
     });
 
+    it('ships no play-along with the feature switched off: no control, no analysis, no broadcasts', async () => {
+        // A ready analysis on the server must not surface either — the flag, not
+        // the analysis state, decides whether the feature exists in this build.
+        analysis.state = { kind: 'ready' };
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+        expect(screen.queryByRole('button', { name: 'Play-along' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
+        expect(viewport()).toHaveAttribute('data-playback', 'off');
+        expect(viewport()).toHaveAttribute('data-analysis-broadcasts', 'off');
+        // Disabled analysis is what keeps status reads, polling and OMR runs off.
+        expect(useScoreAnalysis).toHaveBeenCalled();
+        expect(useScoreAnalysis.mock.calls.every(([, enabled]) => enabled === false)).toBe(true);
+    });
+
     it('keeps the play-along panel and playhead hidden until asked for, and pauses on close', async () => {
+        flags.playalong = true;
         const user = userEvent.setup();
         loadDocumentOffline.mockResolvedValue(null);
         fetchDocument.mockResolvedValue(serverDoc());
@@ -344,8 +411,11 @@ describe('CloudViewer warm open', () => {
 
         const toggle = screen.getByRole('button', { name: 'Play-along' });
         expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        expect(viewport()).toHaveAttribute('data-analysis-broadcasts', 'on');
+        expect(useScoreAnalysis).toHaveBeenLastCalledWith(DOC_ID, true);
         await user.click(toggle);
-        expect(screen.getByTestId('transport-bar')).toBeInTheDocument();
+        // The transport is a lazy chunk, fetched on first open.
+        expect(await screen.findByTestId('transport-bar')).toBeInTheDocument();
         expect(toggle).toHaveAttribute('aria-expanded', 'true');
         expect(viewport()).toHaveAttribute('data-playback', 'on');
         expect(engine.pause).not.toHaveBeenCalled();
@@ -357,6 +427,7 @@ describe('CloudViewer warm open', () => {
     });
 
     it('offers no play-along control when analysis is unavailable', async () => {
+        flags.playalong = true;
         analysis.state = { kind: 'unavailable' };
         loadDocumentOffline.mockResolvedValue(null);
         fetchDocument.mockResolvedValue(serverDoc());

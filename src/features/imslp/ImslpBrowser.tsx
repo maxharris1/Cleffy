@@ -1,7 +1,12 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
-import { fetchImslpWork, type ImslpEdition, type ImslpWorkDetail } from '@/features/imslp/imslpApi';
+import {
+    fetchImslpWork,
+    type ImslpDownloadStage,
+    type ImslpEdition,
+    type ImslpWorkDetail,
+} from '@/features/imslp/imslpApi';
 import { isEditionImportable, recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
@@ -16,11 +21,16 @@ export interface ImslpBrowserProps {
      * the proxy cannot fetch (bot check / disclaimer / restricted license).
      * Real failures are recorded by the shell (captureFailure) before the
      * rethrow, so this component reports only its own load errors.
+     * `onStage` reports a pacing queue (IMSLP downloads are paced
+     * deployment-wide) and the retry that ends it. `signal` is aborted when
+     * the user cancels the queued import or this panel unmounts.
      */
     onImportImslp: (
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+        signal?: AbortSignal,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     /** True while the library is uploading / importing. */
     busy?: boolean;
@@ -68,7 +78,7 @@ const reduce = (state: Flow, action: Action): Flow => {
             };
         }
         case 'select':
-            if (state.phase !== 'work' || state.download.kind === 'downloading') {
+            if (state.phase !== 'work' || state.download.kind === 'downloading' || state.download.kind === 'queued') {
                 return state;
             }
             return { ...state, selected: action.edition, download: { kind: 'idle' } };
@@ -102,6 +112,11 @@ export const ImslpBrowser = ({
     const workSeqRef = useRef(0);
     const loadedTitleRef = useRef<string | null>(null);
     const importInFlightRef = useRef(false);
+    // The running import's cancel handle. Leaving the page cancels a queued
+    // import so it does not wait, retry and land after the user has moved on
+    // (a request already sent still completes into the library).
+    const importAbortRef = useRef<AbortController | null>(null);
+    useEffect(() => () => importAbortRef.current?.abort(), []);
 
     useEffect(() => {
         if (!workParam) {
@@ -150,7 +165,7 @@ export const ImslpBrowser = ({
         if (quotaExhausted) {
             return;
         }
-        if (flow.download.kind === 'downloading' || importInFlightRef.current) {
+        if (flow.download.kind === 'downloading' || flow.download.kind === 'queued' || importInFlightRef.current) {
             return;
         }
         if (!isEditionImportable(flow.selected)) {
@@ -158,10 +173,18 @@ export const ImslpBrowser = ({
         }
         importInFlightRef.current = true;
         const { work, selected } = flow;
+        const controller = new AbortController();
+        importAbortRef.current = controller;
         setError(null);
         dispatch({ type: 'download', download: { kind: 'downloading' } });
         try {
-            const result = await onImportImslp(selected.filename, work.title, true);
+            const result = await onImportImslp(
+                selected.filename,
+                work.title,
+                true,
+                (stage) => dispatch({ type: 'download', download: { kind: stage } }),
+                controller.signal,
+            );
             if (!result.ok) {
                 dispatch({
                     type: 'download',
@@ -172,11 +195,19 @@ export const ImslpBrowser = ({
             dispatch({ type: 'download', download: { kind: 'idle' } });
         } catch {
             // Recorded by the shell as uploadError/uploadLimit — reporting it
-            // here too rendered the same message twice on /search.
+            // here too rendered the same message twice on /search. A cancelled
+            // queue wait lands here too, and is simply back to idle.
             dispatch({ type: 'download', download: { kind: 'idle' } });
         } finally {
             importInFlightRef.current = false;
+            if (importAbortRef.current === controller) {
+                importAbortRef.current = null;
+            }
         }
+    };
+
+    const cancelQueuedImport = () => {
+        importAbortRef.current?.abort();
     };
 
     const importLocalPdf = async (file: File) => {
@@ -194,7 +225,9 @@ export const ImslpBrowser = ({
     };
 
     const blocked =
-        busy || flow.phase === 'loadingWork' || (flow.phase === 'work' && flow.download.kind === 'downloading');
+        busy ||
+        flow.phase === 'loadingWork' ||
+        (flow.phase === 'work' && (flow.download.kind === 'downloading' || flow.download.kind === 'queued'));
 
     return (
         <section className={className}>
@@ -231,6 +264,7 @@ export const ImslpBrowser = ({
                     onBack={closeWork}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
                     onImportSelected={() => void importSelected()}
+                    onCancelQueued={cancelQueuedImport}
                     onImportLocalPdf={(file) => void importLocalPdf(file)}
                 />
             ) : null}

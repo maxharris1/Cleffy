@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 
 import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
@@ -19,7 +19,6 @@ import {
     purgeLocalDocument,
 } from '@/features/library/documentsService';
 import { removeCachedLibraryDocument } from '@/features/library/libraryBootstrap';
-import { TransportBar } from '@/features/playback/TransportBar';
 import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { NotesPanel } from '@/features/notes/NotesPanel';
@@ -28,8 +27,10 @@ import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButt
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
+import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
+import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
 import type { AnnotationStore } from '@/sync/annotationStore';
@@ -43,6 +44,25 @@ import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 import { MusicIcon } from '@/ui/icons';
+
+/**
+ * Play-along's transport loads on first open, and only in a build that ships
+ * the feature — with VITE_FEATURE_PLAYALONG off the chunk is never requested.
+ */
+const TransportBar = lazy(() => import('@/features/playback/TransportBar').then((m) => ({ default: m.TransportBar })));
+
+/**
+ * What a confirmed row contributes to a cache-painted one before (or instead
+ * of) the full swap: the archive state, and the provenance the offline row
+ * cannot carry (the viewer's Source button reads it).
+ */
+const confirmedMeta = (doc: DocumentRow) => ({
+    archived_at: doc.archived_at,
+    source_url: doc.source_url ?? null,
+    source_filename: doc.source_filename ?? null,
+    source_license: doc.source_license ?? null,
+    source_attribution: doc.source_attribution ?? null,
+});
 
 export const ViewerPage = () => {
     const { documentId } = useParams<{ documentId: string }>();
@@ -260,7 +280,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [docId, userId]);
 
     // Play-along: analysis lifecycle + the audio engine for this document.
-    const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, true);
+    // Switched off for this release (src/lib/features.ts): a disabled analysis
+    // stays 'unavailable' and never reads a status, polls, or requests an OMR
+    // run, so usePlayback never has a score to build an engine (or fetch
+    // samples) for.
+    const playAlongEnabled = features.playalong;
+    const { state: analysisState, generate, applyBroadcast } = useScoreAnalysis(docId, playAlongEnabled);
     const { playbackFeature, getEngine, warning, dismissWarning } = usePlayback(docId, analysisState);
     const analysisInFlight = analysisState.kind === 'pending' || analysisState.kind === 'processing';
 
@@ -329,7 +354,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         prev?.provisional
                             ? {
                                   ...prev,
-                                  doc: { ...prev.doc, archived_at: confirmedDoc.archived_at },
+                                  doc: { ...prev.doc, ...confirmedMeta(confirmedDoc) },
                                   role: confirmedRole,
                                   provisional: false,
                               }
@@ -370,7 +395,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     }
                     if (offline) {
                         setState({
-                            doc: { ...offline.doc, archived_at: confirmedDoc.archived_at },
+                            doc: { ...offline.doc, ...confirmedMeta(confirmedDoc) },
                             role: confirmedRole ?? offline.role,
                             bytes: offline.bytes,
                             provisional: roleResult.status !== 'fulfilled' ? true : undefined,
@@ -518,7 +543,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 >
                     Notes
                 </button>
-                {analysisState.kind !== 'unavailable' ? (
+                {playAlongEnabled && analysisState.kind !== 'unavailable' ? (
                     <button
                         type="button"
                         title={
@@ -547,6 +572,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         ) : null}
                     </button>
                 ) : null}
+                {/* IMSLP source, license and credits — for everyone on the score (CC-BY). */}
+                <ScoreSourceButton doc={state.doc} />
                 {/*
                   Export loads from Dexie on demand — no third live ArrayBuffer for
                   the menu. The row lets it download the PDF when the cache has none.
@@ -605,7 +632,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         onStoreReady={onStoreReady}
                         // Playhead, loop tint and tap-to-seek live only while
                         // the transport is on screen to drive them.
-                        playback={playAlongOpen ? playbackFeature : undefined}
+                        playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
                         sync={
                             // Not while provisional: the engine would start,
                             // then tear down and restart when the confirmed
@@ -622,7 +649,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                       onHeld,
                                       onPeers,
                                       onDocReplaced,
-                                      onScoreAnalysis: applyBroadcast,
+                                      // A broadcast from a build with play-along on
+                                      // must not wake the analysis (a 'ready'
+                                      // would fetch the ScoreData) in this one.
+                                      onScoreAnalysis: playAlongEnabled ? applyBroadcast : undefined,
                                       onMembershipChanged: recheckAccess,
                                   }
                                 : undefined
@@ -630,17 +660,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     />
                 </PdfProvider>
             </div>
-            {playAlongOpen ? (
+            {playAlongEnabled && playAlongOpen ? (
                 <div id="play-along-bar" className="flex-none">
-                    <TransportBar
-                        state={analysisState}
-                        role={state.role}
-                        onGenerate={() => void generate()}
-                        getEngine={getEngine}
-                        pageCount={state.doc.page_count}
-                        warning={warning}
-                        onDismissWarning={dismissWarning}
-                    />
+                    <Suspense fallback={null}>
+                        <TransportBar
+                            state={analysisState}
+                            role={state.role}
+                            onGenerate={() => void generate()}
+                            getEngine={getEngine}
+                            pageCount={state.doc.page_count}
+                            warning={warning}
+                            onDismissWarning={dismissWarning}
+                        />
+                    </Suspense>
                 </div>
             ) : null}
             {shareOpen && resolvedUserId && state.role ? (

@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
  * without a database is who may call them. Every one is SECURITY DEFINER, so a
  * grant in the wrong place is not a style slip: restore_plan_archived_scores
  * granted to authenticated would let anyone un-archive their scores past the
- * cap, and record_smart_import_charge would let anyone mint refundable charges.
+ * cap.
  *
  * The LAST definition in timestamp order is the one checked, same as
  * limitsInSync, so a later migration that redefines a function is what counts.
@@ -62,13 +62,12 @@ const SERVICE_ONLY = [
     'restore_plan_archived_scores',
     'restore_user_plan_archived_scores',
     'apply_free_tier_archival',
-    'record_smart_import_charge',
     // No caller check at all: anyone who could call it could read any user's plan.
     'resolve_entitlements',
 ];
 // Trigger functions run as their definer; nobody should be able to call them.
-const TRIGGER_ONLY = ['studio_members_restore_plan_archived', 'documents_refuse_refunded_import'];
-const CLIENT_RPCS = ['claim_pdf_export', 'consume_pdf_export', 'refund_smart_import'];
+const TRIGGER_ONLY = ['studio_members_restore_plan_archived'];
+const CLIENT_RPCS = ['claim_pdf_export', 'consume_pdf_export'];
 
 describe('billing-correctness RPC privileges', () => {
     it.each([...SERVICE_ONLY, ...CLIENT_RPCS])('%s is SECURITY DEFINER with a pinned search_path', (fn) => {
@@ -117,18 +116,18 @@ describe('billing-correctness RPC privileges', () => {
         expect(def).toMatch(/if\s+v_user\s+is\s+null\s+then\s+raise/i);
     });
 
-    it('keeps the smart-import ledger out of every client role', () => {
-        const sql = latestDefining('refund_smart_import');
-        for (const role of ['public', 'anon', 'authenticated']) {
-            expect(sql).toMatch(
-                new RegExp(
-                    `revoke\\s+all\\s+on\\s+table\\s+public\\.smart_import_charges\\s+from\\s+${role}\\s*;`,
-                    'i',
-                ),
-            );
+    it('offers clients no smart-import refund: imslp-download refunds its own failures', () => {
+        // A client-callable refund existed only for an import the client rolled
+        // back. imslp-download now creates the score after the PDF is fetched and
+        // gives the credit back on every failure itself, so such an RPC would
+        // only let an account import, delete the score and take the credit back.
+        for (const m of migrations()) {
+            if (/_imslp_works_catalog\.sql$/.test(m.name)) {
+                continue;
+            }
+            expect(m.sql, m.name).not.toMatch(/function\s+public\.refund_smart_import\s*\(/i);
+            expect(m.sql, m.name).not.toMatch(/create\s+table\s+public\.smart_import_charges/i);
         }
-        expect(sql).not.toMatch(/create\s+policy\s+\w+\s+on\s+public\.smart_import_charges/i);
-        expect(sql).toMatch(/alter\s+table\s+public\.smart_import_charges\s+enable\s+row\s+level\s+security/i);
     });
 
     it('derives archived_reason from the writing role, in a SECURITY INVOKER trigger', () => {
@@ -200,11 +199,6 @@ describe('billing-correctness RPC privileges', () => {
         expect(def).toMatch(/public\.consume_quota\s*\(\s*v_owner\s*,\s*'pdf_exports'/i);
     });
 
-    it('bounds a refund by what is left of the monthly cap, per charge', () => {
-        const refund = definition(latestDefining('refund_smart_import'), 'refund_smart_import');
-        expect(refund).toMatch(/limit\s+v_monthly_refunds\s*-\s*v_already/i);
-    });
-
     it('asks about the row owner without the JWT caller check wherever server code acts for someone else', () => {
         // get_entitlements(p_user) raises when p_user is not the JWT's user, so
         // a seat invite (JWT: the Academy owner) restoring the teacher's scores
@@ -243,22 +237,5 @@ describe('billing-correctness RPC privileges', () => {
         const after = resolution(definition(read('20261007120300_billing_correctness.sql'), 'resolve_entitlements'));
         expect(after).toBe(before);
         expect(after).toMatch(/s\.mode\s*=\s*any\s*\(public\.entitling_billing_modes\s*\(\s*\)\)/i);
-    });
-
-    it('refunds an import only once its bytes are gone, and retires the id for good', () => {
-        const refund = definition(latestDefining('refund_smart_import'), 'refund_smart_import');
-        expect(refund).toMatch(/from\s+storage\.objects\s+o\s+where\s+o\.bucket_id\s*=\s*'scores'/i);
-        expect(refund).toMatch(/from\s+public\.documents\s+d\s+where\s+d\.id\s*=\s*p_document/i);
-        // Same per-id lock in the refund and the insert guard, so they serialize.
-        const lock = /pg_advisory_xact_lock\s*\(\s*hashtext\('cleffy\.smart_import_refund'\)/i;
-        expect(refund).toMatch(lock);
-
-        const sql = latestDefining('documents_refuse_refunded_import');
-        const guard = definition(sql, 'documents_refuse_refunded_import');
-        expect(guard).toMatch(lock);
-        expect(guard).toMatch(/refunded_at\s+is\s+not\s+null/i);
-        expect(sql).toMatch(
-            /create\s+trigger\s+documents_refuse_refunded_import\s+before\s+insert\s+or\s+update\s+of\s+id\s+on\s+public\.documents/i,
-        );
     });
 });

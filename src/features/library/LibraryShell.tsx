@@ -8,6 +8,7 @@ import { recordImportStatus, shouldOfferImport } from '@/features/import/importP
 import { prescanDocument } from '@/features/import/prescan';
 import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
+import { isImslpImportCancelled, type ImslpDownloadStage } from '@/features/imslp/imslpApi';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
 import {
     fetchLibraryBootstrap,
@@ -45,6 +46,13 @@ export type LibraryOutletContext = {
         filename: string,
         workTitle: string,
         acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+        /**
+         * Aborted when the user cancels a queued import or leaves the page. A
+         * queued import then stops (ImslpImportCancelledError); one already
+         * sent finishes and lands in the library, without navigating.
+         */
+        signal?: AbortSignal,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
@@ -285,7 +293,13 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
-    const onImportImslp = async (filename: string, workTitle: string, acceptedDisclaimer: boolean) => {
+    const onImportImslp = async (
+        filename: string,
+        workTitle: string,
+        acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+        signal?: AbortSignal,
+    ) => {
         const before = snapshotBefore();
         try {
             const beforeSnap = await refuseIfCloudScoreCap(before);
@@ -293,7 +307,10 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             // The Edge function fetches server-side, so there is no byte progress
             // to report — show the indeterminate bar instead of a stuck 0%.
             setImportingImslp(true);
-            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer);
+            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer, {
+                onStage,
+                signal,
+            });
             if (!result.ok) {
                 return {
                     ok: false as const,
@@ -303,10 +320,17 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             }
             rememberNewScore(before, result.document);
             refreshCap([result.document, ...(beforeSnap?.documents ?? [])]);
-            navigate(`/doc/${result.document.id}`);
+            // The user cancelled or moved on while this was in flight: the
+            // score is in their library, but they are not pulled back to it.
+            if (!signal?.aborted) {
+                navigate(`/doc/${result.document.id}`);
+            }
             return { ok: true as const };
         } catch (err) {
-            captureFailure(err, 'Import failed.');
+            // A cancelled queue wait created nothing and is not a failure.
+            if (!isImslpImportCancelled(err)) {
+                captureFailure(err, 'Import failed.');
+            }
             throw err;
         } finally {
             setImportingImslp(false);

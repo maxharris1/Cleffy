@@ -217,3 +217,100 @@ export const parseImslpFileBlocks = (wikitext: string): Map<string, ImslpFileMet
     }
     return out;
 };
+
+/**
+ * Who IMSLP credits for one file — what a Creative Commons Attribution
+ * license obliges a copy to name. Kept apart from ImslpFileMeta (which drives
+ * edition ranking in imslp-work) so the picker's response shape is unchanged.
+ */
+export interface ImslpFileCredits {
+    /** `Editor` field: names from `{{LinkEd|First|Last}}`, or plain text. */
+    editor: string | null;
+    /** `Arranger` / `Transcriber` fields, same treatment. */
+    arranger: string | null;
+    /** `{{P}}` official name, or a plain-text publisher line ("Viktor Keil, 2024."). */
+    publisher: string | null;
+    year: number | null;
+}
+
+/** Longest credit kept; a field past this is not a name. */
+const MAX_CREDIT_CHARS = 200;
+
+const clipCredit = (value: string): string | null => {
+    const trimmed = value
+        .replace(/\s+/g, ' ')
+        .replace(/^[\s,;.]+|[\s,;]+$/g, '')
+        .trim();
+    if (!trimmed) {
+        return null;
+    }
+    return trimmed.length > MAX_CREDIT_CHARS ? `${trimmed.slice(0, MAX_CREDIT_CHARS - 1)}…` : trimmed;
+};
+
+/**
+ * Person names out of an Editor/Arranger value. IMSLP links people with
+ * `{{LinkEd|First|Last|born|died}}`, `{{LinkArr|…}}` and kin (first two args
+ * are the name); other templates (`{{FE}}` "first edition", scan credits) are
+ * not names and are dropped; any plain text left over is kept.
+ */
+const creditNames = (value: string): string | null => {
+    const names: string[] = [];
+    const rest = value.replace(/\{\{((?:[^{}]|\{\{[^{}]*\}\})*)\}\}/g, (_, inner: string) => {
+        const args = splitTemplateArgs(inner);
+        const name = args[0] ?? '';
+        if (/^Link(Ed|Arr|Name|Comp|Tr|Trans)\b/i.test(name)) {
+            const person = [stripMarkup(args[1] ?? ''), stripMarkup(args[2] ?? '')].filter(Boolean).join(' ');
+            if (person) {
+                names.push(person);
+            }
+        }
+        return ' ';
+    });
+    const plain = stripMarkup(rest.replace(/<br\s*\/?>/gi, ', '))
+        .split(/\s*,\s*/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+    for (const part of plain) {
+        names.push(part);
+    }
+    const unique = [...new Set(names)];
+    return unique.length > 0 ? clipCredit(unique.join(', ')) : null;
+};
+
+/** Plain-text publisher line once templates are gone ("Viktor Keil, 2024." → "Viktor Keil, 2024"). */
+const plainPublisher = (value: string): string | null =>
+    clipCredit(stripMarkup(value.replace(/\{\{((?:[^{}]|\{\{[^{}]*\}\})*)\}\}/g, ' ')).replace(/\.$/, ''));
+
+/**
+ * Credits for one file on the work page, or null when no file block lists it.
+ * Per-file `Publisher Information N` / `Editor N` override the block's shared
+ * value, as in parseImslpFileBlocks.
+ */
+export const fileCreditsFor = (wikitext: string, filename: string): ImslpFileCredits | null => {
+    const wanted = fileBlockKey(filename);
+    for (const block of extractBlocks(wikitext)) {
+        const fields = parseFields(block);
+        for (const [key, name] of fields) {
+            const nameMatch = key.match(/^File Name (\d+)$/);
+            if (!nameMatch || !name || fileBlockKey(name) !== wanted) {
+                continue;
+            }
+            const n = nameMatch[1];
+            const publisherField =
+                fields.get(`Publisher Information ${n}`) ?? fields.get('Publisher Information') ?? '';
+            const info = parsePublisherInfo(publisherField);
+            const editorField = fields.get(`Editor ${n}`) ?? fields.get('Editor') ?? '';
+            const arrangers = [...fields.entries()]
+                .filter(([field]) => isArrangerField(field))
+                .map(([, value]) => creditNames(value))
+                .filter((v): v is string => Boolean(v));
+            return {
+                editor: creditNames(editorField),
+                arranger: arrangers.length > 0 ? clipCredit([...new Set(arrangers)].join(', ')) : null,
+                publisher: info.publisher ? clipCredit(info.publisher) : plainPublisher(publisherField),
+                year: info.year,
+            };
+        }
+    }
+    return null;
+};

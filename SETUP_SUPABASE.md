@@ -445,6 +445,45 @@ supabase functions deploy score-analyze analyze-annotations analyze-notes
 supabase functions deploy imslp-download   # now meters smart imports
 ```
 
+**Deploy `imslp-download` and `imslp-work` after applying
+`20261007120700_document_provenance.sql`.** The download now writes the score's
+provenance (`documents.source_url`, `source_filename`, `source_license`,
+`source_attribution`) and calls `edge_rate_block`; against a database without
+them every import fails at the provenance write (and is refunded). `imslp-work`
+now reports an edition as not downloadable when IMSLP's license lookup was
+unavailable (`licenseCheck: 'unavailable'`), matching what `imslp-download`
+already refused.
+
+`imslp-download` also paces live IMSLP fetches for the whole deployment on one
+`edge_rate_buckets` key (`imslp:download:global`): at most
+`IMSLP_DOWNLOAD_GLOBAL_MAX` fetches per `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
+(defaults `2` and `1000` — two a second). A caller that finds the window full
+gets `429 { code: 'download_queued', retryAfterSec }` at once and the client
+waits and retries (up to 90 s), showing "Queued for IMSLP…". When IMSLP itself
+answers 429 — on the file servers or on the API (license parse, imageinfo) —
+the function closes the same key for IMSLP's `Retry-After` (60 s when absent,
+900 s at most), so every import backs off together. The slot is taken before
+the invocation's first live IMSLP request, the license parse included, so
+nothing reaches IMSLP while the key is closed; a cached license refusal spends
+no slot. Tune with
+`npx supabase secrets set IMSLP_DOWNLOAD_GLOBAL_MAX=1 IMSLP_DOWNLOAD_GLOBAL_SPACING_MS=2000`.
+
+Per-caller limits: 60 requests a minute per client address (a school's NAT
+shares one), then 10 a minute per signed-in user, answered as
+`429 { code: 'caller_rate_limited', retryAfterSec }`, which current clients wait
+out like the queue.
+
+**`imslp-download` now creates the score itself.** Current clients send
+`create: true` and a `title` with a fresh `documentId`; the function inserts the
+`documents` row (as the caller, so RLS and the score-cap trigger apply) only once
+the PDF is fetched, so a queued or abandoned import never leaves an empty score
+behind. **Deploy the function before the web app**: a new client talking to the
+old function is refused (403, "Only the document owner…") because the row it
+names does not exist yet. Clients from before this change still create the row
+first and are served as before (owner-checked), but they do not understand
+`download_queued`/`caller_rate_limited`: while the queue is busy they show the
+message as an error and roll their row back, until the PWA updates.
+
 **Deploy the three student functions together**, after applying
 `20260827150000_student_credentials.sql`. They are one change: `student-claim` is
 new, `student-login` now takes a username and password instead of a code, and

@@ -103,6 +103,7 @@ interface EditionLicenseFields {
     licenseLabel?: string | null;
     restriction?: string | null;
     downloadable?: boolean;
+    licenseCheck?: 'unavailable';
 }
 
 export type EditionAvailability =
@@ -125,6 +126,11 @@ export const editionAvailability = (edition: EditionLicenseFields): EditionAvail
         }
         if (edition.license === 'non-pd') {
             return { kind: 'restricted', label: edition.licenseLabel ?? 'Copyright restricted' };
+        }
+        // IMSLP could not be asked just now: say so, rather than implying the
+        // file failed a check it never had.
+        if (edition.licenseCheck === 'unavailable') {
+            return { kind: 'unknown', label: 'License check unavailable' };
         }
         return { kind: 'unknown', label: 'License unverified' };
     }
@@ -223,8 +229,9 @@ const scoreEdition = (edition: EditionRankFields, index: number): number => {
 
 /**
  * Cleared for a one-tap fetch. `downloadable !== false` keeps older responses
- * without license fields eligible; `license === 'unknown'` is fail-open on the
- * server but must not be a one-tap import (the download 409s after insert).
+ * without license fields eligible; `license === 'unknown'` is never importable
+ * (imslp-download refuses it as license_unknown, and older imslp-work builds
+ * still marked a failed lookup downloadable).
  */
 export const isEditionImportable = (edition: EditionLicenseFields): boolean =>
     edition.downloadable !== false && edition.license !== 'unknown';

@@ -1,7 +1,15 @@
 -- Billing correctness for the paid launch: resubscribing restores what a lapse
--- archived, the PDF export allowance is claimed server-side before the export
--- is built, and a smart-import credit spent on an import the client then rolled
--- back can be given back -- once, and only for an import that no longer exists.
+-- archived, and the PDF export allowance is claimed server-side before the
+-- export is built.
+--
+-- (This migration also carried a smart-import refund ledger -- a credit spent
+-- on an import the CLIENT then rolled back could be given back once. It was
+-- dropped when integrating with fix/scope-imslp, before ever being applied:
+-- imslp-download now creates the score itself once the PDF is in hand, refunds
+-- every failure before it answers, and the client never rolls a delivered
+-- score back, so there is no client rollback left to refund. Keeping a
+-- client-callable refund would only have let an account import, delete the
+-- score and take the credit back. See the note at the end of this file.)
 --
 -- Design notes:
 --  * Archival now records WHY a score is archived. apply_free_tier_archival is
@@ -26,9 +34,6 @@
 --  * A share-link guest's PDF export is drawn from the score owner's allowance
 --    rather than exempted, so the free plan's one export a month cannot be
 --    multiplied by opening one's own share link anonymously.
---  * A refunded smart import's document id is spent for good, and a refund
---    needs the score's bytes gone as well as its row, so a refund can never be
---    taken while keeping the score.
 
 -- ---------------------------------------------------------------------------
 -- Why a score is archived
@@ -631,233 +636,16 @@ revoke all on function public.consume_pdf_export () from anon;
 grant execute on function public.consume_pdf_export () to authenticated;
 
 -- ---------------------------------------------------------------------------
--- Smart-import credits: a ledger, so a rolled-back import can be refunded once
+-- Smart-import credits: no client refund
 -- ---------------------------------------------------------------------------
--- imslp-download meters smart_imports and refunds its own failures, but the
--- import is only finished when the CLIENT has the bytes. If the client fails
--- after the function answered (the response is lost, the download from Storage
--- fails), it rolls the import back by deleting the score -- and the credit was
--- already spent on a score the teacher never got.
---
--- One row per metered import, written by the function only after the PDF landed
--- in Storage, and only when a credit was actually consumed (an unlimited plan
--- spends none, so has nothing to give back). document_id is deliberately not a
--- foreign key: a refund is only allowed once that document is GONE, and the
--- row has to outlive it to say so.
-create table public.smart_import_charges (
-    id uuid primary key default gen_random_uuid(),
-    user_id uuid not null references auth.users (id) on delete cascade,
-    document_id uuid not null,
-    -- The usage_counters month the credit was taken from. A refund only ever
-    -- gives back to the same month, so it cannot carry credit across a rollover.
-    month date not null,
-    charged_at timestamptz not null default now(),
-    refunded_at timestamptz
-);
-
--- Not partial: the refund looks up open charges by document, and the insert
--- guard below looks up REFUNDED ones on every new score.
-create index smart_import_charges_document on public.smart_import_charges (document_id);
-
-create index smart_import_charges_user_month on public.smart_import_charges (user_id, month);
-
-alter table public.smart_import_charges enable row level security;
-
--- Zero policies: written by the Edge Function (service role), consumed only
--- through refund_smart_import below. Nothing for a client to read or forge.
-revoke all on table public.smart_import_charges from public;
-revoke all on table public.smart_import_charges from anon;
-revoke all on table public.smart_import_charges from authenticated;
-grant all on table public.smart_import_charges to service_role;
-
--- Records the charge for an import that landed. Refuses to record more open
--- charges in a month than the counter has increments: every refundable charge
--- must stand for a distinct unit that really was taken from THIS month. That is
--- what closes the one gap between consume_quota and this call -- an import that
--- straddles midnight on the 1st was counted in the old month, finds nothing in
--- the new one to stand for, and is simply not refundable.
-create or replace function public.record_smart_import_charge (p_user uuid, p_document uuid) returns boolean language plpgsql security definer
-set search_path = public as $$
-declare
-    v_month date := date_trunc('month', now())::date;
-    v_count int;
-    v_open int;
-begin
-    if p_user is null or p_document is null then
-        raise exception 'record_smart_import_charge requires p_user and p_document' using errcode = '22023';
-    end if;
-
-    -- Serializes this user's charges and refunds against each other, so the
-    -- count-then-insert below cannot interleave.
-    perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_charges'), hashtext(p_user::text));
-
-    select uc.count into v_count
-    from public.usage_counters uc
-    where uc.user_id = p_user and uc.metric = 'smart_imports' and uc.month = v_month;
-
-    select count(*)::int into v_open
-    from public.smart_import_charges c
-    where c.user_id = p_user and c.month = v_month and c.refunded_at is null;
-
-    if coalesce(v_count, 0) <= v_open then
-        return false;
-    end if;
-
-    insert into public.smart_import_charges (user_id, document_id, month)
-    values (p_user, p_document, v_month);
-    return true;
-end;
-$$;
-
-revoke all on function public.record_smart_import_charge (uuid, uuid) from public;
-revoke all on function public.record_smart_import_charge (uuid, uuid) from anon;
-revoke all on function public.record_smart_import_charge (uuid, uuid) from authenticated;
-grant execute on function public.record_smart_import_charge (uuid, uuid) to service_role;
-
--- The client's half of the rollback, called after it has deleted the score.
--- What keeps it from minting credits:
---  * it only refunds charges the server recorded, each at most once (the
---    refunded_at stamp is set in the same statement that selects it);
---  * only the caller's own charges, so nobody refunds into someone else's month;
---  * only once the import is really gone -- the documents row AND every object
---    under its folder in the scores bucket. Deleting only the row would leave
---    the PDF in Storage, and since document ids are client-chosen the owner
---    could re-create the row under the same id and be its owner again;
---  * and the id is spent for good: documents_refuse_refunded_import below
---    refuses any score under an id whose import was refunded, so the row (and
---    with it access to that folder) can never come back;
---  * only in the month it was charged, and only within 15 minutes of the
---    charge: a rollback follows its import immediately, so anything later is a
---    score that was used and then deleted, which is not a failed import;
---  * at most two credits in a calendar month, counted per charge rather than
---    per call (the free plan's whole smart-import allowance; no paid plan
---    meters imports). A modified client could still
---    keep bytes it downloaded and re-upload them as an ordinary score -- an
---    upload any account may make, counted against the cloud-score cap -- and
---    this bounds how far that can stretch the allowance. A genuine third
---    rollback in one month is rare enough to cost the credit.
--- Returns the number of credits given back (0 when there was nothing to give).
-create or replace function public.refund_smart_import (p_document uuid) returns int language plpgsql security definer
-set search_path = public as $$
-declare
-    v_user uuid := auth.uid();
-    v_month date := date_trunc('month', now())::date;
-    v_monthly_refunds constant int := 2;
-    v_already int;
-    v_refunded int;
-begin
-    if v_user is null then
-        raise exception 'not authenticated' using errcode = '28000';
-    end if;
-    if p_document is null then
-        raise exception 'refund_smart_import requires p_document' using errcode = '22023';
-    end if;
-
-    -- This user's charges and refunds, then this id: the insert guard takes the
-    -- id's lock too, so a score re-created under the id either commits before
-    -- the existence check below (and is seen) or waits for this refund to commit
-    -- (and is refused). Only this function takes both, in this order.
-    perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_charges'), hashtext(v_user::text));
-    perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_refund'), hashtext(p_document::text));
-
-    if exists (select 1 from public.documents d where d.id = p_document) then
-        return 0;
-    end if;
-
-    -- The bytes must be gone too. A prefix match on the folder, not
-    -- storage.foldername(): it uses the bucket/name index, and a uuid's text
-    -- holds no LIKE wildcards.
-    if exists (
-        select 1
-        from storage.objects o
-        where o.bucket_id = 'scores'
-          and o.name like p_document::text || '/%'
-    ) then
-        return 0;
-    end if;
-
-    select count(*)::int into v_already
-    from public.smart_import_charges c
-    where c.user_id = v_user and c.month = v_month and c.refunded_at is not null;
-
-    if v_already >= v_monthly_refunds then
-        return 0;
-    end if;
-
-    -- Bounded by what is left of the monthly cap, not just by the document: the
-    -- same id metered twice (imslp-download called again for it) holds two open
-    -- charges, and refunding both in one go must not carry the month past the
-    -- cap. Oldest first; the per-user lock above already serializes this.
-    with refundable as (
-        select c.id
-        from public.smart_import_charges c
-        where c.document_id = p_document
-          and c.user_id = v_user
-          and c.refunded_at is null
-          and c.month = v_month
-          and c.charged_at > now() - interval '15 minutes'
-        order by c.charged_at, c.id
-        limit v_monthly_refunds - v_already
-    ),
-    refunded as (
-        update public.smart_import_charges c
-        set refunded_at = now()
-        where c.id in (select r.id from refundable r)
-        returning 1
-    )
-    select count(*)::int into v_refunded from refunded;
-
-    if v_refunded > 0 then
-        update public.usage_counters
-        set count = greatest(0, count - v_refunded), updated_at = now()
-        where user_id = v_user
-          and metric = 'smart_imports'
-          and month = v_month;
-    end if;
-
-    return v_refunded;
-end;
-$$;
-
-revoke all on function public.refund_smart_import (uuid) from public;
-revoke all on function public.refund_smart_import (uuid) from anon;
-grant execute on function public.refund_smart_import (uuid) to authenticated;
-
--- A refunded import's id is spent. Without this the refund is a loan: delete
--- the row, take the credit back, re-create the row under the same id (ids are
--- client-chosen) and the owner-membership trigger makes the caller owner of
--- that folder again. The app always mints a fresh uuid, so no legitimate flow
--- reuses one. UPDATE OF id is covered too, although the document_members
--- foreign key already keeps a score's id from changing under it.
---
--- SECURITY DEFINER to read the ledger, which no client role can. Takes the
--- refund's per-id lock so the check cannot interleave with a refund in flight
--- (see refund_smart_import); an uncontended advisory lock is cheap next to the
--- insert it guards.
-create or replace function public.documents_refuse_refunded_import () returns trigger language plpgsql security definer
-set search_path = public as $$
-begin
-    if tg_op = 'UPDATE' and new.id is not distinct from old.id then
-        return new;
-    end if;
-
-    perform pg_advisory_xact_lock (hashtext('cleffy.smart_import_refund'), hashtext(new.id::text));
-
-    if exists (
-        select 1
-        from public.smart_import_charges c
-        where c.document_id = new.id
-          and c.refunded_at is not null
-    ) then
-        raise exception 'document id is not available' using errcode = '23505';
-    end if;
-    return new;
-end;
-$$;
-
-revoke all on function public.documents_refuse_refunded_import () from public;
-revoke all on function public.documents_refuse_refunded_import () from anon;
-revoke all on function public.documents_refuse_refunded_import () from authenticated;
-
-create trigger documents_refuse_refunded_import before insert or update of id on public.documents
-for each row execute function public.documents_refuse_refunded_import ();
+-- An earlier revision of this file added smart_import_charges,
+-- record_smart_import_charge(), refund_smart_import() and the
+-- documents_refuse_refunded_import trigger, so a client that rolled an IMSLP
+-- import back (deleting the row it had created before calling imslp-download)
+-- could ask for the credit back. With 20261007120700 and the matching
+-- imslp-download, the row is created by the function after the PDF is fetched,
+-- every failure path removes what the function created and refunds the credit
+-- before answering, and the client keeps whatever a 200 delivered. Nothing is
+-- left for a client to roll back, so none of those objects exist: a credit is
+-- spent exactly when an import delivered its score, and given back by the one
+-- place that knows it did not.

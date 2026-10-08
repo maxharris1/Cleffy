@@ -1,3 +1,4 @@
+import { PAID_VISION_READS } from '@/features/billing/paidAllowances';
 import type { BillingTier, EffectiveTier, Entitlements, UsageMetric } from '@/types/database';
 
 /**
@@ -207,15 +208,20 @@ const METRIC_COPY: Record<UsageMetric, { spent: string; spentUnknown: string; up
         spentUnknown: 'You have used this month’s play-alongs',
         upgrade: 'Upgrade for unlimited play-along analysis.',
     },
+    // Named for what spends them, not the internal metric: the AI pass of
+    // Import marks (and fingering note reads, where that ships) draws on
+    // vision_reads, and an IMSLP import on smart_imports. Paid plans carry a
+    // fair-use ceiling on AI reads, so the upgrade quotes it — "unlimited"
+    // here would be a promise the paid tier then breaks.
     vision_reads: {
-        spent: 'You have used your {limit} free fingering reads this month',
-        spentUnknown: 'You have used this month’s fingering reads',
-        upgrade: 'Upgrade for unlimited AI fingering reads.',
+        spent: 'You have used your {limit} free AI page reads this month',
+        spentUnknown: 'You have used this month’s AI page reads',
+        upgrade: `Upgrade for up to ${PAID_VISION_READS} AI page reads a month.`,
     },
     smart_imports: {
-        spent: 'You have used your {limit} free smart imports this month',
-        spentUnknown: 'You have used this month’s smart imports',
-        upgrade: 'Upgrade for unlimited smart imports.',
+        spent: 'You have used your {limit} free IMSLP imports this month',
+        spentUnknown: 'You have used this month’s IMSLP imports',
+        upgrade: 'Upgrade for unlimited IMSLP imports.',
     },
     pdf_exports: {
         spent: 'You have used your {limit} free PDF export this month',
@@ -246,7 +252,9 @@ export const limitHeadline = (payload: LimitReachedPayload): string => {
 
 export const limitAction = (payload: LimitReachedPayload): string => {
     if (payload.code === 'fair_use_cap') {
-        return 'Your plan is unlimited in normal use — get in touch and we will lift it.';
+        // Only paid AI page reads carry a fair-use ceiling, and the pricing
+        // card states the number — so this must not call the plan unlimited.
+        return 'Your allowance resets at the start of next month — get in touch if you need more before then.';
     }
     return METRIC_COPY[payload.metric].upgrade;
 };

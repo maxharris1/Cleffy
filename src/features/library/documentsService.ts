@@ -1,4 +1,8 @@
-import { importImslpPdfToStorage, type ImslpDownloadFallback } from '@/features/imslp/imslpApi';
+import {
+    importImslpPdfToStorage,
+    type ImslpDownloadFallback,
+    type ImslpDownloadStage,
+} from '@/features/imslp/imslpApi';
 import { prepareUploadFile } from '@/features/import/prepareUpload';
 import { getThumbnail } from '@/features/library/thumbnailService';
 import { uploadPdfToStorage, type UploadProgress } from '@/lib/storageUpload';
@@ -325,89 +329,69 @@ export const uploadDocument = async (
 };
 
 /**
- * IMSLP import: create the documents row, let Edge fetch+store the PDF, then
- * hydrate Dexie from Storage (one download leg — no Edge→browser PDF proxy).
+ * IMSLP import: Edge fetches the PDF, creates the documents row and stores
+ * the PDF; then hydrate Dexie from Storage (one download leg — no Edge→browser
+ * PDF proxy).
+ *
+ * The row is created server-side, after the PDF is in hand, rather than here
+ * first: an import can wait in the deployment-wide IMSLP queue for up to a
+ * minute and a half, and a row inserted up front would sit in the library as
+ * an empty score — counting against the free cap and visible on every device
+ * — whenever the tab closed or the network dropped before a rollback could
+ * run. Now nothing exists until the import has succeeded, and an import that
+ * finishes after the browser stopped waiting lands complete.
+ *
+ * The smart_imports credit is therefore only ever spent on an import that
+ * delivered its score: imslp-download gives the credit back on every failure
+ * before it answers (and removes any PDF and row it created), and nothing on
+ * this side rolls a delivered score back — a failed read after a 200 leaves the
+ * score in the library. So there is no client-side refund, and no client
+ * rollback that could need one.
  */
 export const importDocumentFromImslp = async (
     imslpFilename: string,
     workTitle: string,
     ownerId: string,
     acceptedDisclaimer: boolean,
+    options: { onStage?: (stage: ImslpDownloadStage) => void; signal?: AbortSignal } = {},
 ): Promise<{ ok: true; document: DocumentRow } | { ok: false; fallback: ImslpDownloadFallback }> => {
     noteLibraryMutation();
-    const supabase = getSupabase();
     const id = crypto.randomUUID();
-    const storagePath = `${id}/original.pdf`;
     const title = workTitle.replace(/\.pdf$/i, '').trim() || imslpFilename.replace(/\.pdf$/i, '');
 
-    const { data: document, error: insertError } = await supabase
-        .from('documents')
-        .insert({ id, owner_id: ownerId, title, storage_path: storagePath })
-        .select()
-        .single();
-    if (insertError) {
-        // The free-tier cap is a database trigger, so it arrives here rather
-        // than as an HTTP 402 — normalize it to the same typed error.
-        const limit = await cloudScoreCapRefusal(insertError, ownerId);
-        if (limit) {
-            throw limit;
-        }
-        throw new Error(`Could not create document: ${insertError.message}`);
+    const result = await importImslpPdfToStorage({
+        filename: imslpFilename,
+        documentId: id,
+        title,
+        acceptedDisclaimer,
+        workTitle,
+        onStage: options.onStage,
+        signal: options.signal,
+    });
+    if (!result.ok) {
+        return { ok: false, fallback: result };
+    }
+    noteLibraryMutationCommitted();
+
+    const document = await fetchDocument(id).catch(() => null);
+    if (!document) {
+        throw new Error('The score was added, but could not be opened yet — refresh your library to see it.');
     }
 
-    /**
-     * Undo the import. Once the score is gone, ask for the smart_imports credit
-     * back: imslp-download refunds its own failures, but a failure on THIS side
-     * of its answer (the response lost in transit, the download from Storage
-     * failing) happens after the credit was spent. refund_smart_import only pays
-     * out for a charge the function recorded against this id, once, and only
-     * once both the PDF and the row are gone (which is why the PDF goes first,
-     * while this session still owns its folder) -- so it is skipped when the
-     * delete did not land, and it answers 0 when there was nothing to give back
-     * (a fallback the function already refunded, an unlimited plan, a PDF that
-     * would not delete). A refunded id is retired for good server-side; this
-     * flow never reuses one. Best effort: a failed refund costs the teacher one
-     * credit, and must not mask the error being reported.
-     */
-    const rollback = async () => {
-        await supabase.storage
-            .from('scores')
-            .remove([storagePath])
-            .catch(() => undefined);
-        const { error: deleteError } = await supabase.from('documents').delete().eq('id', id);
-        noteLibraryMutationCommitted();
-        if (deleteError) {
-            return;
-        }
-        try {
-            const { error: refundError } = await supabase.rpc('refund_smart_import', { p_document: id });
-            if (refundError) {
-                console.warn('Could not refund the smart import', refundError.message);
-            }
-        } catch (err) {
-            console.warn('Could not refund the smart import', err);
-        }
-    };
-
+    // Page count and the offline copy are conveniences: the score is already
+    // stored, so a slow or failed read here must not undo a paid import.
+    let pageCount: number | null = document.page_count;
     try {
-        const result = await importImslpPdfToStorage(imslpFilename, id, acceptedDisclaimer, workTitle);
-        if (!result.ok) {
-            await rollback();
-            return { ok: false, fallback: result };
-        }
-        noteLibraryMutationCommitted();
-
-        const bytes = await loadDocumentBytes({ ...document, page_count: null }, { userId: ownerId });
-        const pageCount = await countPdfPages(bytes);
+        const bytes = await loadDocumentBytes(document, { userId: ownerId });
+        pageCount = await countPdfPages(bytes);
         if (pageCount !== null) {
-            await supabase.from('documents').update({ page_count: pageCount }).eq('id', id);
+            await getSupabase().from('documents').update({ page_count: pageCount }).eq('id', id);
         }
-
-        return { ok: true, document: { ...document, page_count: pageCount } };
-    } catch (err) {
-        await rollback();
-        throw err;
+    } catch {
+        // the viewer loads the PDF (and counts its pages) on open
     }
+
+    return { ok: true, document: { ...document, page_count: pageCount } };
 };
 
 /** Ids of the caller's favorited documents (favorites are per-user, RLS-scoped). */

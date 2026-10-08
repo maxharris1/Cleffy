@@ -18,8 +18,18 @@ import { buttonClassName, linkClassName } from '@/ui/classNames';
 const DISCLAIMER =
     'IMSLP makes no guarantee that files are public domain in your country. By downloading you acknowledge you understand and agree to obey the copyright laws of your country.';
 
+/**
+ * `queued`: IMSLP downloads are paced deployment-wide and this one is waiting
+ * for its slot — the client retries on its own, so it reads as progress, not
+ * as an error.
+ */
 export type DownloadStatus =
-    { kind: 'idle' } | { kind: 'downloading' } | { kind: 'fallback'; openUrl: string; message: string };
+    | { kind: 'idle' }
+    | { kind: 'downloading' }
+    | { kind: 'queued' }
+    | { kind: 'fallback'; openUrl: string; message: string };
+
+const QUEUED_COPY = 'Queued — IMSLP downloads are paced. Retrying automatically…';
 
 interface ImslpWorkPanelProps {
     work: ImslpWorkDetail;
@@ -37,6 +47,8 @@ interface ImslpWorkPanelProps {
     onSelect: (edition: ImslpEdition) => void;
     onImportSelected: () => void;
     onImportLocalPdf: (file: File) => void;
+    /** Stops an import waiting in the pacing queue. Nothing has been created or charged yet. */
+    onCancelQueued?: () => void;
 }
 
 const URTEXT_COPYRIGHT_NOTE = /copyright status for urtext/i;
@@ -73,6 +85,7 @@ export const ImslpWorkPanel = ({
     onSelect,
     onImportSelected,
     onImportLocalPdf,
+    onCancelQueued,
 }: ImslpWorkPanelProps) => {
     const parsed = displayWorkTitle(work.title);
     const composer = work.composer ?? parsed.composer;
@@ -87,10 +100,23 @@ export const ImslpWorkPanel = ({
     const selectedImportable = selected !== null && isEditionImportable(selected);
 
     const buttonLabel =
-        download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : 'Add to my library';
+        download.kind === 'downloading'
+            ? 'Downloading from IMSLP…'
+            : download.kind === 'queued'
+              ? 'Queued for IMSLP…'
+              : busy
+                ? 'Adding to library…'
+                : 'Add to my library';
     /* The Add button is disabled while this runs, so its label change is not
        announced — the polite region below is the only screen-reader feedback. */
-    const statusLine = download.kind === 'downloading' ? 'Downloading from IMSLP…' : busy ? 'Adding to library…' : null;
+    const statusLine =
+        download.kind === 'downloading'
+            ? 'Downloading from IMSLP…'
+            : download.kind === 'queued'
+              ? QUEUED_COPY
+              : busy
+                ? 'Adding to library…'
+                : null;
 
     return (
         <div className="imslp-panel-view mt-4">
@@ -182,16 +208,20 @@ export const ImslpWorkPanel = ({
                                     ) : null}
                                     {!importable ? (
                                         <span className="mt-0.5 block text-xs text-stone-500">
-                                            {availability?.kind === 'unknown'
-                                                ? 'Not importable here — '
-                                                : 'Not downloadable here — '}
+                                            {edition.licenseCheck === 'unavailable'
+                                                ? 'Couldn’t check the license just now — '
+                                                : availability?.kind === 'unknown'
+                                                  ? 'Not importable here — '
+                                                  : 'Not downloadable here — '}
                                             <a
                                                 href={edition.openUrl}
                                                 target="_blank"
                                                 rel="noreferrer"
                                                 className={`text-xs ${linkClassName}`}
                                             >
-                                                open on IMSLP
+                                                {edition.licenseCheck === 'unavailable'
+                                                    ? 'check on IMSLP'
+                                                    : 'open on IMSLP'}
                                             </a>
                                         </span>
                                     ) : null}
@@ -291,6 +321,19 @@ export const ImslpWorkPanel = ({
                         ) : null}
                     </div>
                 </>
+            ) : null}
+
+            {download.kind === 'queued' ? (
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <p className="text-xs text-stone-600" aria-hidden="true">
+                        {QUEUED_COPY}
+                    </p>
+                    {onCancelQueued ? (
+                        <button type="button" onClick={onCancelQueued} className={buttonClassName('ghost', 'sm')}>
+                            Cancel import
+                        </button>
+                    ) : null}
+                </div>
             ) : null}
 
             <p className="sr-only" role="status" aria-live="polite">

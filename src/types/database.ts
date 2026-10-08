@@ -41,6 +41,30 @@ export type DocumentRow = {
      * column lists do not select it.
      */
     archived_reason?: ArchivedReason | null;
+    // Provenance of an imported score (IMSLP), written only by imslp-download
+    // under the service role — clients can neither set nor change it
+    // (documents_guard_provenance). Present on a full-row read (`select('*')`,
+    // fetchDocument); optional because the library list, library_bootstrap and
+    // a cache-synthesized offline row don't carry it. Null for an uploaded PDF
+    // and for imports made before provenance was recorded.
+    /** The IMSLP work page, e.g. https://imslp.org/wiki/Piano_Sonata_No.14… */
+    source_url?: string | null;
+    /** The IMSLP file the PDF came from. */
+    source_filename?: string | null;
+    /** IMSLP's license tag, verbatim, e.g. "Creative Commons Attribution 4.0". */
+    source_license?: string | null;
+    source_attribution?: DocumentSourceAttribution | null;
+};
+
+/** documents.source_attribution — who IMSLP credits for the file (mirrors _shared/imslpProvenance.ts). */
+export type DocumentSourceAttribution = {
+    source: 'imslp';
+    work: string;
+    composer: string | null;
+    editor: string | null;
+    arranger: string | null;
+    publisher: string | null;
+    year: number | null;
 };
 
 export type ArchivedReason = 'plan_lapse' | 'owner';
@@ -706,6 +730,12 @@ export type Database = {
                 Args: { p_account_key: string };
                 Returns: number;
             };
+            // Service role only: imslp-download closes the shared IMSLP pacing
+            // key for IMSLP's Retry-After after a 429.
+            edge_rate_block: {
+                Args: { p_key: string; p_seconds: number };
+                Returns: undefined;
+            };
             // p_user is omitted by clients — the function resolves auth.uid() and
             // rejects any attempt to read another user's entitlements.
             get_entitlements: {
@@ -764,16 +794,6 @@ export type Database = {
             consume_pdf_export: {
                 Args: Record<string, never>;
                 Returns: PdfExportClaim;
-            };
-            // Gives back the smart_imports credit for an IMSLP import the client
-            // rolled back: only for a charge imslp-download recorded against this
-            // document, once, within 15 minutes, at most twice a month, and only
-            // once the row AND its PDF in Storage are gone -- after which the id
-            // can never hold a score again. Returns the number of credits
-            // refunded (0 when nothing applied).
-            refund_smart_import: {
-                Args: { p_document: string };
-                Returns: number;
             };
             // Upserts the assignment AND the document_members row that carries the
             // access, returning the assignment id.
