@@ -328,14 +328,26 @@ Deno.serve(async (req) => {
             email: user.email,
             password,
         });
-        if (verifyError || verified.user?.id !== user.id) {
-            const status = verifyError?.status === 429 ? 429 : 403;
+        if (verifyError?.status === 429) {
             return jsonResponse(
-                status === 429
-                    ? { error: 'Too many attempts. Wait a few minutes and try again.', code: 'rate_limited' }
-                    : { error: 'That password is not correct.', code: 'reauthentication_failed' },
-                status,
+                { error: 'Too many attempts. Wait a few minutes and try again.', code: 'rate_limited' },
+                429,
             );
+        }
+        if (verifyError && (!verifyError.status || verifyError.status >= 500)) {
+            // GoTrue itself failed: "wrong password" would send the person off to
+            // reset a password that was right all along.
+            logError(FN, verifyError, { code: 'reauthentication_unavailable', userId: user.id });
+            return jsonResponse(
+                {
+                    error: 'We could not check your password just now, so nothing has been deleted. Please try again.',
+                    code: 'reauthentication_unavailable',
+                },
+                503,
+            );
+        }
+        if (verifyError || verified.user?.id !== user.id) {
+            return jsonResponse({ error: 'That password is not correct.', code: 'reauthentication_failed' }, 403);
         }
         await verifier.auth.signOut({ scope: 'local' }).catch(() => undefined);
     }
