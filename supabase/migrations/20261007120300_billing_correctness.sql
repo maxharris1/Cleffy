@@ -20,6 +20,12 @@
 --    service-only resolve_entitlements(), so server bookkeeping can ask about a
 --    user other than the JWT's (a seat invite restores the seated teacher's
 --    scores while the request is the Academy owner's).
+--  * A resubscribe restores the subscriber AND the teachers seated in the
+--    studios they own: an Academy subscription entitles those seats, and a
+--    seated teacher gets no webhook of their own.
+--  * A share-link guest's PDF export is drawn from the score owner's allowance
+--    rather than exempted, so the free plan's one export a month cannot be
+--    multiplied by opening one's own share link anonymously.
 --  * A refunded smart import's document id is spent for good, and a refund
 --    needs the score's bytes gone as well as its row, so a refund can never be
 --    taken while keeping the score.
@@ -340,14 +346,11 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Resubscribe: restore what the lapse archived, up to the plan's cap
 -- ---------------------------------------------------------------------------
--- Called by the webhook whenever a subscription is applied in an entitling
--- status (a new checkout, a trial, unpaid -> active), and by the seat trigger
--- below when an Academy owner seats a teacher (an Academy seat is unlimited
--- even when the teacher's own plan lapsed). Every paid tier is
--- unlimited on cloud_scores, so in practice this restores everything; the cap
--- arithmetic is for an entitling row that still resolves to a finite plan (an
--- unrecognised price stores tier 'free'), which must restore no further than
--- the owner could have unarchived by hand.
+-- One user's restore. Every paid tier is unlimited on cloud_scores, so in
+-- practice this restores everything; the cap arithmetic is for an entitling
+-- row that still resolves to a finite plan (an unrecognised price stores tier
+-- 'free'), which must restore no further than the owner could have unarchived
+-- by hand.
 --
 -- Most recently updated first, the same order the lapse kept by -- and the
 -- touch trigger leaves updated_at alone on archive changes, so that order is
@@ -355,7 +358,7 @@ $$;
 -- archive stays put. The cap trigger still fires on every restored row and is
 -- the real backstop: if this ever computed one slot too many, the whole restore
 -- would roll back rather than leave the owner over their cap.
-create or replace function public.restore_plan_archived_scores (p_user uuid) returns int language plpgsql security definer
+create or replace function public.restore_user_plan_archived_scores (p_user uuid) returns int language plpgsql security definer
 set search_path = public as $$
 declare
     v_limit int;
@@ -364,7 +367,7 @@ declare
     v_restored int;
 begin
     if p_user is null then
-        raise exception 'restore_plan_archived_scores requires p_user' using errcode = '22023';
+        raise exception 'restore_user_plan_archived_scores requires p_user' using errcode = '22023';
     end if;
 
     -- Rows first, then the advisory lock: the order a concurrent unarchive takes
@@ -410,6 +413,57 @@ begin
 end;
 $$;
 
+revoke all on function public.restore_user_plan_archived_scores (uuid) from public;
+revoke all on function public.restore_user_plan_archived_scores (uuid) from anon;
+revoke all on function public.restore_user_plan_archived_scores (uuid) from authenticated;
+grant execute on function public.restore_user_plan_archived_scores (uuid) to service_role;
+
+-- The webhook's entry point, called whenever a subscription is applied in an
+-- entitling status (a new checkout, a trial, unpaid -> active). It restores the
+-- subscriber, and then every teacher seated in a studio the subscriber owns:
+-- an Academy subscription entitles those teachers too, and they get no webhook
+-- of their own. A teacher whose own plan lapsed while their Academy owner was
+-- also not paying was archived down to the free cap; when the owner pays again
+-- the teacher resolves to Academy, and without this would keep those scores
+-- read-only indefinitely -- there is no client surface that un-archives.
+--
+-- A seated teacher is only restored when they now resolve to an unlimited plan
+-- (the Academy that just started paying, or their own): a seat in a studio that
+-- is still not paying hands nothing back past the free cap that the teacher did
+-- not ask for, the same rule the backfill below follows. The member restore
+-- re-reads that teacher's entitlements under their own lock, so the gate here
+-- is only a filter, never the cap. Members are visited in id order, so two
+-- restores that overlap on a teacher take that teacher's locks in one order.
+-- Returns the number of scores restored across everyone it visited.
+create or replace function public.restore_plan_archived_scores (p_user uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_member uuid;
+    v_restored int;
+begin
+    if p_user is null then
+        raise exception 'restore_plan_archived_scores requires p_user' using errcode = '22023';
+    end if;
+
+    v_restored := public.restore_user_plan_archived_scores (p_user);
+
+    for v_member in
+        select distinct sm.user_id
+        from public.studio_members sm
+        join public.studios st on st.id = sm.studio_id
+        where st.owner_id = p_user
+          and sm.user_id <> p_user
+        order by sm.user_id
+    loop
+        if (public.resolve_entitlements (v_member) -> 'limits' ->> 'cloud_scores')::int < 0 then
+            v_restored := v_restored + public.restore_user_plan_archived_scores (v_member);
+        end if;
+    end loop;
+
+    return v_restored;
+end;
+$$;
+
 revoke all on function public.restore_plan_archived_scores (uuid) from public;
 revoke all on function public.restore_plan_archived_scores (uuid) from anon;
 revoke all on function public.restore_plan_archived_scores (uuid) from authenticated;
@@ -418,15 +472,16 @@ grant execute on function public.restore_plan_archived_scores (uuid) to service_
 -- An Academy seat entitles without any webhook for the seated teacher: the
 -- subscription that pays for it is the owner's. Without this, a teacher whose
 -- own plan lapsed and who is then given a seat would resolve to an unlimited
--- plan and still find everything past the free cap read-only -- and there is
--- no client surface that un-archives. The restore re-reads the teacher's own
--- entitlements, so a seat in an academy that is not paying restores nothing
--- past the cap. Seats are written only by studio_invite_member (owner- and
--- Academy-checked) and the service role; clients have no insert grant.
+-- plan and still find everything past the free cap read-only. The restore
+-- re-reads the teacher's own entitlements, so a seat in an academy that is not
+-- paying restores nothing past the cap. Only the seated teacher: a seat changes
+-- nobody else's plan, so the studio sweep in restore_plan_archived_scores has
+-- nothing to do here. Seats are written only by studio_invite_member (owner-
+-- and Academy-checked) and the service role; clients have no insert grant.
 create or replace function public.studio_members_restore_plan_archived () returns trigger language plpgsql security definer
 set search_path = public as $$
 begin
-    perform public.restore_plan_archived_scores (new.user_id);
+    perform public.restore_user_plan_archived_scores (new.user_id);
     return null;
 end;
 $$;
@@ -440,10 +495,11 @@ for each row execute function public.studio_members_restore_plan_archived ();
 
 -- Owners who are ALREADY entitled again when this ships would otherwise wait
 -- for their next entitling webhook -- up to a year on an annual plan -- for the
--- fix this migration is. Only owners whose plan is unlimited now: a free owner
--- with lapse archives gets nothing back that they did not ask for. (Production
--- held no archived scores at the time of writing, so this is expected to be a
--- no-op there; it is here for every other database built from these files.)
+-- fix this migration is. Only owners whose plan is unlimited now (their own
+-- subscription or an Academy seat): a free owner with lapse archives gets
+-- nothing back that they did not ask for. (Production held no archived scores
+-- at the time of writing, so this is expected to be a no-op there; it is here
+-- for every other database built from these files.)
 do $$
 declare
     v_owner uuid;
@@ -452,9 +508,10 @@ begin
         select distinct d.owner_id
         from public.documents d
         where d.archived_reason = 'plan_lapse'
+        order by d.owner_id
     loop
         if (public.resolve_entitlements (v_owner) -> 'limits' ->> 'cloud_scores')::int < 0 then
-            perform public.restore_plan_archived_scores (v_owner);
+            perform public.restore_user_plan_archived_scores (v_owner);
         end if;
     end loop;
 end;
@@ -481,12 +538,24 @@ grant execute on function public.apply_free_tier_archival (uuid) to service_role
 -- can word a refusal for the plan the server actually saw, and can remember
 -- that an unlimited plan needs no claim to export offline.
 --
+-- A share-link guest (an anonymous session) has no plan of its own, and used to
+-- be exempt outright -- which made "1 PDF export a month" unenforced for any
+-- free owner who opened their own share link in a private window. A guest's
+-- export is now drawn from the allowance of the score's OWNER, whose plan is
+-- what the export is a feature of: free if the owner pays for unlimited export,
+-- the owner's one free export otherwise. So a guest must name the score
+-- (p_document) and hold a membership on it -- the share link's redemption is
+-- what grants one -- and the answer says billed_to:'owner' so the client words
+-- a refusal for someone who cannot upgrade. A signed-in account's export is
+-- always drawn from its own allowance; p_document is ignored for it.
+--
 -- Only what the pricing promises to limit is claimed: "1 PDF export a month".
 -- Sharing a page as a photo is a PNG, never calls this, and is never counted.
-create or replace function public.claim_pdf_export () returns jsonb language plpgsql security definer
+create or replace function public.claim_pdf_export (p_document uuid default null) returns jsonb language plpgsql security definer
 set search_path = public as $$
 declare
     v_user uuid := auth.uid();
+    v_owner uuid;
     v_ent jsonb;
     v_tier text;
     v_limit int;
@@ -495,10 +564,34 @@ begin
         raise exception 'not authenticated' using errcode = '28000';
     end if;
 
-    -- A share-link guest is someone else's visitor, with no plan of their own to
-    -- draw down and no way to upgrade. Never gated.
     if coalesce((auth.jwt() ->> 'is_anonymous')::boolean, false) then
-        return jsonb_build_object('ok', true, 'exempt', 'anonymous', 'unlimited', true);
+        if p_document is null then
+            raise exception 'a share-link guest must name the score being exported' using errcode = '22023';
+        end if;
+
+        -- document_role() is the caller's membership; the owner is read only
+        -- once that is established, so a guest cannot probe whose a score is.
+        if public.document_role (p_document) is null then
+            raise exception 'not a member of this score' using errcode = '42501';
+        end if;
+        select d.owner_id into v_owner
+        from public.documents d
+        where d.id = p_document;
+        if v_owner is null then
+            raise exception 'not a member of this score' using errcode = '42501';
+        end if;
+
+        -- tier_limits('student') is unlimited on pdf_exports, so a student
+        -- owner's guests fall in the first branch along with every paid plan's.
+        v_limit := (public.resolve_entitlements (v_owner) -> 'limits' ->> 'pdf_exports')::int;
+        if v_limit < 0 then
+            return jsonb_build_object('ok', true, 'unlimited', true, 'billed_to', 'owner');
+        end if;
+
+        -- The owner's tier is deliberately not returned: a guest learns that the
+        -- allowance ran out, not what the owner pays for.
+        return public.consume_quota (v_owner, 'pdf_exports', v_limit) - 'count'
+            || jsonb_build_object('unlimited', false, 'billed_to', 'owner');
     end if;
 
     v_ent := public.get_entitlements ();
@@ -520,13 +613,14 @@ begin
 end;
 $$;
 
-revoke all on function public.claim_pdf_export () from public;
-revoke all on function public.claim_pdf_export () from anon;
-grant execute on function public.claim_pdf_export () to authenticated;
+revoke all on function public.claim_pdf_export (uuid) from public;
+revoke all on function public.claim_pdf_export (uuid) from anon;
+grant execute on function public.claim_pdf_export (uuid) to authenticated;
 
 -- Kept for bundles already in the field, which call it by this name; one
 -- implementation, so the two cannot drift. The answer is a superset of the old
--- one ({ok, count, limit, exempt}).
+-- one ({ok, count, limit, exempt}). Those bundles name no score, so a guest
+-- calling it is refused (22023) rather than exempted.
 create or replace function public.consume_pdf_export () returns jsonb language sql security definer
 set search_path = public as $$
     select public.claim_pdf_export ();
@@ -635,8 +729,9 @@ grant execute on function public.record_smart_import_charge (uuid, uuid) to serv
 --  * only in the month it was charged, and only within 15 minutes of the
 --    charge: a rollback follows its import immediately, so anything later is a
 --    score that was used and then deleted, which is not a failed import;
---  * at most twice in a calendar month (the free plan's whole smart-import
---    allowance; no paid plan meters imports). A modified client could still
+--  * at most two credits in a calendar month, counted per charge rather than
+--    per call (the free plan's whole smart-import allowance; no paid plan
+--    meters imports). A modified client could still
 --    keep bytes it downloaded and re-upload them as an ordinary score -- an
 --    upload any account may make, counted against the cloud-score cap -- and
 --    this bounds how far that can stretch the allowance. A genuine third
@@ -648,6 +743,7 @@ declare
     v_user uuid := auth.uid();
     v_month date := date_trunc('month', now())::date;
     v_monthly_refunds constant int := 2;
+    v_already int;
     v_refunded int;
 begin
     if v_user is null then
@@ -680,22 +776,33 @@ begin
         return 0;
     end if;
 
-    if (
-        select count(*)
-        from public.smart_import_charges c
-        where c.user_id = v_user and c.month = v_month and c.refunded_at is not null
-    ) >= v_monthly_refunds then
+    select count(*)::int into v_already
+    from public.smart_import_charges c
+    where c.user_id = v_user and c.month = v_month and c.refunded_at is not null;
+
+    if v_already >= v_monthly_refunds then
         return 0;
     end if;
 
-    with refunded as (
-        update public.smart_import_charges c
-        set refunded_at = now()
+    -- Bounded by what is left of the monthly cap, not just by the document: the
+    -- same id metered twice (imslp-download called again for it) holds two open
+    -- charges, and refunding both in one go must not carry the month past the
+    -- cap. Oldest first; the per-user lock above already serializes this.
+    with refundable as (
+        select c.id
+        from public.smart_import_charges c
         where c.document_id = p_document
           and c.user_id = v_user
           and c.refunded_at is null
           and c.month = v_month
           and c.charged_at > now() - interval '15 minutes'
+        order by c.charged_at, c.id
+        limit v_monthly_refunds - v_already
+    ),
+    refunded as (
+        update public.smart_import_charges c
+        set refunded_at = now()
+        where c.id in (select r.id from refundable r)
         returning 1
     )
     select count(*)::int into v_refunded from refunded;

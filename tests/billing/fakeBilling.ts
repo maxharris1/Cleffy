@@ -275,12 +275,35 @@ export class FakeBilling implements QuotaBackend {
     }
 
     /**
-     * Mirrors restore_plan_archived_scores(): bring back 'plan_lapse' archives,
-     * most recently touched first, up to the free slots of the plan the owner
-     * resolves to now -- all of them on an unlimited plan. An owner's own
-     * archive stays where they put it. Returns how many were restored.
+     * Mirrors restore_plan_archived_scores(): the subscriber's own restore, then
+     * one for every teacher seated in a studio the subscriber owns who now
+     * resolves to an unlimited plan -- an Academy subscription entitles those
+     * seats, and a seated teacher gets no webhook of their own. A seat holder
+     * still on a finite plan gets nothing back past it. Returns the total.
      */
     async restorePlanArchivedScores(ownerId: string): Promise<number> {
+        let restored = await this.restoreUserPlanArchivedScores(ownerId);
+        const seated = [...this.studioSeats.entries()]
+            .filter(([memberId, owners]) => memberId !== ownerId && owners.includes(ownerId))
+            .map(([memberId]) => memberId)
+            .sort();
+        for (const memberId of seated) {
+            const limit = (await this.getEntitlements(memberId))?.limits.cloud_scores ?? 0;
+            if (isUnlimited(limit)) {
+                restored += await this.restoreUserPlanArchivedScores(memberId);
+            }
+        }
+        return restored;
+    }
+
+    /**
+     * Mirrors restore_user_plan_archived_scores(): bring back 'plan_lapse'
+     * archives, most recently touched first, up to the free slots of the plan
+     * the owner resolves to now -- all of them on an unlimited plan. An owner's
+     * own archive stays where they put it. Returns how many were restored. Also
+     * what a new Academy seat runs for its teacher (the studio_members trigger).
+     */
+    async restoreUserPlanArchivedScores(ownerId: string): Promise<number> {
         const archived = this.archivedScores.get(ownerId) ?? [];
         const candidates = archived
             .filter((row) => row.reason === 'plan_lapse')

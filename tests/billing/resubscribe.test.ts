@@ -27,6 +27,7 @@ const FREE_SCORES = TIER_LIMITS.free.cloud_scores;
 const PRICE_TIERS = {
     price_teacher_annual: 'teacher',
     price_personal_monthly: 'personal',
+    price_academy_monthly: 'academy',
 } as const;
 
 /** A WebhookStore whose subscriptions and archive live in one FakeBilling. */
@@ -208,6 +209,90 @@ describe('lapse and resubscribe', () => {
         expect(active(billing)).toEqual(['score-2', 'score-4', 'score-5']);
         await expect(billing.insertScore('teacher', 'one-too-many')).rejects.toMatchObject({
             message: 'limit_reached',
+        });
+    });
+
+    describe('an Academy seat', () => {
+        const academyEvent = (id: string, type: string, overrides: Partial<StripeSubscriptionLike> = {}) =>
+            subEvent(id, type, {
+                id: 'sub_academy',
+                items: { data: [{ price: { id: 'price_academy_monthly' } }] },
+                metadata: { user_id: 'owner' },
+                ...overrides,
+            });
+
+        /**
+         * A seated teacher whose own plan lapsed while the Academy owner was not
+         * paying either: archived down to the free cap, with nothing of their
+         * own left to send a webhook when the owner pays again.
+         */
+        const lapsedSeatHolder = async () => {
+            const { billing, store } = await payingTeacherWith(5);
+            billing.seatIn('teacher', 'owner');
+            await handleStripeEvent(academyEvent('evt_academy', 'customer.subscription.created'), store, PRICE_TIERS);
+            await handleStripeEvent(
+                academyEvent('evt_academy_cancel', 'customer.subscription.deleted'),
+                store,
+                PRICE_TIERS,
+            );
+            await handleStripeEvent(subEvent('evt_cancel', 'customer.subscription.deleted'), store, PRICE_TIERS);
+            expect(active(billing)).toHaveLength(FREE_SCORES);
+            return { billing, store };
+        };
+
+        it('restores the seated teacher when the Academy owner resubscribes', async () => {
+            const { billing, store } = await lapsedSeatHolder();
+
+            await handleStripeEvent(
+                academyEvent('evt_academy_back', 'customer.subscription.created', { id: 'sub_academy_2' }),
+                store,
+                PRICE_TIERS,
+            );
+
+            expect(store.restoredCounts.at(-1)).toBe(5 - FREE_SCORES);
+            expect(active(billing)).toHaveLength(5);
+            expect(billing.archivedScores.get('teacher')).toEqual([]);
+        });
+
+        it('restores the seated teacher when the owner pays an unpaid Academy invoice', async () => {
+            const { billing, store } = await lapsedSeatHolder();
+
+            await handleStripeEvent(
+                academyEvent('evt_academy_unpaid', 'customer.subscription.updated', {
+                    id: 'sub_academy_2',
+                    status: 'unpaid',
+                }),
+                store,
+                PRICE_TIERS,
+            );
+            expect(active(billing)).toHaveLength(FREE_SCORES);
+
+            await handleStripeEvent(
+                academyEvent('evt_academy_paid', 'customer.subscription.updated', { id: 'sub_academy_2' }),
+                store,
+                PRICE_TIERS,
+            );
+            expect(active(billing)).toHaveLength(5);
+        });
+
+        it('restores nothing past the free cap when the owner comes back on a plan without seats', async () => {
+            // A seat entitles only through an Academy subscription; the owner
+            // returning on Teacher leaves the seated teacher on Free.
+            const { billing, store } = await lapsedSeatHolder();
+
+            await handleStripeEvent(
+                subEvent('evt_owner_teacher', 'customer.subscription.created', {
+                    id: 'sub_owner_teacher',
+                    metadata: { user_id: 'owner' },
+                }),
+                store,
+                PRICE_TIERS,
+            );
+
+            expect(active(billing)).toHaveLength(FREE_SCORES);
+            expect(billing.archivedScores.get('teacher')?.filter((row) => row.reason === 'plan_lapse')).toHaveLength(
+                5 - FREE_SCORES,
+            );
         });
     });
 

@@ -60,6 +60,7 @@ const grants = (sql: string, fn: string, verb: 'grant' | 'revoke', role: string)
 
 const SERVICE_ONLY = [
     'restore_plan_archived_scores',
+    'restore_user_plan_archived_scores',
     'apply_free_tier_archival',
     'record_smart_import_charge',
     // No caller check at all: anyone who could call it could read any user's plan.
@@ -141,7 +142,10 @@ describe('billing-correctness RPC privileges', () => {
     it('stamps plan_lapse only from the lapse, and restores only plan_lapse', () => {
         const archival = definition(latestDefining('apply_free_tier_archival'), 'apply_free_tier_archival');
         expect(archival).toMatch(/archived_reason\s*=\s*'plan_lapse'/i);
-        const restore = definition(latestDefining('restore_plan_archived_scores'), 'restore_plan_archived_scores');
+        const restore = definition(
+            latestDefining('restore_user_plan_archived_scores'),
+            'restore_user_plan_archived_scores',
+        );
         expect(restore).toMatch(/archived_reason\s*=\s*'plan_lapse'/i);
         // Same advisory lock key as documents_enforce_score_cap, so the two serialize.
         for (const def of [archival, restore]) {
@@ -150,7 +154,10 @@ describe('billing-correctness RPC privileges', () => {
     });
 
     it('restores lapse archives most recently used first', () => {
-        const restore = definition(latestDefining('restore_plan_archived_scores'), 'restore_plan_archived_scores');
+        const restore = definition(
+            latestDefining('restore_user_plan_archived_scores'),
+            'restore_user_plan_archived_scores',
+        );
         // The ordering and filter of the restore set itself, not only the row lock.
         expect(restore).toMatch(
             /where\s+d\.owner_id\s*=\s*p_user\s+and\s+d\.archived_reason\s*=\s*'plan_lapse'\s+order\s+by\s+d\.updated_at\s+desc/i,
@@ -164,14 +171,50 @@ describe('billing-correctness RPC privileges', () => {
             /create\s+trigger\s+studio_members_restore_plan_archived\s+after\s+insert\s+on\s+public\.studio_members/i,
         );
         const def = definition(sql, 'studio_members_restore_plan_archived');
-        expect(def).toMatch(/public\.restore_plan_archived_scores\s*\(\s*new\.user_id\s*\)/i);
+        // Only the seated teacher: a seat changes nobody else's plan.
+        expect(def).toMatch(/public\.restore_user_plan_archived_scores\s*\(\s*new\.user_id\s*\)/i);
+    });
+
+    it("restores the teachers seated in the subscriber's studios on the webhook's restore", () => {
+        // A seated teacher gets no webhook of their own; the Academy owner's
+        // resubscribe is the only event that says their seat entitles again.
+        const def = definition(latestDefining('restore_plan_archived_scores'), 'restore_plan_archived_scores');
+        expect(def).toMatch(/public\.restore_user_plan_archived_scores\s*\(\s*p_user\s*\)/i);
+        expect(def).toMatch(
+            /from\s+public\.studio_members\s+sm\s+join\s+public\.studios\s+st\s+on\s+st\.id\s*=\s*sm\.studio_id\s+where\s+st\.owner_id\s*=\s*p_user/i,
+        );
+        // Gated on the member now being unlimited, then restored under their own lock.
+        expect(def).toMatch(
+            /resolve_entitlements\s*\(\s*v_member\s*\)\s*->\s*'limits'\s*->>\s*'cloud_scores'\s*\)::int\s*<\s*0/i,
+        );
+        expect(def).toMatch(/public\.restore_user_plan_archived_scores\s*\(\s*v_member\s*\)/i);
+    });
+
+    it('meters a share-link guest against the score owner, never exempting them', () => {
+        const def = definition(latestDefining('claim_pdf_export'), 'claim_pdf_export');
+        expect(def).toMatch(/claim_pdf_export\s*\(\s*p_document\s+uuid\s+default\s+null\s*\)/i);
+        expect(def).not.toMatch(/'exempt',\s*'anonymous'/i);
+        // Membership first, then the owner's plan and the owner's counter.
+        expect(def).toMatch(/public\.document_role\s*\(\s*p_document\s*\)\s+is\s+null/i);
+        expect(def).toMatch(/public\.resolve_entitlements\s*\(\s*v_owner\s*\)/i);
+        expect(def).toMatch(/public\.consume_quota\s*\(\s*v_owner\s*,\s*'pdf_exports'/i);
+    });
+
+    it('bounds a refund by what is left of the monthly cap, per charge', () => {
+        const refund = definition(latestDefining('refund_smart_import'), 'refund_smart_import');
+        expect(refund).toMatch(/limit\s+v_monthly_refunds\s*-\s*v_already/i);
     });
 
     it('asks about the row owner without the JWT caller check wherever server code acts for someone else', () => {
         // get_entitlements(p_user) raises when p_user is not the JWT's user, so
         // a seat invite (JWT: the Academy owner) restoring the teacher's scores
         // would abort in the cap trigger if any of these still called it.
-        for (const fn of ['documents_enforce_score_cap', 'restore_plan_archived_scores', 'apply_free_tier_archival']) {
+        for (const fn of [
+            'documents_enforce_score_cap',
+            'restore_plan_archived_scores',
+            'restore_user_plan_archived_scores',
+            'apply_free_tier_archival',
+        ]) {
             const def = definition(latestDefining(fn), fn);
             expect(def, fn).toMatch(/public\.resolve_entitlements\s*\(/i);
             expect(def, fn).not.toMatch(/public\.get_entitlements\s*\(/i);
