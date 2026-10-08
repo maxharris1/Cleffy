@@ -198,7 +198,12 @@ export type AnnotationRow = {
     kind: AnnotationKind;
     color: string;
     payload: AnnotationPayload;
-    created_by: string;
+    /**
+     * Null once the author's account has been deleted: the mark stays on the
+     * score it was drawn on (20261007120600_account_deletion.sql). Inserts still
+     * always carry the caller's id — RLS requires created_by = auth.uid().
+     */
+    created_by: string | null;
     created_at: string;
     updated_at: string;
     deleted_at: string | null;

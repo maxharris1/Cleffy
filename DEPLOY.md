@@ -326,6 +326,62 @@ catalogue. That is deliberate. A per-key merge would let a half-finished
 catalogue change serve two vintages of price from one account, which looks fine
 until someone is billed the wrong amount.
 
+### Account deletion — `delete-account`
+
+Self-serve deletion (Account page → Delete account) is a new function,
+declared in `supabase/config.toml` with `verify_jwt = true`, so the Supabase
+GitHub integration deploys it on the `dev` → `main` merge like every other
+function (§5) — no manual `functions deploy`, no second `db push`. The same
+merge must carry migration `20261007120600_account_deletion.sql` and the updated
+`stripe-webhook`; they ship together on that merge. Without the migration,
+deleting someone who drew on another person's score would cascade-delete those
+marks from the owner's copy; without the webhook change, a Checkout completed in
+another tab during a deletion could keep billing an account that is gone.
+
+It needs no new secret, but it depends on the Stripe ones above:
+
+- **`STRIPE_SECRET_KEY_LIVE` must be set wherever a live `billing_customers`
+  row can exist.** Deletion cancels every subscription before it deletes
+  anything, and refuses with `503 billing_unavailable` — deleting nothing — for
+  any user with a live customer when it cannot reach the live account. That is
+  the intended fail-closed behaviour, but it means a missing live key blocks
+  every paying customer from deleting their account.
+- A missing **test** key is skipped with a log line: sandbox subscriptions never
+  charge a card, so they are no reason to keep someone's data.
+- It also uses `SUPABASE_URL`, `SUPABASE_ANON_KEY` (to re-check the password)
+  and `SUPABASE_SERVICE_ROLE_KEY`, which every project has already.
+
+What it deletes and in which order is documented at the top of
+`supabase/functions/_shared/accountDeletion.ts`.
+
+### Error monitoring — optional
+
+All of it is off until a DSN is set, and costs nothing while off.
+
+| Where                   | Variable              | What it does                                                                                                                       |
+| ----------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Edge Function secret    | `SENTRY_DSN`          | Also post every `logError` record (`_shared/errorLog.ts`) to Sentry. Unset: the JSON line in the function logs is the only record. |
+| Edge Function secret    | `SENTRY_ENVIRONMENT`  | Optional. Defaults from the project ref: `production` for `jibgwgosihadbjgxdsfe`, `development` for `qdbnlrgylelelvwbkvnm`.        |
+| Edge Function secret    | `SENTRY_RELEASE`      | Optional release tag for edge events.                                                                                              |
+| Vercel env (build time) | `VITE_SENTRY_DSN`     | DSN of a Sentry **browser** project. Unset: the SDK is not even emitted into the bundle. Environment comes from the hostname.      |
+| Vercel env (build time) | `VITE_SENTRY_RELEASE` | Optional. Defaults to `cleffy@<VERCEL_GIT_COMMIT_SHA>`; set it only to match a release that source maps were uploaded under.       |
+
+```bash
+npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe SENTRY_DSN='https://<key>@<org>.ingest.sentry.io/<project>'
+```
+
+- Use one Sentry project for the browser and one for the functions, or one for
+  both; the environment tag keeps production and dev apart either way.
+- Both sides scrub before sending: no annotation contents, no emails, no tokens,
+  no URL query strings (`src/lib/monitoring/scrub.ts`, `_shared/errorLog.ts`).
+  Keep it that way — the privacy policy promises it.
+- If a Content-Security-Policy is in force, its `connect-src` must allow the
+  DSN's ingest host (`https://*.ingest.sentry.io`, or the region-specific
+  `*.ingest.de.sentry.io`), or browser reports are silently blocked.
+- `VITE_SENTRY_DSN` is read at build time: redeploy after setting it.
+- Sentry is a new processor of personal data (account ids, IP addresses at
+  ingest); `docs/LEGAL_REVIEW.md` lists it.
+
 ## 3. Vercel project
 
 ### 3a. Add a GitHub Login Connection (human only)
@@ -418,6 +474,9 @@ these for the _Preview_ environment is enough to repoint the dev deploy.
 VITE_SUPABASE_URL       = https://<dev-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY  = sb_publishable_…
 ```
+
+Optional on either environment: `VITE_SENTRY_DSN` (and `VITE_SENTRY_RELEASE`)
+to turn on browser error monitoring — see §2, _Error monitoring_.
 
 ## 5. A separate dev Supabase backend — done
 

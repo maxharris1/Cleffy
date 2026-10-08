@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import { redeemShareLink } from '@/features/share/shareService';
 import { BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -102,6 +103,7 @@ export const JoinPage = () => {
                     <p className="mt-3 text-xs text-stone-600">
                         No account needed — you can add an email later to keep your work across devices.
                     </p>
+                    <AgreementNote action="joining" className="mt-2" />
                 </>
             )}
         </BrandShell>

@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router';
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { signUpWithPassword } from '@/features/auth/session';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -45,12 +46,15 @@ const RegisterForm = () => {
                 busyLabel="Creating…"
                 fallbackError="Could not create account."
                 footer={
-                    <p className="mt-6 text-center text-sm text-stone-600">
-                        Already have an account?{' '}
-                        <Link to="/login" className={linkClassName}>
-                            Log in
-                        </Link>
-                    </p>
+                    <>
+                        <AgreementNote action="creating an account" className="mt-4 text-center" />
+                        <p className="mt-6 text-center text-sm text-stone-600">
+                            Already have an account?{' '}
+                            <Link to="/login" className={linkClassName}>
+                                Log in
+                            </Link>
+                        </p>
+                    </>
                 }
                 onSubmit={async ({ email: nextEmail, password }) => {
                     const result = await signUpWithPassword(nextEmail, password);

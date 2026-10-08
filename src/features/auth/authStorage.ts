@@ -134,6 +134,38 @@ const clearRestoreCookie = (io: AuthStorageIo): void => {
     io.writeCookie(`${AUTH_RESTORE_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0${secure}`);
 };
 
+/**
+ * Drop every stored Supabase session on this device — each `*-auth-token`
+ * key and the restore cookie — without asking the server. For after account
+ * deletion, when there is no session left on the server to sign out of, and a
+ * stale token must not be able to restore one.
+ */
+export const forgetStoredSessions = (io: AuthStorageIo = browserIo(), keys: string[] = localStorageKeys()): void => {
+    for (const key of keys) {
+        if (isAuthSessionKey(key)) {
+            io.removeLocal(key);
+        }
+    }
+    clearRestoreCookie(io);
+};
+
+/** Every localStorage key, or none when storage is unavailable (private mode). */
+export const localStorageKeys = (): string[] => {
+    try {
+        const storage = globalThis.localStorage;
+        const keys: string[] = [];
+        for (let index = 0; index < storage.length; index += 1) {
+            const key = storage.key(index);
+            if (key !== null) {
+                keys.push(key);
+            }
+        }
+        return keys;
+    } catch {
+        return [];
+    }
+};
+
 /** Supabase `auth.storage` adapter: localStorage first, restore cookie as fallback. */
 export const createAuthStorage = (io: AuthStorageIo = browserIo()) => ({
     getItem: (key: string): string | null => {

@@ -44,6 +44,8 @@ vi.mock('@/features/auth/session', () => ({
     updatePassword: (...args: unknown[]) => updatePassword(...args),
     signOut: (...args: unknown[]) => signOut(...args),
     syncBeforeSignOut: () => syncBeforeSignOut(),
+    userTypeOf: (session: { user?: { app_metadata?: Record<string, unknown> } } | null) =>
+        session?.user?.app_metadata?.['user_type'] === 'student' ? 'student' : null,
 }));
 
 vi.mock('@/features/billing/entitlementsService', () => ({

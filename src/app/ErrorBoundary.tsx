@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
+import { reportError } from '@/lib/monitoring';
 import { BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 
@@ -21,6 +22,9 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
     componentDidCatch(error: Error, info: ErrorInfo): void {
         console.error('Unhandled render error', error, info.componentStack);
+        // Scrubbed before it leaves the browser (lib/monitoring/scrub.ts); a
+        // no-op on a build without a DSN.
+        reportError(error, { componentStack: info.componentStack ?? undefined, tags: { source: 'error-boundary' } });
     }
 
     render(): ReactNode {

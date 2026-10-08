@@ -215,6 +215,19 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
+    it('offers help and the legal pages from the account menu', async () => {
+        const user = userEvent.setup();
+        renderShell();
+
+        await user.click(await screen.findByRole('button', { name: /Account menu/ }));
+        expect(screen.getByRole('menuitem', { name: 'Help & support' })).toHaveAttribute(
+            'href',
+            'mailto:support@cleffy.io',
+        );
+        expect(screen.getByRole('menuitem', { name: 'Privacy' })).toHaveAttribute('href', '/privacy');
+        expect(screen.getByRole('menuitem', { name: 'Terms' })).toHaveAttribute('href', '/terms');
+    });
+
     it('pads the chrome for the iPhone status bar', () => {
         renderShell();
         expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');

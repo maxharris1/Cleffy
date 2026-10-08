@@ -1,6 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import {
     checkRateLimit,
     clientKey,
@@ -246,6 +247,7 @@ Deno.serve(async (req) => {
             byteLength: result.bytes.byteLength,
         });
     } catch (err) {
+        logError('imslp-download', err, { code: 'download_failed' });
         await giveBack();
         return jsonResponse({ error: err instanceof Error ? err.message : 'IMSLP download failed' }, 502);
     }

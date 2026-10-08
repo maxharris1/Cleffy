@@ -1,4 +1,10 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import {
+    type DeletedAccountStripe,
+    FOREIGN_KEY_VIOLATION,
+    stopDeletedAccountSubscription,
+} from '../_shared/deletedAccountBilling.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
 import {
@@ -100,6 +106,23 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Billing is not configured' }, 500);
     }
 
+    // For a subscription whose user was deleted (see deletedAccountBilling.ts).
+    const deletedAccountStripe: DeletedAccountStripe = {
+        retrieveStatus: async (subscriptionId) => {
+            try {
+                return (await stripe.subscriptions.retrieve(subscriptionId)).status;
+            } catch (err) {
+                if ((err as { code?: string } | null)?.code === 'resource_missing') {
+                    return null;
+                }
+                throw err;
+            }
+        },
+        cancel: async (subscriptionId) => {
+            await stripe.subscriptions.cancel(subscriptionId);
+        },
+    };
+
     const store: WebhookStore = {
         claimEvent: async (id, type) => {
             // Single statement, so two concurrent deliveries of the same event
@@ -126,6 +149,13 @@ Deno.serve(async (req) => {
                 .from('billing_customers')
                 .upsert({ user_id: userId, mode, stripe_customer_id: customerId }, { onConflict: 'user_id,mode' });
             if (error) {
+                // The user was deleted while their Checkout was open. Nothing to
+                // link; the subscription write that follows hits the same FK and
+                // cancels whatever the checkout started.
+                if (error.code === FOREIGN_KEY_VIOLATION) {
+                    console.log(`customer ${customerId} belongs to a deleted account; not linked`);
+                    return;
+                }
                 throw new Error(`could not link customer ${customerId}: ${error.message}`);
             }
         },
@@ -137,6 +167,19 @@ Deno.serve(async (req) => {
                     { onConflict: 'stripe_subscription_id' },
                 );
             if (error) {
+                // 23503 on the only FK here (user_id → auth.users): the account was
+                // deleted. Usually this is delete-account's own cancellation being
+                // reported; if the subscription can still bill, it is cancelled now.
+                // Either way there is no row to write.
+                if (error.code === FOREIGN_KEY_VIOLATION) {
+                    await stopDeletedAccountSubscription(
+                        row.stripe_subscription_id,
+                        row.status,
+                        deletedAccountStripe,
+                        (message) => console.log(message),
+                    );
+                    return;
+                }
                 throw new Error(`could not upsert subscription ${row.stripe_subscription_id}: ${error.message}`);
             }
         },
@@ -209,7 +252,7 @@ Deno.serve(async (req) => {
         // the event. Release the claim first, then ask for the retry with a 500.
         // Re-running is safe: every store write is an upsert or is idempotent.
         await store.releaseEvent(event.id);
-        console.error(`stripe-webhook failed for ${event.id} (${event.type}):`, err);
+        logError('stripe-webhook', err, { code: 'event_failed', eventId: event.id, eventType: event.type, mode });
         return jsonResponse({ error: err instanceof Error ? err.message : 'Webhook handling failed' }, 500);
     }
 });

@@ -112,6 +112,9 @@ describe('Auth pages', () => {
         expect(screen.getByRole('button', { name: 'Create account' })).toBeInTheDocument();
         expect(screen.getByRole('link', { name: 'Log in' })).toHaveAttribute('href', '/login');
         expect(screen.getByRole('main')).toHaveClass('safe-brand-shell');
+        expect(screen.getByText(/By creating an account you agree to the/)).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: 'Terms of Service' })).toHaveAttribute('href', '/terms');
+        expect(screen.getByRole('link', { name: 'Privacy Policy' })).toHaveAttribute('href', '/privacy');
     });
 
     it('holds a new password to the account policy before calling sign-up', async () => {

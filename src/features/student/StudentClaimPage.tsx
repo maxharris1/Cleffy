@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
+import { AgreementNote } from '@/features/legal/AgreementNote';
 import { StudentAuthError, claimStudentAccount } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -257,6 +258,7 @@ const ClaimFlow = () => {
                         <Button type="submit" disabled={busy} className="mt-4 w-full">
                             {busy ? 'Setting up…' : 'Create my account'}
                         </Button>
+                        <AgreementNote action="creating your account" className="mt-3 text-center" />
                     </>
                 )}
                 {error ? <ErrorText className="mt-2.5">{error}</ErrorText> : null}
