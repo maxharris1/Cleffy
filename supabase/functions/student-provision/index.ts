@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
@@ -257,7 +258,7 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         // student_user_id against a later re-provision. Undo it.
         const { error: cleanupError } = await admin.auth.admin.deleteUser(created.user.id);
         if (cleanupError) {
-            console.error(`orphaned student auth user ${created.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: created.user.id });
         }
         return jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
@@ -314,7 +315,7 @@ const createEmailStudent = async (
         console.error(`could not flag invited student ${invited.user.id}: ${metadataError.message}`);
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
-            console.error(`unflagged student auth user ${invited.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'unflagged_student', studentUserId: invited.user.id });
         }
         return jsonResponse({ error: 'Could not create the student account' }, 502);
     }
@@ -333,7 +334,7 @@ const createEmailStudent = async (
     if (insertError) {
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
-            console.error(`orphaned student auth user ${invited.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: invited.user.id });
         }
         return jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }

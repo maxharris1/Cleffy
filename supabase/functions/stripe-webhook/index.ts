@@ -1,4 +1,5 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
 import { handleStripeEvent, type StripeEventLike, type WebhookStore } from '../_shared/stripeEvents.ts';
@@ -185,7 +186,7 @@ Deno.serve(async (req) => {
                     console.error(`could not release claim on ${event.id}: ${error.message}`);
                 }
             });
-        console.error(`stripe-webhook failed for ${event.id} (${event.type}):`, err);
+        logError('stripe-webhook', err, { code: 'event_failed', eventId: event.id, eventType: event.type, mode });
         return jsonResponse({ error: err instanceof Error ? err.message : 'Webhook handling failed' }, 500);
     }
 });
