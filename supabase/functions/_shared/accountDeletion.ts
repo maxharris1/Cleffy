@@ -47,7 +47,24 @@
  *  6. Delete the auth user. Marks the caller drew on OTHER people's scores
  *     survive with their author cleared (20261007120600_account_deletion.sql):
  *     they are part of a score somebody else owns, and silently erasing them
- *     from a paying teacher's copy is the worse failure.
+ *     from a paying teacher's copy is the worse failure. Every other
+ *     user-keyed FK is CASCADE or SET NULL, but SET NULL is an UPDATE, and an
+ *     UPDATE trigger can still refuse it: score_analyses' client-write guard
+ *     (20260803120000) treats any write without a service_role JWT as a
+ *     client's, and GoTrue's admin delete carries no JWT at all, so a play-along
+ *     analysis the caller requested on someone else's score would abort the
+ *     auth delete on every retry. `releaseAuthorship` clears that authorship
+ *     first, as the service role the guard admits.
+ *
+ *  7. Sweep billing once more. Step 2 ran while the caller's tokens were still
+ *     valid, so a Checkout opened from another tab in between (stripe-checkout
+ *     reuses the existing customer) could still complete and start a
+ *     subscription for an account that no longer exists. Once the auth user is
+ *     gone no new session can be minted, so expiring and cancelling again for
+ *     every customer step 2 knew closes that window for good. The account is
+ *     already deleted by then, so a failure here is reported, not returned —
+ *     and stripe-webhook cancels any subscription that resolves to a deleted
+ *     account as a last line (deletedAccountBilling.ts).
  *
  * Every step is idempotent, so a request that times out or fails part-way is
  * safely retried: cancelled subscriptions are skipped, deleted rows are no
@@ -122,6 +139,11 @@ export interface DeletionPorts {
     deleteDocument: (documentId: string) => Promise<void>;
     /** Studios the user owns (cascading their seats), and every seat and membership they hold. */
     deleteStudiosAndMemberships: (userId: string) => Promise<void>;
+    /**
+     * Clears created_by on the rows whose triggers would refuse the auth
+     * delete's own ON DELETE SET NULL (score_analyses), as the service role.
+     */
+    releaseAuthorship: (userId: string) => Promise<void>;
     deleteAuthUser: (userId: string) => Promise<'deleted' | 'not_found'>;
     log: (message: string) => void;
 }
@@ -133,6 +155,10 @@ export interface DeletionSummary {
     documentsDeleted: number;
     storageObjectsRemoved: number;
     authUser: 'deleted' | 'not_found';
+    /** Step 7, after the auth user is gone. 'failed' is logged loudly by the caller. */
+    lateBillingSweep: 'done' | 'failed';
+    /** Subscriptions step 7 found and cancelled: started from another tab mid-deletion. */
+    lateSubscriptionsCanceled: number;
 }
 
 export type DeletionFailureCode =
@@ -146,7 +172,7 @@ export type DeletionFailureCode =
     | 'auth_delete_failed';
 
 export type DeletionResult =
-    | { ok: true; summary: DeletionSummary }
+    | { ok: true; summary: DeletionSummary; lateBillingFailure?: unknown }
     | { ok: false; status: number; code: DeletionFailureCode; error: string; cause?: unknown };
 
 export type DeletionFailure = Extract<DeletionResult, { ok: false }>;
@@ -159,19 +185,29 @@ const fail = (status: number, code: DeletionFailureCode, error: string, cause?: 
     cause,
 });
 
+export interface BillingCancellation {
+    ok: true;
+    canceled: number;
+    expired: number;
+    /** Every customer swept, so step 7 can sweep them again once the tables have cascaded away. */
+    customers: StripeCustomerRef[];
+}
+
 /**
- * Step 2. Cancels everything that can still bill, in every account we have a
- * customer in, or reports why it could not — in which case nothing has been
- * deleted.
+ * Step 2 (and step 7). Cancels everything that can still bill, in every account
+ * we have a customer in, or reports why it could not — in which case, in step
+ * 2, nothing has been deleted. `knownCustomers` adds customers the tables may
+ * no longer list: after the auth delete, billing_customers has cascaded away.
  */
 export const cancelBilling = async (
     userId: string,
     ports: DeletionPorts,
-): Promise<{ ok: true; canceled: number; expired: number } | DeletionFailure> => {
+    knownCustomers: readonly StripeCustomerRef[] = [],
+): Promise<BillingCancellation | DeletionFailure> => {
     let customers: StripeCustomerRef[];
     let stored: StoredSubscriptionRef[];
     try {
-        customers = await ports.billingCustomers(userId);
+        customers = [...knownCustomers, ...(await ports.billingCustomers(userId))];
         stored = await ports.storedSubscriptions(userId);
     } catch (err) {
         // Not knowing whether someone pays is the same as not being able to stop it.
@@ -218,6 +254,7 @@ export const cancelBilling = async (
 
     let canceled = 0;
     let expired = 0;
+    const swept: StripeCustomerRef[] = [];
 
     for (const mode of modes) {
         const stripe = ports.stripeFor(mode);
@@ -245,6 +282,7 @@ export const cancelBilling = async (
             const handled = new Set<string>();
 
             for (const customerId of customerIds) {
+                swept.push({ customerId, mode });
                 // Expire first: a Checkout session completed between the list and
                 // the cancel below would otherwise create a subscription after it.
                 expired += await stripe.expireOpenCheckoutSessions(customerId);
@@ -287,7 +325,25 @@ export const cancelBilling = async (
         }
     }
 
-    return { ok: true, canceled, expired };
+    return { ok: true, canceled, expired, customers: swept };
+};
+
+/**
+ * Step 6's last moment: authorship that would block the delete is released,
+ * then the auth user goes. One immediate second attempt, because the only
+ * known way for the first to fail on data is a row authored by this user
+ * landing between the release and the delete (another tab); anything else —
+ * GoTrue down — fails the same way twice and is left to the caller's retry.
+ */
+const closeAuthUser = async (userId: string, ports: DeletionPorts): Promise<'deleted' | 'not_found'> => {
+    await ports.releaseAuthorship(userId);
+    try {
+        return await ports.deleteAuthUser(userId);
+    } catch (err) {
+        ports.log(`auth delete for ${userId} failed once, releasing authorship and retrying: ${String(err)}`);
+        await ports.releaseAuthorship(userId);
+        return ports.deleteAuthUser(userId);
+    }
 };
 
 /** Step 4 for one owner: every score's files, then its row. Returns objects removed. */
@@ -337,7 +393,7 @@ export const purgeManagedStudents = async (
         const purged = await purgeOwnedDocuments(studentUserId, ports);
         objects += purged.objects;
         await ports.deleteStudiosAndMemberships(studentUserId);
-        if ((await ports.deleteAuthUser(studentUserId)) === 'deleted') {
+        if ((await closeAuthUser(studentUserId, ports)) === 'deleted') {
             students += 1;
         }
     }
@@ -418,7 +474,7 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
 
     let authUser: 'deleted' | 'not_found';
     try {
-        authUser = await ports.deleteAuthUser(caller.userId);
+        authUser = await closeAuthUser(caller.userId, ports);
     } catch (err) {
         return fail(
             502,
@@ -428,16 +484,38 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
         );
     }
 
+    // Step 7. Nothing below can undo the deletion, so nothing below fails it.
+    let lateBillingSweep: DeletionSummary['lateBillingSweep'] = 'done';
+    let lateSubscriptionsCanceled = 0;
+    let lateBillingFailure: unknown;
+    let checkoutSessionsExpired = billing.expired;
+    try {
+        const late = await cancelBilling(caller.userId, ports, billing.customers);
+        if (late.ok) {
+            lateSubscriptionsCanceled = late.canceled;
+            checkoutSessionsExpired += late.expired;
+        } else {
+            lateBillingSweep = 'failed';
+            lateBillingFailure = late.cause ?? new Error(late.error);
+        }
+    } catch (err) {
+        lateBillingSweep = 'failed';
+        lateBillingFailure = err;
+    }
+
     return {
         ok: true,
         summary: {
-            subscriptionsCanceled: billing.canceled,
-            checkoutSessionsExpired: billing.expired,
+            subscriptionsCanceled: billing.canceled + lateSubscriptionsCanceled,
+            checkoutSessionsExpired,
             studentsDeleted,
             documentsDeleted,
             storageObjectsRemoved,
             authUser,
+            lateBillingSweep,
+            lateSubscriptionsCanceled,
         },
+        ...(lateBillingFailure === undefined ? {} : { lateBillingFailure }),
     };
 };
 

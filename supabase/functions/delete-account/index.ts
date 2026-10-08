@@ -248,6 +248,17 @@ const ports = (admin: SupabaseClient): DeletionPorts => ({
             }
         }
     },
+    releaseAuthorship: async (userId) => {
+        // The service-role client's JWT carries role=service_role, which is what
+        // guard_score_analyses_client_write admits; GoTrue's own ON DELETE SET
+        // NULL arrives with no JWT and is refused as a client write. The other
+        // SET NULL authorship columns (annotations, annotation_snapshots,
+        // document_imports, omr_jobs) have no trigger that refuses it.
+        const { error } = await admin.from('score_analyses').update({ created_by: null }).eq('created_by', userId);
+        if (error) {
+            throw new Error(`could not release score_analyses authorship: ${error.message}`);
+        }
+    },
     deleteAuthUser: async (userId) => {
         const { error } = await admin.auth.admin.deleteUser(userId);
         if (!error) {
@@ -363,6 +374,12 @@ Deno.serve(async (req) => {
         console.log(
             JSON.stringify({ level: 'info', fn: FN, event: 'account_deleted', userId: user.id, ...result.summary }),
         );
+        if (result.lateBillingFailure !== undefined) {
+            // The account is gone, so the person is told it worked — it did. A
+            // subscription started mid-deletion may still exist, though, so this
+            // must reach a human (stripe-webhook cancels it too when it reports in).
+            logError(FN, result.lateBillingFailure, { code: 'late_billing_sweep_failed', userId: user.id });
+        }
         return jsonResponse({ deleted: true, summary: result.summary });
     } catch (err) {
         logError(FN, err, { code: 'unexpected', userId: user.id });

@@ -93,6 +93,16 @@ class FakeWorld {
     stored: Array<StoredSubscriptionRef & { userId: string }> = [];
     stripe: Record<StripeMode, FakeStripe | null> = { live: new FakeStripe(this.log), test: new FakeStripe(this.log) };
 
+    /**
+     * score_analyses.created_by, by document. A row authored by a user being
+     * deleted makes the auth delete fail, as guard_score_analyses_client_write
+     * refuses GoTrue's JWT-less ON DELETE SET NULL; only releaseAuthorship (the
+     * service role) clears it.
+     */
+    analysisAuthors = new Map<string, string | null>();
+    /** Runs once, right after the first releaseAuthorship — "another tab" again. */
+    onFirstRelease: (() => void) | null = null;
+
     failStorageFor: string | null = null;
     failAuthDelete = false;
     failBillingRead = false;
@@ -202,9 +212,23 @@ class FakeWorld {
                     }
                 }
             },
+            releaseAuthorship: async (userId) => {
+                this.log.push(`release:${userId}`);
+                for (const [doc, author] of this.analysisAuthors) {
+                    if (author === userId) {
+                        this.analysisAuthors.set(doc, null);
+                    }
+                }
+                const hook = this.onFirstRelease;
+                this.onFirstRelease = null;
+                hook?.();
+            },
             deleteAuthUser: async (userId) => {
                 if (this.failAuthDelete) {
                     throw new Error('gotrue down');
+                }
+                if ([...this.analysisAuthors.values()].includes(userId)) {
+                    throw new Error('score_analyses: clients may only set pending or failed');
                 }
                 if (!this.users.has(userId)) {
                     return 'not_found';
@@ -478,5 +502,105 @@ describe('retries', () => {
         await deleteAccount(teacher(), world.ports());
         const again = await deleteAccount(teacher(), world.ports());
         expect(again).toMatchObject({ ok: true, summary: { authUser: 'not_found' } });
+    });
+});
+
+describe('authorship that would block the auth delete', () => {
+    it('releases a play-along analysis the user requested on someone else’s score before deleting them', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.analysisAuthors.set('theirs', TEACHER);
+
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { authUser: 'deleted' } });
+        // The analysis belongs to the colleague's score: it stays, unattributed.
+        expect(world.analysisAuthors.get('theirs')).toBeNull();
+        expect(world.documents.get('theirs')).toBe('colleague');
+        expect(world.log.indexOf(`release:${TEACHER}`)).toBeLessThan(world.log.indexOf(`auth:${TEACHER}`));
+    });
+
+    it('releases a student’s authorship before deleting the student too', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.addStudent('student-1', TEACHER);
+        world.analysisAuthors.set('theirs', 'student-1');
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { studentsDeleted: 1 } });
+        expect(world.users.has('student-1')).toBe(false);
+    });
+
+    it('retries once when a row authored by the user lands between the release and the delete', async () => {
+        const world = new FakeWorld();
+        world.users.set('colleague', { userType: null, teacherId: null });
+        world.addDocument('theirs', 'colleague');
+        world.onFirstRelease = () => world.analysisAuthors.set('theirs', TEACHER);
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { authUser: 'deleted' } });
+        expect(world.log.filter((entry) => entry === `release:${TEACHER}`)).toHaveLength(2);
+    });
+
+    it('reports auth_delete_failed, with the data already gone, when the delete keeps failing', async () => {
+        const world = payingTeacher();
+        world.failAuthDelete = true;
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'auth_delete_failed' });
+        expect(world.users.has(TEACHER)).toBe(true);
+        expect(world.log.filter((entry) => entry === `release:${TEACHER}`)).toHaveLength(2);
+    });
+});
+
+describe('billing after the account is gone', () => {
+    it('cancels a subscription a checkout in another tab started mid-deletion', async () => {
+        const world = payingTeacher();
+        const live = world.stripe.live as FakeStripe;
+        // After step 2 has run: the customer completes a Checkout that was
+        // opened (on the existing customer) while the deletion was under way.
+        world.onFirstDocumentListing = () =>
+            live.subscriptions.set('sub_late', { id: 'sub_late', status: 'active', customerId: 'cus_live' });
+
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { lateBillingSweep: 'done', lateSubscriptionsCanceled: 1, subscriptionsCanceled: 2 },
+        });
+        expect(live.subscriptions.get('sub_late')?.status).toBe('canceled');
+        // Swept after the auth user was deleted, when no new Checkout can be opened.
+        expect(world.log.indexOf('stripe.cancel:sub_late')).toBeGreaterThan(world.log.indexOf(`auth:${TEACHER}`));
+    });
+
+    it('expires a checkout opened mid-deletion, from the customers step 2 knew', async () => {
+        const world = payingTeacher();
+        const live = world.stripe.live as FakeStripe;
+        world.onFirstDocumentListing = () => live.openSessions.set('cus_live', ['cs_late']);
+        const result = await deleteAccount(teacher(), world.ports());
+        // billing_customers cascaded with the user; the customer was carried over.
+        expect(world.customers).toEqual([]);
+        expect(result).toMatchObject({ ok: true, summary: { checkoutSessionsExpired: 2 } });
+        expect(live.openSessions.get('cus_live')).toEqual([]);
+    });
+
+    it('still reports success when the late sweep fails, with the failure handed back to be logged', async () => {
+        const world = payingTeacher();
+        const live = world.stripe.live as FakeStripe;
+        world.onFirstDocumentListing = () => {
+            live.subscriptions.set('sub_late', { id: 'sub_late', status: 'active', customerId: 'cus_live' });
+            live.failCancel = true;
+        };
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { lateBillingSweep: 'failed', authUser: 'deleted' } });
+        expect(result.ok && result.lateBillingFailure).toBeTruthy();
+        expect(world.users.has(TEACHER)).toBe(false);
+    });
+
+    it('leaves a clean deletion’s late sweep with nothing to do', async () => {
+        const world = payingTeacher();
+        const result = await deleteAccount(teacher(), world.ports());
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { lateBillingSweep: 'done', lateSubscriptionsCanceled: 0, subscriptionsCanceled: 1 },
+        });
+        expect(result.ok && 'lateBillingFailure' in result).toBe(false);
     });
 });
