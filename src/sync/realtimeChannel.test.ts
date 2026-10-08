@@ -10,7 +10,7 @@ import {
     docTopic,
     type DocRealtimeChannelOptions,
 } from '@/sync/realtimeChannel';
-import { INK_PROGRESS_EVENT, SCORE_ANALYSIS_EVENT } from '@/sync/wire';
+import { INK_PROGRESS_EVENT, MEMBERSHIP_EVENT, SCORE_ANALYSIS_EVENT, parseMembershipChange } from '@/sync/wire';
 import type { AnnotationRow } from '@/types/database';
 
 const DOC = 'c0ffee00-0000-4000-8000-000000000001';
@@ -156,7 +156,9 @@ describe('DocRealtimeChannel topics', () => {
         expect(opts.onDbChange).not.toHaveBeenCalled();
         expect(opts.onScoreAnalysis).not.toHaveBeenCalled();
         expect(opts.onDocReplaced).not.toHaveBeenCalled();
-        expect(live.events('broadcast')).toEqual([INK_PROGRESS_EVENT]);
+        // Live ink, plus the membership hint (which only triggers a role
+        // re-read over PostgREST, so a forged one changes nothing).
+        expect(live.events('broadcast')).toEqual([INK_PROGRESS_EVENT, MEMBERSHIP_EVENT]);
     });
 
     it('still takes live ink from doc:{id}, never from doc-db:{id}', () => {
@@ -362,5 +364,86 @@ describe('DocRealtimeChannel when doc-db:{id} will not join', () => {
         vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 3);
         expect(opts.onResync).toHaveBeenCalledTimes(1);
         expect(vi.getTimerCount()).toBe(0);
+    });
+});
+
+const membership = (userId: string, role: string | null, documentId = DOC) => ({
+    table: 'document_members',
+    document_id: documentId,
+    user_id: userId,
+    role,
+    id: 'msg-id',
+});
+
+describe('membership broadcasts', () => {
+    it('re-checks when this user’s own membership changes or ends (sent on doc:{id})', () => {
+        const onMembershipChanged = vi.fn();
+        const { live } = setup({ onMembershipChanged });
+
+        live.broadcast('membership', membership(SELF, 'viewer'));
+        live.broadcast('membership', membership(SELF, null));
+
+        expect(onMembershipChanged).toHaveBeenCalledTimes(2);
+    });
+
+    it('ignores other members’ changes and other documents', () => {
+        const onMembershipChanged = vi.fn();
+        const { live } = setup({ onMembershipChanged });
+
+        live.broadcast('membership', membership('someone-else', null));
+        live.broadcast('membership', membership(SELF, null, 'doc-2'));
+
+        expect(onMembershipChanged).not.toHaveBeenCalled();
+    });
+
+    it('ignores a malformed payload', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const onMembershipChanged = vi.fn();
+        const { live } = setup({ onMembershipChanged });
+
+        live.broadcast('membership', { table: 'document_members', user_id: SELF });
+
+        expect(onMembershipChanged).not.toHaveBeenCalled();
+        warn.mockRestore();
+    });
+
+    it('re-checks when the doc:{id} join is refused, but not after stop', () => {
+        const onMembershipChanged = vi.fn();
+        const { live, rt } = setup({ onMembershipChanged });
+
+        live.status('CHANNEL_ERROR');
+        expect(onMembershipChanged).toHaveBeenCalledTimes(1);
+
+        rt.stop();
+        live.status('CHANNEL_ERROR');
+        expect(onMembershipChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a refused doc-db:{id} join to the polling fallback, not an access re-check', () => {
+        const onMembershipChanged = vi.fn();
+        const { db } = setup({ onMembershipChanged });
+
+        db.status('CHANNEL_ERROR');
+
+        expect(onMembershipChanged).not.toHaveBeenCalled();
+    });
+});
+
+describe('parseMembershipChange', () => {
+    it('accepts the trigger payload, including a removal', () => {
+        expect(parseMembershipChange(membership(SELF, null))).toEqual({
+            table: 'document_members',
+            document_id: DOC,
+            user_id: SELF,
+            role: null,
+        });
+        expect(parseMembershipChange(membership(SELF, 'editor'))?.role).toBe('editor');
+    });
+
+    it('rejects anything that is not a membership change', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        expect(parseMembershipChange({ ...membership(SELF, 'admin') })).toBeNull();
+        expect(parseMembershipChange({ ...membership(SELF, null), table: 'annotations' })).toBeNull();
+        warn.mockRestore();
     });
 });

@@ -261,6 +261,41 @@ describe('SyncEngine.pullSince', () => {
     });
 });
 
+describe('SyncEngine.stop during an in-flight pull', () => {
+    it('writes neither rows nor a watermark once stopped', async () => {
+        await api.insertIgnoreDuplicates({
+            id: 'r1',
+            document_id: DOC,
+            page: 0,
+            kind: 'stroke',
+            color: '#ff0000',
+            payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+            created_by: 'other',
+        });
+        // Hold the fetch open, the way a slow network would, and stop the
+        // engine while it is pending — what the viewer does when the account
+        // loses the score and its local copy is about to be purged.
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const realFetch = api.fetchSince.bind(api);
+        api.fetchSince = async (...args: Parameters<FakeApi['fetchSince']>) => {
+            await gate;
+            return realFetch(...args);
+        };
+
+        const pull = engine.pullSince();
+        engine.stop();
+        release();
+        await pull;
+
+        expect(store.get('r1')).toBeUndefined();
+        expect(await db.annotations.where('docId').equals(DOC).count()).toBe(0);
+        expect(await db.syncState.get(DOC)).toBeUndefined();
+    });
+});
+
 describe('SyncEngine.applyServerRow (broadcast path)', () => {
     it('applies rows and advances the watermark monotonically', async () => {
         await engine.applyServerRow({

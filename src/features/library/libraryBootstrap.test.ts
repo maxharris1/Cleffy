@@ -4,10 +4,15 @@ import {
     fetchLibraryBootstrap,
     prependCachedLibraryDocument,
     readCachedLibraryList,
+    removeCachedLibraryDocument,
     writeCachedLibraryList,
     type LibraryListSnapshot,
 } from '@/features/library/libraryBootstrap';
-import { libraryMutationEpoch, noteLibraryMutation, noteLibraryMutationCommitted } from '@/features/library/libraryCache';
+import {
+    libraryMutationEpoch,
+    noteLibraryMutation,
+    noteLibraryMutationCommitted,
+} from '@/features/library/libraryCache';
 import { getDb } from '@/sync/db';
 import type { DocumentRow } from '@/types/database';
 
@@ -215,6 +220,37 @@ describe('fetchLibraryBootstrap', () => {
         const row = await readCachedLibraryList('user-prepend');
         expect(row?.documents[0]?.id).toBe('d-new');
         expect(row?.documents[1]?.title).toBe('AFTER-PERSIST');
+    });
+
+    it('drops a score the account lost from the snapshot, with its favorite and tags', async () => {
+        const kept = payload('Kept').documents[0] as DocumentRow;
+        const lost: DocumentRow = { ...kept, id: 'd-lost', title: 'Lost' };
+        await writeCachedLibraryList('user-lost', {
+            documents: [kept, lost],
+            hasMore: false,
+            favoriteIds: new Set(['d1', 'd-lost']),
+            tags: [],
+            documentTags: new Map([
+                ['d1', ['t1']],
+                ['d-lost', ['t1']],
+            ]),
+        });
+
+        await removeCachedLibraryDocument('user-lost', 'd-lost');
+
+        const row = await readCachedLibraryList('user-lost');
+        expect(row?.documents.map((d) => d.id)).toEqual(['d1']);
+        expect([...(row?.favoriteIds ?? [])]).toEqual(['d1']);
+        expect([...(row?.documentTags.keys() ?? [])]).toEqual(['d1']);
+    });
+
+    it('leaves the snapshot alone when the score was never in it', async () => {
+        await writeCachedLibraryList('user-absent', listSnapshot('Only'));
+        const spy = vi.spyOn(getDb(), 'transaction');
+        await removeCachedLibraryDocument('user-absent', 'd-other');
+        await removeCachedLibraryDocument('user-without-snapshot', 'd-other');
+        expect(spy).not.toHaveBeenCalled();
+        spy.mockRestore();
     });
 
     it('does not memoize a failed request', async () => {

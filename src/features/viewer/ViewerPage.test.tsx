@@ -13,8 +13,15 @@ const loadDocumentBytes = vi.fn();
 const loadDocumentOffline = vi.fn();
 const ensureDocumentPageCount = vi.fn();
 const prefetchDocumentBytes = vi.fn();
+const purgeLocalDocument = vi.fn();
+const removeCachedLibraryDocument = vi.fn();
+
+vi.mock('@/features/library/libraryBootstrap', () => ({
+    removeCachedLibraryDocument: (...args: unknown[]) => removeCachedLibraryDocument(...args),
+}));
 
 vi.mock('@/features/library/documentsService', () => ({
+    purgeLocalDocument: (...args: unknown[]) => purgeLocalDocument(...args),
     isCloudDocId: (id: string) => /^[0-9a-f-]{36}$/i.test(id),
     fetchDocument: (...args: unknown[]) => fetchDocument(...args),
     fetchMyRole: (...args: unknown[]) => fetchMyRole(...args),
@@ -28,25 +35,42 @@ const SESSION = {
     user: { id: 'teacher-1', email: 'teacher@example.com', is_anonymous: false, user_metadata: {} },
 };
 
+const sessionKind: { userType: 'student' | null } = { userType: null };
+
 vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
     isRegisteredSession: () => true,
     displayNameOf: () => 'Teacher',
+    userTypeOf: () => sessionKind.userType,
 }));
+
+/** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
+const viewportSync: { current: { onMembershipChanged?: () => void } | undefined } = { current: undefined };
 
 vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
     PdfProvider: ({ children }: { children: ReactNode }) => <div data-testid="pdf-provider">{children}</div>,
 }));
 
 vi.mock('@/features/viewer/PdfViewport', () => ({
-    PdfViewport: ({ readOnly, sync, playback }: { readOnly?: boolean; sync?: unknown; playback?: unknown }) => (
-        <div
-            data-testid="pdf-viewport"
-            data-readonly={String(Boolean(readOnly))}
-            data-sync={sync ? 'on' : 'off'}
-            data-playback={playback ? 'on' : 'off'}
-        />
-    ),
+    PdfViewport: ({
+        readOnly,
+        sync,
+        playback,
+    }: {
+        readOnly?: boolean;
+        sync?: { onMembershipChanged?: () => void };
+        playback?: unknown;
+    }) => {
+        viewportSync.current = sync;
+        return (
+            <div
+                data-testid="pdf-viewport"
+                data-readonly={String(Boolean(readOnly))}
+                data-sync={sync ? 'on' : 'off'}
+                data-playback={playback ? 'on' : 'off'}
+            />
+        );
+    },
 }));
 
 vi.mock('@/features/viewer/ViewerHeader', () => ({
@@ -70,7 +94,15 @@ vi.mock('@/features/import/analyzeApi', () => ({ makeCloudClassifyFn: () => null
 vi.mock('@/features/import/cleanReplace', () => ({ buildCleanFn: () => null }));
 vi.mock('@/features/import/prepareUpload', () => ({ UPLOAD_ACCEPT: '', prepareUploadFile: vi.fn() }));
 vi.mock('@/features/notes/NotesPanel', () => ({ NotesPanel: () => null }));
-vi.mock('@/features/share/ShareDialog', () => ({ ShareDialog: () => null }));
+vi.mock('@/features/share/ShareDialog', () => ({
+    ShareDialog: ({ role, onLeft }: { role: string; onLeft?: () => void }) => (
+        <div data-testid="share-dialog" data-role={role}>
+            <button type="button" onClick={() => onLeft?.()}>
+                mock leave
+            </button>
+        </div>
+    ),
+}));
 vi.mock('@/features/auth/UpgradeBanner', () => ({ UpgradeBanner: () => null }));
 vi.mock('@/features/playback/TransportBar', () => ({
     TransportBar: () => <div data-testid="transport-bar" />,
@@ -128,6 +160,7 @@ const renderViewer = () =>
             <Routes>
                 <Route path="/doc/:documentId" element={<ViewerPage />} />
                 <Route path="/" element={<div>home</div>} />
+                <Route path="/library" element={<div>library</div>} />
             </Routes>
         </MemoryRouter>,
     );
@@ -137,6 +170,10 @@ const viewport = () => screen.getByTestId('pdf-viewport');
 beforeEach(() => {
     vi.clearAllMocks();
     analysis.state = { kind: 'none' };
+    sessionKind.userType = null;
+    viewportSync.current = undefined;
+    purgeLocalDocument.mockResolvedValue(undefined);
+    removeCachedLibraryDocument.mockResolvedValue(undefined);
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
     ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
     fetchMyRole.mockResolvedValue('owner');
@@ -162,6 +199,9 @@ describe('CloudViewer warm open', () => {
         expect(await screen.findByText(/access was revoked/)).toBeInTheDocument();
         expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
         expect(screen.queryByText('Nocturne (cached)')).not.toBeInTheDocument();
+        // This account's cached copy goes with it.
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+        expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
     });
 
     it('keeps the cached score, no longer provisional, when the server cannot be reached', async () => {
@@ -334,5 +374,152 @@ describe('CloudViewer warm open', () => {
         expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
         expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer membership changes', () => {
+    /** A cold open that settles as `role` on a score someone else owns. */
+    const openAs = async (role: 'editor' | 'viewer') => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue(role);
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+    };
+
+    const membershipChanged = async () => {
+        await act(async () => {
+            viewportSync.current?.onMembershipChanged?.();
+            await Promise.resolve();
+        });
+    };
+
+    it('turns read-only and says why when the owner lowers the role', async () => {
+        await openAs('editor');
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+
+        fetchMyRole.mockResolvedValue('viewer');
+        await membershipChanged();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByRole('status')).toHaveTextContent('you can now only view this score');
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('opens for writing when the owner raises the role', async () => {
+        await openAs('viewer');
+        expect(viewport()).toHaveAttribute('data-readonly', 'true');
+
+        fetchMyRole.mockResolvedValue('editor');
+        await membershipChanged();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(screen.getByRole('status')).toHaveTextContent('you can now edit this score');
+    });
+
+    it('leaves the score with a clear message, and purges it, once access is gone', async () => {
+        await openAs('editor');
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(
+            await screen.findByText(/no longer available to you — it was deleted, or your access was removed/),
+        ).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+        expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('does not drop a change that arrives while a re-check is still running', async () => {
+        await openAs('editor');
+
+        // The first check reads the role before the owner's second change
+        // commits (editor, then viewer, in quick succession).
+        let answerFirst: (role: string) => void = () => undefined;
+        fetchMyRole.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    answerFirst = resolve;
+                }),
+        );
+        await membershipChanged();
+        fetchMyRole.mockResolvedValue('viewer');
+        await membershipChanged();
+        expect(fetchMyRole).toHaveBeenCalledTimes(2); // load + the first check only
+
+        await act(async () => {
+            answerFirst('editor');
+            await Promise.resolve();
+        });
+
+        // The second event was queued, not ignored: one more read, and the
+        // viewer lands on the latest role.
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(fetchMyRole).toHaveBeenCalledTimes(3);
+        expect(screen.getByRole('status')).toHaveTextContent('you can now only view this score');
+    });
+
+    it('follows a role change and then a removal in quick succession to the end', async () => {
+        await openAs('editor');
+
+        let answerFirst: (role: string) => void = () => undefined;
+        fetchMyRole.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    answerFirst = resolve;
+                }),
+        );
+        await membershipChanged();
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+        await membershipChanged();
+
+        await act(async () => {
+            answerFirst('viewer');
+            await Promise.resolve();
+        });
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        expect(screen.queryByTestId('pdf-viewport')).not.toBeInTheDocument();
+        // Two events mid-check still mean one follow-up, not two.
+        expect(fetchMyRole).toHaveBeenCalledTimes(3);
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+    });
+
+    it('changes nothing when the re-check cannot reach the server', async () => {
+        await openAs('editor');
+
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+        await membershipChanged();
+
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('offers members the sharing dialog, and leaving purges then returns to the library', async () => {
+        const user = userEvent.setup();
+        await openAs('viewer');
+
+        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Sharing' }));
+        expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'viewer');
+
+        await user.click(screen.getByRole('button', { name: 'mock leave' }));
+
+        expect(await screen.findByText('library')).toBeInTheDocument();
+        expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID);
+        expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('gives a roster student no way to leave an assigned score', async () => {
+        sessionKind.userType = 'student';
+        await openAs('editor');
+
+        expect(screen.queryByRole('button', { name: 'Sharing' })).not.toBeInTheDocument();
     });
 });

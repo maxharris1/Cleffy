@@ -3,10 +3,12 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import {
     INK_PROGRESS_EVENT,
+    MEMBERSHIP_EVENT,
     SCORE_ANALYSIS_EVENT,
     parseDbChange,
     parseDocumentChange,
     parseInkProgress,
+    parseMembershipChange,
     parseScoreAnalysisBroadcast,
     presenceSchema,
     type InkProgressMsg,
@@ -80,6 +82,14 @@ export interface DocRealtimeChannelOptions {
     onDocReplaced?: (contentRev: number) => void;
     /** Play-along analysis lifecycle changed (trimmed broadcast). */
     onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
+    /**
+     * This user's own access to the document may have changed: the server
+     * broadcast a role change or removal for them, or the channel join was
+     * refused (Realtime re-checks membership only when a channel joins, so a
+     * refusal on rejoin is the other way a removal shows up). The receiver
+     * re-reads its role rather than trusting either signal.
+     */
+    onMembershipChanged?: () => void;
 }
 
 /** Private topic for presence and live ink — members may send on it. */
@@ -154,6 +164,19 @@ export class DocRealtimeChannel {
             }
         });
 
+        // The membership event (document_members_broadcast trigger) is sent on
+        // this topic, so any editor could forge one too. That is harmless: it is
+        // only a hint — the receiver re-reads its own role over PostgREST and
+        // never acts on the payload.
+        channel.on('broadcast', { event: MEMBERSHIP_EVENT }, ({ payload }) => {
+            const msg = parseMembershipChange(payload);
+            // Other members' changes are none of this client's business; the
+            // presence bar already follows who is here.
+            if (msg && msg.document_id === docId && msg.user_id === self.userId) {
+                this.opts.onMembershipChanged?.();
+            }
+        });
+
         channel.on('presence', { event: 'sync' }, () => {
             const state = channel.presenceState<Record<string, unknown>>();
             const peers: PresencePeer[] = [];
@@ -173,6 +196,14 @@ export class DocRealtimeChannel {
             if (status === 'SUBSCRIBED') {
                 // Only write path for track() — force so join/reconnect always announce.
                 this.trackPresence({ force: true });
+            } else if (status === 'CHANNEL_ERROR' && !this.stopped) {
+                // Also what a refused join looks like: a removed member's
+                // rejoin fails the realtime.messages policy on doc:{id}. A
+                // transport error lands here too; the re-check tells them
+                // apart. (doc-db:{id} refusals are left to the polling
+                // fallback: before migration 20261007120101 every member's
+                // join there is refused, which says nothing about access.)
+                this.opts.onMembershipChanged?.();
             }
             this.onChannelStatus('live', status);
         });

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { MoreVerticalIcon } from '@/ui/icons';
 
 /**
- * Owner-only actions for one score, as a popover menu.
+ * Owner actions for one score, as a popover menu.
  *
  * Lifted out of LibraryPage unchanged so the shelf card and the list row share
  * one implementation — the accessible name ("Score actions"), the item labels
@@ -24,7 +24,31 @@ export const RowMenu = ({
     /** Omitted when the plan has no roster — the item disappears with it. */
     onAssign?: () => void;
     onDelete: () => void;
-}) => {
+}) => (
+    <MenuPopover>
+        {(pick) => (
+            <>
+                <MenuItem label="Rename" onClick={() => pick(onRename)} />
+                <MenuItem label="Share…" onClick={() => pick(onShare)} />
+                {onAssign ? <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} /> : null}
+                <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
+            </>
+        )}
+    </MenuPopover>
+);
+
+/**
+ * The same menu for a score someone else shared with you. Rename, share and
+ * delete are the owner's; what a member can do is take it out of their own
+ * library, which is leaving it.
+ */
+export const SharedScoreMenu = ({ onLeave }: { onLeave: () => void }) => (
+    <MenuPopover>
+        {(pick) => <MenuItem label="Remove from my library" danger onClick={() => pick(onLeave)} />}
+    </MenuPopover>
+);
+
+const MenuPopover = ({ children }: { children: (pick: (action: () => void) => void) => ReactNode }) => {
     const [open, setOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -70,12 +94,9 @@ export const RowMenu = ({
             {open ? (
                 <div
                     role="menu"
-                    className="absolute right-0 z-20 mt-1 w-44 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
+                    className="absolute right-0 z-20 mt-1 w-48 rounded-xl border border-stone-200 bg-white py-1 shadow-lg"
                 >
-                    <MenuItem label="Rename" onClick={() => pick(onRename)} />
-                    <MenuItem label="Share…" onClick={() => pick(onShare)} />
-                    {onAssign ? <MenuItem label="Assign to student…" onClick={() => pick(onAssign)} /> : null}
-                    <MenuItem label="Delete" danger onClick={() => pick(onDelete)} />
+                    {children(pick)}
                 </div>
             ) : null}
         </div>

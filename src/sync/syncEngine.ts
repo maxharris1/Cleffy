@@ -295,8 +295,17 @@ export class SyncEngine {
             return;
         }
         const pendingIds = new Set((await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId));
+        // Re-checked after every await: stop() may have come in meanwhile
+        // because this account lost the score, and the caller is purging its
+        // local copy — nothing may be written back over that.
+        if (this.stopped) {
+            return;
+        }
         await store.applyRemoteBatch([fromServerRow(row)], pendingIds);
         const state = await db.syncState.get(docId);
+        if (this.stopped) {
+            return;
+        }
         if (!state || row.seq > state.watermarkSeq) {
             await db.syncState.put({ docId, watermarkSeq: row.seq });
         }
@@ -315,6 +324,13 @@ export class SyncEngine {
 
             for (;;) {
                 const { data, error } = await api.fetchSince(docId, after, PULL_PAGE_SIZE);
+                // stop() can land during any await below (the account lost
+                // the score and its local copy is being purged): a pull that
+                // was already in flight must not write rows or a watermark
+                // back afterwards.
+                if (this.stopped) {
+                    return;
+                }
                 if (error) {
                     this.setStatus(error.transient && navigator.onLine === false ? 'offline' : 'error');
                     if (error.transient) {
@@ -329,6 +345,9 @@ export class SyncEngine {
                 const pendingIds = new Set(
                     (await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId),
                 );
+                if (this.stopped) {
+                    return;
+                }
                 await store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
                 const last = rows[rows.length - 1];
                 if (last) {
@@ -338,6 +357,9 @@ export class SyncEngine {
                 if (rows.length < PULL_PAGE_SIZE) {
                     break;
                 }
+            }
+            if (this.stopped) {
+                return;
             }
             await db.syncState.put({ docId, watermarkSeq: watermark });
         } finally {

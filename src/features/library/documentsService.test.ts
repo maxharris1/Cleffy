@@ -78,6 +78,7 @@ vi.mock('@/features/import/prepareUpload', () => ({
 
 import {
     deleteDocument,
+    leaveSharedDocument,
     loadDocumentBytes,
     loadDocumentOffline,
     prefetchDocumentBytes,
@@ -525,6 +526,39 @@ describe('deleteDocument', () => {
         });
         await deleteDocument(d);
         expect(memThumbs.has(d.id)).toBe(false);
+    });
+});
+
+describe('leaveSharedDocument', () => {
+    const stubRpc = (error: { message: string; details?: string } | null) => {
+        const rpc = vi.fn(() => Promise.resolve({ data: null, error }));
+        vi.mocked(getSupabase).mockReturnValue({ rpc } as never);
+        return rpc;
+    };
+
+    it('leaves on the server, then purges this device’s copy, moving the epoch on both edges', async () => {
+        const rpc = stubRpc(null);
+        const d = doc({ owner_id: 'someone-else' });
+        await putCache({ docId: d.id, bytes: new ArrayBuffer(4), title: d.title, cachedAt: 'x', userId: 'user-1' });
+        const before = libraryMutationEpoch();
+
+        await leaveSharedDocument(d.id);
+
+        expect(rpc).toHaveBeenCalledWith('leave_document', { p_document: d.id });
+        expect(memCache.has(d.id)).toBe(false);
+        expect(libraryMutationEpoch()).toBe(before + 2);
+    });
+
+    it('keeps the cached copy when the server refuses, and explains an assigned score', async () => {
+        stubRpc({ message: 'this score was assigned by your teacher', details: '{"code":"assigned_score"}' });
+        const d = doc({ owner_id: 'teacher-9' });
+        await putCache({ docId: d.id, bytes: new ArrayBuffer(4), title: d.title, cachedAt: 'x', userId: 'user-1' });
+        const before = libraryMutationEpoch();
+
+        await expect(leaveSharedDocument(d.id)).rejects.toThrow('Your teacher assigned this score');
+
+        expect(memCache.has(d.id)).toBe(true);
+        expect(libraryMutationEpoch()).toBe(before + 1);
     });
 });
 

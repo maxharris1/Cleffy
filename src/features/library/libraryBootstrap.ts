@@ -132,6 +132,30 @@ export const prependCachedLibraryDocument = async (
     });
 };
 
+/**
+ * Drop one score from the snapshot — the account lost it (left, or was
+ * removed) somewhere other than the mounted library page, which persists its
+ * own list. Without this the next library visit paints the score from the
+ * snapshot until the bootstrap lands, and a tap in that window opens onto an
+ * access error.
+ */
+export const removeCachedLibraryDocument = async (userId: string, docId: string): Promise<void> => {
+    const current = await readCachedLibraryList(userId).catch(() => null);
+    if (!current || !current.documents.some((d) => d.id === docId)) {
+        return;
+    }
+    const favoriteIds = new Set(current.favoriteIds);
+    favoriteIds.delete(docId);
+    const documentTags = new Map(current.documentTags);
+    documentTags.delete(docId);
+    await writeCachedLibraryList(userId, {
+        ...current,
+        documents: current.documents.filter((d) => d.id !== docId),
+        favoriteIds,
+        documentTags,
+    });
+};
+
 /** Dexie snapshot for an instant library paint before the network returns. */
 export const readCachedLibraryList = async (userId: string): Promise<LibraryListSnapshot | null> => {
     const row = await getDb().libraryList.get(userId);

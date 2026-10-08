@@ -133,6 +133,31 @@ export const parseScoreAnalysisBroadcast = (payload: unknown): ScoreAnalysisBroa
     return parsed.data;
 };
 
+/**
+ * A member's role changed or their membership ended (document_members_broadcast
+ * trigger). `role` null means removed. Treated as a hint only: the receiver
+ * re-reads its own role over PostgREST rather than trusting the payload.
+ */
+export const MEMBERSHIP_EVENT = 'membership';
+
+const membershipChangeSchema = z.object({
+    table: z.literal('document_members'),
+    document_id: z.string().min(1),
+    user_id: z.string().min(1),
+    role: z.enum(['owner', 'editor', 'viewer']).nullable(),
+});
+
+export type MembershipChange = z.infer<typeof membershipChangeSchema>;
+
+export const parseMembershipChange = (payload: unknown): MembershipChange | null => {
+    const parsed = membershipChangeSchema.safeParse(payload);
+    if (!parsed.success) {
+        console.warn('Ignoring malformed membership broadcast', parsed.error.issues[0]?.message);
+        return null;
+    }
+    return parsed.data;
+};
+
 /** Presence payload tracked per user. */
 export const presenceSchema = z.object({
     userId: z.string().min(1),
