@@ -460,6 +460,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                     ink.clearRemoteInk();
                     void engine?.sync();
                 },
+                onResync: () => {
+                    void engine?.sync();
+                },
                 onDocReplaced: (contentRev) => syncOnDocReplaced?.(contentRev),
                 onScoreAnalysis: (msg) => syncOnScoreAnalysis?.(msg),
             });

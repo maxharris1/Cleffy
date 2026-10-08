@@ -27,6 +27,22 @@ const FLUSH_MAX_POINTS = 45;
 /** Min gap between presence `track` calls — avoids ClientPresenceRateLimitReached. */
 const PRESENCE_TRACK_MIN_MS = 1000;
 
+/**
+ * How long doc-db:{id} may lag behind a joined doc:{id} before we stop waiting
+ * for it. Both topics share one socket, so a healthy re-join lands within a
+ * round-trip of the other; anything slower means the join is being refused or
+ * retried (e.g. the frontend is live before migration 20261007120101).
+ */
+export const DB_JOIN_GRACE_MS = 4000;
+/** Pull cadence while committed rows cannot arrive live (fallback mode). */
+export const DB_FALLBACK_POLL_MS = 15_000;
+/**
+ * In fallback mode a peer's finished live stroke is pulled this long after its
+ * last batch — long enough for their outbox flush to commit, well inside the
+ * 10 s live-preview TTL so the mark never visibly disappears.
+ */
+export const DB_FALLBACK_INK_PULL_MS = 1500;
+
 export interface StrokeMeta {
     strokeId: string;
     page: number;
@@ -54,20 +70,52 @@ export interface DocRealtimeChannelOptions {
     onPeers: (peers: PresencePeer[]) => void;
     /** Fired on re-join after a drop: clear live buffers + gap-fill pull. */
     onReconnect: () => void;
+    /**
+     * Pull committed rows without touching live buffers. Used while
+     * doc-db:{id} cannot be joined, when committed rows can only come from
+     * pulls, and once it finally joins (to cover the gap until then).
+     */
+    onResync: () => void;
     /** Another member replaced the document's PDF bytes (smart-import cleanup). */
     onDocReplaced?: (contentRev: number) => void;
     /** Play-along analysis lifecycle changed (trimmed broadcast). */
     onScoreAnalysis?: (msg: ScoreAnalysisBroadcast) => void;
 }
 
+/** Private topic for presence and live ink — members may send on it. */
+export const docTopic = (docId: string): string => `doc:${docId}`;
+
 /**
- * The per-document realtime channel: presence, live ink, and committed
- * annotation fan-out, all multiplexed on the private topic `doc:{id}`.
+ * Private topic for server-authored events: committed annotation rows, PDF
+ * replacement and play-along status, all written by database triggers. RLS lets
+ * members receive on it and no client send on it (migration
+ * 20261007120101_realtime_db_topic). It is separate from doc:{id} because
+ * Realtime authorizes a channel's sends for every event name at once, so on a
+ * shared topic any editor could broadcast a hand-made 'INSERT' that peers
+ * would apply as a committed row (forged author, forged seq).
+ */
+export const docDbTopic = (docId: string): string => `doc-db:${docId}`;
+
+type ChannelKey = 'live' | 'db';
+
+/**
+ * The per-document realtime connection: presence and live ink on the private
+ * topic `doc:{id}`, and committed-row fan-out on the receive-only `doc-db:{id}`.
  */
 export class DocRealtimeChannel {
     private channel: RealtimeChannel | null = null;
-    private everSubscribed = false;
+    private dbChannel: RealtimeChannel | null = null;
+    private readonly joined: Record<ChannelKey, boolean> = { live: false, db: false };
+    private readonly everJoined: Record<ChannelKey, boolean> = { live: false, db: false };
+    private reconnectPending = false;
     private stopped = false;
+
+    // Fallback when doc-db:{id} will not join (see armDbFallback).
+    private dbGraceTimer: ReturnType<typeof setTimeout> | null = null;
+    private dbPollTimer: ReturnType<typeof setInterval> | null = null;
+    private dbInkPullTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Committed rows have had no live path since this was set; a db join must pull. */
+    private dbFallback = false;
 
     // Live-ink batching state.
     private meta: StrokeMeta | null = null;
@@ -86,7 +134,7 @@ export class DocRealtimeChannel {
 
     start(): void {
         const { supabase, docId, self } = this.opts;
-        const channel = supabase.channel(`doc:${docId}`, {
+        const channel = supabase.channel(docTopic(docId), {
             config: {
                 private: true,
                 broadcast: { self: false, ack: false },
@@ -94,31 +142,15 @@ export class DocRealtimeChannel {
             },
         });
 
+        // Only live ink is accepted here. Committed rows are never read off this
+        // topic: every member who may send on it could have written them.
         channel.on('broadcast', { event: INK_PROGRESS_EVENT }, ({ payload }) => {
             const msg = parseInkProgress(payload);
             if (msg && msg.userId !== self.userId) {
                 this.opts.onRemoteInk(msg);
-            }
-        });
-        const onDb = ({ payload }: { payload: unknown }) => {
-            // The topic multiplexes two tables: documents (bytes replaced) and annotations.
-            const docChange = parseDocumentChange(payload);
-            if (docChange) {
-                this.opts.onDocReplaced?.(docChange.content_rev);
-                return;
-            }
-            const row = parseDbChange(payload);
-            if (row) {
-                this.opts.onDbChange(row);
-            }
-        };
-        channel.on('broadcast', { event: 'INSERT' }, onDb);
-        channel.on('broadcast', { event: 'UPDATE' }, onDb);
-
-        channel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
-            const msg = parseScoreAnalysisBroadcast(payload);
-            if (msg && msg.document_id === docId) {
-                this.opts.onScoreAnalysis?.(msg);
+                if (msg.done && this.dbFallback) {
+                    this.scheduleInkPull();
+                }
             }
         });
 
@@ -141,16 +173,154 @@ export class DocRealtimeChannel {
             if (status === 'SUBSCRIBED') {
                 // Only write path for track() — force so join/reconnect always announce.
                 this.trackPresence({ force: true });
-                if (this.everSubscribed) {
-                    this.opts.onReconnect();
-                }
-                this.everSubscribed = true;
+            }
+            this.onChannelStatus('live', status);
+        });
+
+        // Receive-only: no presence, and nothing is ever sent on it.
+        const dbChannel = supabase.channel(docDbTopic(docId), {
+            config: { private: true, broadcast: { self: false, ack: false } },
+        });
+        const onDb = ({ payload }: { payload: unknown }) => {
+            // The topic multiplexes two tables: documents (bytes replaced) and annotations.
+            const docChange = parseDocumentChange(payload);
+            if (docChange) {
+                this.opts.onDocReplaced?.(docChange.content_rev);
+                return;
+            }
+            const row = parseDbChange(payload);
+            if (row) {
+                this.opts.onDbChange(row);
+            }
+        };
+        dbChannel.on('broadcast', { event: 'INSERT' }, onDb);
+        dbChannel.on('broadcast', { event: 'UPDATE' }, onDb);
+        dbChannel.on('broadcast', { event: SCORE_ANALYSIS_EVENT }, ({ payload }) => {
+            const msg = parseScoreAnalysisBroadcast(payload);
+            if (msg && msg.document_id === docId) {
+                this.opts.onScoreAnalysis?.(msg);
             }
         });
+        this.dbChannel = dbChannel;
+        dbChannel.subscribe((status) => this.onChannelStatus('db', status));
+    }
+
+    /**
+     * Re-join bookkeeping across the two channels. A drop usually takes both
+     * (they share one socket), and the gap-fill pull must start only once the
+     * committed-row channel is live again — otherwise a row committed between
+     * the pull and the db channel's re-join would be missed by both. So
+     * onReconnect fires once both are joined after either re-joined; the first
+     * join of each is not a reconnect.
+     *
+     * Waiting on doc-db:{id} is bounded, though: if it stays unjoined
+     * DB_JOIN_GRACE_MS after doc:{id} joined, the channel degrades to pulling
+     * (see armDbFallback) instead of leaving the score with no committed-row
+     * path at all.
+     */
+    private onChannelStatus(key: ChannelKey, status: string): void {
+        if (this.stopped) {
+            return;
+        }
+        if (status !== 'SUBSCRIBED') {
+            this.joined[key] = false;
+            this.updateDbFallback();
+            return;
+        }
+        this.joined[key] = true;
+        if (this.everJoined[key]) {
+            this.reconnectPending = true;
+        }
+        this.everJoined[key] = true;
+        if (this.joined.live && this.joined.db) {
+            const missedRows = this.reconnectPending || this.dbFallback;
+            const clearLive = this.reconnectPending;
+            this.reconnectPending = false;
+            this.leaveDbFallback();
+            if (clearLive) {
+                this.opts.onReconnect();
+            } else if (missedRows) {
+                // First db join after running without it: rows committed since
+                // the last fallback pull reached nobody. Live ink was intact.
+                this.opts.onResync();
+            }
+            return;
+        }
+        this.updateDbFallback();
+    }
+
+    /** Start or stop waiting on doc-db:{id} as the two join states change. */
+    private updateDbFallback(): void {
+        if (this.joined.live && !this.joined.db) {
+            this.armDbFallback();
+        } else {
+            // Socket down (live not joined): pulls would only fail; the next
+            // live join re-arms. Or db is joined: onChannelStatus handled it.
+            this.clearDbFallbackTimers();
+        }
+    }
+
+    /**
+     * doc:{id} is joined but doc-db:{id} is not. Give it DB_JOIN_GRACE_MS, then
+     * run whatever gap-fill was waiting on it and keep pulling every
+     * DB_FALLBACK_POLL_MS (plus shortly after each peer stroke ends) until it
+     * joins. realtime-js keeps retrying the refused join on its own.
+     */
+    private armDbFallback(): void {
+        if (this.dbGraceTimer || this.dbPollTimer) {
+            return;
+        }
+        this.dbGraceTimer = setTimeout(() => {
+            this.dbGraceTimer = null;
+            if (this.stopped || !this.joined.live || this.joined.db) {
+                return;
+            }
+            this.dbFallback = true;
+            if (this.reconnectPending) {
+                this.reconnectPending = false;
+                this.opts.onReconnect();
+            } else {
+                this.opts.onResync();
+            }
+            this.dbPollTimer = setInterval(() => this.opts.onResync(), DB_FALLBACK_POLL_MS);
+        }, DB_JOIN_GRACE_MS);
+    }
+
+    private scheduleInkPull(): void {
+        if (this.dbInkPullTimer) {
+            clearTimeout(this.dbInkPullTimer);
+        }
+        this.dbInkPullTimer = setTimeout(() => {
+            this.dbInkPullTimer = null;
+            if (!this.stopped && this.dbFallback && !this.joined.db) {
+                this.opts.onResync();
+            }
+        }, DB_FALLBACK_INK_PULL_MS);
+    }
+
+    private leaveDbFallback(): void {
+        this.dbFallback = false;
+        this.clearDbFallbackTimers();
+        if (this.dbInkPullTimer) {
+            clearTimeout(this.dbInkPullTimer);
+            this.dbInkPullTimer = null;
+        }
+    }
+
+    private clearDbFallbackTimers(): void {
+        if (this.dbGraceTimer) {
+            clearTimeout(this.dbGraceTimer);
+            this.dbGraceTimer = null;
+        }
+        if (this.dbPollTimer) {
+            clearInterval(this.dbPollTimer);
+            this.dbPollTimer = null;
+        }
     }
 
     stop(): void {
         this.stopped = true;
+        this.leaveDbFallback();
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
@@ -162,6 +332,10 @@ export class DocRealtimeChannel {
         if (this.channel) {
             void this.opts.supabase.removeChannel(this.channel);
             this.channel = null;
+        }
+        if (this.dbChannel) {
+            void this.opts.supabase.removeChannel(this.dbChannel);
+            this.dbChannel = null;
         }
     }
 

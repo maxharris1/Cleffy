@@ -529,6 +529,25 @@ are ignored.
 `main` → cleffy.io; Supabase applies backend on the same merge. Do not merge
 that PR until you intend to ship production.
 
+**Release note — realtime topic split (migrations `20261007120100`/`20261007120101`).**
+Committed annotation rows, PDF replacement and play-along status move from
+`doc:{id}` to the receive-only `doc-db:{id}`. The merge deploys the bundle
+and the migrations with no guaranteed order, and both orders are safe but
+not seamless:
+
+- _Bundle first_ (or the migration fails): the new client cannot join
+  `doc-db:{id}` yet. After 4 s it falls back to pulling — every 15 s, and
+  1.5 s after a peer finishes a stroke — and does one more pull when the join
+  finally succeeds. Marks arrive a little later than usual, but none are lost.
+- _Migration first_, and every tab still on the old bundle: committed rows no
+  longer arrive live on `doc:{id}`. A peer's live preview fades after 10 s,
+  and the committed mark appears on the next pull (reconnect, the browser's
+  `online` event, or a reload).
+
+So ship outside lesson hours if you can, check the migrations applied
+(Supabase check on the merge commit) before announcing, and expect open tabs
+to need one reload before collaborators' marks appear live again.
+
 **Automatic branching must stay OFF** (`new_branch_per_pr`). Confirm at
 [Project Settings → Integrations](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/settings/integrations)
 — toggle **Automatic branching**. The public API can *list* GitHub connections
