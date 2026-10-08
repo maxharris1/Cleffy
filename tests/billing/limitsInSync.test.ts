@@ -13,6 +13,8 @@ import {
     type UsageMetric,
 } from '../../supabase/functions/_shared/entitlements';
 import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
+import { limitAction } from '../../src/features/billing/limitErrors';
+import { PAID_VISION_READS } from '../../src/features/billing/paidAllowances';
 
 /**
  * Drift guard.
@@ -237,5 +239,31 @@ describe('the pricing page describes the limits it actually enforces', () => {
 
         expect(teacher?.features.join(' ')).toContain('Unlimited students');
         expect(TIER_LIMITS.teacher.students).toBe(UNLIMITED);
+    });
+});
+
+describe('the upgrade prompts promise only what the paid tiers enforce', () => {
+    it('quotes the paid AI page-read allowance the SQL actually grants', () => {
+        for (const tier of PAID_TIERS) {
+            expect(TIER_LIMITS[tier].vision_reads).toBe(PAID_VISION_READS);
+        }
+    });
+
+    it.each(METRICS)('never sells "unlimited" %s unless every paid tier is uncapped', (metric) => {
+        const action = limitAction({ code: 'limit_reached', metric, limit: TIER_LIMITS.free[metric], tier: 'free' });
+        const everyPaidTierUnlimited = PAID_TIERS.every((tier) => TIER_LIMITS[tier][metric] === UNLIMITED);
+        if (!everyPaidTierUnlimited) {
+            expect(action).not.toMatch(/unlimited/i);
+        }
+    });
+
+    it('tells a free user the real paid AI page-read allowance', () => {
+        const action = limitAction({ code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' });
+        expect(action).toContain(`${TIER_LIMITS.personal.vision_reads} AI page reads a month`);
+    });
+
+    it('does not call a capped paid plan unlimited when its fair-use ceiling is hit', () => {
+        const action = limitAction({ code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'personal' });
+        expect(action).not.toMatch(/unlimited/i);
     });
 });

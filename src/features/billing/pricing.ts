@@ -1,3 +1,4 @@
+import { PAID_VISION_READS } from '@/features/billing/paidAllowances';
 import { features } from '@/lib/features';
 import type { BillingTier } from '@/types/database';
 
@@ -120,7 +121,7 @@ export const tierCards = (flags: TierCardFlags): TierCard[] => {
                 'Unlimited IMSLP imports',
                 // Paid AI reads carry a fair-use ceiling (tier_limits() in SQL),
                 // so the card states it rather than promising "unlimited".
-                `500 ${aiReads} a month (fair use)`,
+                `${PAID_VISION_READS} ${aiReads} a month (fair use)`,
                 'Unlimited PDF export',
                 'No roster — this plan is just for you',
             ],

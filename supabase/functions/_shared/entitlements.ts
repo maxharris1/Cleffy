@@ -119,9 +119,10 @@ export const isUnlimited = (limit: number): boolean => limit < 0;
 export const limitFor = (tier: EffectiveTier, metric: UsageMetric): number => limitsFor(tier)[metric];
 
 /**
- * Paid tiers advertise "unlimited" vision reads but carry a generous fair-use
- * ceiling. Hitting it is an anomaly worth logging, not an upsell moment, so it
- * reports a different code and the UI points at support rather than at Checkout.
+ * Paid tiers carry a generous fair-use ceiling on vision reads, and the
+ * pricing card states the number. Hitting it is an anomaly worth logging, not
+ * an upsell moment, so it reports a different code and the UI points at
+ * support rather than at Checkout.
  *
  * Only the metered budgets reach here: `students` is a stock, refused where a
  * seat is provisioned, and never travels the quota path. A student's zeroes are
