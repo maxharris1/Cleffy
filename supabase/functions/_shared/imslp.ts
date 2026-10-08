@@ -16,7 +16,16 @@ export {
     type DownloadFailureCode,
     type DownloadResult,
 } from './imslpDownload.ts';
-import { IMSLP_ORIGIN, USER_AGENT, readBodyCapped, tryDownloadPdfWith, type DownloadResult } from './imslpDownload.ts';
+import {
+    IMSLP_ORIGIN,
+    ImslpFetchError,
+    USER_AGENT,
+    parseRetryAfterSec,
+    readBodyCapped,
+    tryDownloadPdfWith,
+    type DownloadResult,
+    type MwFetchOptions,
+} from './imslpDownload.ts';
 
 export const IMSLP_API = `${IMSLP_ORIGIN}/api.php`;
 
@@ -30,11 +39,13 @@ const MW_429_ATTEMPTS = 3;
  */
 const MW_MAX_BYTES = 16 * 1024 * 1024;
 
-export interface MwFetchOptions {
-    /** Tries on timeout / 429 (default 3). One for best-effort lookups that must not stall a request. */
-    attempts?: number;
-    timeoutMs?: number;
-}
+/**
+ * attempts: tries on timeout / 429 (default 3) — one for best-effort lookups
+ * that must not stall a request, and for anything on the import path, where a
+ * 429 must reach the caller (as ImslpFetchError 'rate_limited') rather than be
+ * retried against a host that is throttling us.
+ */
+export type { MwFetchOptions };
 
 const retryAfterMs = (res: Response): number => {
     const raw = res.headers.get('Retry-After');
@@ -79,11 +90,24 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
             }
             throw err;
         }
-        if (res.status === 429 && attempt < attempts) {
-            await new Promise((resolve) => setTimeout(resolve, retryAfterMs(res)));
-            continue;
+        if (res.status === 429) {
+            if (attempt < attempts) {
+                await res.body?.cancel().catch(() => undefined);
+                await new Promise((resolve) => setTimeout(resolve, retryAfterMs(res)));
+                continue;
+            }
+            // Typed, so the download path can back the deployment off for as
+            // long as IMSLP asked instead of reading this as a plain failure.
+            await res.body?.cancel().catch(() => undefined);
+            // The message is unchanged from the untyped error it replaces:
+            // categorySync retries on /HTTP 429/ and records it as lastError.
+            throw new ImslpFetchError('rate_limited', 'IMSLP API HTTP 429', {
+                status: 429,
+                retryAfterSec: parseRetryAfterSec(res.headers.get('Retry-After')),
+            });
         }
         if (!res.ok) {
+            await res.body?.cancel().catch(() => undefined);
             throw new Error(`IMSLP API HTTP ${res.status}`);
         }
         const declared = Number(res.headers.get('content-length') ?? '');
@@ -113,20 +137,41 @@ export const mwFetch = async (params: Record<string, string>, options: MwFetchOp
 export const workPageUrl = (title: string): string =>
     `${IMSLP_ORIGIN}/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`;
 
+export type WorkPageFetch =
+    | { ok: true; html: string }
+    /** IMSLP answered 429: it is throttling this egress IP. */
+    | { ok: false; reason: 'rate_limited'; retryAfterSec: number | null }
+    /** Timeout, API error, or no rendered text — the license is simply unknown. */
+    | { ok: false; reason: 'unavailable' };
+
 /**
  * Rendered work page HTML via action=parse — the only place IMSLP exposes
- * per-file license tags with their regional Non-PD flags. Null on any failure
- * so callers degrade to license-unknown instead of failing the lookup.
+ * per-file license tags with their regional Non-PD flags. Never throws: a
+ * throttled API is reported as such (the import path backs off on it), any
+ * other failure as unavailable.
  */
-export const fetchWorkPageHtml = async (title: string): Promise<string | null> => {
+export const fetchWorkPage = async (title: string, options: MwFetchOptions = {}): Promise<WorkPageFetch> => {
     try {
-        const data = (await mwFetch({ action: 'parse', page: title, prop: 'text' })) as {
+        const data = (await mwFetch({ action: 'parse', page: title, prop: 'text' }, options)) as {
             parse?: { text?: { '*'?: string } };
         };
-        return data.parse?.text?.['*'] ?? null;
-    } catch {
-        return null;
+        const html = data.parse?.text?.['*'];
+        return typeof html === 'string' ? { ok: true, html } : { ok: false, reason: 'unavailable' };
+    } catch (err) {
+        if (err instanceof ImslpFetchError && err.code === 'rate_limited') {
+            return { ok: false, reason: 'rate_limited', retryAfterSec: err.retryAfterSec };
+        }
+        return { ok: false, reason: 'unavailable' };
     }
+};
+
+/**
+ * Work page HTML, or null on any failure so callers degrade to
+ * license-unknown instead of failing the lookup.
+ */
+export const fetchWorkPageHtml = async (title: string, options: MwFetchOptions = {}): Promise<string | null> => {
+    const page = await fetchWorkPage(title, options);
+    return page.ok ? page.html : null;
 };
 
 export const parseComposerFromTitle = (title: string): string | null => {

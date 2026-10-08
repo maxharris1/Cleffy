@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     MAX_PDF_BYTES,
@@ -7,8 +7,18 @@ import {
     fetchImslpBytes,
     isAllowedImslpUrl,
     parseRetryAfterSec,
+    toAllowedImslpUrl,
     tryDownloadPdfWith,
 } from '../../supabase/functions/_shared/imslpDownload';
+
+// Refused hosts are logged (by host only); keep the run quiet and assertable.
+let warn: ReturnType<typeof vi.spyOn>;
+beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+});
+afterEach(() => {
+    warn.mockRestore();
+});
 
 const PDF = new TextEncoder().encode('%PDF-1.4 tiny');
 const CDN = 'https://ks15.imslp.org/files/imglnks/usimg/0/07/IMSLP51037-PMLP01458-Op.27-2_Manuscript.pdf';
@@ -63,14 +73,45 @@ describe('isAllowedImslpUrl', () => {
     });
 });
 
+describe('toAllowedImslpUrl', () => {
+    it('passes an https IMSLP URL through', () => {
+        expect(toAllowedImslpUrl(CDN)).toBe(CDN);
+    });
+
+    it('upgrades a plain-http link on an IMSLP host to https rather than fetching it over http', () => {
+        expect(toAllowedImslpUrl('http://ks15.imslp.org/files/score.pdf')).toBe(
+            'https://ks15.imslp.org/files/score.pdf',
+        );
+        expect(toAllowedImslpUrl('http://imslp.org:80/files/score.pdf')).toBe('https://imslp.org/files/score.pdf');
+    });
+
+    it('refuses everything off the allowlist, http or not', () => {
+        expect(toAllowedImslpUrl('http://evil.example/score.pdf')).toBeNull();
+        expect(toAllowedImslpUrl('http://imslp.org:8080/score.pdf')).toBeNull();
+        expect(toAllowedImslpUrl('ftp://imslp.org/score.pdf')).toBeNull();
+        expect(toAllowedImslpUrl('http://user:pw@imslp.org/score.pdf')).toBeNull();
+        expect(toAllowedImslpUrl('not a url')).toBeNull();
+    });
+});
+
 describe('extractCdnUrlFromWaitPage', () => {
     it('returns the IMSLP CDN URL from the wait page', () => {
         expect(extractCdnUrlFromWaitPage(waitPage(CDN))).toBe(CDN);
     });
 
-    it('ignores a wait page that points off IMSLP or at plain http', () => {
-        expect(extractCdnUrlFromWaitPage(waitPage('https://evil.example/score.pdf'))).toBeNull();
-        expect(extractCdnUrlFromWaitPage(waitPage('http://ks15.imslp.org/files/score.pdf'))).toBeNull();
+    it('ignores a wait page that points off IMSLP, and logs the refused host without its path', () => {
+        expect(extractCdnUrlFromWaitPage(waitPage('https://evil.example/score.pdf?token=secret'))).toBeNull();
+        expect(warn).toHaveBeenCalledTimes(1);
+        const logged = String(warn.mock.calls[0]?.[0]);
+        expect(logged).toContain('https://evil.example');
+        expect(logged).not.toContain('score.pdf');
+        expect(logged).not.toContain('secret');
+    });
+
+    it('returns a plain-http IMSLP CDN link upgraded to https', () => {
+        expect(extractCdnUrlFromWaitPage(waitPage('http://ks15.imslp.org/files/score.pdf'))).toBe(
+            'https://ks15.imslp.org/files/score.pdf',
+        );
     });
 });
 
@@ -99,11 +140,30 @@ describe('fetchImslpBytes', () => {
         expect(init.signal).toBeInstanceOf(AbortSignal);
     });
 
-    it('never requests a non-IMSLP URL', async () => {
+    it('never requests a non-IMSLP URL, and says which host it refused', async () => {
         const fetchImpl = vi.fn(async () => pdfResponse());
         const err = await errorOf(fetchImslpBytes('https://evil.example/a.pdf', { ...opts, fetchImpl }));
         expect(err.code).toBe('blocked_host');
         expect(fetchImpl).not.toHaveBeenCalled();
+        expect(String(warn.mock.calls[0]?.[0])).toContain('evil.example');
+    });
+
+    it('follows a redirect to plain http on IMSLP over https', async () => {
+        const fetchImpl = vi
+            .fn<typeof fetch>()
+            .mockResolvedValueOnce(
+                new Response(null, { status: 302, headers: { location: 'http://ks15.imslp.org/files/a.pdf' } }),
+            )
+            .mockResolvedValueOnce(pdfResponse());
+        const got = await fetchImslpBytes('https://imslp.org/wiki/Special:ImagefromIndex/a.pdf', {
+            ...opts,
+            fetchImpl,
+        });
+        expect(got.finalUrl).toBe('https://ks15.imslp.org/files/a.pdf');
+        expect(fetchImpl.mock.calls.map((c) => String(c[0]))).toEqual([
+            'https://imslp.org/wiki/Special:ImagefromIndex/a.pdf',
+            'https://ks15.imslp.org/files/a.pdf',
+        ]);
     });
 
     it('follows an IMSLP redirect but refuses one that leaves IMSLP', async () => {
@@ -292,5 +352,42 @@ describe('tryDownloadPdfWith', () => {
         fetchImpl.mockResolvedValueOnce(htmlResponse('<html>nothing</html>'));
         await tryDownloadPdfWith('a.pdf', { mwFetch: legacyMw, fetchImpl });
         expect(fetchImpl.mock.calls.map((c) => String(c[0])).some((u) => u.includes('evil.example'))).toBe(false);
+    });
+
+    it('asks the imageinfo API once, within what is left of the budget', async () => {
+        let clock = 0;
+        const fetchImpl = vi.fn<typeof fetch>(async () => {
+            clock += 85_000;
+            return htmlResponse('<html>no wait page here</html>');
+        });
+        const legacyMw = vi.fn(async () => ({ query: { pages: {} } }));
+        await tryDownloadPdfWith('a.pdf', { mwFetch: legacyMw, fetchImpl, budgetMs: 90_000, now: () => clock });
+        expect(legacyMw).toHaveBeenCalledTimes(1);
+        const options = (legacyMw.mock.calls[0] as unknown as [unknown, { attempts?: number; timeoutMs?: number }])[1];
+        expect(options.attempts).toBe(1);
+        // 5 s were left, so the call may not take the default 10 s.
+        expect(options.timeoutMs).toBeLessThanOrEqual(5_000);
+    });
+
+    it('cannot be pushed past its budget by an API call that never answers', async () => {
+        const fetchImpl = vi.fn<typeof fetch>(async () => htmlResponse('<html>no wait page here</html>'));
+        // Ignores its own timeout entirely — the budget must still hold.
+        const stuckMw = vi.fn(() => new Promise<never>(() => undefined));
+        const started = Date.now();
+        const result = await tryDownloadPdfWith('a.pdf', { mwFetch: stuckMw, fetchImpl, budgetMs: 150 });
+        expect(Date.now() - started).toBeLessThan(2_000);
+        expect(result).toMatchObject({ ok: false, code: 'timeout' });
+        // The wait page, then nothing: the fallback ran the budget out.
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it('treats a 429 from the imageinfo API as IMSLP throttling us: no more requests', async () => {
+        const fetchImpl = vi.fn<typeof fetch>(async () => htmlResponse('<html>no wait page here</html>'));
+        const throttledMw = vi.fn(async () => {
+            throw new ImslpFetchError('rate_limited', 'IMSLP API HTTP 429', { status: 429, retryAfterSec: 75 });
+        });
+        const result = await tryDownloadPdfWith('a.pdf', { mwFetch: throttledMw, fetchImpl });
+        expect(result).toMatchObject({ ok: false, code: 'rate_limited', retryAfterSec: 75 });
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
 });

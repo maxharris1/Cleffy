@@ -45,6 +45,11 @@ const IMSLP_SESSION_COOKIES = 'imslpdisclaimeraccepted=yes; imslp_wikiLanguageSe
  */
 const ALLOWED_HOST_SUFFIXES = ['imslp.org', 'imslp.net', 'petruccimusiclibrary.ca', 'imslp.simssa.ca'] as const;
 
+const isImslpHost = (hostname: string): boolean => {
+    const host = hostname.toLowerCase().replace(/\.$/, '');
+    return ALLOWED_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+};
+
 /** True for an https URL on an IMSLP host, with no credentials and the default port. */
 export const isAllowedImslpUrl = (raw: string): boolean => {
     let url: URL;
@@ -59,8 +64,47 @@ export const isAllowedImslpUrl = (raw: string): boolean => {
     if (url.port && url.port !== '443') {
         return false;
     }
-    const host = url.hostname.toLowerCase().replace(/\.$/, '');
-    return ALLOWED_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+    return isImslpHost(url.hostname);
+};
+
+/**
+ * The URL to request for a link IMSLP handed us, or null when it is not one we
+ * may fetch. A plain-http link on an IMSLP host (older wait pages and redirects
+ * still emit some) is upgraded to https rather than refused: the request then
+ * goes out encrypted to the same host, and if that host cannot answer over
+ * https the fetch fails like any other upstream error. Nothing is ever fetched
+ * over http, and nothing off the allowlist is fetched at all.
+ */
+export const toAllowedImslpUrl = (raw: string): string | null => {
+    let url: URL;
+    try {
+        url = new URL(raw);
+    } catch {
+        return null;
+    }
+    if (url.protocol === 'http:' && isImslpHost(url.hostname) && (!url.port || url.port === '80')) {
+        url.port = '';
+        url.protocol = 'https:';
+    }
+    const candidate = url.toString();
+    return isAllowedImslpUrl(candidate) ? candidate : null;
+};
+
+/**
+ * Log a refused download URL by scheme and host only — never the path or query
+ * (signed CDN tokens). The allowlist was written from IMSLP's known hosts, not
+ * observed from every live page, so a miss must show up in the Edge logs
+ * rather than only as imports quietly falling back to "open on IMSLP".
+ */
+const warnBlockedHost = (raw: string, where: string): void => {
+    let origin = 'an unparseable URL';
+    try {
+        const url = new URL(raw);
+        origin = `${url.protocol}//${url.hostname}`;
+    } catch {
+        // keep the placeholder
+    }
+    console.warn(`imslp-download: refused ${where} on ${origin} (not an https IMSLP host)`);
 };
 
 export type ImslpFetchFailure =
@@ -198,9 +242,12 @@ export const fetchImslpBytes = async (url: string, options: BoundedFetchOptions)
     let current = url;
     try {
         for (let hop = 0; ; hop++) {
-            if (!isAllowedImslpUrl(current)) {
+            const allowed = toAllowedImslpUrl(current);
+            if (!allowed) {
+                warnBlockedHost(current, hop === 0 ? 'a download URL' : 'a redirect');
                 throw new ImslpFetchError('blocked_host', 'Refusing to fetch a non-IMSLP URL');
             }
+            current = allowed;
             let res: Response;
             try {
                 res = await fetchImpl(current, {
@@ -341,8 +388,9 @@ const decodeHtmlEntities = (value: string): string =>
 /**
  * IMSLP's free-user "wait 15 seconds" page already embeds the real CDN URL in
  * `#sm_dl_wait[data-id]` — the timer only delays revealing it in the browser.
- * The URL is third-party HTML: only an https IMSLP host is returned, so a
- * tampered or unexpected page cannot aim the service-side fetch elsewhere.
+ * The URL is third-party HTML: only an IMSLP host is returned (an http link
+ * on one comes back upgraded to https), so a tampered or unexpected page
+ * cannot aim the service-side fetch elsewhere.
  */
 export const extractCdnUrlFromWaitPage = (html: string): string | null => {
     const patterns = [
@@ -353,8 +401,12 @@ export const extractCdnUrlFromWaitPage = (html: string): string | null => {
         const match = html.match(pattern);
         if (match?.[1]) {
             const url = decodeHtmlEntities(match[1]).trim();
-            if (/^https?:\/\//i.test(url) && /\.pdf(\?|#|$)/i.test(url) && isAllowedImslpUrl(url)) {
-                return url;
+            if (/^https?:\/\//i.test(url) && /\.pdf(\?|#|$)/i.test(url)) {
+                const allowed = toAllowedImslpUrl(url);
+                if (allowed) {
+                    return allowed;
+                }
+                warnBlockedHost(url, 'the wait page CDN link');
             }
         }
     }
@@ -368,10 +420,24 @@ const PAGE_TIMEOUT_MS = 20_000;
 /** One PDF transfer: up to 50 MB from IMSLP's CDN. */
 const PDF_TIMEOUT_MS = 60_000;
 
-export type MwFetch = (params: Record<string, string>) => Promise<unknown>;
+/** Longest the imageinfo fallback's one API call may take (less when the budget is nearly spent). */
+const FALLBACK_API_TIMEOUT_MS = 10_000;
+
+export interface MwFetchOptions {
+    /** Tries on timeout / 429. */
+    attempts?: number;
+    timeoutMs?: number;
+}
+
+/**
+ * MediaWiki API call (imslp.ts mwFetch). Must throw ImslpFetchError with code
+ * 'rate_limited' when the API answers 429 on its last attempt, so the download
+ * can tell "IMSLP is throttling us" from any other failure.
+ */
+export type MwFetch = (params: Record<string, string>, options?: MwFetchOptions) => Promise<unknown>;
 
 export interface DownloadDeps {
-    /** MediaWiki API call (imslp.ts mwFetch) for the imageinfo fallback. */
+    /** MediaWiki API call for the imageinfo fallback. */
     mwFetch: MwFetch;
     fetchImpl?: typeof fetch;
     budgetMs?: number;
@@ -505,15 +571,33 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
     }
 
     // Legacy: MediaWiki imageinfo URL + ImagefromIndex (often blocked / disclaimer HTML).
+    // The API call is held to the same budget as every other request: one try
+    // (a retry would mean more requests to a host that may be throttling us),
+    // a timeout no longer than what is left, and a race against the deadline
+    // in case the call does not honour its own timeout.
     let imageUrl: string | null = null;
-    if (remaining() > 0) {
+    const left = remaining();
+    if (left > 0) {
+        let budgetTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-            const data = (await deps.mwFetch({
-                action: 'query',
-                titles: `File:${filename}`,
-                prop: 'imageinfo',
-                iiprop: 'url|size|mime',
-            })) as {
+            const budgetSpent = new Promise<never>((_, reject) => {
+                budgetTimer = setTimeout(
+                    () => reject(new ImslpFetchError('timeout', 'Download budget exhausted')),
+                    left,
+                );
+            });
+            const data = (await Promise.race([
+                deps.mwFetch(
+                    {
+                        action: 'query',
+                        titles: `File:${filename}`,
+                        prop: 'imageinfo',
+                        iiprop: 'url|size|mime',
+                    },
+                    { attempts: 1, timeoutMs: Math.max(1, Math.min(FALLBACK_API_TIMEOUT_MS, left)) },
+                ),
+                budgetSpent,
+            ])) as {
                 query?: {
                     pages?: Record<string, { imageinfo?: Array<{ url?: string; size?: number; mime?: string }> }>;
                 };
@@ -526,11 +610,23 @@ export const tryDownloadPdfWith = async (filename: string, deps: DownloadDeps): 
             if (info?.url) {
                 const candidate = info.url.startsWith('//') ? `https:${info.url}` : info.url;
                 // Same host rule as the scraped CDN URL: the API answer is IMSLP's,
-                // but a plain-http or off-site URL is still not fetched.
-                imageUrl = isAllowedImslpUrl(candidate) ? candidate : null;
+                // but an off-site URL is still not fetched.
+                imageUrl = toAllowedImslpUrl(candidate);
+                if (!imageUrl) {
+                    warnBlockedHost(candidate, 'the imageinfo URL');
+                }
             }
-        } catch {
-            // ignore
+        } catch (err) {
+            // A 429 from the API is IMSLP throttling this egress IP, exactly as
+            // on the file servers: stop here so the caller backs the whole
+            // deployment off. Anything else (timeout, API error) just leaves
+            // the ImagefromIndex candidate below.
+            if (err instanceof ImslpFetchError && err.code === 'rate_limited') {
+                retryAfterSec = err.retryAfterSec;
+                return fail('rate_limited');
+            }
+        } finally {
+            clearTimeout(budgetTimer);
         }
     }
 
