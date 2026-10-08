@@ -1,7 +1,12 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
-import { handleStripeEvent, type StripeEventLike, type WebhookStore } from '../_shared/stripeEvents.ts';
+import {
+    handleStripeEvent,
+    SUBSCRIPTION_MISSING,
+    type StripeEventLike,
+    type WebhookStore,
+} from '../_shared/stripeEvents.ts';
 import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeSignature.ts';
 
 /**
@@ -139,9 +144,16 @@ Deno.serve(async (req) => {
             try {
                 return await stripe.subscriptions.retrieve(subscriptionId);
             } catch (err) {
-                // The handler turns null into a released claim and a retryable
-                // 500, so the reason only needs to reach the logs.
                 console.error(`could not retrieve subscription ${subscriptionId}:`, err);
+                // Stripe answered, and the answer is "no such subscription": a
+                // retry cannot change that, so the handler acknowledges it
+                // instead of collecting days of 500s. Everything else -- a
+                // connection failure, a rate limit, a Stripe 5xx, even a bad
+                // key -- may heal, so it becomes a released claim and a 500.
+                const stripeError = err as { type?: unknown; code?: unknown } | null;
+                if (stripeError?.type === 'StripeInvalidRequestError' && stripeError.code === 'resource_missing') {
+                    return SUBSCRIPTION_MISSING;
+                }
                 return null;
             }
         },
