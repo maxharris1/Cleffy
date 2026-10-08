@@ -2,7 +2,9 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
+import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { passwordProblem, passwordProblemMessage } from '../_shared/passwordPolicy.ts';
+import { loginThrottleSecret } from '../_shared/rateLimit.ts';
 import {
     hashLoginCode,
     isPlausibleLoginCode,
@@ -225,6 +227,12 @@ Deno.serve(async (req) => {
         console.error(`roster row ${student.id} was already claimed when this request tried to commit`);
         return reject();
     }
+
+    // The card is spent and the username is this student's now, so whatever
+    // student-login has counted against that name — someone hammering it before
+    // a teacher's reset, or before this student ever claimed it — no longer
+    // stands between them and signing in. Best effort, past the commit.
+    await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username);
 
     // A FRESH anon-key client, deliberately carrying no Authorization header:
     // nothing the caller sent travels with this sign-in, and the session it

@@ -104,3 +104,15 @@ export const clientKey = (req: Request): string => {
     }
     return 'unknown';
 };
+
+/**
+ * Key material for loginThrottle.ts's HMAC'd keys. LOGIN_THROTTLE_SECRET when
+ * set (a dedicated secret is the cleaner option, and rotating it only resets
+ * the counters); otherwise the service-role key, which every function that
+ * touches the limiter already holds and never leaves the server. Function
+ * secrets are project-wide, so student-login, student-claim and
+ * student-provision always derive the same keys. Null only on a misconfigured
+ * deploy, which those functions treat as one.
+ */
+export const loginThrottleSecret = (): string | null =>
+    Deno.env.get('LOGIN_THROTTLE_SECRET') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || null;

@@ -4,7 +4,9 @@ import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts'
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
+import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
+import { loginThrottleSecret } from '../_shared/rateLimit.ts';
 import {
     formatLoginCode,
     generateLoginCode,
@@ -507,6 +509,15 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     if (updateError) {
         console.error(`login code hash out of step for student ${row.id}: ${updateError.message}`);
         return jsonResponse({ error: 'Could not reset the login code' }, 502);
+    }
+
+    // The teacher's reset is the way back for a student someone has been
+    // locking out by hammering their username, so it lifts student-login's
+    // limits on that name too (the claim does again, for whichever name the
+    // student ends up with). Best effort: the reset itself has happened, and a
+    // failure here only means the lock runs out on its own.
+    if (row.username) {
+        await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, row.username);
     }
 
     // Resetting an archived student is allowed and changes nothing for them:

@@ -467,8 +467,9 @@ verify_jwt = true
 # set a username and a password of the student's own, and student-login takes
 # those from then on. Open is not the same as an oracle — both are hard
 # rate-limited (60/min per IP; student-claim guards ~59-bit codes, student-login
-# a user-chosen password behind a per-username lockout with backoff — GoTrue's
-# own throttling only ever sees the function's IP) and both answer every
+# a user-chosen password behind per-username limits — a backoff per username
+# and address plus a ceiling per username — since GoTrue's own throttling only
+# ever sees the function's IP) and both answer every
 # failure a guess can reach with one indistinguishable 401. Deploy
 # with the flag, as with stripe-webhook above:
 # `supabase functions deploy student-claim --no-verify-jwt`

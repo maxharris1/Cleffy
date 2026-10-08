@@ -708,25 +708,44 @@ payload) is flagged by the security advisor on both projects. It needs a paid
 plan; when it is on, a breached password is refused with
 `weak_password`/`reasons: ["pwned"]`, which `mapAuthError` already words.
 
-## 9. Student sign-in limiter — migration BEFORE the function
+## 9. Student sign-in limiter — migration BEFORE the functions
 
-`student-login` now counts failed attempts per username
+`student-login` now limits attempts per username
 (`supabase/functions/_shared/loginThrottle.ts`) through the
-`begin_login_attempt` / `clear_login_attempts` RPCs created by
-`20261007120501_student_login_throttle.sql`. The limiter fails CLOSED: if the
-RPC is missing, every username sign-in is refused with "Too many sign-in
-attempts". So on each project, apply the migration first, then deploy the
-function (still `--no-verify-jwt`):
+`begin_login_attempt` / `clear_login_attempts` / `clear_login_account` RPCs
+created by `20261007120501_student_login_throttle.sql`. Two limits:
+
+- **Per username + address**: 5 tries, then locks of 30 s doubling to 15 min
+  for that address only. Someone hammering a classmate's username locks out
+  their own address, not the classmate signing in from elsewhere.
+- **Per username, all addresses**: 30 attempts per hour, to cap guessing from
+  many addresses. No real student gets near it.
+
+The limiter fails CLOSED: if the RPCs are missing, every username sign-in is
+refused with "Too many sign-in attempts". So on each project, apply the
+migration first, then deploy all three functions that use it
+(`student-provision` and `student-claim` clear a username's limits on a
+teacher's reset and on a successful claim):
 
 ```bash
 supabase functions deploy student-login --no-verify-jwt
+supabase functions deploy student-claim --no-verify-jwt
+supabase functions deploy student-provision
 ```
 
-A student locked out by someone hammering their username waits at most 15
-minutes, or the teacher issues a fresh setup card (student-claim does not go
-through this limiter). To lift a lock by hand, delete the student's row from
-`public.edge_login_attempts`; the key is `student-login:` + the SHA-256 hex of
-the lowercase username.
+Keys are HMAC-SHA-256 of the username (and of the client address) under
+`LOGIN_THROTTLE_SECRET` if that function secret is set, otherwise under the
+service-role key, so the table holds neither names nor addresses. A dedicated
+secret is optional and recommended
+(`supabase secrets set LOGIN_THROTTLE_SECRET=$(openssl rand -hex 32)`); setting
+or rotating it, or rotating the service-role key while it is unset, simply
+resets all counters.
+
+A student locked out at the account ceiling waits for the hour to end, or the
+teacher issues a fresh setup card ('reset'), which clears every limit on that
+username; claiming the card clears them again for the name the student picks.
+Because the keys are HMAC'd, a lock cannot be lifted by hand from the table
+without the secret; use the reset.
 
 ## Migration history — reconciled 2026-08-27
 
