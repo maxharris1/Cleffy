@@ -547,8 +547,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         ) : null}
                     </button>
                 ) : null}
-                {/* Export loads from Dexie on demand — no third live ArrayBuffer for the menu. */}
-                {!state.provisional ? <ShareExportMenu docId={docId} title={state.doc.title} /> : null}
+                {/*
+                  Export loads from Dexie on demand — no third live ArrayBuffer for
+                  the menu. The row lets it download the PDF when the cache has none.
+                */}
+                {!state.provisional ? <ShareExportMenu docId={docId} doc={state.doc} title={state.doc.title} /> : null}
                 {!state.provisional && state.role === 'owner' ? (
                     <Button size="sm" onClick={() => setShareOpen(true)}>
                         Invite

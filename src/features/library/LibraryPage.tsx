@@ -1,15 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
 import {
+    LIBRARY_PAGE_SIZE,
     deleteDocument,
+    fetchLibraryPage,
     leaveSharedDocument,
     listDocuments,
     listFavoriteDocumentIds,
     renameDocument,
     setDocumentFavorite,
+    sweepPendingStorageCleanup,
 } from '@/features/library/documentsService';
 import {
     fetchLibraryBootstrap,
@@ -18,10 +21,12 @@ import {
 } from '@/features/library/libraryBootstrap';
 import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import {
+    appendPage,
+    applyLibraryFilters,
     displayTitleOf,
-    filterByTag,
     groupByComposer,
     groupByTag,
+    isFiltering,
     sortDocuments,
     type LibraryGroup,
     type LibrarySort,
@@ -66,6 +71,36 @@ import { SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 const TAG_CHIP_LIMIT = 8;
 /** Max assigned tag names shown under a score title before “+N”. */
 const INLINE_TAG_LIMIT = 3;
+/** Quiet time after the last keystroke before the search goes to the server. */
+const SEARCH_DEBOUNCE_MS = 300;
+
+/**
+ * One server-side answer for the current sort + filters, used while the
+ * library is only partly loaded. `key` names the request it answers, so a
+ * slow response for an earlier query can never be shown under a later one.
+ */
+interface RemoteResults {
+    key: string;
+    documents: DocumentRow[];
+    hasMore: boolean;
+    /** Where the next page continues — see mainCursorRef. */
+    cursor: DocumentRow | null;
+}
+
+/** Is the browser online? Follows the online/offline events. */
+const useOnline = (): boolean => {
+    const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false);
+    useEffect(() => {
+        const update = () => setOnline(navigator.onLine !== false);
+        window.addEventListener('online', update);
+        window.addEventListener('offline', update);
+        return () => {
+            window.removeEventListener('online', update);
+            window.removeEventListener('offline', update);
+        };
+    }, []);
+    return online;
+};
 
 export const LibraryPage = () => {
     const {
@@ -105,6 +140,39 @@ export const LibraryPage = () => {
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
     const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
+    /** The search text the server was last asked about (debounced, trimmed). */
+    const [debouncedQuery, setDebouncedQuery] = useState('');
+    const [remote, setRemote] = useState<RemoteResults | null>(null);
+    /** Keyed like RemoteResults: a failure belongs to the search that failed. */
+    const [remoteFailure, setRemoteFailure] = useState<{ key: string; message: string } | null>(null);
+    /** Bumped by "Try again" to re-ask the server the same question. */
+    const [remoteAttempt, setRemoteAttempt] = useState(0);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+    /**
+     * Set when a page added nothing new although the server says there is
+     * more. Infinite scroll then stands down and the button is the only way
+     * on: a sentinel still in view would otherwise fire again the moment the
+     * load settles, and keep firing.
+     */
+    const [autoLoadPaused, setAutoLoadPaused] = useState(false);
+    /**
+     * The last row the server handed the main list, kept apart from the rows
+     * on screen. A keyset continuation must start from what the server
+     * returned — not from a row the page has since renamed, deleted or
+     * re-sorted, which would skip or repeat scores. It is also the "is this
+     * still the list the page continues?" check: anything that repaints the
+     * list from the server sets a new cursor object, and a page that lands
+     * for the old one is dropped. Set synchronously alongside the state it
+     * describes, so the check holds even before React commits.
+     */
+    const mainCursorRef = useRef<DocumentRow | null>(null);
+    /** Rows on screen as last committed — only used to count what a page added. */
+    const documentsRef = useRef<DocumentRow[] | null>(null);
+    useEffect(() => {
+        documentsRef.current = documents;
+    }, [documents]);
+    const online = useOnline();
     /**
      * Bumped after a mutation's server write resolved, once the state updates
      * that reflect it are queued. The effect below then persists what is on
@@ -119,9 +187,12 @@ export const LibraryPage = () => {
         if (persistTick === 0 || documents === null) {
             return;
         }
+        // Only the first page goes into the snapshot. It is what the next
+        // visit's bootstrap returns, so the instant paint and the network
+        // paint agree instead of the list shrinking under the teacher.
         void writeCachedLibraryList(userId, {
-            documents,
-            hasMore,
+            documents: documents.slice(0, LIBRARY_PAGE_SIZE),
+            hasMore: hasMore || documents.length > LIBRARY_PAGE_SIZE,
             favoriteIds: favorites,
             tags,
             documentTags: assignments,
@@ -159,6 +230,8 @@ export const LibraryPage = () => {
             await Promise.resolve();
             let painted = false;
             if (!cancelled && !firstResolved && cachedList && cachedList.documents.length > 0) {
+                mainCursorRef.current = cachedList.documents[cachedList.documents.length - 1] ?? null;
+                setAutoLoadPaused(false);
                 setDocuments(cachedList.documents);
                 setHasMore(cachedList.hasMore);
                 setFavorites(cachedList.favoriteIds);
@@ -193,6 +266,8 @@ export const LibraryPage = () => {
                             return;
                         }
                     }
+                    mainCursorRef.current = boot.documents[boot.documents.length - 1] ?? null;
+                    setAutoLoadPaused(false);
                     setDocuments(boot.documents);
                     setHasMore(boot.hasMore);
                     setFavorites(boot.favoriteIds);
@@ -201,6 +276,7 @@ export const LibraryPage = () => {
                     setError(null);
                     perfMark('library-network-paint');
                     perfLogIfDev();
+                    void sweepPendingStorageCleanup(userId);
                     return;
                 } catch (err: unknown) {
                     // Fallback: four parallel GETs if the bootstrap RPC is unavailable.
@@ -223,6 +299,8 @@ export const LibraryPage = () => {
                                 return;
                             }
                         }
+                        mainCursorRef.current = docs[docs.length - 1] ?? null;
+                        setAutoLoadPaused(false);
                         setDocuments(docs);
                         setHasMore(more);
                         setFavorites(ids);
@@ -231,6 +309,7 @@ export const LibraryPage = () => {
                         setError(null);
                         perfMark('library-network-paint');
                         perfLogIfDev();
+                        void sweepPendingStorageCleanup(userId);
                         return;
                     } catch {
                         if (cancelled) {
@@ -256,21 +335,78 @@ export const LibraryPage = () => {
     }, [userId]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
+    const isOfflineNotice = error?.startsWith('Offline') ?? false;
+    // Either the browser says so, or the library itself could only be painted
+    // from this device's snapshot. A server search would just fail.
+    const offline = !online || isOfflineNotice;
 
     const q = query.trim().toLowerCase();
+    const filters = { query: q, favoritesOnly, favorites, tagId: activeTagId, assignments };
+    const filtering = isFiltering(filters);
+
+    // The server learns about the query once typing pauses; clearing the box
+    // is applied at once (there is nothing to fetch for an empty query).
+    useEffect(() => {
+        const next = query.trim().toLowerCase();
+        const timer = setTimeout(() => setDebouncedQuery(next), next === '' ? 0 : SEARCH_DEBOUNCE_MS);
+        return () => clearTimeout(timer);
+    }, [query]);
+
+    /**
+     * With every score loaded, search, filters and sort all run in memory, as
+     * they always did. With more on the server, an in-memory filter would
+     * only see the newest page — a teacher with 300 scores could not find the
+     * oldest one — so filters and the A–Z order are asked of the server.
+     */
+    const serverMode = hasMore && (filtering || sort === 'title');
+    // Offline, the loaded rows are all there is: they are searched and sorted
+    // in memory, and labelled as such, rather than asking a server that cannot
+    // answer. Nothing is asked while the query is still being typed either: a
+    // request for the half-typed text would only be thrown away.
+    const askServer = serverMode && !offline;
+    const remoteKey =
+        askServer && debouncedQuery === q ? JSON.stringify([sort, debouncedQuery, activeTagId, favoritesOnly]) : null;
+    const remoteRequest = useRef(0);
+
+    useEffect(() => {
+        if (remoteKey === null) {
+            return;
+        }
+        const requestId = ++remoteRequest.current;
+        fetchLibraryPage({ sort, query: debouncedQuery, tagId: activeTagId, favoritesOnly })
+            .then((page) => {
+                if (remoteRequest.current === requestId) {
+                    setRemote({ key: remoteKey, ...page, cursor: page.documents[page.documents.length - 1] ?? null });
+                    // An earlier failure of this same question is answered now.
+                    setRemoteFailure((failure) => (failure?.key === remoteKey ? null : failure));
+                    setLoadMoreError(null);
+                    setAutoLoadPaused(false);
+                }
+            })
+            .catch((err: unknown) => {
+                if (remoteRequest.current === requestId) {
+                    setRemoteFailure({
+                        key: remoteKey,
+                        message: err instanceof Error ? err.message : 'Search failed.',
+                    });
+                }
+            });
+    }, [remoteKey, remoteAttempt, sort, debouncedQuery, activeTagId, favoritesOnly]);
+
+    const remoteResults = remoteKey !== null && remote?.key === remoteKey ? remote : null;
+    // Results on screen outrank an older failure of the same question.
+    const remoteError =
+        remoteKey !== null && remoteResults === null && remoteFailure?.key === remoteKey ? remoteFailure.message : null;
+    // Waiting on the server: the loaded rows that match stay on screen in
+    // the meantime, labelled as a search in progress rather than an answer.
+    const searching = askServer && remoteResults === null && remoteError === null;
+
     const visible =
-        documents === null
-            ? null
-            : (() => {
-                  let list = documents
-                      .filter((doc) => !q || doc.title.toLowerCase().includes(q))
-                      .filter((doc) => !favoritesOnly || favorites.has(doc.id));
-                  if (activeTagId) {
-                      list = filterByTag(list, activeTagId, assignments);
-                  }
-                  return list;
-              })();
-    const sorted = visible ? sortDocuments(visible, sort) : null;
+        documents === null ? null : applyLibraryFilters(remoteResults ? remoteResults.documents : documents, filters);
+    // Server results arrive in the requested order; re-sorting them in the
+    // browser (localeCompare vs. the database's collation) could disagree
+    // with where the next page continues.
+    const sorted = visible ? (remoteResults ? visible : sortDocuments(visible, sort)) : null;
     const groups: LibraryGroup[] | null = sorted
         ? groupTag
             ? groupByTag(sorted, tags, assignments)
@@ -279,8 +415,117 @@ export const LibraryPage = () => {
               : [{ label: null, documents: sorted }]
         : null;
 
+    const canLoadMore = remoteResults ? remoteResults.hasMore : !serverMode && hasMore;
+
+    /**
+     * Fetch the next keyset page after the last row on screen. A page is
+     * appended only if the list it continues is still the one showing — a
+     * bootstrap that repainted, or a new search, makes the cursor meaningless,
+     * and appending anyway could leave a gap or a duplicate run.
+     */
+    // Mirrors loadingMore synchronously: two observer callbacks (or a tap
+    // and a callback) in the same tick both see the state before React
+    // re-renders, and would both ask for the same page.
+    const loadingMoreRef = useRef(false);
+    const loadMore = async () => {
+        if (loadingMoreRef.current || !canLoadMore) {
+            return;
+        }
+        loadingMoreRef.current = true;
+        setLoadingMore(true);
+        setLoadMoreError(null);
+        /** New rows a page brings, measured against the rows already held. */
+        const freshCount = (held: DocumentRow[] | null, page: DocumentRow[]): number => {
+            const seen = new Set((held ?? []).map((doc) => doc.id));
+            return page.filter((doc) => !seen.has(doc.id)).length;
+        };
+        try {
+            if (remoteResults) {
+                const base = remoteResults;
+                const cursor = base.cursor;
+                if (!cursor) {
+                    return;
+                }
+                const page = await fetchLibraryPage({
+                    sort,
+                    query: debouncedQuery,
+                    tagId: activeTagId,
+                    favoritesOnly,
+                    after: cursor,
+                });
+                // A server that says "more" but sends nothing would have the
+                // next request ask the same question; treat it as the end.
+                const more = page.hasMore && page.documents.length > 0;
+                setRemote((prev) =>
+                    prev && prev.key === base.key && prev.cursor === cursor
+                        ? {
+                              ...prev,
+                              documents: appendPage(prev.documents, page.documents),
+                              hasMore: more,
+                              cursor: page.documents[page.documents.length - 1] ?? cursor,
+                          }
+                        : prev,
+                );
+                setAutoLoadPaused(more && freshCount(base.documents, page.documents) === 0);
+                return;
+            }
+            const cursor = mainCursorRef.current;
+            if (!cursor) {
+                return;
+            }
+            const page = await fetchLibraryPage({ sort: 'recent', after: cursor });
+            if (mainCursorRef.current !== cursor) {
+                // The list was repainted from the server while this page was
+                // in flight; it no longer continues from here.
+                return;
+            }
+            const more = page.hasMore && page.documents.length > 0;
+            mainCursorRef.current = page.documents[page.documents.length - 1] ?? cursor;
+            // An updater, not a value: a delete or rename queued while the
+            // page was in flight must survive the append.
+            setDocuments((prev) => (prev ? appendPage(prev, page.documents) : prev));
+            setHasMore(more);
+            setAutoLoadPaused(more && freshCount(documentsRef.current, page.documents) === 0);
+        } catch (err) {
+            setLoadMoreError(err instanceof Error ? err.message : 'Could not load more scores.');
+        } finally {
+            loadingMoreRef.current = false;
+            setLoadingMore(false);
+        }
+    };
+    const onSentinelVisible = useEffectEvent(() => {
+        void loadMore();
+    });
+
+    // Infinite scroll: the sentinel below the list asks for the next page as
+    // it nears the viewport. Re-armed after every page, so a tall screen keeps
+    // filling; paused after a failure, where the button is the retry.
+    const sentinelRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        const node = sentinelRef.current;
+        if (
+            !node ||
+            !canLoadMore ||
+            loadingMore ||
+            loadMoreError ||
+            autoLoadPaused ||
+            typeof IntersectionObserver === 'undefined'
+        ) {
+            return;
+        }
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) {
+                    onSentinelVisible();
+                }
+            },
+            { rootMargin: '600px 0px' },
+        );
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused]);
+
     const hasScores = documents !== null && documents.length > 0;
-    const isOfflineNotice = error?.startsWith('Offline') ?? false;
     const statusError = uploadError ?? actionError ?? error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
@@ -288,7 +533,30 @@ export const LibraryPage = () => {
      * when the shelf is the whole library: under a filter it would look like a
      * result, and under a grouping it would have to pick a group to live in.
      */
-    const showAddTile = view === 'grid' && !q && !activeTagId && !favoritesOnly && !groupComposer && !groupTag;
+    const showAddTile = view === 'grid' && !filtering && !groupComposer && !groupTag;
+
+    const countLabel = (() => {
+        if (documents === null || visible === null) {
+            return '';
+        }
+        const n = documents.length;
+        if (searching) {
+            return 'Searching all scores…';
+        }
+        if (remoteResults) {
+            const more = remoteResults.hasMore ? '+' : '';
+            return filtering ? `${visible.length}${more} found` : `${visible.length}${more} scores, A–Z`;
+        }
+        // Below here with hasMore, the server was not (or could not be)
+        // asked: everything counted is what this page has loaded.
+        if (filtering) {
+            return hasMore ? `${visible.length} of ${n} loaded` : `${visible.length} of ${n}`;
+        }
+        if (hasMore) {
+            return sort === 'title' ? `${n} loaded, A–Z` : `Showing ${n} most recent`;
+        }
+        return `${n} ${n === 1 ? 'score' : 'scores'}`;
+    })();
 
     const changeView = (next: LibraryView) => {
         setView(next);
@@ -425,6 +693,11 @@ export const LibraryPage = () => {
         try {
             await renameDocument(target.id, title);
             setDocuments((docs) => docs?.map((d) => (d.id === target.id ? { ...d, title } : d)) ?? docs);
+            setRemote((prev) =>
+                prev
+                    ? { ...prev, documents: prev.documents.map((d) => (d.id === target.id ? { ...d, title } : d)) }
+                    : prev,
+            );
             setRenameTarget(null);
             persistSnapshot();
         } finally {
@@ -442,6 +715,9 @@ export const LibraryPage = () => {
         try {
             await deleteDocument(target);
             setDocuments((docs) => docs?.filter((d) => d.id !== target.id) ?? docs);
+            setRemote((prev) =>
+                prev ? { ...prev, documents: prev.documents.filter((d) => d.id !== target.id) } : prev,
+            );
             setAssignments((prev) => {
                 const next = new Map(prev);
                 next.delete(target.id);
@@ -462,6 +738,8 @@ export const LibraryPage = () => {
     /** Drop a score from every piece of list state, after it left the library. */
     const forgetLocally = (docId: string) => {
         setDocuments((docs) => docs?.filter((d) => d.id !== docId) ?? docs);
+        // Server search / A-Z / filter results too, or the score lingers there.
+        setRemote((prev) => (prev ? { ...prev, documents: prev.documents.filter((d) => d.id !== docId) } : prev));
         setFavorites((prev) => {
             if (!prev.has(docId)) {
                 return prev;
@@ -575,13 +853,8 @@ export const LibraryPage = () => {
                                 className={fieldClassName('sm', 'sm:max-w-xs')}
                             />
                             <div className="flex items-center gap-3">
-                                <p className="text-xs text-stone-600">
-                                    {query.trim() || favoritesOnly || activeTagId
-                                        ? `${visible?.length ?? 0} of ${documents.length}`
-                                        : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                                    {hasMore && !query.trim() && !favoritesOnly && !activeTagId
-                                        ? ' · showing latest 100'
-                                        : null}
+                                <p className="text-xs text-stone-600" aria-live="polite">
+                                    {countLabel}
                                 </p>
                                 <ViewToggle view={view} onChange={changeView} />
                             </div>
@@ -663,13 +936,41 @@ export const LibraryPage = () => {
                             )}
                         </div>
 
+                        {serverMode && offline && !isOfflineNotice ? (
+                            <p className="mt-4 text-sm text-amber-800" role="status">
+                                {filtering
+                                    ? `You’re offline, so only the ${documents.length} scores loaded here were searched.`
+                                    : `You’re offline, so only the ${documents.length} scores loaded here are sorted A–Z.`}
+                            </p>
+                        ) : null}
+                        {remoteError ? (
+                            <ErrorText className="mt-4">
+                                {filtering
+                                    ? `Couldn’t search all of your scores, so only matches among the ${documents.length} loaded here are shown.`
+                                    : `Couldn’t sort all of your scores A–Z, so only the ${documents.length} loaded here are shown.`}{' '}
+                                {remoteError}{' '}
+                                <button
+                                    type="button"
+                                    className="font-medium underline"
+                                    onClick={() => {
+                                        setRemoteFailure(null);
+                                        setRemoteAttempt((n) => n + 1);
+                                    }}
+                                >
+                                    Try again
+                                </button>
+                            </ErrorText>
+                        ) : null}
+
                         {visible && visible.length === 0 ? (
-                            <p className="mt-8 text-sm text-stone-500">
-                                {activeTagId && !query.trim() && !favoritesOnly
-                                    ? 'No scores with this tag yet.'
-                                    : favoritesOnly && !query.trim()
-                                      ? 'No favorites yet — tap the star on a score to keep it handy.'
-                                      : `No scores match “${query.trim()}”.`}
+                            <p className="mt-8 text-sm text-stone-500" role={searching ? 'status' : undefined}>
+                                {searching
+                                    ? 'Searching all of your scores…'
+                                    : activeTagId && !query.trim() && !favoritesOnly
+                                      ? 'No scores with this tag yet.'
+                                      : favoritesOnly && !query.trim()
+                                        ? 'No favorites yet — tap the star on a score to keep it handy.'
+                                        : `No scores match “${query.trim()}”.`}
                             </p>
                         ) : (
                             groups?.map((group) => (
@@ -738,6 +1039,23 @@ export const LibraryPage = () => {
                                 </section>
                             ))
                         )}
+
+                        {canLoadMore ? (
+                            <div className="mt-8 flex flex-col items-center gap-2">
+                                <div ref={sentinelRef} aria-hidden="true" />
+                                {loadMoreError ? (
+                                    <ErrorText>Couldn’t load more scores. {loadMoreError}</ErrorText>
+                                ) : null}
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={loadingMore}
+                                    onClick={() => void loadMore()}
+                                >
+                                    {loadingMore ? 'Loading more…' : loadMoreError ? 'Try again' : 'Load more scores'}
+                                </Button>
+                            </div>
+                        ) : null}
                     </section>
                 ) : null}
 
