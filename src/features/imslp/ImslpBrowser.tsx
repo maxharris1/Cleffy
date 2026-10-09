@@ -10,6 +10,7 @@ import {
 import { isEditionImportable, recommendEdition, suggestedPdfName } from '@/features/imslp/imslpDisplay';
 import { ImslpSearchPanel } from '@/features/imslp/ImslpSearchPanel';
 import { ImslpWorkPanel, type DownloadStatus } from '@/features/imslp/ImslpWorkPanel';
+import type { LimitReachedError } from '@/features/billing/limitErrors';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
 
@@ -36,8 +37,12 @@ export interface ImslpBrowserProps {
     busy?: boolean;
     /** Free cloud-score quota is exhausted — disable the primary Add. */
     quotaExhausted?: boolean;
+    /** This month's IMSLP imports are spent — disable the primary Add and say so. */
+    importLimit?: LimitReachedError | null;
     /** False on student (limit 0): disabled copy, no upgrade CTA. */
     quotaUpgradeHint?: boolean;
+    /** Opens the plans; the disabled Add's hint links to it. */
+    onUpgrade?: () => void;
     /** When false, omit the panel title (e.g. page already has a heading). */
     showHeading?: boolean;
     className?: string;
@@ -99,7 +104,9 @@ export const ImslpBrowser = ({
     onImportImslp,
     busy = false,
     quotaExhausted = false,
+    importLimit = null,
     quotaUpgradeHint = true,
+    onUpgrade,
     showHeading = true,
     className = 'mt-6',
 }: ImslpBrowserProps) => {
@@ -162,7 +169,7 @@ export const ImslpBrowser = ({
         if (flow.phase !== 'work' || !flow.selected) {
             return;
         }
-        if (quotaExhausted) {
+        if (quotaExhausted || importLimit) {
             return;
         }
         if (flow.download.kind === 'downloading' || flow.download.kind === 'queued' || importInFlightRef.current) {
@@ -260,7 +267,9 @@ export const ImslpBrowser = ({
                     busy={busy}
                     importing={blocked}
                     quotaExhausted={quotaExhausted}
+                    importLimit={importLimit}
                     quotaUpgradeHint={quotaUpgradeHint}
+                    onUpgrade={onUpgrade}
                     onBack={closeWork}
                     onSelect={(edition) => dispatch({ type: 'select', edition })}
                     onImportSelected={() => void importSelected()}

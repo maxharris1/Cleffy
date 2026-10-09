@@ -23,10 +23,12 @@ import { PlanBadge } from '@/features/billing/PlanBadge';
 import { clearCachedEntitlements, isUnlimited } from '@/features/billing/entitlementsService';
 import {
     cloudScoreCapReached,
+    cloudScoresLimitError,
     isLimitReachedError,
     parseLooseLimitError,
     type LimitReachedError,
 } from '@/features/billing/limitErrors';
+import { ownSubscriptionOf } from '@/features/billing/planStatus';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
@@ -59,10 +61,22 @@ export type LibraryOutletContext = {
     /** Set when the server refused for quota reasons rather than a real failure. */
     uploadLimit: LimitReachedError | null;
     /**
-     * Client-side owned-score cap (or student limit 0). Disables Add/Upload
-     * without raising the upgrade notice — that stays `uploadLimit`.
+     * The limit to explain on the page: the server's refusal if there was one,
+     * else the owned-score cap the account is already at. The upload button is
+     * greyed out at the cap, so a page that waited for a refusal would leave a
+     * disabled button with no reason and no way on.
+     */
+    limitNotice?: LimitReachedError | null;
+    /**
+     * Client-side owned-score cap (or student limit 0), or a cloud-score refusal.
+     * Disables Add/Upload; `limitNotice` says why.
      */
     quotaExhausted?: boolean;
+    /**
+     * This month's IMSLP imports are spent (the server's 402 said so). Blocks
+     * the IMSLP Add button only — uploading a PDF of your own is still open.
+     */
+    importLimit?: LimitReachedError | null;
     /** False on student (limit 0): disabled copy, no upgrade CTA. */
     quotaUpgradeHint?: boolean;
     tier: EffectiveTier;
@@ -134,10 +148,17 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const uploading = uploadPct !== null || importingImslp;
     const cloudScoreLimit = entitlements?.limits.cloud_scores;
     const quotaUpgradeHint = cloudScoreLimit !== 0;
-    const quotaExhausted =
-        cloudScoreLimit === 0 ||
-        (typeof cloudScoreLimit === 'number' && !isUnlimited(cloudScoreLimit) && capReached) ||
-        Boolean(uploadLimit);
+    const atScoreCap =
+        cloudScoreLimit === 0 || (typeof cloudScoreLimit === 'number' && !isUnlimited(cloudScoreLimit) && capReached);
+    // Only a cloud-score refusal blocks uploading. An IMSLP-import refusal is a
+    // different allowance: the teacher can still upload a PDF of their own.
+    const quotaExhausted = atScoreCap || uploadLimit?.metric === 'cloud_scores';
+    const importLimit = uploadLimit?.metric === 'smart_imports' ? uploadLimit : null;
+    const limitNotice =
+        uploadLimit ??
+        (atScoreCap && entitlements && typeof cloudScoreLimit === 'number'
+            ? cloudScoresLimitError(cloudScoreLimit, entitlements.tier)
+            : null);
 
     const clearErrors = () => {
         setUploadError(null);
@@ -169,18 +190,26 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         setUploadError(err instanceof Error ? err.message : fallback);
     };
 
+    /**
+     * The client-side half of the cap, checked before anything is sent. It
+     * refuses with the same typed error the server's trigger would, so the page
+     * shows the plan notice (with its way to upgrade) rather than a bare red
+     * "limit reached". A plan with no cloud scores at all (limit 0) gets the same
+     * typed refusal: ScoreLimitNotice already words it as the plain sentence, and
+     * a plain Error here would repeat that sentence as red error text below it.
+     */
     const refuseIfCloudScoreCap = async (
         snapshot: Promise<LibraryListSnapshot | null>,
     ): Promise<LibraryListSnapshot | null> => {
         const snap = await snapshot.catch(() => null);
         const limit = entitlements?.limits.cloud_scores;
-        if (entitlements && typeof limit === 'number' && limit === 0) {
+        if (
+            entitlements &&
+            typeof limit === 'number' &&
+            (limit === 0 || cloudScoreCapReached(limit, snap?.documents ?? [], userId))
+        ) {
             setCapReached(true);
-            throw new Error('This account cannot add cloud scores.');
-        }
-        if (entitlements && typeof limit === 'number' && cloudScoreCapReached(limit, snap?.documents ?? [], userId)) {
-            setCapReached(true);
-            throw new Error('Cloud-score limit reached.');
+            throw cloudScoresLimitError(limit, entitlements.tier);
         }
         setCapReached(false);
         return snap;
@@ -346,7 +375,9 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         uploadError,
         clearUploadError,
         uploadLimit,
+        limitNotice,
         quotaExhausted,
+        importLimit,
         quotaUpgradeHint,
         tier,
         canManageStudents,
@@ -454,7 +485,11 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
             {pricingOpen ? (
                 <Suspense fallback={null}>
-                    <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} />
+                    <PricingDialog
+                        currentTier={tier}
+                        subscription={ownSubscriptionOf(entitlements)}
+                        onClose={() => setPricingOpen(false)}
+                    />
                 </Suspense>
             ) : null}
 

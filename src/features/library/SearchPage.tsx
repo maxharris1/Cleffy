@@ -1,8 +1,8 @@
 import { useOutletContext } from 'react-router';
 
-import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { ImslpBrowser } from '@/features/imslp/ImslpBrowser';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { ErrorText } from '@/ui/ErrorText';
 
 export const SearchPage = () => {
@@ -11,8 +11,9 @@ export const SearchPage = () => {
         onUpload,
         onImportImslp,
         uploadError,
-        uploadLimit,
+        limitNotice,
         quotaExhausted,
+        importLimit,
         quotaUpgradeHint,
         openPricing,
     } = useOutletContext<LibraryOutletContext>();
@@ -26,17 +27,23 @@ export const SearchPage = () => {
                 </p>
             </header>
 
-            {/* Quota refusals get the amber upgrade card, not red error text —
-                same split as LibraryPage. Skip the CTA on student (limit 0). */}
-            {uploadLimit && quotaUpgradeHint !== false ? (
-                <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-4" />
-            ) : null}
+            {/* Quota refusals — and a cap the account is already at — get the
+                amber notice with its way to the plans, not red error text: same
+                split as LibraryPage. A student (limit 0) gets the plain copy. */}
+            <ScoreLimitNotice
+                limit={limitNotice}
+                upgradeHint={quotaUpgradeHint !== false}
+                onUpgrade={openPricing}
+                className="mt-4"
+            />
             {uploadError ? <ErrorText className="mt-4">{uploadError}</ErrorText> : null}
 
             <ImslpBrowser
                 busy={uploading}
                 quotaExhausted={Boolean(quotaExhausted)}
+                importLimit={importLimit ?? null}
                 quotaUpgradeHint={quotaUpgradeHint !== false}
+                onUpgrade={openPricing}
                 onImportFile={onUpload}
                 onImportImslp={onImportImslp}
                 showHeading={false}

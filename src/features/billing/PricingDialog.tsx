@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
-import { createCheckoutSession, redirectTo } from '@/features/billing/billingApi';
+import { createCheckoutSession, createPortalSession, redirectTo } from '@/features/billing/billingApi';
+import { formatPlanDate, type OwnSubscription } from '@/features/billing/planStatus';
 import {
     TIER_CARDS,
     foundingPrice,
@@ -25,6 +26,13 @@ export interface PricingDialogProps {
     currentTier: EffectiveTier;
     /** Optional line explaining what prompted the upgrade prompt. */
     reason?: string;
+    /**
+     * The subscription this account already pays for (ownSubscriptionOf), if
+     * any. Then every plan change goes through the billing portal, which
+     * switches the one subscription: Checkout would start a SECOND one beside
+     * it and bill both.
+     */
+    subscription?: OwnSubscription | null;
 }
 
 /**
@@ -33,11 +41,13 @@ export interface PricingDialogProps {
  * of teachers — plus a monthly/annual toggle and the Founding Teacher price
  * when that launch offer is switched on.
  */
-export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogProps) => {
+export const PricingDialog = ({ onClose, currentTier, reason, subscription = null }: PricingDialogProps) => {
     const [interval, setInterval] = useState<BillingInterval>('annual');
     const [busyPrice, setBusyPrice] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const founding = foundingPrice();
+    // The portal cannot switch anyone onto the Founding price (DEPLOY.md §1), so
+    // for a subscriber it would only be reachable as a second subscription.
+    const founding = subscription ? null : foundingPrice();
 
     const startCheckout = async (priceId: string) => {
         setError(null);
@@ -46,6 +56,18 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
             redirectTo(await createCheckoutSession(priceId));
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Could not start checkout.');
+            setBusyPrice(null);
+        }
+    };
+
+    /** Switching or resuming an existing subscription happens on Stripe's portal. */
+    const openPortal = async (busyKey: string) => {
+        setError(null);
+        setBusyPrice(busyKey);
+        try {
+            redirectTo(await createPortalSession());
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Could not open the billing portal.');
             setBusyPrice(null);
         }
     };
@@ -68,6 +90,13 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                 <p className="mb-4 text-sm text-stone-600">
                     Personal is the practice tool. Teacher adds your students. Academy covers a team of teachers.
                 </p>
+
+                {subscription ? (
+                    <p className="mb-4 text-sm text-stone-600">
+                        You already have a subscription, so switching plans happens in the billing portal — the plan you
+                        have changes there, and you are never billed for two.
+                    </p>
+                ) : null}
 
                 <div className="mb-5 flex items-center gap-2" role="group" aria-label="Billing interval">
                     {(['monthly', 'annual'] as const).map((option) => (
@@ -121,6 +150,13 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
 
                                 <p className="mt-1 text-sm text-stone-600">{card.tagline}</p>
                                 {price?.note ? <p className="mt-1 text-xs text-ok">{price.note}</p> : null}
+                                {isCurrent && subscription?.cancelling ? (
+                                    <p className="mt-1 text-sm text-amber-800">
+                                        {subscription.endsAt
+                                            ? `Ends ${formatPlanDate(subscription.endsAt)} — it won’t renew.`
+                                            : 'Cancelled — it won’t renew.'}
+                                    </p>
+                                ) : null}
 
                                 <ul className="mt-3 flex flex-col gap-1 text-sm text-stone-700">
                                     {card.features.map((feature) => (
@@ -128,7 +164,32 @@ export const PricingDialog = ({ onClose, currentTier, reason }: PricingDialogPro
                                     ))}
                                 </ul>
 
-                                {price?.priceId && !isCurrent ? (
+                                {isCurrent && subscription?.cancelling ? (
+                                    <Button
+                                        size="sm"
+                                        className="mt-4 w-full"
+                                        disabled={busyPrice !== null}
+                                        onClick={() => void openPortal(`resume:${card.tier}`)}
+                                    >
+                                        {busyPrice === `resume:${card.tier}`
+                                            ? 'Opening billing portal…'
+                                            : 'Resume subscription'}
+                                    </Button>
+                                ) : price?.priceId && !isCurrent && subscription ? (
+                                    // Free has no price, so no card ever offers a
+                                    // portal "switch" down to it: cancelling is.
+                                    <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        className="mt-4 w-full"
+                                        disabled={busyPrice !== null}
+                                        onClick={() => void openPortal(`switch:${card.tier}`)}
+                                    >
+                                        {busyPrice === `switch:${card.tier}`
+                                            ? 'Opening billing portal…'
+                                            : `Switch to ${card.name}`}
+                                    </Button>
+                                ) : price?.priceId && !isCurrent ? (
                                     <Button
                                         size="sm"
                                         className="mt-4 w-full"

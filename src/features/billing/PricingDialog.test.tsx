@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PricingDialog } from '@/features/billing/PricingDialog';
 
 const createCheckoutSession = vi.fn();
+const createPortalSession = vi.fn();
 const redirectTo = vi.fn();
 
 vi.mock('@/features/billing/billingApi', () => ({
     createCheckoutSession: (...args: unknown[]) => createCheckoutSession(...args),
+    createPortalSession: (...args: unknown[]) => createPortalSession(...args),
     redirectTo: (...args: unknown[]) => redirectTo(...args),
 }));
 
@@ -149,6 +151,83 @@ describe('PricingDialog', () => {
     it('says students never pay', () => {
         render(<PricingDialog currentTier="free" onClose={vi.fn()} />);
         expect(screen.getByText(/Students never pay/)).toBeInTheDocument();
+    });
+});
+
+describe('PricingDialog for an existing subscriber', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        configurePrices();
+        vi.stubEnv('VITE_STRIPE_FOUNDING_OFFER', 'true');
+        createPortalSession.mockResolvedValue('https://billing.stripe.com/session');
+    });
+
+    afterEach(() => {
+        cleanup();
+        vi.unstubAllEnvs();
+    });
+
+    it('switches plans in the billing portal, never through a second Checkout', async () => {
+        // Checkout always creates a new subscription; a Personal subscriber who
+        // "chose Teacher" there was billed for both.
+        const user = userEvent.setup();
+        render(
+            <PricingDialog
+                currentTier="personal"
+                subscription={{ endsAt: '2026-11-08T00:00:00Z', cancelling: false }}
+                onClose={vi.fn()}
+            />,
+        );
+
+        expect(screen.queryByRole('button', { name: /^Choose / })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Switch to Teacher' }));
+
+        expect(createPortalSession).toHaveBeenCalledTimes(1);
+        expect(createCheckoutSession).not.toHaveBeenCalled();
+        expect(redirectTo).toHaveBeenCalledWith('https://billing.stripe.com/session');
+    });
+
+    it('does not sell the Founding price beside a subscription the portal cannot switch onto it', () => {
+        render(
+            <PricingDialog
+                currentTier="teacher"
+                subscription={{ endsAt: null, cancelling: false }}
+                onClose={vi.fn()}
+            />,
+        );
+        expect(screen.queryByRole('button', { name: 'Become a Founding Teacher' })).not.toBeInTheDocument();
+    });
+
+    it('says a cancelled plan ends, and offers to resume it', async () => {
+        const user = userEvent.setup();
+        const endsAt = '2026-11-08T12:00:00Z';
+        render(<PricingDialog currentTier="personal" subscription={{ endsAt, cancelling: true }} onClose={vi.fn()} />);
+
+        expect(screen.getByText(`Ends ${new Date(endsAt).toLocaleDateString()} — it won’t renew.`)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Resume subscription' }));
+        expect(createPortalSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces a portal failure instead of redirecting', async () => {
+        const user = userEvent.setup();
+        createPortalSession.mockRejectedValue(new Error('Portal is down'));
+        render(
+            <PricingDialog
+                currentTier="personal"
+                subscription={{ endsAt: null, cancelling: false }}
+                onClose={vi.fn()}
+            />,
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Switch to Academy' }));
+
+        expect(await screen.findByText('Portal is down')).toBeInTheDocument();
+        expect(redirectTo).not.toHaveBeenCalled();
+    });
+
+    it('still sells through Checkout to a seated teacher, whose Academy is not theirs to switch', () => {
+        render(<PricingDialog currentTier="academy" subscription={null} onClose={vi.fn()} />);
+        expect(screen.getByRole('button', { name: 'Choose Teacher' })).toBeInTheDocument();
     });
 });
 

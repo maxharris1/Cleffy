@@ -22,6 +22,7 @@ import { PlanBadge } from '@/features/billing/PlanBadge';
 import { PricingDialog } from '@/features/billing/PricingDialog';
 import { StudioSeats } from '@/features/billing/StudioSeats';
 import { clearCachedEntitlements, loadUsage } from '@/features/billing/entitlementsService';
+import { formatPlanDate, ownSubscriptionOf, planPeriodOf } from '@/features/billing/planStatus';
 import { TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { LegalLinks } from '@/features/legal/LegalLinks';
@@ -304,9 +305,11 @@ export const AccountPage = () => {
     }
 
     const tier = entitlements?.tier ?? 'free';
-    const renewal = entitlements?.current_period_end
-        ? new Date(entitlements.current_period_end).toLocaleDateString()
-        : null;
+    // A cancelled plan's period end is its last day, not a renewal: saying
+    // "Renews" to someone who cancelled tells them they will be charged again.
+    const period = planPeriodOf(entitlements);
+    const subscription = ownSubscriptionOf(entitlements);
+    const resumable = subscription?.cancelling === true;
     const label = displayNameOf(session);
     const email = session.user.email ?? '';
     const joined = formatJoined(session.user.created_at);
@@ -441,9 +444,13 @@ export const AccountPage = () => {
                                 <span className="text-sm text-stone-600">through your academy</span>
                             ) : null}
                         </p>
-                        {renewal ? (
-                            <p className="mt-1 text-sm text-stone-500">
-                                {tier === 'free' ? 'Ended' : 'Renews'} {renewal}
+                        {period?.kind === 'renews' ? (
+                            <p className="mt-1 text-sm text-stone-500">Renews {formatPlanDate(period.endsAt)}</p>
+                        ) : period?.kind === 'ends' ? (
+                            <p className="mt-1 text-sm text-amber-800">
+                                {period.viaAcademy
+                                    ? `Your academy’s plan ends ${formatPlanDate(period.endsAt)} — ask its owner if you need it longer.`
+                                    : `Ends ${formatPlanDate(period.endsAt)} — your plan won’t renew. Resume it any time before then.`}
                             </p>
                         ) : null}
                     </div>
@@ -465,7 +472,7 @@ export const AccountPage = () => {
                                 disabled={portalBusy}
                                 onClick={() => void openPortal()}
                             >
-                                {portalBusy ? 'Opening…' : 'Manage subscription'}
+                                {portalBusy ? 'Opening…' : resumable ? 'Resume subscription' : 'Manage subscription'}
                             </Button>
                         ) : null}
                     </div>
@@ -596,7 +603,9 @@ export const AccountPage = () => {
                 />
             ) : null}
 
-            {pricingOpen ? <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} /> : null}
+            {pricingOpen ? (
+                <PricingDialog currentTier={tier} subscription={subscription} onClose={() => setPricingOpen(false)} />
+            ) : null}
         </div>
     );
 };

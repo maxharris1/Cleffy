@@ -329,6 +329,11 @@ export type PdfExportClaim = {
     exempt?: 'anonymous' | 'student';
     /** Set on a share-link guest's claim: the unit, if any, came from the score owner's allowance. */
     billed_to?: 'owner';
+    /**
+     * The claim id was already answered ok (a retry of the same export), so this
+     * answer counted nothing. Since 20261009120100.
+     */
+    replayed?: boolean;
 };
 
 export type Entitlements = {
@@ -337,6 +342,12 @@ export type Entitlements = {
     status: string | null;
     source: EntitlementSource;
     current_period_end: string | null;
+    /**
+     * The plan stops at current_period_end instead of renewing (the subscriber
+     * cancelled; for an Academy seat, the owner did). Optional because servers
+     * before 20261009120101, and entitlements cached from them, do not carry it.
+     */
+    cancel_at_period_end?: boolean;
     limits: EntitlementLimits;
 };
 
@@ -786,7 +797,12 @@ export type Database = {
             // A share-link guest must pass p_document: their export is drawn from
             // that score's owner's allowance. Ignored for a signed-in account.
             claim_pdf_export: {
-                Args: { p_document?: string };
+                /**
+                 * p_claim (since 20261009120100) names one export attempt: asked
+                 * again by the same caller within the hour it answers ok without
+                 * counting again.
+                 */
+                Args: { p_document?: string; p_claim?: string };
                 Returns: PdfExportClaim;
             };
             // Legacy name for claim_pdf_export, kept for bundles already in the

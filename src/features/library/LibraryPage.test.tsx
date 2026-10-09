@@ -265,7 +265,7 @@ describe('LibraryPage', () => {
         const context: LibraryOutletContext = {
             ...outletContext,
             openPricing,
-            uploadLimit: new LimitReachedError({
+            limitNotice: new LimitReachedError({
                 code: 'limit_reached',
                 metric: 'cloud_scores',
                 limit: 3,
@@ -298,7 +298,7 @@ describe('LibraryPage', () => {
         deleteDocument.mockRejectedValue(new Error('Network request failed'));
         const context: LibraryOutletContext = {
             ...outletContext,
-            uploadLimit: new LimitReachedError({
+            limitNotice: new LimitReachedError({
                 code: 'limit_reached',
                 metric: 'cloud_scores',
                 limit: 3,
@@ -335,7 +335,7 @@ describe('LibraryPage', () => {
         const context: LibraryOutletContext = {
             ...outletContext,
             clearUploadError,
-            uploadLimit: new LimitReachedError({
+            limitNotice: new LimitReachedError({
                 code: 'limit_reached',
                 metric: 'cloud_scores',
                 limit: 3,

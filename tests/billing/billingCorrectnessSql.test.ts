@@ -191,12 +191,43 @@ describe('billing-correctness RPC privileges', () => {
 
     it('meters a share-link guest against the score owner, never exempting them', () => {
         const def = definition(latestDefining('claim_pdf_export'), 'claim_pdf_export');
-        expect(def).toMatch(/claim_pdf_export\s*\(\s*p_document\s+uuid\s+default\s+null\s*\)/i);
+        expect(def).toMatch(/claim_pdf_export\s*\(\s*p_document\s+uuid\s+default\s+null\b/i);
         expect(def).not.toMatch(/'exempt',\s*'anonymous'/i);
         // Membership first, then the owner's plan and the owner's counter.
         expect(def).toMatch(/public\.document_role\s*\(\s*p_document\s*\)\s+is\s+null/i);
         expect(def).toMatch(/public\.resolve_entitlements\s*\(\s*v_owner\s*\)/i);
-        expect(def).toMatch(/public\.consume_quota\s*\(\s*v_owner\s*,\s*'pdf_exports'/i);
+        expect(def).toMatch(/v_billed\s*:=\s*v_owner\s*;/i);
+        expect(def).toMatch(/public\.consume_quota\s*\(\s*v_billed\s*,\s*'pdf_exports'/i);
+    });
+
+    it('lets a claim id be retried without counting twice, and never gives a unit back', () => {
+        // Behaviour is proven in tests/sql/billing_export_claims.sql; this holds
+        // the shape that makes the retry safe in place without a database.
+        const sql = latestDefining('claim_pdf_export');
+        const def = definition(sql, 'claim_pdf_export');
+        expect(def).toMatch(/p_claim\s+uuid\s+default\s+null/i);
+        // A replay must be the claimer's own, recent, and for the same account.
+        expect(def).toMatch(/v_prior\.claimed_by\s*=\s*v_user/i);
+        expect(def).toMatch(/v_prior\.billed_to\s*=\s*v_billed/i);
+        expect(def).toMatch(/v_prior\.created_at\s*>\s*now\s*\(\s*\)\s*-\s*interval\s*'1 hour'/i);
+        // A refused id is forgotten, so it can never replay as ok.
+        expect(def).toMatch(/not\s+\(v_answer\s*->>\s*'ok'\)::boolean/i);
+        // No client-callable path that hands a unit back.
+        for (const m of migrations()) {
+            if (/_imslp_works_catalog\.sql$/.test(m.name)) {
+                continue;
+            }
+            expect(m.sql, m.name).not.toMatch(/function\s+public\.release_pdf_export/i);
+        }
+        // The ledger is the function's alone.
+        for (const role of ['public', 'anon', 'authenticated']) {
+            expect(sql).toMatch(
+                new RegExp(`revoke\\s+all\\s+on\\s+table\\s+public\\.pdf_export_claims\\s+from\\s+${role}\\s*;`, 'i'),
+            );
+        }
+        expect(sql).toMatch(/alter\s+table\s+public\.pdf_export_claims\s+enable\s+row\s+level\s+security/i);
+        // One function: an old one-argument overload would make p_document alone ambiguous.
+        expect(sql).toMatch(/drop\s+function\s+if\s+exists\s+public\.claim_pdf_export\s*\(\s*uuid\s*\)\s*;/i);
     });
 
     it('asks about the row owner without the JWT caller check wherever server code acts for someone else', () => {

@@ -8,7 +8,8 @@ import type { DocumentRow } from '@/types/database';
 // Where the PDF comes from (cache, download, row fetch) and how failures are
 // shown. The allowance claim itself is exportClaim's, tested in
 // exportClaim.test.ts and ShareExportMenu.test.tsx; here it is a stub.
-const exportAnnotatedPdf = vi.fn();
+const buildAnnotatedPdf = vi.fn();
+const deliverPdf = vi.fn();
 const exportAnnotatedPageImage = vi.fn();
 const loadDocumentBytes = vi.fn();
 const fetchDocument = vi.fn();
@@ -16,7 +17,8 @@ const getCachedPdf = vi.fn();
 const claimPdfExport = vi.fn();
 
 vi.mock('@/features/export/exportPdf', () => ({
-    exportAnnotatedPdf: (...args: unknown[]) => exportAnnotatedPdf(...args),
+    buildAnnotatedPdf: (...args: unknown[]) => buildAnnotatedPdf(...args),
+    deliverPdf: (...args: unknown[]) => deliverPdf(...args),
 }));
 vi.mock('@/features/export/exportPageImage', () => ({
     exportAnnotatedPageImage: (...args: unknown[]) => exportAnnotatedPageImage(...args),
@@ -32,6 +34,8 @@ vi.mock('@/sync/pdfCache', () => ({
 }));
 vi.mock('@/features/export/exportClaim', () => ({
     claimPdfExport: (...args: unknown[]) => claimPdfExport(...args),
+    exportAttemptKey: () => 'attempt',
+    markExportDelivered: () => undefined,
 }));
 // A registered teacher: the PDF flows are metered for them.
 vi.mock('@/features/auth/session', () => ({
@@ -64,7 +68,8 @@ const openAndExport = async (user: ReturnType<typeof userEvent.setup>) => {
 
 beforeEach(() => {
     vi.clearAllMocks();
-    exportAnnotatedPdf.mockResolvedValue(undefined);
+    buildAnnotatedPdf.mockResolvedValue(new File([], 'Sonata (annotated).pdf'));
+    deliverPdf.mockResolvedValue('downloaded');
     exportAnnotatedPageImage.mockResolvedValue(undefined);
     claimPdfExport.mockResolvedValue({ ok: true });
     getCachedPdf.mockResolvedValue(null);
@@ -102,9 +107,9 @@ describe('ShareExportMenu', () => {
         expect(claimPdfExport).not.toHaveBeenCalled();
 
         finish(bytes);
-        await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
+        await waitFor(() => expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
         expect(loadDocumentBytes).toHaveBeenCalledWith(row(), expect.objectContaining({ userId: 'teacher-1' }));
-        expect(claimPdfExport).toHaveBeenCalledWith(expect.anything(), DOC_ID);
+        expect(claimPdfExport).toHaveBeenCalledWith(expect.anything(), DOC_ID, 'attempt');
         await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
     });
 
@@ -117,7 +122,7 @@ describe('ShareExportMenu', () => {
             await screen.findByText(/Couldn’t download this score to export it \(Could not download score: HTTP 500\)/),
         ).toBeInTheDocument();
         expect(claimPdfExport).not.toHaveBeenCalled();
-        expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        expect(deliverPdf).not.toHaveBeenCalled();
         expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled();
     });
 
@@ -132,7 +137,7 @@ describe('ShareExportMenu', () => {
 
     it('shows an export that failed after the bytes were in hand', async () => {
         const user = userEvent.setup();
-        exportAnnotatedPdf.mockRejectedValue(new Error('Worker crashed'));
+        buildAnnotatedPdf.mockRejectedValue(new Error('Worker crashed'));
         render(<ShareExportMenu docId={DOC_ID} bytes={new ArrayBuffer(4)} title="Score" />);
         await openAndExport(user);
         expect(await screen.findByText('The export failed (Worker crashed). Please try again.')).toBeInTheDocument();
@@ -158,7 +163,7 @@ describe('ShareExportMenu', () => {
 
     it('clears the old error when the menu is opened again', async () => {
         const user = userEvent.setup();
-        exportAnnotatedPdf.mockRejectedValueOnce(new Error('Worker crashed'));
+        buildAnnotatedPdf.mockRejectedValueOnce(new Error('Worker crashed'));
         render(<ShareExportMenu docId={DOC_ID} bytes={new ArrayBuffer(4)} title="Score" />);
         await openAndExport(user);
         await screen.findByText(/The export failed/);
@@ -174,7 +179,7 @@ describe('ShareExportMenu', () => {
         loadDocumentBytes.mockResolvedValue(bytes);
         render(<ShareExportMenu docId={DOC_ID} title="Sonata" />);
         await openAndExport(user);
-        await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
+        await waitFor(() => expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
         expect(fetchDocument).toHaveBeenCalledWith(DOC_ID);
     });
 
@@ -184,7 +189,7 @@ describe('ShareExportMenu', () => {
         getCachedPdf.mockResolvedValue({ bytes });
         render(<ShareExportMenu docId={DOC_ID} title="Sonata" />);
         await openAndExport(user);
-        await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
+        await waitFor(() => expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
         expect(fetchDocument).not.toHaveBeenCalled();
     });
 
@@ -205,7 +210,7 @@ describe('ShareExportMenu', () => {
         render(<ShareExportMenu docId={DOC_ID} bytes={new ArrayBuffer(4)} title="Score" />);
         await openAndExport(user);
         await waitFor(() => expect(claimPdfExport).toHaveBeenCalled());
-        expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        expect(deliverPdf).not.toHaveBeenCalled();
         expect(screen.queryByText(/failed/)).not.toBeInTheDocument();
     });
 });
