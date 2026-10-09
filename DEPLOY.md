@@ -220,8 +220,12 @@ to refund (comment at the end of `20261007120300`).
     `For harpsichord`, `For harpsichord (arr)`, `For clavichord` — have no
     `imslp_category_sync` row on either project, so the `imslp-sync` cron
     (every 2 min) walks them next, one per tick, about 10 minutes in all; no
-    migration. Until then typed search checks them live and a chip browse
-    with another chip may miss harpsichord-only works. Check:
+    migration. Until then typed search checks them live, but browsing by
+    chip with no query is affected: Piano alone (or with chips whose
+    categories aren't walked yet either) shows "IMSLP index is still being
+    built for Piano", and Piano with another walked chip (e.g. Baroque) lists
+    only the `For piano` side, missing keyboard- and harpsichord-only works.
+    Check:
     `select category, state, pages_done from imslp_category_sync where category ~ 'keyboard|harpsichord|clavichord'`
     shows five `ok` rows. Then search "BWV 846" on cleffy.io: "Prelude and
     Fugue in C major, BWV 846" first.

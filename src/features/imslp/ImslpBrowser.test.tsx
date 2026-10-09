@@ -24,7 +24,7 @@ import {
 } from '@/features/imslp/imslpDisplay';
 import { moonlightFilenames, moonlightWorkDetail } from '../../../tests/imslp/moonlightEditions';
 import { groupPopularByComposer, POPULAR_WORKS, popularWorkTags } from '@/features/imslp/popularWorks';
-import { buildSearchFilters, hasActiveFilters } from '@/features/imslp/searchFacets';
+import { buildSearchFilters, hasActiveFilters, labelsForCategories } from '@/features/imslp/searchFacets';
 
 /**
  * Node defines a `localStorage` global whose getter returns undefined unless
@@ -1356,6 +1356,20 @@ describe('ImslpBrowser', () => {
             screen.getByText('IMSLP index is still being built for Piano and Nocturne. Try typing a title.'),
         ).toBeInTheDocument();
         expect(screen.queryByText(/for For piano/)).not.toBeInTheDocument();
+    });
+
+    it("labels the Piano chip's keyboard categories as Piano until the sync walks them", () => {
+        // A Piano-only browse whose keyboard categories have no snapshot yet.
+        expect(
+            labelsForCategories([
+                'For keyboard',
+                'For keyboard (arr)',
+                'For harpsichord',
+                'For harpsichord (arr)',
+                'For clavichord',
+                'Nocturnes',
+            ]),
+        ).toEqual(['Piano', 'Nocturne']);
     });
 
     it('stops offering a seventh chip in a dimension and says why', async () => {
