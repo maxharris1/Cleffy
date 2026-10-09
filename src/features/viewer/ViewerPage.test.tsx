@@ -473,7 +473,8 @@ describe('CloudViewer stored role and reconnects', () => {
         expect(viewport()).toHaveAttribute('data-sync', 'on');
         expect(screen.queryByText('view only')).not.toBeInTheDocument();
         // Owner chrome still waits for the server's answer.
-        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
         expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
     });
 
@@ -574,7 +575,7 @@ describe('CloudViewer stored role and reconnects', () => {
         fetchMyRole.mockResolvedValue('owner');
 
         renderViewer();
-        await waitFor(() => expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
 
         await act(async () => {
             window.dispatchEvent(new Event('online'));

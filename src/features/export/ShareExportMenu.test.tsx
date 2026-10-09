@@ -139,7 +139,7 @@ describe('ShareExportMenu export allowance', () => {
 
         await user.click(screen.getByRole('menuitem', { name: 'Share page 1 as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
-        await user.click(screen.getByRole('button', { name: 'Share' }));
+        await user.click(screen.getByRole('button', { name: 'Export' }));
         await user.click(screen.getByRole('menuitem', { name: 'Share page 1 as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
 
@@ -172,7 +172,7 @@ describe('ShareExportMenu export allowance', () => {
 
         await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
-        await user.click(screen.getByRole('button', { name: 'Share' }));
+        await user.click(screen.getByRole('button', { name: 'Export' }));
         await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
         await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
 
