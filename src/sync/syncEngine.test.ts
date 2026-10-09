@@ -1095,3 +1095,125 @@ describe('SyncEngine shared outbox', () => {
         expect(await db.ops.count()).toBe(0);
     });
 });
+
+describe('SyncEngine mirror repairs reach the open viewer', () => {
+    /**
+     * The viewer: its own store and a started engine, as on screen. Its own
+     * network is down, so whatever reaches its store came from the repair,
+     * not from it syncing for itself.
+     */
+    let viewerStore: AnnotationStore;
+    let viewer: SyncEngine;
+    let viewerRejections: SyncRejection[];
+
+    const openViewer = async () => {
+        viewerStore = new AnnotationStore(db, DOC);
+        await viewerStore.load();
+        const viewerApi = new FakeApi();
+        viewerApi.offline = true;
+        viewerRejections = [];
+        viewer = new SyncEngine({
+            db,
+            store: viewerStore,
+            api: viewerApi,
+            docId: DOC,
+            getUserId: () => USER,
+            onRejected: (r) => viewerRejections.push(r),
+        });
+        viewer.start();
+    };
+
+    /** The background drain: a headless engine over a store nobody draws. */
+    const drainInBackground = async () => {
+        const headless = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC),
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+        });
+        await headless.flush();
+        headless.stop();
+    };
+
+    afterEach(() => {
+        viewer.stop();
+    });
+
+    it('shows a collaborator’s delete that the background drain adopted over an offline undo/redo', async () => {
+        await openViewer();
+        await viewerStore.create(makeStroke('m5'));
+        await viewerStore.create(makeStroke('m6'));
+        await engine.flush(); // synced while online
+        await viewerStore.undoLast(); // delete m6, offline
+        await viewerStore.undoLast(); // delete m5
+        await viewerStore.redoLast(); // restore m5
+        await viewerStore.redoLast(); // restore m6
+        expect(await db.ops.count()).toBe(4);
+        expect(viewerStore.getPage(0).has('m6')).toBe(true);
+
+        const erasedAt = '2026-03-03T03:03:03.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: erasedAt, seq: api.nextSeq++ });
+
+        await drainInBackground();
+
+        expect(await db.ops.count()).toBe(0);
+        await vi.waitFor(() => expect(viewerStore.getPage(0).has('m6')).toBe(false));
+        expect(viewerStore.get('m6')?.deletedAt).toBe(erasedAt);
+        expect(viewerStore.getPage(0).has('m5')).toBe(true);
+        expect(viewerRejections).toEqual([]);
+    });
+
+    it('rolls a refused change back on the viewer’s screen and tells it why', async () => {
+        await store.create(makeStroke('r1'));
+        await engine.flush();
+        await openViewer();
+        await viewerStore.update('r1', { color: '#ff0000' });
+        api.invisibleToUpdate.add('r1');
+
+        await drainInBackground();
+
+        await vi.waitFor(() => expect(viewerRejections.map((r) => r.annotationId)).toEqual(['r1']));
+        expect(viewerStore.get('r1')?.color).toBe('#111111');
+        expect(viewerStore.getPage(0).get('r1')?.color).toBe('#111111');
+    });
+
+    it('does not overwrite a change the viewer still has queued', async () => {
+        await store.create(makeStroke('q1'));
+        await engine.flush();
+        await openViewer();
+        await viewerStore.update('q1', { color: '#00aa00' });
+
+        await viewerStore.reloadFromMirror(['q1']);
+
+        expect(viewerStore.get('q1')?.color).toBe('#00aa00');
+    });
+
+    it('hears repairs made in another tab, for its own database only', async () => {
+        await store.create(makeStroke('t1'));
+        await engine.flush();
+        await openViewer();
+        // Another tab adopted the server's tombstone into the shared mirror.
+        const mirror = (await db.annotations.get('t1'))!;
+        await db.annotations.put({ ...mirror, deletedAt: '2026-05-05T05:05:05.000Z', seq: 99 });
+
+        const otherTab = new BroadcastChannel('cleffy-sync');
+        try {
+            otherTab.postMessage({ db: 'some-other-db', docId: DOC, annotationIds: ['t1'], origin: 'tab-2' });
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(viewerStore.getPage(0).has('t1')).toBe(true);
+
+            otherTab.postMessage({
+                db: db.name,
+                docId: DOC,
+                annotationIds: ['t1'],
+                origin: 'tab-2',
+                rejection: { annotationId: 't1', opType: 'update', reason: 'refused' },
+            });
+            await vi.waitFor(() => expect(viewerStore.getPage(0).has('t1')).toBe(false));
+            expect(viewerRejections.map((r) => r.annotationId)).toEqual(['t1']);
+        } finally {
+            otherTab.close();
+        }
+    });
+});

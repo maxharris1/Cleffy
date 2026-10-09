@@ -8,6 +8,8 @@ import { getSupabase, isSupabaseConfigured } from '@/lib/supabase';
  * score while someone is signed in, on whatever page they are — see
  * sync/backgroundDrain. Renders nothing.
  */
+const SCORE_PAGE_START_DELAY_MS = 5000;
+
 export const BackgroundSync = () => (isSupabaseConfigured() ? <SignedInDrain /> : null);
 
 const SignedInDrain = () => {
@@ -38,6 +40,9 @@ const SignedInDrain = () => {
                     userId,
                     retrySnapshots: () => snapshots.retryPendingSnapshots(db),
                     countPendingSnapshots: () => snapshots.countPendingSnapshots(db),
+                    // Opened straight onto a score: its viewer drains it, so
+                    // give that viewer time to register before the first look.
+                    startDelayMs: window.location.pathname.startsWith('/doc/') ? SCORE_PAGE_START_DELAY_MS : 0,
                 });
                 stop = () => drain.stop();
             })

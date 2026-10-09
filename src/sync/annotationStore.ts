@@ -41,6 +41,12 @@ export class AnnotationStore {
     private onDirty: (() => void) | null = null;
     private loading: Promise<void> | null = null;
     private loaded = false;
+    /**
+     * Local edits applied to memory whose mirror write has not finished, by
+     * id. reloadFromMirror must not replace them with the older row Dexie
+     * still holds.
+     */
+    private unpersisted = new Map<string, number>();
 
     constructor(
         private db: ScribblerDb,
@@ -288,7 +294,7 @@ export class AnnotationStore {
         const touched = new Set<number>();
         const ops: CommitOp[] = [];
         for (const annotation of annotations) {
-            this.applyMemory(annotation);
+            this.applyLocal(annotation);
             this.undo.pushInverse({ type: 'delete', id: annotation.id });
             ops.push({ type: 'create', annotation });
             touched.add(annotation.page);
@@ -416,6 +422,49 @@ export class AnnotationStore {
         this.notifyPage(remote.page);
     }
 
+    /**
+     * Another engine rewrote these rows in the mirror from server truth — the
+     * background drain adopting a collaborator's delete, another tab rolling a
+     * refused change back. Re-read them so this tab draws what Dexie now holds
+     * instead of the copy it loaded before. A row with local intent still
+     * pending (queued in the outbox, or applied here and not yet written) is
+     * left alone: that intent is newer, and its own sync settles it.
+     */
+    async reloadFromMirror(ids: readonly string[]): Promise<void> {
+        await this.ensureLoaded();
+        const { rows, queued } = await this.db.transaction('r', this.db.annotations, this.db.ops, async () => ({
+            rows: await this.db.annotations.bulkGet([...ids]),
+            queued: new Set(
+                (await this.db.ops.where('docId').equals(this.docId).toArray()).map((op) => op.annotationId),
+            ),
+        }));
+        const touched = new Set<number>();
+        ids.forEach((id, i) => {
+            if (queued.has(id) || this.unpersisted.has(id)) {
+                return;
+            }
+            const row = rows[i];
+            const prev = this.byId.get(id);
+            if (row && row.docId !== this.docId) {
+                return;
+            }
+            if (prev && (!row || prev.page !== row.page)) {
+                this.pageMap(prev.page).delete(id);
+                touched.add(prev.page);
+            }
+            if (!row) {
+                this.byId.delete(id);
+                return;
+            }
+            const { pending: _pending, ...annotation } = row;
+            this.applyMemory(annotation);
+            touched.add(annotation.page);
+        });
+        for (const page of touched) {
+            this.notifyPage(page);
+        }
+    }
+
     /** Group several ops (e.g. an eraser drag) into one undo entry. Nests. */
     beginBatch(): UndoBatchHandle {
         return this.undo.beginBatch();
@@ -534,7 +583,7 @@ export class AnnotationStore {
         switch (op.type) {
             case 'create': {
                 const annotation = { ...op.annotation, updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return { commit: { type: 'create', annotation }, inverse: { type: 'delete', id: annotation.id } };
             }
             case 'delete': {
@@ -543,7 +592,7 @@ export class AnnotationStore {
                     return null;
                 }
                 const annotation = { ...prev, deletedAt: nowIso(), updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return { commit: { type: 'delete', annotation }, inverse: { type: 'restore', id: op.id } };
             }
             case 'restore': {
@@ -552,7 +601,7 @@ export class AnnotationStore {
                     return null;
                 }
                 const annotation = { ...prev, deletedAt: null, updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return {
                     commit: { type: 'restore', annotation, baseDeletedAt: prev.deletedAt },
                     inverse: { type: 'delete', id: op.id },
@@ -569,7 +618,7 @@ export class AnnotationStore {
                     return null;
                 }
                 const annotation = { ...op.annotation, updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return {
                     commit: { type: 'update', annotation, prev },
                     inverse: { type: 'update', id: op.id, annotation: prev },
@@ -589,7 +638,7 @@ export class AnnotationStore {
         // tombstone during that yield must not still apply (`stillApplies`).
         if (op.type === 'create') {
             const preEdit = options.recordUndo ? this.liveAnnotations() : [];
-            this.applyMemory(op.annotation);
+            this.applyLocal(op.annotation);
             if (options.recordUndo) {
                 this.pushCommitInverse(op);
                 await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
@@ -615,7 +664,7 @@ export class AnnotationStore {
         const { annotation } = op;
 
         // 1. In-memory map (render source) — synchronous, so the UI never waits on IndexedDB.
-        this.applyMemory(annotation);
+        this.applyLocal(annotation);
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
@@ -684,6 +733,12 @@ export class AnnotationStore {
         }
     }
 
+    /** applyMemory for a local edit, which persistMany will write (and release). */
+    private applyLocal(annotation: Annotation): void {
+        this.unpersisted.set(annotation.id, (this.unpersisted.get(annotation.id) ?? 0) + 1);
+        this.applyMemory(annotation);
+    }
+
     /**
      * Durable mirror + outbox for a set of ops, atomically per chunk. Bulk
      * writes amortize the IndexedDB transaction overhead that dominates
@@ -691,6 +746,21 @@ export class AnnotationStore {
      * transaction that starves concurrent readers.
      */
     private async persistMany(ops: CommitOp[]): Promise<void> {
+        try {
+            await this.writeMany(ops);
+        } finally {
+            for (const op of ops) {
+                const left = (this.unpersisted.get(op.annotation.id) ?? 1) - 1;
+                if (left > 0) {
+                    this.unpersisted.set(op.annotation.id, left);
+                } else {
+                    this.unpersisted.delete(op.annotation.id);
+                }
+            }
+        }
+    }
+
+    private async writeMany(ops: CommitOp[]): Promise<void> {
         const CHUNK = 4000;
         for (let start = 0; start < ops.length; start += CHUNK) {
             const slice = ops.slice(start, start + CHUNK);

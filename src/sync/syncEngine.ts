@@ -172,6 +172,89 @@ export const observeRejections = (observer: RejectionObserver): (() => void) => 
     };
 };
 
+/**
+ * Rows an engine rewrote in the Dexie mirror from server truth: reconcile
+ * adopted the server's row, or a refusal rolled a change back. Every engine
+ * renders through its own AnnotationStore, so without this the open viewer —
+ * in another tab, or in this one when the background drain reached the score
+ * first — keeps drawing the copy it loaded and calls it synced.
+ */
+interface MirrorRepair {
+    /** The Dexie database the rows live in; another one is not this device's mirror. */
+    db: string;
+    docId: string;
+    annotationIds: string[];
+    /** Set when the repair rolled back a refused change, so the viewer can say so. */
+    rejection?: SyncRejection;
+    /** The engine that made it, which has already applied it. */
+    origin: string;
+}
+
+const SYNC_CHANNEL_NAME = 'cleffy-sync';
+const repairListeners = new Set<(repair: MirrorRepair) => void>();
+let syncChannel: BroadcastChannel | null | undefined;
+
+const deliverRepair = (repair: MirrorRepair): void => {
+    for (const listener of [...repairListeners]) {
+        listener(repair);
+    }
+};
+
+/** This tab's end of the cross-tab channel, opened on first use (null where unsupported). */
+const getSyncChannel = (): BroadcastChannel | null => {
+    if (syncChannel !== undefined) {
+        return syncChannel;
+    }
+    syncChannel = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+        try {
+            const channel = new BroadcastChannel(SYNC_CHANNEL_NAME);
+            channel.onmessage = (event: MessageEvent<MirrorRepair>) => deliverRepair(event.data);
+            // Node (tests) would otherwise keep the process alive for it.
+            (channel as { unref?: () => void }).unref?.();
+            syncChannel = channel;
+        } catch {
+            // No cross-tab delivery; this tab's engines still hear each other.
+        }
+    }
+    return syncChannel;
+};
+
+/** Tell every other engine on the document — this tab's and other tabs' — to re-read these rows. */
+const announceRepair = (repair: MirrorRepair): void => {
+    deliverRepair(repair);
+    try {
+        getSyncChannel()?.postMessage(repair);
+    } catch {
+        // Best effort: the next pull covers another tab that missed it.
+    }
+};
+
+const VIEWER_LOCK_PREFIX = 'cleffy-viewer:';
+
+/**
+ * Scores open in a viewer in any tab of this browser. Each started engine
+ * holds a shared Web Lock for its document while it runs, so the background
+ * drain can leave those to their viewers. Empty where Web Locks are missing.
+ */
+export const docsOpenInViewers = async (): Promise<Set<string>> => {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    if (!locks || typeof locks.query !== 'function') {
+        return new Set();
+    }
+    try {
+        const { held = [] } = await locks.query();
+        return new Set(
+            held
+                .map((lock) => lock.name ?? '')
+                .filter((name) => name.startsWith(VIEWER_LOCK_PREFIX))
+                .map((name) => name.slice(VIEWER_LOCK_PREFIX.length)),
+        );
+    } catch {
+        return new Set();
+    }
+};
+
 /** In-tab fallback for withOutboxLock where the Web Locks API is missing. */
 const outboxLockTails = new Map<string, Promise<unknown>>();
 
@@ -346,6 +429,10 @@ export class SyncEngine {
      * per flush: a later flush re-checks, since the server may have moved.
      */
     private reconciled = new Set<number>();
+    /** Names this engine in the repairs it announces, so it skips its own. */
+    private readonly engineId = crypto.randomUUID();
+    private releaseViewerLock: (() => void) | null = null;
+    private repairListener = (repair: MirrorRepair) => this.onRepair(repair);
 
     constructor(
         private deps: {
@@ -367,6 +454,9 @@ export class SyncEngine {
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
         activeEngines.set(this.deps.docId, this);
+        repairListeners.add(this.repairListener);
+        getSyncChannel();
+        this.holdViewerLock();
         if (navigator.onLine === false) {
             this.setStatus('offline');
         }
@@ -381,7 +471,65 @@ export class SyncEngine {
         if (activeEngines.get(this.deps.docId) === this) {
             activeEngines.delete(this.deps.docId);
         }
+        repairListeners.delete(this.repairListener);
+        this.releaseViewerLock?.();
+        this.releaseViewerLock = null;
         this.clearRetry();
+    }
+
+    /** See docsOpenInViewers. Released by stop(). */
+    private holdViewerLock(): void {
+        const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+        if (!locks || typeof locks.request !== 'function') {
+            return;
+        }
+        void locks
+            .request(
+                `${VIEWER_LOCK_PREFIX}${this.deps.docId}`,
+                { mode: 'shared' },
+                () =>
+                    new Promise<void>((resolve) => {
+                        if (this.stopped) {
+                            resolve();
+                        } else {
+                            this.releaseViewerLock = resolve;
+                        }
+                    }),
+            )
+            .catch(() => undefined);
+    }
+
+    /**
+     * Another engine repaired rows of this document in the mirror (see
+     * MirrorRepair): draw them as they now are, and pass a refusal on to the
+     * viewer, which is the one that can tell the user.
+     */
+    private onRepair(repair: MirrorRepair): void {
+        const { db, store, docId } = this.deps;
+        if (this.stopped || repair.origin === this.engineId || repair.docId !== docId || repair.db !== db.name) {
+            return;
+        }
+        void store
+            .reloadFromMirror(repair.annotationIds)
+            .then(() => {
+                if (repair.rejection && !this.stopped) {
+                    this.deps.onRejected?.(repair.rejection);
+                }
+            })
+            .catch((err: unknown) => console.warn('Could not reload repaired marks', err));
+    }
+
+    private announce(annotationIds: string[], rejection?: SyncRejection): void {
+        if (annotationIds.length === 0) {
+            return;
+        }
+        announceRepair({
+            db: this.deps.db.name,
+            docId: this.deps.docId,
+            annotationIds,
+            ...(rejection ? { rejection } : {}),
+            origin: this.engineId,
+        });
     }
 
     /** Delay of the currently scheduled retry (ms), or null when none is pending. */
@@ -617,7 +765,7 @@ export class SyncEngine {
      * and the whole pass is retried, so nothing is sent on a guess.
      */
     private async reconcile(groups: OpGroup[]): Promise<boolean> {
-        const { api, db, store, docId } = this.deps;
+        const { api, docId } = this.deps;
         const { data, error } = await this.withAuth(() =>
             api.fetchMany(
                 docId,
@@ -633,43 +781,57 @@ export class SyncEngine {
             return false;
         }
         const rows = new Map((data ?? []).map((row) => [row.id, row]));
-        for (const group of groups) {
-            const opIds = group.ops.map((op) => op.opId as number);
-            const row = rows.get(group.annotationId);
-            if (!row) {
-                // Not visible (or gone): send the ops as queued, and the
-                // refusal path repairs from what the server says about each.
-                opIds.forEach((id) => this.reconciled.add(id));
-                continue;
-            }
-            const outcome = reconcileWithServer(group.ops, row);
-            const applied = await db.transaction('rw', db.ops, async () => {
-                // Another tab may have drained (or rewritten) these meanwhile.
-                const current = await db.ops.bulkGet(opIds);
-                if (current.some((op) => !op)) {
+        const adopted: string[] = [];
+        try {
+            for (const group of groups) {
+                if (!(await this.reconcileGroup(group, rows.get(group.annotationId), adopted))) {
                     return false;
                 }
-                if (outcome.kind === 'send') {
-                    await db.ops.bulkDelete(opIds.slice(1));
-                    await db.ops.put(outcome.op);
-                } else {
-                    await db.ops.bulkDelete(opIds);
-                }
-                return true;
-            });
-            if (this.stopped) {
+            }
+        } finally {
+            this.announce(adopted);
+        }
+        return true;
+    }
+
+    /** reconcile for one mark; false once the engine has been stopped. */
+    private async reconcileGroup(group: OpGroup, row: AnnotationRow | undefined, adopted: string[]): Promise<boolean> {
+        const { db, store } = this.deps;
+        const opIds = group.ops.map((op) => op.opId as number);
+        if (!row) {
+            // Not visible (or gone): send the ops as queued, and the
+            // refusal path repairs from what the server says about each.
+            opIds.forEach((id) => this.reconciled.add(id));
+            return true;
+        }
+        const outcome = reconcileWithServer(group.ops, row);
+        const applied = await db.transaction('rw', db.ops, async () => {
+            // Another tab may have drained (or rewritten) these meanwhile.
+            const current = await db.ops.bulkGet(opIds);
+            if (current.some((op) => !op)) {
                 return false;
             }
-            if (!applied) {
-                continue;
-            }
             if (outcome.kind === 'send') {
-                this.reconciled.add(outcome.op.opId as number);
-            } else if ((await this.queuedFor(group.annotationId)) === 0) {
-                // Nothing to send: the server's row is how the mark stands.
-                // Pulls skipped it while ops were queued, so adopt it here.
-                await store.adoptServerRow(fromServerRow(row));
+                await db.ops.bulkDelete(opIds.slice(1));
+                await db.ops.put(outcome.op);
+            } else {
+                await db.ops.bulkDelete(opIds);
             }
+            return true;
+        });
+        if (this.stopped) {
+            return false;
+        }
+        if (!applied) {
+            return true;
+        }
+        if (outcome.kind === 'send') {
+            this.reconciled.add(outcome.op.opId as number);
+        } else if ((await this.queuedFor(group.annotationId)) === 0) {
+            // Nothing to send: the server's row is how the mark stands.
+            // Pulls skipped it while ops were queued, so adopt it here.
+            await store.adoptServerRow(fromServerRow(row));
+            adopted.push(group.annotationId);
         }
         return true;
     }
@@ -760,6 +922,7 @@ export class SyncEngine {
             await store.discardLocal(op.annotationId);
         }
         const rejection: SyncRejection = { annotationId: op.annotationId, opType: op.type, reason };
+        this.announce([op.annotationId], rejection);
         this.deps.onRejected?.(rejection);
         for (const observer of rejectionObservers) {
             observer({ ...rejection, docId });

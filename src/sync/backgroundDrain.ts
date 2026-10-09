@@ -1,7 +1,7 @@
 import { isCloudDocId } from '@/features/library/documentsService';
 import { AnnotationStore } from '@/sync/annotationStore';
 import type { ScribblerDb } from '@/sync/db';
-import { activeEngineFor, SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
+import { activeEngineFor, docsOpenInViewers, SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
 
 /**
  * Background upload of queued annotation changes.
@@ -18,9 +18,13 @@ import { activeEngineFor, SyncEngine, type AnnotationsApi } from '@/sync/syncEng
  *   from server truth); offline, throttling and server faults keep them; an
  *   archived score's marks are held, not dropped. Undo/redo pairs collapse.
  * - Headless: no realtime channel and no pull. Committed rows reach the open
- *   viewers through the database broadcast as usual.
- * - A score whose viewer is open is left to that viewer's engine. The outbox
- *   lock (withOutboxLock) serializes the two if the viewer opens mid-drain.
+ *   viewers through the database broadcast as usual; rows it rewrites from
+ *   server truth (an undo/redo pair beaten by a collaborator's delete, a
+ *   refused change rolled back) reach them as a mirror repair (see
+ *   SyncEngine.announce), with the refusal notice.
+ * - A score whose viewer is open — in this tab or another — is left to that
+ *   viewer's engine. The outbox lock (withOutboxLock) serializes the two if
+ *   the viewer opens mid-drain, and the repair keeps its screen honest.
  * - Bounded: at most `concurrency` scores upload at once.
  * - Backoff per score is the engine's own (Retry-After honoured), rescheduled
  *   here rather than by the engine's timer so a held or failing score does
@@ -44,6 +48,11 @@ export interface BackgroundDrainDeps {
     concurrency?: number;
     /** How often the outboxes are looked at when nothing else wakes the drain. */
     intervalMs?: number;
+    /**
+     * Wait before the first look. The app starting on a score page should let
+     * that score's viewer register its engine first rather than race it.
+     */
+    startDelayMs?: number;
 }
 
 export const BACKGROUND_DRAIN_INTERVAL_MS = 30_000;
@@ -190,10 +199,15 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
             return;
         }
         const pending = new Set(pendingDocs);
+        const viewed = pendingDocs.length > 0 ? await docsOpenInViewers() : new Set<string>();
+        if (stopped) {
+            return;
+        }
+        const isViewed = (docId: string) => viewed.has(docId) || !!activeEngineFor(docId);
         for (const docId of [...engines.keys()]) {
             // Drained elsewhere (the viewer, sign-out, another tab), or now the
             // open viewer's to drain.
-            if (!draining.has(docId) && (!pending.has(docId) || activeEngineFor(docId))) {
+            if (!draining.has(docId) && (!pending.has(docId) || isViewed(docId))) {
                 dropEngine(docId);
             }
         }
@@ -203,7 +217,7 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
             if (draining.size >= concurrency) {
                 break;
             }
-            if (draining.has(docId) || activeEngineFor(docId) || (engines.get(docId)?.nextAt ?? 0) > now) {
+            if (draining.has(docId) || isViewed(docId) || (engines.get(docId)?.nextAt ?? 0) > now) {
                 continue;
             }
             work.push(drainDoc(docId));
@@ -264,6 +278,14 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
 
     running.add(drain);
     window.addEventListener('online', onOnline);
-    void drain.poke();
+    const startDelayMs = deps.startDelayMs ?? 0;
+    if (startDelayMs > 0) {
+        wakeTimer = setTimeout(() => {
+            wakeTimer = null;
+            void drain.poke();
+        }, startDelayMs);
+    } else {
+        void drain.poke();
+    }
     return drain;
 };

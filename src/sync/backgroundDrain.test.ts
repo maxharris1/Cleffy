@@ -127,6 +127,34 @@ describe('startBackgroundDrain', () => {
         expect(inserted.map((r) => r.id)).toEqual(['b1']);
     });
 
+    it('leaves a score open in another tab’s viewer to that viewer', async () => {
+        const { api, inserted } = makeApi();
+        await queue(DOC_A, 'a1');
+        await queue(DOC_B, 'b1');
+        // The other tab's started engine holds this shared Web Lock.
+        Object.defineProperty(navigator, 'locks', {
+            configurable: true,
+            value: { query: async () => ({ held: [{ name: `cleffy-viewer:${DOC_A}`, mode: 'shared' }] }) },
+        });
+        try {
+            drain = startBackgroundDrain({ db, api, userId: USER });
+            await drain.poke();
+        } finally {
+            delete (navigator as { locks?: unknown }).locks;
+        }
+
+        expect(inserted.map((r) => r.id)).toEqual(['b1']);
+    });
+
+    it('holds its first look back when asked, so a score’s own viewer registers first', async () => {
+        const { api, inserted } = makeApi();
+        await queue(DOC_A, 'a1');
+        drain = startBackgroundDrain({ db, api, userId: USER, startDelayMs: 300 });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(inserted).toEqual([]);
+        await vi.waitFor(() => expect(inserted.map((r) => r.id)).toEqual(['a1']));
+    });
+
     it('waits while offline and drains as soon as the browser is back online', async () => {
         const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
         const { api, inserted } = makeApi();
