@@ -1,6 +1,7 @@
+import { AuthApiError, AuthRetryableFetchError } from '@supabase/supabase-js';
 import { describe, expect, it } from 'vitest';
 
-import { mapAuthError } from '@/features/auth/authErrors';
+import { mapAuthError, passwordResetProblem } from '@/features/auth/authErrors';
 
 describe('mapAuthError', () => {
     it('maps by Auth error code', () => {
@@ -55,6 +56,46 @@ describe('mapAuthError — password policy refusals', () => {
     it('maps same_password', () => {
         expect(mapAuthError({ code: 'same_password', message: 'noise' })).toBe(
             'Choose a password different from your current one.',
+        );
+    });
+});
+
+describe('passwordResetProblem', () => {
+    it('answers neutrally for anything only an existing account can cause', () => {
+        // The per-address resend limit: only an account has a last-sent time.
+        expect(
+            passwordResetProblem(
+                new AuthApiError(
+                    'For security purposes, you can only request this after 52 seconds.',
+                    429,
+                    'over_email_send_rate_limit',
+                ),
+            ),
+        ).toBeNull();
+        // The account's mail could not be sent.
+        expect(
+            passwordResetProblem(new AuthApiError('Error sending recovery email', 500, 'unexpected_failure')),
+        ).toBeNull();
+        expect(passwordResetProblem(new Error('something else entirely'))).toBeNull();
+    });
+
+    it('tells the person to wait when the request rate is limited for everyone', () => {
+        expect(
+            passwordResetProblem(new AuthApiError('Request rate limit reached', 429, 'over_request_rate_limit')),
+        ).toMatch(/Wait a few minutes/);
+        expect(
+            passwordResetProblem(new AuthApiError('Email rate limit exceeded', 429, 'over_email_send_rate_limit')),
+        ).toMatch(/Wait a few minutes/);
+    });
+
+    it('reports an address GoTrue will not take, and a request that never got an answer', () => {
+        expect(
+            passwordResetProblem(
+                new AuthApiError('Unable to validate email address: invalid format', 400, 'validation_failed'),
+            ),
+        ).toBe('Enter a valid email address.');
+        expect(passwordResetProblem(new AuthRetryableFetchError('Failed to fetch', 0))).toMatch(
+            /Check your connection/,
         );
     });
 });
