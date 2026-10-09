@@ -241,7 +241,11 @@ to refund (comment at the end of `20261007120300`).
     asking a name, and no guest appears in Auth); join as a guest and use
     "Delete my guest profile" (gone from Auth and from the owner's member
     list); cancel a plan in the portal and see "Ends <date>" with Resume on the
-    Account page.
+    Account page. As an editor, draw offline, have the owner make you a viewer,
+    reconnect on the library: the marks stay until you open the score, which
+    then undoes them and says why. On a free account, dismiss the share sheet
+    of "Save page 1 as PDF", then "Export whole score as PDF": it goes through,
+    not refused.
 14. **Leftover Storage of accounts deleted any other way.** `delete-account`
     empties both buckets for every `document_storage_cleanup` tombstone the
     account owns before it deletes the auth user. An account removed from the
