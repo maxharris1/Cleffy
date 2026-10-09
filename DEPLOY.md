@@ -45,11 +45,13 @@ the steps that need a human because no API exposes them — each one says why.
 ## Release checklist — launch fixes (20261007\*)
 
 One ordered list for the integrated `fix/*` branches (integrity, sharing, sync,
-billing, library, security, compliance, scope-imslp) shipping on one `dev` →
-`main` merge. Steps are in the order to do them; each says what breaks if it is
-skipped or reordered. Reference detail stays in the sections it links to.
+billing, library, security, compliance, scope-imslp) and the pre-launch QA
+round on top of them (`qa/sync`, `qa/billing`, `qa/sharing`, `qa/polish`,
+integrated on `qa-integrate`) shipping on one `dev` → `main` merge. Steps are
+in the order to do them; each says what breaks if it is skipped or reordered.
+Reference detail stays in the sections it links to.
 
-**What ships.** Eleven migrations, applied in filename order by the Supabase
+**What ships.** Fourteen migrations, applied in filename order by the Supabase
 GitHub integration on the merge (migrations before functions):
 
 | Migration                                                | Branch      | Order constraint                                                                                                                                                                       |
@@ -65,12 +67,35 @@ GitHub integration on the merge (migrations before functions):
 | `20261007120501_student_login_throttle`                  | security    | **Before** `student-login` / `student-claim` / `student-provision`: the limiter fails closed (§9).                                                                                     |
 | `20261007120600_account_deletion`                        | compliance  | **Before** `delete-account`, with the updated `stripe-webhook` (§2, _Account deletion_).                                                                                               |
 | `20261007120700_document_provenance`                     | scope-imslp | **Before** `imslp-download` / `imslp-work`: imports fail at the provenance write without it (and are refunded).                                                                        |
+| `20261009120100_pdf_export_claim_ids`                    | qa/billing  | Any order: without it the client repeats the claim without its id (PGRST202 fallback), so a lost answer or a dismissed share sheet can count an export twice, as before.               |
+| `20261009120101_entitlements_cancel_at_period_end`       | qa/billing  | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                 |
+| `20261009120200_share_link_errors_and_peek`              | qa/sharing  | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                   |
 
 Functions changed: `delete-account` (new), `imslp-download`, `imslp-work`,
-`imslp-sync`, `stripe-webhook`, `stripe-checkout`, `stripe-portal`,
-`student-login`, `student-claim`, `student-provision`, `resend-inbound`,
-`analyze-annotations`, and `_shared/` (so redeploy every function that imports
-it — the merge deploys all of them).
+`imslp-sync`, `imslp-search`, `stripe-webhook`, `stripe-checkout`,
+`stripe-portal`, `student-login`, `student-claim`, `student-provision`,
+`resend-inbound`, `analyze-annotations`, and `_shared/` (so redeploy every
+function that imports it — the merge deploys all of them).
+
+**QA round (20261009\*).** What each function change needs:
+
+- `stripe-checkout` refuses a second subscription in the same mode
+  (`409 already_subscribed`); plan changes then go through the Customer portal
+  only. Check Switch plans in **both** modes' portal first (§1, _Checkout
+  depends on it_; step 2) — the sandbox one has never been verified.
+- `stripe-webhook` / `stripe-checkout` (`_shared/stripeEvents.ts`): a
+  `cancel_at` inside the period now reads as cancelling. Rows already scheduled
+  that way pick it up on their next subscription event.
+- `delete-account` (`_shared/accountDeletion.ts`) now deletes share-link
+  guests (no password, no Stripe call) instead of refusing them with
+  `403 anonymous_session`. The new bundle's "Delete my guest profile" and the
+  join page's dead-link cleanup need it; until it is deployed they get that
+  403 and delete nothing.
+- `imslp-search` (`_shared/search.ts`, `searchFacetData.ts`, `popularWorks.ts`)
+  and `imslp-sync` (`_shared/categorySync.ts`): ranking and the Piano chip's
+  keyboard categories — step 16.
+- The bundle also emits a same-origin `/supabase-preconnect.js` (CSP
+  `script-src 'self'`); it is in `dist/` and needs nothing else.
 
 `stripe-webhook` now applies `customer.subscription.created` / `.updated` from
 the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
@@ -195,8 +220,10 @@ to refund (comment at the end of `20261007120300`).
 ### After the merge
 
 11. Supabase check on the merge commit green; `list_migrations` on production
-    ends at `20261007120700`; security advisor: no new
-    `function_search_path_mutable` / `anon_security_definer_function_executable`.
+    ends at `20261009120200`; security advisor: no new
+    `function_search_path_mutable` / `anon_security_definer_function_executable`
+    except `peek_share_link`, which is anon-callable on purpose (the join page
+    checks a link before anyone signs in) and answers only `{valid, role}`.
 12. Run the CSP smoke against the production build
     (`npm run build && node scripts/csp-smoke.mjs`; with a Sentry DSN build also
     `CSP_SMOKE_SENTRY=1`) — zero violations, legal pages, Account page, Source
@@ -205,10 +232,16 @@ to refund (comment at the end of `20261007120300`).
 13. Smoke on production with throwaway accounts: share a score, change a
     member's role and watch the other tab follow live, revoke a link with
     removal, leave a score; draw offline and come back online; export a PDF on
-    a free account twice (second is refused, nothing built); import from IMSLP
-    and open its Source dialog; delete a score and check the library and
-    Storage; delete a throwaway account from the Account page (needs the live
-    key) and confirm it is gone from Auth, Storage and Stripe.
+    a free account twice (the second is refused and nothing is saved or
+    shared; the PDF is built before the claim, so a failed build spends
+    nothing); import from IMSLP and open its Source dialog; delete a score and
+    check the library and Storage; delete a throwaway account from the Account
+    page (needs the live key) and confirm it is gone from Auth, Storage and
+    Stripe. QA round: open a revoked share link (the join page says so before
+    asking a name, and no guest appears in Auth); join as a guest and use
+    "Delete my guest profile" (gone from Auth and from the owner's member
+    list); cancel a plan in the portal and see "Ends <date>" with Resume on the
+    Account page.
 14. **Leftover Storage of accounts deleted any other way.** `delete-account`
     empties both buckets for every `document_storage_cleanup` tombstone the
     account owns before it deletes the auth user. An account removed from the
