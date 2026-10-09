@@ -1,6 +1,6 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
 import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
-import type { LocalAnnotation, PendingOpType, ScribblerDb } from '@/sync/db';
+import type { LocalAnnotation, PendingOp, ScribblerDb } from '@/sync/db';
 import type { Annotation, AnnotationPayload } from '@/types/models';
 
 export type PageListener = (pageIndex: number) => void;
@@ -14,7 +14,8 @@ type CommitOp =
     | { type: 'create'; annotation: Annotation }
     | { type: 'update'; annotation: Annotation; prev: Annotation }
     | { type: 'delete'; annotation: Annotation }
-    | { type: 'restore'; annotation: Annotation };
+    /** baseDeletedAt: the tombstone being undone — see PendingOp.baseDeletedAt. */
+    | { type: 'restore'; annotation: Annotation; baseDeletedAt: string | null };
 
 /**
  * THE single write path for annotations (plan §sync).
@@ -201,7 +202,11 @@ export class AnnotationStore {
                     await this.create({ ...next, createdAt: snap.createdAt || now, seq: 0 });
                 } else if (existing.deletedAt) {
                     await this.commit(
-                        { type: 'restore', annotation: { ...next, seq: existing.seq } },
+                        {
+                            type: 'restore',
+                            annotation: { ...next, seq: existing.seq },
+                            baseDeletedAt: existing.deletedAt,
+                        },
                         { recordUndo: true },
                     );
                     // After restore, payload/color may still differ — update if needed.
@@ -434,7 +439,11 @@ export class AnnotationStore {
             return;
         }
         await this.commit(
-            { type: 'restore', annotation: { ...prev, deletedAt: null, updatedAt: nowIso() } },
+            {
+                type: 'restore',
+                annotation: { ...prev, deletedAt: null, updatedAt: nowIso() },
+                baseDeletedAt: prev.deletedAt,
+            },
             { recordUndo: true },
         );
     }
@@ -544,7 +553,10 @@ export class AnnotationStore {
                 }
                 const annotation = { ...prev, deletedAt: null, updatedAt: nowIso() };
                 this.applyMemory(annotation);
-                return { commit: { type: 'restore', annotation }, inverse: { type: 'delete', id: op.id } };
+                return {
+                    commit: { type: 'restore', annotation, baseDeletedAt: prev.deletedAt },
+                    inverse: { type: 'delete', id: op.id },
+                };
             }
             case 'update': {
                 // A tombstone here means a collaborator deleted the mark after
@@ -684,12 +696,13 @@ export class AnnotationStore {
             const slice = ops.slice(start, start + CHUNK);
             const rows: LocalAnnotation[] = slice.map((op) => ({ ...op.annotation, pending: 1 }));
             const queuedAt = nowIso();
-            const opRows = slice.map((op) => ({
+            const opRows = slice.map((op): PendingOp => ({
                 docId: this.docId,
-                type: op.type as PendingOpType,
+                type: op.type,
                 annotationId: op.annotation.id,
                 annotation: op.annotation,
                 queuedAt,
+                ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
             }));
             await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
                 await this.db.annotations.bulkPut(rows);

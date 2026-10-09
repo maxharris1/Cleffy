@@ -7,6 +7,7 @@ import {
     classifyFailure,
     fromServerRow,
     observeRejections,
+    PERSISTENT_FAILURE_MS,
     SyncEngine,
     type AnnotationPatchRow,
     type AnnotationsApi,
@@ -178,6 +179,23 @@ class FakeApi implements AnnotationsApi {
             return { data: null, error: this.fetchOneError };
         }
         return { data: this.rows.get(id) ?? null, error: null };
+    }
+
+    fetchManys = 0;
+    fetchManyError: ApiError | null = null;
+
+    async fetchMany(docId: string, ids: string[]) {
+        this.fetchManys += 1;
+        if (this.offline) {
+            return { data: null, error: this.err() };
+        }
+        if (this.fetchManyError) {
+            return { data: null, error: this.fetchManyError };
+        }
+        const data = ids
+            .map((id) => this.rows.get(id))
+            .filter((r): r is AnnotationRow => !!r && r.document_id === docId);
+        return { data, error: null };
     }
 
     async fetchSince(docId: string, afterSeq: number, limit: number) {
@@ -837,6 +855,243 @@ describe('offline → queue → flush → converge (integration)', () => {
         expect(api.rows.get('local1')?.created_by).toBe(USER);
         // …and the remote stroke reached us.
         expect(store.getPage(1).has('remote1')).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+    });
+});
+
+describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () => {
+    /** M5 and M6 drawn by this device and synced, so the server holds both. */
+    const drawAndSync = async () => {
+        await store.create(makeStroke('m5'));
+        await store.create(makeStroke('m6'));
+        await engine.flush();
+        expect(await db.ops.count()).toBe(0);
+    };
+
+    it('does not resurrect a mark a collaborator erased while undo/redo sat in the outbox', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.undoLast(); // delete m6
+        await store.undoLast(); // delete m5
+        await store.redoLast(); // restore m5
+        await store.redoLast(); // restore m6
+        expect(await db.ops.count()).toBe(4);
+
+        // Meanwhile a collaborator erases m6.
+        const erasedAt = '2026-03-03T03:03:03.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: erasedAt, seq: api.nextSeq++ });
+        const updatesBefore = api.updates;
+
+        api.offline = false;
+        await engine.sync();
+
+        // The collaborator's newer delete stands, here and on the server…
+        expect(api.rows.get('m6')?.deleted_at).toBe(erasedAt);
+        expect(store.get('m6')?.deletedAt).toBe(erasedAt);
+        expect(store.getPage(0).has('m6')).toBe(false);
+        // …and the undo/redo pairs cancelled out: nothing was sent at all.
+        expect(api.updates).toBe(updatesBefore);
+        expect(api.rows.get('m5')?.deleted_at).toBeNull();
+        expect(store.getPage(0).has('m5')).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+        expect((await db.annotations.get('m6'))?.pending).toBe(0);
+        expect(rejections).toEqual([]);
+    });
+
+    it('sends only the net change for a mark edited several times offline', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.update('m5', { color: '#aa0000' });
+        await store.update('m5', { color: '#bb0000' });
+        await store.delete('m6');
+        await store.undoLast(); // restore m6
+        await store.delete('m6');
+        const updatesBefore = api.updates;
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.updates - updatesBefore).toBe(2); // one patch per mark
+        expect(api.rows.get('m5')?.color).toBe('#bb0000');
+        expect(api.rows.get('m6')?.deleted_at).not.toBeNull();
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('restores its own delete even when that delete landed but its answer was lost', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.undoLast(); // delete m6, queued
+        // The delete reaches the server, but the response never comes back.
+        const tombstone = store.get('m6')!.deletedAt!;
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: tombstone, seq: api.nextSeq++ });
+        await store.redoLast(); // restore m6, queued behind it
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(store.getPage(0).has('m6')).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('a lone restore does not undo a collaborator’s newer delete', async () => {
+        await drawAndSync();
+        await store.undoLast(); // delete m6 …
+        await engine.flush(); // … acked
+        api.offline = true;
+        await store.redoLast(); // restore m6, queued
+
+        // A collaborator brings m6 back and erases it again (a new tombstone).
+        const theirs = '2026-04-04T04:04:04.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: theirs, seq: api.nextSeq++ });
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBe(theirs);
+        expect(store.getPage(0).has('m6')).toBe(false);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('a lone restore of this device’s own acked delete still goes through', async () => {
+        await drawAndSync();
+        await store.undoLast(); // delete m6 …
+        await engine.flush(); // … acked; local seq still predates it
+        api.offline = true;
+        await store.redoLast();
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(store.getPage(0).has('m6')).toBe(true);
+    });
+
+    it('keeps the ops untouched when the server rows cannot be read', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.undoLast();
+        await store.redoLast();
+        api.offline = false;
+        api.fetchManyError = { message: 'bad gateway', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(2);
+        expect(engine.pendingRetryDelayMs).not.toBeNull();
+        expect(rejections).toEqual([]);
+    });
+
+    it('never folds later changes into an unsent create', async () => {
+        api.offline = true;
+        await store.create(makeStroke('n1'));
+        await store.update('n1', { color: '#cc0000' });
+        await store.delete('n1');
+        api.offline = false;
+        // The create's insert lands, but its answer is lost: had the delete
+        // been folded into it, the retried insert would be ignored as a
+        // duplicate and the mark would stay on the server.
+        api.failWrites = null;
+        const insert = api.insertIgnoreDuplicates.bind(api);
+        let lost = false;
+        api.insertIgnoreDuplicates = async (row) => {
+            await insert(row);
+            if (!lost) {
+                lost = true;
+                return { error: { message: 'timeout', kind: 'retry' } };
+            }
+            return { error: null };
+        };
+        await engine.flush();
+        await engine.flush();
+
+        expect(api.rows.get('n1')?.deleted_at).not.toBeNull();
+        expect(await db.ops.count()).toBe(0);
+    });
+});
+
+describe('SyncEngine status', () => {
+    const statuses: string[] = [];
+    let statusEngine: SyncEngine;
+
+    beforeEach(() => {
+        statuses.length = 0;
+        statusEngine = new SyncEngine({
+            db,
+            store,
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onStatus: (s) => statuses.push(s),
+        });
+    });
+
+    afterEach(() => {
+        statusEngine.stop();
+    });
+
+    it('stays offline after a failed pull, even with nothing queued', async () => {
+        vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        api.offline = true;
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('offline');
+        expect(statuses).not.toContain('synced');
+    });
+
+    it('does not claim synced while the server cannot be reached', async () => {
+        api.offline = true;
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('retrying');
+        expect(statuses).not.toContain('synced');
+    });
+
+    it('shows a transient failure as retrying, and only a long one as an error', async () => {
+        const start = Date.parse('2026-05-05T05:00:00Z');
+        const now = vi.spyOn(Date, 'now').mockReturnValue(start);
+        api.failWrites = { error: { message: 'too many', kind: 'retry' }, times: 10 };
+        await store.create(makeStroke('a1'));
+        await statusEngine.flush();
+        expect(statuses.at(-1)).toBe('retrying');
+
+        now.mockReturnValue(start + PERSISTENT_FAILURE_MS + 1);
+        await statusEngine.flush();
+        expect(statuses.at(-1)).toBe('error');
+
+        api.failWrites = null;
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('synced');
+    });
+
+    it('reports a pull the server refuses as an error', async () => {
+        api.fetchSince = async () => ({ data: null, error: { message: 'forbidden', kind: 'reject' } });
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('error');
+    });
+
+    it('says synced once a pull and the outbox both went through', async () => {
+        await store.create(makeStroke('a1'));
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('synced');
+    });
+});
+
+describe('SyncEngine shared outbox', () => {
+    it('two engines on one document drain it one at a time, never pushing an op twice', async () => {
+        const other = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC),
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+        });
+        for (let i = 0; i < 5; i++) {
+            await store.create(makeStroke(`s${i}`));
+        }
+        const inserts = vi.spyOn(api, 'insertMany');
+        await Promise.all([engine.flush(), other.flush()]);
+        other.stop();
+
+        expect(inserts).toHaveBeenCalledTimes(1);
         expect(await db.ops.count()).toBe(0);
     });
 });

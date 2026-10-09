@@ -5,7 +5,15 @@ import type { PendingOp, PendingOpType, ScribblerDb } from '@/sync/db';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
-export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'error';
+/**
+ * - retrying: a transient failure (throttling, a server fault, a dropped
+ *   request); the outbox is kept and retried with backoff. Nothing is wrong
+ *   that waiting will not fix, so the viewer shows it calmly.
+ * - error: the server refused for good (a pull it will never answer, an
+ *   archived score holding the outbox), or retries have been failing for
+ *   PERSISTENT_FAILURE_MS — long enough that the user should know.
+ */
+export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'retrying' | 'error';
 
 /** Pull overlap window: covers the commit-visibility race where seq N commits
  * after N+1 was pulled while broadcast was down (plan §sync). */
@@ -15,6 +23,10 @@ const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 /** Outbox ops drained per round-trip (creates / patches). */
 const FLUSH_BATCH_SIZE = 40;
+/** Marks checked against the server per reconcile round-trip (see reconcile). */
+const RECONCILE_BATCH_SIZE = 100;
+/** Retryable failures this long in a row stop being "retrying" and become an error. */
+export const PERSISTENT_FAILURE_MS = 3 * 60_000;
 
 export type AnnotationPatchRow = { id: string; document_id: string } & AnnotationUpdate;
 
@@ -30,6 +42,8 @@ export interface AnnotationsApi {
     /** Multi-row patch; each entry is { id, document_id, ...AnnotationUpdate }. */
     updateMany(patches: AnnotationPatchRow[]): Promise<PatchResult>;
     fetchOne(id: string): Promise<{ data: AnnotationRow | null; error: ApiError | null }>;
+    /** Current server rows for these ids in one document (missing = not visible / gone). */
+    fetchMany(docId: string, ids: string[]): Promise<{ data: AnnotationRow[] | null; error: ApiError | null }>;
     /**
      * Whether the document is archived (read-only past the plan's score cap).
      * False when it is not, or when this account can no longer see it at all.
@@ -158,6 +172,144 @@ export const observeRejections = (observer: RejectionObserver): (() => void) => 
     };
 };
 
+/** In-tab fallback for withOutboxLock where the Web Locks API is missing. */
+const outboxLockTails = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` while holding the document's outbox. One document's outbox can be
+ * drained by more than one engine — the open viewer's, the background drain's,
+ * sign-out's, another tab's — and reconcile rewrites queued ops, which is only
+ * safe while nothing else is pushing them. Web Locks serialize across tabs;
+ * without them (older browsers, tests) a promise chain serializes this tab.
+ * The lock is held for one drain pass only, never across a backoff wait.
+ */
+const withOutboxLock = async <T>(docId: string, fn: () => Promise<T>): Promise<T> => {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    if (locks && typeof locks.request === 'function') {
+        return locks.request(`cleffy-outbox:${docId}`, fn) as Promise<T>;
+    }
+    const prev = outboxLockTails.get(docId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    outboxLockTails.set(docId, tail);
+    try {
+        return await run;
+    } finally {
+        if (outboxLockTails.get(docId) === tail) {
+            outboxLockTails.delete(docId);
+        }
+    }
+};
+
+const sameInstant = (a: string | null | undefined, b: string | null | undefined): boolean =>
+    !!a && !!b && Date.parse(a) === Date.parse(b);
+
+/** One mark's queued ops, oldest first. */
+interface OpGroup {
+    annotationId: string;
+    ops: PendingOp[];
+}
+
+/**
+ * Marks whose queued ops must be checked against the server row before any is
+ * sent (at most `limit`):
+ *  - two or more ops: they collapse to their net effect, so an undo/redo pair
+ *    made offline sends nothing instead of replaying both halves;
+ *  - any restore: a restore must not resurrect a mark someone erased again
+ *    after the tombstone it undoes.
+ * Groups headed by a create are left alone — the row is not on the server yet
+ * (or a lost response hides that it is, and an insert of a folded snapshot
+ * would be ignored as a duplicate), so they replay op by op as before. So is a
+ * group with a create further in (a delete + re-create under the same id),
+ * whose page or kind may differ and cannot be patched.
+ */
+export const groupsToReconcile = (ops: PendingOp[], verified: ReadonlySet<number>, limit: number): OpGroup[] => {
+    const groups = new Map<string, PendingOp[]>();
+    for (const op of ops) {
+        const group = groups.get(op.annotationId);
+        if (group) {
+            group.push(op);
+        } else {
+            groups.set(op.annotationId, [op]);
+        }
+    }
+    const out: OpGroup[] = [];
+    for (const [annotationId, group] of groups) {
+        if (out.length >= limit) {
+            break;
+        }
+        if (group.some((op) => op.type === 'create')) {
+            continue;
+        }
+        if (group.length < 2 && !group.some((op) => op.type === 'restore')) {
+            continue;
+        }
+        if (group.every((op) => verified.has(op.opId as number))) {
+            continue;
+        }
+        out.push({ annotationId, ops: group });
+    }
+    return out;
+};
+
+/** What to do with a mark's queued ops once its server row is known. */
+export type Reconciled =
+    /** Replace them with this one op. */
+    | { kind: 'send'; op: PendingOp }
+    /** Send nothing: the server already holds the outcome, or a newer change there wins. Adopt its row. */
+    | { kind: 'adopt' };
+
+/**
+ * Collapse one mark's queued ops (no create among them) to a single op that
+ * takes the server row as it is NOW to the state the user left the mark in —
+ * or to nothing at all. Judged against the server rather than against what
+ * the device last saw because either may have moved: a collaborator's edit,
+ * or one of these very ops that landed although its response was lost.
+ *
+ * Tombstones are told apart by deleted_at, which the client sends and the
+ * server keeps verbatim: a server row deleted at an instant one of these ops
+ * (or the tombstone a restore undoes) carries is this device's own delete; any
+ * other instant is a collaborator's, newer than anything queued here, and wins
+ * over a restore — undo/redo replays the user's history, it does not get to
+ * erase someone else's.
+ */
+export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Reconciled => {
+    const first = ops[0];
+    const last = ops[ops.length - 1];
+    if (!first || !last) {
+        return { kind: 'adopt' };
+    }
+    const finalLive = !last.annotation.deletedAt;
+    const serverLive = server.deleted_at === null;
+    const net = (type: PendingOpType, extra: Partial<PendingOp> = {}): Reconciled => ({
+        kind: 'send',
+        op: {
+            opId: first.opId,
+            docId: first.docId,
+            annotationId: first.annotationId,
+            queuedAt: first.queuedAt,
+            type,
+            annotation: last.annotation,
+            ...extra,
+        },
+    });
+    if (!finalLive) {
+        // Already erased on the server (by anyone): nothing left to say.
+        return serverLive ? net('delete') : { kind: 'adopt' };
+    }
+    if (serverLive) {
+        // Only edits change what a live mark looks like; a delete + restore
+        // pair, or a restore someone else already made, leaves nothing to send.
+        return ops.some((op) => op.type === 'update') ? net('update') : { kind: 'adopt' };
+    }
+    const ours =
+        ops.some((op) => op.type === 'delete' && sameInstant(op.annotation.deletedAt, server.deleted_at)) ||
+        (first.type === 'restore' &&
+            // Queued by a build that did not record the tombstone: restore, as it always did.
+            (first.baseDeletedAt === undefined || sameInstant(first.baseDeletedAt, server.deleted_at)));
+    return ours ? net('restore', { baseDeletedAt: server.deleted_at }) : { kind: 'adopt' };
+};
+
 /**
  * Drains the Dexie outbox to Supabase and pulls remote changes by watermark.
  * One instance per open cloud document. Local-first: the UI never waits on
@@ -180,6 +332,20 @@ export class SyncEngine {
     private onlineListener = () => this.onOnline();
     private offlineListener = () => this.setStatus('offline');
     private status: SyncStatus = 'syncing';
+    /** When the current run of retryable failures began; null while healthy. */
+    private failingSince: number | null = null;
+    /**
+     * How the last pull ended. A flush that empties the outbox says "synced"
+     * only after a pull that worked: with the pull failing (offline, or the
+     * server down) this device has not heard what changed elsewhere.
+     */
+    private lastPullError: ApiError | null = null;
+    /**
+     * Ops reconcile already checked against the server during this flush, so
+     * a mark it decided to send is pushed rather than checked again. Cleared
+     * per flush: a later flush re-checks, since the server may have moved.
+     */
+    private reconciled = new Set<number>();
 
     constructor(
         private deps: {
@@ -224,6 +390,23 @@ export class SyncEngine {
     }
 
     /**
+     * For a driver that schedules its own retries (the background drain):
+     * cancel the retry this engine scheduled and return its delay, keeping the
+     * backoff it was computed from so the next failure waits longer still.
+     */
+    takeScheduledRetry(): number | null {
+        const delay = this.pendingRetryDelayMs;
+        this.clearRetry();
+        return delay;
+    }
+
+    /** The network is back: retry at the shortest delay again. */
+    resetBackoff(): void {
+        this.backoffMs = INITIAL_BACKOFF_MS;
+        this.failingSince = null;
+    }
+
+    /**
      * Full cycle: pull remote changes, then push local ops. Waits for the
      * store to hydrate from Dexie first, so pulled rows merge against the
      * mirror instead of racing the load that would otherwise replace them.
@@ -247,7 +430,7 @@ export class SyncEngine {
     }
 
     private onOnline(): void {
-        this.backoffMs = INITIAL_BACKOFF_MS;
+        this.resetBackoff();
         this.clearRetry();
         void this.sync();
     }
@@ -295,8 +478,22 @@ export class SyncEngine {
 
     /** Keep the outbox as it is and come back later. */
     private deferRetry(error: ApiError): void {
-        this.setStatus(navigator.onLine === false ? 'offline' : 'error');
+        this.failingSince ??= Date.now();
+        this.setStatus(this.failureStatus());
         this.scheduleRetry(error.retryAfterMs);
+    }
+
+    /**
+     * What a retryable failure looks like to the user: offline when the
+     * browser says so, a calm "retrying" through ordinary throttling and
+     * blips, and an error only once it has gone on for PERSISTENT_FAILURE_MS.
+     */
+    private failureStatus(): SyncStatus {
+        if (navigator.onLine === false) {
+            return 'offline';
+        }
+        const since = this.failingSince ?? Date.now();
+        return Date.now() - since >= PERSISTENT_FAILURE_MS ? 'error' : 'retrying';
     }
 
     /**
@@ -324,66 +521,157 @@ export class SyncEngine {
         }
         this.flushing = true;
         try {
-            const { db, docId } = this.deps;
-            for (;;) {
-                if (this.stopped) {
-                    return;
-                }
-                const ops = await db.ops.where('docId').equals(docId).sortBy('opId');
-                if (ops.length === 0) {
-                    break;
-                }
-                this.setStatus('syncing');
-
-                const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
-                const result = await this.push(batch);
-
-                if (result.error?.kind === 'reject' && batch.length > 1) {
-                    // Non-transient batch reject: RPC is transactional (nothing applied).
-                    // Peel one-by-one so an innocent head is not discarded for a sibling fault.
-                    for (const op of batch) {
-                        if (this.stopped || !(await this.settle(op, await this.push([op])))) {
-                            return;
-                        }
-                    }
-                    continue;
-                }
-
-                if (result.error) {
-                    // An error covers the whole batch; settling the head is enough
-                    // to either stop (retry later) or reject the single op it was.
-                    const head = batch[0];
-                    if (head && !(await this.settle(head, result))) {
-                        return;
-                    }
-                    continue;
-                }
-
-                // The server applied the batch. Ack everything it reports as
-                // updated BEFORE repairing the ids it missed: a repair whose
-                // fetch fails stops the drain, and an applied op left queued
-                // behind it would be pushed again on retry — re-sending an
-                // update over a collaborator's newer edit, or a restore over
-                // their delete.
-                const missed: PendingOp[] = [];
-                for (const op of batch) {
-                    if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
-                        missed.push(op);
-                    } else {
-                        await this.ackOp(op);
-                    }
-                }
-                for (const op of missed) {
-                    if (!(await this.reject(op, 'the change matched no row this account may edit'))) {
-                        return;
-                    }
-                }
-            }
-            this.backoffMs = INITIAL_BACKOFF_MS;
-            this.setStatus('synced');
+            await withOutboxLock(this.deps.docId, () => this.drain());
         } finally {
             this.flushing = false;
         }
+    }
+
+    /** One pass over the outbox, under the document's outbox lock. */
+    private async drain(): Promise<void> {
+        const { db, docId } = this.deps;
+        this.reconciled = new Set();
+        for (;;) {
+            if (this.stopped) {
+                return;
+            }
+            const ops = await db.ops.where('docId').equals(docId).sortBy('opId');
+            if (ops.length === 0) {
+                break;
+            }
+            this.setStatus('syncing');
+
+            const groups = groupsToReconcile(ops, this.reconciled, RECONCILE_BATCH_SIZE);
+            if (groups.length > 0) {
+                if (!(await this.reconcile(groups))) {
+                    return;
+                }
+                continue;
+            }
+
+            const batch = takeHomogeneousBatch(ops, FLUSH_BATCH_SIZE);
+            const result = await this.push(batch);
+
+            if (result.error?.kind === 'reject' && batch.length > 1) {
+                // Non-transient batch reject: RPC is transactional (nothing applied).
+                // Peel one-by-one so an innocent head is not discarded for a sibling fault.
+                for (const op of batch) {
+                    if (this.stopped || !(await this.settle(op, await this.push([op])))) {
+                        return;
+                    }
+                }
+                continue;
+            }
+
+            if (result.error) {
+                // An error covers the whole batch; settling the head is enough
+                // to either stop (retry later) or reject the single op it was.
+                const head = batch[0];
+                if (head && !(await this.settle(head, result))) {
+                    return;
+                }
+                continue;
+            }
+
+            // The server applied the batch. Ack everything it reports as
+            // updated BEFORE repairing the ids it missed: a repair whose
+            // fetch fails stops the drain, and an applied op left queued
+            // behind it would be pushed again on retry — re-sending an
+            // update over a collaborator's newer edit, or a restore over
+            // their delete.
+            const missed: PendingOp[] = [];
+            for (const op of batch) {
+                if (result.updatedIds && !result.updatedIds.has(op.annotationId)) {
+                    missed.push(op);
+                } else {
+                    await this.ackOp(op);
+                }
+            }
+            for (const op of missed) {
+                if (!(await this.reject(op, 'the change matched no row this account may edit'))) {
+                    return;
+                }
+            }
+        }
+        // The outbox is empty. Healthy only if the pull that came with it
+        // worked too: a failed pull means changes made elsewhere have not
+        // arrived, which is not "synced", and the retry it scheduled keeps
+        // its backoff rather than starting over at the shortest delay.
+        if (navigator.onLine === false) {
+            this.setStatus('offline');
+            return;
+        }
+        if (this.lastPullError) {
+            this.setStatus(this.lastPullError.kind === 'reject' ? 'error' : this.failureStatus());
+            return;
+        }
+        this.backoffMs = INITIAL_BACKOFF_MS;
+        this.failingSince = null;
+        this.setStatus('synced');
+    }
+
+    /**
+     * Check marks with several queued ops, or a restore, against their server
+     * rows and rewrite their ops to the net change (see reconcileWithServer).
+     * False when the rows could not be read: the ops stay exactly as queued
+     * and the whole pass is retried, so nothing is sent on a guess.
+     */
+    private async reconcile(groups: OpGroup[]): Promise<boolean> {
+        const { api, db, store, docId } = this.deps;
+        const { data, error } = await this.withAuth(() =>
+            api.fetchMany(
+                docId,
+                groups.map((g) => g.annotationId),
+            ),
+        );
+        if (error) {
+            // A refused read says nothing about the ops; keep them and retry.
+            this.deferRetry(error.kind === 'reject' ? { ...error, kind: 'retry' } : error);
+            return false;
+        }
+        if (this.stopped) {
+            return false;
+        }
+        const rows = new Map((data ?? []).map((row) => [row.id, row]));
+        for (const group of groups) {
+            const opIds = group.ops.map((op) => op.opId as number);
+            const row = rows.get(group.annotationId);
+            if (!row) {
+                // Not visible (or gone): send the ops as queued, and the
+                // refusal path repairs from what the server says about each.
+                opIds.forEach((id) => this.reconciled.add(id));
+                continue;
+            }
+            const outcome = reconcileWithServer(group.ops, row);
+            const applied = await db.transaction('rw', db.ops, async () => {
+                // Another tab may have drained (or rewritten) these meanwhile.
+                const current = await db.ops.bulkGet(opIds);
+                if (current.some((op) => !op)) {
+                    return false;
+                }
+                if (outcome.kind === 'send') {
+                    await db.ops.bulkDelete(opIds.slice(1));
+                    await db.ops.put(outcome.op);
+                } else {
+                    await db.ops.bulkDelete(opIds);
+                }
+                return true;
+            });
+            if (this.stopped) {
+                return false;
+            }
+            if (!applied) {
+                continue;
+            }
+            if (outcome.kind === 'send') {
+                this.reconciled.add(outcome.op.opId as number);
+            } else if ((await this.queuedFor(group.annotationId)) === 0) {
+                // Nothing to send: the server's row is how the mark stands.
+                // Pulls skipped it while ops were queued, so adopt it here.
+                await store.adoptServerRow(fromServerRow(row));
+            }
+        }
+        return true;
     }
 
     /**
@@ -606,6 +894,7 @@ export class SyncEngine {
                     return;
                 }
                 if (error) {
+                    this.lastPullError = error;
                     if (error.kind === 'reject') {
                         this.setStatus('error');
                     } else {
@@ -637,6 +926,7 @@ export class SyncEngine {
                 return;
             }
             await db.syncState.put({ docId, watermarkSeq: watermark });
+            this.lastPullError = null;
         } finally {
             this.pulling = false;
         }
@@ -688,6 +978,17 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
         },
         async fetchOne(id) {
             const { data, error, status } = await supabase.from('annotations').select('*').eq('id', id).maybeSingle();
+            return { data, error: fail(error, status) };
+        },
+        async fetchMany(docId, ids) {
+            if (ids.length === 0) {
+                return { data: [], error: null };
+            }
+            const { data, error, status } = await supabase
+                .from('annotations')
+                .select('*')
+                .eq('document_id', docId)
+                .in('id', ids);
             return { data, error: fail(error, status) };
         },
         async fetchDocumentArchived(docId) {

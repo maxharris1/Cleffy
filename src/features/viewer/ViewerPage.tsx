@@ -700,12 +700,24 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     );
 };
 
-const SyncDot = ({ status }: { status: SyncStatus }) => {
+export const SyncDot = ({ status }: { status: SyncStatus }) => {
+    // Red is kept for what needs the user's attention: a refusal, or failures
+    // that have gone on for minutes. A throttled or briefly unreachable server
+    // is "retrying" — the marks are safe on this device either way.
     const styles: Record<SyncStatus, { dot: string; short: string; label: string }> = {
         synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
         syncing: { dot: 'bg-amber-400 animate-pulse', short: 'Syncing…', label: 'Syncing…' },
         offline: { dot: 'bg-stone-400', short: 'Offline', label: 'Offline — changes saved on this device' },
-        error: { dot: 'bg-red-500', short: 'Sync error', label: 'Sync error — retrying' },
+        retrying: {
+            dot: 'bg-amber-400',
+            short: 'Retrying…',
+            label: 'Couldn’t reach the server — retrying. Changes are saved on this device.',
+        },
+        error: {
+            dot: 'bg-red-500',
+            short: 'Not syncing',
+            label: 'Changes aren’t reaching the server. They are saved on this device and will upload when it recovers.',
+        },
     };
     const { dot, short, label } = styles[status];
     return (
