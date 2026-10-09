@@ -454,6 +454,61 @@ describe('loadDocumentBytes content_rev staleness', () => {
     });
 });
 
+describe('loadDocumentBytes remembers the role for offline opens', () => {
+    it('stores the confirmed role with bytes cached on a first open', async () => {
+        makeStub({ downloadBytes: 'fresh-bytes' });
+        const d = doc({ content_rev: 0 });
+
+        await loadDocumentBytes(d, { userId: 'user-1', role: 'editor' });
+
+        // The next open without a network edits, rather than viewing only.
+        const offline = await loadDocumentOffline(d.id, 'user-1');
+        expect(offline?.cachedRole).toBe('editor');
+        expect(offline?.role).toBe('editor');
+    });
+
+    it('updates the stored role on a cache hit, and keeps it when none is given', async () => {
+        const calls = makeStub();
+        const d = doc({ content_rev: 1 });
+        await putCache({
+            docId: d.id,
+            bytes: new Blob(['cached-bytes']),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+            myRole: 'editor',
+            userId: 'user-1',
+        });
+
+        await loadDocumentBytes(d, { userId: 'user-1', role: 'viewer' });
+        expect((await getDb().pdfCache.get(d.id))?.myRole).toBe('viewer');
+        await loadDocumentBytes(d, { userId: 'user-1' });
+        expect((await getDb().pdfCache.get(d.id))?.myRole).toBe('viewer');
+        expect(calls.download).not.toHaveBeenCalled();
+    });
+
+    it('updates the stored role on a warm open that hands its bytes over', async () => {
+        makeStub();
+        const d = doc({ content_rev: 1 });
+        await putCache({
+            docId: d.id,
+            bytes: new ArrayBuffer(4),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+            myRole: 'owner',
+            userId: 'user-1',
+        });
+
+        await loadDocumentBytes(d, {
+            preloaded: { bytes: new ArrayBuffer(4), contentRev: 1, archivedAt: null },
+            userId: 'user-1',
+            role: 'editor',
+        });
+        expect((await getDb().pdfCache.get(d.id))?.myRole).toBe('editor');
+    });
+});
+
 describe('loadDocumentBytes preloaded bytes (warm open)', () => {
     it('returns the caller’s buffer without a second cache read when the revision is current', async () => {
         const calls = makeStub();
