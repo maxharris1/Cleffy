@@ -43,8 +43,9 @@ export interface Entitlements {
     current_period_end: string | null;
     /**
      * The plan stops at current_period_end instead of renewing (Stripe's
-     * cancel_at_period_end, from the subscription that entitles — the owner's,
-     * for an Academy seat). False whenever there is no period to end.
+     * cancel_at_period_end, or a cancel_at inside the period — see
+     * stripeEvents.subscriptionRowFrom — from the subscription that entitles:
+     * the owner's, for an Academy seat). False whenever there is no period to end.
      */
     cancel_at_period_end: boolean;
     limits: EntitlementLimits;

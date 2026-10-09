@@ -325,18 +325,39 @@ describe('claimPdfExport with a claim id', () => {
         expect(retry).toBe(lost);
     });
 
-    it('drops an id the server refused or will not take', async () => {
+    it('drops an id the server refused, so the next try is a new claim', async () => {
         const attempt = freshAttempt();
         rpc.mockResolvedValueOnce({ data: { ok: false, count: 1, limit: 1, tier: 'free' }, error: null });
         await claimPdfExport(teacher, 'doc-1', attempt);
-        rpc.mockResolvedValueOnce({ data: null, error: { code: '22023', message: 'already been used' } });
-        expect(messageOf(await claimPdfExport(teacher, 'doc-1', attempt))).toBe(EXPORT_CLAIM_FAILED_MESSAGE);
         rpc.mockResolvedValue(granted);
         await claimPdfExport(teacher, 'doc-1', attempt);
 
-        const [refused, rejected, fresh] = claimIdsSent();
-        expect(rejected).not.toBe(refused);
+        const [refused, next] = claimIdsSent();
+        expect(next).not.toBe(refused);
+    });
+
+    it('asks again at once under a fresh id when the server will not take the old one', async () => {
+        // The old id is spent: "try again, it won't be counted twice" would be
+        // untrue, so the fresh claim's own answer is what the teacher sees.
+        const attempt = freshAttempt();
+        rpc.mockResolvedValueOnce({ data: null, error: { code: '22023', message: 'already been used' } });
+        rpc.mockResolvedValueOnce(granted);
+        await expect(claimPdfExport(teacher, 'doc-1', attempt)).resolves.toEqual({ ok: true });
+
+        const [rejected, fresh] = claimIdsSent();
+        expect(fresh).toMatch(/^[0-9a-f-]{36}$/);
         expect(fresh).not.toBe(rejected);
+    });
+
+    it('shows the plan notice, not the retry promise, when the fresh claim is refused', async () => {
+        const attempt = freshAttempt();
+        rpc.mockResolvedValueOnce({ data: null, error: { code: '22023', message: 'already been used' } });
+        rpc.mockResolvedValueOnce({ data: { ok: false, count: 1, limit: 1, tier: 'free' }, error: null });
+        const claim = await claimPdfExport(teacher, 'doc-1', attempt);
+
+        expect(messageOf(claim)).toBeNull();
+        expect(!claim.ok && 'limit' in claim ? claim.limit : null).toMatchObject({ metric: 'pdf_exports', limit: 1 });
+        expect(rpc).toHaveBeenCalledTimes(2);
     });
 
     it('asks again without the id when the server predates claim ids', async () => {

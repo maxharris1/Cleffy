@@ -22,7 +22,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                                    |
 | Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                    |
 | Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                    |
-| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`                                          |
+| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`; plan switching **not verified** (§1)    |
 | Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on  |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
@@ -128,6 +128,10 @@ to refund (comment at the end of `20261007120300`).
    off), then **Resend** the older one. The `subscriptions` row must keep the
    newer state (there: `cancel_at_period_end = false`), and the function log
    must show the resent event applied, not refused and not a 500.
+   While in the sandbox dashboard, check its Customer portal has Switch plans
+   on with the six plan prices and without Founding (§1, _Checkout depends on
+   it_) — subscribers can change plan nowhere else once `stripe-checkout`
+   refuses them a second subscription.
 3. **Auth password policy on both projects** — 8+ characters, letters and
    digits, via the Management API (§8). `config.toml` only covers the local
    stack. Existing passwords keep working.
@@ -425,6 +429,25 @@ Two things the UI does not warn about:
 - **The portal has no direction control.** Listing the products enables downgrades
   as well as upgrades; under `always_invoice` a downgrade yields a credit balance
   against future invoices, not a refund.
+
+### Checkout depends on it — verify both modes before deploying
+
+`stripe-checkout` answers **409 `already_subscribed`** to anyone who already
+holds a running subscription in that mode (active or trialing inside its
+period — cancelling included — or past_due), and the pricing dialog sends
+subscribers to the portal instead of Checkout. Checkout always creates a new
+subscription, so before this guard a Personal subscriber who chose Teacher
+there was billed for both. The cost is that the **portal is now the only way a
+subscriber changes plan**: in a mode whose portal has Switch plans off, its
+subscribers cannot change plan at all.
+
+Live was verified with switching on (2026-08-29, above). **The sandbox
+configuration never was** — the status table only records that it exists, and
+dev.cleffy.io sells from the sandbox. Before deploying `stripe-checkout` with the
+guard, open **Settings → Billing → Customer portal** in **each** mode and confirm
+the table above: Switch plans on, the six Personal / Teacher / Academy prices
+listed, the Founding price **not** listed. Then, on dev.cleffy.io with a test
+subscription, Account → Manage subscription must offer the other plans.
 
 ### This is dashboard-only — the API cannot do it
 
@@ -828,11 +851,9 @@ test-mode records.
 
 ### Still worth doing
 
-The portal's **subscription_update is disabled**, which is Stripe's default. So
-customers can cancel and update cards there, but cannot switch plans — despite
-`stripe-portal`'s own comment saying plan changes happen in the portal. To close
-that gap, enable "Switch plans" in the portal settings and add the three
-products.
+~~Enable "Switch plans" in the portal~~ — done for live on 2026-08-29; the
+sandbox is still to be checked, and `stripe-checkout` now relies on it in both
+modes (§1, _Checkout depends on it_).
 
 ## 7. Inbound support mail (Resend) — live
 

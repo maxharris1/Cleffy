@@ -623,6 +623,74 @@ describe('subscription row mapping', () => {
         expect(row.current_period_end).toBe(new Date(1_800_000_000 * 1000).toISOString());
     });
 
+    it('treats a cancellation scheduled with cancel_at within the period as cancelling', () => {
+        // The dashboard's "cancel on a custom date" sets cancel_at and leaves
+        // cancel_at_period_end false; the owner must not be told it renews.
+        const periodEnd = 1_800_000_000;
+        const atPeriodEnd = subscriptionRowFrom(
+            {
+                id: 'sub_c1',
+                status: 'active',
+                cancel_at_period_end: false,
+                cancel_at: periodEnd,
+                current_period_end: periodEnd,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            },
+            'teacher-1',
+            PRICE_TIERS,
+        );
+        expect(atPeriodEnd.cancel_at_period_end).toBe(true);
+        expect(atPeriodEnd.current_period_end).toBe(new Date(periodEnd * 1000).toISOString());
+
+        // Mid-period: Stripe ends it at cancel_at, so that is the date shown.
+        const midPeriod = subscriptionRowFrom(
+            {
+                id: 'sub_c2',
+                status: 'active',
+                cancel_at: periodEnd - 86_400,
+                current_period_end: periodEnd,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            },
+            'teacher-1',
+            PRICE_TIERS,
+        );
+        expect(midPeriod.cancel_at_period_end).toBe(true);
+        expect(midPeriod.current_period_end).toBe(new Date((periodEnd - 86_400) * 1000).toISOString());
+    });
+
+    it('still renews when cancel_at lies beyond the current period', () => {
+        const periodEnd = 1_800_000_000;
+        const row = subscriptionRowFrom(
+            {
+                id: 'sub_c3',
+                status: 'active',
+                cancel_at: periodEnd + 30 * 86_400,
+                current_period_end: periodEnd,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            },
+            'teacher-1',
+            PRICE_TIERS,
+        );
+        expect(row.cancel_at_period_end).toBe(false);
+        expect(row.current_period_end).toBe(new Date(periodEnd * 1000).toISOString());
+    });
+
+    it('keeps the portal flag as it is when no cancel_at is set', () => {
+        const row = subscriptionRowFrom(
+            {
+                id: 'sub_c4',
+                status: 'active',
+                cancel_at_period_end: true,
+                cancel_at: null,
+                current_period_end: 1_800_000_000,
+                items: { data: [{ price: { id: 'price_teacher_annual' } }] },
+            },
+            'teacher-1',
+            PRICE_TIERS,
+        );
+        expect(row.cancel_at_period_end).toBe(true);
+    });
+
     it('maps an unknown price to free rather than guessing', () => {
         const row = subscriptionRowFrom(
             { id: 'sub_u', status: 'active', items: { data: [{ price: { id: 'price_mystery' } }] } },

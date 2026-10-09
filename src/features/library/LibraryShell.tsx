@@ -25,7 +25,6 @@ import {
     cloudScoreCapReached,
     cloudScoresLimitError,
     isLimitReachedError,
-    NO_CLOUD_SCORES_MESSAGE,
     parseLooseLimitError,
     type LimitReachedError,
 } from '@/features/billing/limitErrors';
@@ -195,18 +194,20 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
      * The client-side half of the cap, checked before anything is sent. It
      * refuses with the same typed error the server's trigger would, so the page
      * shows the plan notice (with its way to upgrade) rather than a bare red
-     * "limit reached".
+     * "limit reached". A plan with no cloud scores at all (limit 0) gets the same
+     * typed refusal: ScoreLimitNotice already words it as the plain sentence, and
+     * a plain Error here would repeat that sentence as red error text below it.
      */
     const refuseIfCloudScoreCap = async (
         snapshot: Promise<LibraryListSnapshot | null>,
     ): Promise<LibraryListSnapshot | null> => {
         const snap = await snapshot.catch(() => null);
         const limit = entitlements?.limits.cloud_scores;
-        if (entitlements && typeof limit === 'number' && limit === 0) {
-            setCapReached(true);
-            throw new Error(NO_CLOUD_SCORES_MESSAGE);
-        }
-        if (entitlements && typeof limit === 'number' && cloudScoreCapReached(limit, snap?.documents ?? [], userId)) {
+        if (
+            entitlements &&
+            typeof limit === 'number' &&
+            (limit === 0 || cloudScoreCapReached(limit, snap?.documents ?? [], userId))
+        ) {
             setCapReached(true);
             throw cloudScoresLimitError(limit, entitlements.tier);
         }

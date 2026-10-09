@@ -121,7 +121,7 @@ const ShellPage = ({ name }: { name: string }) => {
 /** Drives onImportImslp the way ImslpBrowser does, with a cancel handle. */
 const importControl = { controller: new AbortController() };
 const ImportPage = () => {
-    const { onImportImslp, uploadError, limitNotice, importLimit, quotaExhausted, openPricing } =
+    const { onImportImslp, uploadError, limitNotice, importLimit, quotaExhausted, quotaUpgradeHint, openPricing } =
         useOutletContext<LibraryOutletContext>();
     return (
         <div>
@@ -138,7 +138,7 @@ const ImportPage = () => {
                 import
             </button>
             {uploadError ? <p>error: {uploadError}</p> : null}
-            <ScoreLimitNotice limit={limitNotice} upgradeHint onUpgrade={openPricing} />
+            <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
             {importLimit ? <p>imports spent</p> : null}
             {quotaExhausted ? <p>uploads blocked</p> : null}
         </div>
@@ -405,5 +405,20 @@ describe('LibraryShell', () => {
         expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
         expect(screen.queryByText(/reached your 0 free cloud scores/)).not.toBeInTheDocument();
         expect(screen.queryByText(/Upgrade for unlimited scores/)).not.toBeInTheDocument();
+    });
+
+    it('says once, without red error text, that a student cannot add a score', async () => {
+        const user = userEvent.setup();
+        entitlementsState.current = studentEntitlements();
+        fetchLibraryBootstrap.mockResolvedValue(listSnapshot([]));
+        readCachedLibraryList.mockResolvedValue(listSnapshot([]));
+        renderShell('/search');
+
+        await user.click(screen.getByRole('button', { name: 'import' }));
+
+        await waitFor(() => expect(screen.getAllByText('This account cannot add cloud scores.')).toHaveLength(1));
+        expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
+        expect(importDocumentFromImslp).not.toHaveBeenCalled();
     });
 });

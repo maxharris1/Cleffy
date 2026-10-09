@@ -80,6 +80,8 @@ export interface StripeSubscriptionLike {
     id: string;
     status: string;
     cancel_at_period_end?: boolean | null;
+    /** A scheduled cancellation (seconds), set from the dashboard or the API. */
+    cancel_at?: number | null;
     current_period_end?: number | null;
     customer?: string | { id?: string } | null;
     metadata?: Record<string, string> | null;
@@ -187,12 +189,29 @@ const priceIdOf = (sub: StripeSubscriptionLike): string | null => {
  * `current_period_end` sits on the subscription in older API versions and on the
  * subscription item in newer ones — read whichever is present.
  */
-const periodEndOf = (sub: StripeSubscriptionLike): string | null => {
+const periodEndSecondsOf = (sub: StripeSubscriptionLike): number | null => {
     const seconds = sub.current_period_end ?? sub.items?.data?.[0]?.current_period_end ?? null;
-    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
-        return null;
-    }
-    return new Date(seconds * 1000).toISOString();
+    return typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null;
+};
+
+/**
+ * When the plan stops, and whether that is instead of renewing. The portal
+ * cancels with cancel_at_period_end; the dashboard's "cancel on a custom date"
+ * and the API set `cancel_at` and leave that flag false. A `cancel_at` at or
+ * before the period end means this period is the last one, so it counts as
+ * cancelling too, and the period is cut short to it: Stripe ends the
+ * subscription then, not at the period end. One later than the period end
+ * still renews first, so it is left out until the renewal brings it in range.
+ */
+const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; cancelling: boolean } => {
+    const periodEnd = periodEndSecondsOf(sub);
+    const cancelAt = typeof sub.cancel_at === 'number' && Number.isFinite(sub.cancel_at) ? sub.cancel_at : null;
+    const scheduled = cancelAt !== null && (periodEnd === null || cancelAt <= periodEnd);
+    const end = scheduled ? cancelAt : periodEnd;
+    return {
+        periodEnd: end === null ? null : new Date(end * 1000).toISOString(),
+        cancelling: sub.cancel_at_period_end === true || scheduled,
+    };
 };
 
 export const subscriptionRowFrom = (
@@ -201,14 +220,15 @@ export const subscriptionRowFrom = (
     priceTiers: Record<string, BillingTier>,
 ): SubscriptionUpsert => {
     const priceId = priceIdOf(sub);
+    const ending = endingOf(sub);
     return {
         stripe_subscription_id: sub.id,
         user_id: userId,
         tier: isEntitlingStatus(sub.status) ? tierForPrice(priceId, priceTiers) : 'free',
         status: sub.status,
         price_id: priceId,
-        current_period_end: periodEndOf(sub),
-        cancel_at_period_end: sub.cancel_at_period_end === true,
+        current_period_end: ending.periodEnd,
+        cancel_at_period_end: ending.cancelling,
     };
 };
 

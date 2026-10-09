@@ -215,11 +215,24 @@ const requestClaim = async (documentId?: string, claimId?: string): Promise<Clai
     return supabase.rpc('consume_pdf_export', {});
 };
 
-/** requestClaim, settling the attempt's claim id on whatever came back. */
+/**
+ * requestClaim, settling the attempt's claim id on whatever came back.
+ *
+ * A 22023 on an id is asked again at once under a fresh one. The old id is
+ * spent, so the fresh claim is counted like any new export: reporting the 22023
+ * with the claim-failed copy would promise a retry "won't be counted twice"
+ * when it would be, and the fresh answer is a decision the teacher can act on
+ * -- the export, or the plan notice. (The 50-minute reuse window keeps the
+ * client inside the server's hour, so this needs a clock jump to happen.)
+ */
 const requestClaimFor = async (attempt: string | undefined, documentId?: string): Promise<ClaimAnswer> => {
-    const answer = await requestClaim(documentId, attempt === undefined ? undefined : claimIdFor(attempt));
-    settleClaimId(attempt, answer);
-    return answer;
+    const ask = async (): Promise<ClaimAnswer> => {
+        const answer = await requestClaim(documentId, attempt === undefined ? undefined : claimIdFor(attempt));
+        settleClaimId(attempt, answer);
+        return answer;
+    };
+    const answer = await ask();
+    return attempt !== undefined && answer.error?.code === '22023' ? ask() : answer;
 };
 
 const isWellFormed = (data: PdfExportClaim | null): data is PdfExportClaim =>
