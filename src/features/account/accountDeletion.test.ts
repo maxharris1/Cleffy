@@ -15,6 +15,7 @@ const signOut = vi.fn();
 const stopAutoRefresh = vi.fn();
 const syncBeforeSignOut = vi.fn();
 const clearAccountCachesFromDevice = vi.fn();
+const stopAllBackgroundDrains = vi.fn();
 
 vi.mock('@/features/billing/billingApi', () => ({
     callEdgeFunction: (...args: unknown[]) => callEdgeFunction(...args),
@@ -32,6 +33,10 @@ vi.mock('@/lib/supabase', () => ({
 vi.mock('@/features/auth/session', () => ({
     syncBeforeSignOut: () => syncBeforeSignOut(),
     clearAccountCachesFromDevice: () => clearAccountCachesFromDevice(),
+}));
+
+vi.mock('@/sync/backgroundDrain', () => ({
+    stopAllBackgroundDrains: () => stopAllBackgroundDrains(),
 }));
 
 const json = (status: number, body: unknown) =>
@@ -95,6 +100,7 @@ describe('clearLocalAccountData', () => {
     beforeEach(() => {
         signOut.mockReset().mockResolvedValue({ error: null });
         stopAutoRefresh.mockReset().mockResolvedValue(undefined);
+        stopAllBackgroundDrains.mockReset();
         localStorage.clear();
     });
 
@@ -145,6 +151,22 @@ describe('clearLocalAccountData', () => {
         expect(document.cookie).not.toContain(`${AUTH_RESTORE_COOKIE}=abc`);
     });
 
+    it('stops the app-wide background drain before it empties the outbox', async () => {
+        // A drain mid-flush would otherwise write a synced row back after the clear.
+        const db = getDb();
+        await db.syncState.put({ docId: 'doc-1', watermarkSeq: 4 });
+        let rowsWhenStopped: Promise<number> | null = null;
+        stopAllBackgroundDrains.mockImplementation(() => {
+            rowsWhenStopped = db.syncState.count();
+        });
+
+        await clearLocalAccountData();
+
+        expect(stopAllBackgroundDrains).toHaveBeenCalledTimes(1);
+        expect(await rowsWhenStopped).toBe(1);
+        expect(await db.syncState.count()).toBe(0);
+    });
+
     it('still clears the device when the auth client fails', async () => {
         stopAutoRefresh.mockRejectedValue(new Error('client gone'));
         localStorage.setItem('cleffy:page-columns', '2');
@@ -162,6 +184,7 @@ describe('deleteGuestProfile', () => {
         stopAutoRefresh.mockReset().mockResolvedValue(undefined);
         syncBeforeSignOut.mockReset().mockResolvedValue({ pending: 0, refused: 0 });
         clearAccountCachesFromDevice.mockReset().mockResolvedValue(undefined);
+        stopAllBackgroundDrains.mockReset();
         localStorage.clear();
     });
 
@@ -183,12 +206,17 @@ describe('deleteGuestProfile', () => {
             order.push('clear');
             return Promise.resolve();
         });
+        stopAllBackgroundDrains.mockImplementation(() => {
+            order.push('stop drains');
+        });
         localStorage.setItem('sb-project-auth-token', '{"access_token":"x"}');
         localStorage.setItem('cleffy:library-view', 'grid');
 
         await deleteGuestProfile();
 
-        expect(order).toEqual(['sync', 'delete', 'clear']);
+        // The background drain is stopped before the clear, or a flush in
+        // flight would write the guest's synced marks back afterwards.
+        expect(order).toEqual(['sync', 'delete', 'stop drains', 'clear']);
         expect(callEdgeFunction).toHaveBeenCalledWith('delete-account', { confirm: DELETE_ACCOUNT_CONFIRMATION });
         expect(signOut).not.toHaveBeenCalled();
         expect(localStorage.getItem('sb-project-auth-token')).toBeNull();
@@ -205,5 +233,6 @@ describe('deleteGuestProfile', () => {
         await expect(deleteGuestProfile()).rejects.toMatchObject({ code: 'auth_delete_failed', status: 502 });
         expect(localStorage.getItem('sb-project-auth-token')).not.toBeNull();
         expect(clearAccountCachesFromDevice).not.toHaveBeenCalled();
+        expect(stopAllBackgroundDrains).not.toHaveBeenCalled();
     });
 });

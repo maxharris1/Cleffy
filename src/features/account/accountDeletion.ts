@@ -105,6 +105,26 @@ export const forgetLocalSession = (): void => {
     forgetStoredSessions();
 };
 
+/**
+ * Stop what writes this account's rows into Dexie on its own before the
+ * clear, as sign-out does: the app-wide background outbox drain (a flush in
+ * flight would write a synced or rolled-back mark back after the clear) and
+ * snapshot uploads it or a viewer started. The page is reloaded afterwards,
+ * but not before an in-flight write could land.
+ */
+const stopLocalWriters = async (): Promise<void> => {
+    try {
+        const [{ stopSnapshotWrites }, { stopAllBackgroundDrains }] = await Promise.all([
+            import('@/features/viewer/history/snapshotService'),
+            import('@/sync/backgroundDrain'),
+        ]);
+        stopSnapshotWrites();
+        stopAllBackgroundDrains();
+    } catch {
+        // Not loaded and cannot be (offline, a stale bundle): none of them is running.
+    }
+};
+
 /** Where a deleted guest profile lands: the same page, worded for a guest. */
 export const GUEST_DELETED_PATH = `${ACCOUNT_DELETED_PATH}?guest=1`;
 
@@ -125,9 +145,8 @@ export const deleteGuestProfile = async (): Promise<void> => {
     await syncBeforeSignOut().catch(() => undefined);
     await requestAccountDeletion();
     forgetLocalSession();
+    await stopLocalWriters();
     try {
-        const { stopSnapshotWrites } = await import('@/features/viewer/history/snapshotService');
-        stopSnapshotWrites();
         await clearAccountCachesFromDevice();
     } catch {
         // IndexedDB unavailable: there is nothing cached to clear.
@@ -154,6 +173,7 @@ const APP_KEY_PREFIX = 'cleffy:';
  */
 export const clearLocalAccountData = async (): Promise<void> => {
     forgetLocalSession();
+    await stopLocalWriters();
 
     try {
         const db = getDb();
