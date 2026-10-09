@@ -37,11 +37,12 @@ import type { PdfExportClaim } from '@/types/database';
  * The menu builds the PDF FIRST and claims only once the file exists, so an
  * export that fails to build never spends anything. What can still go wrong
  * after a claim is answered -- the answer lost on the way back, the share sheet
- * dismissed -- is covered by the claim id: each export the teacher asks for
- * carries one (see claimIdFor), kept until that export is delivered, and the
- * server answers a repeat of it ok without counting again
- * (20261009120100_pdf_export_claim_ids.sql). So "try again" after any of those
- * is the same export retried, not a second one the free plan would refuse.
+ * dismissed -- is covered by the claim id: a claim carries one (see
+ * claimIdFor), kept until an export is delivered, and the server answers a
+ * repeat of it ok without counting again
+ * (20261009120100_pdf_export_claim_ids.sql). So the next PDF export after any
+ * of those -- the same one again, or the whole score instead of the page -- is
+ * the unit already claimed, not a second one the free plan would refuse.
  */
 
 export type ExportClaim = { ok: true } | { ok: false; limit: LimitReachedError } | { ok: false; message: string };
@@ -66,6 +67,9 @@ export const EXPORT_GUEST_LIMIT_MESSAGE =
 export const EXPORT_GUEST_CLAIM_FAILED_MESSAGE =
     'We couldn’t check this score’s PDF export allowance, so nothing was exported. Please try again — it won’t be counted twice.';
 
+/** The share sheet was dismissed: the claim is kept for the next PDF export (exportAttemptKey). */
+export const EXPORT_NOT_SENT_MESSAGE = 'Not sent. Export again when you’re ready — it won’t be counted twice.';
+
 const isOffline = (): boolean => typeof navigator !== 'undefined' && navigator.onLine === false;
 
 /** supabase-js reports a failed fetch as an error value, not a throw. */
@@ -84,7 +88,7 @@ const CLAIM_ID_REUSE_MS = 50 * 60_000;
 type PendingClaim = { id: string; mintedAt: number };
 
 /**
- * Claim ids for exports that were claimed but not yet delivered, by export.
+ * Claim ids that were claimed but not yet delivered, by exportAttemptKey.
  * Mirrored to sessionStorage so a reload of the tab -- the obvious thing to try
  * after "check your connection" -- still retries under the same id. Best-effort:
  * a browser that refuses storage keeps them for the life of the page only.
@@ -128,12 +132,18 @@ const savePending = (): void => {
 };
 
 /**
- * Names one export the teacher asked for: who is exporting, which score, and
- * the whole score or one page. Retrying the same thing reuses the claim id;
- * anything else is a different export and mints its own.
+ * What an undelivered claim is kept for: the account and, for a share-link
+ * guest, the score -- exactly what the server matches a replay on (an
+ * account's allowance is its own whatever score it names; a guest's is the
+ * score owner's). Not which page, nor page or whole score: until a PDF is
+ * delivered, the next PDF export asked for is the same one unit, so a share
+ * sheet dismissed on page 3 does not cost the free plan's month when the
+ * teacher then exports the whole score, or scrolls on and tries again.
  */
-export const exportAttemptKey = (session: Session | null, documentId: string, page: number | null): string =>
-    `${session?.user.id ?? 'signed-out'}:${documentId}:${page === null ? 'score' : `p${page}`}`;
+export const exportAttemptKey = (session: Session | null, documentId: string): string => {
+    const who = session?.user.id ?? 'signed-out';
+    return isRegisteredSession(session) ? who : `${who}:${documentId}`;
+};
 
 const claimIdFor = (attempt: string): string => {
     const now = Date.now();
@@ -155,7 +165,7 @@ const forgetClaimId = (attempt: string): void => {
 
 /**
  * The export reached the teacher (shared or downloaded), so its claim id is
- * spent: the next export of the same score is a new one and is counted.
+ * spent: the next export is a new one and is counted.
  */
 export const markExportDelivered = (attempt: string): void => {
     forgetClaimId(attempt);
@@ -272,9 +282,10 @@ const claimAsGuest = async (documentId: string, attempt?: string): Promise<Expor
  * lives on this device. It only matters for a guest; an account's export is
  * always drawn from its own allowance.
  *
- * `attempt` (exportAttemptKey) names the export being claimed for, so a retry
- * of it is not counted twice; call markExportDelivered once the file is out.
- * Without it every ok answer counts, as claims always did.
+ * `attempt` (exportAttemptKey) names what the claim is kept for, so the next
+ * export after one that was not delivered is not counted twice; call
+ * markExportDelivered once the file is out. Without it every ok answer
+ * counts, as claims always did.
  */
 export const claimPdfExport = async (
     session: Session | null,

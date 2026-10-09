@@ -4,7 +4,12 @@ import { useSession } from '@/features/auth/session';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { type LimitReachedError, limitHeadline } from '@/features/billing/limitErrors';
 import { isBillingConfigured } from '@/features/billing/pricing';
-import { claimPdfExport, exportAttemptKey, markExportDelivered } from '@/features/export/exportClaim';
+import {
+    claimPdfExport,
+    EXPORT_NOT_SENT_MESSAGE,
+    exportAttemptKey,
+    markExportDelivered,
+} from '@/features/export/exportClaim';
 import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
 import { buildAnnotatedPdf, deliverPdf } from '@/features/export/exportPdf';
 import { fetchDocument, isCloudDocId, loadDocumentBytes } from '@/features/library/documentsService';
@@ -61,9 +66,10 @@ const describeFailure = (stage: 'source' | 'export', label: string, err: unknown
 
 /**
  * The viewer's Export menu: this page as photo or PDF (Web Share → Messages on
- * iOS), or the whole annotated score as PDF. Labelled "Export", not "Share":
- * "Share" is the owner's button for giving people access (ShareDialog), and
- * one word for both sent people to the wrong one.
+ * iOS), or the whole annotated score as PDF. Labelled "Export", not "Share" --
+ * the button and every item in it: "Share" is the owner's button for giving
+ * people access (ShareDialog), and one word for both sent people to the wrong
+ * one.
  */
 export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
@@ -74,6 +80,8 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
     const [limit, setLimit] = useState<LimitReachedError | null>(null);
     /** Why a PDF export was held back when it was not the allowance (offline, unreachable meter). */
     const [refusal, setRefusal] = useState<string | null>(null);
+    /** The share sheet was dismissed after a PDF export was claimed. */
+    const [notSent, setNotSent] = useState(false);
     const [pricingOpen, setPricingOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement | null>(null);
     const focusedPageIndex = useViewerStore((s) => s.focusedPageIndex);
@@ -141,6 +149,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
         setBusy(label);
         setLimit(null);
         setRefusal(null);
+        setNotSent(false);
         setError(null);
         return true;
     };
@@ -154,7 +163,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
     };
 
     const fail = (stage: 'source' | 'export', failureLabel: string, err: unknown) => {
-        console.warn('Share/export failed', err);
+        console.warn('Export failed', err);
         setError(describeFailure(stage, failureLabel, err));
         // The menu may have been dismissed while this ran; the failure must
         // still be seen, not just logged.
@@ -167,7 +176,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
     };
 
     /**
-     * Sharing the page as a photo: a PNG, which is not what the pdf_exports
+     * Sending the page as a photo: a PNG, which is not what the pdf_exports
      * allowance counts (the pricing promises "1 PDF export a month"), so it is
      * built and handed over in one step with no claim.
      */
@@ -201,14 +210,15 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
      * that never existed is exactly the dishonesty this counter exists to
      * avoid. The claim fails closed (see exportClaim.ts, and its one exception:
      * an unlimited plan exporting offline). What can still miss after an ok --
-     * the share sheet dismissed, the answer lost -- keeps the export's claim id,
-     * so asking again is a retry the server does not count twice.
+     * the share sheet dismissed, the answer lost -- keeps the claim id for the
+     * next PDF export, whichever it is, which the server does not count twice;
+     * a dismissed sheet says so, or the teacher would assume it had been.
      */
     const runMetered = async (label: string, failureLabel: string, page: number | null) => {
         if (!begin(label)) {
             return;
         }
-        const attempt = exportAttemptKey(session, docId, page);
+        const attempt = exportAttemptKey(session, docId);
         let stage: 'source' | 'export' = 'source';
         try {
             const source = await sourceFor(label);
@@ -227,9 +237,12 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                 setOpen(true);
                 return;
             }
-            if ((await deliverPdf(file)) !== 'cancelled') {
-                markExportDelivered(attempt);
+            if ((await deliverPdf(file)) === 'cancelled') {
+                setNotSent(true);
+                setOpen(true);
+                return;
             }
+            markExportDelivered(attempt);
             setOpen(false);
         } catch (err) {
             fail(stage, failureLabel, err);
@@ -239,6 +252,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
     };
 
     const pageLabel = focusedPageIndex + 1;
+    const status = refusal ?? (notSent ? EXPORT_NOT_SENT_MESSAGE : null);
 
     return (
         <div ref={rootRef} className="relative">
@@ -251,6 +265,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                 onClick={() => {
                     setLimit(null);
                     setRefusal(null);
+                    setNotSent(false);
                     setError(null);
                     setOpen((v) => !v);
                 }}
@@ -263,25 +278,25 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
             {open ? (
                 <div
                     className={`absolute right-0 z-30 mt-1 rounded-xl border border-stone-200 bg-white py-1 shadow-lg ${
-                        limit || refusal || error ? 'w-80' : 'w-64'
+                        limit || status || error ? 'w-80' : 'w-64'
                     }`}
                 >
                     {/* The notice is a sibling of the menu, not an item in it. */}
                     <div role="menu">
                         <MenuItem
-                            label={`Share page ${pageLabel} as photo`}
+                            label={`Send page ${pageLabel} as photo`}
                             hint="PNG — send via Messages"
                             disabled={busy !== null}
                             onClick={() =>
-                                void runUnmetered('Sharing…', 'Sharing the page', (source) =>
+                                void runUnmetered('Exporting…', 'The export', (source) =>
                                     exportAnnotatedPageImage(docId, source, focusedPageIndex, title),
                                 )
                             }
                         />
                         <MenuItem
-                            label={`Share page ${pageLabel} as PDF`}
+                            label={`Save page ${pageLabel} as PDF`}
                             disabled={busy !== null}
-                            onClick={() => void runMetered('Sharing…', 'Sharing the page', focusedPageIndex)}
+                            onClick={() => void runMetered('Exporting…', 'The export', focusedPageIndex)}
                         />
                         <div className="my-1 border-t border-stone-100" />
                         <MenuItem
@@ -315,12 +330,12 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                             className="m-2"
                         />
                     ) : null}
-                    {refusal ? (
+                    {status ? (
                         <p
                             role="status"
                             className="m-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700"
                         >
-                            {refusal}
+                            {status}
                         </p>
                     ) : null}
                 </div>

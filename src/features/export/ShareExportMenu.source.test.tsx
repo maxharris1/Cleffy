@@ -158,7 +158,7 @@ describe('ShareExportMenu', () => {
         await user.keyboard('{Escape}');
         expect(screen.queryByRole('menu')).not.toBeInTheDocument();
         fail(new Error('Share sheet unavailable'));
-        expect(await screen.findByText(/Sharing the page failed \(Share sheet unavailable\)/)).toBeInTheDocument();
+        expect(await screen.findByText(/The export failed \(Share sheet unavailable\)/)).toBeInTheDocument();
     });
 
     it('clears the old error when the menu is opened again', async () => {

@@ -259,8 +259,9 @@ describe('claimPdfExport for a share-link guest', () => {
 describe('claimPdfExport with a claim id', () => {
     const teacher = sessionOf();
     let n = 0;
-    // A fresh export per test: the pending ids live in the module.
-    const freshAttempt = () => exportAttemptKey(teacher, `doc-${++n}`, null);
+    // A fresh key per test: the pending ids live in the module, kept per account.
+    const freshAttempt = () =>
+        exportAttemptKey({ user: { id: `teacher-${++n}`, is_anonymous: false } } as unknown as Session, 'doc-1');
     const claimIdsSent = (): unknown[] =>
         rpc.mock.calls
             .filter(([fn]) => fn === 'claim_pdf_export')
@@ -278,11 +279,16 @@ describe('claimPdfExport with a claim id', () => {
         vi.restoreAllMocks();
     });
 
-    it('names one export by who, which score and which page', () => {
-        expect(exportAttemptKey(teacher, 'doc-1', null)).not.toBe(exportAttemptKey(teacher, 'doc-1', 0));
-        expect(exportAttemptKey(teacher, 'doc-1', 0)).not.toBe(exportAttemptKey(teacher, 'doc-1', 1));
-        expect(exportAttemptKey(null, 'doc-1', null)).not.toBe(exportAttemptKey(teacher, 'doc-1', null));
-        expect(exportAttemptKey(teacher, 'doc-1', 2)).toBe(exportAttemptKey(teacher, 'doc-1', 2));
+    it('keeps an undelivered claim per account, and per score for a share-link guest', () => {
+        // The server replays an account's id for any score; a guest's only for
+        // the score it named (its owner's allowance).
+        const guest = sessionOf({ anonymous: true });
+        const otherTeacher = { user: { id: 'teacher-2', is_anonymous: false } } as unknown as Session;
+        expect(exportAttemptKey(teacher, 'doc-1')).toBe(exportAttemptKey(teacher, 'doc-2'));
+        expect(exportAttemptKey(otherTeacher, 'doc-1')).not.toBe(exportAttemptKey(teacher, 'doc-1'));
+        expect(exportAttemptKey(guest, 'doc-1')).not.toBe(exportAttemptKey(guest, 'doc-2'));
+        expect(exportAttemptKey(guest, 'doc-1')).toBe(exportAttemptKey(guest, 'doc-1'));
+        expect(exportAttemptKey(null, 'doc-1')).not.toBe(exportAttemptKey(teacher, 'doc-1'));
     });
 
     it('sends the same id until the export is delivered, then a new one', async () => {
@@ -376,7 +382,7 @@ describe('claimPdfExport with a claim id', () => {
 
     it("carries a guest's id alongside the score it names", async () => {
         const guest = sessionOf({ anonymous: true });
-        const attempt = exportAttemptKey(guest, 'doc-guest', null);
+        const attempt = exportAttemptKey(guest, 'doc-guest');
         rpc.mockResolvedValue({ data: { ok: true, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
         await claimPdfExport(guest, 'doc-guest', attempt);
         expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_document: 'doc-guest', p_claim: expect.any(String) });

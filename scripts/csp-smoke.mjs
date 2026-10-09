@@ -453,7 +453,7 @@ if (SENTRY) {
     check('Sentry report reached the ingest host (connect-src)', sentryReports.length > 0, sentryReports.join(', '));
 }
 
-const png = await exportVia(/Share page 1 as photo/);
+const png = await exportVia(/Send page 1 as photo/);
 check('page photo export (pdf.js)', png.subarray(1, 4).toString() === 'PNG', `${png.length} bytes`);
 const pdf = await exportVia(/Export whole score as PDF/);
 check('annotated PDF export (pdf-lib worker)', pdf.subarray(0, 5).toString() === '%PDF-', `${pdf.length} bytes`);
