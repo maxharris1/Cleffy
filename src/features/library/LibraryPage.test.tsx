@@ -714,9 +714,91 @@ describe('LibraryPage', () => {
             fetchLibraryBootstrap.mockRejectedValue(new Error('offline'));
             listDocuments.mockRejectedValue(new Error('offline'));
             renderLibrary();
-            expect(await screen.findByText('offline')).toBeInTheDocument();
+            expect(await screen.findByText('Couldn’t load your scores')).toBeInTheDocument();
             expect(screen.queryByText('Someone else’s score')).not.toBeInTheDocument();
             expect(writeCachedLibraryList).not.toHaveBeenCalled();
+        });
+
+        it('says it is offline, not empty, when a never-loaded library cannot be reached', async () => {
+            vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+            fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
+            listDocuments.mockRejectedValue(new TypeError('Failed to fetch'));
+            renderLibrary();
+
+            expect(await screen.findByText('You’re offline')).toBeInTheDocument();
+            expect(screen.getByText('Your library will appear when you reconnect.')).toBeInTheDocument();
+            expect(screen.queryByText('No scores yet')).not.toBeInTheDocument();
+            expect(screen.queryByText(/TypeError|Failed to fetch/)).not.toBeInTheDocument();
+        });
+
+        it('loads the library by itself once the browser reconnects', async () => {
+            const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+            fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
+            listDocuments.mockRejectedValue(new TypeError('Failed to fetch'));
+            renderLibrary();
+            await screen.findByText('You’re offline');
+
+            mockBootstrap({ documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')] });
+            onLine.mockReturnValue(true);
+            await act(async () => {
+                window.dispatchEvent(new Event('online'));
+            });
+
+            expect(
+                await screen.findByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' }),
+            ).toBeInTheDocument();
+            expect(screen.queryByText('You’re offline')).not.toBeInTheDocument();
+        });
+
+        it('does not claim to be offline when the browser is online but the server cannot be reached', async () => {
+            const user = userEvent.setup();
+            // DNS, an ad-blocker, an outage without CORS headers: no 'online' event will come.
+            fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
+            listDocuments.mockRejectedValue(new TypeError('Failed to fetch'));
+            renderLibrary();
+
+            expect(await screen.findByText('Couldn’t reach Cleffy')).toBeInTheDocument();
+            expect(screen.queryByText('You’re offline')).not.toBeInTheDocument();
+            expect(screen.queryByText(/TypeError|Failed to fetch/)).not.toBeInTheDocument();
+
+            mockBootstrap({ documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')] });
+            await user.click(screen.getByRole('button', { name: 'Try again' }));
+            expect(
+                await screen.findByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' }),
+            ).toBeInTheDocument();
+        });
+
+        it('keeps retrying by itself while the server cannot be reached', async () => {
+            const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
+            fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
+            listDocuments.mockRejectedValue(new TypeError('Failed to fetch'));
+            renderLibrary();
+            await screen.findByText('Couldn’t reach Cleffy');
+
+            const retry = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
+            expect(retry).toBeDefined();
+            mockBootstrap({ documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')] });
+            await act(async () => {
+                (retry![0] as () => void)();
+            });
+            expect(
+                await screen.findByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' }),
+            ).toBeInTheDocument();
+        });
+
+        it('offers to try again when the server fails, without its raw error', async () => {
+            const user = userEvent.setup();
+            fetchLibraryBootstrap.mockRejectedValue(new Error('Could not load scores: 500 internal'));
+            listDocuments.mockRejectedValue(new Error('Could not load documents: 500 internal'));
+            renderLibrary();
+            await screen.findByText('Couldn’t load your scores');
+            expect(screen.queryByText(/500 internal/)).not.toBeInTheDocument();
+
+            mockBootstrap({ documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')] });
+            await user.click(screen.getByRole('button', { name: 'Try again' }));
+            expect(
+                await screen.findByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' }),
+            ).toBeInTheDocument();
         });
     });
 

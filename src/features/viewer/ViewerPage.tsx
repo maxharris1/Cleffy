@@ -33,6 +33,7 @@ import { ViewerHeader } from '@/features/viewer/ViewerHeader';
 import { features } from '@/lib/features';
 import { getLocalDoc, localDocId, putLocalDoc } from '@/lib/localDocs';
 import { perfMark } from '@/lib/perf';
+import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { SyncHold, SyncRejection, SyncStatus } from '@/sync/syncEngine';
 import type { PresencePeer } from '@/sync/wire';
@@ -80,24 +81,58 @@ interface CloudDocState {
     role: MemberRole | null;
     bytes: ArrayBuffer;
     /**
-     * A warm Dexie paint the server hasn't confirmed yet. The cached role may
-     * overstate today's access, and RLS discards (not retries) an annotation
-     * flushed under a role that turned out read-only — so writes and sync wait
-     * until the fetch settles. Cleared by the server response, or by the
-     * offline fallback, where the last-known role is the best truth available.
+     * No role to go on: a warm Dexie paint whose cache row stored none (a
+     * score cached by an older build, or by a share link). Read-only, and no
+     * sync, until the server says what this account may do — a guessed role
+     * must never grant writes. Cleared by the server's answer.
      */
     provisional?: boolean;
+    /**
+     * Painted with the role this device stored the last time the server
+     * vouched for it, and not re-confirmed on this visit yet. That role
+     * applies at once — editing and sync start without waiting on a network
+     * that may be minutes away, or absent — and the server's answer, whenever
+     * it comes, replaces it (a lowered role turns the viewer read-only, and
+     * the engine rolls back anything the server then refuses, saying so).
+     * Owner and export chrome still wait for the answer.
+     */
+    unconfirmed?: boolean;
 }
 
-const isTransportFailure = (err: unknown): boolean => {
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        return true;
+/** A first open while the browser is offline: there is nothing on this device to show. */
+const OFFLINE_NO_COPY_MESSAGE =
+    'You’re offline, and this score isn’t saved on this device yet. It will open when you reconnect.';
+/**
+ * A first open that never got an answer although the browser says it is
+ * online (DNS, a blocker, an outage) — no 'online' event will come, so it is
+ * retried on a timer.
+ */
+const UNREACHABLE_NO_COPY_MESSAGE =
+    'Couldn’t reach Cleffy to open this score. Check your connection — we’ll keep trying.';
+/** A first open the server failed (its "no" is the not-found message instead). */
+const OPEN_FAILED_MESSAGE = 'Couldn’t open this score. Try again in a moment.';
+/** Load errors that asking again can fix: they get Try again, and a timer. */
+const RETRYABLE_OPEN_MESSAGES: ReadonlySet<string> = new Set([
+    OFFLINE_NO_COPY_MESSAGE,
+    UNREACHABLE_NO_COPY_MESSAGE,
+    OPEN_FAILED_MESSAGE,
+]);
+const CONFIRM_RETRY_BASE_MS = 5000;
+const CONFIRM_RETRY_MAX_MS = 60_000;
+
+/** What a first open (nothing on this device) says when it failed. The raw text goes to the console. */
+const firstOpenFailure = (err: unknown): string => {
+    console.warn('Could not open the score', err);
+    if (!isTransportFailure(err)) {
+        return OPEN_FAILED_MESSAGE;
     }
-    if (err instanceof TypeError) {
-        return true;
-    }
-    return err instanceof Error && /failed to fetch/i.test(err.message);
+    return navigator.onLine === false ? OFFLINE_NO_COPY_MESSAGE : UNREACHABLE_NO_COPY_MESSAGE;
 };
+
+const accessChangedNotice = (role: MemberRole | null): string =>
+    role === 'editor' || role === 'owner'
+        ? 'Your access changed: you can now edit this score.'
+        : 'Your access changed: you can now only view this score.';
 
 /**
  * Shown when the server says this account can no longer see the score. Neutral
@@ -121,6 +156,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const [state, setState] = useState<CloudDocState | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
+    const online = useOnline();
     /**
      * Marks whose change the server refused for good (rolled back) since the
      * last dismiss, tagged with the score they belong to: CloudViewer is not
@@ -199,8 +235,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             }
             const role = roleResult.value;
             const current = stateRef.current;
-            // A provisional paint is confirmed by the load effect, not here.
-            if (!current || current.provisional || current.role === role) {
+            // A cache paint is confirmed by the load effect, not here.
+            if (!current || current.provisional || current.unconfirmed || current.role === role) {
                 return false;
             }
             // Read-only follows from the new role, and the viewport restarts
@@ -210,11 +246,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             // A follow-up check compares against this role, not the one the
             // ref holds until the next commit.
             stateRef.current = { ...current, role };
-            setAccessNotice(
-                role === 'editor' || role === 'owner'
-                    ? 'Your access changed: you can now edit this score.'
-                    : 'Your access changed: you can now only view this score.',
-            );
+            setAccessNotice(accessChangedNotice(role));
             return false;
         };
 
@@ -298,6 +330,19 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         setPlayAlongOpen(!playAlongOpen);
     };
 
+    /** The server confirmed doc + role for this score on this visit (see the 'online' re-check). */
+    const confirmedFor = useRef<string | null>(null);
+    /** Bumped to ask the server again — the browser came back online before it had answered. */
+    const [confirmAttempt, setConfirmAttempt] = useState(0);
+    /**
+     * The last attempt ended without the server confirming doc + role: the
+     * score is painted under the stored role (or read-only, with none) and
+     * is asked about again on a backoff while online — see the retry effect.
+     */
+    const [awaitingServer, setAwaitingServer] = useState(false);
+    /** Timed retries since the server last answered, for their backoff. */
+    const confirmRetries = useRef(0);
+
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -309,18 +354,32 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 return;
             }
 
-            // Warm open: paint from Dexie immediately (provisionally — see
-            // CloudDocState), then refresh in the background. A hung confirm
-            // stays read-only: lifting provisional on a timer would grant a
-            // cached role the server never vouched for.
+            // A re-check after reconnecting keeps what is on screen: the same
+            // bytes (a new buffer would reload the PDF) and the role in use.
+            const current = stateRef.current?.doc.id === docId ? stateRef.current : null;
+
+            // Warm open: paint from Dexie immediately with the role stored
+            // there (see CloudDocState), then confirm in the background.
             // Prefetch leaves in the same tick as the Dexie read; a hit ignores
             // that download, a miss reuses it.
-            const prefetch = prefetchDocumentBytes(docId);
-            const offline = await loadDocumentOffline(docId, userId).catch(() => null);
+            const prefetch = current ? undefined : prefetchDocumentBytes(docId);
+            const offline = current ? null : await loadDocumentOffline(docId, userId).catch(() => null);
             if (!cancelled && offline) {
-                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes, provisional: true });
+                setState({
+                    doc: offline.doc,
+                    role: offline.role,
+                    bytes: offline.bytes,
+                    ...(offline.cachedRole ? { unconfirmed: true } : { provisional: true }),
+                });
                 perfMark('viewer-cache-paint');
             }
+            const held = current
+                ? {
+                      doc: current.doc,
+                      bytes: current.bytes,
+                      cachedRole: current.provisional ? null : current.role,
+                  }
+                : offline;
 
             const [docResult, roleResult] = await Promise.allSettled([
                 fetchDocument(docId),
@@ -343,36 +402,66 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     // the score back must not leave it readable offline. Only
                     // when the cache row was this account's — another account's
                     // copy on a shared device is not ours to throw away.
-                    if (offline) {
+                    if (held) {
                         setAccessLoss('denied');
                     }
                     return;
                 }
                 const confirmedRole = roleResult.status === 'fulfilled' ? roleResult.value : null;
                 if (roleResult.status === 'fulfilled') {
+                    const before = stateRef.current;
+                    if (
+                        before?.doc.id === docId &&
+                        confirmedFor.current !== docId &&
+                        !before.provisional &&
+                        before.role !== confirmedRole &&
+                        (before.role === 'owner' || before.role === 'editor')
+                    ) {
+                        // The stored role was already in use (online or off);
+                        // say why editing stopped.
+                        setAccessNotice(accessChangedNotice(confirmedRole));
+                    }
+                    confirmedFor.current = docId;
+                    confirmRetries.current = 0;
+                    setAwaitingServer(false);
                     setState((prev) =>
-                        prev?.provisional
+                        prev?.doc.id === docId && (prev.provisional || prev.unconfirmed || prev.role !== confirmedRole)
                             ? {
                                   ...prev,
                                   doc: { ...prev.doc, ...confirmedMeta(confirmedDoc) },
                                   role: confirmedRole,
-                                  provisional: false,
+                                  provisional: undefined,
+                                  unconfirmed: undefined,
                               }
                             : prev,
                     );
                     perfMark('viewer-confirmed');
                 }
+                // The role request failed: keep whatever role is in use (the
+                // stored one, or none), still waiting on the server.
+                if (roleResult.status === 'rejected') {
+                    setAwaitingServer(true);
+                }
+                const pending = (prev: CloudDocState | null): Pick<CloudDocState, 'provisional' | 'unconfirmed'> =>
+                    roleResult.status === 'fulfilled'
+                        ? {}
+                        : prev?.doc.id === docId && !prev.provisional
+                          ? { unconfirmed: true }
+                          : { provisional: true };
                 try {
                     const bytes = await loadDocumentBytes(confirmedDoc, {
-                        preloaded: offline
+                        preloaded: held
                             ? {
-                                  bytes: offline.bytes,
-                                  contentRev: offline.doc.content_rev ?? 0,
-                                  archivedAt: offline.doc.archived_at,
+                                  bytes: held.bytes,
+                                  contentRev: held.doc.content_rev ?? 0,
+                                  archivedAt: held.doc.archived_at,
                               }
                             : undefined,
-                        prefetch: offline ? undefined : prefetch,
+                        prefetch: held ? undefined : prefetch,
                         userId,
+                        // Stored with the bytes, so the next open without a
+                        // network knows what this account may do.
+                        role: roleResult.status === 'fulfilled' ? confirmedRole : undefined,
                     });
                     const withPages = await ensureDocumentPageCount(confirmedDoc, bytes).catch(() => confirmedDoc);
                     if (!cancelled) {
@@ -385,7 +474,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                                 (prev.doc.content_rev ?? 0) >= (withPages.content_rev ?? 0)
                                     ? prev.bytes
                                     : bytes,
-                            provisional: roleResult.status !== 'fulfilled' ? true : undefined,
+                            ...pending(prev),
                         }));
                         setLoadError(null);
                     }
@@ -393,16 +482,16 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     if (cancelled) {
                         return;
                     }
-                    if (offline) {
-                        setState({
-                            doc: { ...offline.doc, ...confirmedMeta(confirmedDoc) },
-                            role: confirmedRole ?? offline.role,
-                            bytes: offline.bytes,
-                            provisional: roleResult.status !== 'fulfilled' ? true : undefined,
-                        });
+                    if (held) {
+                        setState((prev) => ({
+                            doc: { ...held.doc, ...confirmedMeta(confirmedDoc) },
+                            role: confirmedRole ?? prev?.role ?? held.cachedRole ?? 'viewer',
+                            bytes: held.bytes,
+                            ...pending(prev),
+                        }));
                         return;
                     }
-                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                    setLoadError(firstOpenFailure(err));
                 }
                 return;
             }
@@ -411,16 +500,23 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 isTransportFailure(docResult.reason) &&
                 roleResult.status === 'rejected' &&
                 isTransportFailure(roleResult.reason);
-            if (offline && bothTransport && offline.cachedRole) {
-                setState({ doc: offline.doc, role: offline.role, bytes: offline.bytes });
+            if (held) {
+                setAwaitingServer(true);
+            }
+            if (held && bothTransport && held.cachedRole) {
+                // No server to ask: the last-known role is the best truth
+                // there is. The 'online' re-check asks again on reconnect.
+                setState((prev) =>
+                    prev?.doc.id === docId ? { ...prev, provisional: undefined, unconfirmed: undefined } : prev,
+                );
                 return;
             }
-            if (offline) {
-                // Stay provisional: a PostgREST throw is not "the server never
+            if (held) {
+                // Stay as painted: a PostgREST throw is not "the server never
                 // answered", and a missing stored role must not grant writes.
                 return;
             }
-            setLoadError(docResult.reason instanceof Error ? docResult.reason.message : 'Could not open this score.');
+            setLoadError(firstOpenFailure(docResult.reason));
         })();
 
         // Resist storage eviction — annotations and cached scores must survive
@@ -430,7 +526,40 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         return () => {
             cancelled = true;
         };
-    }, [docId, userId]);
+    }, [docId, userId, confirmAttempt]);
+
+    // Back online before the server confirmed this score: ask it now. A role
+    // read from the cache (or none at all) is re-verified, a provisional paint
+    // can finally start syncing, and a first open that failed offline loads.
+    useEffect(() => {
+        const onOnline = () => {
+            if (confirmedFor.current === docId) {
+                return;
+            }
+            setLoadError((prev) => (prev !== null && RETRYABLE_OPEN_MESSAGES.has(prev) ? null : prev));
+            setConfirmAttempt((n) => n + 1);
+        };
+        window.addEventListener('online', onOnline);
+        return () => window.removeEventListener('online', onOnline);
+    }, [docId]);
+
+    // Online, and the server has not answered yet (a failed role confirm, a
+    // first open that could not reach it): ask again on a backoff. Waiting for
+    // an 'online' event would wait forever — the browser already is online.
+    const retryOpen = loadError !== null && RETRYABLE_OPEN_MESSAGES.has(loadError);
+    const askAgain = useCallback(() => {
+        setLoadError((prev) => (prev !== null && RETRYABLE_OPEN_MESSAGES.has(prev) ? null : prev));
+        setConfirmAttempt((n) => n + 1);
+    }, []);
+    useEffect(() => {
+        if (!online || !(awaitingServer || retryOpen)) {
+            return;
+        }
+        const attempt = confirmRetries.current;
+        confirmRetries.current = attempt + 1;
+        const timer = setTimeout(askAgain, Math.min(CONFIRM_RETRY_BASE_MS * 2 ** attempt, CONFIRM_RETRY_MAX_MS));
+        return () => clearTimeout(timer);
+    }, [online, awaitingServer, retryOpen, confirmAttempt, askAgain]);
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
     const onRejected = useCallback(
@@ -467,6 +596,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         return (
             <main className="landing-page flex min-h-full flex-col items-center justify-center gap-3 p-8">
                 <ErrorText className="max-w-md text-center">{loadError}</ErrorText>
+                {RETRYABLE_OPEN_MESSAGES.has(loadError) ? (
+                    <Button size="sm" variant="secondary" onClick={askAgain}>
+                        Try again
+                    </Button>
+                ) : null}
                 <Link to={escapeTo} className={linkClassName}>
                     {escapeLabel}
                 </Link>
@@ -496,6 +630,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         (state.role !== 'owner' && state.role !== 'editor') ||
         !resolvedUserId ||
         state.provisional === true;
+    // Owner and export chrome waits for the server (or, offline, for the
+    // stored role standing in for it); drawing and sync do not — see
+    // CloudDocState.unconfirmed.
+    const confirmed = !state.provisional && !state.unconfirmed;
+    const syncing = Boolean(resolvedUserId) && !state.provisional;
     const backTo = isRegisteredSession(session) ? '/library' : '/';
     const backLabel = isRegisteredSession(session) ? 'Back to library' : 'Back to home';
     // A roster student's scores are their teacher's to assign and withdraw
@@ -506,7 +645,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
                 <PresenceBar peers={peers} selfUserId={resolvedUserId} />
-                <SyncDot status={syncStatus} />
+                {/* No engine yet (no role to sync under): say whether that is the network, or the server not having answered. */}
+                <SyncDot status={syncing ? syncStatus : !online ? 'offline' : awaitingServer ? 'waiting' : 'syncing'} />
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
                         <Badge tone="warn">Archived</Badge>
@@ -514,7 +654,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : readOnly ? (
                     <Badge>view only</Badge>
                 ) : null}
-                {annotationStore && !state.provisional && state.role === 'owner' ? (
+                {annotationStore && confirmed && state.role === 'owner' ? (
                     <ImportScanButton
                         store={annotationStore}
                         docId={docId}
@@ -578,12 +718,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                   Export loads from Dexie on demand — no third live ArrayBuffer for
                   the menu. The row lets it download the PDF when the cache has none.
                 */}
-                {!state.provisional ? <ShareExportMenu docId={docId} doc={state.doc} title={state.doc.title} /> : null}
-                {!state.provisional && state.role === 'owner' ? (
+                {confirmed ? <ShareExportMenu docId={docId} doc={state.doc} title={state.doc.title} /> : null}
+                {confirmed && state.role === 'owner' ? (
                     <Button size="sm" onClick={() => setShareOpen(true)}>
                         Invite
                     </Button>
-                ) : !state.provisional && state.role && canLeave ? (
+                ) : confirmed && state.role && canLeave ? (
                     // Members get the same dialog, minus the owner's controls:
                     // who else is here (editors) and a way to leave.
                     <button
@@ -634,10 +774,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         // the transport is on screen to drive them.
                         playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
                         sync={
-                            // Not while provisional: the engine would start,
-                            // then tear down and restart when the confirmed
-                            // role lands a beat later.
-                            resolvedUserId && !state.provisional
+                            // Not while provisional: with no role there is
+                            // nothing to sync under yet. A stored role syncs at
+                            // once; the engine restarts only if the server's
+                            // answer changes whether this account may write.
+                            syncing
                                 ? {
                                       userId: resolvedUserId,
                                       name: displayNameOf(session),
@@ -700,12 +841,33 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     );
 };
 
-const SyncDot = ({ status }: { status: SyncStatus }) => {
-    const styles: Record<SyncStatus, { dot: string; short: string; label: string }> = {
+/**
+ * 'waiting': no engine yet because the server has not confirmed this score
+ * (and no role was stored to edit under meanwhile); it is being asked again.
+ */
+export const SyncDot = ({ status }: { status: SyncStatus | 'waiting' }) => {
+    // Red is kept for what needs the user's attention: a refusal, or failures
+    // that have gone on for minutes. A throttled or briefly unreachable server
+    // is "retrying" — the marks are safe on this device either way.
+    const styles: Record<SyncStatus | 'waiting', { dot: string; short: string; label: string }> = {
         synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
         syncing: { dot: 'bg-amber-400 animate-pulse', short: 'Syncing…', label: 'Syncing…' },
         offline: { dot: 'bg-stone-400', short: 'Offline', label: 'Offline — changes saved on this device' },
-        error: { dot: 'bg-red-500', short: 'Sync error', label: 'Sync error — retrying' },
+        retrying: {
+            dot: 'bg-amber-400',
+            short: 'Retrying…',
+            label: 'Sync delayed — retrying. Changes are saved on this device.',
+        },
+        error: {
+            dot: 'bg-red-500',
+            short: 'Not syncing',
+            label: 'Changes aren’t reaching the server yet. They’re saved on this device.',
+        },
+        waiting: {
+            dot: 'bg-stone-400',
+            short: 'Waiting for server',
+            label: 'Waiting for the server to confirm this score — asking again shortly.',
+        },
     };
     const { dot, short, label } = styles[status];
     return (

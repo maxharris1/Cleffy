@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ViewerPage } from '@/features/viewer/ViewerPage';
+import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
 import type { DocumentRow } from '@/types/database';
 
 const fetchDocument = vi.fn();
@@ -159,6 +159,9 @@ const cachedOpen = (role: 'owner' | 'editor' | 'viewer' = 'owner') => ({
     bytes: new ArrayBuffer(8),
 });
 
+/** A cache row written before the role was stored with it (see loadDocumentBytes). */
+const cachedWithoutRole = () => ({ ...cachedOpen('viewer'), cachedRole: null });
+
 const deferred = <T,>() => {
     let resolve!: (value: T) => void;
     let reject!: (reason?: unknown) => void;
@@ -233,8 +236,8 @@ describe('CloudViewer warm open', () => {
         expect(screen.queryByText(/access was revoked/)).not.toBeInTheDocument();
     });
 
-    it('stays read-only while confirm hangs, even after several seconds', async () => {
-        loadDocumentOffline.mockResolvedValue(cachedOpen());
+    it('stays read-only while confirm hangs when the cache stored no role', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
         fetchDocument.mockReturnValue(new Promise(() => undefined));
         fetchMyRole.mockReturnValue(new Promise(() => undefined));
 
@@ -254,8 +257,8 @@ describe('CloudViewer warm open', () => {
         expect(viewport()).toHaveAttribute('data-sync', 'off');
     });
 
-    it('paints read-only without sync until the role is confirmed, then opens for writing', async () => {
-        loadDocumentOffline.mockResolvedValue(cachedOpen());
+    it('paints read-only without sync until a role is confirmed when none was stored', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
         const docRequest = deferred<DocumentRow | null>();
         const roleRequest = deferred<'owner'>();
         fetchDocument.mockReturnValue(docRequest.promise);
@@ -439,8 +442,8 @@ describe('CloudViewer warm open', () => {
         expect(screen.queryByTestId('transport-bar')).not.toBeInTheDocument();
     });
 
-    it('stays read-only when confirm fails with a PostgREST error', async () => {
-        loadDocumentOffline.mockResolvedValue(cachedOpen());
+    it('stays read-only when confirm fails with a PostgREST error and no role was stored', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
         fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
         fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
 
@@ -451,6 +454,240 @@ describe('CloudViewer warm open', () => {
         expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
         expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+    });
+});
+
+describe('CloudViewer stored role and reconnects', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('edits and syncs at once under the stored role while the server is still being asked', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('owner'));
+        fetchDocument.mockReturnValue(new Promise(() => undefined));
+        fetchMyRole.mockReturnValue(new Promise(() => undefined));
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.queryByText('view only')).not.toBeInTheDocument();
+        // Owner chrome still waits for the server's answer.
+        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
+    });
+
+    it('keeps the stored role in use when the confirm fails with a PostgREST error', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('editor'));
+        fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        await waitFor(() => expect(fetchMyRole).toHaveBeenCalled());
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
+    });
+
+    it('downgrades, and says so, when the server lowered the stored role', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('editor'));
+        const roleRequest = deferred<'viewer'>();
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockReturnValue(roleRequest.promise);
+
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        roleRequest.resolve('viewer');
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByText('Your access changed: you can now only view this score.')).toBeInTheDocument();
+    });
+
+    it('stores the confirmed role with the bytes of a first open', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(loadDocumentBytes).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+    });
+
+    it('asks the server again on reconnect, then edits and syncs what was queued offline', async () => {
+        // A device whose cache never stored a role, opened offline.
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        await waitFor(() => expect(fetchMyRole).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(viewport()).toHaveAttribute('data-sync', 'off');
+        // Not a "Syncing…" that never ends: there is no network to sync over.
+        expect(screen.getByTitle('Offline — changes saved on this device')).toBeInTheDocument();
+
+        onLine.mockReturnValue(true);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+        // Same bytes on screen: the re-check does not reload the PDF from the cache.
+        expect(loadDocumentOffline).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-verifies a stored role used offline once back online, and downgrades if it changed', async () => {
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        loadDocumentOffline.mockResolvedValue(cachedOpen('editor'));
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+        await waitFor(() => expect(fetchMyRole).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+
+        onLine.mockReturnValue(true);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('viewer');
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
+        expect(screen.getByText('Your access changed: you can now only view this score.')).toBeInTheDocument();
+    });
+
+    it('does not ask again on reconnect once the server has confirmed', async () => {
+        loadDocumentOffline.mockResolvedValue(cachedOpen('owner'));
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+
+        renderViewer();
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument());
+
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+        expect(fetchMyRole).toHaveBeenCalledTimes(1);
+    });
+
+    it('explains a first open with no network, and opens on reconnect', async () => {
+        const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        expect(
+            await screen.findByText(/You’re offline, and this score isn’t saved on this device yet/),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/TypeError|Failed to fetch/)).not.toBeInTheDocument();
+
+        onLine.mockReturnValue(true);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await act(async () => {
+            window.dispatchEvent(new Event('online'));
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+    });
+});
+
+describe('CloudViewer when the server cannot be reached while online', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('does not claim a first open is offline when the browser is online, and offers to try again', async () => {
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        // DNS, an ad-blocker, an outage without CORS headers: no 'online' event will come.
+        fetchDocument.mockRejectedValue(new TypeError('Failed to fetch'));
+        fetchMyRole.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        expect(await screen.findByText(/Couldn’t reach Cleffy to open this score/)).toBeInTheDocument();
+        expect(screen.queryByText(/You’re offline/)).not.toBeInTheDocument();
+
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+    });
+
+    it('shows a server failure on a first open without its raw text, with Try again', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockRejectedValue(new Error('Could not load document: 500 upstream'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: 500 upstream'));
+
+        renderViewer();
+
+        expect(await screen.findByText('Couldn’t open this score. Try again in a moment.')).toBeInTheDocument();
+        expect(screen.queryByText(/500 upstream/)).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    });
+
+    it('says it is waiting for the server, not syncing, and asks again by itself', async () => {
+        const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
+        loadDocumentOffline.mockResolvedValue(cachedWithoutRole());
+        fetchDocument.mockRejectedValue(new Error('Could not load document: JWT expired'));
+        fetchMyRole.mockRejectedValue(new Error('Could not load membership: JWT expired'));
+
+        renderViewer();
+
+        await waitFor(() =>
+            expect(
+                screen.getByTitle('Waiting for the server to confirm this score — asking again shortly.'),
+            ).toBeInTheDocument(),
+        );
+        expect(screen.queryByText('Syncing…')).not.toBeInTheDocument();
+
+        const retry = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
+        expect(retry).toBeDefined();
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        await act(async () => {
+            (retry![0] as () => void)();
+        });
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        expect(viewport()).toHaveAttribute('data-sync', 'on');
+    });
+});
+
+describe('SyncDot', () => {
+    it('shows a retryable failure calmly and keeps red for errors', () => {
+        const { rerender } = render(<SyncDot status="retrying" />);
+        expect(screen.getByText('Retrying…')).toBeInTheDocument();
+        expect(document.querySelector('.bg-red-500')).toBeNull();
+
+        rerender(<SyncDot status="error" />);
+        expect(document.querySelector('.bg-red-500')).not.toBeNull();
+    });
+
+    it('words a delay without claiming the server was unreachable, or that it will recover by itself', () => {
+        const { rerender } = render(<SyncDot status="retrying" />);
+        expect(screen.getByTitle('Sync delayed — retrying. Changes are saved on this device.')).toBeInTheDocument();
+
+        rerender(<SyncDot status="error" />);
+        expect(
+            screen.getByTitle('Changes aren’t reaching the server yet. They’re saved on this device.'),
+        ).toBeInTheDocument();
     });
 });
 

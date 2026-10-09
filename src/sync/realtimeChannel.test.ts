@@ -429,6 +429,76 @@ describe('membership broadcasts', () => {
     });
 });
 
+describe('DocRealtimeChannel while doc:{id} is down', () => {
+    const peerJoins = (live: FakeChannel) => {
+        live.presenceState = () =>
+            ({
+                [PEER]: [{ userId: PEER, name: 'Peer', color: '#000000', page: 0, isAnonymous: false }],
+            }) as ReturnType<FakeChannel['presenceState']>;
+        for (const h of live.handlers) {
+            if (h.type === 'presence' && h.event === 'sync') {
+                h.handler({ payload: undefined });
+            }
+        }
+    };
+
+    const drawStroke = (rt: DocRealtimeChannel) => {
+        rt.publisher.start({ strokeId: 's1', page: 0, kind: 'stroke', color: '#000000', w: 0.01 });
+        rt.publisher.append(new Array(3 * 50).fill(0.5));
+        rt.publisher.end();
+    };
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('streams live ink while joined with someone watching', () => {
+        const { rt, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        peerJoins(live);
+
+        drawStroke(rt);
+
+        expect(live.send).toHaveBeenCalled();
+    });
+
+    it('sends no live ink (no REST fallback burst) once the channel drops', () => {
+        const { rt, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        peerJoins(live);
+
+        // The socket drops: realtime-js reports the channel and leaves its state.
+        live.state = 'errored';
+        live.status('CHANNEL_ERROR');
+        drawStroke(rt);
+        rt.publisher.cancel();
+
+        expect(live.send).not.toHaveBeenCalled();
+    });
+
+    it('does not push presence while down, and announces itself again on rejoin', () => {
+        vi.useFakeTimers();
+        const { rt, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        expect(live.track).toHaveBeenCalledTimes(1);
+
+        live.state = 'errored';
+        live.status('TIMED_OUT');
+        vi.advanceTimersByTime(5000);
+        rt.setPage(3);
+        vi.advanceTimersByTime(5000);
+        expect(live.track).toHaveBeenCalledTimes(1);
+
+        live.state = 'joined';
+        live.status('SUBSCRIBED');
+        expect(live.track).toHaveBeenCalledTimes(2);
+        expect(live.track).toHaveBeenLastCalledWith(expect.objectContaining({ page: 3 }));
+    });
+});
+
 describe('parseMembershipChange', () => {
     it('accepts the trigger payload, including a removal', () => {
         expect(parseMembershipChange(membership(SELF, null))).toEqual({

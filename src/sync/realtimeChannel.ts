@@ -193,10 +193,7 @@ export class DocRealtimeChannel {
 
         this.channel = channel;
         channel.subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-                // Only write path for track() — force so join/reconnect always announce.
-                this.trackPresence({ force: true });
-            } else if (status === 'CHANNEL_ERROR' && !this.stopped) {
+            if (status === 'CHANNEL_ERROR' && !this.stopped) {
                 // Also what a refused join looks like: a removed member's
                 // rejoin fails the realtime.messages policy on doc:{id}. A
                 // transport error lands here too; the re-check tells them
@@ -205,7 +202,12 @@ export class DocRealtimeChannel {
                 // join there is refused, which says nothing about access.)
                 this.opts.onMembershipChanged?.();
             }
+            // Join state first: presence and live ink only go out while joined.
             this.onChannelStatus('live', status);
+            if (status === 'SUBSCRIBED') {
+                // Only write path for track() — force so join/reconnect always announce.
+                this.trackPresence({ force: true });
+            }
         });
 
         // Receive-only: no presence, and nothing is ever sent on it.
@@ -255,6 +257,17 @@ export class DocRealtimeChannel {
         }
         if (status !== 'SUBSCRIBED') {
             this.joined[key] = false;
+            if (key === 'live') {
+                // Whoever was watching is not reachable until the rejoin's
+                // presence sync says so again; a stroke drawn meanwhile is
+                // not streamed (it still lands as a committed row).
+                this.hasRemoteAudience = false;
+                this.pending = [];
+                if (this.flushTimer) {
+                    clearTimeout(this.flushTimer);
+                    this.flushTimer = null;
+                }
+            }
             this.updateDbFallback();
             return;
         }
@@ -387,7 +400,9 @@ export class DocRealtimeChannel {
             this.presenceTrackTimer = null;
         }
         const channel = this.channel;
-        if (this.stopped || !channel) {
+        // Not while the channel is down: realtime-js would queue the push and
+        // replay it on rejoin, and the rejoin announces itself (force) anyway.
+        if (this.stopped || !channel || !this.joined.live) {
             return;
         }
         const force = opts?.force === true;
@@ -411,6 +426,11 @@ export class DocRealtimeChannel {
         this.lastTrackedPage = page;
         this.lastPresenceTrackAt = Date.now();
         void channel.track({ ...this.opts.self });
+    }
+
+    /** doc:{id} is joined right now, so a send goes over the websocket. */
+    private isLive(): boolean {
+        return this.joined.live && this.channel?.state === 'joined';
     }
 
     // ---- Live ink publishing (called by InkController) -------------------
@@ -465,8 +485,14 @@ export class DocRealtimeChannel {
         this.send({ ...metaToMsg(meta, this.opts.self.userId), pts, ...(extra ?? {}) });
     }
 
+    /**
+     * Live ink rides the websocket or not at all. On a channel that is not
+     * joined realtime-js falls back to one REST request per send — a burst of
+     * them for every stroke while Realtime is down — for previews nobody can
+     * receive. Committed strokes still reach everyone through the outbox.
+     */
     private send(payload: InkProgressMsg): void {
-        if (!this.channel || this.stopped || !this.hasRemoteAudience) {
+        if (!this.channel || this.stopped || !this.hasRemoteAudience || !this.isLive()) {
             return;
         }
         void this.channel

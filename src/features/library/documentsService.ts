@@ -382,7 +382,7 @@ export const importDocumentFromImslp = async (
     // stored, so a slow or failed read here must not undo a paid import.
     let pageCount: number | null = document.page_count;
     try {
-        const bytes = await loadDocumentBytes(document, { userId: ownerId });
+        const bytes = await loadDocumentBytes(document, { userId: ownerId, role: 'owner' });
         pageCount = await countPdfPages(bytes);
         if (pageCount !== null) {
             await getSupabase().from('documents').update({ page_count: pageCount }).eq('id', id);
@@ -781,19 +781,28 @@ export const loadDocumentBytes = async (
         preloaded?: PreloadedBytes;
         prefetch?: BytesPrefetch;
         userId?: string;
+        /**
+         * The caller's confirmed role, stored with the bytes. fetchMyRole only
+         * stamps a cache row that already exists, and on a score's first open
+         * on this device the row is written here, after the role came back —
+         * without this the offline copy had no role, and the next offline open
+         * was view-only with nothing able to lift it.
+         */
+        role?: MemberRole | null;
         /** Asked for by callers with a progress UI; switches the download to a streamed read. */
         onProgress?: (progress: UploadProgress) => void;
     } = {},
 ): Promise<ArrayBuffer> => {
     const wantRev = doc.content_rev ?? 0;
     const { preloaded, prefetch, userId, onProgress } = options;
+    const role = options.role ?? undefined;
     if (preloaded && preloaded.contentRev >= wantRev) {
         // The warm open already read and materialised these bytes; a second
         // Dexie read would hold a second multi-megabyte copy for nothing.
-        if (preloaded.archivedAt !== doc.archived_at) {
+        if (preloaded.archivedAt !== doc.archived_at || role) {
             const cached = await getCachedPdf(doc.id);
-            if (cached) {
-                await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
+            if (cached && (cached.archivedAt !== doc.archived_at || (role && cached.myRole !== role))) {
+                await putCachedPdf({ ...cached, archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
             }
         }
         return preloaded.bytes;
@@ -802,8 +811,8 @@ export const loadDocumentBytes = async (
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
         // Refresh the archive flag from the row we were handed, same as fetchMyRole
         // does for the role — an offline open must know the score is read-only.
-        if (cached.archivedAt !== doc.archived_at) {
-            await putCachedPdf({ ...cached, archivedAt: doc.archived_at });
+        if (cached.archivedAt !== doc.archived_at || (role && cached.myRole !== role)) {
+            await putCachedPdf({ ...cached, archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
         }
         return readCachedPdfBytes(cached.bytes);
     }
@@ -840,7 +849,7 @@ export const loadDocumentBytes = async (
         bytes,
         title: doc.title,
         cachedAt: new Date().toISOString(),
-        myRole: cached?.myRole,
+        myRole: role ?? cached?.myRole,
         contentRev: wantRev,
         archivedAt: doc.archived_at,
         userId: userId ?? cached?.userId,

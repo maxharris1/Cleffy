@@ -54,6 +54,9 @@ const makeApi = (online: { value: boolean }): AnnotationsApi & { inserted: strin
         async fetchOne() {
             return { data: null, error: online.value ? null : down };
         },
+        async fetchMany() {
+            return { data: [], error: online.value ? null : down };
+        },
         async fetchSince() {
             return { data: [], error: online.value ? null : down };
         },

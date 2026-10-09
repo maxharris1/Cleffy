@@ -30,6 +30,14 @@ export interface PendingOp {
     /** Full row snapshot at enqueue time (server payload source). */
     annotation: Annotation;
     queuedAt: string;
+    /**
+     * Restores only: the tombstone (deleted_at) this restore undoes. A server
+     * row deleted at any OTHER instant was erased again by someone after it,
+     * and that newer delete wins (see SyncEngine.reconcile). Absent on ops
+     * queued before this field existed — those restore as they always did.
+     * Plain field, not indexed — no Dexie version bump needed.
+     */
+    baseDeletedAt?: string | null;
 }
 
 export interface SyncState {
