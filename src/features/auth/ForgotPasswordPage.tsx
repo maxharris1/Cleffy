@@ -15,7 +15,7 @@ class ResetProblem extends Error {}
  * mailed, there is no account, or the account's mail could not go out — the
  * page says the same neutral thing, so it cannot be used to find out who has
  * an account. Only answers that are the same for every address (a malformed
- * address, rate limiting, no connection) are reported as errors.
+ * address, the per-IP request limit, no connection) are reported as errors.
  */
 export const ForgotPasswordPage = () => {
     const [sentTo, setSentTo] = useState<string | null>(null);

@@ -61,6 +61,8 @@ describe('mapAuthError — password policy refusals', () => {
 });
 
 describe('passwordResetProblem', () => {
+    // Each of these is raised by GoTrue only AFTER it has found the account, so
+    // an unknown address (a plain 200) can never produce it.
     it('answers neutrally for anything only an existing account can cause', () => {
         // The per-address resend limit: only an account has a last-sent time.
         expect(
@@ -72,29 +74,45 @@ describe('passwordResetProblem', () => {
                 ),
             ),
         ).toBeNull();
-        // The account's mail could not be sent.
+        // The project-wide email-send cap, checked only when a mail is sent.
+        expect(
+            passwordResetProblem(new AuthApiError('email rate limit exceeded', 429, 'over_email_send_rate_limit')),
+        ).toBeNull();
+        // A 429 we cannot place before the lookup.
+        expect(passwordResetProblem(new AuthApiError('Too many requests', 429, undefined))).toBeNull();
+        // The mail validator's verdict on the account's address.
+        expect(
+            passwordResetProblem(new AuthApiError('Email address "a@b.test" is invalid', 400, 'email_address_invalid')),
+        ).toBeNull();
+        expect(
+            passwordResetProblem(
+                new AuthApiError('Email address "a@b.test" cannot be used', 400, 'email_address_not_authorized'),
+            ),
+        ).toBeNull();
+        // The account's mail could not be sent, quickly or slowly.
         expect(
             passwordResetProblem(new AuthApiError('Error sending recovery email', 500, 'unexpected_failure')),
         ).toBeNull();
+        expect(passwordResetProblem(new AuthRetryableFetchError('Gateway Timeout', 504))).toBeNull();
         expect(passwordResetProblem(new Error('something else entirely'))).toBeNull();
     });
 
-    it('tells the person to wait when the request rate is limited for everyone', () => {
+    it('tells the person to wait when the per-IP request limit, checked before the lookup, is hit', () => {
         expect(
             passwordResetProblem(new AuthApiError('Request rate limit reached', 429, 'over_request_rate_limit')),
         ).toMatch(/Wait a few minutes/);
-        expect(
-            passwordResetProblem(new AuthApiError('Email rate limit exceeded', 429, 'over_email_send_rate_limit')),
-        ).toMatch(/Wait a few minutes/);
     });
 
-    it('reports an address GoTrue will not take, and a request that never got an answer', () => {
+    it('reports a malformed address, and a request that never got an answer', () => {
         expect(
             passwordResetProblem(
                 new AuthApiError('Unable to validate email address: invalid format', 400, 'validation_failed'),
             ),
         ).toBe('Enter a valid email address.');
         expect(passwordResetProblem(new AuthRetryableFetchError('Failed to fetch', 0))).toMatch(
+            /Check your connection/,
+        );
+        expect(passwordResetProblem(new AuthRetryableFetchError('Service Unavailable', 503))).toMatch(
             /Check your connection/,
         );
     });

@@ -215,7 +215,26 @@ describe('ForgotPasswordPage', () => {
         expect(screen.queryByText(/Could not send/)).not.toBeInTheDocument();
     });
 
-    it('tells the person to wait when everyone is being rate limited', async () => {
+    it('answers the project-wide email cap and a rejected address like a success too', async () => {
+        // Both are raised only once GoTrue has found the account: with the cap
+        // used up, "wait" would single out exactly the addresses that exist.
+        requestPasswordReset.mockRejectedValue(
+            new AuthApiError('email rate limit exceeded', 429, 'over_email_send_rate_limit'),
+        );
+        await submit();
+        expect(await screen.findByText(NEUTRAL)).toBeInTheDocument();
+        expect(screen.queryByText(/Wait a few minutes/)).not.toBeInTheDocument();
+        cleanup();
+
+        requestPasswordReset.mockRejectedValue(
+            new AuthApiError('Email address "ana@x.test" is invalid', 400, 'email_address_invalid'),
+        );
+        await submit();
+        expect(await screen.findByText(NEUTRAL)).toBeInTheDocument();
+        expect(screen.queryByText(/Enter a valid email/)).not.toBeInTheDocument();
+    });
+
+    it('tells the person to wait when the per-IP request limit is hit', async () => {
         requestPasswordReset.mockRejectedValue(
             new AuthApiError('Request rate limit reached', 429, 'over_request_rate_limit'),
         );
