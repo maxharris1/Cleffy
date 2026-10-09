@@ -26,7 +26,8 @@ import { servedModes, stripeClient } from '../_shared/stripe.ts';
  *  * the body must carry the account's current password, verified against
  *    GoTrue. A leaked access token (an XSS, a borrowed device) can do a lot of
  *    damage in an hour, but it must not be able to erase a paying teacher's
- *    library and roster for good.
+ *    library and roster for good. A share-link guest has no password, and is
+ *    deleted on the confirmation alone (see _shared/accountDeletion.ts).
  *
  * A retry after success is answered 200 `already_deleted`: the JWT still
  * verifies until it expires, and GoTrue then says the user no longer exists,
@@ -375,7 +376,11 @@ Deno.serve(async (req) => {
         userType: user.app_metadata?.user_type === 'student' ? ('student' as const) : null,
     };
 
-    // The refusals need no password: answer them before asking GoTrue anything.
+    // The student refusal needs no password: answer it before asking GoTrue
+    // anything. A share-link guest has no password to give; the session is
+    // the whole of a guest's identity, and what deleting a guest takes away
+    // (their memberships, their name) is no more than that session can already
+    // remove by leaving each score.
     if (!caller.isAnonymous && caller.userType !== 'student') {
         const password = typeof body.password === 'string' ? body.password : '';
         if (!user.email || password.length === 0) {

@@ -225,6 +225,16 @@ export const signOut = async (): Promise<void> => {
     await getSupabase().auth.signOut();
     noteLibraryMutation();
     rememberSession(null);
+    await clearAccountCachesFromDevice();
+};
+
+/**
+ * What sign-out removes from this browser: the signed-out account's cached
+ * scores, lists and cloud-score marks. Device-only (`local-…`) scores and the
+ * app's preferences are not the account's and stay. Also the tail of deleting
+ * a guest profile (accountDeletion.ts), which ends the same way.
+ */
+export const clearAccountCachesFromDevice = async (): Promise<void> => {
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const { clearCloudAnnotationData } = await import('@/sync/signOutSync');

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
+import { GUEST_DELETED_PATH, deleteGuestProfile } from '@/features/account/accountDeletion';
 import {
     DEFAULT_LINK_EXPIRY,
     DEFAULT_LINK_ROLE,
@@ -33,10 +34,17 @@ export interface ShareDialogProps {
     role: MemberRole;
     /** False for a roster student, whose scores are their teacher's to withdraw. */
     canLeave?: boolean;
+    /** A share-link guest (anonymous account), who may also delete their guest profile here. */
+    isGuest?: boolean;
     onClose: () => void;
     /** The caller left the score; local caches are the parent's to purge once the viewer is down. */
     onLeft?: () => void;
+    /** The guest profile is gone. Defaults to a full page load of the farewell page; tests replace it. */
+    onGuestDeleted?: () => void;
 }
+
+/** Full page load: nothing of the deleted guest may survive in memory (see DeleteAccountSection). */
+const leaveForGuestDeletedPage = () => window.location.replace(GUEST_DELETED_PATH);
 
 const ROLE_LABEL: Record<ShareRole, string> = { editor: 'Can edit', viewer: 'View only' };
 
@@ -47,12 +55,29 @@ const errorText = (err: unknown, fallback: string) => (err instanceof Error ? er
  * manages who has access; a member sees what they can do (and, as an editor,
  * who else is here) and can leave.
  */
-export const ShareDialog = ({ docId, userId, role, canLeave = true, onClose, onLeft }: ShareDialogProps) => (
+export const ShareDialog = ({
+    docId,
+    userId,
+    role,
+    canLeave = true,
+    isGuest = false,
+    onClose,
+    onLeft,
+    onGuestDeleted = leaveForGuestDeletedPage,
+}: ShareDialogProps) => (
     <Dialog label={role === 'owner' ? 'Share this score' : 'Sharing'} onClose={onClose}>
         {role === 'owner' ? (
             <OwnerSharing docId={docId} userId={userId} />
         ) : (
-            <MemberSharing docId={docId} userId={userId} role={role} canLeave={canLeave} onLeft={onLeft} />
+            <MemberSharing
+                docId={docId}
+                userId={userId}
+                role={role}
+                canLeave={canLeave}
+                isGuest={isGuest}
+                onLeft={onLeft}
+                onGuestDeleted={onGuestDeleted}
+            />
         )}
     </Dialog>
 );
@@ -493,19 +518,23 @@ const MemberSharing = ({
     userId,
     role,
     canLeave,
+    isGuest,
     onLeft,
+    onGuestDeleted,
 }: {
     docId: string;
     userId: string;
     role: MemberRole;
     canLeave: boolean;
+    isGuest: boolean;
     onLeft?: () => void;
+    onGuestDeleted: () => void;
 }) => {
     // Only editors may list collaborators (list_document_members refuses
     // viewers, who never saw names beyond presence).
     const canList = role === 'editor';
     const [members, setMembers] = useState<DocumentMemberListing[] | null>(null);
-    const [confirming, setConfirming] = useState(false);
+    const [confirming, setConfirming] = useState<'leave' | 'deleteGuest' | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -535,14 +564,29 @@ const MemberSharing = ({
         setError(null);
         try {
             await leaveDocument(docId);
-            setConfirming(false);
+            setConfirming(null);
             onLeft?.();
         } catch (err) {
-            setConfirming(false);
+            setConfirming(null);
             setError(errorText(err, 'Could not leave this score.'));
         } finally {
             setBusy(false);
         }
+    };
+
+    const deleteGuest = async () => {
+        setBusy(true);
+        setError(null);
+        try {
+            await deleteGuestProfile();
+        } catch (err) {
+            setConfirming(null);
+            setBusy(false);
+            setError(errorText(err, 'Could not delete your guest profile. Please try again.'));
+            return;
+        }
+        // Stays busy: the page is about to be replaced.
+        onGuestDeleted();
     };
 
     return (
@@ -580,15 +624,27 @@ const MemberSharing = ({
 
             {error ? <ErrorText className="mt-3">{error}</ErrorText> : null}
 
-            {canLeave ? (
-                <div className="mt-5 flex justify-end">
-                    <Button variant="dangerGhost" size="sm" disabled={busy} onClick={() => setConfirming(true)}>
-                        Leave score
-                    </Button>
+            {canLeave || isGuest ? (
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    {isGuest ? (
+                        <Button
+                            variant="dangerGhost"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => setConfirming('deleteGuest')}
+                        >
+                            Delete my guest profile
+                        </Button>
+                    ) : null}
+                    {canLeave ? (
+                        <Button variant="dangerGhost" size="sm" disabled={busy} onClick={() => setConfirming('leave')}>
+                            Leave score
+                        </Button>
+                    ) : null}
                 </div>
             ) : null}
 
-            {confirming ? (
+            {confirming === 'leave' ? (
                 <ConfirmDialog
                     title="Leave this score?"
                     body="It will be removed from your library and from this device. Marks you made stay on the score for everyone else. To come back you would need a new link from its owner."
@@ -596,7 +652,18 @@ const MemberSharing = ({
                     danger
                     busy={busy}
                     onConfirm={() => void leave()}
-                    onCancel={() => setConfirming(false)}
+                    onCancel={() => setConfirming(null)}
+                />
+            ) : null}
+            {confirming === 'deleteGuest' ? (
+                <ConfirmDialog
+                    title="Delete your guest profile?"
+                    body="You will be removed from every score shared with you as a guest, your guest name is deleted, and this device forgets you. Marks you made stay on the scores, no longer attributed to you. To come back you would need a new link. This cannot be undone."
+                    confirmLabel={busy ? 'Deleting…' : 'Delete guest profile'}
+                    danger
+                    busy={busy}
+                    onConfirm={() => void deleteGuest()}
+                    onCancel={() => setConfirming(null)}
                 />
             ) : null}
         </>

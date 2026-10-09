@@ -282,6 +282,10 @@ export const PRIVACY_POLICY: LegalDocument = {
                 p(
                     'This cannot be undone. Copies may persist in our providers’ backups and logs for a limited time before they expire.',
                 ),
+                // ShareDialog's guest action → delete-account's guest path (_shared/accountDeletion.ts deleteGuest).
+                p(
+                    'If you joined a score through a share link without an account, you can delete that guest profile from the score’s Sharing panel. You are removed from every score shared with you as a guest, the guest sign-in and the name you gave are deleted, and markings you made stay on those scores, no longer attributed to you.',
+                ),
             ],
         },
         {

@@ -13,6 +13,12 @@ const revokeShareLink = vi.fn();
 const setMemberRole = vi.fn();
 const removeMember = vi.fn();
 const leaveDocument = vi.fn();
+const deleteGuestProfile = vi.fn();
+
+vi.mock('@/features/account/accountDeletion', () => ({
+    GUEST_DELETED_PATH: '/account-deleted?guest=1',
+    deleteGuestProfile: () => deleteGuestProfile(),
+}));
 
 vi.mock('@/features/share/shareService', async () => {
     const actual = await vi.importActual<typeof ShareServiceModule>('@/features/share/shareService');
@@ -355,5 +361,64 @@ describe('ShareDialog for a member', () => {
     it('hides Leave when the caller cannot leave', () => {
         render(<ShareDialog docId="doc-1" userId="vi" role="viewer" canLeave={false} onClose={vi.fn()} />);
         expect(screen.queryByRole('button', { name: 'Leave score' })).not.toBeInTheDocument();
+    });
+
+    it('offers a registered member no guest-profile deletion', () => {
+        render(<ShareDialog docId="doc-1" userId="vi" role="viewer" onClose={vi.fn()} />);
+        expect(screen.queryByRole('button', { name: 'Delete my guest profile' })).not.toBeInTheDocument();
+    });
+});
+
+describe('ShareDialog for a share-link guest', () => {
+    it('deletes the guest profile after confirming, then leaves the page', async () => {
+        const user = userEvent.setup();
+        const onGuestDeleted = vi.fn();
+        deleteGuestProfile.mockResolvedValue(undefined);
+        render(
+            <ShareDialog
+                docId="doc-1"
+                userId="guest"
+                role="editor"
+                isGuest
+                onClose={vi.fn()}
+                onGuestDeleted={onGuestDeleted}
+            />,
+        );
+
+        // Leaving one score is still on offer beside it.
+        expect(screen.getByRole('button', { name: 'Leave score' })).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Delete my guest profile' }));
+        const confirm = screen.getByRole('dialog', { name: 'Delete your guest profile?' });
+        expect(confirm).toHaveTextContent(/removed from every score shared with you/);
+        expect(confirm).toHaveTextContent(/Marks you made stay on the scores/);
+        expect(deleteGuestProfile).not.toHaveBeenCalled();
+        await user.click(within(confirm).getByRole('button', { name: 'Delete guest profile' }));
+
+        await waitFor(() => expect(onGuestDeleted).toHaveBeenCalled());
+        expect(deleteGuestProfile).toHaveBeenCalledTimes(1);
+        expect(leaveDocument).not.toHaveBeenCalled();
+    });
+
+    it('stays put and explains when the deletion did not finish', async () => {
+        const user = userEvent.setup();
+        const onGuestDeleted = vi.fn();
+        deleteGuestProfile.mockRejectedValue(new Error('We could not finish deleting your guest profile.'));
+        render(
+            <ShareDialog
+                docId="doc-1"
+                userId="guest"
+                role="viewer"
+                isGuest
+                onClose={vi.fn()}
+                onGuestDeleted={onGuestDeleted}
+            />,
+        );
+
+        await user.click(screen.getByRole('button', { name: 'Delete my guest profile' }));
+        await user.click(screen.getByRole('button', { name: 'Delete guest profile' }));
+
+        expect(await screen.findByText(/could not finish deleting your guest profile/)).toBeInTheDocument();
+        expect(onGuestDeleted).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: 'Delete my guest profile' })).toBeEnabled();
     });
 });

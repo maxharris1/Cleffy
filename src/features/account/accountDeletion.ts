@@ -36,11 +36,19 @@ export class AccountDeletionError extends Error {
  * account is gone (or was already gone); otherwise throws an
  * AccountDeletionError carrying the server's own explanation, which is written
  * for the person reading it and says whether anything was deleted.
+ *
+ * `password` is required for a registered account and absent for a share-link
+ * guest, who has none (the server tells the two apart, not this argument).
  */
-export const requestAccountDeletion = async (password: string): Promise<void> => {
+export const requestAccountDeletion = async (password?: string): Promise<void> => {
     let response: Response;
     try {
-        response = await callEdgeFunction('delete-account', { confirm: DELETE_ACCOUNT_CONFIRMATION, password });
+        response = await callEdgeFunction(
+            'delete-account',
+            password === undefined
+                ? { confirm: DELETE_ACCOUNT_CONFIRMATION }
+                : { confirm: DELETE_ACCOUNT_CONFIRMATION, password },
+        );
     } catch (err) {
         throw new AccountDeletionError(
             err instanceof Error && err.message === 'Not signed in'
@@ -72,6 +80,60 @@ export const requestAccountDeletion = async (password: string): Promise<void> =>
     );
 };
 
+/**
+ * Drop this browser's session for an account the server has just deleted,
+ * WITHOUT asking the server. supabase-js has no such call: signOut() — even
+ * with `scope: 'local'` — first POSTs /auth/v1/logout, which for a deleted
+ * user can only fail (GoTrue answers 403 user_not_found), and is a request to
+ * a server that has already done everything there was to do.
+ *
+ * The client reads its session from storage on every use (persistSession), so
+ * removing the stored copy — each `*-auth-token` key and the iOS restore
+ * cookie — is what signs this tab out; stopping the refresh ticker keeps it
+ * from trying to refresh a token that no longer exists in the meantime. The
+ * React tree still holds the session it last saw, so callers finish with a
+ * full page load.
+ */
+export const forgetLocalSession = (): void => {
+    try {
+        void getSupabase()
+            .auth.stopAutoRefresh()
+            .catch(() => undefined);
+    } catch {
+        // The client is unavailable: there is no ticker to stop.
+    }
+    forgetStoredSessions();
+};
+
+/** Where a deleted guest profile lands: the same page, worded for a guest. */
+export const GUEST_DELETED_PATH = `${ACCOUNT_DELETED_PATH}?guest=1`;
+
+/**
+ * A share-link guest leaving for good: removed from every score shared with
+ * them and their anonymous account deleted, by the same delete-account
+ * function (it needs no password from a guest and makes no billing calls).
+ *
+ * Marks they made stay on the scores — so what has not reached the server yet
+ * is uploaded first, best effort, the same way sign-out does it. Afterwards
+ * the device forgets the guest the way sign-out forgets an account: their
+ * cached scores and cloud-score marks go, and anything opened from this device
+ * (not the guest's) stays. Throws an AccountDeletionError, with nothing
+ * deleted locally, when the server did not finish.
+ */
+export const deleteGuestProfile = async (): Promise<void> => {
+    const { clearAccountCachesFromDevice, syncBeforeSignOut } = await import('@/features/auth/session');
+    await syncBeforeSignOut().catch(() => undefined);
+    await requestAccountDeletion();
+    forgetLocalSession();
+    try {
+        const { stopSnapshotWrites } = await import('@/features/viewer/history/snapshotService');
+        stopSnapshotWrites();
+        await clearAccountCachesFromDevice();
+    } catch {
+        // IndexedDB unavailable: there is nothing cached to clear.
+    }
+};
+
 /** Preference keys the app writes (imslpPrefs, libraryPrefs, viewerPrefs, installPrefs). */
 const APP_KEY_PREFIX = 'cleffy:';
 
@@ -91,13 +153,7 @@ const APP_KEY_PREFIX = 'cleffy:';
  * already happened, and one store failing to clear must not stop the others.
  */
 export const clearLocalAccountData = async (): Promise<void> => {
-    try {
-        // Local scope: the server deleted every session along with the user,
-        // so there is nothing to revoke there — only this tab's copy to drop.
-        await getSupabase().auth.signOut({ scope: 'local' });
-    } catch {
-        // Already signed out, or the client is unavailable: storage is cleared below regardless.
-    }
+    forgetLocalSession();
 
     try {
         const db = getDb();

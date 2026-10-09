@@ -288,11 +288,53 @@ const payingTeacher = () => {
 };
 
 describe('who may delete', () => {
-    it('refuses a share-link guest without touching anything', async () => {
-        const world = payingTeacher();
-        const result = await deleteAccount(teacher({ isAnonymous: true }), world.ports());
-        expect(result).toMatchObject({ ok: false, status: 403, code: 'anonymous_session' });
-        expect(world.log).toEqual([]);
+    it('deletes a share-link guest: their memberships and the anonymous auth user, nothing else', async () => {
+        const world = new FakeWorld();
+        world.addDocument('doc-1', TEACHER);
+        world.addDocument('doc-2', TEACHER);
+        world.users.set('guest-1', { userType: null, teacherId: null });
+        world.memberships.add('doc-1:guest-1');
+        world.memberships.add('doc-2:guest-1');
+        world.analysisAuthors.set('doc-1', 'guest-1');
+
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+
+        expect(result).toMatchObject({
+            ok: true,
+            summary: { authUser: 'deleted', subscriptionsCanceled: 0, studentsDeleted: 0, documentsDeleted: 0 },
+        });
+        expect(world.users.has('guest-1')).toBe(false);
+        expect([...world.memberships].filter((key) => key.endsWith(':guest-1'))).toEqual([]);
+        // The owner's scores, files and access are untouched.
+        expect(world.documents.size).toBe(2);
+        expect(world.memberships.has('doc-1:teacher-1')).toBe(true);
+        expect(world.objects.size).toBe(4);
+        // Nothing about billing is asked: a guest cannot have checked out.
+        expect(world.log.some((line) => line.startsWith('stripe.'))).toBe(false);
+        expect(world.log).toEqual(['memberships:guest-1', 'release:guest-1', 'auth:guest-1']);
+    });
+
+    it('never touches Stripe for a guest, even with no Stripe key configured', async () => {
+        const world = new FakeWorld();
+        world.stripe = { live: null, test: null };
+        world.users.set('guest-1', { userType: null, teacherId: null });
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+        expect(result).toMatchObject({ ok: true });
+        expect(world.users.has('guest-1')).toBe(false);
+    });
+
+    it('answers a guest retry after success as done', async () => {
+        const world = new FakeWorld();
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+        expect(result).toMatchObject({ ok: true, summary: { authUser: 'not_found' } });
+    });
+
+    it('reports a guest deletion that could not remove the auth user', async () => {
+        const world = new FakeWorld();
+        world.users.set('guest-1', { userType: null, teacherId: null });
+        world.failAuthDelete = true;
+        const result = await deleteAccount({ userId: 'guest-1', isAnonymous: true, userType: null }, world.ports());
+        expect(result).toMatchObject({ ok: false, status: 502, code: 'auth_delete_failed' });
     });
 
     it('refuses a provisioned student: their teacher controls the account', async () => {

@@ -681,6 +681,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     userId={resolvedUserId}
                     role={state.role}
                     canLeave={canLeave}
+                    isGuest={Boolean(session?.user.is_anonymous)}
                     onClose={() => setShareOpen(false)}
                     onLeft={() => {
                         setShareOpen(false);

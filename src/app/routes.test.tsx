@@ -50,6 +50,7 @@ describe('AppRoutes public pages', () => {
         ['/privacy', 'Privacy Policy'],
         ['/terms', 'Terms of Service'],
         ['/account-deleted', 'Your account is deleted'],
+        ['/account-deleted?guest=1', 'Your guest profile is deleted'],
     ])('renders %s whatever the session', async (path, heading) => {
         render(
             <MemoryRouter initialEntries={[path]}>
