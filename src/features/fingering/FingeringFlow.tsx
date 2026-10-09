@@ -170,11 +170,11 @@ export const FingeringFlow = ({ docId, selection, layout, store, canWrite, score
         // Clear the overlay FIRST — createMany is a no-op while it is shown.
         store.setHistoryOverlay(null);
         if (commit && pendingProposals.length > 0) {
-            store.beginBatch();
+            const batch = store.beginBatch();
             try {
                 await store.createMany(pendingProposals);
             } finally {
-                store.endBatch();
+                store.endBatch(batch);
             }
         }
         setPendingProposals([]);

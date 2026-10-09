@@ -2,10 +2,21 @@ import { useOutletContext } from 'react-router';
 
 import { ImslpBrowser } from '@/features/imslp/ImslpBrowser';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { ErrorText } from '@/ui/ErrorText';
 
 export const SearchPage = () => {
-    const { uploading, onUpload, onImportImslp, uploadError } = useOutletContext<LibraryOutletContext>();
+    const {
+        uploading,
+        onUpload,
+        onImportImslp,
+        uploadError,
+        limitNotice,
+        quotaExhausted,
+        importLimit,
+        quotaUpgradeHint,
+        openPricing,
+    } = useOutletContext<LibraryOutletContext>();
 
     return (
         <div>
@@ -16,9 +27,27 @@ export const SearchPage = () => {
                 </p>
             </header>
 
+            {/* Quota refusals — and a cap the account is already at — get the
+                amber notice with its way to the plans, not red error text: same
+                split as LibraryPage. A student (limit 0) gets the plain copy. */}
+            <ScoreLimitNotice
+                limit={limitNotice}
+                upgradeHint={quotaUpgradeHint !== false}
+                onUpgrade={openPricing}
+                className="mt-4"
+            />
             {uploadError ? <ErrorText className="mt-4">{uploadError}</ErrorText> : null}
 
-            <ImslpBrowser busy={uploading} onImportFile={onUpload} onImportImslp={onImportImslp} showHeading={false} />
+            <ImslpBrowser
+                busy={uploading}
+                quotaExhausted={Boolean(quotaExhausted)}
+                importLimit={importLimit ?? null}
+                quotaUpgradeHint={quotaUpgradeHint !== false}
+                onUpgrade={openPricing}
+                onImportFile={onUpload}
+                onImportImslp={onImportImslp}
+                showHeading={false}
+            />
         </div>
     );
 };

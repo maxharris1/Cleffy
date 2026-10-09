@@ -1,8 +1,23 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { noteRetryAfter } from '@/lib/retryAfter';
 import { AnnotationStore } from '@/sync/annotationStore';
-import { ScribblerDb } from '@/sync/db';
-import { SyncEngine, type AnnotationsApi, type ApiError } from '@/sync/syncEngine';
+import { ScribblerDb, type PendingOp, type PendingOpType } from '@/sync/db';
+import {
+    classifyFailure,
+    fromServerRow,
+    observeRejections,
+    PERSISTENT_FAILURE_MS,
+    reconcileWithServer,
+    SyncEngine,
+    type AnnotationPatchRow,
+    type AnnotationsApi,
+    type ApiError,
+    type HeldRefusal,
+    type PatchResult,
+    type SyncHold,
+    type SyncRejection,
+} from '@/sync/syncEngine';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
@@ -23,21 +38,59 @@ const makeStroke = (id: string, page = 0): Annotation => ({
     seq: 0,
 });
 
-/** In-memory server: assigns seq like the DB trigger; can go offline. */
+const serverRow = (id: string, overrides: Partial<AnnotationRow> = {}): AnnotationRow => ({
+    id,
+    document_id: DOC,
+    page: 0,
+    kind: 'stroke',
+    color: '#00ff00',
+    payload: { pts: [0.5, 0.5, 0.5], w: 0.005 },
+    created_by: 'other',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    deleted_at: null,
+    seq: 7,
+    ...overrides,
+});
+
+/**
+ * In-memory server: assigns seq like the DB trigger; can go offline, refuse
+ * writes, or (like RLS) silently match nothing on update.
+ */
 class FakeApi implements AnnotationsApi {
     rows = new Map<string, AnnotationRow>();
     offline = false;
     nextSeq = 1;
     inserts = 0;
     updates = 0;
+    fetchOnes = 0;
+    /** Ids whose UPDATE matches nothing (RLS USING false), without an error. */
+    invisibleToUpdate = new Set<string>();
+    /** Report updated ids (new RPC) or null (pre-migration void RPC). */
+    reportsUpdatedIds = true;
+    /** Next N write calls fail with this error (then behave normally). */
+    failWrites: { error: ApiError; times: number } | null = null;
+    refreshAuth = vi.fn(async () => true);
 
     private err(): ApiError {
-        return { message: 'network down', transient: true };
+        return { message: 'network down', kind: 'retry' };
+    }
+
+    private injected(): ApiError | null {
+        if (this.offline) {
+            return this.err();
+        }
+        if (this.failWrites && this.failWrites.times > 0) {
+            this.failWrites.times -= 1;
+            return this.failWrites.error;
+        }
+        return null;
     }
 
     async insertIgnoreDuplicates(row: AnnotationInsert) {
-        if (this.offline) {
-            return { error: this.err() };
+        const error = this.injected();
+        if (error) {
+            return { error };
         }
         this.inserts += 1;
         if (!this.rows.has(row.id)) {
@@ -62,37 +115,89 @@ class FakeApi implements AnnotationsApi {
         return { error: null };
     }
 
-    async update(id: string, _docId: string, patch: AnnotationUpdate) {
-        if (this.offline) {
-            return { error: this.err() };
-        }
-        this.updates += 1;
+    private applyPatch(id: string, patch: AnnotationUpdate): boolean {
         const existing = this.rows.get(id);
-        if (existing) {
-            this.rows.set(id, { ...existing, ...patch, updated_at: new Date().toISOString(), seq: this.nextSeq++ });
+        if (!existing || this.invisibleToUpdate.has(id)) {
+            return false;
         }
-        return { error: null };
+        const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+        this.rows.set(id, { ...existing, ...defined, updated_at: new Date().toISOString(), seq: this.nextSeq++ });
+        return true;
     }
 
-    async updateMany(patches: Array<{ id: string; document_id: string } & AnnotationUpdate>) {
-        for (const p of patches) {
-            const result = await this.update(p.id, p.document_id, {
-                color: p.color,
-                payload: p.payload,
-                deleted_at: p.deleted_at,
-            });
-            if (result.error) {
-                return result;
+    async update(id: string, _docId: string, patch: AnnotationUpdate): Promise<PatchResult> {
+        const error = this.injected();
+        if (error) {
+            return { error };
+        }
+        this.updates += 1;
+        const hit = this.applyPatch(id, patch);
+        return { error: null, updatedIds: this.reportsUpdatedIds ? (hit ? [id] : []) : null };
+    }
+
+    async updateMany(patches: AnnotationPatchRow[]): Promise<PatchResult> {
+        // Like production: a single patch goes through the plain update.
+        if (patches.length === 1) {
+            const { id, document_id, ...patch } = patches[0]!;
+            return this.update(id, document_id, patch);
+        }
+        const error = this.injected();
+        if (error) {
+            return { error };
+        }
+        const updated: string[] = [];
+        for (const { id, document_id: _doc, ...patch } of patches) {
+            this.updates += 1;
+            if (this.applyPatch(id, patch)) {
+                updated.push(id);
             }
         }
-        return { error: null };
+        return { error: null, updatedIds: this.reportsUpdatedIds ? updated : null };
+    }
+
+    fetchOneError: ApiError | null = null;
+    /** documents.archived_at is set (plan lapsed): RLS refuses every write. */
+    archived = false;
+    archiveCheckError: ApiError | null = null;
+    archiveChecks = 0;
+
+    async fetchDocumentArchived(_docId: string) {
+        this.archiveChecks += 1;
+        if (this.offline) {
+            return { archived: false, error: this.err() };
+        }
+        if (this.archiveCheckError) {
+            return { archived: false, error: this.archiveCheckError };
+        }
+        return { archived: this.archived, error: null };
     }
 
     async fetchOne(id: string) {
+        this.fetchOnes += 1;
         if (this.offline) {
             return { data: null, error: this.err() };
         }
+        if (this.fetchOneError) {
+            return { data: null, error: this.fetchOneError };
+        }
         return { data: this.rows.get(id) ?? null, error: null };
+    }
+
+    fetchManys = 0;
+    fetchManyError: ApiError | null = null;
+
+    async fetchMany(docId: string, ids: string[]) {
+        this.fetchManys += 1;
+        if (this.offline) {
+            return { data: null, error: this.err() };
+        }
+        if (this.fetchManyError) {
+            return { data: null, error: this.fetchManyError };
+        }
+        const data = ids
+            .map((id) => this.rows.get(id))
+            .filter((r): r is AnnotationRow => !!r && r.document_id === docId);
+        return { data, error: null };
     }
 
     async fetchSince(docId: string, afterSeq: number, limit: number) {
@@ -111,13 +216,59 @@ let db: ScribblerDb;
 let store: AnnotationStore;
 let api: FakeApi;
 let engine: SyncEngine;
+let rejections: SyncRejection[];
+let holds: SyncHold[];
 
 beforeEach(async () => {
     db = new ScribblerDb(`test-${crypto.randomUUID()}`);
     store = new AnnotationStore(db, DOC);
     await store.load();
     api = new FakeApi();
-    engine = new SyncEngine({ db, store, api, docId: DOC, getUserId: () => USER });
+    rejections = [];
+    holds = [];
+    engine = new SyncEngine({
+        db,
+        store,
+        api,
+        docId: DOC,
+        getUserId: () => USER,
+        onRejected: (r) => rejections.push(r),
+        onHeld: (h) => holds.push(h),
+    });
+});
+
+afterEach(() => {
+    engine.stop();
+    vi.restoreAllMocks();
+});
+
+describe('classifyFailure', () => {
+    it.each([
+        [undefined, 'retry'],
+        [0, 'retry'],
+        [401, 'auth'],
+        [404, 'retry'],
+        [408, 'retry'],
+        [425, 'retry'],
+        [429, 'retry'],
+        [500, 'retry'],
+        [502, 'retry'],
+        [503, 'retry'],
+        [504, 'retry'],
+        [400, 'reject'],
+        [403, 'reject'],
+        [409, 'reject'],
+        [413, 'reject'],
+    ])('status %s → %s', (status, kind) => {
+        expect(classifyFailure('x', status).kind).toBe(kind);
+    });
+
+    it('carries a fresh Retry-After from a throttled response', () => {
+        noteRetryAfter({ status: 429, headers: new Headers({ 'retry-after': '7' }) });
+        expect(classifyFailure('slow down', 429)).toEqual({ message: 'slow down', kind: 'retry', retryAfterMs: 7000 });
+        // Consumed: the next throttle without a header has no hint.
+        expect(classifyFailure('slow down', 429).retryAfterMs).toBeUndefined();
+    });
 });
 
 describe('SyncEngine.flush', () => {
@@ -129,6 +280,8 @@ describe('SyncEngine.flush', () => {
         expect(api.rows.get('a1')?.created_by).toBe(USER);
         expect(await db.ops.count()).toBe(0);
         expect((await db.annotations.get('a1'))?.pending).toBe(0);
+        expect((await db.annotations.get('a1'))?.createdBy).toBe(USER);
+        expect(store.get('a1')?.createdBy).toBe(USER);
     });
 
     it('keeps ops queued while offline and drains after reconnect', async () => {
@@ -137,6 +290,7 @@ describe('SyncEngine.flush', () => {
         await store.delete('a1');
         await engine.flush();
         expect(await db.ops.count()).toBe(2);
+        expect(engine.pendingRetryDelayMs).not.toBeNull();
 
         api.offline = false;
         await engine.flush();
@@ -144,22 +298,10 @@ describe('SyncEngine.flush', () => {
         expect(api.rows.get('a1')?.deleted_at).not.toBeNull();
     });
 
-    it('drops rejected ops and repairs from server truth', async () => {
+    it('drops rejected ops, repairs from server truth, and tells the user', async () => {
         // Server already has the row (someone else's version).
-        api.rows.set('a1', {
-            id: 'a1',
-            document_id: DOC,
-            page: 0,
-            kind: 'stroke',
-            color: '#00ff00',
-            payload: { pts: [0.5, 0.5, 0.5], w: 0.005 },
-            created_by: 'other',
-            created_at: '2026-01-01T00:00:00Z',
-            updated_at: '2026-01-01T00:00:00Z',
-            deleted_at: null,
-            seq: 7,
-        });
-        api.update = async () => ({ error: { message: 'rls rejection', transient: false } });
+        api.rows.set('a1', serverRow('a1'));
+        api.update = async () => ({ error: { message: 'rls rejection', kind: 'reject' } });
 
         await store.create(makeStroke('a1')); // duplicate id; insert is ignoreDuplicates → fine
         await store.update('a1', { color: '#123456' }); // this update will be "rejected"
@@ -169,25 +311,69 @@ describe('SyncEngine.flush', () => {
         // Repair adopted the server row.
         expect(store.get('a1')?.color).toBe('#00ff00');
         expect(store.get('a1')?.seq).toBe(7);
+        expect((await db.annotations.get('a1'))?.color).toBe('#00ff00');
+        expect((await db.annotations.get('a1'))?.pending).toBe(0);
+        expect(rejections).toEqual([{ annotationId: 'a1', opType: 'update', reason: 'rls rejection' }]);
+    });
+
+    it('repair adopts the server row even when its seq equals the refused local edit', async () => {
+        // A synced row: local and server both at seq 7.
+        api.rows.set('a1', serverRow('a1', { color: '#00ff00', seq: 7 }));
+        await store.applyRemoteBatch([{ ...makeStroke('a1'), color: '#00ff00', seq: 7 }], new Set());
+        await store.update('a1', { color: '#ff0000' }); // local edit keeps seq 7
+        api.update = async () => ({ error: { message: 'check violation', kind: 'reject' } });
+
+        await engine.flush();
+
+        // Plain LWW (local.seq >= remote.seq) would have kept the refused edit.
+        expect(store.get('a1')?.color).toBe('#00ff00');
+        expect((await db.annotations.get('a1'))?.color).toBe('#00ff00');
     });
 
     it('discards local annotations the server never accepted', async () => {
-        api.insertIgnoreDuplicates = async () => ({ error: { message: 'rls rejection', transient: false } });
+        api.insertIgnoreDuplicates = async () => ({ error: { message: 'rls rejection', kind: 'reject' } });
         await store.create(makeStroke('a1'));
+        await store.update('a1', { color: '#222222' });
         await engine.flush();
 
         expect(store.get('a1')).toBeUndefined();
         expect(await db.annotations.get('a1')).toBeUndefined();
+        // The queued update for a row the server never had is dropped with it.
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
+    });
+
+    it('never drops a refused op before the repair fetch succeeds', async () => {
+        api.rows.set('a1', serverRow('a1'));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a1'))], new Set());
+        await store.update('a1', { color: '#123456' });
+        api.update = async () => ({ error: { message: 'forbidden', kind: 'reject' } });
+        api.fetchOneError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        // Op kept, local edit untouched, nobody told anything was lost.
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')?.color).toBe('#123456');
+        expect(rejections).toEqual([]);
+        expect(engine.pendingRetryDelayMs).not.toBeNull();
+
+        // Once the server can be read, the rejection completes.
+        api.fetchOneError = null;
+        await engine.flush();
+        expect(await db.ops.count()).toBe(0);
+        expect(store.get('a1')?.color).toBe('#00ff00');
+        expect(rejections).toHaveLength(1);
     });
 
     it('on batch reject, peels one-by-one so an innocent head is not discarded', async () => {
         const goodInsertMany = api.insertMany.bind(api);
         api.insertMany = async (rows) => {
             if (rows.length > 1) {
-                return { error: { message: 'batch rejected', transient: false } };
+                return { error: { message: 'batch rejected', kind: 'reject' } };
             }
             if (rows[0]?.id === 'a2') {
-                return { error: { message: 'rls rejection', transient: false } };
+                return { error: { message: 'rls rejection', kind: 'reject' } };
             }
             return goodInsertMany(rows);
         };
@@ -201,6 +387,373 @@ describe('SyncEngine.flush', () => {
         expect(store.get('a1')).toBeDefined();
         expect(store.get('a2')).toBeUndefined();
         expect(store.get('a3')).toBeDefined();
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a2']);
+    });
+});
+
+describe('SyncEngine expired session (401)', () => {
+    it('refreshes the session and retries the same op', async () => {
+        api.failWrites = { error: { message: 'JWT expired', kind: 'auth' }, times: 1 };
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+
+        expect(api.refreshAuth).toHaveBeenCalledTimes(1);
+        expect(api.rows.has('a1')).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+        expect(store.get('a1')).toBeDefined();
+        expect(rejections).toEqual([]);
+    });
+
+    it('keeps the op (no repair, no discard) when the refresh fails', async () => {
+        api.refreshAuth.mockResolvedValue(false);
+        api.failWrites = { error: { message: 'JWT expired', kind: 'auth' }, times: 5 };
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')).toBeDefined();
+        expect(api.fetchOnes).toBe(0);
+        expect(rejections).toEqual([]);
+        expect(engine.pendingRetryDelayMs).not.toBeNull();
+    });
+
+    it('treats a 401 that survives a refresh as retryable, not a rejection', async () => {
+        api.failWrites = { error: { message: 'JWT expired', kind: 'auth' }, times: 2 };
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+
+        expect(api.refreshAuth).toHaveBeenCalledTimes(1);
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')).toBeDefined();
+
+        await engine.flush();
+        expect(await db.ops.count()).toBe(0);
+    });
+});
+
+describe('SyncEngine throttling and backoff', () => {
+    it('429 keeps the op and waits at least the server Retry-After', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        api.failWrites = { error: { message: 'too many', kind: 'retry', retryAfterMs: 9000 }, times: 1 };
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')).toBeDefined();
+        expect(api.fetchOnes).toBe(0);
+        expect(engine.pendingRetryDelayMs).toBe(9000);
+        expect(rejections).toEqual([]);
+    });
+
+    it.each([408, 425, 500, 503])('%s keeps the op for a later retry', async (status) => {
+        api.failWrites = { error: classifyFailure('flaky', status), times: 1 };
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        expect(await db.ops.count()).toBe(1);
+        expect(rejections).toEqual([]);
+
+        await engine.flush();
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('backs off exponentially with jitter, capped at a minute', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        // Capture the engine's retry timers (long delays) instead of waiting
+        // them out; short ones (IndexedDB internals) run for real.
+        const realSetTimeout = globalThis.setTimeout;
+        const retries: Array<{ fire: () => void; delay: number }> = [];
+        vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, delay?: number) => {
+            if ((delay ?? 0) >= 100) {
+                retries.push({ fire: fn, delay: delay! });
+                return 1 as unknown as ReturnType<typeof setTimeout>;
+            }
+            return realSetTimeout(fn, delay);
+        }) as typeof setTimeout);
+
+        api.offline = true;
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        for (let i = 1; i < 9; i++) {
+            retries[i - 1]!.fire(); // the timer runs sync(), which fails again
+            await vi.waitFor(() => expect(retries).toHaveLength(i + 1));
+        }
+
+        // Jitter floor (random 0) is half the base: 1s, 2s, 4s … capped at 60s.
+        expect(retries.map((r) => r.delay)).toEqual([500, 1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+        expect(await db.ops.count()).toBe(1);
+    });
+
+    it('a new edit does not jump a scheduled retry', async () => {
+        api.failWrites = { error: { message: 'too many', kind: 'retry', retryAfterMs: 30_000 }, times: 1 };
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        expect(engine.pendingRetryDelayMs).toBe(30_000);
+
+        const flush = vi.spyOn(engine, 'flush');
+        engine.requestFlush();
+        await Promise.resolve();
+        expect(flush).not.toHaveBeenCalled();
+    });
+});
+
+describe('SyncEngine zero-row updates', () => {
+    it('treats an update RLS filtered out as a rejection and repairs from the server', async () => {
+        api.rows.set('a1', serverRow('a1', { color: '#00ff00', seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a1', { color: '#00ff00', seq: 3 }))], new Set());
+        await store.update('a1', { color: '#ff0000' });
+        api.invisibleToUpdate.add('a1'); // e.g. our role dropped to viewer
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(api.rows.get('a1')?.color).toBe('#00ff00');
+        expect(store.get('a1')?.color).toBe('#00ff00');
+        expect(rejections).toHaveLength(1);
+        expect(rejections[0]?.opType).toBe('update');
+    });
+
+    it('acks the rows a batch did update and repairs only the one it missed', async () => {
+        for (const id of ['a1', 'a2', 'a3']) {
+            api.rows.set(id, serverRow(id, { color: '#00ff00', seq: 3 }));
+            await store.applyRemoteBatch([fromServerRow(serverRow(id, { color: '#00ff00', seq: 3 }))], new Set());
+            await store.update(id, { color: '#ff0000' });
+        }
+        api.invisibleToUpdate.add('a2');
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(api.rows.get('a1')?.color).toBe('#ff0000');
+        expect(api.rows.get('a3')?.color).toBe('#ff0000');
+        expect(store.get('a2')?.color).toBe('#00ff00');
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a2']);
+    });
+
+    it('acks applied rows even when the repair of an earlier missed one cannot be fetched', async () => {
+        for (const id of ['a1', 'a2', 'a3']) {
+            api.rows.set(id, serverRow(id, { color: '#00ff00', seq: 3 }));
+            await store.applyRemoteBatch([fromServerRow(serverRow(id, { color: '#00ff00', seq: 3 }))], new Set());
+            await store.update(id, { color: '#ff0000' });
+        }
+        // The FIRST op is the one the server missed, and its repair fetch fails.
+        api.invisibleToUpdate.add('a1');
+        api.fetchOneError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        // a2 and a3 were applied by the RPC: acked, not left to be re-pushed
+        // over a collaborator's later edit on retry.
+        const queued = await db.ops.toArray();
+        expect(queued.map((o) => o.annotationId)).toEqual(['a1']);
+        expect((await db.annotations.get('a2'))?.pending).toBe(0);
+        expect((await db.annotations.get('a3'))?.pending).toBe(0);
+        // a1 is untouched until the server can be read.
+        expect(store.get('a1')?.color).toBe('#ff0000');
+        expect(rejections).toEqual([]);
+
+        // A collaborator now edits a2; the retry must not overwrite it.
+        api.rows.set('a2', serverRow('a2', { color: '#abcdef', seq: 50 }));
+        api.fetchOneError = null;
+        await engine.flush();
+
+        expect(api.rows.get('a2')?.color).toBe('#abcdef');
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
+    });
+
+    it('discards a mark whose row the server no longer has', async () => {
+        await store.applyRemoteBatch([fromServerRow(serverRow('gone', { seq: 3 }))], new Set());
+        await store.update('gone', { color: '#ff0000' });
+        await store.update('gone', { color: '#0000ff' });
+
+        await engine.flush();
+
+        expect(store.get('gone')).toBeUndefined();
+        expect(await db.annotations.get('gone')).toBeUndefined();
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('acks as before against the pre-migration RPC that cannot report rows', async () => {
+        api.reportsUpdatedIds = false;
+        api.rows.set('a1', serverRow('a1', { seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a1', { seq: 3 }))], new Set());
+        api.invisibleToUpdate.add('a1');
+        await store.update('a1', { color: '#ff0000' });
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections).toEqual([]);
+    });
+
+    it('an edit queued offline does not undelete a mark a collaborator erased', async () => {
+        api.rows.set('a1', serverRow('a1', { seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a1', { seq: 3 }))], new Set());
+        api.offline = true;
+        await store.update('a1', { color: '#ff0000' });
+        await engine.flush();
+
+        // Meanwhile a collaborator erases it.
+        api.rows.set('a1', serverRow('a1', { seq: 4, deleted_at: '2026-01-02T00:00:00Z' }));
+        api.offline = false;
+        await engine.sync();
+
+        expect(api.rows.get('a1')?.deleted_at).toBe('2026-01-02T00:00:00Z');
+    });
+});
+
+describe('SyncEngine archived score', () => {
+    const refuseWrites = () => {
+        const forbidden: ApiError = { message: 'new row violates row-level security policy', kind: 'reject' };
+        api.insertIgnoreDuplicates = async () => ({ error: forbidden });
+        api.insertMany = async () => ({ error: forbidden });
+        api.update = async () => ({ error: forbidden });
+        api.updateMany = async () => ({ error: forbidden });
+    };
+
+    it('keeps marks drawn offline on a score archived meanwhile, and says so', async () => {
+        await store.create(makeStroke('a1'));
+        await store.create(makeStroke('a2'));
+        await store.update('a2', { color: '#222222' });
+        api.archived = true;
+        const realInsertMany = api.insertMany.bind(api);
+        refuseWrites();
+
+        await engine.flush();
+
+        // Nothing discarded, nobody told their work was undone.
+        expect(await db.ops.count()).toBe(3);
+        expect(store.get('a1')).toBeDefined();
+        expect(store.get('a2')?.color).toBe('#222222');
+        expect(await db.annotations.get('a1')).toBeDefined();
+        expect(rejections).toEqual([]);
+        expect(holds).toEqual([{ reason: 'archived', pendingMarks: 2 }]);
+        // Retried slowly: nothing changes until the plan does.
+        expect(engine.pendingRetryDelayMs).toBeGreaterThanOrEqual(60_000);
+
+        // The owner resubscribes and the score is unarchived: the marks upload.
+        api.archived = false;
+        api.insertMany = realInsertMany;
+        api.insertIgnoreDuplicates = FakeApi.prototype.insertIgnoreDuplicates.bind(api);
+        api.update = FakeApi.prototype.update.bind(api);
+        api.updateMany = FakeApi.prototype.updateMany.bind(api);
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(api.rows.get('a1')).toBeDefined();
+        expect(api.rows.get('a2')?.color).toBe('#222222');
+    });
+
+    it('keeps an edit to an existing mark instead of reverting it', async () => {
+        api.rows.set('a1', serverRow('a1', { seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('a1', { seq: 3 }))], new Set());
+        await store.update('a1', { color: '#ff0000' });
+        api.archived = true;
+        refuseWrites();
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')?.color).toBe('#ff0000');
+        expect(rejections).toEqual([]);
+        expect(holds).toHaveLength(1);
+    });
+
+    it('keeps the op when whether the score is archived cannot be read', async () => {
+        await store.create(makeStroke('a1'));
+        refuseWrites();
+        api.archiveCheckError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')).toBeDefined();
+        expect(rejections).toEqual([]);
+        expect(api.fetchOnes).toBe(0);
+    });
+
+    it('still rejects (and reports) when the score is not archived', async () => {
+        await store.create(makeStroke('a1'));
+        refuseWrites();
+
+        await engine.flush();
+
+        expect(api.archiveChecks).toBeGreaterThan(0);
+        expect(await db.ops.count()).toBe(0);
+        expect(store.get('a1')).toBeUndefined();
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
+        expect(holds).toEqual([]);
+    });
+});
+
+describe('SyncEngine holding refusals (headless)', () => {
+    it('leaves a refused change queued and the mark as drawn, and reports the op', async () => {
+        await store.create(makeStroke('h1'));
+        await engine.flush();
+        await store.update('h1', { color: '#ff0000' });
+        api.invisibleToUpdate.add('h1'); // edit access lost meanwhile
+        const queued = await db.ops.toArray();
+        const held: HeldRefusal[] = [];
+        const seen: SyncRejection[] = [];
+        const stopObserving = observeRejections((r) => seen.push(r));
+        const headless = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC),
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onRejected: (r) => rejections.push(r),
+            onRefusalHeld: (refusal) => held.push(refusal),
+        });
+
+        await headless.flush();
+        headless.stop();
+        stopObserving();
+
+        expect(held).toEqual([
+            { opId: queued[0]!.opId, annotationId: 'h1', reason: 'the change matched no row this account may edit' },
+        ]);
+        expect(await db.ops.toArray()).toEqual(queued);
+        expect((await db.annotations.get('h1'))?.color).toBe('#ff0000');
+        expect(api.fetchOnes).toBe(0);
+        expect(rejections).toEqual([]);
+        expect(seen).toEqual([]);
+        expect(headless.pendingRetryDelayMs).toBeNull();
+    });
+});
+
+describe('observeRejections', () => {
+    it('reports every engine’s refusals, with the document, until unsubscribed', async () => {
+        const seen: { docId: string; annotationId: string }[] = [];
+        const stop = observeRejections(({ docId, annotationId }) => seen.push({ docId, annotationId }));
+        api.insertIgnoreDuplicates = async () => ({ error: { message: 'rls rejection', kind: 'reject' } });
+        await store.create(makeStroke('a1'));
+        await engine.flush();
+        stop();
+        await store.create(makeStroke('a2'));
+        await engine.flush();
+
+        expect(seen).toEqual([{ docId: DOC, annotationId: 'a1' }]);
+    });
+});
+
+describe('SyncEngine load ordering', () => {
+    it('sync waits for hydration so an overlap row cannot overwrite a newer mirror row', async () => {
+        // The mirror (from an earlier session) has a1 at seq 10.
+        await db.annotations.put({ ...makeStroke('a1'), color: '#aaaaaa', seq: 10, pending: 0 });
+        await db.syncState.put({ docId: DOC, watermarkSeq: 10 });
+        // The server still returns an older version inside the pull overlap.
+        api.rows.set('a1', serverRow('a1', { color: '#bbbbbb', seq: 5 }));
+
+        const fresh = new AnnotationStore(db, DOC);
+        const e = new SyncEngine({ db, store: fresh, api, docId: DOC, getUserId: () => USER });
+        // Engine first, as PdfViewport effects may order it — no explicit load().
+        await e.sync();
+        e.stop();
+
+        expect(fresh.get('a1')?.color).toBe('#aaaaaa');
+        expect((await db.annotations.get('a1'))?.color).toBe('#aaaaaa');
+        expect(fresh.getPage(0).has('a1')).toBe(true);
     });
 });
 
@@ -221,6 +774,19 @@ describe('SyncEngine.pullSince', () => {
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(1);
     });
 
+    it('refreshes an expired session for the pull too', async () => {
+        const real = api.fetchSince.bind(api);
+        let calls = 0;
+        api.fetchSince = async (...args) => {
+            calls += 1;
+            return calls === 1 ? { data: null, error: { message: 'JWT expired', kind: 'auth' } } : real(...args);
+        };
+        api.rows.set('r1', serverRow('r1', { seq: 1 }));
+        await engine.pullSince();
+        expect(api.refreshAuth).toHaveBeenCalledTimes(1);
+        expect(store.get('r1')).toBeDefined();
+    });
+
     it('skips rows with pending local ops (local intent wins until acked)', async () => {
         api.offline = true;
         await store.create(makeStroke('a1'));
@@ -228,19 +794,7 @@ describe('SyncEngine.pullSince', () => {
         api.offline = false;
 
         // Server has a conflicting version of a1.
-        api.rows.set('a1', {
-            id: 'a1',
-            document_id: DOC,
-            page: 0,
-            kind: 'stroke',
-            color: '#000000',
-            payload: { pts: [0.9, 0.9, 0.5], w: 0.005 },
-            created_by: 'other',
-            created_at: '2026-01-01T00:00:00Z',
-            updated_at: '2026-01-01T00:00:00Z',
-            deleted_at: null,
-            seq: 3,
-        });
+        api.rows.set('a1', serverRow('a1', { color: '#000000', seq: 3 }));
         await engine.pullSince();
         expect(store.get('a1')?.color).toBe('#ffffff'); // local intent preserved
     });
@@ -259,55 +813,54 @@ describe('SyncEngine.pullSince', () => {
     });
 });
 
-describe('SyncEngine.applyServerRow (broadcast path)', () => {
-    it('applies rows and advances the watermark monotonically', async () => {
-        await engine.applyServerRow({
-            id: 'b1',
+describe('SyncEngine.stop during an in-flight pull', () => {
+    it('writes neither rows nor a watermark once stopped', async () => {
+        await api.insertIgnoreDuplicates({
+            id: 'r1',
             document_id: DOC,
-            page: 4,
+            page: 0,
             kind: 'stroke',
-            color: '#123',
+            color: '#ff0000',
             payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
             created_by: 'other',
-            created_at: '2026-01-01T00:00:00Z',
-            updated_at: '2026-01-01T00:00:00Z',
-            deleted_at: null,
-            seq: 9,
         });
+        // Hold the fetch open, the way a slow network would, and stop the
+        // engine while it is pending — what the viewer does when the account
+        // loses the score and its local copy is about to be purged.
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const realFetch = api.fetchSince.bind(api);
+        api.fetchSince = async (...args: Parameters<FakeApi['fetchSince']>) => {
+            await gate;
+            return realFetch(...args);
+        };
+
+        const pull = engine.pullSince();
+        engine.stop();
+        release();
+        await pull;
+
+        expect(store.get('r1')).toBeUndefined();
+        expect(await db.annotations.where('docId').equals(DOC).count()).toBe(0);
+        expect(await db.syncState.get(DOC)).toBeUndefined();
+    });
+});
+
+describe('SyncEngine.applyServerRow (broadcast path)', () => {
+    it('applies rows and advances the watermark monotonically', async () => {
+        await engine.applyServerRow(serverRow('b1', { page: 4, color: '#123', seq: 9 }));
         expect(store.getPage(4).has('b1')).toBe(true);
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
 
         // Lower-seq stragglers never move the watermark backwards.
-        await engine.applyServerRow({
-            id: 'b2',
-            document_id: DOC,
-            page: 4,
-            kind: 'stroke',
-            color: '#123',
-            payload: { pts: [0.2, 0.2, 0.5], w: 0.005 },
-            created_by: 'other',
-            created_at: '2026-01-01T00:00:00Z',
-            updated_at: '2026-01-01T00:00:00Z',
-            deleted_at: null,
-            seq: 5,
-        });
+        await engine.applyServerRow(serverRow('b2', { page: 4, color: '#123', seq: 5 }));
         expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(9);
     });
 
     it('ignores rows for other documents', async () => {
-        await engine.applyServerRow({
-            id: 'x1',
-            document_id: 'someone-elses-doc',
-            page: 0,
-            kind: 'stroke',
-            color: '#123',
-            payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
-            created_by: 'other',
-            created_at: '2026-01-01T00:00:00Z',
-            updated_at: '2026-01-01T00:00:00Z',
-            deleted_at: null,
-            seq: 99,
-        });
+        await engine.applyServerRow(serverRow('x1', { document_id: 'someone-elses-doc', seq: 99 }));
         expect(store.get('x1')).toBeUndefined();
     });
 });
@@ -318,19 +871,16 @@ describe('offline → queue → flush → converge (integration)', () => {
         api.offline = true;
         await store.create(makeStroke('local1', 1));
         // Remote (the other collaborator) drew meanwhile.
-        api.rows.set('remote1', {
-            id: 'remote1',
-            document_id: DOC,
-            page: 1,
-            kind: 'highlight',
-            color: '#eab308',
-            payload: { pts: [0.3, 0.3, 0.5, 0.4, 0.3, 0.5], w: 0.0175 },
-            created_by: 'other',
-            created_at: '2026-01-01T00:00:00Z',
-            updated_at: '2026-01-01T00:00:00Z',
-            deleted_at: null,
-            seq: 41,
-        });
+        api.rows.set(
+            'remote1',
+            serverRow('remote1', {
+                page: 1,
+                kind: 'highlight',
+                color: '#eab308',
+                payload: { pts: [0.3, 0.3, 0.5, 0.4, 0.3, 0.5], w: 0.0175 },
+                seq: 41,
+            }),
+        );
         api.nextSeq = 42;
 
         await engine.sync(); // offline: nothing happens, op stays
@@ -344,5 +894,408 @@ describe('offline → queue → flush → converge (integration)', () => {
         // …and the remote stroke reached us.
         expect(store.getPage(1).has('remote1')).toBe(true);
         expect(await db.ops.count()).toBe(0);
+    });
+});
+
+describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () => {
+    /** M5 and M6 drawn by this device and synced, so the server holds both. */
+    const drawAndSync = async () => {
+        await store.create(makeStroke('m5'));
+        await store.create(makeStroke('m6'));
+        await engine.flush();
+        expect(await db.ops.count()).toBe(0);
+    };
+
+    it('does not resurrect a mark a collaborator erased while undo/redo sat in the outbox', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.undoLast(); // delete m6
+        await store.undoLast(); // delete m5
+        await store.redoLast(); // restore m5
+        await store.redoLast(); // restore m6
+        expect(await db.ops.count()).toBe(4);
+
+        // Meanwhile a collaborator erases m6.
+        const erasedAt = '2026-03-03T03:03:03.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: erasedAt, seq: api.nextSeq++ });
+        const updatesBefore = api.updates;
+
+        api.offline = false;
+        await engine.sync();
+
+        // The collaborator's newer delete stands, here and on the server…
+        expect(api.rows.get('m6')?.deleted_at).toBe(erasedAt);
+        expect(store.get('m6')?.deletedAt).toBe(erasedAt);
+        expect(store.getPage(0).has('m6')).toBe(false);
+        // …and the undo/redo pairs cancelled out: nothing was sent at all.
+        expect(api.updates).toBe(updatesBefore);
+        expect(api.rows.get('m5')?.deleted_at).toBeNull();
+        expect(store.getPage(0).has('m5')).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+        expect((await db.annotations.get('m6'))?.pending).toBe(0);
+        expect(rejections).toEqual([]);
+    });
+
+    it('sends only the net change for a mark edited several times offline', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.update('m5', { color: '#aa0000' });
+        await store.update('m5', { color: '#bb0000' });
+        await store.delete('m6');
+        await store.undoLast(); // restore m6
+        await store.delete('m6');
+        const updatesBefore = api.updates;
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.updates - updatesBefore).toBe(2); // one patch per mark
+        expect(api.rows.get('m5')?.color).toBe('#bb0000');
+        expect(api.rows.get('m6')?.deleted_at).not.toBeNull();
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('restores its own delete even when that delete landed but its answer was lost', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.undoLast(); // delete m6, queued
+        // The delete reaches the server, but the response never comes back.
+        const tombstone = store.get('m6')!.deletedAt!;
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: tombstone, seq: api.nextSeq++ });
+        await store.redoLast(); // restore m6, queued behind it
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(store.getPage(0).has('m6')).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('a lone restore does not undo a collaborator’s newer delete', async () => {
+        await drawAndSync();
+        await store.undoLast(); // delete m6 …
+        await engine.flush(); // … acked
+        api.offline = true;
+        await store.redoLast(); // restore m6, queued
+
+        // A collaborator brings m6 back and erases it again (a new tombstone).
+        const theirs = '2026-04-04T04:04:04.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: theirs, seq: api.nextSeq++ });
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBe(theirs);
+        expect(store.getPage(0).has('m6')).toBe(false);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('a lone restore of this device’s own acked delete still goes through', async () => {
+        await drawAndSync();
+        await store.undoLast(); // delete m6 …
+        await engine.flush(); // … acked; local seq still predates it
+        api.offline = true;
+        await store.redoLast();
+
+        api.offline = false;
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(store.getPage(0).has('m6')).toBe(true);
+    });
+
+    it('keeps an edit made after undoing an erase, even against a collaborator’s later delete', async () => {
+        await drawAndSync();
+        await store.delete('m6'); // erased here …
+        await engine.flush(); // … and that synced
+        api.offline = true;
+        await store.undoLast(); // brought back, offline …
+        await store.update('m6', { color: '#ff0000' }); // … and recoloured
+        // Meanwhile a collaborator restored m6 and erased it again.
+        const theirs = '2026-05-05T05:05:05.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: theirs, seq: api.nextSeq++ });
+
+        api.offline = false;
+        await engine.flush();
+
+        // Which came last cannot be told, so the user's work is not thrown
+        // away: the mark stands, as they left it, here and on the server.
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(api.rows.get('m6')?.color).toBe('#ff0000');
+        expect(store.getPage(0).get('m6')?.color).toBe('#ff0000');
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections).toEqual([]);
+    });
+
+    it('carries the author stamp onto the net change', () => {
+        const queued = (opId: number, type: PendingOpType, color: string): PendingOp => ({
+            opId,
+            docId: DOC,
+            type,
+            annotationId: 'm1',
+            annotation: { ...makeStroke('m1'), color },
+            queuedAt: '2026-01-01T00:00:00.000Z',
+            userId: USER,
+        });
+        const outcome = reconcileWithServer(
+            [queued(1, 'update', '#aa0000'), queued(2, 'update', '#bb0000')],
+            serverRow('m1'),
+        );
+        expect(outcome).toMatchObject({ kind: 'send', op: { type: 'update', userId: USER } });
+    });
+
+    it('keeps the ops untouched when the server rows cannot be read', async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.undoLast();
+        await store.redoLast();
+        api.offline = false;
+        api.fetchManyError = { message: 'bad gateway', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(2);
+        expect(engine.pendingRetryDelayMs).not.toBeNull();
+        expect(rejections).toEqual([]);
+    });
+
+    it('never folds later changes into an unsent create', async () => {
+        api.offline = true;
+        await store.create(makeStroke('n1'));
+        await store.update('n1', { color: '#cc0000' });
+        await store.delete('n1');
+        api.offline = false;
+        // The create's insert lands, but its answer is lost: had the delete
+        // been folded into it, the retried insert would be ignored as a
+        // duplicate and the mark would stay on the server.
+        api.failWrites = null;
+        const insert = api.insertIgnoreDuplicates.bind(api);
+        let lost = false;
+        api.insertIgnoreDuplicates = async (row) => {
+            await insert(row);
+            if (!lost) {
+                lost = true;
+                return { error: { message: 'timeout', kind: 'retry' } };
+            }
+            return { error: null };
+        };
+        await engine.flush();
+        await engine.flush();
+
+        expect(api.rows.get('n1')?.deleted_at).not.toBeNull();
+        expect(await db.ops.count()).toBe(0);
+    });
+});
+
+describe('SyncEngine status', () => {
+    const statuses: string[] = [];
+    let statusEngine: SyncEngine;
+
+    beforeEach(() => {
+        statuses.length = 0;
+        statusEngine = new SyncEngine({
+            db,
+            store,
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onStatus: (s) => statuses.push(s),
+        });
+    });
+
+    afterEach(() => {
+        statusEngine.stop();
+    });
+
+    it('stays offline after a failed pull, even with nothing queued', async () => {
+        vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        api.offline = true;
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('offline');
+        expect(statuses).not.toContain('synced');
+    });
+
+    it('does not claim synced while the server cannot be reached', async () => {
+        api.offline = true;
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('retrying');
+        expect(statuses).not.toContain('synced');
+    });
+
+    it('shows a transient failure as retrying, and only a long one as an error', async () => {
+        const start = Date.parse('2026-05-05T05:00:00Z');
+        const now = vi.spyOn(Date, 'now').mockReturnValue(start);
+        api.failWrites = { error: { message: 'too many', kind: 'retry' }, times: 10 };
+        await store.create(makeStroke('a1'));
+        await statusEngine.flush();
+        expect(statuses.at(-1)).toBe('retrying');
+
+        now.mockReturnValue(start + PERSISTENT_FAILURE_MS + 1);
+        await statusEngine.flush();
+        expect(statuses.at(-1)).toBe('error');
+
+        api.failWrites = null;
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('synced');
+    });
+
+    it('reports a pull the server refuses as an error', async () => {
+        api.fetchSince = async () => ({ data: null, error: { message: 'forbidden', kind: 'reject' } });
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('error');
+    });
+
+    it('says synced once a pull and the outbox both went through', async () => {
+        await store.create(makeStroke('a1'));
+        await statusEngine.sync();
+        expect(statuses.at(-1)).toBe('synced');
+    });
+});
+
+describe('SyncEngine shared outbox', () => {
+    it('two engines on one document drain it one at a time, never pushing an op twice', async () => {
+        const other = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC),
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+        });
+        for (let i = 0; i < 5; i++) {
+            await store.create(makeStroke(`s${i}`));
+        }
+        const inserts = vi.spyOn(api, 'insertMany');
+        await Promise.all([engine.flush(), other.flush()]);
+        other.stop();
+
+        expect(inserts).toHaveBeenCalledTimes(1);
+        expect(await db.ops.count()).toBe(0);
+    });
+});
+
+describe('SyncEngine mirror repairs reach the open viewer', () => {
+    /**
+     * The viewer: its own store and a started engine, as on screen. Its own
+     * network is down, so whatever reaches its store came from the repair,
+     * not from it syncing for itself.
+     */
+    let viewerStore: AnnotationStore;
+    let viewer: SyncEngine;
+    let viewerRejections: SyncRejection[];
+
+    const openViewer = async () => {
+        viewerStore = new AnnotationStore(db, DOC);
+        await viewerStore.load();
+        const viewerApi = new FakeApi();
+        viewerApi.offline = true;
+        viewerRejections = [];
+        viewer = new SyncEngine({
+            db,
+            store: viewerStore,
+            api: viewerApi,
+            docId: DOC,
+            getUserId: () => USER,
+            onRejected: (r) => viewerRejections.push(r),
+        });
+        viewer.start();
+    };
+
+    /**
+     * Another engine on the score — the background drain's, sign-out's: a
+     * headless engine over a store nobody draws.
+     */
+    const drainInBackground = async () => {
+        const headless = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC),
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+        });
+        await headless.flush();
+        headless.stop();
+    };
+
+    afterEach(() => {
+        viewer.stop();
+    });
+
+    it('shows a collaborator’s delete that the background drain adopted over an offline undo/redo', async () => {
+        await openViewer();
+        await viewerStore.create(makeStroke('m5'));
+        await viewerStore.create(makeStroke('m6'));
+        await engine.flush(); // synced while online
+        await viewerStore.undoLast(); // delete m6, offline
+        await viewerStore.undoLast(); // delete m5
+        await viewerStore.redoLast(); // restore m5
+        await viewerStore.redoLast(); // restore m6
+        expect(await db.ops.count()).toBe(4);
+        expect(viewerStore.getPage(0).has('m6')).toBe(true);
+
+        const erasedAt = '2026-03-03T03:03:03.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: erasedAt, seq: api.nextSeq++ });
+
+        await drainInBackground();
+
+        expect(await db.ops.count()).toBe(0);
+        await vi.waitFor(() => expect(viewerStore.getPage(0).has('m6')).toBe(false));
+        expect(viewerStore.get('m6')?.deletedAt).toBe(erasedAt);
+        expect(viewerStore.getPage(0).has('m5')).toBe(true);
+        expect(viewerRejections).toEqual([]);
+    });
+
+    it('rolls a refused change back on the viewer’s screen and tells it why', async () => {
+        await store.create(makeStroke('r1'));
+        await engine.flush();
+        await openViewer();
+        await viewerStore.update('r1', { color: '#ff0000' });
+        api.invisibleToUpdate.add('r1');
+        // Sign-out's drain, say (the background drain holds refusals instead).
+
+        await drainInBackground();
+
+        await vi.waitFor(() => expect(viewerRejections.map((r) => r.annotationId)).toEqual(['r1']));
+        expect(viewerStore.get('r1')?.color).toBe('#111111');
+        expect(viewerStore.getPage(0).get('r1')?.color).toBe('#111111');
+    });
+
+    it('does not overwrite a change the viewer still has queued', async () => {
+        await store.create(makeStroke('q1'));
+        await engine.flush();
+        await openViewer();
+        await viewerStore.update('q1', { color: '#00aa00' });
+
+        await viewerStore.reloadFromMirror(['q1']);
+
+        expect(viewerStore.get('q1')?.color).toBe('#00aa00');
+    });
+
+    it('hears repairs made in another tab, for its own database only', async () => {
+        await store.create(makeStroke('t1'));
+        await engine.flush();
+        await openViewer();
+        // Another tab adopted the server's tombstone into the shared mirror.
+        const mirror = (await db.annotations.get('t1'))!;
+        await db.annotations.put({ ...mirror, deletedAt: '2026-05-05T05:05:05.000Z', seq: 99 });
+
+        const otherTab = new BroadcastChannel('cleffy-sync');
+        try {
+            otherTab.postMessage({ db: 'some-other-db', docId: DOC, annotationIds: ['t1'], origin: 'tab-2' });
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(viewerStore.getPage(0).has('t1')).toBe(true);
+
+            otherTab.postMessage({
+                db: db.name,
+                docId: DOC,
+                annotationIds: ['t1'],
+                origin: 'tab-2',
+                rejection: { annotationId: 't1', opType: 'update', reason: 'refused' },
+            });
+            await vi.waitFor(() => expect(viewerStore.getPage(0).has('t1')).toBe(false));
+            expect(viewerRejections.map((r) => r.annotationId)).toEqual(['t1']);
+        } finally {
+            otherTab.close();
+        }
     });
 });

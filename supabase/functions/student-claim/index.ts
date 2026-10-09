@@ -2,14 +2,15 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
+import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
+import { passwordProblem, passwordProblemMessage } from '../_shared/passwordPolicy.ts';
+import { loginThrottleSecret } from '../_shared/rateLimit.ts';
 import {
     hashLoginCode,
     isPlausibleLoginCode,
     isValidUsername,
     normalizeLoginCode,
     normalizeUsername,
-    STUDENT_PASSWORD_MIN,
-    studentPasswordProblem,
     USERNAME_MAX,
     USERNAME_MIN,
 } from '../_shared/studentCodes.ts';
@@ -105,21 +106,14 @@ Deno.serve(async (req) => {
     // spaces are silently eaten here is one the student cannot type at
     // /auth/v1/token afterwards.
     const password = typeof body.password === 'string' ? body.password : '';
-    const passwordProblem = studentPasswordProblem(password);
-    if (passwordProblem) {
-        // Two bounds, so two sentences. Naming the minimum to a student who
-        // typed too MUCH is the one answer they cannot act on, and this form is
-        // spent once.
-        return jsonResponse(
-            {
-                error:
-                    passwordProblem === 'too_long'
-                        ? 'That password is too long — pick a shorter one'
-                        : `Passwords are at least ${STUDENT_PASSWORD_MIN} characters`,
-                code: 'weak_password',
-            },
-            422,
-        );
+    // Checked here, before the code is anywhere near spent, against the same
+    // policy GoTrue enforces on updateUserById below — a password it would
+    // refuse there surfaces as a 502 "could not set up the account", which a
+    // child cannot act on. One sentence per rule: naming the minimum to a
+    // student who typed too MUCH is the one answer they cannot act on.
+    const problem = passwordProblem(password);
+    if (problem) {
+        return jsonResponse({ error: passwordProblemMessage(problem), code: 'weak_password' }, 422);
     }
 
     const admin = serviceClient();
@@ -233,6 +227,12 @@ Deno.serve(async (req) => {
         console.error(`roster row ${student.id} was already claimed when this request tried to commit`);
         return reject();
     }
+
+    // The card is spent and the username is this student's now, so whatever
+    // student-login has counted against that name — someone hammering it before
+    // a teacher's reset, or before this student ever claimed it — no longer
+    // stands between them and signing in. Best effort, past the commit.
+    await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, username);
 
     // A FRESH anon-key client, deliberately carrying no Authorization header:
     // nothing the caller sent travels with this sign-in, and the session it

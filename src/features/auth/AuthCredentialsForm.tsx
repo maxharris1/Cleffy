@@ -1,6 +1,11 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 
 import { mapAuthError } from '@/features/auth/authErrors';
+import {
+    PASSWORD_HINT,
+    passwordProblem,
+    passwordProblemMessage,
+} from '../../../supabase/functions/_shared/passwordPolicy';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
 import { TextField } from '@/ui/TextField';
@@ -20,11 +25,12 @@ interface AuthCredentialsFormProps {
     passwordLabel?: string;
     submitLabel: string;
     busyLabel: string;
-    minPasswordLength?: number;
     /** Optional slot under the password field (e.g. forgot-password link). */
     afterPassword?: ReactNode;
     footer?: ReactNode;
     fallbackError?: string;
+    /** Turns a failed submit into the message shown; defaults to mapAuthError with fallbackError. */
+    describeError?: (err: unknown) => string;
     onSubmit: (credentials: AuthCredentials) => Promise<void>;
 }
 
@@ -39,10 +45,10 @@ export const AuthCredentialsForm = ({
     passwordLabel = 'Password',
     submitLabel,
     busyLabel,
-    minPasswordLength = 6,
     afterPassword,
     footer,
     fallbackError = 'Something went wrong.',
+    describeError,
     onSubmit,
 }: AuthCredentialsFormProps) => {
     const [emailValue, setEmailValue] = useState('');
@@ -50,6 +56,11 @@ export const AuthCredentialsForm = ({
     const [confirmValue, setConfirmValue] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    // A password is being CHOSEN (sign-up, recovery, welcome) rather than typed
+    // to sign in. Only then does the policy apply: an account made under the
+    // old 6-character minimum must still be able to log in.
+    const choosingPassword = confirm || (password && !email);
 
     const validationError = (): string | null => {
         if (email && !emailValue.includes('@')) {
@@ -61,8 +72,11 @@ export const AuthCredentialsForm = ({
         if (email && password && !confirm && passwordValue.length === 0) {
             return 'Enter your email and password.';
         }
-        if ((confirm || (password && !email)) && passwordValue.length < minPasswordLength) {
-            return `Password must be at least ${minPasswordLength} characters.`;
+        if (choosingPassword) {
+            const problem = passwordProblem(passwordValue);
+            if (problem) {
+                return passwordProblemMessage(problem);
+            }
         }
         if (confirm && passwordValue !== confirmValue) {
             return 'Passwords do not match.';
@@ -82,7 +96,7 @@ export const AuthCredentialsForm = ({
         try {
             await onSubmit({ email: emailValue.trim(), password: passwordValue });
         } catch (err) {
-            setError(mapAuthError(err, fallbackError));
+            setError(describeError ? describeError(err) : mapAuthError(err, fallbackError));
             setBusy(false);
         }
     };
@@ -106,12 +120,13 @@ export const AuthCredentialsForm = ({
                         id={passwordId}
                         label={passwordLabel}
                         type="password"
-                        autoComplete={confirm || !email ? 'new-password' : 'current-password'}
+                        autoComplete={choosingPassword ? 'new-password' : 'current-password'}
                         value={passwordValue}
                         onChange={(e) => setPasswordValue(e.target.value)}
                         spaced={email}
                     />
                 ) : null}
+                {choosingPassword ? <p className="mt-1.5 text-xs text-stone-500">{PASSWORD_HINT}</p> : null}
                 {afterPassword}
                 {confirm ? (
                     <TextField

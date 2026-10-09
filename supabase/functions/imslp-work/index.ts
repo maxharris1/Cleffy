@@ -2,20 +2,128 @@ import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
 import {
     checkRateLimit,
     clientKey,
+    fetchWorkPageHtml,
     imagefromIndexUrl,
     isPdfFileTitle,
     mwFetch,
     parseComposerFromTitle,
+    serviceClient,
     stripFilePrefix,
     workPageUrl,
 } from '../_shared/imslp.ts';
+import { fileMetaFor, parseImslpFileBlocks, type ImslpFileMeta } from '../_shared/imslpFileBlocks.ts';
+import { fetchWorkPageOrImages, wikitextFromMwPage } from '../_shared/imslpWorkPage.ts';
+import {
+    LICENSE_TTL_MS,
+    classifyLicense,
+    isDownloadable,
+    parseWorkPageLicenses,
+    type FileLicense,
+    type ImslpLicenseClass,
+} from '../_shared/imslpLicense.ts';
 
-interface Edition {
+interface Edition extends ImslpFileMeta {
     filename: string;
     size: number | null;
     mime: string | null;
     openUrl: string;
+    license: ImslpLicenseClass;
+    licenseLabel: string | null;
+    restriction: string | null;
+    downloadable: boolean;
+    /** Present when the license lookup itself failed (IMSLP unreachable), not when IMSLP withheld clearance. */
+    licenseCheck?: 'unavailable';
 }
+
+interface LicenseRow {
+    filename: string;
+    license_label: string | null;
+    restriction: string | null;
+    eu_hosted: boolean;
+    fetched_at: string;
+}
+
+/**
+ * Per-file licenses for the work's PDFs: fresh cache rows, plus one
+ * action=parse of the rendered page (then cached) when they don't cover
+ * every file.
+ * `source` distinguishes "IMSLP was parsed and this file wasn't cleared" from
+ * "license lookup unavailable". Neither is downloadable (imslp-download fails
+ * closed on both); the second is reported so the picker can say why.
+ */
+const resolveLicenses = async (
+    workTitle: string,
+    pdfTitles: string[],
+): Promise<{ licenses: Map<string, FileLicense>; source: 'cache' | 'live' | 'unavailable' }> => {
+    const licenses = new Map<string, FileLicense>();
+    if (pdfTitles.length === 0) {
+        return { licenses, source: 'cache' };
+    }
+
+    const admin = serviceClient();
+    if (admin) {
+        try {
+            const { data } = await admin
+                .from('imslp_file_licenses')
+                .select('filename, license_label, restriction, eu_hosted, fetched_at')
+                .in('filename', pdfTitles);
+            const rows = (data ?? []) as LicenseRow[];
+            const fresh = rows.filter((r) => Date.now() - new Date(r.fetched_at).getTime() < LICENSE_TTL_MS);
+            // Seeded before the coverage check so a known restriction is never
+            // dropped just because a sibling file has no row — otherwise a
+            // failed live parse below would report it as downloadable.
+            for (const row of fresh) {
+                licenses.set(row.filename, {
+                    licenseLabel: row.license_label,
+                    restriction: row.restriction,
+                    euHosted: row.eu_hosted,
+                });
+            }
+            if (fresh.length === pdfTitles.length) {
+                return { licenses, source: 'cache' };
+            }
+        } catch {
+            // fall through to a live parse
+        }
+    }
+
+    const html = await fetchWorkPageHtml(workTitle);
+    if (!html) {
+        return { licenses, source: 'unavailable' };
+    }
+    const parsed = parseWorkPageLicenses(html);
+    // Only what this parse actually re-verified is written back — upserting the
+    // seeded cache rows too would keep renewing their TTL without rechecking.
+    const freshlyParsed = new Map<string, FileLicense>();
+    for (const filename of pdfTitles) {
+        const license = parsed.get(filename);
+        if (license) {
+            licenses.set(filename, license);
+            freshlyParsed.set(filename, license);
+        }
+    }
+
+    if (admin && freshlyParsed.size > 0) {
+        const fetchedAt = new Date().toISOString();
+        const upserts = [...freshlyParsed.entries()].map(([filename, license]) => ({
+            filename,
+            work_title: workTitle,
+            license: classifyLicense(license.licenseLabel),
+            license_label: license.licenseLabel,
+            restriction: license.restriction,
+            eu_hosted: license.euHosted,
+            downloadable: isDownloadable(license),
+            fetched_at: fetchedAt,
+        }));
+        try {
+            await admin.from('imslp_file_licenses').upsert(upserts);
+        } catch {
+            // cache write is best-effort — the response already has the data
+        }
+    }
+
+    return { licenses, source: 'live' };
+};
 
 Deno.serve(async (req) => {
     if (req.method === 'OPTIONS') {
@@ -43,15 +151,20 @@ Deno.serve(async (req) => {
     }
 
     try {
-        const imagesData = (await mwFetch({
-            action: 'query',
-            titles: title,
-            prop: 'images',
-            imlimit: '500',
-            redirects: '1',
-        })) as {
+        // The wikitext rides along with the image list: its #fte:imslpfile
+        // blocks are the only place IMSLP states each PDF's publisher and
+        // {{Urtext}} tag.
+        const imagesData = (await fetchWorkPageOrImages(title, mwFetch)) as {
             query?: {
-                pages?: Record<string, { missing?: boolean; title?: string; images?: Array<{ title: string }> }>;
+                pages?: Record<
+                    string,
+                    {
+                        missing?: boolean;
+                        title?: string;
+                        images?: Array<{ title: string }>;
+                        revisions?: Array<{ '*'?: string }>;
+                    }
+                >;
             };
         };
 
@@ -64,6 +177,36 @@ Deno.serve(async (req) => {
             .map((img) => img.title)
             .filter(isPdfFileTitle)
             .map(stripFilePrefix);
+
+        const fileMeta = parseImslpFileBlocks(wikitextFromMwPage(page));
+        const metaFields = (filename: string): ImslpFileMeta => fileMetaFor(fileMeta, filename);
+
+        const { licenses, source: licenseSource } = await resolveLicenses(page.title ?? title, pdfTitles);
+        const licenseFields = (
+            filename: string,
+        ): Pick<Edition, 'license' | 'licenseLabel' | 'restriction' | 'downloadable' | 'licenseCheck'> => {
+            const license = licenses.get(filename);
+            if (license) {
+                return {
+                    license: classifyLicense(license.licenseLabel),
+                    licenseLabel: license.licenseLabel,
+                    restriction: license.restriction,
+                    downloadable: isDownloadable(license),
+                };
+            }
+            // Not cleared either way. A parsed page without this file means
+            // IMSLP's own listing didn't clear it; a failed lookup means nobody
+            // checked. imslp-download refuses both (license_unknown), so the
+            // picker must not offer a one-tap import it would then refuse —
+            // `licenseCheck` lets it say "check on IMSLP" for the transient case.
+            return {
+                license: 'unknown',
+                licenseLabel: null,
+                restriction: null,
+                downloadable: false,
+                ...(licenseSource === 'unavailable' ? { licenseCheck: 'unavailable' as const } : {}),
+            };
+        };
 
         const editions: Edition[] = [];
 
@@ -105,6 +248,8 @@ Deno.serve(async (req) => {
                     size: info?.size ?? null,
                     mime: info?.mime ?? null,
                     openUrl: imagefromIndexUrl(filename),
+                    ...licenseFields(filename),
+                    ...metaFields(filename),
                 });
             }
         }

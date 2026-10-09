@@ -22,11 +22,52 @@ export type DocumentRow = {
     page_count: number | null;
     /** Bumped when the stored PDF bytes are replaced (smart import cleanup). */
     content_rev: number;
+    /**
+     * content_rev of the cover published to the `thumbnails` bucket at
+     * `{id}/{thumb_rev}.jpg`; null until the owner's browser has rendered one
+     * (a fresh upload is content_rev 0, so 0 is a real revision, not "none").
+     */
+    thumb_rev: number | null;
     created_at: string;
     updated_at: string;
     /** Non-null once the score is over the free cap: read-only, still viewable and exportable. */
     archived_at: string | null;
+    /**
+     * Why it is archived: 'plan_lapse' (apply_free_tier_archival, undone by
+     * restore_plan_archived_scores on resubscribe or an Academy seat) or
+     * 'owner'. Null exactly when
+     * archived_at is. Server-stamped by the documents_archived_reason trigger --
+     * a client value is overwritten -- and optional here because the client's
+     * column lists do not select it.
+     */
+    archived_reason?: ArchivedReason | null;
+    // Provenance of an imported score (IMSLP), written only by imslp-download
+    // under the service role — clients can neither set nor change it
+    // (documents_guard_provenance). Present on a full-row read (`select('*')`,
+    // fetchDocument); optional because the library list, library_bootstrap and
+    // a cache-synthesized offline row don't carry it. Null for an uploaded PDF
+    // and for imports made before provenance was recorded.
+    /** The IMSLP work page, e.g. https://imslp.org/wiki/Piano_Sonata_No.14… */
+    source_url?: string | null;
+    /** The IMSLP file the PDF came from. */
+    source_filename?: string | null;
+    /** IMSLP's license tag, verbatim, e.g. "Creative Commons Attribution 4.0". */
+    source_license?: string | null;
+    source_attribution?: DocumentSourceAttribution | null;
 };
+
+/** documents.source_attribution — who IMSLP credits for the file (mirrors _shared/imslpProvenance.ts). */
+export type DocumentSourceAttribution = {
+    source: 'imslp';
+    work: string;
+    composer: string | null;
+    editor: string | null;
+    arranger: string | null;
+    publisher: string | null;
+    year: number | null;
+};
+
+export type ArchivedReason = 'plan_lapse' | 'owner';
 
 export type DocumentInsert = {
     id: string;
@@ -35,7 +76,30 @@ export type DocumentInsert = {
     storage_path: string;
     page_count?: number | null;
     content_rev?: number;
+    thumb_rev?: number | null;
     archived_at?: string | null;
+};
+
+/**
+ * What an owner may change on a score. id, owner_id, storage_path and
+ * created_at are immutable for clients (documents_guard_columns, migration
+ * 20261007120100); updated_at is stamped by documents_touch.
+ */
+export type DocumentUpdate = Partial<
+    Pick<DocumentRow, 'title' | 'page_count' | 'content_rev' | 'thumb_rev' | 'archived_at'>
+>;
+
+/**
+ * A deleted score whose Storage folder may still hold bytes. Written only by
+ * the documents AFTER DELETE trigger; the former owner reads it to finish the
+ * cleanup and deletes it once the folder is empty.
+ */
+export type DocumentStorageCleanupRow = {
+    document_id: string;
+    owner_id: string;
+    storage_path: string;
+    thumb_rev: number | null;
+    deleted_at: string;
 };
 
 export type ImportStatusValue = 'prompted' | 'declined' | 'imported';
@@ -50,19 +114,22 @@ export type DocumentImportRow = {
     updated_at: string;
 };
 
+/**
+ * created_by / created_at / updated_at are stamped by the server
+ * (document_imports_guard_columns); backup_path may only be null or
+ * '{document_id}/pre-import-original.pdf' (CHECK constraint).
+ */
 export type DocumentImportInsert = {
     document_id: string;
     status: ImportStatusValue;
     backup_path?: string | null;
     pages_cleaned?: number[];
-    created_by?: string | null;
 };
 
 export type DocumentImportUpdate = {
     status?: ImportStatusValue;
     backup_path?: string | null;
     pages_cleaned?: number[];
-    updated_at?: string;
 };
 
 export type DocumentMemberRow = {
@@ -117,6 +184,30 @@ export type ShareLinkRow = {
     revoked_at: string | null;
 };
 
+/**
+ * One row of list_document_members(). Labels are resolved server-side because
+ * auth.users is not client-readable; `email`, `joined_via_link` and
+ * `is_assigned` are only ever filled for the score's owner (an editor may be a
+ * link guest).
+ */
+export type DocumentMemberListing = {
+    user_id: string;
+    role: MemberRole;
+    /**
+     * The caller's own roster name for a student on their roster, else the
+     * account's display_name (what presence shows); null when neither is set.
+     */
+    display_name: string | null;
+    email: string | null;
+    is_anonymous: boolean;
+    /** The member has an assignment on THIS score (owner only; false for everyone else). */
+    is_assigned: boolean;
+    /** Token of the share link that granted this access, when one did. */
+    joined_via_link: string | null;
+    joined_at: string;
+};
+
+/** The token is always minted by the server (share_links_guard_columns). */
 export type ShareLinkInsert = {
     document_id: string;
     role: ShareRole;
@@ -131,13 +222,23 @@ export type AnnotationRow = {
     kind: AnnotationKind;
     color: string;
     payload: AnnotationPayload;
-    created_by: string;
+    /**
+     * Null once the author's account has been deleted: the mark stays on the
+     * score it was drawn on (20261007120600_account_deletion.sql). Inserts still
+     * always carry the caller's id — RLS requires created_by = auth.uid().
+     */
+    created_by: string | null;
     created_at: string;
     updated_at: string;
     deleted_at: string | null;
     seq: number;
 };
 
+/**
+ * created_by must be the caller (annotations_insert); created_at is clamped
+ * into [the score's created_at, server clock] (annotations_guard_columns).
+ * seq / updated_at are server-stamped.
+ */
 export type AnnotationInsert = {
     id: string;
     document_id: string;
@@ -150,6 +251,10 @@ export type AnnotationInsert = {
     deleted_at?: string | null;
 };
 
+/**
+ * Everything an editor may change on a mark. id, document_id, page, kind,
+ * created_by and created_at are refused by annotations_guard_columns.
+ */
 export type AnnotationUpdate = {
     color?: string;
     payload?: AnnotationPayload;
@@ -172,6 +277,10 @@ export type AnnotationSnapshotInsert = {
     captured_on: string;
     label?: string | null;
     payload: Annotation[];
+    /**
+     * Ignored: the server stamps the caller (annotation_snapshots_guard_columns),
+     * so whatever is sent here — the client sends null — never becomes the author.
+     */
     created_by?: string | null;
 };
 
@@ -207,12 +316,38 @@ export type EntitlementLimits = Record<UsageMetric, number>;
  */
 export type EntitlementSource = 'subscription' | 'studio_member' | 'managed' | 'none';
 
+/** What claim_pdf_export() answers. */
+export type PdfExportClaim = {
+    ok: boolean;
+    count?: number;
+    /** -1 on an unlimited plan; absent for an exempt caller. */
+    limit?: number;
+    /** True when nothing was counted: an unlimited plan, or an exempt caller. */
+    unlimited?: boolean;
+    tier?: EffectiveTier;
+    /** 'anonymous' only from servers predating the guest metering; kept so their answer still types. */
+    exempt?: 'anonymous' | 'student';
+    /** Set on a share-link guest's claim: the unit, if any, came from the score owner's allowance. */
+    billed_to?: 'owner';
+    /**
+     * The claim id was already answered ok (a retry of the same export), so this
+     * answer counted nothing. Since 20261009120100.
+     */
+    replayed?: boolean;
+};
+
 export type Entitlements = {
     user_id: string;
     tier: EffectiveTier;
     status: string | null;
     source: EntitlementSource;
     current_period_end: string | null;
+    /**
+     * The plan stops at current_period_end instead of renewing (the subscriber
+     * cancelled; for an Academy seat, the owner did). Optional because servers
+     * before 20261009120101, and entitlements cached from them, do not carry it.
+     */
+    cancel_at_period_end?: boolean;
     limits: EntitlementLimits;
 };
 
@@ -392,7 +527,7 @@ export type Database = {
             documents: {
                 Row: DocumentRow;
                 Insert: DocumentInsert;
-                Update: Partial<DocumentInsert>;
+                Update: DocumentUpdate;
                 Relationships: [];
             };
             document_members: {
@@ -419,6 +554,13 @@ export type Database = {
             document_tags: {
                 Row: DocumentTagRow;
                 Insert: DocumentTagInsert;
+                Update: never;
+                Relationships: [];
+            };
+            document_storage_cleanup: {
+                // Trigger-written tombstones; clients only read and delete them.
+                Row: DocumentStorageCleanupRow;
+                Insert: never;
                 Update: never;
                 Relationships: [];
             };
@@ -521,21 +663,94 @@ export type Database = {
                 Args: { doc: string };
                 Returns: MemberRole | null;
             };
+            // Storage-policy helper: the caller owned this deleted score's folder
+            // and has not finished cleaning it up.
+            document_storage_cleanup_pending: {
+                Args: { folder: string };
+                Returns: boolean;
+            };
             redeem_share_link: {
                 Args: { p_token: string };
                 Returns: Array<{ document_id: string; granted_role: MemberRole }>;
+            };
+            // Anon-callable; exactly one row, role null unless valid (20261009120200).
+            peek_share_link: {
+                Args: { p_token: string };
+                Returns: Array<{ valid: boolean; role: ShareRole | null }>;
+            };
+            // Owners and editors only; see DocumentMemberListing for what each sees.
+            list_document_members: {
+                Args: { p_document: string };
+                Returns: DocumentMemberListing[];
+            };
+            // Owner only. The owner's own row can be neither changed nor removed.
+            set_document_member_role: {
+                Args: { p_document: string; p_user: string; p_role: ShareRole };
+                Returns: undefined;
+            };
+            remove_document_member: {
+                Args: { p_document: string; p_user: string };
+                Returns: undefined;
+            };
+            // Any non-owner, for themselves. Refused for a score assigned to a
+            // roster student (detail code 'assigned_score').
+            leave_document: {
+                Args: { p_document: string };
+                Returns: undefined;
+            };
+            // Owner only. Returns how many members' link-granted access was
+            // withdrawn (always 0 unless p_remove_members).
+            revoke_share_link: {
+                Args: { p_token: string; p_remove_members?: boolean };
+                Returns: number;
             };
             insert_annotations_batch: {
                 Args: { p_rows: AnnotationInsert[] };
                 Returns: undefined;
             };
+            // Ids of the rows actually updated — a patch RLS filtered out (or
+            // whose row does not exist) is missing. Null only from the void
+            // function that predates 20261007120200.
             patch_annotations_batch: {
                 Args: { p_patches: Array<{ id: string; document_id: string } & AnnotationUpdate> };
-                Returns: undefined;
+                Returns: string[] | null;
             };
             check_edge_rate_limit: {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
+            };
+            // Service role only (student-login's per-username limiter, see
+            // supabase/functions/_shared/loginThrottle.ts); clients get no EXECUTE.
+            // Its table, edge_login_attempts, is service-only like edge_rate_buckets
+            // and so not listed under Tables.
+            begin_login_attempt: {
+                Args: {
+                    p_account_key: string;
+                    p_source_key: string;
+                    p_free_attempts: number;
+                    p_base_lock_ms: number;
+                    p_max_lock_ms: number;
+                    p_decay_ms: number;
+                    p_account_limit: number;
+                    p_account_window_ms: number;
+                };
+                Returns:
+                    | { ok: true; attempts: number; accountAttempts: number }
+                    | { ok: false; retryAfterSec: number; scope: 'source' | 'account' };
+            };
+            clear_login_attempts: {
+                Args: { p_key: string };
+                Returns: undefined;
+            };
+            clear_login_account: {
+                Args: { p_account_key: string };
+                Returns: number;
+            };
+            // Service role only: imslp-download closes the shared IMSLP pacing
+            // key for IMSLP's Retry-After after a 429.
+            edge_rate_block: {
+                Args: { p_key: string; p_seconds: number };
+                Returns: undefined;
             };
             // p_user is omitted by clients — the function resolves auth.uid() and
             // rejects any attempt to read another user's entitlements.
@@ -543,16 +758,63 @@ export type Database = {
                 Args: { p_user?: string };
                 Returns: Entitlements;
             };
+            /** One round-trip for library page + shell entitlements. */
+            library_bootstrap: {
+                Args: Record<string, never>;
+                Returns: {
+                    documents: DocumentRow[];
+                    has_more: boolean;
+                    favorite_ids: string[];
+                    tags: LibraryTagRow[];
+                    document_tags: Array<{ document_id: string; tag_id: string }>;
+                    entitlements: Entitlements;
+                };
+            };
+            /**
+             * One keyset page of the caller's visible scores. The cursor is the
+             * last row the client holds: (updated_at, id) for 'recent',
+             * (title, id) for 'title' — passed back exactly as received.
+             */
+            library_documents: {
+                Args: {
+                    p_sort?: 'recent' | 'title';
+                    p_after_updated_at?: string | null;
+                    p_after_title?: string | null;
+                    p_after_id?: string | null;
+                    p_query?: string | null;
+                    p_tag_id?: string | null;
+                    p_favorites_only?: boolean;
+                    p_limit?: number;
+                };
+                Returns: {
+                    documents: DocumentRow[];
+                    has_more: boolean;
+                };
+            };
             tier_limits: {
                 // Answers for 'student' too, which is why this is EffectiveTier.
                 Args: { p_tier: EffectiveTier };
                 Returns: EntitlementLimits;
             };
-            // The honest-UI export counter. The export runs on-device, so this is
-            // called before it starts and never blocks anything by itself.
+            // Claims one pdf_exports unit before the on-device export is built:
+            // check and increment in one statement. The client builds nothing
+            // unless this answers ok:true (see features/export/exportClaim.ts).
+            // A share-link guest must pass p_document: their export is drawn from
+            // that score's owner's allowance. Ignored for a signed-in account.
+            claim_pdf_export: {
+                /**
+                 * p_claim (since 20261009120100) names one export attempt: asked
+                 * again by the same caller within the hour it answers ok without
+                 * counting again.
+                 */
+                Args: { p_document?: string; p_claim?: string };
+                Returns: PdfExportClaim;
+            };
+            // Legacy name for claim_pdf_export, kept for bundles already in the
+            // field; same body, same answer.
             consume_pdf_export: {
                 Args: Record<string, never>;
-                Returns: { ok: boolean; count?: number; limit?: number; exempt?: 'anonymous' | 'student' };
+                Returns: PdfExportClaim;
             };
             // Upserts the assignment AND the document_members row that carries the
             // access, returning the assignment id.

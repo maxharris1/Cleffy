@@ -1,6 +1,6 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
-import { UndoStack, type UndoableOp } from '@/features/viewer/ink/undoStack';
-import type { LocalAnnotation, PendingOpType, ScribblerDb } from '@/sync/db';
+import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
+import type { LocalAnnotation, PendingOp, ScribblerDb } from '@/sync/db';
 import type { Annotation, AnnotationPayload } from '@/types/models';
 
 export type PageListener = (pageIndex: number) => void;
@@ -14,7 +14,8 @@ type CommitOp =
     | { type: 'create'; annotation: Annotation }
     | { type: 'update'; annotation: Annotation; prev: Annotation }
     | { type: 'delete'; annotation: Annotation }
-    | { type: 'restore'; annotation: Annotation };
+    /** baseDeletedAt: the tombstone being undone — see PendingOp.baseDeletedAt. */
+    | { type: 'restore'; annotation: Annotation; baseDeletedAt: string | null };
 
 /**
  * THE single write path for annotations (plan §sync).
@@ -38,28 +39,71 @@ export class AnnotationStore {
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
     private onDirty: (() => void) | null = null;
+    private author: string | null = null;
+    private loading: Promise<void> | null = null;
+    private loaded = false;
+    /**
+     * Local edits applied to memory whose mirror write has not finished, by
+     * id. reloadFromMirror must not replace them with the older row Dexie
+     * still holds.
+     */
+    private unpersisted = new Map<string, number>();
 
     constructor(
         private db: ScribblerDb,
         readonly docId: string,
     ) {}
 
-    /** Hydrate the in-memory map from the Dexie mirror. Call once on document open. */
-    async load(): Promise<void> {
+    /**
+     * Hydrate the in-memory map from the Dexie mirror. Idempotent: every caller
+     * (the viewport, the sync engine, a remote apply) shares one read.
+     *
+     * The read is async, and the viewport opens the document and starts the
+     * sync engine in the same tick. Hydration therefore MERGES instead of
+     * replacing: a row already in memory was put there after the read began —
+     * a stroke drawn while the mirror was still loading — and is newer than
+     * what the read returned. Remote rows never race it: applyRemoteBatch,
+     * adoptServerRow and discardLocal wait for hydration first, so their LWW
+     * checks see the mirror's seq rather than an empty map (which used to let
+     * a pull-overlap row older than the mirror overwrite it in Dexie).
+     */
+    load(): Promise<void> {
+        if (!this.loading) {
+            this.loading = this.hydrate().catch((err: unknown) => {
+                // Let the next caller try again instead of caching the failure.
+                this.loading = null;
+                throw err;
+            });
+        }
+        return this.loading;
+    }
+
+    private async hydrate(): Promise<void> {
         const rows = await this.db.annotations.where('docId').equals(this.docId).toArray();
-        this.pages.clear();
-        this.byId.clear();
+        const touched = new Set<number>();
         for (const row of rows) {
+            if (this.byId.has(row.id)) {
+                continue;
+            }
             const { pending: _pending, ...annotation } = row;
             this.byId.set(annotation.id, annotation);
             if (!annotation.deletedAt) {
                 this.pageMap(annotation.page).set(annotation.id, annotation);
+                touched.add(annotation.page);
             }
         }
-        for (const page of this.pages.keys()) {
+        this.loaded = true;
+        for (const page of touched) {
             this.notifyPage(page);
         }
         this.notifyMeta();
+    }
+
+    /** Resolve once the mirror is in memory; no extra yield once it is. */
+    private async ensureLoaded(): Promise<void> {
+        if (!this.loaded) {
+            await this.load();
+        }
     }
 
     /** Live (non-deleted) annotations on a page. Do not mutate. */
@@ -145,7 +189,7 @@ export class AnnotationStore {
             this.setHistoryOverlay(null);
         }
         const snapById = new Map(snapshot.filter((a) => !a.deletedAt).map((a) => [a.id, a]));
-        this.beginBatch();
+        const batch = this.beginBatch();
         try {
             for (const live of this.liveAnnotations()) {
                 if (!snapById.has(live.id)) {
@@ -165,7 +209,11 @@ export class AnnotationStore {
                     await this.create({ ...next, createdAt: snap.createdAt || now, seq: 0 });
                 } else if (existing.deletedAt) {
                     await this.commit(
-                        { type: 'restore', annotation: { ...next, seq: existing.seq } },
+                        {
+                            type: 'restore',
+                            annotation: { ...next, seq: existing.seq },
+                            baseDeletedAt: existing.deletedAt,
+                        },
                         { recordUndo: true },
                     );
                     // After restore, payload/color may still differ — update if needed.
@@ -195,7 +243,7 @@ export class AnnotationStore {
                 }
             }
         } finally {
-            this.endBatch();
+            this.endBatch(batch);
         }
     }
 
@@ -218,6 +266,11 @@ export class AnnotationStore {
     /** Hook for the sync engine (M3): poked after every committed op. */
     setDirtyHook(hook: (() => void) | null): void {
         this.onDirty = hook;
+    }
+
+    /** The signed-in account, stamped on every op queued from now on (see PendingOp.userId). */
+    setAuthor(userId: string | null): void {
+        this.author = userId;
     }
 
     get canUndo(): boolean {
@@ -247,7 +300,7 @@ export class AnnotationStore {
         const touched = new Set<number>();
         const ops: CommitOp[] = [];
         for (const annotation of annotations) {
-            this.applyMemory(annotation);
+            this.applyLocal(annotation);
             this.undo.pushInverse({ type: 'delete', id: annotation.id });
             ops.push({ type: 'create', annotation });
             touched.add(annotation.page);
@@ -269,12 +322,13 @@ export class AnnotationStore {
         await this.commit({ type: 'update', annotation: next, prev }, { recordUndo: true });
     }
 
-    async delete(id: string): Promise<void> {
+    /** True when this call tombstoned the row; false if it was already gone. */
+    async delete(id: string): Promise<boolean> {
         const prev = this.byId.get(id);
         if (!prev || prev.deletedAt) {
-            return;
+            return false;
         }
-        await this.commit(
+        return this.commit(
             { type: 'delete', annotation: { ...prev, deletedAt: nowIso(), updatedAt: nowIso() } },
             {
                 recordUndo: true,
@@ -288,6 +342,7 @@ export class AnnotationStore {
      * flush acks, at which point the server re-broadcasts a newer seq.
      */
     async applyRemoteBatch(remotes: Annotation[], pendingIds: ReadonlySet<string>): Promise<void> {
+        await this.ensureLoaded();
         const touchedPages = new Set<number>();
         const rows: LocalAnnotation[] = [];
         for (const remote of remotes) {
@@ -315,35 +370,159 @@ export class AnnotationStore {
         }
     }
 
-    /** Remove an annotation the server rejected/never had (sync repair path). */
-    async discardLocal(id: string): Promise<void> {
-        const existing = this.byId.get(id);
-        if (!existing) {
+    /**
+     * The server accepted the outbox for this row. A local create is born with
+     * createdBy null, which means "this device, still waiting". Leave it null
+     * after the ack and the next account on this browser treats the row as
+     * theirs, and treats another account's marks as its own.
+     */
+    async markSynced(id: string, createdBy: string | null): Promise<void> {
+        await this.ensureLoaded();
+        const current = this.byId.get(id);
+        if (current && createdBy && !current.createdBy) {
+            this.applyMemory({ ...current, createdBy });
+            this.notifyPage(current.page);
+        }
+        const mirror = await this.db.annotations.get(id);
+        if (!mirror) {
             return;
         }
-        this.byId.delete(id);
-        this.pageMap(existing.page).delete(id);
+        const attributed = mirror.createdBy ?? createdBy;
+        if (mirror.pending === 0 && mirror.createdBy === attributed) {
+            return;
+        }
+        await this.db.annotations.put({ ...mirror, pending: 0, createdBy: attributed });
+    }
+
+    /** Remove an annotation the server rejected/never had (sync repair path). */
+    async discardLocal(id: string): Promise<void> {
+        await this.ensureLoaded();
+        const existing = this.byId.get(id);
+        if (existing) {
+            this.byId.delete(id);
+            this.pageMap(existing.page).delete(id);
+        }
+        // The mirror row goes even when memory never had it, or it would
+        // come back on the next open.
         await this.db.annotations.delete(id);
-        this.notifyPage(existing.page);
+        if (existing) {
+            this.notifyPage(existing.page);
+        }
     }
 
-    /** Group several ops (e.g. an eraser drag) into one undo entry. */
-    beginBatch(): void {
-        this.undo.beginBatch();
+    /**
+     * Sync repair: the server refused a local op, so its row is the truth.
+     * Unlike applyRemoteBatch this ignores the seq comparison — a refused
+     * local edit keeps the seq it started from, which equals the server's,
+     * and LWW would otherwise keep the edit the server just refused.
+     */
+    async adoptServerRow(remote: Annotation): Promise<void> {
+        await this.ensureLoaded();
+        const prev = this.byId.get(remote.id);
+        if (prev && prev.page !== remote.page) {
+            this.pageMap(prev.page).delete(remote.id);
+            this.notifyPage(prev.page);
+        }
+        this.applyMemory(remote);
+        await this.db.annotations.put({ ...remote, pending: 0 });
+        this.notifyPage(remote.page);
     }
 
-    endBatch(): void {
-        this.undo.endBatch();
+    /**
+     * Another engine rewrote these rows in the mirror from server truth — the
+     * background drain adopting a collaborator's delete, another tab rolling a
+     * refused change back. Re-read them so this tab draws what Dexie now holds
+     * instead of the copy it loaded before. A row with local intent still
+     * pending (queued in the outbox, or applied here and not yet written) is
+     * left alone: that intent is newer, and its own sync settles it.
+     */
+    async reloadFromMirror(ids: readonly string[]): Promise<void> {
+        await this.ensureLoaded();
+        const { rows, queued } = await this.db.transaction('r', this.db.annotations, this.db.ops, async () => ({
+            rows: await this.db.annotations.bulkGet([...ids]),
+            queued: new Set(
+                (await this.db.ops.where('docId').equals(this.docId).toArray()).map((op) => op.annotationId),
+            ),
+        }));
+        const touched = new Set<number>();
+        ids.forEach((id, i) => {
+            if (queued.has(id) || this.unpersisted.has(id)) {
+                return;
+            }
+            const row = rows[i];
+            const prev = this.byId.get(id);
+            if (row && row.docId !== this.docId) {
+                return;
+            }
+            if (prev && (!row || prev.page !== row.page)) {
+                this.pageMap(prev.page).delete(id);
+                touched.add(prev.page);
+            }
+            if (!row) {
+                this.byId.delete(id);
+                return;
+            }
+            const { pending: _pending, ...annotation } = row;
+            this.applyMemory(annotation);
+            touched.add(annotation.page);
+        });
+        for (const page of touched) {
+            this.notifyPage(page);
+        }
+    }
+
+    /** Group several ops (e.g. an eraser drag) into one undo entry. Nests. */
+    beginBatch(): UndoBatchHandle {
+        return this.undo.beginBatch();
+    }
+
+    endBatch(handle?: UndoBatchHandle): void {
+        this.undo.endBatch(handle);
         this.notifyMeta();
     }
 
+    /** Drop `handle`'s open batch without recording it. */
+    cancelBatch(handle?: UndoBatchHandle): void {
+        this.undo.cancelBatch(handle);
+        this.notifyMeta();
+    }
+
+    /** Undelete a tombstone (convert abort restores siblings it already deleted). */
+    async restore(id: string): Promise<void> {
+        const prev = this.byId.get(id);
+        if (!prev || !prev.deletedAt) {
+            return;
+        }
+        await this.commit(
+            {
+                type: 'restore',
+                annotation: { ...prev, deletedAt: null, updatedAt: nowIso() },
+                baseDeletedAt: prev.deletedAt,
+            },
+            { recordUndo: true },
+        );
+    }
+
+    /**
+     * Undo the newest entry that still has something to undo. An entry whose
+     * every op targets a mark a collaborator has since deleted is dropped and
+     * the next one is tried, so one press always does something visible
+     * instead of silently spending itself on a mark that is already gone.
+     */
     async undoLast(): Promise<void> {
         if (this.historyOverlay) {
             return; // read-only while an overlay is shown — don't consume the entry
         }
-        const inverses = await this.replayEntry(this.undo.popUndo());
-        if (inverses) {
-            this.undo.pushRedoEntry(inverses);
+        for (;;) {
+            const entry = this.undo.popUndo();
+            if (!entry) {
+                break;
+            }
+            const inverses = await this.replayEntry(entry);
+            if (inverses) {
+                this.undo.pushRedoEntry(inverses);
+                break;
+            }
         }
         this.notifyMeta();
     }
@@ -352,9 +531,16 @@ export class AnnotationStore {
         if (this.historyOverlay) {
             return;
         }
-        const inverses = await this.replayEntry(this.undo.popRedo());
-        if (inverses) {
-            this.undo.pushUndoEntryRaw(inverses);
+        for (;;) {
+            const entry = this.undo.popRedo();
+            if (!entry) {
+                break;
+            }
+            const inverses = await this.replayEntry(entry);
+            if (inverses) {
+                this.undo.pushUndoEntryRaw(inverses);
+                break;
+            }
         }
         this.notifyMeta();
     }
@@ -403,7 +589,7 @@ export class AnnotationStore {
         switch (op.type) {
             case 'create': {
                 const annotation = { ...op.annotation, updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return { commit: { type: 'create', annotation }, inverse: { type: 'delete', id: annotation.id } };
             }
             case 'delete': {
@@ -412,7 +598,7 @@ export class AnnotationStore {
                     return null;
                 }
                 const annotation = { ...prev, deletedAt: nowIso(), updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return { commit: { type: 'delete', annotation }, inverse: { type: 'restore', id: op.id } };
             }
             case 'restore': {
@@ -421,16 +607,24 @@ export class AnnotationStore {
                     return null;
                 }
                 const annotation = { ...prev, deletedAt: null, updatedAt: nowIso() };
-                this.applyMemory(annotation);
-                return { commit: { type: 'restore', annotation }, inverse: { type: 'delete', id: op.id } };
+                this.applyLocal(annotation);
+                return {
+                    commit: { type: 'restore', annotation, baseDeletedAt: prev.deletedAt },
+                    inverse: { type: 'delete', id: op.id },
+                };
             }
             case 'update': {
+                // A tombstone here means a collaborator deleted the mark after
+                // this entry was recorded (a local delete would have pushed its
+                // own restore, replayed before this op). Replaying the old
+                // fields — deletedAt null among them — would resurrect a mark
+                // someone else removed, so the op is skipped and dropped.
                 const prev = this.byId.get(op.id);
-                if (!prev) {
+                if (!prev || prev.deletedAt) {
                     return null;
                 }
                 const annotation = { ...op.annotation, updatedAt: nowIso() };
-                this.applyMemory(annotation);
+                this.applyLocal(annotation);
                 return {
                     commit: { type: 'update', annotation, prev },
                     inverse: { type: 'update', id: op.id, annotation: prev },
@@ -439,9 +633,27 @@ export class AnnotationStore {
         }
     }
 
-    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<void> {
+    private async commit(op: CommitOp, options: { recordUndo?: boolean }): Promise<boolean> {
         if (this.historyOverlay) {
-            return;
+            return false;
+        }
+
+        // Creates apply to the live map before any IndexedDB yield so the
+        // handwriting pause can start at pointer-up. Snapshot still uses the
+        // pre-edit set. Updates/deletes keep snapshot-first because a peer
+        // tombstone during that yield must not still apply (`stillApplies`).
+        if (op.type === 'create') {
+            const preEdit = options.recordUndo ? this.liveAnnotations() : [];
+            this.applyLocal(op.annotation);
+            if (options.recordUndo) {
+                this.pushCommitInverse(op);
+                await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
+            }
+            await this.persistMany([op]);
+            this.notifyPage(op.annotation.page);
+            this.notifyMeta();
+            this.onDirty?.();
+            return true;
         }
 
         // Capture today's starting point before the first user edit of the day.
@@ -449,27 +661,20 @@ export class AnnotationStore {
             await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
         }
 
+        // The snapshot read yields. A peer erase in that window must not still
+        // tombstone (or undo-record) a row that is already gone.
+        if (!this.stillApplies(op)) {
+            return false;
+        }
+
         const { annotation } = op;
 
         // 1. In-memory map (render source) — synchronous, so the UI never waits on IndexedDB.
-        this.applyMemory(annotation);
+        this.applyLocal(annotation);
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
-            switch (op.type) {
-                case 'create':
-                    this.undo.pushInverse({ type: 'delete', id: annotation.id });
-                    break;
-                case 'update':
-                    this.undo.pushInverse({ type: 'update', id: annotation.id, annotation: op.prev });
-                    break;
-                case 'delete':
-                    this.undo.pushInverse({ type: 'restore', id: annotation.id });
-                    break;
-                case 'restore':
-                    this.undo.pushInverse({ type: 'delete', id: annotation.id });
-                    break;
-            }
+            this.pushCommitInverse(op);
         }
 
         // 3. Durable mirror + outbox, atomically.
@@ -479,6 +684,49 @@ export class AnnotationStore {
         this.notifyPage(annotation.page);
         this.notifyMeta();
         this.onDirty?.();
+        return true;
+    }
+
+    /** False when a concurrent erase/restore won during `commit`'s snapshot yield. */
+    private stillApplies(op: CommitOp): boolean {
+        switch (op.type) {
+            case 'create':
+                return true;
+            case 'update':
+            case 'delete': {
+                const live = this.byId.get(op.annotation.id);
+                return !!live && !live.deletedAt;
+            }
+            case 'restore': {
+                const live = this.byId.get(op.annotation.id);
+                return !!live && !!live.deletedAt;
+            }
+            default: {
+                const _exhaustive: never = op;
+                return _exhaustive;
+            }
+        }
+    }
+
+    private pushCommitInverse(op: CommitOp): void {
+        switch (op.type) {
+            case 'create':
+                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                return;
+            case 'update':
+                this.undo.pushInverse({ type: 'update', id: op.annotation.id, annotation: op.prev });
+                return;
+            case 'delete':
+                this.undo.pushInverse({ type: 'restore', id: op.annotation.id });
+                return;
+            case 'restore':
+                this.undo.pushInverse({ type: 'delete', id: op.annotation.id });
+                return;
+            default: {
+                const _exhaustive: never = op;
+                return _exhaustive;
+            }
+        }
     }
 
     /** In-memory map updates (render source) — synchronous, UI never waits on IndexedDB. */
@@ -491,6 +739,12 @@ export class AnnotationStore {
         }
     }
 
+    /** applyMemory for a local edit, which persistMany will write (and release). */
+    private applyLocal(annotation: Annotation): void {
+        this.unpersisted.set(annotation.id, (this.unpersisted.get(annotation.id) ?? 0) + 1);
+        this.applyMemory(annotation);
+    }
+
     /**
      * Durable mirror + outbox for a set of ops, atomically per chunk. Bulk
      * writes amortize the IndexedDB transaction overhead that dominates
@@ -498,17 +752,35 @@ export class AnnotationStore {
      * transaction that starves concurrent readers.
      */
     private async persistMany(ops: CommitOp[]): Promise<void> {
+        try {
+            await this.writeMany(ops);
+        } finally {
+            for (const op of ops) {
+                const left = (this.unpersisted.get(op.annotation.id) ?? 1) - 1;
+                if (left > 0) {
+                    this.unpersisted.set(op.annotation.id, left);
+                } else {
+                    this.unpersisted.delete(op.annotation.id);
+                }
+            }
+        }
+    }
+
+    private async writeMany(ops: CommitOp[]): Promise<void> {
         const CHUNK = 4000;
         for (let start = 0; start < ops.length; start += CHUNK) {
             const slice = ops.slice(start, start + CHUNK);
             const rows: LocalAnnotation[] = slice.map((op) => ({ ...op.annotation, pending: 1 }));
             const queuedAt = nowIso();
-            const opRows = slice.map((op) => ({
+            const author = this.author;
+            const opRows = slice.map((op): PendingOp => ({
                 docId: this.docId,
-                type: op.type as PendingOpType,
+                type: op.type,
                 annotationId: op.annotation.id,
                 annotation: op.annotation,
                 queuedAt,
+                ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
+                ...(author ? { userId: author } : {}),
             }));
             await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
                 await this.db.annotations.bulkPut(rows);

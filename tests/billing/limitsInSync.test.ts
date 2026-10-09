@@ -13,6 +13,8 @@ import {
     type UsageMetric,
 } from '../../supabase/functions/_shared/entitlements';
 import { FREE_LIMITS } from '../../src/features/billing/entitlementsService';
+import { limitAction } from '../../src/features/billing/limitErrors';
+import { PAID_VISION_READS } from '../../src/features/billing/paidAllowances';
 
 /**
  * Drift guard.
@@ -151,22 +153,73 @@ describe('tier limits stay in sync with the migration', () => {
 });
 
 describe('the pricing page describes the limits it actually enforces', () => {
+    /** Play-along and fingering are switched off for this release (src/lib/features.ts). */
+    const RELEASE = { playalong: false, fingering: false } as const;
+    const ALL_ON = { playalong: true, fingering: true } as const;
+
+    const cardCopy = async (tier: BillingTier, flags: { playalong: boolean; fingering: boolean } = RELEASE) => {
+        const { tierCards } = await import('../../src/features/billing/pricing');
+        const card = tierCards(flags).find((c) => c.tier === tier);
+        return card?.features.join(' ') ?? '';
+    };
+
     it('quotes the free-tier numbers on the free card', async () => {
-        const { TIER_CARDS } = await import('../../src/features/billing/pricing');
-        const free = TIER_CARDS.find((card) => card.tier === 'free');
-        const copy = free?.features.join(' ') ?? '';
+        const copy = await cardCopy('free');
 
         expect(copy).toContain(`${TIER_LIMITS.free.cloud_scores} active cloud scores`);
-        expect(copy).toContain(`${TIER_LIMITS.free.omr_runs} play-along analyses a month`);
-        expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} smart imports a month`);
+        // smart_imports is what an IMSLP import spends; vision_reads is Import marks' AI pass.
+        expect(copy).toContain(`${TIER_LIMITS.free.smart_imports} IMSLP imports a month`);
+        expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI page reads for Import marks a month`);
         expect(copy).toContain(`${TIER_LIMITS.free.pdf_exports} PDF export a month`);
-        expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI fingering reads a month`);
         // Nothing on this card may advertise a roster it does not have, the same
         // rule the Personal card is held to below.
         expect(copy).not.toMatch(/student/i);
         expect(TIER_LIMITS.free.students).toBe(0);
         // Export left the unlimited line when it became a metered free allowance.
+        expect(copy).toContain('Unlimited annotation');
+        expect(copy).not.toMatch(/unlimited pdf/i);
+    });
+
+    it('sells nothing this release switches off, on any card', async () => {
+        // omr_runs is still enforced in SQL (above) — it just must not be sold
+        // while play-along is hidden, and neither may fingering.
+        const { tierCards } = await import('../../src/features/billing/pricing');
+        for (const card of tierCards(RELEASE)) {
+            const copy = `${card.tagline} ${card.features.join(' ')}`;
+            expect(copy).not.toMatch(/play-?along|fingering|playback|omr/i);
+        }
+    });
+
+    it('quotes the play-along and fingering allowances in a build that ships them', async () => {
+        const copy = await cardCopy('free', ALL_ON);
+
+        expect(copy).toContain(`${TIER_LIMITS.free.omr_runs} play-along analyses a month`);
+        expect(copy).toContain(`${TIER_LIMITS.free.vision_reads} AI page reads (Import marks and fingering) a month`);
         expect(copy).toContain('Unlimited annotation and fingering tools');
+        expect(await cardCopy('personal', ALL_ON)).toContain('Unlimited play-along analysis');
+        // Unlimited is only promised where every paid tier really is uncapped.
+        for (const tier of PAID_TIERS) {
+            expect(TIER_LIMITS[tier].omr_runs).toBe(UNLIMITED);
+        }
+    });
+
+    it('promises Personal exactly the IMSLP imports and AI page reads it enforces', async () => {
+        const copy = await cardCopy('personal');
+
+        expect(copy).toContain('Unlimited IMSLP imports');
+        expect(TIER_LIMITS.personal.smart_imports).toBe(UNLIMITED);
+        // AI reads are a fair-use ceiling on paid plans, not unlimited.
+        expect(copy).toContain(
+            `${TIER_LIMITS.personal.vision_reads} AI page reads for Import marks a month (fair use)`,
+        );
+        expect(copy).not.toMatch(/unlimited ai/i);
+        expect(TIER_LIMITS.personal.pdf_exports).toBe(UNLIMITED);
+    });
+
+    it('sells the cards this build is configured for', async () => {
+        const { TIER_CARDS, tierCards } = await import('../../src/features/billing/pricing');
+        const { features } = await import('../../src/lib/features');
+        expect(TIER_CARDS).toEqual(tierCards(features));
     });
 
     it('promises no student features on the Personal card, whose roster limit is zero', async () => {
@@ -186,5 +239,31 @@ describe('the pricing page describes the limits it actually enforces', () => {
 
         expect(teacher?.features.join(' ')).toContain('Unlimited students');
         expect(TIER_LIMITS.teacher.students).toBe(UNLIMITED);
+    });
+});
+
+describe('the upgrade prompts promise only what the paid tiers enforce', () => {
+    it('quotes the paid AI page-read allowance the SQL actually grants', () => {
+        for (const tier of PAID_TIERS) {
+            expect(TIER_LIMITS[tier].vision_reads).toBe(PAID_VISION_READS);
+        }
+    });
+
+    it.each(METRICS)('never sells "unlimited" %s unless every paid tier is uncapped', (metric) => {
+        const action = limitAction({ code: 'limit_reached', metric, limit: TIER_LIMITS.free[metric], tier: 'free' });
+        const everyPaidTierUnlimited = PAID_TIERS.every((tier) => TIER_LIMITS[tier][metric] === UNLIMITED);
+        if (!everyPaidTierUnlimited) {
+            expect(action).not.toMatch(/unlimited/i);
+        }
+    });
+
+    it('tells a free user the real paid AI page-read allowance', () => {
+        const action = limitAction({ code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' });
+        expect(action).toContain(`${TIER_LIMITS.personal.vision_reads} AI page reads a month`);
+    });
+
+    it('does not call a capped paid plan unlimited when its fair-use ceiling is hit', () => {
+        const action = limitAction({ code: 'fair_use_cap', metric: 'vision_reads', limit: 500, tier: 'personal' });
+        expect(action).not.toMatch(/unlimited/i);
     });
 });

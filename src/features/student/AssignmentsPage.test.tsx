@@ -23,6 +23,7 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
     ...(await importOriginal<typeof sessionModule>()),
     useSession: () => ({ session: studentSession, loading: false, lastEvent: null }),
     signOut: (...args: unknown[]) => signOut(...args),
+    syncBeforeSignOut: async () => ({ pending: 0, refused: 0 }),
 }));
 
 /** A provisioned student: no email, user_type set by student-provision. */
@@ -56,6 +57,7 @@ const assigned = (id: string, title: string, over: Partial<AssignmentRow> = {}):
         storage_path: `${id}/original.pdf`,
         page_count: 3,
         content_rev: 0,
+        thumb_rev: null,
         created_at: '2026-08-01T00:00:00Z',
         updated_at: '2026-08-01T00:00:00Z',
         archived_at: null,

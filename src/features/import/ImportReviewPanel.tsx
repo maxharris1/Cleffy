@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 
+import { limitAction, limitHeadline } from '@/features/billing/limitErrors';
+import { isBillingConfigured } from '@/features/billing/pricing';
 import { applyProposals } from '@/features/import/applyImport';
 import { scanDocument } from '@/features/import/importPipeline';
 import { recordImportStatus } from '@/features/import/importPromptService';
@@ -19,6 +21,12 @@ import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
+
+// Lazy for the same reason as the share menu's copy: pricing is a rare
+// destination, and the viewer should not carry it in its first paint.
+const PricingDialog = lazy(() =>
+    import('@/features/billing/PricingDialog').then((m) => ({ default: m.PricingDialog })),
+);
 
 interface ImportReviewPanelProps {
     store: AnnotationStore;
@@ -52,6 +60,7 @@ export const ImportReviewPanel = ({
     const [previewOn, setPreviewOn] = useState(true);
     const [cleanChecked, setCleanChecked] = useState(true);
     const [scanRun, setScanRun] = useState(0);
+    const [pricingOpen, setPricingOpen] = useState(false);
     // Scan the bytes the panel was OPENED with — accepting with cleaning swaps
     // the viewer's bytes, and that must not restart the scan over the 'done' view.
     const [scanBytes] = useState(bytes);
@@ -192,164 +201,195 @@ export const ImportReviewPanel = ({
     const foundCount = proposal ? proposal.pages.reduce((sum, page) => sum + page.items.length, 0) : 0;
 
     return (
-        <Dialog label="Import existing marks" onClose={onClose} sheet>
-            {status.kind === 'idle' || status.kind === 'scanning' || status.kind === 'classifying' ? (
-                <ScanProgress status={status} />
-            ) : null}
+        <>
+            <Dialog label="Import existing marks" onClose={onClose} sheet>
+                {status.kind === 'idle' || status.kind === 'scanning' || status.kind === 'classifying' ? (
+                    <ScanProgress status={status} />
+                ) : null}
 
-            {status.kind === 'nothing-found' ? (
-                <div className="mt-2">
-                    <p className="text-sm text-stone-700">
-                        No importable marks found. Only <span className="font-medium">colored ink</span> (blue/red pen,
-                        highlighter) and real PDF annotations can be detected — pencil and black-ink handwriting can’t
-                        be separated from the printed music yet.
-                    </p>
-                    {status.unreadablePages.length > 0 ? (
-                        <p className="mt-2 text-sm text-amber-800" role="status">
-                            {status.unreadablePages.length} page(s) couldn’t be read (blank or undecodable scan).
-                        </p>
-                    ) : null}
-                    {status.tooColorfulPages.length > 0 ? (
-                        <p className="mt-2 text-sm text-amber-800" role="status">
-                            {status.tooColorfulPages.length} page(s) look like color photos and were skipped.
-                        </p>
-                    ) : null}
-                    <div className="mt-4 flex justify-end">
-                        <Button size="sm" onClick={onClose}>
-                            Close
-                        </Button>
-                    </div>
-                </div>
-            ) : null}
-
-            {status.kind === 'error' ? (
-                <div className="mt-2">
-                    <ErrorText>{status.message}</ErrorText>
-                    <div className="mt-4 flex justify-end gap-2">
-                        <Button variant="ghost" size="sm" onClick={onClose}>
-                            Close
-                        </Button>
-                        <Button size="sm" onClick={rescan}>
-                            Try again
-                        </Button>
-                    </div>
-                </div>
-            ) : null}
-
-            {proposal ? (
-                <div className="mt-1">
-                    {proposal.aiDegraded ? (
-                        <div className="mb-3 rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-2.5">
-                            <p className="text-sm text-amber-900">
-                                Text recognition is unavailable right now — everything will import as ink you can erase,
-                                not as editable text.
-                            </p>
-                            <button
-                                type="button"
-                                onClick={rescan}
-                                className="mt-1.5 text-sm font-medium text-amber-900 underline underline-offset-2"
-                            >
-                                Try recognition again
-                            </button>
-                        </div>
-                    ) : null}
-
-                    <div className="flex flex-wrap items-center justify-between gap-2">
+                {status.kind === 'nothing-found' ? (
+                    <div className="mt-2">
                         <p className="text-sm text-stone-700">
-                            Found <span className="font-medium">{foundCount}</span> marks on {proposal.pages.length}{' '}
-                            page(s). Unchecked marks stay untouched on the page.
+                            No importable marks found. Only <span className="font-medium">colored ink</span> (blue/red
+                            pen, highlighter) and real PDF annotations can be detected — pencil and black-ink
+                            handwriting can’t be separated from the printed music yet.
                         </p>
-                        <label className="flex items-center gap-1.5 text-sm text-stone-600">
-                            <input
-                                type="checkbox"
-                                checked={previewOn}
-                                onChange={(e) => setPreviewOn(e.target.checked)}
-                            />
-                            Preview on pages
-                        </label>
+                        {status.unreadablePages.length > 0 ? (
+                            <p className="mt-2 text-sm text-amber-800" role="status">
+                                {status.unreadablePages.length} page(s) couldn’t be read (blank or undecodable scan).
+                            </p>
+                        ) : null}
+                        {status.tooColorfulPages.length > 0 ? (
+                            <p className="mt-2 text-sm text-amber-800" role="status">
+                                {status.tooColorfulPages.length} page(s) look like color photos and were skipped.
+                            </p>
+                        ) : null}
+                        <div className="mt-4 flex justify-end">
+                            <Button size="sm" onClick={onClose}>
+                                Close
+                            </Button>
+                        </div>
                     </div>
+                ) : null}
 
-                    <ul className="mt-3 flex max-h-72 flex-col gap-3 overflow-y-auto pr-1">
-                        {proposal.pages.map((page) => (
-                            <PageSection
-                                key={page.pageIndex}
-                                page={page}
-                                disabled={disabled}
-                                onToggleItem={toggleItem}
-                                onSetPage={setPage}
-                            />
-                        ))}
-                    </ul>
+                {status.kind === 'error' ? (
+                    <div className="mt-2">
+                        <ErrorText>{status.message}</ErrorText>
+                        <div className="mt-4 flex justify-end gap-2">
+                            <Button variant="ghost" size="sm" onClick={onClose}>
+                                Close
+                            </Button>
+                            <Button size="sm" onClick={rescan}>
+                                Try again
+                            </Button>
+                        </div>
+                    </div>
+                ) : null}
 
-                    {clean !== null ? (
-                        <label className="mt-3 flex items-start gap-2 text-sm text-stone-700">
-                            <input
-                                type="checkbox"
-                                className="mt-0.5"
-                                checked={cleanChecked}
-                                onChange={(e) => setCleanChecked(e.target.checked)}
-                            />
-                            <span>
-                                Also lift the original ink off the page (the file is replaced; the untouched original is
-                                kept for recovery)
-                            </span>
-                        </label>
-                    ) : (
-                        <p className="mt-3 text-xs text-amber-800" role="note">
-                            {isCloudDocId(docId)
-                                ? 'The original ink stays printed on the page here — imported marks sit on top of it.'
-                                : 'Heads-up: for scores opened without an account, the original handwriting stays ' +
-                                  'printed on the page — imported marks sit on top of it, so erasing one reveals the ' +
-                                  'ink underneath. Sign in and upload the score to also lift the original ink off ' +
-                                  'the page.'}
+                {proposal ? (
+                    <div className="mt-1">
+                        {proposal.aiDegraded && proposal.aiLimit ? (
+                            // The plan's AI page reads ran out: "try again" would be
+                            // refused the same way, so offer the plans instead.
+                            <div
+                                role="status"
+                                className="mb-3 rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-2.5"
+                            >
+                                <p className="text-sm font-medium text-amber-900">{limitHeadline(proposal.aiLimit)}</p>
+                                <p className="mt-0.5 text-sm text-amber-900">
+                                    Marks it couldn’t read will import as ink you can erase, not as editable text.{' '}
+                                    {limitAction(proposal.aiLimit)}
+                                </p>
+                                {proposal.aiLimit.code !== 'fair_use_cap' && isBillingConfigured() ? (
+                                    <Button size="sm" className="mt-2" onClick={() => setPricingOpen(true)}>
+                                        See plans
+                                    </Button>
+                                ) : null}
+                            </div>
+                        ) : proposal.aiDegraded ? (
+                            <div className="mb-3 rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-2.5">
+                                <p className="text-sm text-amber-900">
+                                    Text recognition is unavailable right now — everything will import as ink you can
+                                    erase, not as editable text.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={rescan}
+                                    className="mt-1.5 text-sm font-medium text-amber-900 underline underline-offset-2"
+                                >
+                                    Try recognition again
+                                </button>
+                            </div>
+                        ) : null}
+
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-sm text-stone-700">
+                                Found <span className="font-medium">{foundCount}</span> marks on {proposal.pages.length}{' '}
+                                page(s). Unchecked marks stay untouched on the page.
+                            </p>
+                            <label className="flex items-center gap-1.5 text-sm text-stone-600">
+                                <input
+                                    type="checkbox"
+                                    checked={previewOn}
+                                    onChange={(e) => setPreviewOn(e.target.checked)}
+                                />
+                                Preview on pages
+                            </label>
+                        </div>
+
+                        <ul className="mt-3 flex max-h-72 flex-col gap-3 overflow-y-auto pr-1">
+                            {proposal.pages.map((page) => (
+                                <PageSection
+                                    key={page.pageIndex}
+                                    page={page}
+                                    disabled={disabled}
+                                    onToggleItem={toggleItem}
+                                    onSetPage={setPage}
+                                />
+                            ))}
+                        </ul>
+
+                        {clean !== null ? (
+                            <label className="mt-3 flex items-start gap-2 text-sm text-stone-700">
+                                <input
+                                    type="checkbox"
+                                    className="mt-0.5"
+                                    checked={cleanChecked}
+                                    onChange={(e) => setCleanChecked(e.target.checked)}
+                                />
+                                <span>
+                                    Also lift the original ink off the page (the file is replaced; the untouched
+                                    original is kept for recovery)
+                                </span>
+                            </label>
+                        ) : (
+                            <p className="mt-3 text-xs text-amber-800" role="note">
+                                {isCloudDocId(docId)
+                                    ? 'The original ink stays printed on the page here — imported marks sit on top of it.'
+                                    : 'Heads-up: for scores opened without an account, the original handwriting stays ' +
+                                      'printed on the page — imported marks sit on top of it, so erasing one reveals the ' +
+                                      'ink underneath. Sign in and upload the score to also lift the original ink off ' +
+                                      'the page.'}
+                            </p>
+                        )}
+
+                        <div className="mt-4 flex justify-end gap-2">
+                            <Button variant="ghost" size="sm" onClick={onClose}>
+                                Cancel
+                            </Button>
+                            <Button size="sm" disabled={enabledItems.length === 0} onClick={() => void accept()}>
+                                Import {enabledItems.length} marks
+                            </Button>
+                        </div>
+                    </div>
+                ) : null}
+
+                {status.kind === 'applying' ? (
+                    <div className="mt-2">
+                        <p className="text-sm text-stone-700" role="status">
+                            {status.step === 'annotations'
+                                ? `Adding marks…${status.total ? ` ${status.done ?? 0} of ${status.total}` : ''}`
+                                : status.step === 'rebuild'
+                                  ? 'Lifting original ink off the page…'
+                                  : 'Saving the cleaned score…'}
                         </p>
-                    )}
-
-                    <div className="mt-4 flex justify-end gap-2">
-                        <Button variant="ghost" size="sm" onClick={onClose}>
-                            Cancel
-                        </Button>
-                        <Button size="sm" disabled={enabledItems.length === 0} onClick={() => void accept()}>
-                            Import {enabledItems.length} marks
-                        </Button>
+                        {status.step === 'annotations' && status.total ? (
+                            <ProgressBar
+                                value={Math.round(((status.done ?? 0) / status.total) * 100)}
+                                label="Adding marks"
+                                className="mt-2"
+                            />
+                        ) : null}
                     </div>
-                </div>
-            ) : null}
+                ) : null}
 
-            {status.kind === 'applying' ? (
-                <div className="mt-2">
-                    <p className="text-sm text-stone-700" role="status">
-                        {status.step === 'annotations'
-                            ? `Adding marks…${status.total ? ` ${status.done ?? 0} of ${status.total}` : ''}`
-                            : status.step === 'rebuild'
-                              ? 'Lifting original ink off the page…'
-                              : 'Saving the cleaned score…'}
-                    </p>
-                    {status.step === 'annotations' && status.total ? (
-                        <ProgressBar
-                            value={Math.round(((status.done ?? 0) / status.total) * 100)}
-                            label="Adding marks"
-                            className="mt-2"
-                        />
-                    ) : null}
-                </div>
-            ) : null}
-
-            {status.kind === 'done' ? (
-                <div className="mt-2">
-                    <p className="text-sm text-stone-700" role="status">
-                        Imported {status.created} marks — they now behave exactly like marks made in Cleffy (edit with
-                        the text tool, erase, undo).
-                        {status.cleaned ? ' The page was cleaned; the original file is kept for recovery.' : ''}
-                    </p>
-                    <div className="mt-4 flex justify-end">
-                        <Button size="sm" onClick={onClose}>
-                            Done
-                        </Button>
+                {status.kind === 'done' ? (
+                    <div className="mt-2">
+                        <p className="text-sm text-stone-700" role="status">
+                            Imported {status.created} marks — they now behave exactly like marks made in Cleffy (edit
+                            with the text tool, erase, undo).
+                            {status.cleaned ? ' The page was cleaned; the original file is kept for recovery.' : ''}
+                        </p>
+                        <div className="mt-4 flex justify-end">
+                            <Button size="sm" onClick={onClose}>
+                                Done
+                            </Button>
+                        </div>
                     </div>
-                </div>
+                ) : null}
+            </Dialog>
+            {/* Stacked over the review rather than replacing it: the review is still
+            there to accept as ink once the plans are closed. */}
+            {pricingOpen && proposal?.aiLimit ? (
+                <Suspense fallback={null}>
+                    <PricingDialog
+                        currentTier={proposal.aiLimit.tier}
+                        reason={limitHeadline(proposal.aiLimit)}
+                        onClose={() => setPricingOpen(false)}
+                    />
+                </Suspense>
             ) : null}
-        </Dialog>
+        </>
     );
 };
 
@@ -383,7 +423,10 @@ const PageSection = ({
                     </span>
                     Page {page.pageIndex + 1}
                     <span className="truncate font-normal text-stone-500">
-                        · {enabledCount === page.items.length ? page.items.length : `${enabledCount}/${page.items.length}`}{' '}
+                        ·{' '}
+                        {enabledCount === page.items.length
+                            ? page.items.length
+                            : `${enabledCount}/${page.items.length}`}{' '}
                         marks
                     </span>
                 </button>

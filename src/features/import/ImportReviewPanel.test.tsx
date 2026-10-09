@@ -154,6 +154,30 @@ describe('ImportReviewPanel', () => {
         expect(store.isHistoryMode).toBe(false);
     });
 
+    it('offers recognition again when the AI was only unavailable', async () => {
+        vi.mocked(scanDocument).mockResolvedValue({ ...proposalOf([makeItem('c1', 'ink mark')]), aiDegraded: true });
+        renderPanel();
+        await screen.findByText(/Text recognition is unavailable right now/);
+        expect(screen.getByRole('button', { name: 'Try recognition again' })).toBeInTheDocument();
+    });
+
+    it('says the AI page reads are spent instead of inviting a retry that would be refused', async () => {
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        vi.mocked(scanDocument).mockResolvedValue({
+            ...proposalOf([makeItem('c1', 'ink mark')]),
+            aiDegraded: true,
+            aiLimit: new LimitReachedError({ code: 'limit_reached', metric: 'vision_reads', limit: 5, tier: 'free' }),
+        });
+        renderPanel();
+
+        expect(await screen.findByText('You have used your 5 free AI page reads this month')).toBeInTheDocument();
+        expect(screen.getByText(/import as ink you can erase/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Try recognition again' })).not.toBeInTheDocument();
+        expect(screen.queryByText(/unavailable right now/)).not.toBeInTheDocument();
+        // The marks can still be imported, as ink.
+        expect(screen.getByRole('button', { name: /Import 1 mark/ })).toBeInTheDocument();
+    });
+
     it('surfaces scan failures with a retry', async () => {
         vi.mocked(scanDocument).mockRejectedValue(new Error('render exploded'));
         renderPanel();

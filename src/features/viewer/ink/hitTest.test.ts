@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import { measureInkText, SYSTEM_FONT_FAMILY } from '@/features/import/textFit';
 import { annotationBboxNorm, annotationsInRect, hitTestAnnotation, hitTestPage } from '@/features/viewer/ink/hitTest';
-import type { Annotation } from '@/types/models';
+import { MUSIC_FONT_FAMILY, textBoundsNorm } from '@/features/viewer/ink/musicFont';
+import type { Annotation, TextPayload } from '@/types/models';
 
 const PAGE_W = 1000;
 const PAGE_H = 1400;
@@ -73,12 +75,34 @@ const text = (id: string, x: number, y: number, content = '3', size = 0.02): Ann
 });
 
 describe('annotationBboxNorm', () => {
-    it('sizes text by the width-normalized char heuristic, height via aspect', () => {
+    it('sizes text by its measured glyph bounds (width against page width, height via aspect)', () => {
         const [minX, minY, maxX, maxY] = annotationBboxNorm(text('t', 0.1, 0.2, 'ab', 0.02), ASPECT);
+        const m = measureInkText('ab', { family: SYSTEM_FONT_FAMILY, style: 'normal' });
         expect(minX).toBe(0.1);
-        expect(minY).toBe(0.2);
-        expect(maxX).toBeCloseTo(0.1 + 2 * 0.02 * 0.6);
-        expect(maxY).toBeCloseTo(0.2 + 0.02 * 1.25 * ASPECT);
+        // The box starts at the glyphs' visual top, below the 'top' baseline anchor.
+        expect(minY).toBeCloseTo(0.2 + m.topInset * 0.02 * ASPECT);
+        expect(maxX).toBeCloseTo(0.1 + m.widthRatio * 0.02);
+        expect(maxY).toBeCloseTo(0.2 + (m.topInset + m.heightRatio) * 0.02 * ASPECT);
+    });
+
+    it('gives a converted music glyph the box of that glyph, not of its em', () => {
+        const HW = PAGE_H / PAGE_W;
+        const accent: TextPayload = { x: 0.3, y: 0.5, text: '\uE4A0', size: 0.1, hw: 1 };
+        const m = measureInkText('\uE4A0', { family: MUSIC_FONT_FAMILY, style: 'normal' });
+        const [minX, minY, maxX, maxY] = textBoundsNorm(accent, HW);
+        expect(maxX - minX).toBeCloseTo(m.widthRatio * 0.1);
+        expect(maxY - minY).toBeCloseTo((m.heightRatio * 0.1) / HW);
+        // Hit inside the glyph box, but not a whole em below the anchor.
+        const annotation: Annotation = { ...text('acc', 0.3, 0.5), payload: accent };
+        expect(hitTestAnnotation(annotation, (minX + maxX) / 2, (minY + maxY) / 2, 0, PAGE_W, PAGE_H)).toBe(true);
+        expect(hitTestAnnotation(annotation, 0.31, 0.5 + (1.2 * 0.1) / HW, 0, PAGE_W, PAGE_H)).toBe(false);
+    });
+
+    it('stacks multi-line text one line pitch apart', () => {
+        const HW = PAGE_H / PAGE_W;
+        const one = textBoundsNorm({ x: 0, y: 0, text: 'a', size: 0.02 }, HW);
+        const two = textBoundsNorm({ x: 0, y: 0, text: 'a\na', size: 0.02 }, HW);
+        expect(two[3] - one[3]).toBeCloseTo((1.25 * 0.02) / HW);
     });
 
     it('inflates stroke bboxes by half the stroke width per axis', () => {

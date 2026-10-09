@@ -2,9 +2,13 @@ import type { FormEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { useOutletContext, useSearchParams } from 'react-router';
 
+import { DeleteAccountSection } from '@/features/account/DeleteAccountSection';
 import { initialsOf } from '@/features/account/initials';
+import { mapAuthError } from '@/features/auth/authErrors';
 import type { OfflineStorageUsage } from '@/features/account/offlineStorage';
 import { clearOfflineStorage, formatMegabytes, readOfflineStorage } from '@/features/account/offlineStorage';
+import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
+import { HomeScreenPreferences } from '@/features/install/HomeScreenPreferences';
 import {
     displayNameOf,
     signOut,
@@ -18,9 +22,12 @@ import { PlanBadge } from '@/features/billing/PlanBadge';
 import { PricingDialog } from '@/features/billing/PricingDialog';
 import { StudioSeats } from '@/features/billing/StudioSeats';
 import { clearCachedEntitlements, loadUsage } from '@/features/billing/entitlementsService';
+import { formatPlanDate, ownSubscriptionOf, planPeriodOf } from '@/features/billing/planStatus';
 import { TIER_LABELS } from '@/features/billing/pricing';
 import { useEntitlements } from '@/features/billing/useEntitlements';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { features } from '@/lib/features';
 import type { UsageMetric } from '@/types/database';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -29,15 +36,26 @@ import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { TextField } from '@/ui/TextField';
 
-const METERED: Array<{ metric: UsageMetric; label: string }> = [
-    { metric: 'omr_runs', label: 'Play-along analyses' },
-    { metric: 'vision_reads', label: 'AI fingering reads' },
-    { metric: 'smart_imports', label: 'Smart imports' },
+import {
+    PASSWORD_HINT,
+    passwordProblem,
+    passwordProblemMessage,
+} from '../../../supabase/functions/_shared/passwordPolicy';
+
+/**
+ * Meters for the features this build ships, named for what actually spends
+ * them: an IMSLP import draws on `smart_imports`, and the AI pass of Import
+ * marks on `vision_reads` (fingering note reads too, where that ships). Play-
+ * along analyses are still metered server-side, but a release with play-along
+ * switched off (src/lib/features.ts) must not show an allowance for something
+ * the reader cannot use.
+ */
+const meteredRows = (): Array<{ metric: UsageMetric; label: string }> => [
+    ...(features.playalong ? [{ metric: 'omr_runs' as const, label: 'Play-along analyses' }] : []),
+    { metric: 'vision_reads', label: 'AI page reads' },
+    { metric: 'smart_imports', label: 'IMSLP imports' },
     { metric: 'pdf_exports', label: 'PDF exports' },
 ];
-
-/** Shortest password Supabase will accept by default; stated, not silently enforced. */
-const MIN_PASSWORD_LENGTH = 8;
 
 const SECTION = 'mt-8 border-t border-stone-300/50 pt-6';
 const SECTION_HEADING = 'text-sm font-medium uppercase tracking-[0.08em] text-stone-600';
@@ -224,8 +242,11 @@ export const AccountPage = () => {
             setPasswordError('Enter a new password.');
             return;
         }
-        if (password.length < MIN_PASSWORD_LENGTH) {
-            setPasswordError(`Use at least ${MIN_PASSWORD_LENGTH} characters.`);
+        // The same policy GoTrue enforces (passwordPolicy.ts), checked first so
+        // the refusal names the rule instead of arriving as a server error.
+        const problem = passwordProblem(password);
+        if (problem) {
+            setPasswordError(passwordProblemMessage(problem));
             return;
         }
         if (password !== confirmPassword) {
@@ -240,7 +261,7 @@ export const AccountPage = () => {
             setConfirmPassword('');
             setPasswordSaved(true);
         } catch (err) {
-            setPasswordError(err instanceof Error ? err.message : 'Could not change your password.');
+            setPasswordError(mapAuthError(err, 'Could not change your password.'));
         } finally {
             setPasswordBusy(false);
         }
@@ -276,15 +297,19 @@ export const AccountPage = () => {
             setSigningOut(false);
         }
     };
+    // Uploads (or asks about) unsynced marks first — sign-out clears them.
+    const guardedSignOut = useGuardedSignOut(handleSignOut);
 
     if (!session || (loading && !entitlements)) {
         return <LoadingText className="mt-10">Loading your account…</LoadingText>;
     }
 
     const tier = entitlements?.tier ?? 'free';
-    const renewal = entitlements?.current_period_end
-        ? new Date(entitlements.current_period_end).toLocaleDateString()
-        : null;
+    // A cancelled plan's period end is its last day, not a renewal: saying
+    // "Renews" to someone who cancelled tells them they will be charged again.
+    const period = planPeriodOf(entitlements);
+    const subscription = ownSubscriptionOf(entitlements);
+    const resumable = subscription?.cancelling === true;
     const label = displayNameOf(session);
     const email = session.user.email ?? '';
     const joined = formatJoined(session.user.created_at);
@@ -375,9 +400,7 @@ export const AccountPage = () => {
                     onSubmit={(event) => void changePassword(event)}
                 >
                     <h3 className={SUB_HEADING}>Change password</h3>
-                    <p className="mt-1 text-xs text-stone-500">
-                        At least {MIN_PASSWORD_LENGTH} characters. You stay signed in on this device.
-                    </p>
+                    <p className="mt-1 text-xs text-stone-500">{PASSWORD_HINT} You stay signed in on this device.</p>
                     <div className="mt-3 max-w-sm">
                         <TextField
                             id="account-new-password"
@@ -421,9 +444,13 @@ export const AccountPage = () => {
                                 <span className="text-sm text-stone-600">through your academy</span>
                             ) : null}
                         </p>
-                        {renewal ? (
-                            <p className="mt-1 text-sm text-stone-500">
-                                {tier === 'free' ? 'Ended' : 'Renews'} {renewal}
+                        {period?.kind === 'renews' ? (
+                            <p className="mt-1 text-sm text-stone-500">Renews {formatPlanDate(period.endsAt)}</p>
+                        ) : period?.kind === 'ends' ? (
+                            <p className="mt-1 text-sm text-amber-800">
+                                {period.viaAcademy
+                                    ? `Your academy’s plan ends ${formatPlanDate(period.endsAt)} — ask its owner if you need it longer.`
+                                    : `Ends ${formatPlanDate(period.endsAt)} — your plan won’t renew. Resume it any time before then.`}
                             </p>
                         ) : null}
                     </div>
@@ -445,7 +472,7 @@ export const AccountPage = () => {
                                 disabled={portalBusy}
                                 onClick={() => void openPortal()}
                             >
-                                {portalBusy ? 'Opening…' : 'Manage subscription'}
+                                {portalBusy ? 'Opening…' : resumable ? 'Resume subscription' : 'Manage subscription'}
                             </Button>
                         ) : null}
                     </div>
@@ -457,7 +484,7 @@ export const AccountPage = () => {
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Usage this month</h2>
                 <ul className="mt-4 flex flex-col gap-4">
-                    {METERED.map(({ metric, label: metricLabel }) => {
+                    {meteredRows().map(({ metric, label: metricLabel }) => {
                         const limit = entitlements?.limits[metric] ?? 0;
                         const used = usage[metric] ?? 0;
                         // A bar for an unlimited allowance can only lie: full says
@@ -497,7 +524,9 @@ export const AccountPage = () => {
                   that really are ungated everywhere.
                 */}
                 <p className="mt-4 text-xs text-stone-500">
-                    Annotation and the fingering optimizer are unlimited on every plan, including {TIER_LABELS.free}.
+                    {features.fingering
+                        ? `Annotation and the fingering optimizer are unlimited on every plan, including ${TIER_LABELS.free}.`
+                        : `Annotation is unlimited on every plan, including ${TIER_LABELS.free}.`}
                 </p>
             </section>
 
@@ -506,7 +535,9 @@ export const AccountPage = () => {
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Preferences</h2>
 
-                <h3 className={`${SUB_HEADING} mt-4`}>Offline storage</h3>
+                <HomeScreenPreferences />
+
+                <h3 className={`${SUB_HEADING} mt-6`}>Offline storage</h3>
                 <p className="mt-1.5 text-sm text-stone-600">
                     {storage === null
                         ? 'Checking what this device has downloaded…'
@@ -539,20 +570,26 @@ export const AccountPage = () => {
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Sign out</h2>
                 <p className="mt-2 text-sm text-stone-600">
-                    Signing out clears your cached plan on this device. Downloaded scores stay behind — remove them
-                    above if you share this computer.
+                    Signing out removes your cached plan, downloaded scores and the offline copy of your marks from this
+                    device. Everything stays in your account; changes not yet saved to it are uploaded first.
                 </p>
                 <Button
                     size="sm"
                     variant="secondary"
                     className="mt-3"
-                    disabled={signingOut}
-                    onClick={() => void handleSignOut()}
+                    disabled={signingOut || guardedSignOut.checking}
+                    onClick={() => void guardedSignOut.requestSignOut()}
                 >
-                    {signingOut ? 'Signing out…' : 'Sign out'}
+                    {guardedSignOut.checking ? 'Saving changes…' : signingOut ? 'Signing out…' : 'Sign out'}
                 </Button>
                 {signOutError ? <ErrorText className="mt-2">{signOutError}</ErrorText> : null}
             </section>
+
+            {guardedSignOut.dialog}
+
+            <DeleteAccountSection session={session} />
+
+            <LegalLinks withContact className="mt-10" />
 
             {clearOpen ? (
                 <ConfirmDialog
@@ -566,7 +603,9 @@ export const AccountPage = () => {
                 />
             ) : null}
 
-            {pricingOpen ? <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} /> : null}
+            {pricingOpen ? (
+                <PricingDialog currentTier={tier} subscription={subscription} onClose={() => setPricingOpen(false)} />
+            ) : null}
         </div>
     );
 };

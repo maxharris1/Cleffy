@@ -6,15 +6,17 @@ import { THUMB_MAX_SIDE } from '@/features/library/thumbnailSize';
 
 export { THUMB_MAX_SIDE };
 
+const THUMB_JPEG_QUALITY = 0.85;
+
 /**
- * Render page 1 of a PDF as a small PNG for the library list.
+ * Render page 1 of a PDF as a small JPEG for the library list.
  *
  * This module statically imports pdf.js and MUST NOT be statically imported
  * from anything in the shell bundle — thumbnailService reaches it through
  * `await import(...)` so the ~1 MB pdf chunk stays off the library's
  * critical path. Nothing here touches the network or Dexie.
  */
-export const renderFirstPagePng = async (
+export const renderFirstPageJpeg = async (
     bytes: ArrayBuffer,
 ): Promise<{ blob: Blob; width: number; height: number }> => {
     const worker = createPdfWorker();
@@ -38,11 +40,20 @@ export const renderFirstPagePng = async (
         }
 
         // Opaque white: scores are line art on transparent backgrounds, which
-        // would otherwise read as black once the PNG lands in a dark row.
+        // would otherwise read as black once the image lands in a dark row —
+        // and JPEG has no alpha to carry it anyway.
         await page.render({ canvasContext: ctx, viewport, canvas, background: 'rgba(255,255,255,1)' }).promise;
 
+        // JPEG, not PNG: this render is also the copy published for every other
+        // device (thumbnailRemote), and at cover size a JPEG of staff lines on
+        // white is a fifth the bytes of the lossless encoding for no visible
+        // difference at the sizes it is shown.
         const blob = await new Promise<Blob>((resolve, reject) => {
-            canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png');
+            canvas.toBlob(
+                (b) => (b ? resolve(b) : reject(new Error('JPEG encode failed'))),
+                'image/jpeg',
+                THUMB_JPEG_QUALITY,
+            );
         });
         const width = canvas.width;
         const height = canvas.height;

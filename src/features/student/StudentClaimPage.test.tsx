@@ -142,6 +142,23 @@ describe('StudentClaimPage', () => {
         expect(claimStudentAccount).not.toHaveBeenCalled();
     });
 
+    it('blocks a password without a digit client-side, before the code is spent', async () => {
+        const user = userEvent.setup();
+        renderClaim();
+
+        await enterCode(user);
+        // Long enough, but Supabase Auth requires letters AND digits; letting it
+        // through would turn into a "could not set up the account" from the
+        // function's updateUserById instead of a sentence a child can act on.
+        await fillCredentials(user, 'ada_lovelace', 'pianopiano');
+        await user.click(screen.getByRole('button', { name: 'Create my account' }));
+
+        expect(screen.getByRole('status')).toHaveTextContent('at least one letter and one number');
+        expect(claimStudentAccount).not.toHaveBeenCalled();
+        // The rule is stated up front, not only on refusal.
+        expect(screen.getByText('At least 8 characters, with a letter and a number.')).toBeInTheDocument();
+    });
+
     it('keeps everything typed when the server says the username is taken', async () => {
         const user = userEvent.setup();
         claimStudentAccount.mockRejectedValue(new StudentAuthError('That username is taken', 'username_taken'));

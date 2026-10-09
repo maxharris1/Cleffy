@@ -1,12 +1,14 @@
+import { useRef } from 'react';
 import { Link } from 'react-router';
 
 import { composerOf, displayTitleOf } from '@/features/library/libraryView';
 import { formatUpdated } from '@/features/library/libraryFormat';
-import { RowMenu } from '@/features/library/RowMenu';
-import { useScoreThumbnail } from '@/features/library/useScoreThumbnail';
+import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
+import { useNearViewport, useScoreThumbnail } from '@/features/library/useScoreThumbnail';
 import type { DocumentRow, LibraryTagRow } from '@/types/database';
 import { Badge } from '@/ui/Badge';
 import { StarIcon } from '@/ui/icons';
+import { TypesetCover } from '@/ui/TypesetCover';
 
 /**
  * Overlay controls on a cover: always in the DOM and always focusable, faded
@@ -21,34 +23,6 @@ const REVEAL =
     'opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100';
 
 /**
- * Stand-in cover for a score whose first page has not been rendered on this
- * device yet — it is only cached once the score has been opened or uploaded
- * here, so a fresh browser meets a shelf of these.
- *
- * Set like a printed title page rather than left blank: a wall of identical
- * empty staves would be less scannable than the list it replaced, so the type
- * carries the recognition until the real page arrives. Purely decorative — the
- * enclosing cover is aria-hidden and the title link already names the score.
- */
-const CoverFallback = ({ title, composer }: { title: string; composer: string | null }) => (
-    /* pt-10 clears the favourite star pinned to the cover's top-right corner —
-       on a favourited score it is always lit, and a centred title ran under it. */
-    <div className="flex h-full w-full flex-col justify-between bg-white px-3 pb-3 pt-10 text-center">
-        <div className="min-h-0">
-            <p className="font-display text-sm font-semibold leading-snug text-stone-800 line-clamp-4">{title}</p>
-            {composer ? (
-                <p className="mt-1.5 truncate text-[0.6rem] uppercase tracking-[0.14em] text-stone-500">{composer}</p>
-            ) : null}
-        </div>
-        <svg viewBox="0 0 40 14" className="w-full shrink-0 text-stone-200" aria-hidden="true">
-            {[1, 4, 7, 10, 13].map((y) => (
-                <line key={y} x1={2} x2={38} y1={y} y2={y} stroke="currentColor" strokeWidth={0.4} />
-            ))}
-        </svg>
-    </div>
-);
-
-/**
  * One score on the shelf: its engraved first page as the cover, with title,
  * composer and meta beneath.
  *
@@ -59,14 +33,14 @@ const CoverFallback = ({ title, composer }: { title: string; composer: string | 
  * explicit `z-10`.
  *
  * Tags are deliberately not shown — five to six cards per row cannot carry chip
- * rows without turning into noise. They survive in the card's tooltip, and the
- * list view remains the place to see and filter them.
+ * rows without turning into noise. The list view remains the place to see and
+ * filter them; the visible title (line-clamp-2) is the card's name.
  */
 export const ScoreCard = ({
     doc,
     index,
     stripComposer,
-    assignedTags,
+    assignedTags: _assignedTags,
     isFavorite,
     isOwner,
     onToggleFavorite,
@@ -74,6 +48,7 @@ export const ScoreCard = ({
     onShare,
     onAssign,
     onDelete,
+    onLeave,
 }: {
     doc: DocumentRow;
     index: number;
@@ -86,8 +61,12 @@ export const ScoreCard = ({
     onShare: () => void;
     onAssign?: () => void;
     onDelete: () => void;
+    /** A score shared with you: its menu offers to take it out of your library. */
+    onLeave?: () => void;
 }) => {
-    const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0);
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    const near = useNearViewport(rootRef);
+    const url = useScoreThumbnail(doc.id, doc.content_rev ?? 0, { thumbRev: doc.thumb_rev ?? null, enabled: near });
     // Suppressed under a composer group header, which already says it — five
     // cards in a row repeating "Bach, Johann Sebastian" is noise, not context.
     const composer = stripComposer ? null : composerOf(doc.title);
@@ -95,15 +74,12 @@ export const ScoreCard = ({
     // "(Chopin)" — printing both turns every card into an echo.
     const title = stripComposer || composer ? displayTitleOf(doc.title) : doc.title;
     const pages = doc.page_count ? `${doc.page_count} ${doc.page_count === 1 ? 'page' : 'pages'} · ` : '';
-    const tagNames = assignedTags.map((t) => t.name);
 
     return (
         <div
+            ref={rootRef}
             className="library-card group relative has-[[aria-expanded=true]]:z-20"
             style={{ animationDelay: `${Math.min(index, 12) * 30}ms` }}
-            // Titles clamp to two lines and tags have no room on a cover, so the
-            // tooltip carries the parts the card had to drop.
-            title={tagNames.length > 0 ? `${doc.title} · ${tagNames.join(' · ')}` : doc.title}
         >
             {/*
               The clipped cover and the controls are siblings on purpose: the
@@ -118,7 +94,10 @@ export const ScoreCard = ({
                     {url ? (
                         <img src={url} alt="" className="h-full w-full object-cover object-top" />
                     ) : (
-                        <CoverFallback title={title} composer={composer} />
+                        /* Default pt-10 clears the favourite star pinned to the
+                           cover's top-right corner — on a favourited score it is
+                           always lit, and a centred title ran under it. */
+                        <TypesetCover title={title} composer={composer} />
                     )}
                 </div>
 
@@ -137,14 +116,18 @@ export const ScoreCard = ({
                     </button>
                 </div>
 
-                {isOwner ? (
+                {isOwner || onLeave ? (
                     // `has-[[aria-expanded=true]]` keeps the pill lit while its
                     // own menu is open — otherwise moving the pointer onto the
                     // menu fades out the menu with it.
                     <div
                         className={`absolute bottom-1.5 right-1.5 z-10 rounded-full bg-white/85 backdrop-blur has-[[aria-expanded=true]]:opacity-100 ${REVEAL}`}
                     >
-                        <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                        {isOwner ? (
+                            <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
+                        ) : onLeave ? (
+                            <SharedScoreMenu onLeave={onLeave} />
+                        ) : null}
                     </div>
                 ) : null}
 

@@ -100,3 +100,42 @@ export const groupByTag = (
     }
     return groups;
 };
+
+export interface LibraryFilters {
+    /** Already trimmed and lower-cased. */
+    query: string;
+    favoritesOnly: boolean;
+    favorites: Set<string>;
+    tagId: string | null;
+    assignments: Map<string, string[]>;
+}
+
+/** True when any filter narrows the list (sorting alone does not). */
+export const isFiltering = (filters: Pick<LibraryFilters, 'query' | 'favoritesOnly' | 'tagId'>): boolean =>
+    filters.query !== '' || filters.favoritesOnly || filters.tagId !== null;
+
+/**
+ * The filters the page applies in memory. Over the whole library when every
+ * row is loaded; over server results too, where it keeps a score the teacher
+ * just unfavorited or untagged from lingering under that filter until the
+ * next search.
+ */
+export const applyLibraryFilters = (documents: DocumentRow[], filters: LibraryFilters): DocumentRow[] => {
+    let list = documents
+        .filter((doc) => !filters.query || doc.title.toLowerCase().includes(filters.query))
+        .filter((doc) => !filters.favoritesOnly || filters.favorites.has(doc.id));
+    if (filters.tagId) {
+        list = filterByTag(list, filters.tagId, filters.assignments);
+    }
+    return list;
+};
+
+/**
+ * Append a fetched page. Ids already held are skipped: a score touched
+ * between two "load more" taps can legitimately come back on a later page,
+ * and React keys (and the teacher) must never see it twice.
+ */
+export const appendPage = (current: DocumentRow[], page: DocumentRow[]): DocumentRow[] => {
+    const seen = new Set(current.map((doc) => doc.id));
+    return [...current, ...page.filter((doc) => !seen.has(doc.id))];
+};

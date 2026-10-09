@@ -1,7 +1,9 @@
 import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { appOrigin, modeForRequest, resolvePrice, stripeClient } from '../_shared/stripe.ts';
+import { holdsRunningSubscription } from '../_shared/stripeEvents.ts';
 
 /**
  * Creates a Stripe Checkout session for a subscription price and maps
@@ -71,6 +73,29 @@ Deno.serve(async (req) => {
     }
 
     try {
+        // One subscription per buyer per account: switching plans or resuming a
+        // cancelled one is the billing portal's job, and a second Checkout here
+        // would bill both (see holdsRunningSubscription). Fails closed -- a buyer
+        // we cannot check is asked to retry rather than risk a double charge.
+        const { data: running, error: runningError } = await admin
+            .from('subscriptions')
+            .select('status, current_period_end')
+            .eq('user_id', auth.caller.userId)
+            .eq('mode', mode);
+        if (runningError) {
+            logError('stripe-checkout', runningError, { code: 'subscription_check_failed' });
+            return jsonResponse({ error: 'Could not check your current plan. Please try again.' }, 502);
+        }
+        if (holdsRunningSubscription(running ?? [], Date.now())) {
+            return jsonResponse(
+                {
+                    error: 'You already have a subscription. Change or resume it with Manage subscription on your Account page.',
+                    code: 'already_subscribed',
+                },
+                409,
+            );
+        }
+
         // Scoped to the mode: a customer id belongs to one Stripe account, so the
         // sandbox `cus_…` a teacher picked up testing on dev is not a customer
         // the live account has ever heard of.
@@ -116,6 +141,7 @@ Deno.serve(async (req) => {
         }
         return jsonResponse({ url: session.url });
     } catch (err) {
+        logError('stripe-checkout', err, { code: 'checkout_failed' });
         return jsonResponse({ error: err instanceof Error ? err.message : 'Checkout failed' }, 502);
     }
 });

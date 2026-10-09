@@ -1,9 +1,11 @@
 import {
     ArrowLeft,
+    BookOpen,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     ChevronUp,
+    Columns2,
     EllipsisVertical,
     Hourglass,
     LayoutGrid,
@@ -19,6 +21,7 @@ import {
     RefreshCw,
     Repeat,
     Settings2,
+    Share,
     SkipBack,
     Square,
     Star,
@@ -28,6 +31,7 @@ import {
     Upload,
     Volume2,
     VolumeX,
+    WandSparkles,
     X,
 } from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
@@ -48,12 +52,16 @@ export const UndoIcon = withBrandStroke(Undo2);
 export const RedoIcon = withBrandStroke(Redo2);
 export const ZoomInIcon = withBrandStroke(Plus);
 export const ZoomOutIcon = withBrandStroke(Minus);
+export const Columns2Icon = withBrandStroke(Columns2);
+export const CoverPageIcon = withBrandStroke(BookOpen);
 export const PointerIcon = withBrandStroke(Pointer);
+export const PrintHandwritingIcon = withBrandStroke(WandSparkles);
 export const StarIcon = withBrandStroke(Star);
 export const TagIcon = withBrandStroke(Tags);
 export const MoreVerticalIcon = withBrandStroke(EllipsisVertical);
 export const SettingsIcon = withBrandStroke(Settings2);
 export const UploadIcon = withBrandStroke(Upload);
+export const ShareIcon = withBrandStroke(Share);
 export const LayoutGridIcon = withBrandStroke(LayoutGrid);
 export const ListIcon = withBrandStroke(List);
 

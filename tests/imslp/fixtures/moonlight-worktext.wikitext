@@ -1,0 +1,167 @@
+{{#fte:imslppage
+
+| *****AUDIO***** =
+====Complete====
+{{#fte:imslpaudio
+|File Name 1=PMLP1458-Y2mate.mx_-_Luis_Kolodin_plays_Beethoven's_Moonlight_Sonata_-_I_Adagio_sostenuto_(128_kbps).mp3
+|File Name 2=PMLP1458-Y2mate.mx_-_Luis_Kolodin_plays_Beethoven's_Moonlight_Sonata_-_II_Allegretto_(128_kbps).mp3
+|File Name 3=PMLP1458-Y2mate.mx_-_Luis_Kolodin_plays_Beethoven's_Moonlight_Sonata_-_III_Presto_(128_kbps).mp3
+|File Description 1=1. Adagio sostenuto
+|File Description 2=2. Allegretto - Trio
+|File Description 3=3. Presto agitato
+|Performers=
+|Performer Categories=Kolodin, Luis=Piano
+|Uploader=[[User:Luiskaludin|Luiskaludin]]
+|Date Submitted=2022/8/3
+|Publisher Information=Luis Kolodin, 2020.
+|Copyright=Creative Commons Attribution-ShareAlike 4.0
+|Misc. Notes=
+}}
+
+| *****FILES***** =
+=====Complete Score=====
+
+{{#fte:imslpfile
+|File Name 1=Beethoven - Op.27 No.2 - Cappi - Score.pdf
+|File Description 1=Complete Score
+|Editor={{FE}}
+|Image Type=Normal Scan
+|Scanner={{SibleyScan|1802/4754}}
+|Uploader=[[User:Peter|Peter]]
+|Date Submitted=2007/11/30
+|Publisher Information={{P|Diabelli|Gio. Cappi e Comp.|Vienna|n.d.[1802]|1802||879}}
+|Copyright=Public Domain
+|Misc. Notes=
+}}
+{{#fte:imslpfile
+|File Name 1=PMLP01458-Beethoven,_Ludwig_van-Werke_Breitkopf_Kalmus_Band_21_B137_Op_27_No_2_scan.pdf
+|File Name 2=PMLP1458-Beethoven,_L._van_-_14._Sonata_for_Piano_in_C-_minor,_Op._27.2_'Moonlight'.pdf
+|File Description 1=Complete Score
+|File Description 2=Complete Score
+|Editor=
+|Image Type=Normal Scan
+|Scanner 1=Piupianissimo
+|Scanner 2=
+|Uploader 1=[[User:Piupianissimo|Piupianissimo]]
+|Uploader 2=[[User:M.kowalski49|M.kowalski49]]
+|Date Submitted 1=2016/4/17
+|Date Submitted 2=2025/10/6
+|Publisher Information={{BeethovenComplete|16:<br>Sonaten für das Pianoforte|137|1862|15-26}}
+|Reprint={{RpEFK}} - #419635
+|Copyright=Public Domain
+|Misc. Notes=Complete Score is 9 x 12 scan, scanned in from newer source at 600dpi (file #994719).
+|Amazon={{AmazonLinks|0769240909|Kalmus/Alfred (reprint)}}
+}}
+{{#fte:imslpfile
+|File Name 1=PMLP1458-Sonata_No._14.pdf
+|File Description 1=Complete Score
+|Editor={{LinkEd|Sigmund|Lebert|1822|1884}}<br>{{LinkEd|Hans von|Bülow|1830|1894}}
+|Image Type=Normal Scan
+|Thumb Filename=Complete_Piano_Sonatas_(Beethoven)(Von_Bülow,_Lebert)(Schirmer).jpg
+|Scanner=
+|Uploader=[[User:HaydnSymphonien|HaydnSymphonien]]
+|Date Submitted=2024/1/20
+|Publisher Information=''[[Complete_Piano_Sonatas_(Beethoven,_Ludwig_van)|Complete Piano Sonatas]]''<br>{{P|Schirmer|G. Schirmer|New York|n.d.(1895-96)|||12589}}
+|Reprint={{P|Schirmer|G. Schirmer|New York|2015||2103|}}
+|Copyright=Public Domain
+|Misc. Notes=
+}}
+{{#fte:imslpfile
+|File Name 1=PMLP01458-Beethoven_Sonaten_Piano_Band1_Peters_9452_14_Op27_No2_1200dpi.pdf
+|File Description 1=Complete Score
+|Editor={{LinkEd|Louis|Köhler|1820|1886}}<br>{{LinkEd|Adolf|Ruthardt|1849|1934}}
+|Image Type=Normal Scan
+|Scanner=piupianissimo
+|Uploader=[[User:Piupianissimo|piupianissimo]]
+|Date Submitted=2009/6/14
+|Publisher Information=''Sonaten für Pianoforte solo, Bd.1'' (pp.248-61)<br>{{P|Edition Peters|C.F. Peters|Leipzig|n.d.(ca.1910)|||9452}}
+|Copyright=Public Domain
+|Thumb Filename=TN-Beethoven_Sonaten_Piano_Band1_Peters_No1_Op2.jpg
+|Misc. Notes=
+}}
+{{#fte:imslpfile
+|File Name 1=PMLP1458-Beethoven.op27no2.sonata.no14.moonlight.wiener.pdf
+|File Description 1=Complete Score
+|Editor={{LinkEd|Leo|Weiner|1885|1960}}
+|Image Type=Normal Scan
+|Scanner=
+|Uploader=[[User:Ermak|Ermak]]
+|Date Submitted=2018/1/11
+|Publisher Information=''Zongoraszonáták'', Vol.2 (pp.38-51)<br>{{P|Editio Musica Budapest||Budapest|n.d.[1959]|||Z. 2347}}
+|Copyright=Public Domain
+|Thumb Filename=Beethoevn_zongoraszonatak_vol.2.jpg
+|Misc. Notes=
+}}
+{{#fte:imslpfile
+|File Name 1=PMLP01458-beethoven_piano-sonata-op27-no2_henle-pp17-30.pdf
+|File Description 1=Complete Score
+|Editor={{LinkEd|Hans|Schmidt-Görg|1930|}}<br>{{LinkEd|Joseph|Schmidt-Görg|1897|1981}}
+|Image Type=Normal Scan
+|Scanner=
+|Uploader=[[User:Fugalicious|Fugalicious]]
+|Date Submitted=2018/7/02
+|Publisher Information=''Klaviersonaten, Band II'' (pp.17-30)<br>{{P|G. Henle Verlag||Munich||1976||}} {{Urtext}}
+|Copyright=Public Domain
+|Misc. Notes=
+}}
+{{#fte:imslpfile
+|File Name 1=PMLP01458-E621557_247-260-beethoven--sonatas-vol1.pdf
+|File Description 1=Complete Score
+|Editor={{LinkEd|Bertha Antonia|Wallner|1876|1976}}
+|Image Type=Normal Scan
+|Scanner=Fugalicious
+|Uploader=[[User:Fugalicious|Fugalicious]]
+|Date Submitted 1=2020/4/25
+|Publisher Information=''[[Klaviersonaten_(Beethoven,_Ludwig_van)|Klaviersonaten]], Band I'' (pp.249-262)<br>{{P|G. Henle Verlag||Munich||1976|HN1032|}} {{Urtext}}
+|Copyright=Public Domain
+|Thumb Filename=TN-Beethoven-sonatas1-HN1032.jpg
+|Misc. Notes=
+}}
+
+=====Typesets=====
+
+{{#fte:imslpfile
+|File Name 1=PMLP1458-Beethoven_Klavier-Mondscheinsonate-Op27Nr2.pdf
+|File Description 1=Complete Score
+|Editor={{LinkEd|Viktor|Keil||}}
+|Image Type=Typeset
+|Scanner=editor
+|Uploader=[[User:Biberle|Biberle]]
+|Date Submitted=2024/8/12
+|Publisher Information=Viktor Keil, 2024.
+|Copyright=Creative Commons Attribution-ShareAlike 4.0
+|Misc. Notes=Created with Lilypond.
+}}
+
+| *****ARRANGE***** =
+====For 2 Guitars (Olson)====
+
+{{#fte:imslpfile
+|File Name 1=PMLP1458-moonlight-guitar-duo.pdf
+|File Name 2=PMLP1458-moonlight-guitar-duo-a4.pdf
+|File Description 1=Complete Score
+|File Description 2=Complete Score (a4)
+|Arranger={{LinkArr|J. J.|Olson|1947|}}
+|Editor=
+|Image Type=Typeset
+|Scanner=arranger
+|Uploader=[[User:Charanguero|Charanguero]]
+|Date Submitted=2019/1/14
+|Publisher Information=Mutopia, 2016.
+|Copyright=Creative Commons Zero 1.0
+|Thumb Filename=TN-PMLP1458-moonlight-guitar-duo-5818.jpg
+|Misc. Notes=An adaptation for guitar duo of the solo arrangement by Tárrega, #293004.  Published as Mutopia-2016/01/21-2101.   See also: {{LinkWorkN|Beethoven Guitar Duets||Olson|J. J.|0}}
+}}
+
+
+| *****WORK INFO***** =
+
+|Work Title=Piano Sonata No.14
+|Alternative Title=Mondscheinsonate ; Moonlight Sonata
+|Opus/Catalogue Number=Op.27 No.2
+|Key=C-sharp minor
+|Year/Date of Composition=1801
+|Piece Style=Classical
+|Instrumentation=piano
+|Tags=sonatas ; pf
+}}

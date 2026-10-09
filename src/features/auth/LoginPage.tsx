@@ -1,8 +1,10 @@
-import { Link, useNavigate } from 'react-router';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 
 import { AuthCredentialsForm } from '@/features/auth/AuthCredentialsForm';
+import { parseAuthNext } from '@/features/auth/authRedirect';
 import { RequireGuest } from '@/features/auth/AuthGates';
 import { signInWithPassword } from '@/features/auth/session';
+import { LegalLinks } from '@/features/legal/LegalLinks';
 import { BrandShell } from '@/ui/BrandShell';
 import { linkClassName } from '@/ui/classNames';
 
@@ -14,6 +16,8 @@ export const LoginPage = () => (
 
 const LoginForm = () => {
     const navigate = useNavigate();
+    const [params] = useSearchParams();
+    const next = parseAuthNext(params.get('next'));
 
     return (
         <BrandShell title="Log in" subtitle="Upload and share scores with your account.">
@@ -33,16 +37,19 @@ const LoginForm = () => {
                     </div>
                 }
                 footer={
-                    <p className="mt-6 text-center text-sm text-stone-600">
-                        No account yet?{' '}
-                        <Link to="/register" className={linkClassName}>
-                            Create one
-                        </Link>
-                    </p>
+                    <>
+                        <p className="mt-6 text-center text-sm text-stone-600">
+                            No account yet?{' '}
+                            <Link to="/register" className={linkClassName}>
+                                Create one
+                            </Link>
+                        </p>
+                        <LegalLinks className="mt-6 justify-center" />
+                    </>
                 }
                 onSubmit={async ({ email, password }) => {
                     await signInWithPassword(email, password);
-                    navigate('/library', { replace: true });
+                    navigate(next, { replace: true });
                 }}
             />
         </BrandShell>

@@ -2,9 +2,12 @@ import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 import { rejectAnonymous, rejectStudent, requireUser } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { isUnlimited, LIMIT_REACHED_STATUS, limitReachedBody, type Entitlements } from '../_shared/entitlements.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
+import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
+import { loginThrottleSecret } from '../_shared/rateLimit.ts';
 import {
     formatLoginCode,
     generateLoginCode,
@@ -257,7 +260,7 @@ const createCodeStudent = async (admin: SupabaseClient, userId: string, spec: Ne
         // student_user_id against a later re-provision. Undo it.
         const { error: cleanupError } = await admin.auth.admin.deleteUser(created.user.id);
         if (cleanupError) {
-            console.error(`orphaned student auth user ${created.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: created.user.id });
         }
         return jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
@@ -314,7 +317,7 @@ const createEmailStudent = async (
         console.error(`could not flag invited student ${invited.user.id}: ${metadataError.message}`);
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
-            console.error(`unflagged student auth user ${invited.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'unflagged_student', studentUserId: invited.user.id });
         }
         return jsonResponse({ error: 'Could not create the student account' }, 502);
     }
@@ -333,7 +336,7 @@ const createEmailStudent = async (
     if (insertError) {
         const { error: cleanupError } = await admin.auth.admin.deleteUser(invited.user.id);
         if (cleanupError) {
-            console.error(`orphaned student auth user ${invited.user.id}: ${cleanupError.message}`);
+            logError('student-provision', cleanupError, { code: 'orphaned_auth_user', studentUserId: invited.user.id });
         }
         return jsonResponse({ error: 'Could not create the student roster row' }, 502);
     }
@@ -507,6 +510,15 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     if (updateError) {
         console.error(`login code hash out of step for student ${row.id}: ${updateError.message}`);
         return jsonResponse({ error: 'Could not reset the login code' }, 502);
+    }
+
+    // The teacher's reset is the way back for a student someone has been
+    // locking out by hammering their username, so it lifts student-login's
+    // limits on that name too (the claim does again, for whichever name the
+    // student ends up with). Best effort: the reset itself has happened, and a
+    // failure here only means the lock runs out on its own.
+    if (row.username) {
+        await forgetLoginAccount(admin, loginThrottleSecret(), STUDENT_LOGIN_SCOPE, row.username);
     }
 
     // Resetting an archived student is allowed and changes nothing for them:

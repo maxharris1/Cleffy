@@ -3,17 +3,32 @@ import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react
 
 import { RequireRegistered } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
+import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { recordImportStatus, shouldOfferImport } from '@/features/import/importPromptService';
 import { prescanDocument } from '@/features/import/prescan';
+import { LEGAL_ENTITY } from '@/features/legal/legalEntity';
 import { UPLOAD_ACCEPT } from '@/features/import/prepareUpload';
+import { isImslpImportCancelled, type ImslpDownloadStage } from '@/features/imslp/imslpApi';
 import { importDocumentFromImslp, loadDocumentBytes, uploadDocument } from '@/features/library/documentsService';
-import { requestScoreAnalysis } from '@/features/playback/scoreAnalysisService';
+import {
+    fetchLibraryBootstrap,
+    prependCachedLibraryDocument,
+    readCachedLibraryList,
+    type LibraryListSnapshot,
+} from '@/features/library/libraryBootstrap';
 import { isSupabaseConfigured } from '@/lib/supabase';
 import type { DocumentRow, EffectiveTier } from '@/types/database';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { PlanBadge } from '@/features/billing/PlanBadge';
-import { clearCachedEntitlements } from '@/features/billing/entitlementsService';
-import { isLimitReachedError, type LimitReachedError } from '@/features/billing/limitErrors';
+import { clearCachedEntitlements, isUnlimited } from '@/features/billing/entitlementsService';
+import {
+    cloudScoreCapReached,
+    cloudScoresLimitError,
+    isLimitReachedError,
+    parseLooseLimitError,
+    type LimitReachedError,
+} from '@/features/billing/limitErrors';
+import { ownSubscriptionOf } from '@/features/billing/planStatus';
 import { useEntitlements } from '@/features/billing/useEntitlements';
 import { buttonClassName } from '@/ui/classNames';
 import { ChevronDownIcon, UploadIcon } from '@/ui/icons';
@@ -32,11 +47,38 @@ export type LibraryOutletContext = {
     onImportImslp: (
         filename: string,
         workTitle: string,
+        acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+        /**
+         * Aborted when the user cancels a queued import or leaves the page. A
+         * queued import then stops (ImslpImportCancelledError); one already
+         * sent finishes and lands in the library, without navigating.
+         */
+        signal?: AbortSignal,
     ) => Promise<{ ok: true } | { ok: false; openUrl: string; message: string }>;
     uploadError: string | null;
     clearUploadError: () => void;
     /** Set when the server refused for quota reasons rather than a real failure. */
     uploadLimit: LimitReachedError | null;
+    /**
+     * The limit to explain on the page: the server's refusal if there was one,
+     * else the owned-score cap the account is already at. The upload button is
+     * greyed out at the cap, so a page that waited for a refusal would leave a
+     * disabled button with no reason and no way on.
+     */
+    limitNotice?: LimitReachedError | null;
+    /**
+     * Client-side owned-score cap (or student limit 0), or a cloud-score refusal.
+     * Disables Add/Upload; `limitNotice` says why.
+     */
+    quotaExhausted?: boolean;
+    /**
+     * This month's IMSLP imports are spent (the server's 402 said so). Blocks
+     * the IMSLP Add button only — uploading a PDF of your own is still open.
+     */
+    importLimit?: LimitReachedError | null;
+    /** False on student (limit 0): disabled copy, no upgrade CTA. */
+    quotaUpgradeHint?: boolean;
     tier: EffectiveTier;
     /**
      * Whether this plan includes a student roster at all.
@@ -89,11 +131,13 @@ export const LibraryShell = () => {
 
 const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLabel: string; userEmail: string }) => {
     const [uploadPct, setUploadPct] = useState<number | null>(null);
+    const [importingImslp, setImportingImslp] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const [importOffer, setImportOffer] = useState<DocumentRow | null>(null);
     const [uploadLimit, setUploadLimit] = useState<LimitReachedError | null>(null);
+    const [capReached, setCapReached] = useState(false);
     const [pricingOpen, setPricingOpen] = useState(false);
-    const { entitlements } = useEntitlements(userId);
+    const { entitlements } = useEntitlements(userId, { viaLibraryBootstrap: true });
     const tier = entitlements?.tier ?? 'free';
     // Hidden until the plan is known rather than shown and withdrawn: entitlements
     // come back from the Dexie cache on any repeat visit, so the wait is a frame,
@@ -101,7 +145,20 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
     const canManageStudents = entitlements !== null && entitlements.limits.students !== 0;
     const navItems = NAV_ITEMS.filter((item) => !item.needsStudents || canManageStudents);
     const navigate = useNavigate();
-    const uploading = uploadPct !== null;
+    const uploading = uploadPct !== null || importingImslp;
+    const cloudScoreLimit = entitlements?.limits.cloud_scores;
+    const quotaUpgradeHint = cloudScoreLimit !== 0;
+    const atScoreCap =
+        cloudScoreLimit === 0 || (typeof cloudScoreLimit === 'number' && !isUnlimited(cloudScoreLimit) && capReached);
+    // Only a cloud-score refusal blocks uploading. An IMSLP-import refusal is a
+    // different allowance: the teacher can still upload a PDF of their own.
+    const quotaExhausted = atScoreCap || uploadLimit?.metric === 'cloud_scores';
+    const importLimit = uploadLimit?.metric === 'smart_imports' ? uploadLimit : null;
+    const limitNotice =
+        uploadLimit ??
+        (atScoreCap && entitlements && typeof cloudScoreLimit === 'number'
+            ? cloudScoresLimitError(cloudScoreLimit, entitlements.tier)
+            : null);
 
     const clearErrors = () => {
         setUploadError(null);
@@ -113,6 +170,8 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         await clearCachedEntitlements(userId).catch(() => undefined);
         await signOut();
     };
+    // Uploads (or asks about) unsynced marks first — sign-out clears them.
+    const { requestSignOut, checking: savingBeforeSignOut, dialog: signOutDialog } = useGuardedSignOut(handleSignOut);
 
     /**
      * A quota refusal is not a failure to report as one: it gets its own state so
@@ -123,24 +182,120 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
             setUploadLimit(err);
             return;
         }
+        const loose = parseLooseLimitError(err, entitlements);
+        if (loose) {
+            setUploadLimit(loose);
+            return;
+        }
         setUploadError(err instanceof Error ? err.message : fallback);
     };
 
-    const onUpload = async (file: File) => {
+    /**
+     * The client-side half of the cap, checked before anything is sent. It
+     * refuses with the same typed error the server's trigger would, so the page
+     * shows the plan notice (with its way to upgrade) rather than a bare red
+     * "limit reached". A plan with no cloud scores at all (limit 0) gets the same
+     * typed refusal: ScoreLimitNotice already words it as the plain sentence, and
+     * a plain Error here would repeat that sentence as red error text below it.
+     */
+    const refuseIfCloudScoreCap = async (
+        snapshot: Promise<LibraryListSnapshot | null>,
+    ): Promise<LibraryListSnapshot | null> => {
+        const snap = await snapshot.catch(() => null);
+        const limit = entitlements?.limits.cloud_scores;
+        if (
+            entitlements &&
+            typeof limit === 'number' &&
+            (limit === 0 || cloudScoreCapReached(limit, snap?.documents ?? [], userId))
+        ) {
+            setCapReached(true);
+            throw cloudScoresLimitError(limit, entitlements.tier);
+        }
+        setCapReached(false);
+        return snap;
+    };
+
+    const refreshCap = (docs: Array<{ owner_id: string; archived_at: string | null }>) => {
+        const limit = entitlements?.limits.cloud_scores;
+        if (limit === undefined || isUnlimited(limit)) {
+            setCapReached(false);
+            return;
+        }
+        if (limit === 0) {
+            setCapReached(true);
+            return;
+        }
+        setCapReached(cloudScoreCapReached(limit, docs, userId));
+    };
+
+    const clearUploadError = () => {
         clearErrors();
-        setUploadPct(0);
+        void readCachedLibraryList(userId)
+            .then((snap) => refreshCap(snap?.documents ?? []))
+            .catch(() => undefined);
+        void fetchLibraryBootstrap(userId)
+            .then((boot) => refreshCap(boot.documents))
+            .catch(() => undefined);
+    };
+
+    useEffect(() => {
+        if (!userId || !entitlements) {
+            return;
+        }
+        const limit = entitlements.limits.cloud_scores;
+        if (isUnlimited(limit) || limit === 0) {
+            return;
+        }
+        let cancelled = false;
+        const apply = (docs: Array<{ owner_id: string; archived_at: string | null }>) => {
+            if (!cancelled) {
+                refreshCap(docs);
+            }
+        };
+        void readCachedLibraryList(userId)
+            .then((snap) => {
+                if (snap) {
+                    apply(snap.documents);
+                }
+            })
+            .catch(() => undefined);
+        void fetchLibraryBootstrap(userId)
+            .then((boot) => apply(boot.documents))
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+        // refreshCap reads the latest entitlements/userId from this effect's closure.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [userId, entitlements]);
+
+    /**
+     * The library snapshot, read before the write that will clear it, so the
+     * new score can be put at the top of it afterwards and the return from the
+     * viewer paints instantly instead of loading.
+     */
+    const snapshotBefore = (): Promise<LibraryListSnapshot | null> => readCachedLibraryList(userId).catch(() => null);
+    const rememberNewScore = (before: Promise<LibraryListSnapshot | null>, document: DocumentRow) =>
+        void before.then((snapshot) => prependCachedLibraryDocument(userId, snapshot, document)).catch(() => undefined);
+
+    const onUpload = async (file: File) => {
+        const before = snapshotBefore();
         try {
+            const beforeSnap = await refuseIfCloudScoreCap(before);
+            clearErrors();
+            setUploadPct(0);
             const { document } = await uploadDocument(file, userId, ({ loaded, total }) => {
                 const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
                 setUploadPct(pct);
             });
-            // Kick off play-along analysis in the background; the viewer's
-            // transport bar reports progress and offers a retry on failure.
-            void requestScoreAnalysis(document.id).catch(() => undefined);
+            rememberNewScore(before, document);
+            refreshCap([document, ...(beforeSnap?.documents ?? [])]);
+            // Play-along analysis is never started here: it costs an OMR run,
+            // so only the viewer's Generate button requests it.
             // Free, local prescan: does this score already carry colored-ink
             // markings? If so (and the user never declined), offer the import.
             try {
-                const bytes = await loadDocumentBytes(document);
+                const bytes = await loadDocumentBytes(document, { userId });
                 if ((await prescanDocument(bytes)) && (await shouldOfferImport(document.id))) {
                     setImportOffer(document);
                     return; // the dialog decides where to navigate
@@ -167,11 +322,24 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         navigate(accepted ? `/doc/${doc.id}?import=1` : `/doc/${doc.id}`);
     };
 
-    const onImportImslp = async (filename: string, workTitle: string) => {
-        clearErrors();
-        setUploadPct(0);
+    const onImportImslp = async (
+        filename: string,
+        workTitle: string,
+        acceptedDisclaimer: boolean,
+        onStage?: (stage: ImslpDownloadStage) => void,
+        signal?: AbortSignal,
+    ) => {
+        const before = snapshotBefore();
         try {
-            const result = await importDocumentFromImslp(filename, workTitle, userId);
+            const beforeSnap = await refuseIfCloudScoreCap(before);
+            clearErrors();
+            // The Edge function fetches server-side, so there is no byte progress
+            // to report — show the indeterminate bar instead of a stuck 0%.
+            setImportingImslp(true);
+            const result = await importDocumentFromImslp(filename, workTitle, userId, acceptedDisclaimer, {
+                onStage,
+                signal,
+            });
             if (!result.ok) {
                 return {
                     ok: false as const,
@@ -179,14 +347,22 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     message: result.fallback.message,
                 };
             }
-            void requestScoreAnalysis(result.document.id).catch(() => undefined);
-            navigate(`/doc/${result.document.id}`);
+            rememberNewScore(before, result.document);
+            refreshCap([result.document, ...(beforeSnap?.documents ?? [])]);
+            // The user cancelled or moved on while this was in flight: the
+            // score is in their library, but they are not pulled back to it.
+            if (!signal?.aborted) {
+                navigate(`/doc/${result.document.id}`);
+            }
             return { ok: true as const };
         } catch (err) {
-            captureFailure(err, 'Import failed.');
+            // A cancelled queue wait created nothing and is not a failure.
+            if (!isImslpImportCancelled(err)) {
+                captureFailure(err, 'Import failed.');
+            }
             throw err;
         } finally {
-            setUploadPct(null);
+            setImportingImslp(false);
         }
     };
 
@@ -197,8 +373,12 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         onUpload,
         onImportImslp,
         uploadError,
-        clearUploadError: clearErrors,
+        clearUploadError,
         uploadLimit,
+        limitNotice,
+        quotaExhausted,
+        importLimit,
+        quotaUpgradeHint,
         tier,
         canManageStudents,
         openPricing: () => setPricingOpen(true),
@@ -208,7 +388,7 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
         <main className="paper-page min-h-full">
             {/* Translucent so the paper wash reads through; sticky so upload
                 progress and the account menu stay reachable from any page. */}
-            <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur">
+            <header className="sticky top-0 z-30 border-b border-line bg-paper/85 pt-[var(--safe-top)] pl-[var(--safe-left)] pr-[var(--safe-right)] backdrop-blur">
                 <div
                     className={`${SHELL_CONTAINER} flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5 sm:h-16 sm:flex-nowrap sm:gap-x-6 sm:py-0`}
                 >
@@ -247,12 +427,21 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     </nav>
 
                     <div className="ml-auto flex shrink-0 items-center gap-2">
-                        <ShellUploadButton uploading={uploading} onUpload={onUpload} />
+                        <ShellUploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
+                        {/* The menu closes on click, and the upload before sign-out can
+                            take seconds on a slow connection: say what is happening
+                            where the menu was, or the click looks like it did nothing. */}
+                        {savingBeforeSignOut ? (
+                            <span role="status" className="text-sm text-stone-600">
+                                Saving changes…
+                            </span>
+                        ) : null}
                         <AccountMenu
                             userLabel={userLabel}
                             userEmail={userEmail}
                             tier={tier}
-                            onSignOut={() => void handleSignOut()}
+                            signingOut={savingBeforeSignOut}
+                            onSignOut={() => void requestSignOut()}
                         />
                     </div>
                 </div>
@@ -260,6 +449,18 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
                     <ProgressBar
                         value={uploadPct}
                         label="Uploading score"
+                        className="shell-progress absolute inset-x-0 bottom-0"
+                    />
+                ) : importingImslp ? (
+                    <ProgressBar
+                        indeterminate
+                        label="Importing from IMSLP"
+                        className="shell-progress absolute inset-x-0 bottom-0"
+                    />
+                ) : savingBeforeSignOut ? (
+                    <ProgressBar
+                        indeterminate
+                        label="Saving changes before signing out"
                         className="shell-progress absolute inset-x-0 bottom-0"
                     />
                 ) : null}
@@ -284,9 +485,15 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
 
             {pricingOpen ? (
                 <Suspense fallback={null}>
-                    <PricingDialog currentTier={tier} onClose={() => setPricingOpen(false)} />
+                    <PricingDialog
+                        currentTier={tier}
+                        subscription={ownSubscriptionOf(entitlements)}
+                        onClose={() => setPricingOpen(false)}
+                    />
                 </Suspense>
             ) : null}
+
+            {signOutDialog}
         </main>
     );
 };
@@ -301,16 +508,18 @@ const LibraryFrame = ({ userId, userLabel, userEmail }: { userId: string; userLa
  */
 const ShellUploadButton = ({
     uploading,
+    quotaExhausted,
     onUpload,
 }: {
     uploading: boolean;
+    quotaExhausted: boolean;
     onUpload: (file: File) => Promise<void>;
 }) => (
     <label
         className={buttonClassName(
             'primary',
             'sm',
-            `shell-upload${uploading ? ' pointer-events-none opacity-80' : ''}`,
+            `shell-upload${uploading || quotaExhausted ? ' pointer-events-none opacity-80' : ''}`,
         )}
     >
         <UploadIcon size={16} />
@@ -319,7 +528,7 @@ const ShellUploadButton = ({
             type="file"
             accept={UPLOAD_ACCEPT}
             className="sr-only"
-            disabled={uploading}
+            disabled={uploading || quotaExhausted}
             onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
@@ -356,11 +565,14 @@ const AccountMenu = ({
     userLabel,
     userEmail,
     tier,
+    signingOut = false,
     onSignOut,
 }: {
     userLabel: string;
     userEmail: string;
     tier: EffectiveTier;
+    /** The pre-sign-out upload is running; a second click would only queue another. */
+    signingOut?: boolean;
     onSignOut: () => void;
 }) => {
     // The route the menu was opened from, rather than a plain boolean: navigating
@@ -444,17 +656,45 @@ const AccountMenu = ({
                     >
                         Account
                     </Link>
+                    <a
+                        role="menuitem"
+                        href={`mailto:${LEGAL_ENTITY.contactEmail}`}
+                        onClick={close}
+                        className="block px-3 py-2 text-sm text-stone-800 transition hover:bg-ink/5"
+                    >
+                        Help &amp; support
+                    </a>
                     <button
                         type="button"
                         role="menuitem"
+                        disabled={signingOut}
                         onClick={() => {
                             close();
                             onSignOut();
                         }}
-                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5"
+                        className="w-full cursor-pointer px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-ink/5 disabled:cursor-default disabled:text-stone-400 disabled:hover:bg-transparent"
                     >
-                        Sign out
+                        {signingOut ? 'Saving changes…' : 'Sign out'}
                     </button>
+                    <div className="my-1 border-t border-stone-200" />
+                    <div className="flex gap-1 px-1.5 pb-0.5">
+                        <Link
+                            role="menuitem"
+                            to="/privacy"
+                            onClick={close}
+                            className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
+                        >
+                            Privacy
+                        </Link>
+                        <Link
+                            role="menuitem"
+                            to="/terms"
+                            onClick={close}
+                            className="rounded-md px-1.5 py-1 text-xs text-stone-500 transition hover:bg-ink/5"
+                        >
+                            Terms
+                        </Link>
+                    </div>
                 </div>
             ) : null}
         </div>

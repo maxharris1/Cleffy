@@ -35,6 +35,36 @@ export const shouldArchiveOnStatus = (status: string): boolean => ARCHIVING_STAT
 
 export const isTerminalStatus = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
+/**
+ * Whether the buyer already holds a subscription that Checkout would put a
+ * SECOND one beside. Checkout always creates a new subscription, so a Personal
+ * subscriber who picked Teacher there was billed for both; plan changes and
+ * resuming a cancelled plan belong to the billing portal, which changes the one
+ * they have.
+ *
+ * Running means entitling and inside its period (cancel_at_period_end included:
+ * it still runs, and resuming it is one click in the portal), or past_due --
+ * Stripe is still retrying it, and fixing the card there brings it back.
+ * Anything that has ended, or never started (incomplete), leaves Checkout open.
+ */
+export const holdsRunningSubscription = (
+    rows: Array<{ status: string; current_period_end: string | null }>,
+    nowMs: number,
+): boolean =>
+    rows.some((row) => {
+        if (row.status === 'past_due') {
+            return true;
+        }
+        if (!isEntitlingStatus(row.status)) {
+            return false;
+        }
+        if (row.current_period_end === null) {
+            return true;
+        }
+        const endMs = Date.parse(row.current_period_end);
+        return Number.isFinite(endMs) ? endMs > nowMs : true;
+    });
+
 export interface SubscriptionUpsert {
     stripe_subscription_id: string;
     user_id: string;
@@ -50,6 +80,8 @@ export interface StripeSubscriptionLike {
     id: string;
     status: string;
     cancel_at_period_end?: boolean | null;
+    /** A scheduled cancellation (seconds), set from the dashboard or the API. */
+    cancel_at?: number | null;
     current_period_end?: number | null;
     customer?: string | { id?: string } | null;
     metadata?: Record<string, string> | null;
@@ -79,18 +111,47 @@ export interface StripeEventLike {
     livemode?: boolean;
 }
 
+/**
+ * What fetchSubscription answers when Stripe says the id does not exist
+ * (resource_missing): a subscription from the other mode's account, or a test
+ * object since deleted. Distinct from `null` because the right answer differs --
+ * a transient failure is retried, a missing object never will be found.
+ */
+export const SUBSCRIPTION_MISSING = 'missing' as const;
+
 export interface WebhookStore {
     /** Records the event id. `false` means it was already recorded — a replay. */
     claimEvent: (id: string, type: string) => Promise<boolean>;
     userIdForCustomer: (customerId: string) => Promise<string | null>;
     linkCustomer: (customerId: string, userId: string) => Promise<void>;
     upsertSubscription: (row: SubscriptionUpsert) => Promise<void>;
-    /** checkout.session.completed carries only a subscription id, so it must be fetched. */
-    fetchSubscription: (subscriptionId: string) => Promise<StripeSubscriptionLike | null>;
+    /**
+     * The subscription as Stripe holds it NOW. Every event that changes a
+     * subscription's entitlements except `deleted` is applied from this rather
+     * than from the copy embedded in the event, which is only as fresh as the
+     * event and may arrive after a newer one. `null` means Stripe could not be
+     * read right now (network, rate limit, a 5xx) and a retry may succeed;
+     * SUBSCRIPTION_MISSING means Stripe answered that the subscription does not
+     * exist, which no retry will change.
+     */
+    fetchSubscription: (subscriptionId: string) => Promise<StripeSubscriptionLike | typeof SUBSCRIPTION_MISSING | null>;
     userIdForSubscription: (subscriptionId: string) => Promise<string | null>;
     /** The status already recorded for a subscription; null when there is no row yet. */
     storedStatusOf: (subscriptionId: string) => Promise<string | null>;
     applyFreeTierArchival: (userId: string) => Promise<void>;
+    /**
+     * Un-archives the scores a lapse archived, up to the cap of the plan the user
+     * now resolves to (restore_plan_archived_scores) -- the user's own, then
+     * those of every teacher seated in a studio the user owns who now resolves
+     * to an unlimited plan. An owner's own archive is never touched.
+     */
+    restorePlanArchivedScores: (userId: string) => Promise<void>;
+    /**
+     * Forgets a claimed event id, so Stripe's retry of it is processed rather
+     * than skipped as a duplicate. Must be called before answering with a
+     * retryable status.
+     */
+    releaseEvent: (id: string) => Promise<void>;
     log: (message: string) => void;
 }
 
@@ -128,12 +189,29 @@ const priceIdOf = (sub: StripeSubscriptionLike): string | null => {
  * `current_period_end` sits on the subscription in older API versions and on the
  * subscription item in newer ones — read whichever is present.
  */
-const periodEndOf = (sub: StripeSubscriptionLike): string | null => {
+const periodEndSecondsOf = (sub: StripeSubscriptionLike): number | null => {
     const seconds = sub.current_period_end ?? sub.items?.data?.[0]?.current_period_end ?? null;
-    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
-        return null;
-    }
-    return new Date(seconds * 1000).toISOString();
+    return typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null;
+};
+
+/**
+ * When the plan stops, and whether that is instead of renewing. The portal
+ * cancels with cancel_at_period_end; the dashboard's "cancel on a custom date"
+ * and the API set `cancel_at` and leave that flag false. A `cancel_at` at or
+ * before the period end means this period is the last one, so it counts as
+ * cancelling too, and the period is cut short to it: Stripe ends the
+ * subscription then, not at the period end. One later than the period end
+ * still renews first, so it is left out until the renewal brings it in range.
+ */
+const endingOf = (sub: StripeSubscriptionLike): { periodEnd: string | null; cancelling: boolean } => {
+    const periodEnd = periodEndSecondsOf(sub);
+    const cancelAt = typeof sub.cancel_at === 'number' && Number.isFinite(sub.cancel_at) ? sub.cancel_at : null;
+    const scheduled = cancelAt !== null && (periodEnd === null || cancelAt <= periodEnd);
+    const end = scheduled ? cancelAt : periodEnd;
+    return {
+        periodEnd: end === null ? null : new Date(end * 1000).toISOString(),
+        cancelling: sub.cancel_at_period_end === true || scheduled,
+    };
 };
 
 export const subscriptionRowFrom = (
@@ -142,14 +220,15 @@ export const subscriptionRowFrom = (
     priceTiers: Record<string, BillingTier>,
 ): SubscriptionUpsert => {
     const priceId = priceIdOf(sub);
+    const ending = endingOf(sub);
     return {
         stripe_subscription_id: sub.id,
         user_id: userId,
         tier: isEntitlingStatus(sub.status) ? tierForPrice(priceId, priceTiers) : 'free',
         status: sub.status,
         price_id: priceId,
-        current_period_end: periodEndOf(sub),
-        cancel_at_period_end: sub.cancel_at_period_end === true,
+        current_period_end: ending.periodEnd,
+        cancel_at_period_end: ending.cancelling,
     };
 };
 
@@ -172,6 +251,22 @@ const resolveUserId = async (
     return null;
 };
 
+/**
+ * Writes the row, then brings the score archive in line with it. Both halves
+ * read the user's entitlements AFTER the upsert, so they act on every
+ * subscription the user holds, not just this one: a lapse while another plan is
+ * live archives nothing, and a restore on a plan that still resolves to a
+ * finite cap restores no further than that cap.
+ *
+ * The restore runs on every entitling write, not only on a status change: it is
+ * a no-op when nothing was archived by a lapse, and keying it to transitions
+ * would need the previous status, which a late or retried event cannot be
+ * trusted to carry. Unpaid -> active, a new checkout after a cancellation, and a
+ * trial all land here. A teacher entitled by someone else's subscription (an
+ * Academy seat) gets no webhook of their own: restore_plan_archived_scores also
+ * restores the teachers seated in the subscriber's studios, and a new seat
+ * restores its teacher in the database (studio_members_restore_plan_archived).
+ */
 const applySubscription = async (
     store: WebhookStore,
     sub: StripeSubscriptionLike,
@@ -181,12 +276,42 @@ const applySubscription = async (
     await store.upsertSubscription(subscriptionRowFrom(sub, userId, priceTiers));
     if (shouldArchiveOnStatus(sub.status)) {
         await store.applyFreeTierArchival(userId);
+    } else if (isEntitlingStatus(sub.status)) {
+        await store.restorePlanArchivedScores(userId);
     }
 };
 
 /**
+ * The answer for an event we could not finish because Stripe itself could not
+ * be read. The claim is released first: keeping it would make the retry this
+ * status asks for look like a duplicate, and the event -- for a checkout, the
+ * customer's whole purchase -- would be acknowledged and lost.
+ */
+const retryLater = async (store: WebhookStore, event: StripeEventLike, reason: string): Promise<WebhookResult> => {
+    await store.releaseEvent(event.id);
+    return { status: 500, body: { error: reason, retry: true } };
+};
+
+/**
+ * The answer for an event whose subscription Stripe says does not exist. The
+ * claim is KEPT and the answer is a 200: retrying for Stripe's three days would
+ * fail identically every time and trip its endpoint-failure alerts, burying the
+ * failures that matter. Logged loudly, because a checkout landing here is a
+ * purchase nobody applied and someone has to look at it.
+ */
+const subscriptionMissing = (store: WebhookStore, event: StripeEventLike, subscriptionId: string): WebhookResult => {
+    store.log(
+        `ALERT ${event.type} ${event.id}: Stripe says subscription ${subscriptionId} does not exist; ` +
+            'acknowledged without applying it',
+    );
+    return { status: 200, body: { received: true, ignored: 'subscription_missing' } };
+};
+
+/**
  * Returns 200 for anything it understands OR deliberately ignores — a non-2xx
- * makes Stripe retry, which is only useful when we genuinely failed.
+ * makes Stripe retry, which is only useful when we genuinely failed. Every
+ * non-2xx it returns has already released the event's claim (see retryLater);
+ * a THROWN error leaves that to the caller, which releases it the same way.
  */
 export const handleStripeEvent = async (
     event: StripeEventLike,
@@ -219,10 +344,17 @@ export const handleStripeEvent = async (
                 return { status: 200, body: { received: true, ignored: 'no_subscription' } };
             }
 
+            // Not retrievable is not "nothing to do": this event is the purchase.
+            // Stripe retries a 5xx with backoff for days, so a transient API
+            // failure heals itself; a 200 here would have dropped it for good.
+            // Only a subscription Stripe says does not exist is acknowledged.
             const sub = await store.fetchSubscription(subscriptionId);
+            if (sub === SUBSCRIPTION_MISSING) {
+                return subscriptionMissing(store, event, subscriptionId);
+            }
             if (!sub) {
                 store.log(`checkout.session.completed ${event.id}: subscription ${subscriptionId} not retrievable`);
-                return { status: 200, body: { received: true, ignored: 'subscription_missing' } };
+                return retryLater(store, event, 'subscription_unavailable');
             }
 
             await applySubscription(store, sub, userId, priceTiers);
@@ -232,38 +364,70 @@ export const handleStripeEvent = async (
         case 'customer.subscription.created':
         case 'customer.subscription.updated':
         case 'customer.subscription.deleted': {
-            const sub = event.data.object as StripeSubscriptionLike;
-            const customerId = idOf(sub.customer);
+            const embedded = event.data.object as StripeSubscriptionLike;
+            const customerId = idOf(embedded.customer);
             const userId =
-                (await resolveUserId(store, customerId, sub.metadata)) ?? (await store.userIdForSubscription(sub.id));
+                (await resolveUserId(store, customerId, embedded.metadata)) ??
+                (await store.userIdForSubscription(embedded.id));
             if (!userId) {
                 store.log(`${event.type} ${event.id}: no user could be resolved`);
                 return { status: 200, body: { received: true, ignored: 'unknown_user' } };
             }
 
-            // A delete event's object can still read `active`; the row must not.
-            const normalized: StripeSubscriptionLike =
-                event.type === 'customer.subscription.deleted' ? { ...sub, status: 'canceled' } : sub;
+            // Stripe guarantees delivery, never ORDER -- and a retry after a 500
+            // (every transient failure here releases the claim and asks for one)
+            // makes a late arrival the normal case rather than an exotic one. The
+            // object embedded in the event is the subscription as it was when the
+            // event was CREATED, so applying it would let any older copy overwrite
+            // a newer state: a late `unpaid` after `active` drops a customer who
+            // has paid to free limits and archives their scores until the next
+            // event (a month away, or a year on an annual plan); a late `active`
+            // after `unpaid` restores paid entitlements Stripe has not been paid
+            // for. Idempotency cannot catch either -- each is a different event id.
+            //
+            // So `created` and `updated` are treated as a notice that the
+            // subscription changed, and what is applied is its CURRENT state,
+            // read back from Stripe -- as checkout.session.completed and
+            // invoice.payment_failed already do. However late a delivery, it
+            // can only ever write the latest state. A failed read is retried
+            // rather than falling back to the embedded copy: falling back is
+            // exactly the stale write this exists to prevent.
+            //
+            // `deleted` needs no read: a cancellation is final, so its event can
+            // never be older than anything it overwrites. Its object can still
+            // read `active`; the row must not.
+            let current: StripeSubscriptionLike;
+            if (event.type === 'customer.subscription.deleted') {
+                current = { ...embedded, status: 'canceled' };
+            } else {
+                const live = await store.fetchSubscription(embedded.id);
+                if (live === SUBSCRIPTION_MISSING) {
+                    return subscriptionMissing(store, event, embedded.id);
+                }
+                if (!live) {
+                    store.log(`${event.type} ${event.id}: subscription ${embedded.id} not retrievable`);
+                    return retryLater(store, event, 'subscription_unavailable');
+                }
+                current = live;
+            }
 
-            // Stripe guarantees delivery, never ORDER — and a retry after a 500
-            // makes a late arrival near-certain rather than exotic. These three
-            // event types are the only ones applied from the object Stripe
-            // embedded rather than from a live re-read, so they are the only ones
-            // that can carry a snapshot older than what is already recorded: an
-            // `updated` still reading `active`, landing after the `deleted` that
-            // cancelled the same subscription, would hand back paid entitlements
-            // for the rest of the period on a subscription that no longer exists.
-            // Idempotency cannot catch it — it is a different event id.
-            const stored = await store.storedStatusOf(sub.id);
-            if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(normalized.status)) {
+            // Belt and braces for the one window the live read leaves: two
+            // deliveries for the same subscription in flight at once, the older
+            // read landing second. A subscription Stripe has ended never comes
+            // back, so nothing may reopen a row already recorded as ended.
+            // Keyed on the status being APPLIED, not the one embedded: the retry
+            // of an event whose archival threw after its upsert landed reads the
+            // ended status back from Stripe and must re-run that archival.
+            const stored = await store.storedStatusOf(embedded.id);
+            if (stored !== null && isTerminalStatus(stored) && !isTerminalStatus(current.status)) {
                 store.log(
-                    `${event.type} ${event.id}: ${sub.id} is already ${stored}; ` +
-                        `refusing to reopen it as ${normalized.status}`,
+                    `${event.type} ${event.id}: ${embedded.id} is already ${stored}; ` +
+                        `refusing to reopen it as ${current.status}`,
                 );
                 return { status: 200, body: { received: true, ignored: 'terminal_status' } };
             }
 
-            await applySubscription(store, normalized, userId, priceTiers);
+            await applySubscription(store, current, userId, priceTiers);
             return { status: 200, body: { received: true, applied: 'subscription_upserted' } };
         }
 
@@ -277,9 +441,14 @@ export const handleStripeEvent = async (
 
             // Re-read from Stripe rather than trusting the invoice: Stripe decides
             // whether this failure means past_due, unpaid, or nothing yet.
+            // Same as checkout: a failed read must be retried, not acknowledged.
             const sub = await store.fetchSubscription(subscriptionId);
+            if (sub === SUBSCRIPTION_MISSING) {
+                return subscriptionMissing(store, event, subscriptionId);
+            }
             if (!sub) {
-                return { status: 200, body: { received: true, ignored: 'subscription_missing' } };
+                store.log(`invoice.payment_failed ${event.id}: subscription ${subscriptionId} not retrievable`);
+                return retryLater(store, event, 'subscription_unavailable');
             }
             const customerId = idOf(invoice.customer) ?? idOf(sub.customer);
             const userId =

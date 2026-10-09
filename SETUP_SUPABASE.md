@@ -79,6 +79,15 @@ npx supabase db push
 - File size limit: 50 MB (raise the project-wide limit under Settings → Storage if you
   need bigger scans)
 
+And a second bucket for the library covers (`20260902130000_thumbnails.sql`
+attempts to create it, but hosted projects can refuse `storage.buckets` writes
+from a migration — check it exists after the migration runs):
+
+- Name: `thumbnails`
+- Public: **OFF** (private)
+- Allowed MIME types: `image/jpeg`
+- File size limit: 2 MB
+
 (The object-level access policies were already created by the migrations.)
 
 ## 3. Auth settings
@@ -178,6 +187,8 @@ turns it into editable Cleffy annotations. Its parts:
     npx supabase secrets set ANALYZE_NOTES_MODEL=claude-sonnet-5 --project-ref jibgwgosihadbjgxdsfe
     ```
 
+Print mode converts digits and symbols on the device. Letters and teaching text stay ink. There is no handwriting-to-text function to deploy.
+
 ## 5. Play-along analysis (OMR service + Edge Function)
 
 The play-along feature converts uploaded PDFs to notes + measure positions via
@@ -208,6 +219,82 @@ select vault.create_secret('<shared secret>', 'omr_service_secret');
 If `pg_cron` / `pg_net` are unavailable, schedule Cloud Scheduler to
 `POST /poke` every minute instead; the worker calls `omr_reap_expired_leases`
 at the top of each poke.
+
+IMSLP chip browse uses the same vault + cron pattern. After deploying
+`imslp-sync` (`--no-verify-jwt`) and setting `IMSLP_SYNC_SECRET` as an Edge
+secret, store the function URL and the same secret in Vault so
+`imslp_sync_tick` can POST every two minutes:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1/imslp-sync', 'imslp_sync_url');
+select vault.create_secret('<same value as IMSLP_SYNC_SECRET>', 'imslp_sync_secret');
+```
+
+Chip browse reads the live `public.imslp_works` snapshot: one row per IMSLP
+work with the array of taxonomy categories it belongs to. Refresh ticks write
+`imslp_works_building` and only promote after a category walk completes, so a
+mid-rebuild failure leaves the previous snapshot serving. Typed search stays on
+live MediaWiki search; key chips there still match the title. Chip browse keys
+are IMSLP key categories on the mirror.
+
+The chip index is a **committed catalog** in the repo
+(`scripts/data/imslp-works-catalog.jsonl.gz` + `imslp-works-sync.json`).
+`db push` loads it (the `*_imslp_works_catalog.sql` migration(s); split if
+a single file would exceed ~40MB). Those files are **not** in
+`scripts/apply-migrations.sql` — a SQL-editor paste cannot carry ~48MB of
+inserts. Locally, `npm run imslp:seed` upserts the same files and does **not**
+call IMSLP.
+
+To rebuild the catalog after a taxonomy change (talks to IMSLP, ~3,500
+requests, ~1 h at `--delay 1000`; do not go below 1000):
+
+```bash
+npm run imslp:export-catalog
+```
+
+That overwrites the gzip jsonl/sync files and regenerates the catalog
+migration(s).
+Interrupt and rerun: a checkpoint at `scripts/data/.imslp-export-progress.json`
+resumes (gitignored). Then commit the new files.
+
+```bash
+# load the committed catalog into the local stack (no IMSLP)
+npm run imslp:seed
+# or a hosted project:
+SUPABASE_URL=https://<project-ref>.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY=<service role key> \
+npm run imslp:seed
+```
+
+`--dry-run` prints counts without writing. The cron tick is only a refresh
+after the catalog is loaded; without the two vault secrets it is a silent
+no-op. Rollout for a fresh project:
+
+1. `npx supabase db push` — schema plus the catalog insert. Do not paste
+   `scripts/apply-migrations.sql` expecting the catalog: that mirror is
+   schema-only. Use `db push` or `psql -f` for `*_imslp_works_catalog.sql`.
+2. (Optional) `npm run imslp:seed` if you need to reload the catalog without
+   re-running migrations.
+3. `npx supabase functions deploy imslp-sync --no-verify-jwt` and
+   `npx supabase functions deploy imslp-search`.
+4. `npx supabase secrets set IMSLP_SYNC_SECRET=<random>`.
+5. The two `vault.create_secret` statements above.
+6. Verify the refresh is ticking:
+
+    ```sql
+    select category, state, pages_done, completed_at
+    from public.imslp_category_sync
+    order by updated_at desc;
+    ```
+
+    Each tick spends up to 60 MediaWiki requests on one category (batches of
+    500 pages, usually 4 requests each) and resumes where it left off. The
+    committed catalog already answers every chip; cron keeps membership from
+    going stale.
+
+Locally the cron does not fire (no vault secrets); with the stack up, run
+`npm run imslp:seed` (no env needed — it targets the local API port from
+`supabase/config.toml` with the public demo service key).
 
 The OMR service also needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `SELF_URL` (its public base URL for drain-chain self-pokes). Without any of
@@ -243,8 +330,8 @@ Unlimited is unlimited except for AI fingering reads, which carry a silent
 
 Annotation, the on-device fingering optimizer and manual fingering are unlimited
 on every plan, including Free. PDF export is the one on-device feature that is
-metered — 1/mo on Free, unlimited everywhere else, and never counted for guests
-or students (§6e).
+metered — 1/mo on Free, unlimited everywhere else, never counted for students,
+and a share-link guest's export is drawn from the score owner's allowance (§6e).
 
 ### 6a. Create the products and prices
 
@@ -350,12 +437,52 @@ explicitly when deploying by hand:
 supabase functions deploy stripe-webhook --no-verify-jwt
 supabase functions deploy student-claim  --no-verify-jwt
 supabase functions deploy student-login  --no-verify-jwt
+supabase functions deploy imslp-sync     --no-verify-jwt
 supabase functions deploy stripe-checkout
 supabase functions deploy stripe-portal
 supabase functions deploy student-provision   # roster create/reset/archive/restore
 supabase functions deploy score-analyze analyze-annotations analyze-notes
 supabase functions deploy imslp-download   # now meters smart imports
 ```
+
+**Deploy `imslp-download` and `imslp-work` after applying
+`20261007120700_document_provenance.sql`.** The download now writes the score's
+provenance (`documents.source_url`, `source_filename`, `source_license`,
+`source_attribution`) and calls `edge_rate_block`; against a database without
+them every import fails at the provenance write (and is refunded). `imslp-work`
+now reports an edition as not downloadable when IMSLP's license lookup was
+unavailable (`licenseCheck: 'unavailable'`), matching what `imslp-download`
+already refused.
+
+`imslp-download` also paces live IMSLP fetches for the whole deployment on one
+`edge_rate_buckets` key (`imslp:download:global`): at most
+`IMSLP_DOWNLOAD_GLOBAL_MAX` fetches per `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
+(defaults `2` and `1000` — two a second). A caller that finds the window full
+gets `429 { code: 'download_queued', retryAfterSec }` at once and the client
+waits and retries (up to 90 s), showing "Queued for IMSLP…". When IMSLP itself
+answers 429 — on the file servers or on the API (license parse, imageinfo) —
+the function closes the same key for IMSLP's `Retry-After` (60 s when absent,
+900 s at most), so every import backs off together. The slot is taken before
+the invocation's first live IMSLP request, the license parse included, so
+nothing reaches IMSLP while the key is closed; a cached license refusal spends
+no slot. Tune with
+`npx supabase secrets set IMSLP_DOWNLOAD_GLOBAL_MAX=1 IMSLP_DOWNLOAD_GLOBAL_SPACING_MS=2000`.
+
+Per-caller limits: 60 requests a minute per client address (a school's NAT
+shares one), then 10 a minute per signed-in user, answered as
+`429 { code: 'caller_rate_limited', retryAfterSec }`, which current clients wait
+out like the queue.
+
+**`imslp-download` now creates the score itself.** Current clients send
+`create: true` and a `title` with a fresh `documentId`; the function inserts the
+`documents` row (as the caller, so RLS and the score-cap trigger apply) only once
+the PDF is fetched, so a queued or abandoned import never leaves an empty score
+behind. **Deploy the function before the web app**: a new client talking to the
+old function is refused (403, "Only the document owner…") because the row it
+names does not exist yet. Clients from before this change still create the row
+first and are served as before (owner-checked), but they do not understand
+`download_queued`/`caller_rate_limited`: while the queue is busy they show the
+message as an error and roll their row back, until the PWA updates.
 
 **Deploy the three student functions together**, after applying
 `20260827150000_student_credentials.sql`. They are one change: `student-claim` is
@@ -416,15 +543,15 @@ the Stripe dashboard is a no-op (the handler reports `duplicate: true`).
 
 Client-side checks are UX only. Every limit is enforced server-side:
 
-| Limit                                   | Enforced by                                                                                                                                                                    |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                  |
-| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                              |
-| PDF export                              | `consume_pdf_export()` — the export runs on-device, so this is an honest-UI counter, not a hard gate. It exempts anonymous share-link guests and provisioned students outright |
-| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                     |
-| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                       |
-| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                  |
-| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                         |
+| Limit                                   | Enforced by                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4th active cloud score                  | `documents_enforce_score_cap` trigger — uploads are a direct browser insert, so the cap lives in the database                                                                                                                                                                                                                                                       |
+| Play-along, vision reads, smart imports | `consume_quota()` called from the Edge Function _before_ any work                                                                                                                                                                                                                                                                                                   |
+| PDF export                              | `claim_pdf_export()` — check and increment in one statement, called before the on-device export is built; the client builds nothing without `ok: true` and fails closed on any error (offline is allowed only on an unlimited plan). A share-link guest names the score and is billed to its owner; students are exempt. `consume_pdf_export()` is the legacy alias |
+| Student seats                           | Stock check in `student-provision`, on both `create` and `restore` — a seat is claimed where the row is written, so archive+restore cannot launder the cap                                                                                                                                                                                                          |
+| Writes to an archived score             | `annotations_insert` / `annotations_update` RLS, so it holds for share-link students too                                                                                                                                                                                                                                                                            |
+| Practice-note visibility                | `practice_notes_select` RLS — a note is private to its author until `shared` is set, and then only to the student it is about                                                                                                                                                                                                                                       |
+| Academy seat count                      | `studio_members_seat_limit` trigger (the v1 `studios` / `studio_members` table names are kept; only the tier they entitle was renamed)                                                                                                                                                                                                                              |
 
 `students` and `cloud_scores` are **stocks** — a live count of rows, checked
 where the row is written — so neither ever reaches `usage_counters`. Everything

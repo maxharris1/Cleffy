@@ -1,5 +1,6 @@
 import { requireUser, rejectAnonymous, rejectStudent } from '../_shared/auth.ts';
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { checkRateLimit, clientKey, serviceClient } from '../_shared/rateLimit.ts';
 import { appOrigin, modeForRequest, stripeClient } from '../_shared/stripe.ts';
 
@@ -80,6 +81,7 @@ Deno.serve(async (req) => {
 
         return jsonResponse({ url: session.url });
     } catch (err) {
+        logError('stripe-portal', err, { code: 'portal_failed' });
         return jsonResponse({ error: err instanceof Error ? err.message : 'Portal session failed' }, 502);
     }
 });

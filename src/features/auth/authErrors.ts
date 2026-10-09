@@ -1,9 +1,17 @@
+import { PASSWORD_HINT } from '../../../supabase/functions/_shared/passwordPolicy';
+
 /** Friendly copy for common Supabase Auth failures. */
 
 const INVALID_CREDENTIALS = 'Email or password is incorrect.';
 const USER_EXISTS = 'An account with this email already exists. Try signing in.';
 const RATE_LIMITED = 'Too many attempts. Try again later.';
 const LINK_EXPIRED = 'This link has expired. Request a new one.';
+// The server's refusal of a password the form let through — which should only
+// happen when the hosted policy and passwordPolicy.ts have drifted apart, or
+// the password is in a breach corpus (see weakPasswordMessage).
+const WEAK_PASSWORD = `That password is too weak. ${PASSWORD_HINT}`;
+const PWNED_PASSWORD = 'That password has appeared in a data breach. Choose a different one.';
+const SAME_PASSWORD = 'Choose a password different from your current one.';
 
 /** Closed map of Auth API `error.code` → product copy. */
 const BY_CODE: Readonly<Record<string, string>> = {
@@ -12,6 +20,7 @@ const BY_CODE: Readonly<Record<string, string>> = {
     over_email_send_rate_limit: RATE_LIMITED,
     over_request_rate_limit: RATE_LIMITED,
     otp_expired: LINK_EXPIRED,
+    same_password: SAME_PASSWORD,
 };
 
 /**
@@ -55,8 +64,21 @@ const readAuthFields = (err: unknown): { code: string; message: string } => {
  * Map a thrown Auth error or auth-redirect `error_description` string to
  * user-facing text. Unknown errors use `fallback` (no raw vendor passthrough).
  */
+/**
+ * AuthWeakPasswordError carries WHY in `reasons` ('length', 'characters',
+ * 'pwned'). A breached password meets every rule the hint states, so repeating
+ * the hint at it would be a refusal nobody can act on.
+ */
+const weakPasswordMessage = (err: unknown): string | null => {
+    const reasons = err && typeof err === 'object' ? (err as { reasons?: unknown }).reasons : undefined;
+    return Array.isArray(reasons) && reasons.includes('pwned') ? PWNED_PASSWORD : null;
+};
+
 export const mapAuthError = (err: unknown, fallback = 'Something went wrong.'): string => {
     const { code, message } = readAuthFields(err);
+    if (code === 'weak_password') {
+        return weakPasswordMessage(err) ?? WEAK_PASSWORD;
+    }
     if (code && BY_CODE[code]) {
         return BY_CODE[code];
     }
@@ -66,4 +88,45 @@ export const mapAuthError = (err: unknown, fallback = 'Something went wrong.'): 
         }
     }
     return fallback;
+};
+
+const RESET_RATE_LIMITED = 'Too many requests right now. Wait a few minutes, then try again.';
+const RESET_INVALID_EMAIL = 'Enter a valid email address.';
+const RESET_UNREACHABLE = 'Could not reach Cleffy. Check your connection and try again.';
+
+/**
+ * What the forgot-password form may say about a failed reset request — or
+ * null, meaning "show the same neutral confirmation as a success".
+ *
+ * GoTrue's /recover validates the address, looks the account up, and answers
+ * an unknown address with a plain 200 straight away; everything after the
+ * lookup runs only for addresses that HAVE an account. Any error raised there
+ * must therefore look like that 200, or the form becomes a way to test which
+ * addresses have accounts. That covers every over_email_send_rate_limit (the
+ * per-address resend limit and the project-wide email-send cap alike — an
+ * attacker can use the cap up, and then only real accounts would hear "wait"),
+ * email_address_invalid / email_address_not_authorized (raised when the mail
+ * is sent), a bare 429 without a code we can place, and any failure to send.
+ * What may still be said is what is decided before the lookup, alike for
+ * every address:
+ *  * over_request_rate_limit — the per-IP limiter in front of /recover —
+ *    so the person knows to wait;
+ *  * validation_failed — a malformed address, from the request validation;
+ *  * no answer at all: offline, or the service down (502/503). Not a 504:
+ *    a gateway timeout can be a slow mail send, which only accounts reach.
+ * The success screen's "try again" covers what a real user needs otherwise.
+ */
+export const passwordResetProblem = (err: unknown): string | null => {
+    const { code, message } = readAuthFields(err);
+    const record = err && typeof err === 'object' ? (err as { name?: unknown; status?: unknown }) : {};
+    if (code === 'over_request_rate_limit') {
+        return RESET_RATE_LIMITED;
+    }
+    if (code === 'validation_failed' || (!code && /unable to validate email/i.test(message))) {
+        return RESET_INVALID_EMAIL;
+    }
+    if (record.name === 'AuthRetryableFetchError' && record.status !== 504) {
+        return RESET_UNREACHABLE;
+    }
+    return null;
 };

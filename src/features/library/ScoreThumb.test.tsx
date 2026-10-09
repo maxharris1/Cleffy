@@ -22,11 +22,18 @@ afterEach(() => {
 });
 
 describe('ScoreThumb', () => {
+    it('passes the published revision through so a cover can be fetched for uncached bytes', async () => {
+        getThumbnail.mockResolvedValue(null);
+        render(<ScoreThumb docId="d1" contentRev={3} thumbRev={2} />);
+
+        await waitFor(() => expect(getThumbnail).toHaveBeenCalledWith('d1', 3, 2));
+    });
+
     it('draws a staff placeholder when there is no render for this score', async () => {
         getThumbnail.mockResolvedValue(null);
         const { container } = render(<ScoreThumb docId="d1" contentRev={0} />);
 
-        await waitFor(() => expect(getThumbnail).toHaveBeenCalledWith('d1', 0));
+        await waitFor(() => expect(getThumbnail).toHaveBeenCalledWith('d1', 0, null));
         expect(container.querySelector('svg')).not.toBeNull();
         expect(container.querySelector('img')).toBeNull();
     });

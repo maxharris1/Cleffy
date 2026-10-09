@@ -1,7 +1,18 @@
 import { jsonResponse, optionsResponse } from '../_shared/cors.ts';
+import {
+    type DeletedAccountStripe,
+    FOREIGN_KEY_VIOLATION,
+    stopDeletedAccountSubscription,
+} from '../_shared/deletedAccountBilling.ts';
+import { logError } from '../_shared/errorReporting.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 import { priceTiers, servedModes, stripeClient, type StripeMode, webhookSecretFor } from '../_shared/stripe.ts';
-import { handleStripeEvent, type StripeEventLike, type WebhookStore } from '../_shared/stripeEvents.ts';
+import {
+    handleStripeEvent,
+    SUBSCRIPTION_MISSING,
+    type StripeEventLike,
+    type WebhookStore,
+} from '../_shared/stripeEvents.ts';
 import { type SignatureFailure, verifyStripeSignature } from '../_shared/stripeSignature.ts';
 
 /**
@@ -95,6 +106,23 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Billing is not configured' }, 500);
     }
 
+    // For a subscription whose user was deleted (see deletedAccountBilling.ts).
+    const deletedAccountStripe: DeletedAccountStripe = {
+        retrieveStatus: async (subscriptionId) => {
+            try {
+                return (await stripe.subscriptions.retrieve(subscriptionId)).status;
+            } catch (err) {
+                if ((err as { code?: string } | null)?.code === 'resource_missing') {
+                    return null;
+                }
+                throw err;
+            }
+        },
+        cancel: async (subscriptionId) => {
+            await stripe.subscriptions.cancel(subscriptionId);
+        },
+    };
+
     const store: WebhookStore = {
         claimEvent: async (id, type) => {
             // Single statement, so two concurrent deliveries of the same event
@@ -121,6 +149,13 @@ Deno.serve(async (req) => {
                 .from('billing_customers')
                 .upsert({ user_id: userId, mode, stripe_customer_id: customerId }, { onConflict: 'user_id,mode' });
             if (error) {
+                // The user was deleted while their Checkout was open. Nothing to
+                // link; the subscription write that follows hits the same FK and
+                // cancels whatever the checkout started.
+                if (error.code === FOREIGN_KEY_VIOLATION) {
+                    console.log(`customer ${customerId} belongs to a deleted account; not linked`);
+                    return;
+                }
                 throw new Error(`could not link customer ${customerId}: ${error.message}`);
             }
         },
@@ -132,13 +167,36 @@ Deno.serve(async (req) => {
                     { onConflict: 'stripe_subscription_id' },
                 );
             if (error) {
+                // 23503 on the only FK here (user_id → auth.users): the account was
+                // deleted. Usually this is delete-account's own cancellation being
+                // reported; if the subscription can still bill, it is cancelled now.
+                // Either way there is no row to write.
+                if (error.code === FOREIGN_KEY_VIOLATION) {
+                    await stopDeletedAccountSubscription(
+                        row.stripe_subscription_id,
+                        row.status,
+                        deletedAccountStripe,
+                        (message) => console.log(message),
+                    );
+                    return;
+                }
                 throw new Error(`could not upsert subscription ${row.stripe_subscription_id}: ${error.message}`);
             }
         },
         fetchSubscription: async (subscriptionId) => {
             try {
                 return await stripe.subscriptions.retrieve(subscriptionId);
-            } catch {
+            } catch (err) {
+                console.error(`could not retrieve subscription ${subscriptionId}:`, err);
+                // Stripe answered, and the answer is "no such subscription": a
+                // retry cannot change that, so the handler acknowledges it
+                // instead of collecting days of 500s. Everything else -- a
+                // connection failure, a rate limit, a Stripe 5xx, even a bad
+                // key -- may heal, so it becomes a released claim and a 500.
+                const stripeError = err as { type?: unknown; code?: unknown } | null;
+                if (stripeError?.type === 'StripeInvalidRequestError' && stripeError.code === 'resource_missing') {
+                    return SUBSCRIPTION_MISSING;
+                }
                 return null;
             }
         },
@@ -165,6 +223,23 @@ Deno.serve(async (req) => {
             }
             console.log(`archived ${data ?? 0} score(s) past the free cap for ${userId}`);
         },
+        restorePlanArchivedScores: async (userId) => {
+            const { data, error } = await admin.rpc('restore_plan_archived_scores', { p_user: userId });
+            if (error) {
+                throw new Error(`could not restore lapse-archived scores for ${userId}: ${error.message}`);
+            }
+            if (data) {
+                console.log(`restored ${data} lapse-archived score(s) for ${userId}`);
+            }
+        },
+        releaseEvent: async (id) => {
+            const { error } = await admin.from('stripe_events').delete().eq('id', id);
+            if (error) {
+                // Nothing more to do from here: the retry will read as a
+                // duplicate. Loud, because that is a lost billing event.
+                console.error(`could not release claim on ${id}: ${error.message}`);
+            }
+        },
         log: (message) => console.log(message),
     };
 
@@ -176,16 +251,8 @@ Deno.serve(async (req) => {
         // of it would make Stripe's retry look like a duplicate and silently drop
         // the event. Release the claim first, then ask for the retry with a 500.
         // Re-running is safe: every store write is an upsert or is idempotent.
-        await admin
-            .from('stripe_events')
-            .delete()
-            .eq('id', event.id)
-            .then(({ error }) => {
-                if (error) {
-                    console.error(`could not release claim on ${event.id}: ${error.message}`);
-                }
-            });
-        console.error(`stripe-webhook failed for ${event.id} (${event.type}):`, err);
+        await store.releaseEvent(event.id);
+        logError('stripe-webhook', err, { code: 'event_failed', eventId: event.id, eventType: event.type, mode });
         return jsonResponse({ error: err instanceof Error ? err.message : 'Webhook handling failed' }, 500);
     }
 });

@@ -1,20 +1,31 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
-import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
+import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
 import {
+    LIBRARY_PAGE_SIZE,
     deleteDocument,
-    listCachedDocuments,
+    fetchLibraryPage,
+    leaveSharedDocument,
     listDocuments,
     listFavoriteDocumentIds,
     renameDocument,
     setDocumentFavorite,
+    sweepPendingStorageCleanup,
 } from '@/features/library/documentsService';
 import {
+    fetchLibraryBootstrap,
+    readCachedLibraryList,
+    writeCachedLibraryList,
+} from '@/features/library/libraryBootstrap';
+import { libraryMutationEpoch } from '@/features/library/libraryCache';
+import {
+    appendPage,
+    applyLibraryFilters,
     displayTitleOf,
-    filterByTag,
     groupByComposer,
     groupByTag,
+    isFiltering,
     sortDocuments,
     type LibraryGroup,
     type LibrarySort,
@@ -24,9 +35,12 @@ import { FileDropZone } from '@/features/library/FileDropZone';
 import { formatUpdated } from '@/features/library/libraryFormat';
 import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
+import { perfLogIfDev, perfMark } from '@/lib/perf';
+import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
-import { RowMenu } from '@/features/library/RowMenu';
+import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
+import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
 import { TagManageDialog } from '@/features/library/TagManageDialog';
@@ -47,16 +61,32 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorText } from '@/ui/ErrorText';
-import { LoadingText } from '@/ui/Loading';
 import { ProgressBar } from '@/ui/ProgressBar';
+import { LibrarySkeleton } from '@/ui/Skeleton';
 import { TextField } from '@/ui/TextField';
+import { ViewToggle } from '@/ui/ViewToggle';
 import { buttonClassName, chipClassName, fieldClassName } from '@/ui/classNames';
-import { LayoutGridIcon, ListIcon, SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
+import { SettingsIcon, StarIcon, TagIcon, UploadIcon } from '@/ui/icons';
 
 /** Above this count, tag filters switch from chips to a select. */
 const TAG_CHIP_LIMIT = 8;
 /** Max assigned tag names shown under a score title before “+N”. */
 const INLINE_TAG_LIMIT = 3;
+/** Quiet time after the last keystroke before the search goes to the server. */
+const SEARCH_DEBOUNCE_MS = 300;
+
+/**
+ * One server-side answer for the current sort + filters, used while the
+ * library is only partly loaded. `key` names the request it answers, so a
+ * slow response for an earlier query can never be shown under a later one.
+ */
+interface RemoteResults {
+    key: string;
+    documents: DocumentRow[];
+    hasMore: boolean;
+    /** Where the next page continues — see mainCursorRef. */
+    cursor: DocumentRow | null;
+}
 
 export const LibraryPage = () => {
     const {
@@ -65,9 +95,11 @@ export const LibraryPage = () => {
         uploadPct,
         onUpload,
         uploadError,
-        uploadLimit,
+        limitNotice,
         clearUploadError,
         canManageStudents,
+        quotaExhausted = false,
+        quotaUpgradeHint = true,
         openPricing,
     } = useOutletContext<LibraryOutletContext>();
     const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
@@ -76,6 +108,16 @@ export const LibraryPage = () => {
     const [assignments, setAssignments] = useState<Map<string, string[]>>(new Map());
     const [hasMore, setHasMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /**
+     * Nothing to show because the list could not be loaded at all — no
+     * snapshot on this device either. Never "No scores yet": that would tell
+     * a teacher with a full library that it is empty.
+     */
+    const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
+    /** Bumped to load the list again (reconnect, retry timer, or "Try again"). */
+    const [reloadKey, setReloadKey] = useState(0);
+    /** Automatic retries since the list last loaded, for their backoff. */
+    const autoRetriesRef = useRef(0);
     const [actionError, setActionError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Read once on mount: a stored preference that throws (private mode) falls
@@ -88,79 +130,317 @@ export const LibraryPage = () => {
     const [activeTagId, setActiveTagId] = useState<string | null>(null);
     const [renameTarget, setRenameTarget] = useState<DocumentRow | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<DocumentRow | null>(null);
+    const [leaveTarget, setLeaveTarget] = useState<DocumentRow | null>(null);
     const [shareTarget, setShareTarget] = useState<DocumentRow | null>(null);
     const [assignTarget, setAssignTarget] = useState<DocumentRow | null>(null);
     const [tagTarget, setTagTarget] = useState<DocumentRow | null>(null);
     const [manageTagsOpen, setManageTagsOpen] = useState(false);
     const [busyAction, setBusyAction] = useState(false);
+    /** The search text the server was last asked about (debounced, trimmed). */
+    const [debouncedQuery, setDebouncedQuery] = useState('');
+    const [remote, setRemote] = useState<RemoteResults | null>(null);
+    /** Keyed like RemoteResults: a failure belongs to the search that failed. */
+    const [remoteFailure, setRemoteFailure] = useState<{ key: string; message: string } | null>(null);
+    /** Bumped by "Try again" to re-ask the server the same question. */
+    const [remoteAttempt, setRemoteAttempt] = useState(0);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+    /**
+     * Set when a page added nothing new although the server says there is
+     * more. Infinite scroll then stands down and the button is the only way
+     * on: a sentinel still in view would otherwise fire again the moment the
+     * load settles, and keep firing.
+     */
+    const [autoLoadPaused, setAutoLoadPaused] = useState(false);
+    /**
+     * The last row the server handed the main list, kept apart from the rows
+     * on screen. A keyset continuation must start from what the server
+     * returned — not from a row the page has since renamed, deleted or
+     * re-sorted, which would skip or repeat scores. It is also the "is this
+     * still the list the page continues?" check: anything that repaints the
+     * list from the server sets a new cursor object, and a page that lands
+     * for the old one is dropped. Set synchronously alongside the state it
+     * describes, so the check holds even before React commits.
+     */
+    const mainCursorRef = useRef<DocumentRow | null>(null);
+    /** Rows on screen as last committed — only used to count what a page added. */
+    const documentsRef = useRef<DocumentRow[] | null>(null);
+    useEffect(() => {
+        documentsRef.current = documents;
+    }, [documents]);
+    const online = useOnline();
+    /**
+     * Bumped after a mutation's server write resolved, once the state updates
+     * that reflect it are queued. The effect below then persists what is on
+     * screen — after the render commits, so it sees the post-edit state, not
+     * the closure's copy. The commit edge outranks in-flight bootstraps; this
+     * is the write that puts the list the page knows is true.
+     */
+    const [persistTick, setPersistTick] = useState(0);
+    const persistSnapshot = () => setPersistTick((t) => t + 1);
+
+    useEffect(() => {
+        if (persistTick === 0 || documents === null) {
+            return;
+        }
+        // Only the first page goes into the snapshot. It is what the next
+        // visit's bootstrap returns, so the instant paint and the network
+        // paint agree instead of the list shrinking under the teacher.
+        void writeCachedLibraryList(userId, {
+            documents: documents.slice(0, LIBRARY_PAGE_SIZE),
+            hasMore: hasMore || documents.length > LIBRARY_PAGE_SIZE,
+            favoriteIds: favorites,
+            tags,
+            documentTags: assignments,
+        }).catch(() => undefined);
+        // Tick + user: the list values are read at persist time, not watched.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [persistTick, userId]);
 
     useEffect(() => {
         let cancelled = false;
-        listDocuments()
-            .then(({ documents: docs, hasMore: more }) => {
-                if (!cancelled) {
-                    setDocuments(docs);
-                    setHasMore(more);
+        // The network request leaves first: it must not queue behind an
+        // IndexedDB open (a schema upgrade can take a good fraction of a
+        // second) that it does not depend on. The snapshot read runs alongside.
+        let firstResolved = false;
+        const first = fetchLibraryBootstrap(userId);
+        first.then(
+            (boot) => {
+                // Only a FRESH answer makes the snapshot moot; a payload a
+                // mutation outran will be refetched, and the snapshot bridges
+                // that gap exactly as it bridges a slow first request.
+                firstResolved = libraryMutationEpoch() === boot.fetchedAtEpoch;
+            },
+            () => undefined,
+        );
+        void (async () => {
+            // Instant paint from the last bootstrap before the network. Only the
+            // user-scoped snapshot qualifies: pdfCache (opened PDFs) is shared by
+            // every account on this browser, so it stays out of the happy path
+            // and appears only under the labelled offline fallback below. A
+            // network answer that beat the snapshot read makes the paint moot.
+            const cachedList = await readCachedLibraryList(userId).catch(() => null);
+            // A bootstrap that already settled must run its then before we
+            // decide whether the snapshot is moot — otherwise a fresh answer
+            // that beat the Dexie read still paints one frame of stale titles.
+            await Promise.resolve();
+            let painted = false;
+            if (!cancelled && !firstResolved && cachedList && cachedList.documents.length > 0) {
+                mainCursorRef.current = cachedList.documents[cachedList.documents.length - 1] ?? null;
+                setAutoLoadPaused(false);
+                setDocuments(cachedList.documents);
+                setHasMore(cachedList.hasMore);
+                setFavorites(cachedList.favoriteIds);
+                setTags(cachedList.tags);
+                setAssignments(cachedList.documentTags);
+                painted = true;
+                perfMark('library-cache-paint');
+            }
+
+            // The painted list is interactive while the network is out, so an
+            // edit made in that window outranks a response whose request left
+            // before it (the epoch moves on the edit's start AND commit, so a
+            // request dispatched mid-write is outranked too). A stale response
+            // is not just dropped — that could strand a nothing-painted page
+            // on "Loading scores…" forever — it is refetched: the new request
+            // sees the post-edit server state. If the refetches are also
+            // outrun, the painted state (which already reflects the edits)
+            // wins over any of the payloads; only an unpainted page takes the
+            // last payload regardless, because anything beats no list at all.
+            for (let pass = 0; pass < 3; pass++) {
+                const lastPass = pass === 2;
+                try {
+                    const boot = await (pass === 0 ? first : fetchLibraryBootstrap(userId));
+                    if (cancelled) {
+                        return;
+                    }
+                    if (libraryMutationEpoch() !== boot.fetchedAtEpoch) {
+                        if (!lastPass) {
+                            continue;
+                        }
+                        if (painted) {
+                            return;
+                        }
+                    }
+                    mainCursorRef.current = boot.documents[boot.documents.length - 1] ?? null;
+                    setAutoLoadPaused(false);
+                    setDocuments(boot.documents);
+                    setHasMore(boot.hasMore);
+                    setFavorites(boot.favoriteIds);
+                    setTags(boot.tags);
+                    setAssignments(boot.documentTags);
                     setError(null);
-                }
-            })
-            .catch(async (err: unknown) => {
-                const cached = await listCachedDocuments().catch(() => []);
-                if (cancelled) {
+                    autoRetriesRef.current = 0;
+                    perfMark('library-network-paint');
+                    perfLogIfDev();
+                    void sweepPendingStorageCleanup(userId);
                     return;
+                } catch (err: unknown) {
+                    // Fallback: four parallel GETs if the bootstrap RPC is unavailable.
+                    try {
+                        const epochAtRetry = libraryMutationEpoch();
+                        const [{ documents: docs, hasMore: more }, ids, tagRows, tagMap] = await Promise.all([
+                            listDocuments(),
+                            listFavoriteDocumentIds().catch(() => new Set<string>()),
+                            listLibraryTags().catch(() => [] as LibraryTagRow[]),
+                            listDocumentTagMap().catch(() => new Map<string, string[]>()),
+                        ]);
+                        if (cancelled) {
+                            return;
+                        }
+                        if (libraryMutationEpoch() !== epochAtRetry) {
+                            if (!lastPass) {
+                                continue;
+                            }
+                            if (painted) {
+                                return;
+                            }
+                        }
+                        mainCursorRef.current = docs[docs.length - 1] ?? null;
+                        setAutoLoadPaused(false);
+                        setDocuments(docs);
+                        setHasMore(more);
+                        setFavorites(ids);
+                        setTags(tagRows);
+                        setAssignments(tagMap);
+                        setError(null);
+                        autoRetriesRef.current = 0;
+                        perfMark('library-network-paint');
+                        perfLogIfDev();
+                        void sweepPendingStorageCleanup(userId);
+                        return;
+                    } catch (fallbackErr: unknown) {
+                        if (cancelled) {
+                            return;
+                        }
+                        // Prefer the user-scoped Dexie snapshot already painted
+                        // above. An empty snapshot plus a failed network is an
+                        // unavailable library — opened PDFs are not a library.
+                        if (cachedList && cachedList.documents.length > 0) {
+                            setError('Offline — showing scores cached on this device.');
+                            return;
+                        }
+                        setDocuments((prev) => prev ?? []);
+                        // The raw text ("TypeError: Failed to fetch") means
+                        // nothing to a teacher; it goes to the console.
+                        console.warn('Could not load the library', err, fallbackErr);
+                        setLoadFailure(classifyLoadFailure(err, fallbackErr));
+                        return;
+                    }
                 }
-                setHasMore(false);
-                if (cached.length > 0) {
-                    setDocuments(cached);
-                    setError('Offline — showing scores cached on this device.');
-                } else {
-                    setDocuments([]);
-                    setError(err instanceof Error ? err.message : 'Could not load your scores.');
-                }
-            });
-        // Favorites and tags are best-effort — an offline library still renders without them.
-        listFavoriteDocumentIds()
-            .then((ids) => {
-                if (!cancelled) {
-                    setFavorites(ids);
-                }
-            })
-            .catch(() => undefined);
-        listLibraryTags()
-            .then((rows) => {
-                if (!cancelled) {
-                    setTags(rows);
-                }
-            })
-            .catch(() => undefined);
-        listDocumentTagMap()
-            .then((map) => {
-                if (!cancelled) {
-                    setAssignments(map);
-                }
-            })
-            .catch(() => undefined);
+            }
+        })();
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [userId, reloadKey]);
+
+    const retryLoad = () => {
+        setLoadFailure(null);
+        setDocuments(null);
+        setReloadKey((k) => k + 1);
+    };
+    // Nothing loaded and the network is to blame: load the library again by
+    // itself — at once on reconnect, and on a backoff while the browser says
+    // it is online but the server could not be reached (DNS, a blocker, an
+    // outage), since no 'online' event will come then.
+    useEffect(() => {
+        if (loadFailure !== 'offline' && loadFailure !== 'unreachable') {
+            return;
+        }
+        const reload = () => {
+            setLoadFailure(null);
+            setDocuments(null);
+            setReloadKey((k) => k + 1);
+        };
+        window.addEventListener('online', reload);
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        if (loadFailure === 'unreachable') {
+            const attempt = autoRetriesRef.current;
+            autoRetriesRef.current = attempt + 1;
+            timer = setTimeout(reload, Math.min(LIBRARY_RETRY_BASE_MS * 2 ** attempt, LIBRARY_RETRY_MAX_MS));
+        }
+        return () => {
+            window.removeEventListener('online', reload);
+            if (timer) {
+                clearTimeout(timer);
+            }
+        };
+    }, [loadFailure]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
+    const isOfflineNotice = error?.startsWith('Offline') ?? false;
+    // Either the browser says so, or the library itself could only be painted
+    // from this device's snapshot. A server search would just fail.
+    const offline = !online || isOfflineNotice;
 
     const q = query.trim().toLowerCase();
+    const filters = { query: q, favoritesOnly, favorites, tagId: activeTagId, assignments };
+    const filtering = isFiltering(filters);
+
+    // The server learns about the query once typing pauses; clearing the box
+    // is applied at once (there is nothing to fetch for an empty query).
+    useEffect(() => {
+        const next = query.trim().toLowerCase();
+        const timer = setTimeout(() => setDebouncedQuery(next), next === '' ? 0 : SEARCH_DEBOUNCE_MS);
+        return () => clearTimeout(timer);
+    }, [query]);
+
+    /**
+     * With every score loaded, search, filters and sort all run in memory, as
+     * they always did. With more on the server, an in-memory filter would
+     * only see the newest page — a teacher with 300 scores could not find the
+     * oldest one — so filters and the A–Z order are asked of the server.
+     */
+    const serverMode = hasMore && (filtering || sort === 'title');
+    // Offline, the loaded rows are all there is: they are searched and sorted
+    // in memory, and labelled as such, rather than asking a server that cannot
+    // answer. Nothing is asked while the query is still being typed either: a
+    // request for the half-typed text would only be thrown away.
+    const askServer = serverMode && !offline;
+    const remoteKey =
+        askServer && debouncedQuery === q ? JSON.stringify([sort, debouncedQuery, activeTagId, favoritesOnly]) : null;
+    const remoteRequest = useRef(0);
+
+    useEffect(() => {
+        if (remoteKey === null) {
+            return;
+        }
+        const requestId = ++remoteRequest.current;
+        fetchLibraryPage({ sort, query: debouncedQuery, tagId: activeTagId, favoritesOnly })
+            .then((page) => {
+                if (remoteRequest.current === requestId) {
+                    setRemote({ key: remoteKey, ...page, cursor: page.documents[page.documents.length - 1] ?? null });
+                    // An earlier failure of this same question is answered now.
+                    setRemoteFailure((failure) => (failure?.key === remoteKey ? null : failure));
+                    setLoadMoreError(null);
+                    setAutoLoadPaused(false);
+                }
+            })
+            .catch((err: unknown) => {
+                if (remoteRequest.current === requestId) {
+                    setRemoteFailure({
+                        key: remoteKey,
+                        message: err instanceof Error ? err.message : 'Search failed.',
+                    });
+                }
+            });
+    }, [remoteKey, remoteAttempt, sort, debouncedQuery, activeTagId, favoritesOnly]);
+
+    const remoteResults = remoteKey !== null && remote?.key === remoteKey ? remote : null;
+    // Results on screen outrank an older failure of the same question.
+    const remoteError =
+        remoteKey !== null && remoteResults === null && remoteFailure?.key === remoteKey ? remoteFailure.message : null;
+    // Waiting on the server: the loaded rows that match stay on screen in
+    // the meantime, labelled as a search in progress rather than an answer.
+    const searching = askServer && remoteResults === null && remoteError === null;
+
     const visible =
-        documents === null
-            ? null
-            : (() => {
-                  let list = documents
-                      .filter((doc) => !q || doc.title.toLowerCase().includes(q))
-                      .filter((doc) => !favoritesOnly || favorites.has(doc.id));
-                  if (activeTagId) {
-                      list = filterByTag(list, activeTagId, assignments);
-                  }
-                  return list;
-              })();
-    const sorted = visible ? sortDocuments(visible, sort) : null;
+        documents === null ? null : applyLibraryFilters(remoteResults ? remoteResults.documents : documents, filters);
+    // Server results arrive in the requested order; re-sorting them in the
+    // browser (localeCompare vs. the database's collation) could disagree
+    // with where the next page continues.
+    const sorted = visible ? (remoteResults ? visible : sortDocuments(visible, sort)) : null;
     const groups: LibraryGroup[] | null = sorted
         ? groupTag
             ? groupByTag(sorted, tags, assignments)
@@ -169,8 +449,117 @@ export const LibraryPage = () => {
               : [{ label: null, documents: sorted }]
         : null;
 
+    const canLoadMore = remoteResults ? remoteResults.hasMore : !serverMode && hasMore;
+
+    /**
+     * Fetch the next keyset page after the last row on screen. A page is
+     * appended only if the list it continues is still the one showing — a
+     * bootstrap that repainted, or a new search, makes the cursor meaningless,
+     * and appending anyway could leave a gap or a duplicate run.
+     */
+    // Mirrors loadingMore synchronously: two observer callbacks (or a tap
+    // and a callback) in the same tick both see the state before React
+    // re-renders, and would both ask for the same page.
+    const loadingMoreRef = useRef(false);
+    const loadMore = async () => {
+        if (loadingMoreRef.current || !canLoadMore) {
+            return;
+        }
+        loadingMoreRef.current = true;
+        setLoadingMore(true);
+        setLoadMoreError(null);
+        /** New rows a page brings, measured against the rows already held. */
+        const freshCount = (held: DocumentRow[] | null, page: DocumentRow[]): number => {
+            const seen = new Set((held ?? []).map((doc) => doc.id));
+            return page.filter((doc) => !seen.has(doc.id)).length;
+        };
+        try {
+            if (remoteResults) {
+                const base = remoteResults;
+                const cursor = base.cursor;
+                if (!cursor) {
+                    return;
+                }
+                const page = await fetchLibraryPage({
+                    sort,
+                    query: debouncedQuery,
+                    tagId: activeTagId,
+                    favoritesOnly,
+                    after: cursor,
+                });
+                // A server that says "more" but sends nothing would have the
+                // next request ask the same question; treat it as the end.
+                const more = page.hasMore && page.documents.length > 0;
+                setRemote((prev) =>
+                    prev && prev.key === base.key && prev.cursor === cursor
+                        ? {
+                              ...prev,
+                              documents: appendPage(prev.documents, page.documents),
+                              hasMore: more,
+                              cursor: page.documents[page.documents.length - 1] ?? cursor,
+                          }
+                        : prev,
+                );
+                setAutoLoadPaused(more && freshCount(base.documents, page.documents) === 0);
+                return;
+            }
+            const cursor = mainCursorRef.current;
+            if (!cursor) {
+                return;
+            }
+            const page = await fetchLibraryPage({ sort: 'recent', after: cursor });
+            if (mainCursorRef.current !== cursor) {
+                // The list was repainted from the server while this page was
+                // in flight; it no longer continues from here.
+                return;
+            }
+            const more = page.hasMore && page.documents.length > 0;
+            mainCursorRef.current = page.documents[page.documents.length - 1] ?? cursor;
+            // An updater, not a value: a delete or rename queued while the
+            // page was in flight must survive the append.
+            setDocuments((prev) => (prev ? appendPage(prev, page.documents) : prev));
+            setHasMore(more);
+            setAutoLoadPaused(more && freshCount(documentsRef.current, page.documents) === 0);
+        } catch (err) {
+            setLoadMoreError(err instanceof Error ? err.message : 'Could not load more scores.');
+        } finally {
+            loadingMoreRef.current = false;
+            setLoadingMore(false);
+        }
+    };
+    const onSentinelVisible = useEffectEvent(() => {
+        void loadMore();
+    });
+
+    // Infinite scroll: the sentinel below the list asks for the next page as
+    // it nears the viewport. Re-armed after every page, so a tall screen keeps
+    // filling; paused after a failure, where the button is the retry.
+    const sentinelRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        const node = sentinelRef.current;
+        if (
+            !node ||
+            !canLoadMore ||
+            loadingMore ||
+            loadMoreError ||
+            autoLoadPaused ||
+            typeof IntersectionObserver === 'undefined'
+        ) {
+            return;
+        }
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) {
+                    onSentinelVisible();
+                }
+            },
+            { rootMargin: '600px 0px' },
+        );
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, [canLoadMore, loadingMore, loadMoreError, autoLoadPaused]);
+
     const hasScores = documents !== null && documents.length > 0;
-    const isOfflineNotice = error?.startsWith('Offline') ?? false;
     const statusError = uploadError ?? actionError ?? error;
     const useTagSelect = tags.length > TAG_CHIP_LIMIT;
     /**
@@ -178,7 +567,30 @@ export const LibraryPage = () => {
      * when the shelf is the whole library: under a filter it would look like a
      * result, and under a grouping it would have to pick a group to live in.
      */
-    const showAddTile = view === 'grid' && !q && !activeTagId && !favoritesOnly && !groupComposer && !groupTag;
+    const showAddTile = view === 'grid' && !filtering && !groupComposer && !groupTag;
+
+    const countLabel = (() => {
+        if (documents === null || visible === null) {
+            return '';
+        }
+        const n = documents.length;
+        if (searching) {
+            return 'Searching all scores…';
+        }
+        if (remoteResults) {
+            const more = remoteResults.hasMore ? '+' : '';
+            return filtering ? `${visible.length}${more} found` : `${visible.length}${more} scores, A–Z`;
+        }
+        // Below here with hasMore, the server was not (or could not be)
+        // asked: everything counted is what this page has loaded.
+        if (filtering) {
+            return hasMore ? `${visible.length} of ${n} loaded` : `${visible.length} of ${n}`;
+        }
+        if (hasMore) {
+            return sort === 'title' ? `${n} loaded, A–Z` : `Showing ${n} most recent`;
+        }
+        return `${n} ${n === 1 ? 'score' : 'scores'}`;
+    })();
 
     const changeView = (next: LibraryView) => {
         setView(next);
@@ -197,18 +609,20 @@ export const LibraryPage = () => {
             }
             return set;
         });
-        setDocumentFavorite(doc.id, userId, next).catch((err: unknown) => {
-            setFavorites((prev) => {
-                const set = new Set(prev);
-                if (next) {
-                    set.delete(doc.id);
-                } else {
-                    set.add(doc.id);
-                }
-                return set;
+        setDocumentFavorite(doc.id, userId, next)
+            .then(persistSnapshot)
+            .catch((err: unknown) => {
+                setFavorites((prev) => {
+                    const set = new Set(prev);
+                    if (next) {
+                        set.delete(doc.id);
+                    } else {
+                        set.add(doc.id);
+                    }
+                    return set;
+                });
+                setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
             });
-            setActionError(err instanceof Error ? err.message : 'Could not update favorites.');
-        });
     };
 
     const patchAssignment = (documentId: string, tagId: string, assigned: boolean) => {
@@ -239,6 +653,7 @@ export const LibraryPage = () => {
         patchAssignment(docId, tagId, assigned);
         try {
             await setDocumentTag(docId, tagId, assigned);
+            persistSnapshot();
         } catch (err) {
             patchAssignment(docId, tagId, !assigned);
             throw err;
@@ -258,6 +673,10 @@ export const LibraryPage = () => {
         } catch (err) {
             patchAssignment(tagTarget.id, created.id, false);
             throw err;
+        } finally {
+            // The tag exists either way; the assignment state is whichever
+            // branch above left it in.
+            persistSnapshot();
         }
     };
 
@@ -265,6 +684,7 @@ export const LibraryPage = () => {
     const handleCreateTagOnly = async (name: string) => {
         const created = await createLibraryTag(userId, name);
         setTags((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+        persistSnapshot();
     };
 
     const handleRenameTag = async (tagId: string, name: string) => {
@@ -274,6 +694,7 @@ export const LibraryPage = () => {
                 .map((t) => (t.id === tagId ? { ...t, name: name.trim().replace(/\s+/g, ' ') } : t))
                 .sort((a, b) => a.name.localeCompare(b.name)),
         );
+        persistSnapshot();
     };
 
     const handleDeleteTag = async (tagId: string) => {
@@ -294,6 +715,7 @@ export const LibraryPage = () => {
         if (activeTagId === tagId) {
             setActiveTagId(null);
         }
+        persistSnapshot();
     };
 
     const saveRename = async (title: string) => {
@@ -305,7 +727,13 @@ export const LibraryPage = () => {
         try {
             await renameDocument(target.id, title);
             setDocuments((docs) => docs?.map((d) => (d.id === target.id ? { ...d, title } : d)) ?? docs);
+            setRemote((prev) =>
+                prev
+                    ? { ...prev, documents: prev.documents.map((d) => (d.id === target.id ? { ...d, title } : d)) }
+                    : prev,
+            );
             setRenameTarget(null);
+            persistSnapshot();
         } finally {
             setBusyAction(false);
         }
@@ -321,6 +749,9 @@ export const LibraryPage = () => {
         try {
             await deleteDocument(target);
             setDocuments((docs) => docs?.filter((d) => d.id !== target.id) ?? docs);
+            setRemote((prev) =>
+                prev ? { ...prev, documents: prev.documents.filter((d) => d.id !== target.id) } : prev,
+            );
             setAssignments((prev) => {
                 const next = new Map(prev);
                 next.delete(target.id);
@@ -329,11 +760,54 @@ export const LibraryPage = () => {
             // A slot just came free, so the "you are at your score limit" notice
             // from the upload that failed a moment ago is no longer true.
             clearUploadError();
+            persistSnapshot();
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Could not delete the score.');
         } finally {
             setBusyAction(false);
             setDeleteTarget(null);
+        }
+    };
+
+    /** Drop a score from every piece of list state, after it left the library. */
+    const forgetLocally = (docId: string) => {
+        setDocuments((docs) => docs?.filter((d) => d.id !== docId) ?? docs);
+        // Server search / A-Z / filter results too, or the score lingers there.
+        setRemote((prev) => (prev ? { ...prev, documents: prev.documents.filter((d) => d.id !== docId) } : prev));
+        setFavorites((prev) => {
+            if (!prev.has(docId)) {
+                return prev;
+            }
+            const next = new Set(prev);
+            next.delete(docId);
+            return next;
+        });
+        setAssignments((prev) => {
+            if (!prev.has(docId)) {
+                return prev;
+            }
+            const next = new Map(prev);
+            next.delete(docId);
+            return next;
+        });
+    };
+
+    const confirmLeave = async () => {
+        if (!leaveTarget) {
+            return;
+        }
+        const target = leaveTarget;
+        setBusyAction(true);
+        setActionError(null);
+        try {
+            await leaveSharedDocument(target.id);
+            forgetLocally(target.id);
+            persistSnapshot();
+        } catch (err) {
+            setActionError(err instanceof Error ? err.message : 'Could not remove the score from your library.');
+        } finally {
+            setBusyAction(false);
+            setLeaveTarget(null);
         }
     };
 
@@ -345,8 +819,12 @@ export const LibraryPage = () => {
     let rowIndex = 0;
 
     return (
-        <FileDropZone disabled={uploading} onFile={(file) => void onUpload(file).catch(() => undefined)}>
+        <FileDropZone
+            disabled={uploading || quotaExhausted}
+            onFile={(file) => void onUpload(file).catch(() => undefined)}
+        >
             <div>
+                <HomeScreenPromptBanner />
                 {/*
                   No upload button in the header: the shell's top bar carries a
                   persistent one and the shelf ends in an "Add a score" tile. The
@@ -363,20 +841,31 @@ export const LibraryPage = () => {
                     uploading && uploadPct !== null ? (
                         <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
                     ) : null
+                ) : loadFailure ? (
+                    <LibraryUnavailable reason={loadFailure} onRetry={retryLoad} />
                 ) : documents !== null ? (
-                    <EmptyLibrary uploading={uploading} uploadPct={uploadPct} onUpload={onUpload} />
+                    <EmptyLibrary
+                        uploading={uploading}
+                        quotaExhausted={quotaExhausted}
+                        uploadPct={uploadPct}
+                        onUpload={onUpload}
+                    />
                 ) : null}
 
                 {/*
               Both, never one instead of the other. The limit notice outlives the
-              upload that raised it — nothing but the next upload clears it — so
-              rendering it in place of statusError would swallow every later
-              failure: a delete that errored, a listDocuments that failed, the
-              offline notice. Two different things, and the teacher needs both.
+              upload that raised it — and at the cap it is there before any
+              upload, explaining the greyed-out button — so rendering it in place
+              of statusError would swallow every later failure: a delete that
+              errored, a listDocuments that failed, the offline notice. Two
+              different things, and the teacher needs both.
             */}
-                {uploadLimit ? (
-                    <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" />
-                ) : null}
+                <ScoreLimitNotice
+                    limit={limitNotice}
+                    upgradeHint={quotaUpgradeHint}
+                    onUpgrade={openPricing}
+                    className="mt-5"
+                />
                 {statusError ? (
                     isOfflineNotice && !uploadError && !actionError ? (
                         <p className="mt-5 text-sm text-amber-800" role="status">
@@ -388,7 +877,7 @@ export const LibraryPage = () => {
                 ) : null}
 
                 {documents === null ? (
-                    <LoadingText className="mt-10">Loading scores…</LoadingText>
+                    <LibrarySkeleton view={view} label="Loading scores…" />
                 ) : hasScores ? (
                     <section className="mt-8">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -404,13 +893,8 @@ export const LibraryPage = () => {
                                 className={fieldClassName('sm', 'sm:max-w-xs')}
                             />
                             <div className="flex items-center gap-3">
-                                <p className="text-xs text-stone-600">
-                                    {query.trim() || favoritesOnly || activeTagId
-                                        ? `${visible?.length ?? 0} of ${documents.length}`
-                                        : `${documents.length} ${documents.length === 1 ? 'score' : 'scores'}`}
-                                    {hasMore && !query.trim() && !favoritesOnly && !activeTagId
-                                        ? ' · showing latest 100'
-                                        : null}
+                                <p className="text-xs text-stone-600" aria-live="polite">
+                                    {countLabel}
                                 </p>
                                 <ViewToggle view={view} onChange={changeView} />
                             </div>
@@ -492,13 +976,41 @@ export const LibraryPage = () => {
                             )}
                         </div>
 
+                        {serverMode && offline && !isOfflineNotice ? (
+                            <p className="mt-4 text-sm text-amber-800" role="status">
+                                {filtering
+                                    ? `You’re offline, so only the ${documents.length} scores loaded here were searched.`
+                                    : `You’re offline, so only the ${documents.length} scores loaded here are sorted A–Z.`}
+                            </p>
+                        ) : null}
+                        {remoteError ? (
+                            <ErrorText className="mt-4">
+                                {filtering
+                                    ? `Couldn’t search all of your scores, so only matches among the ${documents.length} loaded here are shown.`
+                                    : `Couldn’t sort all of your scores A–Z, so only the ${documents.length} loaded here are shown.`}{' '}
+                                {remoteError}{' '}
+                                <button
+                                    type="button"
+                                    className="font-medium underline"
+                                    onClick={() => {
+                                        setRemoteFailure(null);
+                                        setRemoteAttempt((n) => n + 1);
+                                    }}
+                                >
+                                    Try again
+                                </button>
+                            </ErrorText>
+                        ) : null}
+
                         {visible && visible.length === 0 ? (
-                            <p className="mt-8 text-sm text-stone-500">
-                                {activeTagId && !query.trim() && !favoritesOnly
-                                    ? 'No scores with this tag yet.'
-                                    : favoritesOnly && !query.trim()
-                                      ? 'No favorites yet — tap the star on a score to keep it handy.'
-                                      : `No scores match “${query.trim()}”.`}
+                            <p className="mt-8 text-sm text-stone-500" role={searching ? 'status' : undefined}>
+                                {searching
+                                    ? 'Searching all of your scores…'
+                                    : activeTagId && !query.trim() && !favoritesOnly
+                                      ? 'No scores with this tag yet.'
+                                      : favoritesOnly && !query.trim()
+                                        ? 'No favorites yet — tap the star on a score to keep it handy.'
+                                        : `No scores match “${query.trim()}”.`}
                             </p>
                         ) : (
                             groups?.map((group) => (
@@ -526,10 +1038,15 @@ export const LibraryPage = () => {
                                                         canManageStudents ? () => setAssignTarget(doc) : undefined
                                                     }
                                                     onDelete={() => setDeleteTarget(doc)}
+                                                    onLeave={() => setLeaveTarget(doc)}
                                                 />
                                             ))}
                                             {showAddTile ? (
-                                                <AddScoreTile uploading={uploading} onUpload={onUpload} />
+                                                <AddScoreTile
+                                                    uploading={uploading}
+                                                    quotaExhausted={quotaExhausted}
+                                                    onUpload={onUpload}
+                                                />
                                             ) : null}
                                         </div>
                                     ) : (
@@ -554,6 +1071,7 @@ export const LibraryPage = () => {
                                                         canManageStudents ? () => setAssignTarget(doc) : undefined
                                                     }
                                                     onDelete={() => setDeleteTarget(doc)}
+                                                    onLeave={() => setLeaveTarget(doc)}
                                                 />
                                             ))}
                                         </ul>
@@ -561,6 +1079,23 @@ export const LibraryPage = () => {
                                 </section>
                             ))
                         )}
+
+                        {canLoadMore ? (
+                            <div className="mt-8 flex flex-col items-center gap-2">
+                                <div ref={sentinelRef} aria-hidden="true" />
+                                {loadMoreError ? (
+                                    <ErrorText>Couldn’t load more scores. {loadMoreError}</ErrorText>
+                                ) : null}
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={loadingMore}
+                                    onClick={() => void loadMore()}
+                                >
+                                    {loadingMore ? 'Loading more…' : loadMoreError ? 'Try again' : 'Load more scores'}
+                                </Button>
+                            </div>
+                        ) : null}
                     </section>
                 ) : null}
 
@@ -583,8 +1118,24 @@ export const LibraryPage = () => {
                         onCancel={() => setDeleteTarget(null)}
                     />
                 ) : null}
+                {leaveTarget ? (
+                    <ConfirmDialog
+                        title="Remove from your library?"
+                        body={`“${leaveTarget.title}” was shared with you. Removing it ends your access on every device — you'd need a new link from its owner to get it back. Marks you made stay on the score for everyone else.`}
+                        confirmLabel="Remove"
+                        danger
+                        busy={busyAction}
+                        onConfirm={() => void confirmLeave()}
+                        onCancel={() => setLeaveTarget(null)}
+                    />
+                ) : null}
                 {shareTarget ? (
-                    <ShareDialog docId={shareTarget.id} userId={userId} onClose={() => setShareTarget(null)} />
+                    <ShareDialog
+                        docId={shareTarget.id}
+                        userId={userId}
+                        role="owner"
+                        onClose={() => setShareTarget(null)}
+                    />
                 ) : null}
                 {assignTarget ? (
                     <AssignDialog
@@ -653,39 +1204,6 @@ const SortToggle = ({ sort, onChange }: { sort: LibrarySort; onChange: (s: Libra
 );
 
 /**
- * Shelf or list. Two icon buttons rather than a select: it is a two-state
- * choice made rarely, and the icons say what the words would.
- */
-const ViewToggle = ({ view, onChange }: { view: LibraryView; onChange: (v: LibraryView) => void }) => (
-    <div
-        role="group"
-        aria-label="View"
-        className="flex h-8 shrink-0 items-center rounded-lg border border-stone-200 p-0.5"
-    >
-        {(
-            [
-                ['grid', 'Grid view', LayoutGridIcon],
-                ['list', 'List view', ListIcon],
-            ] as const
-        ).map(([value, label, Icon]) => (
-            <button
-                key={value}
-                type="button"
-                aria-pressed={view === value}
-                aria-label={label}
-                title={label}
-                onClick={() => onChange(value)}
-                className={`flex h-full items-center rounded-md px-2 transition ${
-                    view === value ? 'bg-accent-soft text-accent' : 'text-stone-500 hover:text-stone-800'
-                }`}
-            >
-                <Icon size={15} />
-            </button>
-        ))}
-    </div>
-);
-
-/**
  * Last cell of the shelf. A <label> around a file input rather than a button,
  * for the same reason UploadButton is one — a file picker cannot be opened
  * programmatically without a user gesture on the input itself.
@@ -694,10 +1212,18 @@ const ViewToggle = ({ view, onChange }: { view: LibraryView; onChange: (v: Libra
  * only reachable with a mouse would be the one upload path a keyboard user
  * cannot take.
  */
-const AddScoreTile = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
+const AddScoreTile = ({
+    uploading,
+    quotaExhausted,
+    onUpload,
+}: {
+    uploading: boolean;
+    quotaExhausted: boolean;
+    onUpload: (file: File) => Promise<void>;
+}) => (
     <label
         className={`flex aspect-[1/1.414] cursor-pointer flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed border-stone-300 text-stone-500 transition hover:border-accent hover:text-accent focus-within:border-accent focus-within:text-accent ${
-            uploading ? 'pointer-events-none opacity-60' : ''
+            uploading || quotaExhausted ? 'pointer-events-none opacity-60' : ''
         }`}
     >
         <span aria-hidden="true" className="text-3xl font-light leading-none">
@@ -708,7 +1234,7 @@ const AddScoreTile = ({ uploading, onUpload }: { uploading: boolean; onUpload: (
             type="file"
             accept={UPLOAD_ACCEPT}
             className="sr-only"
-            disabled={uploading}
+            disabled={uploading || quotaExhausted}
             onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
@@ -734,6 +1260,7 @@ const ScoreRow = ({
     onShare,
     onAssign,
     onDelete,
+    onLeave,
 }: {
     doc: DocumentRow;
     index: number;
@@ -748,6 +1275,8 @@ const ScoreRow = ({
     onShare: () => void;
     onAssign?: () => void;
     onDelete: () => void;
+    /** A score shared with you: its menu offers to take it out of your library. */
+    onLeave: () => void;
 }) => {
     const hasTags = assignedTags.length > 0;
     const visibleTags = assignedTags.slice(0, INLINE_TAG_LIMIT);
@@ -761,7 +1290,7 @@ const ScoreRow = ({
                   into a column on phones, which would stack the thumbnail above
                   the title instead of beside it.
                 */}
-                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} />
+                <ScoreThumb docId={doc.id} contentRev={doc.content_rev ?? 0} thumbRev={doc.thumb_rev ?? null} />
                 <div className="ml-3 flex min-w-0 flex-1 flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:gap-4 sm:py-3">
                     <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
@@ -840,7 +1369,9 @@ const ScoreRow = ({
                 </button>
                 {isOwner ? (
                     <RowMenu onRename={onRename} onShare={onShare} onAssign={onAssign} onDelete={onDelete} />
-                ) : null}
+                ) : (
+                    <SharedScoreMenu onLeave={onLeave} />
+                )}
             </div>
         </li>
     );
@@ -900,15 +1431,29 @@ const RenameDialog = ({
     );
 };
 
-const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (file: File) => Promise<void> }) => (
-    <label className={buttonClassName('primary', 'sm', uploading ? 'pointer-events-none opacity-80' : '')}>
+const UploadButton = ({
+    uploading,
+    quotaExhausted,
+    onUpload,
+}: {
+    uploading: boolean;
+    quotaExhausted: boolean;
+    onUpload: (file: File) => Promise<void>;
+}) => (
+    <label
+        className={buttonClassName(
+            'primary',
+            'sm',
+            uploading || quotaExhausted ? 'pointer-events-none opacity-80' : '',
+        )}
+    >
         <UploadIcon size={16} />
         {uploading ? 'Uploading…' : 'Upload score'}
         <input
             type="file"
             accept={UPLOAD_ACCEPT}
             className="hidden"
-            disabled={uploading}
+            disabled={uploading || quotaExhausted}
             onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
@@ -920,12 +1465,59 @@ const UploadButton = ({ uploading, onUpload }: { uploading: boolean; onUpload: (
     </label>
 );
 
+/**
+ * Why a library with no copy on this device could not be shown:
+ * - offline: the browser says so; it loads by itself on reconnect.
+ * - unreachable: online, but the request never got an answer (DNS, a
+ *   blocker, an outage without CORS headers); retried on a backoff.
+ * - error: the server answered with a failure.
+ */
+type LoadFailure = 'offline' | 'unreachable' | 'error';
+
+const LIBRARY_RETRY_BASE_MS = 5000;
+const LIBRARY_RETRY_MAX_MS = 60_000;
+
+const classifyLoadFailure = (...errors: unknown[]): LoadFailure => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return 'offline';
+    }
+    return errors.some(isTransportFailure) ? 'unreachable' : 'error';
+};
+
+const LIBRARY_UNAVAILABLE_COPY: Record<LoadFailure, { title: string; body: string }> = {
+    offline: { title: 'You’re offline', body: 'Your library will appear when you reconnect.' },
+    unreachable: {
+        title: 'Couldn’t reach Cleffy',
+        body: 'Check your connection. We’ll keep trying — your scores are safe.',
+    },
+    error: {
+        title: 'Couldn’t load your scores',
+        body: 'Something went wrong loading them. Your scores are safe — try again in a moment.',
+    },
+};
+
+/** The list could not be loaded and this device holds no copy of it. */
+const LibraryUnavailable = ({ reason, onRetry }: { reason: LoadFailure; onRetry: () => void }) => (
+    <EmptyState
+        className="library-empty mt-8 md:mt-16"
+        title={LIBRARY_UNAVAILABLE_COPY[reason].title}
+        body={LIBRARY_UNAVAILABLE_COPY[reason].body}
+    >
+        <Button size="sm" variant="secondary" onClick={onRetry}>
+            Try again
+        </Button>
+        <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
+    </EmptyState>
+);
+
 const EmptyLibrary = ({
     uploading,
+    quotaExhausted,
     uploadPct,
     onUpload,
 }: {
     uploading: boolean;
+    quotaExhausted: boolean;
     uploadPct: number | null;
     onUpload: (file: File) => Promise<void>;
 }) => (
@@ -938,7 +1530,7 @@ const EmptyLibrary = ({
             <Link to="/search" className={buttonClassName('primary', 'sm')}>
                 Find on IMSLP
             </Link>
-            <UploadButton uploading={uploading} onUpload={onUpload} />
+            <UploadButton uploading={uploading} quotaExhausted={quotaExhausted} onUpload={onUpload} />
         </div>
         {uploading && uploadPct !== null ? (
             <ProgressBar value={uploadPct} label="Uploading score" className="w-full max-w-xs" />

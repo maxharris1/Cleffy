@@ -1,3 +1,4 @@
+import type { LimitReachedError } from '@/features/billing/limitErrors';
 import type { Annotation } from '@/types/models';
 
 /**
@@ -94,12 +95,24 @@ export interface ClassifyResult {
     runs: RunLabel[];
 }
 
-/** Page-level classifier; resolves null when the AI is unavailable (degrade to strokes-only). */
+/**
+ * The AI pass was refused for the plan's allowance (vision_reads), not merely
+ * unavailable: asking again this month gets the same answer, so the review says
+ * so instead of offering a retry.
+ */
+export interface ClassifyRefused {
+    refused: LimitReachedError;
+}
+
+/**
+ * Page-level classifier; resolves null when the AI is unavailable (degrade to
+ * strokes-only), or ClassifyRefused when the plan's AI page reads are spent.
+ */
 export type ClassifyFn = (
     segmentation: PageSegmentation,
     raster: DetectionRaster,
     signal?: AbortSignal,
-) => Promise<ClassifyResult | null>;
+) => Promise<ClassifyResult | ClassifyRefused | null>;
 
 // ---------------------------------------------------------------------------
 // Proposals (review units) and the whole-document scan result.
@@ -141,6 +154,11 @@ export interface ImportProposal {
     pages: PageProposal[];
     /** True when classification was skipped/failed → marks imported as ink only. */
     aiDegraded: boolean;
+    /**
+     * Set when (some of) that was the plan's AI page reads running out rather
+     * than the AI being down — a retry would be refused the same way.
+     */
+    aiLimit?: LimitReachedError | null;
     /** Pages that rasterized ≥99.5% white (undecodable scan or genuinely blank). */
     unreadablePages: number[];
     tooColorfulPages: number[];

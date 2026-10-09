@@ -18,7 +18,7 @@ export const applyProposals = async (
     if (store.isHistoryMode) {
         store.setHistoryOverlay(null);
     }
-    store.beginBatch();
+    const batch = store.beginBatch();
     let created = 0;
     try {
         for (let start = 0; start < items.length; start += APPLY_CHUNK_ITEMS) {
@@ -29,7 +29,7 @@ export const applyProposals = async (
             onProgress?.(Math.min(start + slice.length, items.length), items.length);
         }
     } finally {
-        store.endBatch();
+        store.endBatch(batch);
     }
     return created;
 };

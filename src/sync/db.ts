@@ -2,8 +2,14 @@ import Dexie, { type Table } from 'dexie';
 
 import type { RecognizedRegion } from '@/features/fingering/model';
 import type { LocalAnnotationSnapshot } from '@/features/viewer/history/snapshotTypes';
-import type { ScoreAnalysisStatus } from '@/types/database';
-import type { Entitlements } from '@/types/database';
+import type {
+    AssignmentRow,
+    DocumentRow,
+    Entitlements,
+    LibraryTagRow,
+    ManagedStudentRow,
+    ScoreAnalysisStatus,
+} from '@/types/database';
 import type { Annotation } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 
@@ -24,6 +30,23 @@ export interface PendingOp {
     /** Full row snapshot at enqueue time (server payload source). */
     annotation: Annotation;
     queuedAt: string;
+    /**
+     * Restores only: the tombstone (deleted_at) this restore undoes. A server
+     * row deleted at any OTHER instant was erased again by someone after it,
+     * and that newer delete wins (see SyncEngine.reconcile). Absent on ops
+     * queued before this field existed — those restore as they always did.
+     * Plain field, not indexed — no Dexie version bump needed.
+     */
+    baseDeletedAt?: string | null;
+    /**
+     * Account that made the change. Dexie is per browser, not per account, and
+     * a session can end without sign-out clearing the outbox (an expired
+     * refresh token, a share-link guest signing in to their own account): the
+     * background drain uploads only ops stamped with the signed-in account.
+     * Absent on ops queued before this field existed, and on local scores.
+     * Plain field, not indexed — no Dexie version bump needed.
+     */
+    userId?: string;
 }
 
 export interface SyncState {
@@ -56,6 +79,14 @@ export interface CachedPdf {
     contentRev?: number;
     /** Last-known archive state — archived scores are read-only (billing, M6). */
     archivedAt?: string | null;
+    /**
+     * Account that cached these bytes. Warm-open and offline load refuse a
+     * row whose userId is missing (legacy) or does not match the session —
+     * pdfCache is keyed by document, not by user, so a shared device would
+     * otherwise paint another account's score. Plain field, not indexed —
+     * no Dexie version bump needed.
+     */
+    userId?: string;
 }
 
 /** Cached play-along analysis: offline replays and fast viewer opens (M-playback). */
@@ -114,6 +145,43 @@ export interface CachedEntitlements {
     cachedAt: string;
 }
 
+/** Last library bootstrap payload for an instant grid on remount. */
+export interface CachedLibraryList {
+    userId: string;
+    documents: DocumentRow[];
+    hasMore: boolean;
+    favoriteIds: string[];
+    tags: LibraryTagRow[];
+    /** document_id → tag ids */
+    documentTags: Array<[string, string[]]>;
+    cachedAt: string;
+    /**
+     * libraryMutationEpoch() at put time. A later write with a smaller value
+     * is dropped so a detached bootstrap or a stale persist cannot clobber
+     * a newer snapshot. Rows written before this field existed read as 0.
+     */
+    writtenAtEpoch?: number;
+}
+
+/** Last roster snapshot for Library ↔ Students navigations. */
+export interface CachedRoster {
+    userId: string;
+    students: ManagedStudentRow[];
+    /** student_user_id → assignment count (titles filled on network refresh). */
+    assignmentCounts: Array<[string, number]>;
+    cachedAt: string;
+}
+
+/** Last student assignment list for an instant /assignments paint. */
+export interface CachedAssignments {
+    userId: string;
+    scores: Array<{
+        assignment: AssignmentRow;
+        document: DocumentRow;
+    }>;
+    cachedAt: string;
+}
+
 export class ScribblerDb extends Dexie {
     annotations!: Table<LocalAnnotation, string>;
     ops!: Table<PendingOp, number>;
@@ -124,6 +192,9 @@ export class ScribblerDb extends Dexie {
     fingeringRegions!: Table<FingeringRegionCache, string>;
     entitlements!: Table<CachedEntitlements, string>;
     thumbnails!: Table<CachedThumbnail, string>;
+    libraryList!: Table<CachedLibraryList, string>;
+    rosterCache!: Table<CachedRoster, string>;
+    assignmentsCache!: Table<CachedAssignments, string>;
 
     constructor(name = 'scribbler') {
         super(name);
@@ -186,8 +257,104 @@ export class ScribblerDb extends Dexie {
             entitlements: 'userId',
             thumbnails: 'docId',
         });
+        // Instant paint caches for library / roster / student assignments.
+        this.version(7).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
+        });
+        // v8 + v9 make the day snapshot unique per [docId+capturedOn], as the
+        // server's unique (document_id, captured_on) already is. Two devices
+        // (or a local capture racing a pull) could each keep their own row for
+        // the same day, so history listed the day twice and the local copy
+        // that lost the server race was never reconciled.
+        //
+        // Two versions because IndexedDB refuses to build a unique index over
+        // rows that violate it — that would abort the upgrade and leave the
+        // database unopenable. v8 keeps the schema and removes the duplicates;
+        // v9 then builds the unique index over rows that satisfy it. Dexie
+        // runs each version's upgrade before applying the next version's
+        // schema, inside the one versionchange transaction.
+        this.version(8)
+            .stores({
+                annotations: 'id, docId, [docId+page], [docId+seq]',
+                ops: '++opId, docId',
+                syncState: 'docId',
+                pdfCache: 'docId',
+                annotationSnapshots: 'id, docId, [docId+capturedOn], capturedOn',
+                scoreCache: 'docId',
+                fingeringRegions: 'id, docId, createdAt',
+                entitlements: 'userId',
+                thumbnails: 'docId',
+                libraryList: 'userId',
+                rosterCache: 'userId',
+                assignmentsCache: 'userId',
+            })
+            .upgrade(async (tx) => {
+                const rows = (await tx.table('annotationSnapshots').toArray()) as LocalAnnotationSnapshot[];
+                const losers = pickDuplicateSnapshots(rows).map((row) => row.id);
+                if (losers.length > 0) {
+                    await tx.table('annotationSnapshots').bulkDelete(losers);
+                }
+            });
+        this.version(9).stores({
+            annotations: 'id, docId, [docId+page], [docId+seq]',
+            ops: '++opId, docId',
+            syncState: 'docId',
+            pdfCache: 'docId',
+            annotationSnapshots: 'id, docId, &[docId+capturedOn], capturedOn',
+            scoreCache: 'docId',
+            fingeringRegions: 'id, docId, createdAt',
+            entitlements: 'userId',
+            thumbnails: 'docId',
+            libraryList: 'userId',
+            rosterCache: 'userId',
+            assignmentsCache: 'userId',
+        });
     }
 }
+
+/**
+ * The rows to delete so each [docId+capturedOn] keeps one snapshot.
+ *
+ * The keeper is the one most likely to be the server's: a row the server
+ * acknowledged (pending 0) beats one still waiting to upload, then the
+ * earliest capture wins (the server keeps the first insert of the day). A
+ * wrong guess is corrected on the next history pull, which replaces the local
+ * row for a day with the server's.
+ */
+export const pickDuplicateSnapshots = (rows: LocalAnnotationSnapshot[]): LocalAnnotationSnapshot[] => {
+    const groups = new Map<string, LocalAnnotationSnapshot[]>();
+    for (const row of rows) {
+        const key = `${row.docId}\u0000${row.capturedOn}`;
+        const group = groups.get(key);
+        if (group) {
+            group.push(row);
+        } else {
+            groups.set(key, [row]);
+        }
+    }
+    const losers: LocalAnnotationSnapshot[] = [];
+    for (const group of groups.values()) {
+        if (group.length < 2) {
+            continue;
+        }
+        const ranked = [...group].sort(
+            (a, b) => a.pending - b.pending || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+        );
+        losers.push(...ranked.slice(1));
+    }
+    return losers;
+};
 
 let instance: ScribblerDb | null = null;
 

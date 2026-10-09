@@ -86,7 +86,30 @@ const changed = new Set(
         .filter(Boolean),
 );
 
-const hit = WATCHED.filter((f) => changed.has(f));
+/**
+ * A file whose only changed lines are import statements (say, zod now imported
+ * through the app's CSP-safe wrapper) has not changed the contract: bumping
+ * ENGINE_VERSION for it would only make every cached analysis stale. Any other
+ * changed line — schema, parser, geometry — still counts.
+ */
+const IMPORT_LINE = /^\s*import\s.*\sfrom\s+['"][^'"]+['"];?\s*$/;
+const importOnly = (file) => {
+    let patch;
+    try {
+        // WATCHED paths are repo-root-relative; this runs from the service dir.
+        patch = execSync(`git diff -U0 ${base}...HEAD -- ':(top)${file}'`, { cwd: ROOT, encoding: 'utf8' });
+    } catch {
+        return false;
+    }
+    const lines = patch
+        .split('\n')
+        .filter((l) => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---'))
+        .map((l) => l.slice(1))
+        .filter((l) => l.trim() !== '');
+    return lines.length > 0 && lines.every((l) => IMPORT_LINE.test(l));
+};
+
+const hit = WATCHED.filter((f) => changed.has(f) && !importOnly(f));
 if (hit.length === 0) {
     console.log('[engine-version] ok: no watched parser files changed');
     process.exit(0);

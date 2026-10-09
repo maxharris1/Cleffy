@@ -1,46 +1,201 @@
 /// <reference types="vitest/config" />
-import { createReadStream, cpSync, existsSync } from 'node:fs';
+import { createReadStream, cpSync, existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+import { PDFJS_ASSET_DIRS, type PdfjsAssetDir } from './src/features/viewer/pdf/pdfjsAssets';
+import {
+    SUPABASE_PRECONNECT_SCRIPT_PATH,
+    supabasePreconnectPlan,
+    supabasePreconnectScript,
+    type SupabasePreconnectPlan,
+} from './src/lib/supabasePreconnectOrigins';
+
+/**
+ * Lazy chunks of features switched off for this release (src/lib/features.ts).
+ * The service worker precaches every JS chunk, so a gated feature's chunk must
+ * also stay out of the precache — otherwise every install downloads code that
+ * nothing in the build can reach. Flags are read the way the client build reads
+ * them (process env over `.env.production`); only a production build registers
+ * the service worker, so that is the env that matters here.
+ */
+const releaseFlags = loadEnv('production', process.cwd(), 'VITE_FEATURE_');
+const GATED_CHUNK_IGNORES = [
+    ...(releaseFlags['VITE_FEATURE_PLAYALONG'] === '1' ? [] : ['**/assets/TransportBar-*.js']),
+    ...(releaseFlags['VITE_FEATURE_FINGERING'] === '1' ? [] : ['**/assets/FingeringFlow-*.js']),
+];
 
 // ngrok / tunnel hosts allowed to reach the dev + preview servers.
 const TUNNEL_HOSTS = ['.ngrok-free.app', '.ngrok.app', '.ngrok.dev', '.trycloudflare.com'];
 
-const PDFJS_WASM_SRC = fileURLToPath(new URL('./node_modules/pdfjs-dist/wasm', import.meta.url));
-const PDFJS_WASM_PUBLIC = '/pdfjs-wasm';
+const PDFJS_DIST = fileURLToPath(new URL('./node_modules/pdfjs-dist', import.meta.url));
 
-/** Serve / copy pdf.js WASM decoders (JBIG2 / OpenJPEG) required by pdf.js 5.x. */
-const pdfjsWasmPlugin = (): Plugin => ({
-    name: 'pdfjs-wasm',
-    configureServer(server) {
-        server.middlewares.use((req, res, next) => {
-            if (!req.url?.startsWith(`${PDFJS_WASM_PUBLIC}/`)) {
-                next();
-                return;
+const CONTENT_TYPES: Record<string, string> = {
+    '.wasm': 'application/wasm',
+    '.js': 'application/javascript',
+    '.bcmap': 'application/octet-stream',
+    '.pfb': 'application/octet-stream',
+    '.ttf': 'font/ttf',
+    '.icc': 'application/vnd.iccprofile',
+};
+
+/**
+ * Serve (dev) and copy (build) the pdf.js data directories listed in
+ * pdfjsAssets.ts — WASM decoders, CMaps, standard fonts, ICC profile — so the
+ * worker fetches them from our own origin. Excluded files (the unused
+ * document-JS interpreter) are neither served nor copied.
+ */
+const pdfjsAssetsPlugin = (): Plugin => {
+    const dirs = Object.values(PDFJS_ASSET_DIRS).map((dir: PdfjsAssetDir) => ({
+        ...dir,
+        root: path.join(PDFJS_DIST, dir.source),
+    }));
+    return {
+        name: 'pdfjs-assets',
+        configureServer(server) {
+            server.middlewares.use((req, res, next) => {
+                const dir = dirs.find((d) => req.url?.startsWith(d.publicPath));
+                if (!req.url || !dir) {
+                    next();
+                    return;
+                }
+                const notFound = () => {
+                    res.statusCode = 404;
+                    res.end('Not found');
+                };
+                // Strip query string (cache busters) and map onto node_modules/pdfjs-dist/<dir>.
+                // A malformed escape (`%E0`) is a missing file, not a server error.
+                let rel: string;
+                try {
+                    rel = decodeURIComponent(req.url.slice(dir.publicPath.length).split('?')[0] ?? '');
+                } catch {
+                    notFound();
+                    return;
+                }
+                const filePath = path.resolve(dir.root, rel);
+                if (
+                    !filePath.startsWith(dir.root + path.sep) ||
+                    dir.exclude.includes(path.basename(filePath)) ||
+                    !existsSync(filePath)
+                ) {
+                    notFound();
+                    return;
+                }
+                const type = CONTENT_TYPES[path.extname(filePath)];
+                if (type) {
+                    res.setHeader('Content-Type', type);
+                }
+                createReadStream(filePath).pipe(res);
+            });
+        },
+        writeBundle(outputOptions) {
+            const outDir = outputOptions.dir ?? 'dist';
+            for (const dir of dirs) {
+                cpSync(dir.root, path.join(outDir, dir.publicPath), {
+                    recursive: true,
+                    filter: (source) => !dir.exclude.includes(path.basename(source)),
+                });
             }
-            // Strip query string (cache busters) and map onto node_modules/pdfjs-dist/wasm.
-            const rel = req.url.slice(PDFJS_WASM_PUBLIC.length + 1).split('?')[0] ?? '';
-            const filePath = fileURLToPath(new URL(rel, `file://${PDFJS_WASM_SRC}/`));
-            if (!filePath.startsWith(PDFJS_WASM_SRC) || !existsSync(filePath)) {
-                res.statusCode = 404;
-                res.end('Not found');
-                return;
-            }
-            if (filePath.endsWith('.wasm')) {
-                res.setHeader('Content-Type', 'application/wasm');
-            } else if (filePath.endsWith('.js')) {
+        },
+    };
+};
+
+/**
+ * Preconnect to the one Supabase project this page will use. With an explicit
+ * `VITE_SUPABASE_URL` that is a static `<link rel="preconnect">`. The release
+ * build sets only `_PROD` and `_DEV` and the hostname picks at runtime (see
+ * src/lib/supabase.ts), which a static index.html cannot know — naming both
+ * made dev.cleffy.io open a connection to production on every load — so it
+ * gets a tiny same-origin script instead, loaded `async` beside the app bundle,
+ * that adds the link for its own host before the bundle has arrived.
+ */
+const supabasePreconnectPlugin = (): Plugin => {
+    let plan: SupabasePreconnectPlan = { kind: 'none' };
+    const script = (): string => (plan.kind === 'by-host' ? supabasePreconnectScript(plan) : '');
+    return {
+        name: 'supabase-preconnect',
+        configResolved(config) {
+            const env = loadEnv(config.mode, config.envDir ?? process.cwd(), 'VITE_');
+            plan = supabasePreconnectPlan(env);
+        },
+        configureServer(server) {
+            server.middlewares.use((req, res, next) => {
+                if (plan.kind !== 'by-host' || req.url?.split('?')[0] !== SUPABASE_PRECONNECT_SCRIPT_PATH) {
+                    next();
+                    return;
+                }
                 res.setHeader('Content-Type', 'application/javascript');
+                res.end(script());
+            });
+        },
+        generateBundle() {
+            if (plan.kind === 'by-host') {
+                this.emitFile({
+                    type: 'asset',
+                    fileName: SUPABASE_PRECONNECT_SCRIPT_PATH.slice(1),
+                    source: script(),
+                });
             }
-            createReadStream(filePath).pipe(res);
-        });
-    },
-    writeBundle(outputOptions) {
-        const outDir = outputOptions.dir ?? 'dist';
-        cpSync(PDFJS_WASM_SRC, `${outDir}${PDFJS_WASM_PUBLIC}`, { recursive: true });
+        },
+        transformIndexHtml() {
+            switch (plan.kind) {
+                case 'static':
+                    return [
+                        {
+                            tag: 'link',
+                            attrs: { rel: 'preconnect', href: plan.origin, crossorigin: '' },
+                            injectTo: 'head-prepend' as const,
+                        },
+                    ];
+                case 'by-host':
+                    return [
+                        {
+                            tag: 'script',
+                            attrs: { src: SUPABASE_PRECONNECT_SCRIPT_PATH, async: true },
+                            injectTo: 'head-prepend' as const,
+                        },
+                    ];
+                case 'none':
+                    return [];
+                default: {
+                    const _exhaustive: never = plan;
+                    return _exhaustive;
+                }
+            }
+        },
+    };
+};
+
+/**
+ * Build-time constants for error monitoring (see src/lib/monitoring/index.ts).
+ *
+ * `__SENTRY_DSN__` is a define rather than an import.meta.env read so that an
+ * unset DSN is the literal '' and the minifier drops the SDK import entirely.
+ * `__APP_RELEASE__` tags every report with the commit that built it: Vercel
+ * provides VERCEL_GIT_COMMIT_SHA to every build, and VITE_SENTRY_RELEASE wins
+ * when a release name has to match one uploaded elsewhere (source maps).
+ *
+ * The test run always compiles monitoring out, whatever a developer's .env
+ * holds: vitest must never post a report, and the suite asserts the no-op.
+ */
+const buildConstantsPlugin = (): Plugin => ({
+    name: 'build-constants',
+    config(_config, { mode }) {
+        const env = loadEnv(mode, process.cwd(), '');
+        const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
+        const commit = env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12);
+        const release = env.VITE_SENTRY_RELEASE || `cleffy@${commit || pkg.version}`;
+        return {
+            define: {
+                __SENTRY_DSN__: JSON.stringify(mode === 'test' ? '' : (env.VITE_SENTRY_DSN ?? '').trim()),
+                __APP_RELEASE__: JSON.stringify(release),
+            },
+        };
     },
 });
 
@@ -48,7 +203,9 @@ export default defineConfig({
     plugins: [
         react(),
         tailwindcss(),
-        pdfjsWasmPlugin(),
+        pdfjsAssetsPlugin(),
+        supabasePreconnectPlugin(),
+        buildConstantsPlugin(),
         VitePWA({
             registerType: 'autoUpdate',
             includeAssets: ['icons/apple-touch-icon.png', 'favicon.svg'],
@@ -62,6 +219,11 @@ export default defineConfig({
                 background_color: '#f7f5ef',
                 display: 'standalone',
                 orientation: 'any',
+                lang: 'en',
+                categories: ['education', 'music'],
+                start_url: '/library',
+                scope: '/',
+                id: '/library',
                 icons: [
                     { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
                     { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
@@ -72,6 +234,10 @@ export default defineConfig({
                 // App shell only. Supabase traffic must never be cached by the SW;
                 // PDFs are cached as blobs in IndexedDB (see plan §sync), not here.
                 globPatterns: ['**/*.{js,css,html,png,svg,woff2,wasm}'],
+                // The SMuFL music-text face (~450 KB) serves only the opt-in
+                // handwriting → print feature; like the piano samples it is
+                // fetched on first use and then kept, not precached.
+                globIgnores: ['**/fonts/BravuraText.woff2', ...GATED_CHUNK_IGNORES],
                 navigateFallback: '/index.html',
                 navigateFallbackDenylist: [/^\/auth\/callback/],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
@@ -84,6 +250,25 @@ export default defineConfig({
                         options: {
                             cacheName: 'piano-samples',
                             expiration: { maxEntries: 40 },
+                        },
+                    },
+                    {
+                        // pdf.js CMaps / standard fonts / ICC profile: fetched by the
+                        // worker only for PDFs that need them, so not precached —
+                        // kept after first use so those scores still render offline.
+                        urlPattern: /\/pdfjs-(cmaps|standard-fonts|iccs)\//,
+                        handler: 'CacheFirst',
+                        options: {
+                            cacheName: 'pdfjs-data',
+                            expiration: { maxEntries: 80 },
+                        },
+                    },
+                    {
+                        urlPattern: /\/fonts\/BravuraText\.woff2$/,
+                        handler: 'CacheFirst',
+                        options: {
+                            cacheName: 'music-font',
+                            expiration: { maxEntries: 2 },
                         },
                     },
                 ],

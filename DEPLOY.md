@@ -22,7 +22,7 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                                    |
 | Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                    |
 | Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                    |
-| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`                                          |
+| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`; plan switching **not verified** (§1)    |
 | Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on  |
 | Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
 | Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
@@ -38,7 +38,238 @@ the steps that need a human because no API exposes them — each one says why.
 | Billing migration `20260828180000` applied to production               | ✅ applied and recorded                                                 |
 | `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
 | Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
-| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29; repo and production now have zero drift          |
+| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1) |
+
+---
+
+## Release checklist — launch fixes (20261007\*)
+
+One ordered list for the integrated `fix/*` branches (integrity, sharing, sync,
+billing, library, security, compliance, scope-imslp) and the pre-launch QA
+round on top of them (`qa/sync`, `qa/billing`, `qa/sharing`, `qa/polish`,
+integrated on `qa-integrate`) shipping on one `dev` → `main` merge. Steps are
+in the order to do them; each says what breaks if it is skipped or reordered.
+Reference detail stays in the sections it links to.
+
+**What ships.** Fourteen migrations, applied in filename order by the Supabase
+GitHub integration on the merge (migrations before functions):
+
+| Migration                                                | Branch      | Order constraint                                                                                                                                                                       |
+| -------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `20261007120000_sharing_access_control`                  | sharing     | Before the bundle: the new Share dialog, member roles, revoke-with-removal and Leave call its RPCs. Old bundles are unaffected (links still default to the role they send).            |
+| `20261007120100_column_integrity`                        | integrity   | Any order. Holds only for client roles; service role, definer functions and FK actions pass.                                                                                           |
+| `20261007120101_realtime_db_topic`                       | integrity   | Either order is safe but not seamless — step 9.                                                                                                                                        |
+| `20261007120200_patch_annotations_batch_returns_ids`     | sync        | Any order: the client treats the old void answer as "applied".                                                                                                                         |
+| `20261007120300_billing_correctness`                     | billing     | Any order: the export claim falls back to `consume_pdf_export` until it exists. Backfills `archived_reason` (production holds 0 archived scores) and restores already-entitled owners. |
+| `20261007120400_library_pagination`                      | library     | Before the bundle for search / tag / A–Z paging; without it only the plain recent list pages (REST fallback).                                                                          |
+| `20261007120401_document_storage_cleanup`                | library     | **Before the bundle**: the new delete removes the row first and purges Storage through these tombstone policies; without them the purge is refused and the bytes are orphaned.         |
+| `20261007120500_function_search_path_and_execute_grants` | security    | Any order. Restates `guard_score_analyses_client_write` with the 120100 body (role-keyed) — do not "restore" the 20260803 body, it breaks account deletion.                            |
+| `20261007120501_student_login_throttle`                  | security    | **Before** `student-login` / `student-claim` / `student-provision`: the limiter fails closed (§9).                                                                                     |
+| `20261007120600_account_deletion`                        | compliance  | **Before** `delete-account`, with the updated `stripe-webhook` (§2, _Account deletion_).                                                                                               |
+| `20261007120700_document_provenance`                     | scope-imslp | **Before** `imslp-download` / `imslp-work`: imports fail at the provenance write without it (and are refunded).                                                                        |
+| `20261009120100_pdf_export_claim_ids`                    | qa/billing  | Any order: without it the client repeats the claim without its id (PGRST202 fallback), so a lost answer or a dismissed share sheet can count an export twice, as before.               |
+| `20261009120101_entitlements_cancel_at_period_end`       | qa/billing  | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                 |
+| `20261009120200_share_link_errors_and_peek`              | qa/sharing  | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                   |
+
+Functions changed: `delete-account` (new), `imslp-download`, `imslp-work`,
+`imslp-sync`, `imslp-search`, `stripe-webhook`, `stripe-checkout`,
+`stripe-portal`, `student-login`, `student-claim`, `student-provision`,
+`resend-inbound`, `analyze-annotations`, and `_shared/` (so redeploy every
+function that imports it — the merge deploys all of them).
+
+**QA round (20261009\*).** What each function change needs:
+
+- `stripe-checkout` refuses a second subscription in the same mode
+  (`409 already_subscribed`); plan changes then go through the Customer portal
+  only. Check Switch plans in **both** modes' portal first (§1, _Checkout
+  depends on it_; step 2) — the sandbox one has never been verified.
+- `stripe-webhook` / `stripe-checkout` (`_shared/stripeEvents.ts`): a
+  `cancel_at` inside the period now reads as cancelling. Rows already scheduled
+  that way pick it up on their next subscription event.
+- `delete-account` (`_shared/accountDeletion.ts`) now deletes share-link
+  guests (no password, no Stripe call) instead of refusing them with
+  `403 anonymous_session`. The new bundle's "Delete my guest profile" and the
+  join page's dead-link cleanup need it; until it is deployed they get that
+  403 and delete nothing.
+- `imslp-search` (`_shared/search.ts`, `searchFacetData.ts`, `popularWorks.ts`)
+  and `imslp-sync` (`_shared/categorySync.ts`): ranking and the Piano chip's
+  keyboard categories — step 16.
+- The bundle also emits a same-origin `/supabase-preconnect.js` (CSP
+  `script-src 'self'`); it is in `dist/` and needs nothing else.
+
+`stripe-webhook` now applies `customer.subscription.created` / `.updated` from
+the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
+the copy embedded in the event: Stripe does not deliver in order, and a retried
+older event (every transient failure here is a 500 that Stripe retries) would
+otherwise overwrite a newer state — a late `unpaid` after the customer paid
+archived their scores, a late `active` after `unpaid` restored them unpaid.
+`.deleted` still applies as `canceled` without a read. One Stripe API call per
+subscription event; a failed read is a released claim and a 500, which Stripe
+retries.
+
+The smart-import refund ledger that fix/billing first proposed
+(`smart_import_charges`, `refund_smart_import`) was dropped in integration and
+never applied anywhere: `imslp-download` now creates the score itself and
+refunds every failure before it answers, so there is no client rollback left
+to refund (comment at the end of `20261007120300`).
+
+### Before the merge
+
+1. **Production is further behind than this release.** Its migration history
+   ends at `20260830101624` (checked 2026-10-08): the merge also applies
+   `20260830120000` … `20260910160001` (library bootstrap, thumbnails, the IMSLP
+   works mirror and its two catalog data files, ~48 MB). Those two catalog
+   files are not in `scripts/apply-migrations.sql`; only `db push` / the
+   integration applies them. Expect the migration step to take minutes, and
+   confirm the Supabase check on the merge commit is green before announcing.
+   **Migration-history repairs, 2026-10-08.** Both projects carried history
+   rows the repo has no file for, which made `db push` and the integration
+   refuse. Only the history rows were removed; no schema changed.
+    - Production: `20260918042925_tmp_ledger_cleanup`, a hand-run statement
+      whose only effect was to delete other history rows. Newer than every
+      pending `dev` migration, it made all ten "out of order".
+    - `dev` branch: the five `20260921141103` … `20260921141127`
+      `playalong_corpus*` rows, applied by hand from
+      `mh/playalong-on-dev-ab47`, which made Supabase Preview fail with
+      "Remote migration versions not found in local migrations directory".
+
+    The `playalong_corpus*` tables, the `pd_pdf_store` table and the `pd-pdfs`
+    bucket remain on both projects without history rows; no fix here touches
+    them, and that branch's migrations guard their creates so they re-apply
+    over the existing objects when it merges.
+
+2. **Prove the set on the `dev` branch first.** Push `dev` (unpause the branch
+   first, §5), then run, against `qdbnlrgylelelvwbkvnm` only, each rolled-back
+   proof: `tests/sql/column_integrity.sql`, `tests/sql/cross_branch_integration.sql`
+   and `supabase/sql-tests/sharing_access_control.sql` (how: `tests/sql/README.md`).
+   All three must report no failures except the sharing file's realtime checks
+   80–82, 85 and 87, which need today's `realtime.messages` partition and fail
+   on an idle project. (Run on 2026-10-08 before merge, as one rolled-back
+   transaction per file with every 20261007 migration applied first: 113/113,
+   37/37 and 89/94 with exactly those five.)
+   Then the out-of-order webhook check, in the Stripe sandbox against the dev
+   endpoint (Workbench → Events): make any two `customer.subscription.updated`
+   events on a test subscription (e.g. turn cancel-at-period-end on, then
+   off), then **Resend** the older one. The `subscriptions` row must keep the
+   newer state (there: `cancel_at_period_end = false`), and the function log
+   must show the resent event applied, not refused and not a 500.
+   While in the sandbox dashboard, check its Customer portal has Switch plans
+   on with the six plan prices and without Founding (§1, _Checkout depends on
+   it_) — subscribers can change plan nowhere else once `stripe-checkout`
+   refuses them a second subscription.
+3. **Auth password policy on both projects** — 8+ characters, letters and
+   digits, via the Management API (§8). `config.toml` only covers the local
+   stack. Existing passwords keep working.
+4. **Edge secrets.**
+    - `STRIPE_SECRET_KEY_LIVE` must be set on production (it is, since
+      2026-08-28): `delete-account` refuses with `503 billing_unavailable` and
+      deletes nothing for any live customer it cannot reach (§2), and
+      `stripe-webhook` reads every subscription event back from Stripe, so
+      without the key each one is a 500 until it is set (Stripe keeps retrying
+      for three days; nothing is lost if it is set within that window). The
+      dev branch needs its sandbox key the same way (`STRIPE_SECRET_KEY_TEST`,
+      or the older `STRIPE_SECRET_KEY`; set 2026-08-29).
+    - `LOGIN_THROTTLE_SECRET` (recommended, optional): HMAC key for the
+      student-login limiter (§9); unset falls back to the service-role key.
+    - Optional: `SENTRY_DSN` (+ `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`) for edge
+      error reports (§2, _Error monitoring_).
+    - Optional tuning: `IMSLP_DOWNLOAD_GLOBAL_MAX` / `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
+      (deployment-wide IMSLP pacing, defaults 2 per 1000 ms — SETUP_SUPABASE.md).
+5. **Vercel env (build time).** Leave `VITE_FEATURE_PLAYALONG`,
+   `VITE_FEATURE_FINGERING` and `VITE_FEATURE_PRINT_HANDWRITING` unset (or `0`):
+   play-along and fingering are not part of this release and the pricing copy
+   no longer sells them. Optional `VITE_SENTRY_DSN` / `VITE_SENTRY_RELEASE` (§4).
+   The `vercel.json` security headers (CSP, HSTS, frame, referrer, permissions)
+   ship with the bundle; the CSP already allows both Supabase projects and
+   `*.ingest.sentry.io`, `*.ingest.us.sentry.io`, `*.ingest.de.sentry.io`.
+6. **Legal.** `/privacy` and `/terms` go live with this merge. Settle every open
+   item in `docs/LEGAL_REVIEW.md` (operator entity, hosting region, refunds,
+   governing law, processors including Sentry) with counsel first. Two
+   statements changed on 2026-10-08 to match the integrated code, flagged for
+   counsel in §7 and §15: the Terms now say scores past a smaller plan's limits
+   stay read-only "until you upgrade again" (there is no owner unarchive), and
+   the Privacy Policy now says sign-out uploads pending changes, warns about
+   any it could not upload, then removes the account's markings from the
+   device (it used to say unsynced markings were kept).
+7. **CI is green**, including the new `npm audit --omit=dev --audit-level=high`
+   step (pdf.js 6.4.299 fixes GHSA-hq66-cqwq-w95j).
+
+### The merge
+
+8. Merge `dev` → `main` outside lesson hours. The integration applies the
+   migrations, then deploys the functions; Vercel builds the bundle in parallel.
+   For the minutes in between:
+    - a new bundle against the old `imslp-download` gets 403 on IMSLP imports
+      (it no longer creates the row first) — the function must win this race,
+      so if the function deploy fails, redeploy it before anything else;
+    - old bundles against the new `imslp-download` are still served (they
+      create the row themselves), but show a busy queue as an error.
+9. **Realtime topic split** (`20261007120101`). Committed annotation rows, PDF
+   replacement and play-along status move from `doc:{id}` to the receive-only
+   `doc-db:{id}`; presence, live ink and the sharing `membership` event stay on
+   `doc:{id}`. _Bundle first_: the new client cannot join `doc-db:{id}` yet;
+   after 4 s it pulls every 15 s (and 1.5 s after a peer's stroke) and once more
+   when the join succeeds — late, never lost. _Migration first_: tabs on the old
+   bundle stop receiving committed rows live; a peer's live preview fades after
+   10 s and the mark appears on the next pull (reconnect, `online`, reload).
+   Expect open tabs to need one reload.
+10. **Clients upgrade their local database** on first load (Dexie v8 removes
+    duplicate lesson snapshots, v9 makes one per score-day unique) — nothing to
+    do, but a device that cannot open IndexedDB keeps working without it.
+
+### After the merge
+
+11. Supabase check on the merge commit green; `list_migrations` on production
+    ends at `20261009120200`; security advisor: no new
+    `function_search_path_mutable` / `anon_security_definer_function_executable`
+    except `peek_share_link`, which is anon-callable on purpose (the join page
+    checks a link before anyone signs in) and answers only `{valid, role}`.
+12. Run the CSP smoke against the production build
+    (`npm run build && node scripts/csp-smoke.mjs`; with a Sentry DSN build also
+    `CSP_SMOKE_SENTRY=1`) — zero violations, legal pages, Account page, Source
+    dialog and both exports included. Then open cleffy.io with the console open:
+    no CSP or header errors.
+13. Smoke on production with throwaway accounts: share a score, change a
+    member's role and watch the other tab follow live, revoke a link with
+    removal, leave a score; draw offline and come back online; export a PDF on
+    a free account twice (the second is refused and nothing is saved or
+    shared; the PDF is built before the claim, so a failed build spends
+    nothing); import from IMSLP and open its Source dialog; delete a score and
+    check the library and Storage; delete a throwaway account from the Account
+    page (needs the live key) and confirm it is gone from Auth, Storage and
+    Stripe. QA round: open a revoked share link (the join page says so before
+    asking a name, and no guest appears in Auth); join as a guest and use
+    "Delete my guest profile" (gone from Auth and from the owner's member
+    list); cancel a plan in the portal and see "Ends <date>" with Resume on the
+    Account page. As an editor, draw offline, have the owner make you a viewer,
+    reconnect on the library: the marks stay until you open the score, which
+    then undoes them and says why. On a free account, dismiss the share sheet
+    of "Save page 1 as PDF", then "Export whole score as PDF": it goes through,
+    not refused.
+14. **Leftover Storage of accounts deleted any other way.** `delete-account`
+    empties both buckets for every `document_storage_cleanup` tombstone the
+    account owns before it deletes the auth user. An account removed from the
+    dashboard skips that and leaves tombstones whose owner no longer exists;
+    list them with
+    `select c.* from public.document_storage_cleanup c left join auth.users u on u.id = c.owner_id where u.id is null`
+    and remove `{document_id}/` from the `scores` and `thumbnails` buckets
+    (Storage API, service key), then the rows.
+15. If monitoring is on: trigger a test error on dev.cleffy.io and confirm it
+    arrives in Sentry scrubbed (no emails, tokens or annotation content).
+16. **IMSLP Piano chip now covers keyboard works** (qa/polish). Five new
+    taxonomy categories — `For keyboard`, `For keyboard (arr)`,
+    `For harpsichord`, `For harpsichord (arr)`, `For clavichord` — have no
+    `imslp_category_sync` row on either project, so the `imslp-sync` cron
+    (every 2 min) walks them next, one per tick, about 10 minutes in all; no
+    migration. Until then typed search checks them live, but browsing by
+    chip with no query is affected: Piano alone (or with chips whose
+    categories aren't walked yet either) shows "IMSLP index is still being
+    built for Piano", and Piano with another walked chip (e.g. Baroque) lists
+    only the `For piano` side, missing keyboard- and harpsichord-only works.
+    Check:
+    `select category, state, pages_done from imslp_category_sync where category ~ 'keyboard|harpsichord|clavichord'`
+    shows five `ok` rows. Then search "BWV 846" on cleffy.io: "Prelude and
+    Fugue in C major, BWV 846" first.
 
 ---
 
@@ -250,6 +481,25 @@ Two things the UI does not warn about:
   as well as upgrades; under `always_invoice` a downgrade yields a credit balance
   against future invoices, not a refund.
 
+### Checkout depends on it — verify both modes before deploying
+
+`stripe-checkout` answers **409 `already_subscribed`** to anyone who already
+holds a running subscription in that mode (active or trialing inside its
+period — cancelling included — or past_due), and the pricing dialog sends
+subscribers to the portal instead of Checkout. Checkout always creates a new
+subscription, so before this guard a Personal subscriber who chose Teacher
+there was billed for both. The cost is that the **portal is now the only way a
+subscriber changes plan**: in a mode whose portal has Switch plans off, its
+subscribers cannot change plan at all.
+
+Live was verified with switching on (2026-08-29, above). **The sandbox
+configuration never was** — the status table only records that it exists, and
+dev.cleffy.io sells from the sandbox. Before deploying `stripe-checkout` with the
+guard, open **Settings → Billing → Customer portal** in **each** mode and confirm
+the table above: Switch plans on, the six Personal / Teacher / Academy prices
+listed, the Founding price **not** listed. Then, on dev.cleffy.io with a test
+subscription, Account → Manage subscription must offer the other plans.
+
 ### This is dashboard-only — the API cannot do it
 
 There is no create endpoint exposed here, and **`features[subscription_update][products]`
@@ -325,6 +575,67 @@ live — and **all-or-nothing within a mode**: one override replaces that whole
 catalogue. That is deliberate. A per-key merge would let a half-finished
 catalogue change serve two vintages of price from one account, which looks fine
 until someone is billed the wrong amount.
+
+### Account deletion — `delete-account`
+
+Self-serve deletion (Account page → Delete account) is a new function,
+declared in `supabase/config.toml` with `verify_jwt = true`, so the Supabase
+GitHub integration deploys it on the `dev` → `main` merge like every other
+function (§5) — no manual `functions deploy`, no second `db push`. The same
+merge must carry migration `20261007120600_account_deletion.sql` and the updated
+`stripe-webhook`; they ship together on that merge. Without the migration,
+deleting someone who drew on another person's score would cascade-delete those
+marks from the owner's copy; without the webhook change, a Checkout completed in
+another tab during a deletion could keep billing an account that is gone.
+
+It needs no new secret, but it depends on the Stripe ones above:
+
+- **`STRIPE_SECRET_KEY_LIVE` must be set wherever a live `billing_customers`
+  row can exist.** Deletion cancels every subscription before it deletes
+  anything, and refuses with `503 billing_unavailable` — deleting nothing — for
+  any user with a live customer when it cannot reach the live account. That is
+  the intended fail-closed behaviour, but it means a missing live key blocks
+  every paying customer from deleting their account.
+- A missing **test** key is skipped with a log line: sandbox subscriptions never
+  charge a card, so they are no reason to keep someone's data.
+- It also uses `SUPABASE_URL`, `SUPABASE_ANON_KEY` (to re-check the password)
+  and `SUPABASE_SERVICE_ROLE_KEY`, which every project has already.
+
+What it deletes and in which order is documented at the top of
+`supabase/functions/_shared/accountDeletion.ts` — including the
+`document_storage_cleanup` tombstones (`20261007120401`): before the auth user
+goes, it empties both buckets' `{document_id}/` folders for every tombstone the
+account owns (its own score deletes, and library deletes whose Storage purge
+never finished) and drops the rows, failing the request if it cannot.
+
+### Error monitoring — optional
+
+All of it is off until a DSN is set, and costs nothing while off.
+
+| Where                   | Variable              | What it does                                                                                                                       |
+| ----------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Edge Function secret    | `SENTRY_DSN`          | Also post every `logError` record (`_shared/errorLog.ts`) to Sentry. Unset: the JSON line in the function logs is the only record. |
+| Edge Function secret    | `SENTRY_ENVIRONMENT`  | Optional. Defaults from the project ref: `production` for `jibgwgosihadbjgxdsfe`, `development` for `qdbnlrgylelelvwbkvnm`.        |
+| Edge Function secret    | `SENTRY_RELEASE`      | Optional release tag for edge events.                                                                                              |
+| Vercel env (build time) | `VITE_SENTRY_DSN`     | DSN of a Sentry **browser** project. Unset: the SDK is not even emitted into the bundle. Environment comes from the hostname.      |
+| Vercel env (build time) | `VITE_SENTRY_RELEASE` | Optional. Defaults to `cleffy@<VERCEL_GIT_COMMIT_SHA>`; set it only to match a release that source maps were uploaded under.       |
+
+```bash
+npx supabase secrets set --project-ref jibgwgosihadbjgxdsfe SENTRY_DSN='https://<key>@<org>.ingest.sentry.io/<project>'
+```
+
+- Use one Sentry project for the browser and one for the functions, or one for
+  both; the environment tag keeps production and dev apart either way.
+- Both sides scrub before sending: no annotation contents, no emails, no tokens,
+  no URL query strings (`src/lib/monitoring/scrub.ts`, `_shared/errorLog.ts`).
+  Keep it that way — the privacy policy promises it.
+- `vercel.json`'s Content-Security-Policy already allows the ingest hosts
+  (`https://*.ingest.sentry.io`, `*.ingest.us.sentry.io`, `*.ingest.de.sentry.io`);
+  a DSN on any other host needs adding to `connect-src`, or browser reports are
+  silently blocked (`tests/security/securityHeaders.test.ts` pins these).
+- `VITE_SENTRY_DSN` is read at build time: redeploy after setting it.
+- Sentry is a new processor of personal data (account ids, IP addresses at
+  ingest); `docs/LEGAL_REVIEW.md` lists it.
 
 ## 3. Vercel project
 
@@ -419,6 +730,9 @@ VITE_SUPABASE_URL       = https://<dev-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY  = sb_publishable_…
 ```
 
+Optional on either environment: `VITE_SENTRY_DSN` (and `VITE_SENTRY_RELEASE`)
+to turn on browser error monitoring — see §2, _Error monitoring_.
+
 ## 5. A separate dev Supabase backend — done
 
 `dev.cleffy.io` runs on its own Supabase project: the persistent branch **`dev`**
@@ -506,10 +820,50 @@ supabase secrets set --project-ref qdbnlrgylelelvwbkvnm STRIPE_SECRET_KEY=... AP
 
 ### GitHub integration
 
-Connected to `maxharris1/sheet_music_scribbler`, working directory `.`, with
-**automatic branching off** (otherwise every feature branch spawns its own
-billed Supabase branch) and **deploy-to-production off** (see the divergence
-section — auto-deploying `main` could re-apply work that is already live).
+GitHub App `supabase` is installed on **`maxharris1/Cleffy`** (working
+directory `.`). The dashboard still used the pre-rename repo name in older
+notes; the App follows the repo id, and checks/`supabase[bot]` comments land
+on Cleffy.
+
+**Deploy to production is ON.** Verified 2026-09-10 via
+`GET /v1/projects/jibgwgosihadbjgxdsfe/branches`: the default branch
+(`is_default`, project `jibgwgosihadbjgxdsfe`) has `git_branch: "main"`. That
+field _is_ the dashboard **Deploy to production** switch (empty string = off).
+There is no public Management API field named `deploy_to_production`; the
+Studio form PATCHes `/v1/branches/{id}` with `git_branch`. Do not also add a
+GitHub Action `db push` — two appliers would fight.
+
+On merge to `main` the integration applies: pending SQL migrations, Edge
+Functions declared in `config.toml` (including `imslp-sync` with
+`verify_jwt = false`), and storage buckets from `config.toml`. Auth/API/seed
+are ignored.
+
+**Gate:** open a PR `dev` → `main`, approve it, merge with a **merge commit**
+(not squash). That merge is the full deploy: Vercel already auto-deploys
+`main` → cleffy.io; Supabase applies backend on the same merge. Do not merge
+that PR until you intend to ship production.
+
+The October launch-fix release has its own ordered checklist — see
+[Release checklist](#release-checklist--launch-fixes-20261007) above.
+
+**Automatic branching must stay OFF** (`new_branch_per_pr`). Confirm at
+[Project Settings → Integrations](https://supabase.com/dashboard/project/jibgwgosihadbjgxdsfe/settings/integrations)
+— toggle **Automatic branching**. The public API can _list_ GitHub connections
+(`GET /v2/organizations/{slug}/integrations/github/connections`) but cannot
+update them; Studio uses `/platform/integrations/github/connections/{id}`.
+PR #32 spawned preview `cwxkhoqeqbhgakfafthd` (deleted after merge). If that
+toggle is on, turn it off so feature branches do not bill.
+
+**Still human:**
+
+1. **Automatic branching** — confirm OFF on the Integrations page (above).
+2. **Require a PR into `main`** — this sandbox cannot write rulesets
+   (`403 Resource not accessible by integration`). From a PAT with
+   `administration:write`:
+   `GH_TOKEN=ghp_… bash scripts/protect-main.sh --require-pr --require-ci`
+3. Vault `imslp_sync_url` / `imslp_sync_secret` are **not** created by GitHub.
+   Chip browse works without them; cron refresh is a silent no-op until they
+   exist (see SETUP_SUPABASE.md).
 
 ## 6. Smoke test — passed 2026-08-27
 
@@ -548,11 +902,9 @@ test-mode records.
 
 ### Still worth doing
 
-The portal's **subscription_update is disabled**, which is Stripe's default. So
-customers can cancel and update cards there, but cannot switch plans — despite
-`stripe-portal`'s own comment saying plan changes happen in the portal. To close
-that gap, enable "Switch plans" in the portal settings and add the three
-products.
+~~Enable "Switch plans" in the portal~~ — done for live on 2026-08-29; the
+sandbox is still to be checked, and `stripe-checkout` now relies on it in both
+modes (§1, _Checkout depends on it_).
 
 ## 7. Inbound support mail (Resend) — live
 
@@ -639,6 +991,77 @@ The signature gate was checked against the deployed endpoint, not only in tests:
 unsigned → `missing_header`, forged → `signature_mismatch`, stale timestamp →
 `timestamp_out_of_tolerance`, and no row was written by any of them.
 
+## 8. Auth password policy — must be set on both projects
+
+Every new password is checked in the browser (and in `student-claim`) against
+`supabase/functions/_shared/passwordPolicy.ts`: at least 8 characters, at least
+one ASCII letter and one digit, at most 72 bytes. GoTrue is the authority, and
+`config.toml` only configures the local stack (and the `dev` branch, if its
+deploy applies config). Set the hosted projects explicitly, production AND the
+`dev` branch, with a Management API token:
+
+```bash
+for ref in jibgwgosihadbjgxdsfe qdbnlrgylelelvwbkvnm; do
+  curl -sS -X PATCH "https://api.supabase.com/v1/projects/$ref/config/auth" \
+    -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"password_min_length": 8, "password_required_characters": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:0123456789"}'
+done
+```
+
+`password_required_characters` takes the character SETS, colon-separated: the
+string above is the API's enum value for "letters and digits" (one set of
+letters, one of digits) — the same value the CLI writes for
+`password_requirements = "letters_digits"`. Check it with a `GET` on the same
+path before and after; the dashboard (Authentication → Policies → Password
+strength) shows it as "Letters and digits". Existing accounts keep working:
+GoTrue checks strength only where a password is set, never at sign-in, and the
+app does the same.
+
+Leaked-password protection (`"password_hibp_enabled": true` in the same
+payload) is flagged by the security advisor on both projects. It needs a paid
+plan; when it is on, a breached password is refused with
+`weak_password`/`reasons: ["pwned"]`, which `mapAuthError` already words.
+
+## 9. Student sign-in limiter — migration BEFORE the functions
+
+`student-login` now limits attempts per username
+(`supabase/functions/_shared/loginThrottle.ts`) through the
+`begin_login_attempt` / `clear_login_attempts` / `clear_login_account` RPCs
+created by `20261007120501_student_login_throttle.sql`. Two limits:
+
+- **Per username + address**: 5 tries, then locks of 30 s doubling to 15 min
+  for that address only. Someone hammering a classmate's username locks out
+  their own address, not the classmate signing in from elsewhere.
+- **Per username, all addresses**: 30 attempts per hour, to cap guessing from
+  many addresses. No real student gets near it.
+
+The limiter fails CLOSED: if the RPCs are missing, every username sign-in is
+refused with "Too many sign-in attempts". So on each project, apply the
+migration first, then deploy all three functions that use it
+(`student-provision` and `student-claim` clear a username's limits on a
+teacher's reset and on a successful claim):
+
+```bash
+supabase functions deploy student-login --no-verify-jwt
+supabase functions deploy student-claim --no-verify-jwt
+supabase functions deploy student-provision
+```
+
+Keys are HMAC-SHA-256 of the username (and of the client address) under
+`LOGIN_THROTTLE_SECRET` if that function secret is set, otherwise under the
+service-role key, so the table holds neither names nor addresses. A dedicated
+secret is optional and recommended
+(`supabase secrets set LOGIN_THROTTLE_SECRET=$(openssl rand -hex 32)`); setting
+or rotating it, or rotating the service-role key while it is unset, simply
+resets all counters.
+
+A student locked out at the account ceiling waits for the hour to end, or the
+teacher issues a fresh setup card ('reset'), which clears every limit on that
+username; claiming the card clears them again for the name the student picks.
+Because the keys are HMAC'd, a lock cannot be lifted by hand from the table
+without the secret; use the reset.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from
@@ -651,8 +1074,8 @@ identical fingerprints (`md5` over the ordered version list):
 | `dev` branch `qdbnlrgylelelvwbkvnm` | 22         | 22     | 0     | 0               | `4f0bca6b…` |
 
 The previous divergence (25 applied in production, 4 at versions in no branch, 8
-under different timestamps) is gone. `supabase db push` is safe again, and the
-GitHub integration's "deploy to production" can be turned on when wanted.
+under different timestamps) is gone. Deploy-to-production is on (§5); apply
+production by merging `dev` → `main`, not a second `db push`.
 
 All prior data was intentionally discarded in the reset: 40 users, 46 documents,
 1,063 annotations and 47 uploaded PDFs. The Stripe sandbox subscription that
