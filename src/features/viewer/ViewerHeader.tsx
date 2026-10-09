@@ -14,7 +14,7 @@ interface ViewerHeaderProps {
 /**
  * Slim score-viewer top bar, shared by cloud and local viewers; safe-area aware.
  *
- * The action cluster wraps, and below lg it takes its own row, so Invite / Share
+ * The action cluster wraps, and below lg it takes its own row, so Share / Export
  * / Notes stay on-screen on a phone or a ~768px tablet. A single nowrap row at
  * md clipped the title to unreadable crumbs beside the actions.
  */

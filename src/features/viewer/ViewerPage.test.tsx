@@ -245,7 +245,7 @@ describe('CloudViewer warm open', () => {
 
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
         expect(viewport()).toHaveAttribute('data-sync', 'off');
-        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
         expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
         expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();
 
@@ -277,7 +277,7 @@ describe('CloudViewer warm open', () => {
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
         expect(viewport()).toHaveAttribute('data-sync', 'on');
         await waitFor(() => expect(screen.getByText('Nocturne (Chopin)')).toBeInTheDocument());
-        expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
         expect(screen.getByTestId('share-export-menu')).toBeInTheDocument();
     });
 
@@ -452,7 +452,7 @@ describe('CloudViewer warm open', () => {
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
         expect(viewport()).toHaveAttribute('data-sync', 'off');
         expect(screen.getByText('Nocturne (cached)')).toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
         expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
     });
 });
@@ -819,7 +819,7 @@ describe('CloudViewer membership changes', () => {
         const user = userEvent.setup();
         await openAs('viewer');
 
-        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Sharing' }));
         expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'viewer');
 
@@ -828,6 +828,20 @@ describe('CloudViewer membership changes', () => {
         expect(await screen.findByText('library')).toBeInTheDocument();
         expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID);
         expect(removeCachedLibraryDocument).toHaveBeenCalledWith('teacher-1', DOC_ID);
+    });
+
+    it('opens sharing for the owner from the button labelled Share', async () => {
+        // "Share" is people and links; the export menu beside it is "Export".
+        const user = userEvent.setup();
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        fetchMyRole.mockResolvedValue('owner');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        expect(screen.queryByRole('button', { name: 'Invite' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Share' }));
+        expect(screen.getByTestId('share-dialog')).toHaveAttribute('data-role', 'owner');
     });
 
     it('gives a roster student no way to leave an assigned score', async () => {

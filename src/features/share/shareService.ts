@@ -176,17 +176,56 @@ export interface RedeemResult {
     role: string;
 }
 
+/**
+ * redeem_share_link's refusal of an unknown, revoked or expired link: SQLSTATE
+ * PT404 (HTTP 404) with `{"code":"invalid_share_link"}` in detail, since
+ * 20261009120200. Before that it was P0002 (an HTTP 500) with only the message
+ * to go on, which is still matched for the window between this frontend
+ * reaching users and that migration reaching their backend.
+ */
+const isDeadLinkError = (error: { code?: string; message: string; details?: string | null }): boolean =>
+    detailCodeOf(error.details) === 'invalid_share_link' ||
+    error.code === 'PT404' ||
+    (error.code === 'P0002' && error.message.includes('invalid or expired share link'));
+
 /** Join a document via share token (SECURITY DEFINER RPC — see migrations). */
 export const redeemShareLink = async (token: string): Promise<RedeemResult> => {
     const { data, error } = await getSupabase().rpc('redeem_share_link', { p_token: token });
     if (error) {
-        throw new Error(error.message.includes('invalid or expired') ? 'invalid_link' : error.message);
+        throw new Error(isDeadLinkError(error) ? 'invalid_link' : error.message);
     }
     const first = data[0];
     if (!first) {
         throw new Error('invalid_link');
     }
     return { documentId: first.document_id, role: first.granted_role };
+};
+
+/** What a link would do for whoever opens it now. */
+export type LinkPeek = { valid: true; role: ShareRole } | { valid: false };
+
+/**
+ * Check a link before anyone is created to redeem it: the join page asks this
+ * ahead of signing a guest in, so a dead link costs no anonymous account.
+ * Works with no session at all (peek_share_link is granted to anon).
+ *
+ * Resolves null when the server could not say — offline, or a backend that
+ * predates peek_share_link — and the caller should carry on as it did before
+ * peeking existed: redeem_share_link still refuses a dead link either way.
+ */
+export const peekShareLink = async (token: string): Promise<LinkPeek | null> => {
+    try {
+        const { data, error } = await getSupabase().rpc('peek_share_link', { p_token: token });
+        const row = error ? undefined : data?.[0];
+        if (!row) {
+            return null;
+        }
+        return row.valid && (row.role === 'editor' || row.role === 'viewer')
+            ? { valid: true, role: row.role }
+            : { valid: false };
+    } catch {
+        return null;
+    }
 };
 
 export const shareUrlFor = (token: string): string => {

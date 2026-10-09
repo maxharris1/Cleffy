@@ -100,6 +100,8 @@ describe('legal content', () => {
         expect(text).toMatch(/Student accounts you created are deleted/);
         expect(text).toMatch(/stay there, no longer attributed to you/);
         expect(text).toMatch(/cannot be undone/);
+        // Guests delete themselves too (ShareDialog → delete-account's guest path).
+        expect(text).toMatch(/delete that guest profile from the score’s Sharing panel/);
     });
 });
 

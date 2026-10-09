@@ -89,3 +89,44 @@ export const mapAuthError = (err: unknown, fallback = 'Something went wrong.'): 
     }
     return fallback;
 };
+
+const RESET_RATE_LIMITED = 'Too many requests right now. Wait a few minutes, then try again.';
+const RESET_INVALID_EMAIL = 'Enter a valid email address.';
+const RESET_UNREACHABLE = 'Could not reach Cleffy. Check your connection and try again.';
+
+/**
+ * What the forgot-password form may say about a failed reset request — or
+ * null, meaning "show the same neutral confirmation as a success".
+ *
+ * GoTrue's /recover validates the address, looks the account up, and answers
+ * an unknown address with a plain 200 straight away; everything after the
+ * lookup runs only for addresses that HAVE an account. Any error raised there
+ * must therefore look like that 200, or the form becomes a way to test which
+ * addresses have accounts. That covers every over_email_send_rate_limit (the
+ * per-address resend limit and the project-wide email-send cap alike — an
+ * attacker can use the cap up, and then only real accounts would hear "wait"),
+ * email_address_invalid / email_address_not_authorized (raised when the mail
+ * is sent), a bare 429 without a code we can place, and any failure to send.
+ * What may still be said is what is decided before the lookup, alike for
+ * every address:
+ *  * over_request_rate_limit — the per-IP limiter in front of /recover —
+ *    so the person knows to wait;
+ *  * validation_failed — a malformed address, from the request validation;
+ *  * no answer at all: offline, or the service down (502/503). Not a 504:
+ *    a gateway timeout can be a slow mail send, which only accounts reach.
+ * The success screen's "try again" covers what a real user needs otherwise.
+ */
+export const passwordResetProblem = (err: unknown): string | null => {
+    const { code, message } = readAuthFields(err);
+    const record = err && typeof err === 'object' ? (err as { name?: unknown; status?: unknown }) : {};
+    if (code === 'over_request_rate_limit') {
+        return RESET_RATE_LIMITED;
+    }
+    if (code === 'validation_failed' || (!code && /unable to validate email/i.test(message))) {
+        return RESET_INVALID_EMAIL;
+    }
+    if (record.name === 'AuthRetryableFetchError' && record.status !== 504) {
+        return RESET_UNREACHABLE;
+    }
+    return null;
+};

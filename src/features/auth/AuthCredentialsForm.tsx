@@ -29,6 +29,8 @@ interface AuthCredentialsFormProps {
     afterPassword?: ReactNode;
     footer?: ReactNode;
     fallbackError?: string;
+    /** Turns a failed submit into the message shown; defaults to mapAuthError with fallbackError. */
+    describeError?: (err: unknown) => string;
     onSubmit: (credentials: AuthCredentials) => Promise<void>;
 }
 
@@ -46,6 +48,7 @@ export const AuthCredentialsForm = ({
     afterPassword,
     footer,
     fallbackError = 'Something went wrong.',
+    describeError,
     onSubmit,
 }: AuthCredentialsFormProps) => {
     const [emailValue, setEmailValue] = useState('');
@@ -93,7 +96,7 @@ export const AuthCredentialsForm = ({
         try {
             await onSubmit({ email: emailValue.trim(), password: passwordValue });
         } catch (err) {
-            setError(mapAuthError(err, fallbackError));
+            setError(describeError ? describeError(err) : mapAuthError(err, fallbackError));
             setBusy(false);
         }
     };

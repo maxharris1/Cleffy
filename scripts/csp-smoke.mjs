@@ -425,7 +425,7 @@ check(
 // Exports: the page photo goes through pdf.js again, the PDF through pdf-lib
 // in a module worker that fetches the music font. Both end in a download.
 const exportVia = async (item) => {
-    await page.getByRole('button', { name: 'Share', exact: true }).click();
+    await page.getByRole('button', { name: 'Export', exact: true }).click();
     const [download] = await Promise.all([
         page.waitForEvent('download', { timeout: 30_000 }),
         page.getByRole('menuitem', { name: item }).click(),

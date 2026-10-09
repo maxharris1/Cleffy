@@ -8,12 +8,20 @@
  *
  * THE ORDER IS THE SAFETY ARGUMENT:
  *
- *  1. Refuse what this endpoint must never delete. A share-link guest has no
- *     account to delete (signing out discards it). A provisioned student is not
+ *  1. Refuse what this endpoint must never delete. A provisioned student is not
  *     theirs to delete: the account was created, is paid for and is controlled
  *     by their teacher (20260826194426_roster.sql), and a child must not be able
  *     to orphan a roster seat or destroy work their teacher assigned. The UI
  *     explains this and points them at their teacher or support.
+ *
+ *     A share-link guest (an anonymous auth user) takes a short path of its
+ *     own, deleteGuest below: signing out only drops the session from the
+ *     browser, and the guest's name, memberships and auth user would otherwise
+ *     stay on the server with nobody able to remove them. A guest can own
+ *     nothing that bills or holds files -- stripe-checkout refuses anonymous
+ *     callers and documents_insert refuses an anonymous JWT -- so steps 2 and 3
+ *     do not apply, and a guest who added an email is no longer anonymous and
+ *     goes the whole way, password and all.
  *
  *  2. Stop the money FIRST, and completely, before a single row is touched.
  *     Every subscription the caller has, in every Stripe account (live and
@@ -182,7 +190,6 @@ export interface DeletionSummary {
 }
 
 export type DeletionFailureCode =
-    | 'anonymous_session'
     | 'managed_student'
     | 'billing_unavailable'
     | 'billing_cancel_failed'
@@ -443,13 +450,65 @@ export const purgeManagedStudents = async (
  */
 const SWEEP_PASSES = 2;
 
+/**
+ * A share-link guest: steps 4 to 6 only. No billing (stripe-checkout refuses
+ * guests, so there is nothing to stop and no Stripe call is made) and no
+ * roster (student-provision is a teacher's). Step 4 still runs: a guest cannot
+ * create a score, so it finds nothing, but if one ever did own a score its
+ * files must go before the auth delete cascades the row that finds them.
+ */
+const deleteGuest = async (userId: string, ports: DeletionPorts): Promise<DeletionResult> => {
+    let purged: Awaited<ReturnType<typeof purgeOwnedDocuments>>;
+    try {
+        purged = await purgeOwnedDocuments(userId, ports);
+    } catch (err) {
+        return fail(
+            502,
+            'document_delete_failed',
+            'We could not finish deleting your guest profile. Please try again.',
+            err,
+        );
+    }
+    try {
+        await ports.deleteStudiosAndMemberships(userId);
+    } catch (err) {
+        return fail(
+            502,
+            'membership_delete_failed',
+            'We could not remove you from the scores shared with you. Nothing else was changed; please try again.',
+            err,
+        );
+    }
+    let authUser: 'deleted' | 'not_found';
+    try {
+        authUser = await closeAuthUser(userId, ports);
+    } catch (err) {
+        return fail(
+            502,
+            'auth_delete_failed',
+            'You were removed from every shared score, but we could not delete the guest profile itself. Please try again to finish.',
+            err,
+        );
+    }
+    return {
+        ok: true,
+        summary: {
+            subscriptionsCanceled: 0,
+            checkoutSessionsExpired: 0,
+            studentsDeleted: 0,
+            documentsDeleted: purged.documents,
+            storageObjectsRemoved: purged.objects,
+            storageCleanupsCleared: purged.cleanups,
+            authUser,
+            lateBillingSweep: 'done',
+            lateSubscriptionsCanceled: 0,
+        },
+    };
+};
+
 export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts): Promise<DeletionResult> => {
     if (caller.isAnonymous) {
-        return fail(
-            403,
-            'anonymous_session',
-            'Guest sessions have no account to delete. Signing out removes the guest session.',
-        );
+        return deleteGuest(caller.userId, ports);
     }
     if (caller.userType === 'student') {
         return fail(

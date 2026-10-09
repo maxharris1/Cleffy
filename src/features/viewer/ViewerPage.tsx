@@ -720,8 +720,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 */}
                 {confirmed ? <ShareExportMenu docId={docId} doc={state.doc} title={state.doc.title} /> : null}
                 {confirmed && state.role === 'owner' ? (
-                    <Button size="sm" onClick={() => setShareOpen(true)}>
-                        Invite
+                    // "Share" is sharing the score with people (links, who has
+                    // access); sending a copy of it is "Export", beside it.
+                    <Button
+                        size="sm"
+                        title="Share this score — links, and who has access"
+                        onClick={() => setShareOpen(true)}
+                    >
+                        Share
                     </Button>
                 ) : confirmed && state.role && canLeave ? (
                     // Members get the same dialog, minus the owner's controls:
@@ -822,6 +828,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     userId={resolvedUserId}
                     role={state.role}
                     canLeave={canLeave}
+                    isGuest={Boolean(session?.user.is_anonymous)}
                     onClose={() => setShareOpen(false)}
                     onLeft={() => {
                         setShareOpen(false);

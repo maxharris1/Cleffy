@@ -62,7 +62,7 @@ const row = (over: Partial<DocumentRow> = {}): DocumentRow => ({
 });
 
 const openAndExport = async (user: ReturnType<typeof userEvent.setup>) => {
-    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Export' }));
     await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 };
 
@@ -123,7 +123,7 @@ describe('ShareExportMenu', () => {
         ).toBeInTheDocument();
         expect(claimPdfExport).not.toHaveBeenCalled();
         expect(deliverPdf).not.toHaveBeenCalled();
-        expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled();
+        expect(screen.getByRole('button', { name: 'Export' })).toBeEnabled();
     });
 
     it('says so plainly when offline with nothing on the device', async () => {
@@ -153,7 +153,7 @@ describe('ShareExportMenu', () => {
                 }),
         );
         render(<ShareExportMenu docId={DOC_ID} bytes={new ArrayBuffer(4)} title="Score" />);
-        await user.click(screen.getByRole('button', { name: 'Share' }));
+        await user.click(screen.getByRole('button', { name: 'Export' }));
         await user.click(screen.getByRole('menuitem', { name: /as photo/ }));
         await user.keyboard('{Escape}');
         expect(screen.queryByRole('menu')).not.toBeInTheDocument();
@@ -167,8 +167,8 @@ describe('ShareExportMenu', () => {
         render(<ShareExportMenu docId={DOC_ID} bytes={new ArrayBuffer(4)} title="Score" />);
         await openAndExport(user);
         await screen.findByText(/The export failed/);
-        await user.click(screen.getByRole('button', { name: 'Share' }));
-        await user.click(screen.getByRole('button', { name: 'Share' }));
+        await user.click(screen.getByRole('button', { name: 'Export' }));
+        await user.click(screen.getByRole('button', { name: 'Export' }));
         expect(screen.queryByText(/The export failed/)).not.toBeInTheDocument();
     });
 

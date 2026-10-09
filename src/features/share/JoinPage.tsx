@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 
+import { forgetLocalSession, requestAccountDeletion } from '@/features/account/accountDeletion';
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
 import { AgreementNote } from '@/features/legal/AgreementNote';
-import { redeemShareLink } from '@/features/share/shareService';
+import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
 import { BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
 import { ErrorText } from '@/ui/ErrorText';
@@ -11,11 +12,25 @@ import { LoadingText } from '@/ui/Loading';
 import { TextField } from '@/ui/TextField';
 import { linkClassName } from '@/ui/classNames';
 
+const DEAD_LINK = 'This link is invalid, expired, or was revoked. Ask for a new one.';
+
+/** The link's state as far as this page knows, before anyone has joined. */
+type LinkCheck = 'checking' | 'live' | 'dead' | 'unknown';
+
 /**
  * Share-link landing. If a session already exists (teacher clicking their own
  * link, returning student) we redeem with it — NEVER clobber it with a fresh
- * anonymous identity (plan §auth). Otherwise: quick name prompt → anonymous
- * sign-in → redeem → viewer.
+ * anonymous identity (plan §auth). Otherwise: check the link → quick name
+ * prompt → anonymous sign-in → redeem → viewer.
+ *
+ * The check comes first because signing in is what creates a guest account:
+ * asking a name and signing in before finding out the link was dead left an
+ * anonymous auth user behind for every failed join. peek_share_link answers
+ * without a session, so a dead link is reported before anyone is created, and
+ * again just before sign-in (the link may have been revoked while the guest
+ * was typing). A link that dies in the last moment between that check and the
+ * redeem is still refused by redeem_share_link; the guest this page created
+ * for it is then deleted again rather than left behind.
  */
 export const JoinPage = () => {
     const { token } = useParams<{ token: string }>();
@@ -24,7 +39,30 @@ export const JoinPage = () => {
     const [name, setName] = useState('');
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [linkCheck, setLinkCheck] = useState<LinkCheck>('checking');
+    /** True once a deleted guest's session is still in memory: leave by a full page load. */
+    const [guestDiscarded, setGuestDiscarded] = useState(false);
     const redeemedRef = useRef(false);
+    /** Set when THIS page signed a guest in, so a failed redeem may delete what it made. */
+    const createdGuestRef = useRef(false);
+
+    // Only a visitor without a session gets checked: one with a session is
+    // redeemed straight away and creates nobody, so there is nothing to save.
+    const needsCheck = !loading && !session && Boolean(token);
+    useEffect(() => {
+        if (!needsCheck || !token) {
+            return;
+        }
+        let current = true;
+        void peekShareLink(token).then((peek) => {
+            if (current) {
+                setLinkCheck(peek === null ? 'unknown' : peek.valid ? 'live' : 'dead');
+            }
+        });
+        return () => {
+            current = false;
+        };
+    }, [needsCheck, token]);
 
     useEffect(() => {
         if (loading || !token || !session || redeemedRef.current) {
@@ -33,14 +71,24 @@ export const JoinPage = () => {
         redeemedRef.current = true;
         redeemShareLink(token)
             .then(({ documentId }) => navigate(`/doc/${documentId}`, { replace: true }))
-            .catch((err: unknown) => {
+            .catch(async (err: unknown) => {
+                const dead = err instanceof Error && err.message === 'invalid_link';
+                if (dead && createdGuestRef.current) {
+                    // The link died between the check and the redeem, and the
+                    // guest signed in a moment ago has no reason to exist.
+                    // Best effort: a failure leaves what the race always left.
+                    createdGuestRef.current = false;
+                    try {
+                        await requestAccountDeletion();
+                        forgetLocalSession();
+                        setGuestDiscarded(true);
+                    } catch {
+                        // Keep the session: it is a working, if pointless, guest.
+                    }
+                }
                 redeemedRef.current = false;
                 setSubmitting(false);
-                setError(
-                    err instanceof Error && err.message === 'invalid_link'
-                        ? 'This link is invalid, expired, or was revoked. Ask for a new one.'
-                        : 'Could not join this score. Check your connection and try again.',
-                );
+                setError(dead ? DEAD_LINK : 'Could not join this score. Check your connection and try again.');
             });
     }, [loading, session, token, navigate]);
 
@@ -50,10 +98,22 @@ export const JoinPage = () => {
             setError('Enter your name so collaborators know who you are.');
             return;
         }
+        if (!token || submitting) {
+            return;
+        }
         setError(null);
         setSubmitting(true);
+        // Again, right before the account is made: the link may have been
+        // revoked or run out while the name was being typed.
+        const peek = await peekShareLink(token);
+        if (peek && !peek.valid) {
+            setLinkCheck('dead');
+            setSubmitting(false);
+            return;
+        }
         try {
             await signInAnonymouslyWithName(trimmed);
+            createdGuestRef.current = true;
         } catch (err) {
             setSubmitting(false);
             setError(err instanceof Error ? err.message : 'Could not join.');
@@ -64,24 +124,35 @@ export const JoinPage = () => {
         return null;
     }
 
-    const busy = loading || submitting || (session !== null && error === null);
-    const escapeTo = isRegisteredSession(session) ? '/library' : '/';
-    const escapeLabel = isRegisteredSession(session) ? 'Go to the library' : 'Back to home';
+    const shownError = error ?? (!session && linkCheck === 'dead' ? DEAD_LINK : null);
+    const checking = !session && linkCheck === 'checking';
+    const busy = loading || submitting || checking || (session !== null && shownError === null);
+    const registered = isRegisteredSession(session) && !guestDiscarded;
+    const escapeTo = registered ? '/library' : '/';
+    const escapeLabel = registered ? 'Go to the library' : 'Back to home';
 
     return (
         <BrandShell
             title="Join a shared score"
-            subtitle={error || busy ? undefined : 'Enter your name so collaborators know who you are.'}
+            subtitle={shownError || busy ? undefined : 'Enter your name so collaborators know who you are.'}
         >
-            {error ? (
+            {shownError ? (
                 <div className="text-center">
-                    <ErrorText>{error}</ErrorText>
-                    <Link to={escapeTo} className={`mt-3 inline-block ${linkClassName}`}>
-                        {escapeLabel}
-                    </Link>
+                    <ErrorText>{shownError}</ErrorText>
+                    {guestDiscarded ? (
+                        // The deleted guest's session is still in this tab's
+                        // memory; a full load starts the next page without it.
+                        <a href={escapeTo} className={`mt-3 inline-block ${linkClassName}`}>
+                            {escapeLabel}
+                        </a>
+                    ) : (
+                        <Link to={escapeTo} className={`mt-3 inline-block ${linkClassName}`}>
+                            {escapeLabel}
+                        </Link>
+                    )}
                 </div>
             ) : busy ? (
-                <LoadingText className="text-center">Joining…</LoadingText>
+                <LoadingText className="text-center">{checking ? 'Checking the link…' : 'Joining…'}</LoadingText>
             ) : (
                 <>
                     <TextField

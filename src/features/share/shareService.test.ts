@@ -10,6 +10,8 @@ import {
     linkExpiryLabel,
     listDocumentMembers,
     memberLabel,
+    peekShareLink,
+    redeemShareLink,
     removeMember,
     revokeShareLink,
     setMemberRole,
@@ -25,7 +27,7 @@ const NOW = new Date('2026-10-07T12:00:00Z');
 const DAY = 24 * 60 * 60 * 1000;
 const inFuture = (ms: number) => new Date(NOW.getTime() + ms).toISOString();
 
-const stubRpc = (result: { data?: unknown; error?: { message: string; details?: string } | null }) => {
+const stubRpc = (result: { data?: unknown; error?: { message: string; details?: string; code?: string } | null }) => {
     const rpc = vi.fn(() => Promise.resolve({ data: result.data ?? null, error: result.error ?? null }));
     vi.mocked(getSupabase).mockReturnValue({ rpc } as never);
     return rpc;
@@ -143,5 +145,61 @@ describe('memberLabel', () => {
         expect(memberLabel({ display_name: null, email: 'ana@x.test', is_anonymous: false })).toBe('ana@x.test');
         expect(memberLabel({ display_name: null, email: null, is_anonymous: true })).toBe('Guest');
         expect(memberLabel({ display_name: null, email: null, is_anonymous: false })).toBe('Collaborator');
+    });
+});
+
+describe('redeemShareLink', () => {
+    it('joins and reports the granted role', async () => {
+        const rpc = stubRpc({ data: [{ document_id: 'doc-1', granted_role: 'editor' }] });
+        await expect(redeemShareLink('tok')).resolves.toEqual({ documentId: 'doc-1', role: 'editor' });
+        expect(rpc).toHaveBeenCalledWith('redeem_share_link', { p_token: 'tok' });
+    });
+
+    it('recognises a dead link by its stable code, not its wording', async () => {
+        // 20261009120200: PT404 (HTTP 404) with the code in detail. The message
+        // could be reworded tomorrow; the code is the contract.
+        stubRpc({
+            error: { code: 'PT404', message: 'that link is no good', details: '{"code" : "invalid_share_link"}' },
+        });
+        await expect(redeemShareLink('tok')).rejects.toThrow('invalid_link');
+    });
+
+    it('still recognises the pre-migration refusal (P0002 + message)', async () => {
+        stubRpc({ error: { code: 'P0002', message: 'invalid or expired share link' } });
+        await expect(redeemShareLink('tok')).rejects.toThrow('invalid_link');
+    });
+
+    it('passes any other failure through as itself', async () => {
+        stubRpc({ error: { code: '28000', message: 'not authenticated' } });
+        await expect(redeemShareLink('tok')).rejects.toThrow('not authenticated');
+        stubRpc({ error: { code: 'P0002', message: 'not a member of this score' } });
+        await expect(redeemShareLink('tok')).rejects.toThrow('not a member of this score');
+    });
+});
+
+describe('peekShareLink', () => {
+    it('reports a live link and the role it grants', async () => {
+        const rpc = stubRpc({ data: [{ valid: true, role: 'viewer' }] });
+        await expect(peekShareLink('tok')).resolves.toEqual({ valid: true, role: 'viewer' });
+        expect(rpc).toHaveBeenCalledWith('peek_share_link', { p_token: 'tok' });
+    });
+
+    it('reports a dead link as just invalid', async () => {
+        stubRpc({ data: [{ valid: false, role: null }] });
+        await expect(peekShareLink('tok')).resolves.toEqual({ valid: false });
+    });
+
+    it('answers null — "could not tell" — when the server could not say', async () => {
+        // A backend without the function yet: PostgREST's 404 for a missing RPC.
+        stubRpc({ error: { code: 'PGRST202', message: 'Could not find the function public.peek_share_link' } });
+        await expect(peekShareLink('tok')).resolves.toBeNull();
+
+        stubRpc({ data: [] });
+        await expect(peekShareLink('tok')).resolves.toBeNull();
+
+        vi.mocked(getSupabase).mockReturnValue({
+            rpc: () => Promise.reject(new TypeError('Failed to fetch')),
+        } as never);
+        await expect(peekShareLink('tok')).resolves.toBeNull();
     });
 });
