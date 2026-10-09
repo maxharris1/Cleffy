@@ -90,6 +90,10 @@
       "pages_done": 123
     },
     {
+      "category": "For clavichord",
+      "pages_done": 584
+    },
+    {
       "category": "For flute",
       "pages_done": 894
     },
@@ -104,6 +108,22 @@
     {
       "category": "For guitar (arr)",
       "pages_done": 4320
+    },
+    {
+      "category": "For harpsichord",
+      "pages_done": 4566
+    },
+    {
+      "category": "For harpsichord (arr)",
+      "pages_done": 242
+    },
+    {
+      "category": "For keyboard",
+      "pages_done": 5202
+    },
+    {
+      "category": "For keyboard (arr)",
+      "pages_done": 888
     },
     {
       "category": "For orchestra",

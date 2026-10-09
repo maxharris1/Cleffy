@@ -1,6 +1,11 @@
 import { useState } from 'react';
 
-import { hasScoreSource, requiresAttribution, type ProvenanceFields } from '@/features/viewer/scoreSource';
+import {
+    hasScoreSource,
+    imslpFilePageUrl,
+    requiresAttribution,
+    type ProvenanceFields,
+} from '@/features/viewer/scoreSource';
 import { Dialog } from '@/ui/Dialog';
 import { buttonClassName, linkClassName } from '@/ui/classNames';
 
@@ -35,11 +40,19 @@ export const ScoreSourceButton = ({ doc }: { doc: ProvenanceFields }) => {
     );
 };
 
-const Row = ({ term, value }: { term: string; value: string | null | undefined }) =>
+const Row = ({ term, value, href }: { term: string; value: string | null | undefined; href?: string | null }) =>
     value ? (
         <div className="flex flex-wrap gap-x-2 py-1">
             <dt className="w-24 shrink-0 text-stone-500">{term}</dt>
-            <dd className="min-w-0 flex-1 break-words text-stone-800">{value}</dd>
+            <dd className="min-w-0 flex-1 break-words text-stone-800">
+                {href ? (
+                    <a href={href} target="_blank" rel="noreferrer" className={linkClassName}>
+                        {value}
+                    </a>
+                ) : (
+                    value
+                )}
+            </dd>
         </div>
     ) : null;
 
@@ -53,11 +66,12 @@ export const ScoreSourceDetails = ({ doc }: { doc: ProvenanceFields }) => {
     // The column only ever holds an https URL (documents_source_url_check);
     // checked again here because it becomes a link.
     const sourceUrl = doc.source_url && doc.source_url.startsWith('https://') ? doc.source_url : null;
+    const fromImslp = credit?.source === 'imslp' || Boolean(sourceUrl?.startsWith('https://imslp.org/'));
+    // The exact file imported, on IMSLP — the work page below lists every edition.
+    const fileUrl = fromImslp ? imslpFilePageUrl(doc.source_filename) : null;
     return (
         <div className="text-sm">
-            {credit?.source === 'imslp' || sourceUrl?.startsWith('https://imslp.org/') ? (
-                <p className="text-stone-600">Imported from IMSLP, the Petrucci Music Library.</p>
-            ) : null}
+            {fromImslp ? <p className="text-stone-600">Imported from IMSLP, the Petrucci Music Library.</p> : null}
             <dl className="mt-3">
                 <Row term="Work" value={credit?.work} />
                 <Row term="Composer" value={credit?.composer} />
@@ -65,7 +79,7 @@ export const ScoreSourceDetails = ({ doc }: { doc: ProvenanceFields }) => {
                 <Row term="Arranger" value={credit?.arranger} />
                 <Row term="Publisher" value={publisher} />
                 <Row term="License" value={doc.source_license ?? 'Not recorded'} />
-                <Row term="File" value={doc.source_filename} />
+                <Row term="File" value={doc.source_filename} href={fileUrl} />
             </dl>
             {requiresAttribution(doc.source_license) ? (
                 <p className="mt-3 text-xs leading-relaxed text-stone-600">

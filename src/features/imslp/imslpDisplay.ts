@@ -236,70 +236,79 @@ const scoreEdition = (edition: EditionRankFields, index: number): number => {
 export const isEditionImportable = (edition: EditionLicenseFields): boolean =>
     edition.downloadable !== false && edition.license !== 'unknown';
 
-/**
- * 0 = cleared for direct download, 1 = license unknown, 2 = restricted.
- * Used only among non-`{{Urtext}}` files so tagged Urtext still leads the list
- * when IMSLP has marked those rows not-downloadable.
- */
-const availabilityTier = (edition: EditionLicenseFields): number => {
-    if (edition.downloadable === false) {
-        return 2;
-    }
-    return edition.license === 'unknown' ? 1 : 0;
-};
+/** 0 = license unknown (IMSLP may clear it), 1 = restricted. Orders the rows Cleffy cannot fetch. */
+const unavailableTier = (edition: EditionLicenseFields): number => (edition.downloadable === false ? 1 : 0);
 
 const urtextLead = (edition: EditionRankFields): number => (edition.urtext ? 0 : 1);
 
 /**
- * Full list in picker order: `{{Urtext}}` files first (including restricted
- * Henle), then downloadable non-Urtext, then license-unknown, then other
- * restricted rows. Score (house, complete original, size) breaks ties.
+ * Full list in picker order: everything Cleffy can import first — `{{Urtext}}`
+ * files leading, then by score (house, complete original, size) — and only
+ * then the rows it cannot fetch (Urtext first, license-unknown before
+ * restricted). A restricted Henle used to lead the list, so popular works
+ * (Moonlight, Pathétique) opened on greyed-out rows with nothing selected.
  */
 export const rankEditions = <T extends EditionRankFields>(editions: T[]): T[] =>
     editions
         .map((edition, index) => ({
             edition,
             index,
+            blocked: isEditionImportable(edition) ? 0 : 1,
             urtextLead: urtextLead(edition),
-            tier: availabilityTier(edition),
+            tier: unavailableTier(edition),
             score: scoreEdition(edition, index),
         }))
         .sort(
             (a, b) =>
+                a.blocked - b.blocked ||
                 a.urtextLead - b.urtextLead ||
-                (a.urtextLead !== 0 ? a.tier - b.tier : 0) ||
+                a.tier - b.tier ||
                 b.score - a.score ||
                 a.index - b.index,
         )
         .map((r) => r.edition);
 
 /**
- * Suggested import target: the top-ranked row, only when that row is actually
- * importable. Does not skip past a leading restricted Urtext to Weiner.
+ * The picker's two lists, each in rankEditions order: what Add can import, and
+ * what the user can only open on IMSLP (restricted or license-unknown).
  */
-export const recommendEdition = <T extends EditionRankFields>(editions: T[]): T | null => {
-    const top = rankEditions(editions)[0];
-    return top && isEditionImportable(top) ? top : null;
+export const splitEditions = <T extends EditionRankFields>(editions: T[]): { importable: T[]; unavailable: T[] } => {
+    const ranked = rankEditions(editions);
+    return {
+        importable: ranked.filter((e) => isEditionImportable(e)),
+        unavailable: ranked.filter((e) => !isEditionImportable(e)),
+    };
 };
+
+/**
+ * Pre-selected import target: the best edition Cleffy can actually fetch, so
+ * Add works on the first screen. A restricted Urtext does not block it; it
+ * stays listed (with its IMSLP link) under the importable ones.
+ */
+export const recommendEdition = <T extends EditionRankFields>(editions: T[]): T | null =>
+    splitEditions(editions).importable[0] ?? null;
 
 const VISIBLE_ROWS = 3;
 
-/** Count line for the picker: never claims "Urtext first" when tagged files are last or absent. */
+/**
+ * Count line for the importable list: never claims "Urtext first" when tagged
+ * files are last or absent, and says "downloadable" when some files are listed
+ * separately as not.
+ */
 export const editionListSummary = (editions: EditionRankFields[], visibleRows = VISIBLE_ROWS): string | null => {
-    const total = editions.length;
+    const { importable, unavailable } = splitEditions(editions);
+    const total = importable.length;
     if (total === 0) {
         return null;
     }
+    const noun = `${unavailable.length > 0 ? 'downloadable ' : ''}${total === 1 ? 'PDF' : 'PDFs'}`;
     if (total <= visibleRows) {
-        return `${total} ${total === 1 ? 'PDF' : 'PDFs'}`;
+        return `${total} ${noun}`;
     }
-    const ranked = rankEditions(editions);
-    const hasUrtext = editions.some((e) => e.urtext);
-    const urtextInViewport = ranked.slice(0, visibleRows).some((e) => e.urtext);
-    if (hasUrtext && urtextInViewport) {
-        return `${total} PDFs · Urtext first — scroll for others.`;
+    if (importable.slice(0, visibleRows).some((e) => e.urtext)) {
+        return `${total} ${noun} · Urtext first — scroll for others.`;
     }
-    return `${total} PDFs — scroll for others.`;
+    return `${total} ${noun} — scroll for others.`;
 };
 
 /** "Urtext · Henle · 1976" on every high-confidence hit; "Urtext · year" on other `{{Urtext}}`. */

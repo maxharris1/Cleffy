@@ -1,6 +1,6 @@
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
 import { measureIndexAtTick, xAtTickInMeasure } from '@/features/playback/scoreTime';
-import { clampScroll, scrollForPagePoint } from '@/features/viewer/geometry';
+import { NO_OBSCURED, clampScroll, scrollForPagePoint, type ObscuredEdges } from '@/features/viewer/geometry';
 import type { DocumentLayout } from '@/features/viewer/geometry';
 import { useViewerStore } from '@/state/store';
 import type { ScoreData } from '@/types/scoreData';
@@ -63,6 +63,8 @@ export interface PlayheadDeps {
     getLayout: () => DocumentLayout;
     getRenderScale: () => number;
     getViewportSize: () => { width: number; height: number };
+    /** Viewport strips under the toolbars: following keeps the system clear of them. */
+    getObscured?: () => ObscuredEdges;
 }
 
 /** Viewport band the current system is kept inside while following. */
@@ -215,24 +217,30 @@ export class PlayheadController {
         }
         const store = useViewerStore.getState();
         const view = store.view;
+        // The follow band is the part of the viewport no toolbar covers.
+        const obscured = this.deps.getObscured?.() ?? NO_OBSCURED;
+        const bandTop = Math.max(0, obscured.top);
+        const bandHeight = Math.max(1, height - bandTop - Math.max(0, obscured.bottom));
 
         const topPx = (pageLayout.top + rect.y0 * pageLayout.height) * view.scale - view.scrollY;
         const bottomPx = (pageLayout.top + rect.y1 * pageLayout.height) * view.scale - view.scrollY;
         const linePx = (pageLayout.left + rect.x * pageLayout.width) * view.scale - view.scrollX;
         const fits =
-            topPx >= height * FOLLOW_TOP_FRAC &&
-            bottomPx <= height * FOLLOW_BOTTOM_FRAC &&
+            topPx >= bandTop + bandHeight * FOLLOW_TOP_FRAC &&
+            bottomPx <= bandTop + bandHeight * FOLLOW_BOTTOM_FRAC &&
             linePx >= width * 0.05 &&
             linePx <= width * 0.95;
         if (fits && !this.forceFollow) {
             return;
         }
 
+        const anchorY = (bandTop + bandHeight * FOLLOW_ANCHOR_Y) / height;
         const target = clampScroll(
-            scrollForPagePoint(view, pageLayout, rect.x0, rect.y0, width, height, 0.35, FOLLOW_ANCHOR_Y),
+            scrollForPagePoint(view, pageLayout, rect.x0, rect.y0, width, height, 0.35, anchorY),
             layout,
             width,
             height,
+            obscured,
         );
         this.anim = {
             from: { x: view.scrollX, y: view.scrollY },

@@ -10,10 +10,14 @@ import {
     hardFilterGroups,
     KEY_FACETS,
     parseFilters,
+    PIANO_KEYBOARD_CATEGORIES,
     titleMatchesFilters,
 } from '../../supabase/functions/_shared/searchFacetData';
 import { browseFromIndex, readinessFor, type BrowseRpcClient } from '../../supabase/functions/_shared/imslpBrowse';
 import { isWorkTitle } from '../../supabase/functions/_shared/search';
+
+/** The Piano chip: For piano, its arrangements, and the keyboard repertoire filed under period instruments. */
+const PIANO = ['For piano', 'For piano (arr)', ...PIANO_KEYBOARD_CATEGORIES];
 
 describe('parseFilters', () => {
     it('accepts known facet ids as arrays', () => {
@@ -85,15 +89,25 @@ describe('ERA_FACETS', () => {
 
 describe('hardFilterCategories', () => {
     it('returns the instrument category plus its (arr) variant', () => {
-        expect(hardFilterCategories({ instruments: ['piano'] })).toEqual(['For piano', 'For piano (arr)']);
+        expect(hardFilterCategories({ instruments: ['organ'] })).toEqual(['For organ', 'For organ (arr)']);
+    });
+
+    it('lets Piano stand for the keyboard, harpsichord and clavichord repertoire too', () => {
+        // Bach's WTC is "For keyboard" on IMSLP, never "For piano": under the
+        // default chip it used to vanish from "Bach Prelude C major".
+        expect(hardFilterCategories({ instruments: ['piano'] })).toEqual([
+            'For piano',
+            'For piano (arr)',
+            'For keyboard',
+            'For keyboard (arr)',
+            'For harpsichord',
+            'For harpsichord (arr)',
+            'For clavichord',
+        ]);
     });
 
     it('unions instrument and era categories', () => {
-        expect(hardFilterCategories({ instruments: ['piano'], eras: ['baroque'] })).toEqual([
-            'For piano',
-            'For piano (arr)',
-            'Baroque',
-        ]);
+        expect(hardFilterCategories({ instruments: ['piano'], eras: ['baroque'] })).toEqual([...PIANO, 'Baroque']);
     });
 
     it('is empty without an instrument or era filter', () => {
@@ -104,15 +118,12 @@ describe('hardFilterCategories', () => {
 
 describe('hardFilterGroups', () => {
     it('keeps instrument and era as separate AND groups', () => {
-        expect(hardFilterGroups({ instruments: ['piano'], eras: ['baroque'] })).toEqual([
-            ['For piano', 'For piano (arr)'],
-            ['Baroque'],
-        ]);
+        expect(hardFilterGroups({ instruments: ['piano'], eras: ['baroque'] })).toEqual([PIANO, ['Baroque']]);
     });
 
     it('ORs several values inside one dimension', () => {
         expect(hardFilterGroups({ instruments: ['piano', 'organ'], eras: ['baroque', 'classical'] })).toEqual([
-            ['For piano', 'For piano (arr)', 'For organ', 'For organ (arr)'],
+            [...PIANO, 'For organ', 'For organ (arr)'],
             ['Baroque', 'Classical'],
         ]);
     });
@@ -125,10 +136,7 @@ describe('hardFilterGroups', () => {
 
 describe('categoryGroupsFor', () => {
     it('builds For piano ∩ Baroque as two UNION groups', () => {
-        expect(categoryGroupsFor({ instruments: ['piano'], eras: ['baroque'] })).toEqual([
-            ['For piano', 'For piano (arr)'],
-            ['Baroque'],
-        ]);
+        expect(categoryGroupsFor({ instruments: ['piano'], eras: ['baroque'] })).toEqual([PIANO, ['Baroque']]);
     });
 
     it('unions two composers in one group (OR within a dimension)', () => {
@@ -140,14 +148,12 @@ describe('categoryGroupsFor', () => {
     });
 
     it('does not put keys in typed-search groups — those stay title-only', () => {
-        expect(categoryGroupsFor({ instruments: ['piano'], keys: ['c-minor', 'c-sharp-minor'] })).toEqual([
-            ['For piano', 'For piano (arr)'],
-        ]);
+        expect(categoryGroupsFor({ instruments: ['piano'], keys: ['c-minor', 'c-sharp-minor'] })).toEqual([PIANO]);
     });
 
     it('browse groups bind key chips to IMSLP key categories', () => {
         expect(browseCategoryGroupsFor({ instruments: ['piano'], keys: ['c-minor', 'c-sharp-minor'] })).toEqual([
-            ['For piano', 'For piano (arr)'],
+            PIANO,
             ['C minor', 'C-sharp minor'],
         ]);
     });
@@ -161,7 +167,7 @@ describe('categoryGroupsFor', () => {
                 keys: ['e-flat-major'],
                 eras: ['romantic'],
             }),
-        ).toEqual([['Chopin, Frédéric'], ['For piano', 'For piano (arr)'], ['Nocturnes'], ['E-flat major'], ['Romantic']]);
+        ).toEqual([['Chopin, Frédéric'], PIANO, ['Nocturnes'], ['E-flat major'], ['Romantic']]);
     });
 });
 
@@ -170,6 +176,9 @@ describe('ALL_TAXONOMY_CATEGORIES', () => {
         expect(new Set(ALL_TAXONOMY_CATEGORIES).size).toBe(ALL_TAXONOMY_CATEGORIES.length);
         expect(ALL_TAXONOMY_CATEGORIES).toContain('For piano');
         expect(ALL_TAXONOMY_CATEGORIES).toContain('For piano (arr)');
+        for (const category of PIANO_KEYBOARD_CATEGORIES) {
+            expect(ALL_TAXONOMY_CATEGORIES).toContain(category);
+        }
         expect(ALL_TAXONOMY_CATEGORIES).toContain('Chopin, Frédéric');
         expect(ALL_TAXONOMY_CATEGORIES).toContain('Nocturnes');
         expect(ALL_TAXONOMY_CATEGORIES).toContain('C-sharp minor');
@@ -234,7 +243,7 @@ describe('browse intersection (fixture)', () => {
 
     it('missing snapshot categories are distinguishable from an empty intersection', () => {
         const groups = categoryGroupsFor({ instruments: ['piano'], eras: ['baroque'] });
-        const ready = new Set(['For piano', 'For piano (arr)']);
+        const ready = new Set(PIANO);
         const missing = categoriesInGroups(groups).filter((c) => !ready.has(c));
         expect(missing).toEqual(['Baroque']);
         expect(intersectGroups(groups, { 'For piano': [], 'For piano (arr)': [], Baroque: [] })).toEqual([]);
@@ -283,14 +292,23 @@ const WORKS: WorkFixture[] = [
         title: 'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)',
         categories: ['For piano', 'Baroque', 'Bach, Johann Sebastian', 'G major'],
     },
-    { title: 'Sonata in D minor, K.9 (Scarlatti, Domenico)', categories: ['For piano', 'Baroque', 'Sonatas', 'D minor'] },
+    {
+        title: 'Sonata in D minor, K.9 (Scarlatti, Domenico)',
+        categories: ['For piano', 'Baroque', 'Sonatas', 'D minor'],
+    },
     {
         title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
         categories: ['For piano', 'Romantic', 'Nocturnes', 'Chopin, Frédéric', 'E-flat major'],
     },
-    { title: 'Messiah, HWV 56 (Handel, George Frideric)', categories: ['For piano (arr)', 'Baroque', 'Handel, George Frideric'] },
+    {
+        title: 'Messiah, HWV 56 (Handel, George Frideric)',
+        categories: ['For piano (arr)', 'Baroque', 'Handel, George Frideric'],
+    },
     { title: 'Le quattro stagioni (Vivaldi, Antonio)', categories: ['For orchestra', 'Baroque', 'Vivaldi, Antonio'] },
-    { title: 'Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)', categories: ['For organ', 'Baroque', 'Fugues'] },
+    {
+        title: 'Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)',
+        categories: ['For organ', 'Baroque', 'Fugues'],
+    },
     { title: 'Structures I (Boulez, Pierre)', categories: ['For piano', 'Modern'] },
 ];
 
@@ -319,6 +337,18 @@ describe('browseFromIndex (mocked RPC over the works mirror)', () => {
         ]);
     });
 
+    it('Piano ∩ Baroque includes keyboard and harpsichord works, which IMSLP never files under For piano', async () => {
+        const wtc = 'Das wohltemperierte Klavier I, BWV 846-869 (Bach, Johann Sebastian)';
+        const couperin = 'Pièces de clavecin, Livre 1 (Couperin, François)';
+        const works = [
+            ...WORKS,
+            { title: wtc, categories: ['For keyboard', 'For organ (arr)', 'Baroque', 'Preludes', 'Fugues'] },
+            { title: couperin, categories: ['For harpsichord', 'Baroque'] },
+        ];
+        const result = await browse(fakeBrowseRpc(works, allReady), { instruments: ['piano'], eras: ['baroque'] });
+        expect(result.rows.map((r) => r.page_title)).toEqual(expect.arrayContaining([wtc, couperin]));
+    });
+
     it('three-way Piano · Fugue · Modern is an honest empty (AE4)', async () => {
         const result = await browse(fakeBrowseRpc(WORKS, allReady), {
             instruments: ['piano'],
@@ -337,9 +367,7 @@ describe('browseFromIndex (mocked RPC over the works mirror)', () => {
 
     it('typed search does not require key membership — Goldberg has no "G major" in the title', () => {
         const goldberg = 'Goldberg Variations, BWV 988 (Bach, Johann Sebastian)';
-        expect(categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] })).toEqual([
-            ['For piano', 'For piano (arr)'],
-        ]);
+        expect(categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] })).toEqual([PIANO]);
         expect(titleMatchesFilters(goldberg, { keys: ['g-major'] })).toBe(false);
         expect(browseWorks(browseCategoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] }), WORKS)).toEqual([
             goldberg,
@@ -347,7 +375,7 @@ describe('browseFromIndex (mocked RPC over the works mirror)', () => {
     });
 
     it('is ready as soon as one selected group is fully walked — its rows carry the other facets', async () => {
-        const result = await browse(fakeBrowseRpc(WORKS, ['For piano', 'For piano (arr)']), {
+        const result = await browse(fakeBrowseRpc(WORKS, PIANO), {
             instruments: ['piano'],
             eras: ['baroque'],
         });
@@ -356,9 +384,12 @@ describe('browseFromIndex (mocked RPC over the works mirror)', () => {
     });
 
     it('a half-walked instrument group does not count as ready', async () => {
-        const result = await browse(fakeBrowseRpc(WORKS, ['For piano']), { instruments: ['piano'], eras: ['baroque'] });
+        const result = await browse(fakeBrowseRpc(WORKS, PIANO.slice(0, -1)), {
+            instruments: ['piano'],
+            eras: ['baroque'],
+        });
         expect(result.indexReady).toBe(false);
-        expect(result.notReady).toEqual(['For piano (arr)']);
+        expect(result.notReady).toEqual(['For clavichord']);
         expect(result.rows).toEqual([]);
     });
 
@@ -371,7 +402,7 @@ describe('browseFromIndex (mocked RPC over the works mirror)', () => {
     it('missing admin stays not-ready', async () => {
         const result = await browse(null, { instruments: ['piano'], eras: ['baroque'] });
         expect(result.indexReady).toBe(false);
-        expect(result.notReady).toEqual(['For piano', 'For piano (arr)', 'Baroque']);
+        expect(result.notReady).toEqual([...PIANO, 'Baroque']);
     });
 });
 
@@ -385,7 +416,15 @@ describe('readinessFor', () => {
             ready: false,
             notReady: ['C'],
         });
-        expect(readinessFor([['A', 'B'], ['C', 'D']], ['A', 'C'])).toEqual({ ready: false, notReady: ['A'] });
+        expect(
+            readinessFor(
+                [
+                    ['A', 'B'],
+                    ['C', 'D'],
+                ],
+                ['A', 'C'],
+            ),
+        ).toEqual({ ready: false, notReady: ['A'] });
     });
 
     it('no groups is not ready', () => {

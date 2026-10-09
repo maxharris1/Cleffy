@@ -5,6 +5,7 @@ import {
     rankEditions,
     recommendEdition,
     recommendedBadge,
+    splitEditions,
     urtextBadge,
     urtextConfidence,
 } from '@/features/imslp/imslpDisplay';
@@ -28,29 +29,41 @@ describe('Moonlight ranking fixture', () => {
     const work = moonlightWorkDetail();
     const names = moonlightFilenames;
 
-    it('does not default-select Weiner when Henle is restricted', () => {
+    it('pre-selects the best downloadable edition; the restricted Henle files go last, not first', () => {
+        // Henle used to lead with nothing selected and Add disabled, which hid
+        // the downloadable editions behind greyed-out rows on popular works.
         const ranked = rankEditions(work.editions);
-        expect(ranked[0]?.filename).toBe(names.henleII);
-        expect(ranked[1]?.filename).toBe(names.henleI);
+        expect(ranked[0]?.filename).toBe(names.schirmer);
+        expect(recommendEdition(work.editions)?.filename).toBe(names.schirmer);
+        expect(recommendedBadge(ranked[0]!)).toBe('Recommended');
         expect(ranked.map((e) => e.filename)).not.toContainEqual(undefined);
-        expect(ranked.findIndex((e) => e.filename === names.weiner)).toBeGreaterThan(1);
-        expect(recommendEdition(work.editions)).toBeNull();
-        expect(recommendedBadge(ranked[0]!)).toBe('Urtext · Henle · 1976');
-        expect(urtextBadge(ranked[0]!)).toBe('Urtext · Henle · 1976');
-        expect(urtextBadge(ranked[1]!)).toBe('Urtext · Henle · 1976');
+        expect(ranked.slice(-2).map((e) => e.filename)).toEqual([names.henleII, names.henleI]);
+        expect(ranked.findIndex((e) => e.filename === names.weiner)).toBeLessThan(ranked.length - 2);
+        expect(urtextBadge(ranked.at(-2)!)).toBe('Urtext · Henle · 1976');
+        expect(urtextBadge(ranked.at(-1)!)).toBe('Urtext · Henle · 1976');
+        const { importable, unavailable } = splitEditions(work.editions);
+        expect(unavailable.map((e) => e.filename)).toEqual([names.henleII, names.henleI]);
+        expect(importable).toHaveLength(work.editions.length - 2);
     });
 
     it('keeps the huge dump above the guitar arrangement', () => {
         const ranked = rankEditions(work.editions).map((e) => e.filename);
         expect(ranked.indexOf(names.dump)).toBeLessThan(ranked.indexOf(names.guitar));
-        expect(ranked.indexOf(names.henleII)).toBeLessThan(ranked.indexOf(names.dump));
+        expect(ranked.indexOf(names.guitar)).toBeLessThan(ranked.indexOf(names.henleII));
     });
 
-    it('says Urtext first only because the tagged files actually lead', () => {
-        expect(editionListSummary(work.editions)).toBe(
-            `${work.editions.length} PDFs · Urtext first — scroll for others.`,
+    it('counts the downloadable list and says Urtext first only when a tagged file leads it', () => {
+        const downloadable = work.editions.length - 2;
+        expect(editionListSummary(work.editions)).toBe(`${downloadable} downloadable PDFs — scroll for others.`);
+        const henleCleared = work.editions.map((e) =>
+            e.filename === names.henleII ? { ...e, downloadable: true, restriction: null } : e,
         );
-        const noTag = work.editions.map((e) => ({ ...e, urtext: false }));
+        expect(editionListSummary(henleCleared)).toBe(
+            `${downloadable + 1} downloadable PDFs · Urtext first — scroll for others.`,
+        );
+        const allCleared = work.editions.map((e) => ({ ...e, downloadable: true, restriction: null }));
+        expect(editionListSummary(allCleared)).toBe(`${work.editions.length} PDFs · Urtext first — scroll for others.`);
+        const noTag = allCleared.map((e) => ({ ...e, urtext: false }));
         expect(editionListSummary(noTag)).toBe(`${work.editions.length} PDFs — scroll for others.`);
     });
 

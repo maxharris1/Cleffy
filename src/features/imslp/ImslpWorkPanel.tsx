@@ -9,8 +9,8 @@ import {
     editionListSummary,
     formatBytes,
     isEditionImportable,
-    rankEditions,
     recommendEdition,
+    splitEditions,
     urtextBadge,
 } from '@/features/imslp/imslpDisplay';
 import { Badge } from '@/ui/Badge';
@@ -112,10 +112,9 @@ export const ImslpWorkPanel = ({
     const composer = work.composer ?? parsed.composer;
 
     const recommended = useMemo(() => recommendEdition(work.editions), [work.editions]);
-    const ranked = useMemo(() => rankEditions(work.editions), [work.editions]);
+    const { importable, unavailable } = useMemo(() => splitEditions(work.editions), [work.editions]);
 
-    const importableCount = work.editions.filter(isEditionImportable).length;
-    const noneImportable = work.editions.length > 0 && importableCount === 0;
+    const noneImportable = work.editions.length > 0 && importable.length === 0;
     const noUrtext = work.editions.length > 0 && !work.editions.some((e) => e.urtext);
     const countLine = editionListSummary(work.editions);
     const selectedImportable = selected !== null && isEditionImportable(selected);
@@ -161,7 +160,7 @@ export const ImslpWorkPanel = ({
 
             {work.editions.length === 0 ? (
                 <p className="mt-4 text-sm text-stone-500">No PDF editions found for this work.</p>
-            ) : (
+            ) : importable.length > 0 ? (
                 <fieldset className="mt-4">
                     <legend className="text-xs font-medium uppercase tracking-wide text-stone-500">
                         Choose a PDF edition
@@ -171,127 +170,41 @@ export const ImslpWorkPanel = ({
                         <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
                     ) : null}
                     {/* 16rem keeps Add above the fold on a 667px-tall viewport even with
-                        the disclaimer sitting below the list. */}
+                        the disclaimer sitting below the list. Only importable rows live
+                        here, so the first screen is always choosable. */}
                     <ul className="mt-2 max-h-[16rem] overflow-y-auto" aria-label="PDF editions">
-                        {ranked.map((edition) => {
+                        {importable.map((edition) => {
                             const checked = selected?.filename === edition.filename;
-                            const importable = isEditionImportable(edition);
-                            const availability = editionAvailability(edition);
-                            const publisherLabel = edition.publisher
-                                ? [edition.publisher, edition.year].filter(Boolean).join(' ')
-                                : null;
-                            const licenseLabel =
-                                availability && availability.kind === 'downloadable' ? availability.label : null;
-                            const sizeLabel = formatBytes(edition.size) || null;
-                            const facts = [licenseLabel, sizeLabel].filter(Boolean);
                             const name = displayEditionName(edition.filename, edition);
-                            const badge = urtextBadge(edition);
-                            const showRecommended = !badge && recommended?.filename === edition.filename;
-                            const showWarn = !importable && availability !== null;
-                            const identity = (
-                                <span className="min-w-0 flex-1">
-                                    <span className="flex flex-wrap items-center gap-1.5 text-sm text-stone-800">
-                                        {badge ? (
-                                            <Badge tone="accent" className="shrink-0">
-                                                {badge}
-                                            </Badge>
-                                        ) : null}
-                                        {showRecommended ? (
-                                            <Badge tone="accent" className="shrink-0">
-                                                Recommended
-                                            </Badge>
-                                        ) : null}
-                                        {showWarn && availability ? (
-                                            <Badge tone="warn" className="shrink-0">
-                                                {warnBadgeLabel(availability)}
-                                            </Badge>
-                                        ) : null}
-                                        <span className={`min-w-0 break-words ${importable ? '' : 'text-stone-500'}`}>
-                                            {name}
-                                        </span>
-                                    </span>
-                                    {/* displayEditionName falls back to these same strings on dump
-                                        filenames — don't print the title twice. */}
-                                    {publisherLabel && publisherLabel !== name ? (
-                                        <span className="mt-0.5 block text-xs leading-5 text-stone-500">
-                                            {publisherLabel}
-                                        </span>
-                                    ) : null}
-                                    {edition.description && edition.description !== name ? (
-                                        <span className="mt-0.5 block text-xs leading-5 text-stone-500">
-                                            {edition.description}
-                                        </span>
-                                    ) : null}
-                                    {facts.length > 0 ? (
-                                        <span className="mt-0.5 block text-xs leading-5 text-stone-500">
-                                            {facts.join(' · ')}
-                                        </span>
-                                    ) : null}
-                                    {!importable ? (
-                                        <span className="mt-0.5 block text-xs text-stone-500">
-                                            {edition.licenseCheck === 'unavailable'
-                                                ? 'Couldn’t check the license just now — '
-                                                : availability?.kind === 'unknown'
-                                                  ? 'Not importable here — '
-                                                  : 'Not downloadable here — '}
-                                            <a
-                                                href={edition.openUrl}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className={`text-xs ${linkClassName}`}
-                                            >
-                                                {edition.licenseCheck === 'unavailable'
-                                                    ? 'check on IMSLP'
-                                                    : 'open on IMSLP'}
-                                            </a>
-                                        </span>
-                                    ) : null}
-                                </span>
-                            );
-                            const rowClass = [
-                                'flex items-start gap-2.5 border-b border-stone-200/80 py-2.5',
-                                checked ? 'bg-accent-soft' : '',
-                                importable ? (importing ? 'cursor-default' : 'cursor-pointer') : 'opacity-70',
-                            ]
-                                .filter(Boolean)
-                                .join(' ');
-                            /* Restricted rows keep a disabled radio out of the tab order so the
-                               text gutter lines up with the selectable rows above and below. */
-                            const radio = (
-                                <input
-                                    type="radio"
-                                    name="imslp-edition"
-                                    className="mt-1 h-4 w-4 shrink-0 accent-accent"
-                                    checked={checked}
-                                    onChange={() => {
-                                        if (importable) {
-                                            onSelect(edition);
-                                        }
-                                    }}
-                                    disabled={!importable || importing}
-                                    tabIndex={importable ? undefined : -1}
-                                    aria-label={importable ? `Select ${name}` : name}
-                                />
-                            );
+                            const showRecommended = !urtextBadge(edition) && recommended?.filename === edition.filename;
                             return (
                                 <li key={edition.filename}>
-                                    {importable ? (
-                                        <label className={rowClass}>
-                                            {radio}
-                                            {identity}
-                                        </label>
-                                    ) : (
-                                        <div className={rowClass}>
-                                            {radio}
-                                            {identity}
-                                        </div>
-                                    )}
+                                    <label
+                                        className={[
+                                            'flex items-start gap-2.5 border-b border-stone-200/80 py-2.5',
+                                            checked ? 'bg-accent-soft' : '',
+                                            importing ? 'cursor-default' : 'cursor-pointer',
+                                        ]
+                                            .filter(Boolean)
+                                            .join(' ')}
+                                    >
+                                        <input
+                                            type="radio"
+                                            name="imslp-edition"
+                                            className="mt-1 h-4 w-4 shrink-0 accent-accent"
+                                            checked={checked}
+                                            onChange={() => onSelect(edition)}
+                                            disabled={importing}
+                                            aria-label={`Select ${name}`}
+                                        />
+                                        <EditionIdentity edition={edition} recommended={showRecommended} />
+                                    </label>
                                 </li>
                             );
                         })}
                     </ul>
                 </fieldset>
-            )}
+            ) : null}
 
             {noneImportable ? (
                 <div className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50/80 p-3">
@@ -390,7 +303,92 @@ export const ImslpWorkPanel = ({
                     </div>
                 </div>
             ) : null}
+            {unavailable.length > 0 ? (
+                <section className="mt-5 border-t border-stone-200/80 pt-3" aria-labelledby="imslp-unavailable-heading">
+                    <h3
+                        id="imslp-unavailable-heading"
+                        className="text-xs font-medium uppercase tracking-wide text-stone-500"
+                    >
+                        Not downloadable here ({unavailable.length})
+                    </h3>
+                    <p className="mt-1 text-xs text-stone-500">
+                        IMSLP restricts these files or their license could not be confirmed. Open one on IMSLP to see
+                        your options there.
+                    </p>
+                    <ul className="mt-1 max-h-[12rem] overflow-y-auto" aria-label="Editions to open on IMSLP">
+                        {unavailable.map((edition) => (
+                            <li
+                                key={edition.filename}
+                                className="flex items-start border-b border-stone-200/80 py-2.5 opacity-80"
+                            >
+                                <EditionIdentity edition={edition} recommended={false} />
+                            </li>
+                        ))}
+                    </ul>
+                </section>
+            ) : null}
         </div>
+    );
+};
+
+/**
+ * One edition's name, badges and facts. Rows Cleffy cannot fetch also say why
+ * and link to the file on IMSLP, where the user can review their options.
+ */
+const EditionIdentity = ({ edition, recommended }: { edition: ImslpEdition; recommended: boolean }) => {
+    const importable = isEditionImportable(edition);
+    const availability = editionAvailability(edition);
+    const publisherLabel = edition.publisher ? [edition.publisher, edition.year].filter(Boolean).join(' ') : null;
+    const licenseLabel = availability && availability.kind === 'downloadable' ? availability.label : null;
+    const sizeLabel = formatBytes(edition.size) || null;
+    const facts = [licenseLabel, sizeLabel].filter(Boolean);
+    const name = displayEditionName(edition.filename, edition);
+    const badge = urtextBadge(edition);
+    const showWarn = !importable && availability !== null;
+    return (
+        <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-1.5 text-sm text-stone-800">
+                {badge ? (
+                    <Badge tone="accent" className="shrink-0">
+                        {badge}
+                    </Badge>
+                ) : null}
+                {recommended ? (
+                    <Badge tone="accent" className="shrink-0">
+                        Recommended
+                    </Badge>
+                ) : null}
+                {showWarn && availability ? (
+                    <Badge tone="warn" className="shrink-0">
+                        {warnBadgeLabel(availability)}
+                    </Badge>
+                ) : null}
+                <span className={`min-w-0 break-words ${importable ? '' : 'text-stone-500'}`}>{name}</span>
+            </span>
+            {/* displayEditionName falls back to these same strings on dump
+                filenames — don't print the title twice. */}
+            {publisherLabel && publisherLabel !== name ? (
+                <span className="mt-0.5 block text-xs leading-5 text-stone-500">{publisherLabel}</span>
+            ) : null}
+            {edition.description && edition.description !== name ? (
+                <span className="mt-0.5 block text-xs leading-5 text-stone-500">{edition.description}</span>
+            ) : null}
+            {facts.length > 0 ? (
+                <span className="mt-0.5 block text-xs leading-5 text-stone-500">{facts.join(' · ')}</span>
+            ) : null}
+            {!importable ? (
+                <span className="mt-0.5 block text-xs text-stone-500">
+                    {edition.licenseCheck === 'unavailable'
+                        ? 'Couldn’t check the license just now — '
+                        : availability?.kind === 'unknown'
+                          ? 'Not importable here — '
+                          : 'Not downloadable here — '}
+                    <a href={edition.openUrl} target="_blank" rel="noreferrer" className={`text-xs ${linkClassName}`}>
+                        {edition.licenseCheck === 'unavailable' ? 'check on IMSLP' : 'open on IMSLP'}
+                    </a>
+                </span>
+            ) : null}
+        </span>
     );
 };
 

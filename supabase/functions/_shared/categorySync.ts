@@ -54,12 +54,14 @@ export const tickInFlight = (row: CategorySyncRow | undefined, nowMs: number): b
 
 export interface FacetCategorySource {
     category?: string;
+    /** Instruments only: further categories the chip stands for (Piano → For keyboard, …). */
+    related?: string[];
 }
 
 /**
- * Every taxonomy category plus instrument "(arr)" variants, each its own row,
- * in build priority order: the default instrument first (every chip browse
- * intersects with it), then eras, forms and keys (the second chip), then the
+ * Every taxonomy category plus instrument "(arr)" variants and related
+ * categories, each its own row, in build priority order: the default
+ * instrument first (every chip browse intersects with it), then eras, forms and keys (the second chip), then the
  * other instruments and finally composers. pickNextCategory breaks ties by
  * this order.
  */
@@ -81,15 +83,16 @@ export const categoriesToSync = (
         seen.add(name);
         out.push(name);
     };
-    const addInstrument = (category: string | undefined) => {
-        add(category);
-        if (category) {
-            add(`${category} (arr)`);
+    const addInstrument = (facet: FacetCategorySource) => {
+        add(facet.category);
+        if (facet.category) {
+            add(`${facet.category} (arr)`);
         }
+        facet.related?.forEach(add);
     };
     const defaultInstrument = instruments.find((i) => i.category === defaultInstrumentCategory);
     if (defaultInstrument) {
-        addInstrument(defaultInstrument.category);
+        addInstrument(defaultInstrument);
     }
     for (const facet of eras) {
         add(facet.category);
@@ -101,7 +104,7 @@ export const categoriesToSync = (
         add(facet.category);
     }
     for (const facet of instruments) {
-        addInstrument(facet.category);
+        addInstrument(facet);
     }
     for (const facet of composers) {
         add(facet.category);

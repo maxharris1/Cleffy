@@ -46,7 +46,11 @@ interface ImslpSearchPanelProps {
 
 const DEFAULT_SEARCH_LIMIT = 100;
 
-/** Cleffy's OMR reads piano music, so the search starts piano-scoped. */
+/**
+ * Cleffy's OMR reads piano music, so the search starts piano-scoped. The chip
+ * also covers IMSLP's keyboard, harpsichord and clavichord works (Bach's WTC is
+ * never "For piano"), see INSTRUMENT_FACETS.
+ */
 const DEFAULT_INSTRUMENT = 'piano';
 
 /** Chip strips scroll on phones (like the library's) and wrap from sm up. */

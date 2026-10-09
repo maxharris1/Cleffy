@@ -9,7 +9,12 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 import { PDFJS_ASSET_DIRS, type PdfjsAssetDir } from './src/features/viewer/pdf/pdfjsAssets';
-import { collectSupabasePreconnectOrigins } from './src/lib/supabasePreconnectOrigins';
+import {
+    SUPABASE_PRECONNECT_SCRIPT_PATH,
+    supabasePreconnectPlan,
+    supabasePreconnectScript,
+    type SupabasePreconnectPlan,
+} from './src/lib/supabasePreconnectOrigins';
 
 /**
  * Lazy chunks of features switched off for this release (src/lib/features.ts).
@@ -101,24 +106,67 @@ const pdfjsAssetsPlugin = (): Plugin => {
 };
 
 /**
- * `<link rel="preconnect">` for every known Supabase HTTPS origin. Runtime
- * picks the project by hostname when `VITE_SUPABASE_URL` is unset (see
- * src/lib/supabase.ts); a production env typically has only `_PROD` and `_DEV`.
+ * Preconnect to the one Supabase project this page will use. With an explicit
+ * `VITE_SUPABASE_URL` that is a static `<link rel="preconnect">`. The release
+ * build sets only `_PROD` and `_DEV` and the hostname picks at runtime (see
+ * src/lib/supabase.ts), which a static index.html cannot know — naming both
+ * made dev.cleffy.io open a connection to production on every load — so it
+ * gets a tiny same-origin script instead, loaded `async` beside the app bundle,
+ * that adds the link for its own host before the bundle has arrived.
  */
 const supabasePreconnectPlugin = (): Plugin => {
-    let origins: string[] = [];
+    let plan: SupabasePreconnectPlan = { kind: 'none' };
+    const script = (): string => (plan.kind === 'by-host' ? supabasePreconnectScript(plan) : '');
     return {
         name: 'supabase-preconnect',
         configResolved(config) {
             const env = loadEnv(config.mode, config.envDir ?? process.cwd(), 'VITE_');
-            origins = collectSupabasePreconnectOrigins(env);
+            plan = supabasePreconnectPlan(env);
+        },
+        configureServer(server) {
+            server.middlewares.use((req, res, next) => {
+                if (plan.kind !== 'by-host' || req.url?.split('?')[0] !== SUPABASE_PRECONNECT_SCRIPT_PATH) {
+                    next();
+                    return;
+                }
+                res.setHeader('Content-Type', 'application/javascript');
+                res.end(script());
+            });
+        },
+        generateBundle() {
+            if (plan.kind === 'by-host') {
+                this.emitFile({
+                    type: 'asset',
+                    fileName: SUPABASE_PRECONNECT_SCRIPT_PATH.slice(1),
+                    source: script(),
+                });
+            }
         },
         transformIndexHtml() {
-            return origins.map((href) => ({
-                tag: 'link',
-                attrs: { rel: 'preconnect', href, crossorigin: '' },
-                injectTo: 'head-prepend' as const,
-            }));
+            switch (plan.kind) {
+                case 'static':
+                    return [
+                        {
+                            tag: 'link',
+                            attrs: { rel: 'preconnect', href: plan.origin, crossorigin: '' },
+                            injectTo: 'head-prepend' as const,
+                        },
+                    ];
+                case 'by-host':
+                    return [
+                        {
+                            tag: 'script',
+                            attrs: { src: SUPABASE_PRECONNECT_SCRIPT_PATH, async: true },
+                            injectTo: 'head-prepend' as const,
+                        },
+                    ];
+                case 'none':
+                    return [];
+                default: {
+                    const _exhaustive: never = plan;
+                    return _exhaustive;
+                }
+            }
         },
     };
 };
