@@ -170,6 +170,27 @@ describe('AnnotationStore', () => {
         expect(store.canRedo).toBe(false);
     });
 
+    it('stamps every queued op with the account set as author', async () => {
+        await store.create(makeStroke('u0'));
+        store.setAuthor('user-1');
+        await store.create(makeStroke('u1'));
+        await store.update('u1', { color: '#ff0000' });
+        await store.delete('u1');
+        await store.undoLast();
+        store.setAuthor(null);
+        await store.create(makeStroke('u2'));
+
+        const ops = await db.ops.orderBy('opId').toArray();
+        expect(ops.map((op) => [op.annotationId, op.type, op.userId])).toEqual([
+            ['u0', 'create', undefined],
+            ['u1', 'create', 'user-1'],
+            ['u1', 'update', 'user-1'],
+            ['u1', 'delete', 'user-1'],
+            ['u1', 'restore', 'user-1'],
+            ['u2', 'create', undefined],
+        ]);
+    });
+
     it('pokes the dirty hook after commits', async () => {
         let pokes = 0;
         store.setDirtyHook(() => {

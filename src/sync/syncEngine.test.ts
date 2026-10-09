@@ -2,16 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { noteRetryAfter } from '@/lib/retryAfter';
 import { AnnotationStore } from '@/sync/annotationStore';
-import { ScribblerDb } from '@/sync/db';
+import { ScribblerDb, type PendingOp, type PendingOpType } from '@/sync/db';
 import {
     classifyFailure,
     fromServerRow,
     observeRejections,
     PERSISTENT_FAILURE_MS,
+    reconcileWithServer,
     SyncEngine,
     type AnnotationPatchRow,
     type AnnotationsApi,
     type ApiError,
+    type HeldRefusal,
     type PatchResult,
     type SyncHold,
     type SyncRejection,
@@ -684,6 +686,42 @@ describe('SyncEngine archived score', () => {
     });
 });
 
+describe('SyncEngine holding refusals (headless)', () => {
+    it('leaves a refused change queued and the mark as drawn, and reports the op', async () => {
+        await store.create(makeStroke('h1'));
+        await engine.flush();
+        await store.update('h1', { color: '#ff0000' });
+        api.invisibleToUpdate.add('h1'); // edit access lost meanwhile
+        const queued = await db.ops.toArray();
+        const held: HeldRefusal[] = [];
+        const seen: SyncRejection[] = [];
+        const stopObserving = observeRejections((r) => seen.push(r));
+        const headless = new SyncEngine({
+            db,
+            store: new AnnotationStore(db, DOC),
+            api,
+            docId: DOC,
+            getUserId: () => USER,
+            onRejected: (r) => rejections.push(r),
+            onRefusalHeld: (refusal) => held.push(refusal),
+        });
+
+        await headless.flush();
+        headless.stop();
+        stopObserving();
+
+        expect(held).toEqual([
+            { opId: queued[0]!.opId, annotationId: 'h1', reason: 'the change matched no row this account may edit' },
+        ]);
+        expect(await db.ops.toArray()).toEqual(queued);
+        expect((await db.annotations.get('h1'))?.color).toBe('#ff0000');
+        expect(api.fetchOnes).toBe(0);
+        expect(rejections).toEqual([]);
+        expect(seen).toEqual([]);
+        expect(headless.pendingRetryDelayMs).toBeNull();
+    });
+});
+
 describe('observeRejections', () => {
     it('reports every engine’s refusals, with the document, until unsubscribed', async () => {
         const seen: { docId: string; annotationId: string }[] = [];
@@ -967,6 +1005,46 @@ describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () =
         expect(store.getPage(0).has('m6')).toBe(true);
     });
 
+    it('keeps an edit made after undoing an erase, even against a collaborator’s later delete', async () => {
+        await drawAndSync();
+        await store.delete('m6'); // erased here …
+        await engine.flush(); // … and that synced
+        api.offline = true;
+        await store.undoLast(); // brought back, offline …
+        await store.update('m6', { color: '#ff0000' }); // … and recoloured
+        // Meanwhile a collaborator restored m6 and erased it again.
+        const theirs = '2026-05-05T05:05:05.000Z';
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: theirs, seq: api.nextSeq++ });
+
+        api.offline = false;
+        await engine.flush();
+
+        // Which came last cannot be told, so the user's work is not thrown
+        // away: the mark stands, as they left it, here and on the server.
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(api.rows.get('m6')?.color).toBe('#ff0000');
+        expect(store.getPage(0).get('m6')?.color).toBe('#ff0000');
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections).toEqual([]);
+    });
+
+    it('carries the author stamp onto the net change', () => {
+        const queued = (opId: number, type: PendingOpType, color: string): PendingOp => ({
+            opId,
+            docId: DOC,
+            type,
+            annotationId: 'm1',
+            annotation: { ...makeStroke('m1'), color },
+            queuedAt: '2026-01-01T00:00:00.000Z',
+            userId: USER,
+        });
+        const outcome = reconcileWithServer(
+            [queued(1, 'update', '#aa0000'), queued(2, 'update', '#bb0000')],
+            serverRow('m1'),
+        );
+        expect(outcome).toMatchObject({ kind: 'send', op: { type: 'update', userId: USER } });
+    });
+
     it('keeps the ops untouched when the server rows cannot be read', async () => {
         await drawAndSync();
         api.offline = true;
@@ -1123,7 +1201,10 @@ describe('SyncEngine mirror repairs reach the open viewer', () => {
         viewer.start();
     };
 
-    /** The background drain: a headless engine over a store nobody draws. */
+    /**
+     * Another engine on the score — the background drain's, sign-out's: a
+     * headless engine over a store nobody draws.
+     */
     const drainInBackground = async () => {
         const headless = new SyncEngine({
             db,
@@ -1170,6 +1251,7 @@ describe('SyncEngine mirror repairs reach the open viewer', () => {
         await openViewer();
         await viewerStore.update('r1', { color: '#ff0000' });
         api.invisibleToUpdate.add('r1');
+        // Sign-out's drain, say (the background drain holds refusals instead).
 
         await drainInBackground();
 

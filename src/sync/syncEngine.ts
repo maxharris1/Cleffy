@@ -107,6 +107,13 @@ export interface SyncHold {
     pendingMarks: number;
 }
 
+/** A refused op left in the outbox (see the engine's onRefusalHeld). */
+export interface HeldRefusal {
+    opId: number;
+    annotationId: string;
+    reason: string;
+}
+
 /**
  * Classify a failed PostgREST/RPC response by HTTP status.
  *
@@ -339,6 +346,8 @@ export const groupsToReconcile = (ops: PendingOp[], verified: ReadonlySet<number
 export type Reconciled =
     /** Replace them with this one op. */
     | { kind: 'send'; op: PendingOp }
+    /** Send them as queued, one by one. */
+    | { kind: 'keep' }
     /** Send nothing: the server already holds the outcome, or a newer change there wins. Adopt its row. */
     | { kind: 'adopt' };
 
@@ -352,9 +361,13 @@ export type Reconciled =
  * Tombstones are told apart by deleted_at, which the client sends and the
  * server keeps verbatim: a server row deleted at an instant one of these ops
  * (or the tombstone a restore undoes) carries is this device's own delete; any
- * other instant is a collaborator's, newer than anything queued here, and wins
- * over a restore — undo/redo replays the user's history, it does not get to
- * erase someone else's.
+ * other instant is a collaborator's, made after the tombstone the restore
+ * undoes, and wins over the restore — undo/redo replays the user's history, it
+ * does not get to erase someone else's. It does not win over an edit made
+ * after the restore, though: the user brought the mark back and went on
+ * working on it, and device clocks cannot say whether that came before or
+ * after the other delete. Those ops are sent as queued, and the user's
+ * version stands, rather than the edit being dropped without a word.
  */
 export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Reconciled => {
     const first = ops[0];
@@ -373,6 +386,7 @@ export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Re
             queuedAt: first.queuedAt,
             type,
             annotation: last.annotation,
+            ...(last.userId !== undefined ? { userId: last.userId } : {}),
             ...extra,
         },
     });
@@ -390,7 +404,12 @@ export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Re
         (first.type === 'restore' &&
             // Queued by a build that did not record the tombstone: restore, as it always did.
             (first.baseDeletedAt === undefined || sameInstant(first.baseDeletedAt, server.deleted_at)));
-    return ours ? net('restore', { baseDeletedAt: server.deleted_at }) : { kind: 'adopt' };
+    if (ours) {
+        return net('restore', { baseDeletedAt: server.deleted_at });
+    }
+    const restoredAt = ops.findIndex((op) => op.type === 'restore');
+    const editedAfterRestore = restoredAt >= 0 && ops.slice(restoredAt + 1).some((op) => op.type === 'update');
+    return editedAfterRestore ? { kind: 'keep' } : { kind: 'adopt' };
 };
 
 /**
@@ -446,6 +465,15 @@ export class SyncEngine {
             onRejected?: (rejection: SyncRejection) => void;
             /** The outbox is refused but kept (archived score) — see SyncHold. */
             onHeld?: (hold: SyncHold) => void;
+            /**
+             * Set by a driver nobody is watching (the background drain). A
+             * refusal then changes nothing: the op and everything queued
+             * after it stay, no mark is rolled back, the pass stops, and the
+             * refused op is reported here. Rolled back where no one sees it,
+             * the marks would just vanish; left queued, they meet the refusal
+             * again in the score's viewer or at sign-out, which say so.
+             */
+            onRefusalHeld?: (refusal: HeldRefusal) => void;
         },
     ) {}
 
@@ -805,6 +833,10 @@ export class SyncEngine {
             return true;
         }
         const outcome = reconcileWithServer(group.ops, row);
+        if (outcome.kind === 'keep') {
+            opIds.forEach((id) => this.reconciled.add(id));
+            return true;
+        }
         const applied = await db.transaction('rw', db.ops, async () => {
             // Another tab may have drained (or rewritten) these meanwhile.
             const current = await db.ops.bulkGet(opIds);
@@ -883,6 +915,9 @@ export class SyncEngine {
      * drawn offline before the archive landed would otherwise be discarded
      * for good, a whole lesson's work lost to a failed card. Those ops are kept
      * and the drain stops (false) until the score is writable again.
+     *
+     * And except in a headless engine that holds refusals (onRefusalHeld):
+     * the op is kept for an engine whose refusal someone will see.
      */
     private async reject(op: PendingOp, reason: string): Promise<boolean> {
         const { api, db, store, docId } = this.deps;
@@ -893,6 +928,13 @@ export class SyncEngine {
         }
         if (archive.archived) {
             await this.holdForArchive();
+            return false;
+        }
+        if (this.deps.onRefusalHeld) {
+            if (!this.stopped) {
+                console.warn(`Sync op ${op.type} refused for ${op.annotationId}, kept for the viewer: ${reason}`);
+                this.deps.onRefusalHeld({ opId: op.opId as number, annotationId: op.annotationId, reason });
+            }
             return false;
         }
         const { data, error } = await this.withAuth(() => api.fetchOne(op.annotationId));

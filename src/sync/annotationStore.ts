@@ -39,6 +39,7 @@ export class AnnotationStore {
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
     private onDirty: (() => void) | null = null;
+    private author: string | null = null;
     private loading: Promise<void> | null = null;
     private loaded = false;
     /**
@@ -265,6 +266,11 @@ export class AnnotationStore {
     /** Hook for the sync engine (M3): poked after every committed op. */
     setDirtyHook(hook: (() => void) | null): void {
         this.onDirty = hook;
+    }
+
+    /** The signed-in account, stamped on every op queued from now on (see PendingOp.userId). */
+    setAuthor(userId: string | null): void {
+        this.author = userId;
     }
 
     get canUndo(): boolean {
@@ -766,6 +772,7 @@ export class AnnotationStore {
             const slice = ops.slice(start, start + CHUNK);
             const rows: LocalAnnotation[] = slice.map((op) => ({ ...op.annotation, pending: 1 }));
             const queuedAt = nowIso();
+            const author = this.author;
             const opRows = slice.map((op): PendingOp => ({
                 docId: this.docId,
                 type: op.type,
@@ -773,6 +780,7 @@ export class AnnotationStore {
                 annotation: op.annotation,
                 queuedAt,
                 ...(op.type === 'restore' ? { baseDeletedAt: op.baseDeletedAt } : {}),
+                ...(author ? { userId: author } : {}),
             }));
             await this.db.transaction('rw', this.db.annotations, this.db.ops, async () => {
                 await this.db.annotations.bulkPut(rows);

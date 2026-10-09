@@ -1,6 +1,6 @@
 import { isCloudDocId } from '@/features/library/documentsService';
 import { AnnotationStore } from '@/sync/annotationStore';
-import type { ScribblerDb } from '@/sync/db';
+import type { PendingOp, ScribblerDb } from '@/sync/db';
 import { activeEngineFor, docsOpenInViewers, SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
 
 /**
@@ -13,15 +13,23 @@ import { activeEngineFor, docsOpenInViewers, SyncEngine, type AnnotationsApi } f
  * outbox from wherever the app is (library, account, another score) whenever
  * the browser is online and someone is signed in:
  *
+ * - Only this account's changes. Dexie is per browser and a session can end
+ *   without sign-out clearing the outbox (an expired refresh token, a
+ *   share-link guest signing in to their own account), so a score whose
+ *   outbox holds another account's ops is left alone: uploading them would
+ *   put them under this account's name, and a refusal would lose them.
  * - The same SyncEngine flush, so the same rules apply: ops leave the outbox
- *   only when the server accepted them or refused them for good (rolled back
- *   from server truth); offline, throttling and server faults keep them; an
- *   archived score's marks are held, not dropped. Undo/redo pairs collapse.
+ *   only when the server accepted them; offline, throttling and server
+ *   faults keep them; an archived score's marks are held, not dropped.
+ *   Undo/redo pairs collapse.
+ * - Except that a refusal (lost edit access, an invalid mark) is not rolled
+ *   back here, where nobody would see the marks vanish. The score stops at
+ *   the refused op and is left until that op is gone: its viewer, or
+ *   sign-out, meets the refusal again, rolls it back and tells the user.
  * - Headless: no realtime channel and no pull. Committed rows reach the open
  *   viewers through the database broadcast as usual; rows it rewrites from
- *   server truth (an undo/redo pair beaten by a collaborator's delete, a
- *   refused change rolled back) reach them as a mirror repair (see
- *   SyncEngine.announce), with the refusal notice.
+ *   server truth (an undo/redo pair beaten by a collaborator's delete) reach
+ *   them as a mirror repair (see SyncEngine.announce).
  * - A score whose viewer is open — in this tab or another — is left to that
  *   viewer's engine. The outbox lock (withOutboxLock) serializes the two if
  *   the viewer opens mid-drain, and the repair keeps its screen honest.
@@ -80,6 +88,39 @@ export const stopAllBackgroundDrains = (): void => {
     }
 };
 
+/**
+ * Whether every op queued on the score was made by `userId` (PendingOp.userId).
+ * Ops queued before the stamp existed carry none; those count as this
+ * account's only on a score it cached itself, the test the offline open
+ * applies (loadDocumentOffline) — asked once per score, since it reads the
+ * cached PDF's bytes along with the row.
+ */
+const outboxIsOurs = async (
+    db: ScribblerDb,
+    docId: string,
+    userId: string,
+    cachedBy: Map<string, boolean>,
+): Promise<boolean> => {
+    const queued = () => db.ops.where('docId').equals(docId);
+    const notStampedOurs = await queued()
+        .filter((op) => op.userId !== userId)
+        .first();
+    if (!notStampedOurs) {
+        return true;
+    }
+    const foreign = (op: PendingOp) => op.userId !== undefined && op.userId !== userId;
+    if (foreign(notStampedOurs) || (await queued().filter(foreign).first())) {
+        return false;
+    }
+    let ours = cachedBy.get(docId);
+    if (ours === undefined) {
+        const cached = await db.pdfCache.get(docId).catch(() => undefined);
+        ours = cached?.userId === userId;
+        cachedBy.set(docId, ours);
+    }
+    return ours;
+};
+
 export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain => {
     const { db, api, userId } = deps;
     const concurrency = deps.concurrency ?? DEFAULT_CONCURRENCY;
@@ -89,6 +130,15 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
     /** One headless engine per score with work left; it carries that score's backoff. */
     const engines = new Map<string, { engine: SyncEngine; nextAt: number }>();
     const draining = new Set<string>();
+    /**
+     * Scores with no engine not to look at again before this time: their
+     * outbox holds another account's ops, or reading it failed.
+     */
+    const skipUntil = new Map<string, number>();
+    /** outboxIsOurs' answer for unstamped ops, per score. */
+    const cachedBy = new Map<string, boolean>();
+    /** Scores stopped at a refusal, by the refused op; left alone while it is queued. */
+    const parked = new Map<string, number>();
     let wakeTimer: ReturnType<typeof setTimeout> | null = null;
     let snapshotNextAt = 0;
     let snapshotBackoffMs = SNAPSHOT_RETRY_MIN_MS;
@@ -121,9 +171,33 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
         }, at - now);
     };
 
+    /** Still stopped at its refusal: the refused op has not been dealt with elsewhere. */
+    const isParked = async (docId: string): Promise<boolean> => {
+        const opId = parked.get(docId);
+        if (opId === undefined) {
+            return false;
+        }
+        if (await db.ops.get(opId)) {
+            return true;
+        }
+        parked.delete(docId);
+        return false;
+    };
+
     const drainDoc = async (docId: string): Promise<void> => {
         draining.add(docId);
         try {
+            if (!(await outboxIsOurs(db, docId, userId, cachedBy))) {
+                // Looked at again later: the other account may sign back in
+                // and drain it, or sign-out clear it.
+                skipUntil.set(docId, Date.now() + intervalMs);
+                dropEngine(docId);
+                return;
+            }
+            skipUntil.delete(docId);
+            if (stopped) {
+                return;
+            }
             let entry = engines.get(docId);
             if (!entry) {
                 entry = {
@@ -133,6 +207,7 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
                         api,
                         docId,
                         getUserId: () => userId,
+                        onRefusalHeld: ({ opId }) => parked.set(docId, opId),
                     }),
                     nextAt: 0,
                 };
@@ -140,6 +215,10 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
             }
             await entry.engine.flush();
             if (stopped) {
+                return;
+            }
+            if (parked.has(docId)) {
+                dropEngine(docId);
                 return;
             }
             // The engine scheduled its own retry if the drain stopped short;
@@ -158,6 +237,8 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
             const entry = engines.get(docId);
             if (entry) {
                 entry.nextAt = Date.now() + intervalMs;
+            } else {
+                skipUntil.set(docId, Date.now() + intervalMs);
             }
         } finally {
             draining.delete(docId);
@@ -214,10 +295,16 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
         const now = Date.now();
         const work: Promise<void>[] = [];
         for (const docId of pendingDocs) {
-            if (draining.size >= concurrency) {
+            if (draining.size >= concurrency || stopped) {
                 break;
             }
-            if (draining.has(docId) || isViewed(docId) || (engines.get(docId)?.nextAt ?? 0) > now) {
+            if (
+                draining.has(docId) ||
+                isViewed(docId) ||
+                (engines.get(docId)?.nextAt ?? 0) > now ||
+                (skipUntil.get(docId) ?? 0) > now ||
+                (await isParked(docId))
+            ) {
                 continue;
             }
             work.push(drainDoc(docId));

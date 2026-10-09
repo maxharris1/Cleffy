@@ -38,6 +38,15 @@ export interface PendingOp {
      * Plain field, not indexed — no Dexie version bump needed.
      */
     baseDeletedAt?: string | null;
+    /**
+     * Account that made the change. Dexie is per browser, not per account, and
+     * a session can end without sign-out clearing the outbox (an expired
+     * refresh token, a share-link guest signing in to their own account): the
+     * background drain uploads only ops stamped with the signed-in account.
+     * Absent on ops queued before this field existed, and on local scores.
+     * Plain field, not indexed — no Dexie version bump needed.
+     */
+    userId?: string;
 }
 
 export interface SyncState {
