@@ -224,7 +224,8 @@ export const normalizeQuery = (q: string): string => {
     // Single-letter catalogs (K, D, S) only when clearly numeric (2+ digits).
     s = s.replace(/\b([kds])\s*\.?\s*(\d{2,})\b/g, '$1.$2');
     // Haydn's Hoboken numbers carry a roman group: "Hob. XVI: 50" → "hob.xvi:50".
-    s = s.replace(/\bhob\s*\.?\s*([ivx]+[a-z]?)\s*[:.]\s*(\d+)/g, 'hob.$1:$2');
+    // "hob xvi 50" (no punctuation) too.
+    s = s.replace(/\bhob\s*\.?\s*([ivx]+[a-z]?)\s*[:.\s]\s*(\d+)/g, 'hob.$1:$2');
     for (const [re, canonical] of COMPOSER_SPELLINGS) {
         s = s.replace(re, canonical);
     }
@@ -485,7 +486,36 @@ export const keyOf = (text: string): string | null => {
 /** A title in the key the query names. "major" alone would credit C-sharp major for "C major". */
 const KEY_MATCH_SCORE = 8;
 
-export const scoreTitleMatch = (title: string, tokens: string[], queryKey: string | null = null): number => {
+/** "Work (Wille, Rolf-Peter)" → ["wille"]; "(Saint-Saëns, Camille)" → ["saint-saens", "saint", "saens"]. */
+const composerSurnameWords = (title: string): string[] => {
+    const surname = foldAccents(title.match(/\(([^(),]+),[^()]*\)\s*$/)?.[1]?.trim() ?? '');
+    if (!surname) {
+        return [];
+    }
+    return [...new Set([surname, ...surname.split(/[\s-]+/)])].filter((w) => w.length >= 3);
+};
+
+/**
+ * Query words that name a composer of one of the hits: a word equal to some
+ * hit's "(Surname, First)" surname. "chopin etude op 10 no 2" → ["chopin"].
+ */
+export const queryComposerTokens = (tokens: string[], titles: Iterable<string>): string[] => {
+    const surnames = new Set<string>();
+    for (const title of titles) {
+        for (const w of composerSurnameWords(title)) {
+            surnames.add(w);
+        }
+    }
+    const words = tokens.map(foldAccents).filter((t) => !STOP_TOKENS.has(t) && !UNIT_TOKEN_RE.test(t));
+    return [...new Set(words.filter((t) => surnames.has(t)))];
+};
+
+export const scoreTitleMatch = (
+    title: string,
+    tokens: string[],
+    queryKey: string | null = null,
+    queryComposers: string[] = [],
+): number => {
     if (tokens.length === 0) {
         return 0;
     }
@@ -540,9 +570,15 @@ export const scoreTitleMatch = (title: string, tokens: string[], queryKey: strin
         }
     }
     // Opus numbers repeat across composers: "chopin nocturne op 9 no 2" must not
-    // crown Dussek's Op.9 No.2. A catalogue hit on a title that shares none of
-    // the query's words counts as a weak one.
-    const catalogTrusted = words === 0 || wordHits > 0;
+    // crown Dussek's Op.9 No.2. When the query names a composer, a catalogue hit
+    // counts in full only under that composer — "2 Studies on Chopin's Etude,
+    // Op.10 No.2 (Wille, Rolf-Peter)" shares words with "chopin etude op 10 no 2"
+    // but is not Chopin's. Otherwise a title sharing none of the query's words
+    // counts as a weak one.
+    const catalogTrusted =
+        queryComposers.length > 0
+            ? queryComposers.some((c) => composerSurnameWords(title).includes(c))
+            : words === 0 || wordHits > 0;
     score += exactCatalogs * (catalogTrusted ? CATALOG_EXACT_SCORE : CATALOG_WITHIN_SCORE);
     // Bonus when every meaningful token hits somewhere in the title.
     if (hits === scorable.length && scorable.length > 1) {
@@ -939,6 +975,7 @@ export const mergeAndRank = (batches: RankBatch[], opts: RankOptions): RankedHit
     const satisfiesGroups = (categories: Set<string> | undefined): boolean =>
         groups.every((group) => group.some((c) => categories?.has(c) ?? false));
 
+    const queryComposers = queryComposerTokens(opts.tokens, merged.keys());
     const ranked: RankedHit[] = [];
     for (const hit of merged.values()) {
         const folded = foldAccents(hit.title);
@@ -946,7 +983,7 @@ export const mergeAndRank = (batches: RankBatch[], opts: RankOptions): RankedHit
         if (groups.length > 0 && !opts.unverifiedTitles?.has(folded) && !satisfiesGroups(categories)) {
             continue;
         }
-        let score = hit.score + scoreTitleMatch(hit.title, opts.tokens, queryKey);
+        let score = hit.score + scoreTitleMatch(hit.title, opts.tokens, queryKey, queryComposers);
         if (aliasSet.has(hit.title)) {
             score += 50;
         }

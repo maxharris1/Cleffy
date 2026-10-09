@@ -13,6 +13,7 @@ import {
     labelTitlesForQuery,
     mergeAndRank,
     normalizeQuery,
+    queryComposerTokens,
     scoreTitleMatch,
     titleSearchQuery,
     tokenizeQuery,
@@ -28,6 +29,8 @@ const BWV846 = `Prelude and Fugue in C major, BWV 846 ${BACH}`;
 const BWV848 = `Prelude and Fugue in C-sharp major, BWV 848 ${BACH}`;
 const BWV531 = `Prelude and Fugue in C major, BWV 531 ${BACH}`;
 const HAMMERKLAVIER = 'Piano Sonata No.29, Op.106 (Beethoven, Ludwig van)';
+const CHOPIN_OP10 = 'Études, Op.10 (Chopin, Frédéric)';
+const WILLE = "2 Studies on Chopin's Etude, Op.10 No.2 (Wille, Rolf-Peter)";
 
 const batch = (variant: SearchVariant, titles: string[]): RankBatch => ({
     variant,
@@ -45,6 +48,8 @@ const CATEGORIES = new Map<string, Set<string>>([
     [foldAccents(BWV848), new Set(['For keyboard', 'For piano (arr)'])],
     [foldAccents(BWV531), new Set(['For organ'])],
     [foldAccents(HAMMERKLAVIER), new Set(['For piano'])],
+    [foldAccents(CHOPIN_OP10), new Set(['For piano'])],
+    [foldAccents(WILLE), new Set(['For piano'])],
 ]);
 
 /** The edge function's rank call, with its search variants answered by `answers`. */
@@ -85,6 +90,10 @@ describe('catalogue references', () => {
 
     it('reads the query side the way normalizeQuery spells it', () => {
         expect(normalizeQuery('Hob. XVI: 50')).toBe('hob.xvi:50');
+        expect(normalizeQuery('hob xvi 50')).toBe('hob.xvi:50');
+        expect(catalogRefsFromTokens(tokenizeQuery('haydn hob xvi 50'))).toEqual([
+            { catalog: 'hob', num: 50, suffix: 'xvi' },
+        ]);
         expect(catalogRefsFromTokens(tokenizeQuery('Beethoven Op 27 No 2'))).toEqual([
             { catalog: 'op', num: 27, suffix: '', sub: 2 },
         ]);
@@ -119,6 +128,7 @@ describe('title-mode search variant', () => {
         expect(titleSearchQuery('chopin nocturne op 9 no 2')).toBe('Op.9 No.2');
         expect(titleSearchQuery('mozart k 331')).toBe('K.331');
         expect(titleSearchQuery('Hob. XVI:50')).toBe('Hob.XVI:50');
+        expect(titleSearchQuery('hob xvi 50')).toBe('Hob.XVI:50');
         expect(titleSearchQuery('Bach Prelude C major')).toBe('Bach Prelude C major');
         expect(titleSearchQuery('Prelude in C major (WTC I)')).toBe('Prelude in C major WTC I');
         expect(titleSearchQuery('chopin')).toBeNull();
@@ -189,5 +199,20 @@ describe('mergeAndRank — queries testers saw fail under the Piano chip', () =>
             { query: 'chopin nocturne op 9 no 2', tokens: tokenizeQuery('chopin nocturne op 9 no 2') },
         );
         expect(ranked.map((h) => h.title)).toEqual([chopin, dussek]);
+    });
+
+    it('an exact catalogue hit by another composer stays below the composer the query names', () => {
+        const q = 'chopin etude op 10 no 2';
+        expect(queryComposerTokens(tokenizeQuery(q), [CHOPIN_OP10, WILLE])).toEqual(['chopin']);
+        expect(titleSearchQuery(q)).toBe('Op.10 No.2');
+        // Wille's page shares "chopin" and "etude" with the query and is the exact
+        // Op.10 No.2 the title search finds, but it is not Chopin's.
+        const ranked = rank(q, {
+            'text:chopin etude op 10 no 2': [CHOPIN_OP10],
+            'title:Op.10 No.2': [WILLE],
+        });
+        expect(ranked.slice(0, 2)).toEqual([CHOPIN_OP10, WILLE]);
+        const tokens = tokenizeQuery(q);
+        expect(scoreTitleMatch(WILLE, tokens, null, ['chopin'])).toBeLessThan(scoreTitleMatch(WILLE, tokens));
     });
 });
