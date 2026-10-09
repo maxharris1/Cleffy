@@ -4,9 +4,9 @@ import { useSession } from '@/features/auth/session';
 import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { type LimitReachedError, limitHeadline } from '@/features/billing/limitErrors';
 import { isBillingConfigured } from '@/features/billing/pricing';
-import { claimPdfExport } from '@/features/export/exportClaim';
+import { claimPdfExport, exportAttemptKey, markExportDelivered } from '@/features/export/exportClaim';
 import { exportAnnotatedPageImage } from '@/features/export/exportPageImage';
-import { exportAnnotatedPdf } from '@/features/export/exportPdf';
+import { buildAnnotatedPdf, deliverPdf } from '@/features/export/exportPdf';
 import { fetchDocument, isCloudDocId, loadDocumentBytes } from '@/features/library/documentsService';
 import type { UploadProgress } from '@/lib/storageUpload';
 import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
@@ -131,62 +131,108 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
         return loadDocumentBytes(row, { userId, onProgress });
     };
 
-    /**
-     * `metered` marks the flows that draw down the pdf_exports allowance — the
-     * two that produce a PDF. Sharing the page as a photo is a PNG and is not
-     * what that counter counts (the pricing promises "1 PDF export a month").
-     */
-    const run = async (
-        label: string,
-        failureLabel: string,
-        action: (source: ArrayBuffer) => Promise<void>,
-        metered = false,
-    ) => {
+    /** Shared start of every flow: one at a time, and a clean slate of messages. */
+    const begin = (label: string): boolean => {
         if (busy !== null) {
-            return;
+            return false;
         }
         setBusy(label);
         setLimit(null);
         setRefusal(null);
         setError(null);
+        return true;
+    };
+
+    /** The PDF is in hand; put the label back after any download progress. */
+    const sourceFor = async (label: string): Promise<ArrayBuffer> => {
+        const source = await resolveBytes();
+        setDownload(null);
+        setBusy(label);
+        return source;
+    };
+
+    const fail = (stage: 'source' | 'export', failureLabel: string, err: unknown) => {
+        console.warn('Share/export failed', err);
+        setError(describeFailure(stage, failureLabel, err));
+        // The menu may have been dismissed while this ran; the failure must
+        // still be seen, not just logged.
+        setOpen(true);
+    };
+
+    const finish = () => {
+        setBusy(null);
+        setDownload(null);
+    };
+
+    /**
+     * Sharing the page as a photo: a PNG, which is not what the pdf_exports
+     * allowance counts (the pricing promises "1 PDF export a month"), so it is
+     * built and handed over in one step with no claim.
+     */
+    const runUnmetered = async (
+        label: string,
+        failureLabel: string,
+        action: (source: ArrayBuffer) => Promise<unknown>,
+    ) => {
+        if (!begin(label)) {
+            return;
+        }
         let stage: 'source' | 'export' = 'source';
         try {
-            // Bytes first — a cache read or a download, not the export — so a
-            // missing PDF fails before the meter ticks. There is no client-side
-            // refund, and spending a free account's one monthly export on a PDF
-            // that never got built is exactly the dishonesty this counter exists
-            // to avoid.
-            const source = await resolveBytes();
-            setDownload(null);
-            setBusy(label);
+            const source = await sourceFor(label);
             stage = 'export';
-            if (metered) {
-                // Still ahead of any flattening: nothing is built and thrown away.
-                // Fails closed — see exportClaim.ts for why, and for the one
-                // exception (an unlimited plan exporting offline).
-                const claim = await claimPdfExport(session, localOnly ? null : docId);
-                if (!claim.ok) {
-                    if ('limit' in claim) {
-                        setLimit(claim.limit);
-                    } else {
-                        setRefusal(claim.message);
-                    }
-                    // Seen even if the menu was dismissed while the claim ran.
-                    setOpen(true);
-                    return;
-                }
-            }
             await action(source);
             setOpen(false);
         } catch (err) {
-            console.warn('Share/export failed', err);
-            setError(describeFailure(stage, failureLabel, err));
-            // The menu may have been dismissed while this ran; the failure
-            // must still be seen, not just logged.
-            setOpen(true);
+            fail(stage, failureLabel, err);
         } finally {
-            setBusy(null);
-            setDownload(null);
+            finish();
+        }
+    };
+
+    /**
+     * The two PDF flows, which draw down the pdf_exports allowance. In order:
+     * the source bytes, the finished PDF, the claim, then the hand-over. Both
+     * the download and the build come before the meter ticks, so a PDF that
+     * cannot be fetched or flattened fails without spending anything -- there
+     * is no refund, and spending a free account's one monthly export on a file
+     * that never existed is exactly the dishonesty this counter exists to
+     * avoid. The claim fails closed (see exportClaim.ts, and its one exception:
+     * an unlimited plan exporting offline). What can still miss after an ok --
+     * the share sheet dismissed, the answer lost -- keeps the export's claim id,
+     * so asking again is a retry the server does not count twice.
+     */
+    const runMetered = async (label: string, failureLabel: string, page: number | null) => {
+        if (!begin(label)) {
+            return;
+        }
+        const attempt = exportAttemptKey(session, docId, page);
+        let stage: 'source' | 'export' = 'source';
+        try {
+            const source = await sourceFor(label);
+            stage = 'export';
+            const file = await (page === null
+                ? buildAnnotatedPdf(docId, source, title)
+                : buildAnnotatedPdf(docId, source, title, { pageIndex: page }));
+            const claim = await claimPdfExport(session, localOnly ? null : docId, attempt);
+            if (!claim.ok) {
+                if ('limit' in claim) {
+                    setLimit(claim.limit);
+                } else {
+                    setRefusal(claim.message);
+                }
+                // Seen even if the menu was dismissed while the claim ran.
+                setOpen(true);
+                return;
+            }
+            if ((await deliverPdf(file)) !== 'cancelled') {
+                markExportDelivered(attempt);
+            }
+            setOpen(false);
+        } catch (err) {
+            fail(stage, failureLabel, err);
+        } finally {
+            finish();
         }
     };
 
@@ -225,7 +271,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                             hint="PNG — send via Messages"
                             disabled={busy !== null}
                             onClick={() =>
-                                void run('Sharing…', 'Sharing the page', (source) =>
+                                void runUnmetered('Sharing…', 'Sharing the page', (source) =>
                                     exportAnnotatedPageImage(docId, source, focusedPageIndex, title),
                                 )
                             }
@@ -233,28 +279,13 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                         <MenuItem
                             label={`Share page ${pageLabel} as PDF`}
                             disabled={busy !== null}
-                            onClick={() =>
-                                void run(
-                                    'Sharing…',
-                                    'Sharing the page',
-                                    (source) =>
-                                        exportAnnotatedPdf(docId, source, title, { pageIndex: focusedPageIndex }),
-                                    true,
-                                )
-                            }
+                            onClick={() => void runMetered('Sharing…', 'Sharing the page', focusedPageIndex)}
                         />
                         <div className="my-1 border-t border-stone-100" />
                         <MenuItem
                             label="Export whole score as PDF"
                             disabled={busy !== null}
-                            onClick={() =>
-                                void run(
-                                    'Exporting…',
-                                    'The export',
-                                    (source) => exportAnnotatedPdf(docId, source, title),
-                                    true,
-                                )
-                            }
+                            onClick={() => void runMetered('Exporting…', 'The export', null)}
                         />
                     </div>
                     {download ? (

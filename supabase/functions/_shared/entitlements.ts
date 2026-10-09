@@ -41,6 +41,12 @@ export interface Entitlements {
     status: string | null;
     source: EntitlementSource;
     current_period_end: string | null;
+    /**
+     * The plan stops at current_period_end instead of renewing (Stripe's
+     * cancel_at_period_end, from the subscription that entitles — the owner's,
+     * for an Academy seat). False whenever there is no period to end.
+     */
+    cancel_at_period_end: boolean;
     limits: EntitlementLimits;
 }
 
@@ -161,6 +167,7 @@ export const freeEntitlements = (userId: string): Entitlements => ({
     status: null,
     source: 'none',
     current_period_end: null,
+    cancel_at_period_end: false,
     limits: TIER_LIMITS.free,
 });
 
@@ -176,6 +183,7 @@ export const studentEntitlements = (userId: string): Entitlements => ({
     status: null,
     source: 'managed',
     current_period_end: null,
+    cancel_at_period_end: false,
     limits: STUDENT_LIMITS,
 });
 
@@ -274,6 +282,8 @@ export interface SubscriptionLike {
     tier: BillingTier;
     status: string;
     current_period_end: string | null;
+    /** Absent reads as false: the column's default. */
+    cancel_at_period_end?: boolean;
 }
 
 export interface EntitlementInput {
@@ -318,6 +328,7 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
             status: own.status,
             source: 'subscription',
             current_period_end: own.current_period_end,
+            cancel_at_period_end: own.cancel_at_period_end === true,
             limits: TIER_LIMITS[own.tier],
         };
     }
@@ -334,6 +345,7 @@ export const resolveEntitlements = (input: EntitlementInput, nowMs: number): Ent
             status: seat.status,
             source: 'studio_member',
             current_period_end: seat.current_period_end,
+            cancel_at_period_end: seat.cancel_at_period_end === true,
             limits: TIER_LIMITS.academy,
         };
     }

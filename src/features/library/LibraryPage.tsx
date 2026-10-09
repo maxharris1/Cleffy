@@ -1,7 +1,6 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { Link, useOutletContext } from 'react-router';
 
-import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { HomeScreenPromptBanner } from '@/features/install/HomeScreenPromptBanner';
 import {
     LIBRARY_PAGE_SIZE,
@@ -40,6 +39,7 @@ import { perfLogIfDev, perfMark } from '@/lib/perf';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
+import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import { ScoreThumb } from '@/features/library/ScoreThumb';
 import { TagAssignDialog } from '@/features/library/TagAssignDialog';
 import { TagManageDialog } from '@/features/library/TagManageDialog';
@@ -109,7 +109,7 @@ export const LibraryPage = () => {
         uploadPct,
         onUpload,
         uploadError,
-        uploadLimit,
+        limitNotice,
         clearUploadError,
         canManageStudents,
         quotaExhausted = false,
@@ -818,14 +818,18 @@ export const LibraryPage = () => {
 
                 {/*
               Both, never one instead of the other. The limit notice outlives the
-              upload that raised it — nothing but the next upload clears it — so
-              rendering it in place of statusError would swallow every later
-              failure: a delete that errored, a listDocuments that failed, the
-              offline notice. Two different things, and the teacher needs both.
+              upload that raised it — and at the cap it is there before any
+              upload, explaining the greyed-out button — so rendering it in place
+              of statusError would swallow every later failure: a delete that
+              errored, a listDocuments that failed, the offline notice. Two
+              different things, and the teacher needs both.
             */}
-                {uploadLimit && quotaUpgradeHint ? (
-                    <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} className="mt-5" />
-                ) : null}
+                <ScoreLimitNotice
+                    limit={limitNotice}
+                    upgradeHint={quotaUpgradeHint}
+                    onUpgrade={openPricing}
+                    className="mt-5"
+                />
                 {statusError ? (
                     isOfflineNotice && !uploadError && !actionError ? (
                         <p className="mt-5 text-sm text-amber-800" role="status">

@@ -25,6 +25,8 @@ import {
     EXPORT_GUEST_OFFLINE_MESSAGE,
     EXPORT_OFFLINE_MESSAGE,
     claimPdfExport,
+    exportAttemptKey,
+    markExportDelivered,
     type ExportClaim,
 } from '@/features/export/exportClaim';
 
@@ -251,5 +253,111 @@ describe('claimPdfExport for a share-link guest', () => {
         );
         await expect(claimPdfExport(guest, 'doc-1')).resolves.toEqual({ ok: true });
         expect(rpc).toHaveBeenNthCalledWith(2, 'consume_pdf_export', {});
+    });
+});
+
+describe('claimPdfExport with a claim id', () => {
+    const teacher = sessionOf();
+    let n = 0;
+    // A fresh export per test: the pending ids live in the module.
+    const freshAttempt = () => exportAttemptKey(teacher, `doc-${++n}`, null);
+    const claimIdsSent = (): unknown[] =>
+        rpc.mock.calls
+            .filter(([fn]) => fn === 'claim_pdf_export')
+            .map(([, args]) => (args as { p_claim?: string }).p_claim);
+    const granted = { data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null };
+
+    beforeEach(() => {
+        rpc.mockReset();
+        readCachedEntitlements.mockReset();
+        readCachedEntitlements.mockResolvedValue(plan('free', 1));
+        setOnline(true);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('names one export by who, which score and which page', () => {
+        expect(exportAttemptKey(teacher, 'doc-1', null)).not.toBe(exportAttemptKey(teacher, 'doc-1', 0));
+        expect(exportAttemptKey(teacher, 'doc-1', 0)).not.toBe(exportAttemptKey(teacher, 'doc-1', 1));
+        expect(exportAttemptKey(null, 'doc-1', null)).not.toBe(exportAttemptKey(teacher, 'doc-1', null));
+        expect(exportAttemptKey(teacher, 'doc-1', 2)).toBe(exportAttemptKey(teacher, 'doc-1', 2));
+    });
+
+    it('sends the same id until the export is delivered, then a new one', async () => {
+        const attempt = freshAttempt();
+        rpc.mockResolvedValue(granted);
+        await claimPdfExport(teacher, 'doc-1', attempt);
+        await claimPdfExport(teacher, 'doc-1', attempt);
+        markExportDelivered(attempt);
+        await claimPdfExport(teacher, 'doc-1', attempt);
+
+        const [first, retry, next] = claimIdsSent();
+        expect(first).toMatch(/^[0-9a-f-]{36}$/);
+        expect(retry).toBe(first);
+        expect(next).not.toBe(first);
+    });
+
+    it('keeps the id when the answer never arrived, since the server may have counted it', async () => {
+        const attempt = freshAttempt();
+        rpc.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+        expect(messageOf(await claimPdfExport(teacher, 'doc-1', attempt))).toBe(EXPORT_OFFLINE_MESSAGE);
+        rpc.mockResolvedValue(granted);
+        await expect(claimPdfExport(teacher, 'doc-1', attempt)).resolves.toEqual({ ok: true });
+
+        const [lost, retry] = claimIdsSent();
+        expect(retry).toBe(lost);
+    });
+
+    it('keeps a pending id across a reload of the tab', async () => {
+        const attempt = freshAttempt();
+        rpc.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+        await claimPdfExport(teacher, 'doc-1', attempt);
+
+        // A fresh module instance stands in for the reloaded page.
+        vi.resetModules();
+        const reloaded = await import('@/features/export/exportClaim');
+        rpc.mockResolvedValue(granted);
+        await reloaded.claimPdfExport(teacher, 'doc-1', attempt);
+
+        const [lost, retry] = claimIdsSent();
+        expect(retry).toBe(lost);
+    });
+
+    it('drops an id the server refused or will not take', async () => {
+        const attempt = freshAttempt();
+        rpc.mockResolvedValueOnce({ data: { ok: false, count: 1, limit: 1, tier: 'free' }, error: null });
+        await claimPdfExport(teacher, 'doc-1', attempt);
+        rpc.mockResolvedValueOnce({ data: null, error: { code: '22023', message: 'already been used' } });
+        expect(messageOf(await claimPdfExport(teacher, 'doc-1', attempt))).toBe(EXPORT_CLAIM_FAILED_MESSAGE);
+        rpc.mockResolvedValue(granted);
+        await claimPdfExport(teacher, 'doc-1', attempt);
+
+        const [refused, rejected, fresh] = claimIdsSent();
+        expect(rejected).not.toBe(refused);
+        expect(fresh).not.toBe(rejected);
+    });
+
+    it('asks again without the id when the server predates claim ids', async () => {
+        const attempt = freshAttempt();
+        rpc.mockImplementation((_fn: string, args: { p_claim?: string }) =>
+            Promise.resolve(
+                args.p_claim !== undefined
+                    ? { data: null, error: { code: 'PGRST202', message: 'Could not find the function' } }
+                    : granted,
+            ),
+        );
+        await expect(claimPdfExport(teacher, 'doc-1', attempt)).resolves.toEqual({ ok: true });
+        expect(rpc).toHaveBeenNthCalledWith(1, 'claim_pdf_export', { p_claim: expect.any(String) });
+        expect(rpc).toHaveBeenNthCalledWith(2, 'claim_pdf_export', {});
+    });
+
+    it("carries a guest's id alongside the score it names", async () => {
+        const guest = sessionOf({ anonymous: true });
+        const attempt = exportAttemptKey(guest, 'doc-guest', null);
+        rpc.mockResolvedValue({ data: { ok: true, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
+        await claimPdfExport(guest, 'doc-guest', attempt);
+        expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_document: 'doc-guest', p_claim: expect.any(String) });
     });
 });

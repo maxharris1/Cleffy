@@ -35,6 +35,36 @@ export const shouldArchiveOnStatus = (status: string): boolean => ARCHIVING_STAT
 
 export const isTerminalStatus = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
+/**
+ * Whether the buyer already holds a subscription that Checkout would put a
+ * SECOND one beside. Checkout always creates a new subscription, so a Personal
+ * subscriber who picked Teacher there was billed for both; plan changes and
+ * resuming a cancelled plan belong to the billing portal, which changes the one
+ * they have.
+ *
+ * Running means entitling and inside its period (cancel_at_period_end included:
+ * it still runs, and resuming it is one click in the portal), or past_due --
+ * Stripe is still retrying it, and fixing the card there brings it back.
+ * Anything that has ended, or never started (incomplete), leaves Checkout open.
+ */
+export const holdsRunningSubscription = (
+    rows: Array<{ status: string; current_period_end: string | null }>,
+    nowMs: number,
+): boolean =>
+    rows.some((row) => {
+        if (row.status === 'past_due') {
+            return true;
+        }
+        if (!isEntitlingStatus(row.status)) {
+            return false;
+        }
+        if (row.current_period_end === null) {
+            return true;
+        }
+        const endMs = Date.parse(row.current_period_end);
+        return Number.isFinite(endMs) ? endMs > nowMs : true;
+    });
+
 export interface SubscriptionUpsert {
     stripe_subscription_id: string;
     user_id: string;

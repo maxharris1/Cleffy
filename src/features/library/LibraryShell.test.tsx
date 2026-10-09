@@ -3,8 +3,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { LimitReachedNotice } from '@/features/billing/LimitReachedNotice';
 import { LibraryShell, type LibraryOutletContext } from '@/features/library/LibraryShell';
+import { ScoreLimitNotice } from '@/features/library/ScoreLimitNotice';
 import type { Entitlements } from '@/types/database';
 
 // The shell is chrome around an Outlet: everything it reaches for at import
@@ -108,11 +108,12 @@ const Page = ({ name }: { name: string }) => {
 };
 
 const ShellPage = ({ name }: { name: string }) => {
-    const { uploadLimit, openPricing } = useOutletContext<LibraryOutletContext>();
+    const { limitNotice, quotaUpgradeHint, openPricing, uploadError } = useOutletContext<LibraryOutletContext>();
     return (
         <div>
             <Page name={name} />
-            {uploadLimit ? <LimitReachedNotice limit={uploadLimit} onUpgrade={openPricing} /> : null}
+            <ScoreLimitNotice limit={limitNotice} upgradeHint={quotaUpgradeHint !== false} onUpgrade={openPricing} />
+            {uploadError ? <p>error: {uploadError}</p> : null}
         </div>
     );
 };
@@ -120,7 +121,8 @@ const ShellPage = ({ name }: { name: string }) => {
 /** Drives onImportImslp the way ImslpBrowser does, with a cancel handle. */
 const importControl = { controller: new AbortController() };
 const ImportPage = () => {
-    const { onImportImslp, uploadError } = useOutletContext<LibraryOutletContext>();
+    const { onImportImslp, uploadError, limitNotice, importLimit, quotaExhausted, openPricing } =
+        useOutletContext<LibraryOutletContext>();
     return (
         <div>
             <p>search page</p>
@@ -136,6 +138,9 @@ const ImportPage = () => {
                 import
             </button>
             {uploadError ? <p>error: {uploadError}</p> : null}
+            <ScoreLimitNotice limit={limitNotice} upgradeHint onUpgrade={openPricing} />
+            {importLimit ? <p>imports spent</p> : null}
+            {quotaExhausted ? <p>uploads blocked</p> : null}
         </div>
     );
 };
@@ -309,7 +314,9 @@ describe('LibraryShell', () => {
         expect(screen.getByRole('banner')).toHaveClass('pt-[var(--safe-top)]');
     });
 
-    it('refuses upload at the owned-score cap with no progress bar and no unprompted notice', async () => {
+    it('explains the owned-score cap, with the way to the plans, before any upload is tried', async () => {
+        // The greyed-out button alone said nothing: the notice used to wait for a
+        // refusal that a disabled button can never produce.
         entitlementsState.current = freeEntitlements();
         const docs = [ownedDoc('d1'), ownedDoc('d2'), ownedDoc('d3')];
         fetchLibraryBootstrap.mockResolvedValue(listSnapshot(docs));
@@ -320,8 +327,43 @@ describe('LibraryShell', () => {
         await waitFor(() => expect(input).toBeDisabled());
         expect(uploadDocument).not.toHaveBeenCalled();
         expect(screen.queryByRole('progressbar', { name: 'Uploading score' })).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
-        expect(screen.queryByText(/reached your 3 free cloud scores/)).not.toBeInTheDocument();
+        expect(screen.getByText('You have reached your 3 free cloud scores')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'See plans' })).toBeInTheDocument();
+    });
+
+    it('refuses an add at the cap with the plan notice, not a bare red error', async () => {
+        const user = userEvent.setup();
+        entitlementsState.current = freeEntitlements();
+        const docs = [ownedDoc('d1'), ownedDoc('d2'), ownedDoc('d3')];
+        // The cap is only known from the snapshot read at the moment of the add.
+        fetchLibraryBootstrap.mockReturnValue(new Promise(() => undefined));
+        readCachedLibraryList.mockResolvedValueOnce(null).mockResolvedValue(listSnapshot(docs));
+        renderShell('/search');
+
+        await user.click(screen.getByRole('button', { name: 'import' }));
+
+        expect(await screen.findByText('You have reached your 3 free cloud scores')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'See plans' })).toBeInTheDocument();
+        expect(screen.queryByText(/^error:/)).not.toBeInTheDocument();
+        expect(importDocumentFromImslp).not.toHaveBeenCalled();
+    });
+
+    it("blocks only IMSLP adds when the month's imports are spent, and says which allowance it was", async () => {
+        const user = userEvent.setup();
+        entitlementsState.current = freeEntitlements();
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+        importDocumentFromImslp.mockRejectedValue(
+            new LimitReachedError({ code: 'limit_reached', metric: 'smart_imports', limit: 2, tier: 'free' }),
+        );
+        renderShell('/search');
+
+        await user.click(screen.getByRole('button', { name: 'import' }));
+
+        expect(await screen.findByText('You have used your 2 free IMSLP imports this month')).toBeInTheDocument();
+        expect(screen.getByText('imports spent')).toBeInTheDocument();
+        // Uploading a PDF of one's own draws on a different allowance.
+        expect(screen.queryByText('uploads blocked')).not.toBeInTheDocument();
+        expect(screen.getByLabelText('Upload score', { selector: 'input' })).not.toBeDisabled();
     });
 
     it('does not show a limit notice below the cap', async () => {

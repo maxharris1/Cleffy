@@ -113,6 +113,13 @@ export const cloudScoreCapReached = (
     return documents.filter((row) => row.archived_at === null && row.owner_id === ownerId).length >= limit;
 };
 
+/**
+ * An account whose plan carries no cloud scores at all (a provisioned student,
+ * whose teacher assigns what they play). There is nothing to upgrade, so it is
+ * said plainly instead of with the plan notice.
+ */
+export const NO_CLOUD_SCORES_MESSAGE = 'This account cannot add cloud scores.';
+
 export const cloudScoresLimitError = (limit: number, tier: EffectiveTier): LimitReachedError =>
     new LimitReachedError({
         code: 'limit_reached',

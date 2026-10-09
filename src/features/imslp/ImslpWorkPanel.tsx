@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 
+import { NO_CLOUD_SCORES_MESSAGE, limitHeadline, type LimitReachedError } from '@/features/billing/limitErrors';
 import type { ImslpEdition, ImslpWorkDetail } from '@/features/imslp/imslpApi';
 import {
     displayEditionName,
@@ -40,8 +41,12 @@ interface ImslpWorkPanelProps {
     importing: boolean;
     /** Free cloud-score quota is exhausted — Add stays disabled. */
     quotaExhausted?: boolean;
+    /** This month's IMSLP imports are spent — Add stays disabled. */
+    importLimit?: LimitReachedError | null;
     /** False on student (limit 0): plain copy, no upgrade CTA. */
     quotaUpgradeHint?: boolean;
+    /** Opens the plans from the disabled Add's hint. */
+    onUpgrade?: () => void;
     /** Closes the work and returns to search. Sits with the title, not the page chrome. */
     onBack: () => void;
     onSelect: (edition: ImslpEdition) => void;
@@ -52,6 +57,20 @@ interface ImslpWorkPanelProps {
 }
 
 const URTEXT_COPYRIGHT_NOTE = /copyright status for urtext/i;
+
+/**
+ * The way on from a disabled Add: opens the plans. A button (it opens a dialog,
+ * it goes nowhere) dressed as the inline link it reads as. Without a handler
+ * the words stay as plain text rather than a control that does nothing.
+ */
+const UpgradeLink = ({ onUpgrade, children }: { onUpgrade?: () => void; children: string }) =>
+    onUpgrade ? (
+        <button type="button" onClick={onUpgrade} className={`cursor-pointer text-xs ${linkClassName}`}>
+            {children}
+        </button>
+    ) : (
+        <>{children}</>
+    );
 
 type Availability = NonNullable<ReturnType<typeof editionAvailability>>;
 
@@ -80,7 +99,9 @@ export const ImslpWorkPanel = ({
     busy,
     importing,
     quotaExhausted = false,
+    importLimit = null,
     quotaUpgradeHint = true,
+    onUpgrade,
     onBack,
     onSelect,
     onImportSelected,
@@ -300,7 +321,7 @@ export const ImslpWorkPanel = ({
                         <button
                             type="button"
                             onClick={onImportSelected}
-                            disabled={!selectedImportable || importing || quotaExhausted}
+                            disabled={!selectedImportable || importing || quotaExhausted || importLimit !== null}
                             className={buttonClassName('primary', 'sm')}
                         >
                             {buttonLabel}
@@ -312,9 +333,19 @@ export const ImslpWorkPanel = ({
                         ) : null}
                         {quotaExhausted ? (
                             <p className="text-xs text-stone-600">
-                                {quotaUpgradeHint
-                                    ? 'Cloud-score limit reached — upgrade to add this edition.'
-                                    : 'This account cannot add cloud scores.'}
+                                {quotaUpgradeHint ? (
+                                    <>
+                                        Cloud-score limit reached —{' '}
+                                        <UpgradeLink onUpgrade={onUpgrade}>upgrade to add this edition</UpgradeLink>.
+                                    </>
+                                ) : (
+                                    NO_CLOUD_SCORES_MESSAGE
+                                )}
+                            </p>
+                        ) : importLimit ? (
+                            <p className="text-xs text-stone-600">
+                                {limitHeadline(importLimit)} —{' '}
+                                <UpgradeLink onUpgrade={onUpgrade}>see plans</UpgradeLink>.
                             </p>
                         ) : !selectedImportable ? (
                             <p className="text-xs text-stone-500">Select a downloadable edition to add.</p>

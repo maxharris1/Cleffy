@@ -11,7 +11,8 @@ import type { Entitlements } from '@/types/database';
 const rpc = vi.fn();
 const readCachedEntitlements = vi.fn();
 const useSession = vi.fn();
-const exportAnnotatedPdf = vi.fn();
+const buildAnnotatedPdf = vi.fn();
+const deliverPdf = vi.fn();
 const exportAnnotatedPageImage = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
@@ -30,7 +31,8 @@ vi.mock('@/features/billing/entitlementsService', async (importOriginal) => ({
 }));
 
 vi.mock('@/features/export/exportPdf', () => ({
-    exportAnnotatedPdf: (...args: unknown[]) => exportAnnotatedPdf(...args),
+    buildAnnotatedPdf: (...args: unknown[]) => buildAnnotatedPdf(...args),
+    deliverPdf: (...args: unknown[]) => deliverPdf(...args),
 }));
 
 vi.mock('@/features/export/exportPageImage', () => ({
@@ -67,6 +69,13 @@ const plan = (tier: Entitlements['tier'], pdfExports: number): Entitlements => (
 });
 
 const bytes = new Uint8Array([37, 80, 68, 70]).buffer;
+const builtPdf = new File([new Uint8Array([37, 80, 68, 70])], 'Sonata (annotated).pdf', { type: 'application/pdf' });
+
+/** The claim id each claim_pdf_export call carried, in call order. */
+const claimIds = (): unknown[] =>
+    rpc.mock.calls
+        .filter(([fn]) => fn === 'claim_pdf_export')
+        .map(([, args]) => (args as { p_claim?: string }).p_claim);
 
 const openMenu = async (props: { localOnly?: boolean } = {}) => {
     const user = userEvent.setup();
@@ -80,7 +89,8 @@ describe('ShareExportMenu export allowance', () => {
         vi.clearAllMocks();
         useSession.mockReturnValue({ session: teacher, loading: false, lastEvent: null });
         readCachedEntitlements.mockResolvedValue(plan('free', 1));
-        exportAnnotatedPdf.mockResolvedValue(undefined);
+        buildAnnotatedPdf.mockResolvedValue(builtPdf);
+        deliverPdf.mockResolvedValue('downloaded');
         exportAnnotatedPageImage.mockResolvedValue(undefined);
         vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
     });
@@ -90,15 +100,85 @@ describe('ShareExportMenu export allowance', () => {
         vi.restoreAllMocks();
     });
 
-    it('builds the PDF only after the server grants the claim', async () => {
+    it('builds the PDF, then claims, then hands it over only once the claim is granted', async () => {
         rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
         const user = await openMenu();
 
         await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
-        await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledTimes(1));
-        expect(rpc).toHaveBeenCalledWith('claim_pdf_export', {});
-        expect(rpc.mock.invocationCallOrder[0]).toBeLessThan(exportAnnotatedPdf.mock.invocationCallOrder[0] ?? 0);
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledWith(builtPdf));
+        expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_claim: expect.any(String) });
+        const built = buildAnnotatedPdf.mock.invocationCallOrder[0] ?? Infinity;
+        const claimed = rpc.mock.invocationCallOrder[0] ?? Infinity;
+        expect(built).toBeLessThan(claimed);
+        expect(claimed).toBeLessThan(deliverPdf.mock.invocationCallOrder[0] ?? 0);
+    });
+
+    it('never claims for an export that failed to build, so the retry is not refused', async () => {
+        rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        buildAnnotatedPdf.mockRejectedValueOnce(new Error('Worker crashed'));
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+        expect(await screen.findByText('The export failed (Worker crashed). Please try again.')).toBeInTheDocument();
+        expect(rpc).not.toHaveBeenCalled();
+        expect(deliverPdf).not.toHaveBeenCalled();
+
+        // The retry the message invites is the account's first claim, not a second.
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries a dismissed share sheet under the same claim id, so it is not counted twice', async () => {
+        rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
+        deliverPdf.mockResolvedValueOnce('cancelled');
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Share page 1 as PDF' }));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
+        await user.click(screen.getByRole('button', { name: 'Share' }));
+        await user.click(screen.getByRole('menuitem', { name: 'Share page 1 as PDF' }));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
+
+        const [first, second] = claimIds();
+        expect(first).toEqual(expect.any(String));
+        expect(second).toBe(first);
+    });
+
+    it('retries a claim whose answer was lost under the same id', async () => {
+        rpc.mockResolvedValueOnce({ data: null, error: { message: 'TypeError: Failed to fetch' } });
+        rpc.mockResolvedValue({
+            data: { ok: true, replayed: true, limit: 1, tier: 'free', unlimited: false },
+            error: null,
+        });
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        expect(await screen.findByText(EXPORT_OFFLINE_MESSAGE)).toBeInTheDocument();
+        expect(deliverPdf).not.toHaveBeenCalled();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
+        const [first, second] = claimIds();
+        expect(second).toBe(first);
+    });
+
+    it('counts the next export once the last one was delivered', async () => {
+        rpc.mockResolvedValue({ data: { ok: true, count: 1, limit: 1, tier: 'free', unlimited: false }, error: null });
+        const user = await openMenu();
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
+        await user.click(screen.getByRole('button', { name: 'Share' }));
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(2));
+
+        const [first, second] = claimIds();
+        expect(second).toEqual(expect.any(String));
+        expect(second).not.toBe(first);
     });
 
     it('shows the limit and builds nothing when the allowance is spent', async () => {
@@ -108,7 +188,7 @@ describe('ShareExportMenu export allowance', () => {
         await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         expect(await screen.findByText('You have used your 1 free PDF export this month')).toBeInTheDocument();
-        expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        expect(deliverPdf).not.toHaveBeenCalled();
     });
 
     it('fails closed with a clear message when the meter errors', async () => {
@@ -118,7 +198,7 @@ describe('ShareExportMenu export allowance', () => {
         await user.click(screen.getByRole('menuitem', { name: 'Share page 1 as PDF' }));
 
         expect(await screen.findByText(EXPORT_CLAIM_FAILED_MESSAGE)).toBeInTheDocument();
-        expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        expect(deliverPdf).not.toHaveBeenCalled();
     });
 
     it('explains that exporting needs a connection when offline on a metered plan', async () => {
@@ -128,7 +208,7 @@ describe('ShareExportMenu export allowance', () => {
         await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
         expect(await screen.findByText(EXPORT_OFFLINE_MESSAGE)).toBeInTheDocument();
-        expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+        expect(deliverPdf).not.toHaveBeenCalled();
         expect(rpc).not.toHaveBeenCalled();
     });
 
@@ -139,7 +219,7 @@ describe('ShareExportMenu export allowance', () => {
 
         await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
-        await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
         expect(screen.queryByText(EXPORT_OFFLINE_MESSAGE)).not.toBeInTheDocument();
     });
 
@@ -158,14 +238,14 @@ describe('ShareExportMenu export allowance', () => {
             useSession.mockReturnValue({ session: guest, loading: false, lastEvent: null });
         });
 
-        it('claims against this score, billed to its owner, before building', async () => {
+        it('claims against this score, billed to its owner, before handing it over', async () => {
             rpc.mockResolvedValue({ data: { ok: true, limit: 1, unlimited: false, billed_to: 'owner' }, error: null });
             const user = await openMenu();
 
             await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
-            await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledTimes(1));
-            expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_document: 'doc-1' });
+            await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
+            expect(rpc).toHaveBeenCalledWith('claim_pdf_export', { p_document: 'doc-1', p_claim: expect.any(String) });
         });
 
         it("says the owner's allowance is spent, offers no plans, and builds nothing", async () => {
@@ -176,7 +256,7 @@ describe('ShareExportMenu export allowance', () => {
 
             expect(await screen.findByText(EXPORT_GUEST_LIMIT_MESSAGE)).toBeInTheDocument();
             expect(screen.queryByRole('button', { name: 'See plans' })).not.toBeInTheDocument();
-            expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+            expect(deliverPdf).not.toHaveBeenCalled();
         });
 
         it('needs a connection for a shared score', async () => {
@@ -186,7 +266,7 @@ describe('ShareExportMenu export allowance', () => {
             await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
             expect(await screen.findByText(EXPORT_GUEST_OFFLINE_MESSAGE)).toBeInTheDocument();
-            expect(exportAnnotatedPdf).not.toHaveBeenCalled();
+            expect(deliverPdf).not.toHaveBeenCalled();
         });
 
         it('exports a score that lives only on this device without a claim', async () => {
@@ -195,7 +275,7 @@ describe('ShareExportMenu export allowance', () => {
 
             await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
 
-            await waitFor(() => expect(exportAnnotatedPdf).toHaveBeenCalledTimes(1));
+            await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
             expect(rpc).not.toHaveBeenCalled();
         });
     });

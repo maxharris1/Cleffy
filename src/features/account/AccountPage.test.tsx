@@ -289,6 +289,56 @@ describe('AccountPage', () => {
         expect(screen.getByRole('progressbar', { name: 'AI page reads used this month' })).toBeInTheDocument();
     });
 
+    describe('plan period', () => {
+        const endsAt = '2026-11-08T12:00:00Z';
+        const paid = (over: Partial<Entitlements>): Entitlements => ({
+            ...entitlements({ cloud_scores: -1, pdf_exports: -1 }),
+            tier: 'personal',
+            status: 'active',
+            source: 'subscription',
+            current_period_end: endsAt,
+            ...over,
+        });
+
+        it('says a renewing plan renews', async () => {
+            loadEntitlements.mockResolvedValue(paid({ cancel_at_period_end: false }));
+            await renderSettled();
+
+            expect(await screen.findByText(`Renews ${new Date(endsAt).toLocaleDateString()}`)).toBeInTheDocument();
+            expect(screen.getByRole('button', { name: 'Manage subscription' })).toBeInTheDocument();
+        });
+
+        it('says a plan cancelled at period end ends then, and offers to resume it in the portal', async () => {
+            const user = userEvent.setup();
+            createPortalSession.mockResolvedValue('https://billing.stripe.com/session');
+            loadEntitlements.mockResolvedValue(paid({ cancel_at_period_end: true }));
+            await renderSettled();
+
+            expect(await screen.findByText(/^Ends .* your plan won’t renew/)).toBeInTheDocument();
+            expect(screen.queryByText(/^Renews/)).not.toBeInTheDocument();
+
+            await user.click(screen.getByRole('button', { name: 'Resume subscription' }));
+            expect(createPortalSession).toHaveBeenCalledTimes(1);
+            expect(redirectTo).toHaveBeenCalledWith('https://billing.stripe.com/session');
+        });
+
+        it("tells a seated teacher their academy's plan is ending, with nothing of theirs to resume", async () => {
+            loadEntitlements.mockResolvedValue(
+                paid({ tier: 'academy', source: 'studio_member', cancel_at_period_end: true }),
+            );
+            await renderSettled();
+
+            expect(await screen.findByText(/^Your academy’s plan ends/)).toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: 'Resume subscription' })).not.toBeInTheDocument();
+        });
+
+        it('reads entitlements from a server without the flag as renewing', async () => {
+            loadEntitlements.mockResolvedValue(paid({}));
+            await renderSettled();
+            expect(await screen.findByText(/^Renews /)).toBeInTheDocument();
+        });
+    });
+
     it('fills a meter in proportion to what was used', async () => {
         loadUsage.mockResolvedValue({ smart_imports: 1 });
         await renderSettled();

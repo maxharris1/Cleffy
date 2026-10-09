@@ -1130,6 +1130,63 @@ describe('ImslpBrowser', () => {
         expect(onImportImslp).not.toHaveBeenCalled();
     });
 
+    it('links the disabled Add to the plans', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('clean-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onUpgrade = vi.fn();
+
+        await renderBrowser({ quotaExhausted: true, onUpgrade }, `/search?work=${encodeURIComponent(work.title)}`);
+        await screen.findByText('Choose a PDF edition');
+
+        await userEvent.click(screen.getByRole('button', { name: 'upgrade to add this edition' }));
+        expect(onUpgrade).toHaveBeenCalledTimes(1);
+    });
+
+    it('says the month’s IMSLP imports are spent, not the cloud-score cap, and links the plans', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+        const { LimitReachedError } = await import('@/features/billing/limitErrors');
+
+        const work: ImslpWorkDetail = {
+            title: 'Nocturnes, Op.9 (Chopin, Frédéric)',
+            composer: 'Chopin, Frédéric',
+            imslpUrl: 'https://imslp.org/wiki/Nocturnes',
+            editions: [edition('clean-scan.pdf')],
+        };
+        vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
+        const onImportImslp = vi.fn().mockResolvedValue({ ok: true });
+        const onUpgrade = vi.fn();
+        const importLimit = new LimitReachedError({
+            code: 'limit_reached',
+            metric: 'smart_imports',
+            limit: 2,
+            tier: 'free',
+        });
+
+        await renderBrowser(
+            { onImportImslp, importLimit, onUpgrade },
+            `/search?work=${encodeURIComponent(work.title)}`,
+        );
+        await screen.findByText('Choose a PDF edition');
+
+        expect(screen.getByRole('button', { name: 'Add to my library' })).toBeDisabled();
+        expect(screen.getByText(/You have used your 2 free IMSLP imports this month/)).toBeInTheDocument();
+        expect(screen.queryByText(/Cloud-score limit reached/)).not.toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', { name: 'see plans' }));
+        expect(onUpgrade).toHaveBeenCalledTimes(1);
+        expect(onImportImslp).not.toHaveBeenCalled();
+    });
+
     it('does not repeat the display-name fallback as a second line', async () => {
         const { screen } = await import('@testing-library/react');
         const api = await import('@/features/imslp/imslpApi');

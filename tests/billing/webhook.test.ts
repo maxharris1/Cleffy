@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
     handleStripeEvent,
+    holdsRunningSubscription,
     SUBSCRIPTION_MISSING,
     subscriptionRowFrom,
     type StripeEventLike,
@@ -626,5 +630,42 @@ describe('subscription row mapping', () => {
             PRICE_TIERS,
         );
         expect(row.tier).toBe('free');
+    });
+});
+
+describe('checkout guard', () => {
+    const now = Date.parse('2026-10-09T12:00:00Z');
+    const row = (status: string, current_period_end: string | null = '2026-11-09T12:00:00Z') => ({
+        status,
+        current_period_end,
+    });
+
+    it('refuses a second Checkout beside a running subscription, cancelling or not', () => {
+        // Checkout always creates a new subscription: a Personal subscriber who
+        // chose Teacher there was billed for both.
+        expect(holdsRunningSubscription([row('active')], now)).toBe(true);
+        expect(holdsRunningSubscription([row('trialing')], now)).toBe(true);
+        expect(holdsRunningSubscription([row('active', null)], now)).toBe(true);
+        // Stripe is still retrying it; fixing the card in the portal revives it.
+        expect(holdsRunningSubscription([row('past_due', '2026-09-01T00:00:00Z')], now)).toBe(true);
+    });
+
+    it('leaves Checkout open once the subscription has ended or never started', () => {
+        expect(holdsRunningSubscription([], now)).toBe(false);
+        expect(holdsRunningSubscription([row('canceled')], now)).toBe(false);
+        expect(holdsRunningSubscription([row('incomplete_expired')], now)).toBe(false);
+        expect(holdsRunningSubscription([row('incomplete')], now)).toBe(false);
+        expect(holdsRunningSubscription([row('unpaid')], now)).toBe(false);
+        // Active on paper, but its period is over and no renewal has landed.
+        expect(holdsRunningSubscription([row('active', '2026-10-01T00:00:00Z')], now)).toBe(false);
+    });
+
+    it('is wired into stripe-checkout ahead of creating any session', () => {
+        const source = readFileSync(resolve(process.cwd(), 'supabase/functions/stripe-checkout/index.ts'), 'utf8');
+        const guard = source.indexOf('holdsRunningSubscription(running');
+        expect(guard).toBeGreaterThan(0);
+        expect(guard).toBeLessThan(source.indexOf('stripe.customers.create'));
+        expect(guard).toBeLessThan(source.indexOf('stripe.checkout.sessions.create'));
+        expect(source).toMatch(/code:\s*'already_subscribed'/);
     });
 });
