@@ -60,8 +60,10 @@ const describeFailure = (stage: 'source' | 'export', label: string, err: unknown
 };
 
 /**
- * Share/export menu: this page as photo or PDF (Web Share → Messages on iOS),
- * or the whole annotated score as PDF.
+ * The viewer's Export menu: this page as photo or PDF (Web Share → Messages on
+ * iOS), or the whole annotated score as PDF. Labelled "Export", not "Share":
+ * "Share" is the owner's button for giving people access (ShareDialog), and
+ * one word for both sent people to the wrong one.
  */
 export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
@@ -199,7 +201,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                 disabled={busy !== null}
                 aria-expanded={open}
                 aria-haspopup="menu"
-                title="Share or save annotated page"
+                title="Export — this page as a photo or PDF, or the whole score as PDF"
                 onClick={() => {
                     setLimit(null);
                     setRefusal(null);
@@ -210,7 +212,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
             >
                 {busy && download && download.total > 0
                     ? `${busy} ${Math.round((download.loaded / download.total) * 100)}%`
-                    : (busy ?? 'Share')}
+                    : (busy ?? 'Export')}
             </button>
             {open ? (
                 <div

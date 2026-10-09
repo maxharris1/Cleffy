@@ -37,6 +37,11 @@ const check = (name, ok, detail = '') => {
     if (!ok) process.exitCode = 1;
 };
 
+// The viewer's sync status is a dot whose title is the state (ViewerPage SyncDot).
+const SYNCED = '[title="Synced"]';
+// The library page's heading (LibraryPage).
+const libraryHeading = (page) => page.getByRole('heading', { level: 1, name: 'Library' });
+
 const inkPixels = (page, layer = 'committed') =>
     page.$eval(`canvas[data-ink-layer=${layer}]`, (el) => {
         if (el.width === 0) return 0;
@@ -180,7 +185,7 @@ await teacher.evaluate(
     [`sb-${new URL(URL_).hostname.split('.')[0]}-auth-token`, JSON.stringify(signIn.session)],
 );
 await teacher.reload();
-await teacher.waitForSelector('text=Your scores', { timeout: 20000 });
+await libraryHeading(teacher).waitFor({ timeout: 20000 });
 check('teacher library loads', true);
 
 // ---- 3. Upload a score
@@ -192,7 +197,23 @@ try {
     console.log('upload stuck; body:', (await teacher.textContent('body'))?.replace(/\s+/g, ' ').slice(0, 200));
     throw err;
 }
-check('upload → viewer', true, teacher.url().split('/doc/')[1].slice(0, 8) + '…');
+const docId = teacher.url().split('/doc/')[1].split(/[?#/]/)[0];
+check('upload → viewer', true, docId.slice(0, 8) + '…');
+
+/** Rows the server holds for the score: what a collaborator's pull will find. */
+const waitForServerMarks = async (min, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const { count, error } = await admin
+            .from('annotations')
+            .select('id', { count: 'exact', head: true })
+            .eq('document_id', docId)
+            .is('deleted_at', null);
+        if (!error && (count ?? 0) >= min) return count;
+        if (Date.now() > deadline) throw new Error(`server holds ${count ?? '?'} marks, wanted ${min}`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+};
 await teacher.waitForSelector('canvas[data-ink-layer=committed]', { timeout: 20000 });
 await teacher.waitForTimeout(2000);
 
@@ -204,16 +225,24 @@ for (let i = 1; i <= 15; i++) {
     await teacher.waitForTimeout(12);
 }
 await teacher.mouse.up();
-await teacher.waitForSelector('[aria-label=Synced]', { timeout: 20000 });
+// The dot reads Synced before the stroke is flushed too, so the server is the proof.
+await waitForServerMarks(1);
+await teacher.waitForSelector(SYNCED, { timeout: 20000 });
 check('teacher stroke synced to server', true);
 const teacherInkStart = await inkPixels(teacher);
 
 // ---- 5. Share link (edit)
-await teacher.click('text=Share');
-await teacher.click('text=Create link & copy');
-await teacher.waitForSelector('span.truncate:has-text("/join/")', { timeout: 10000 });
-const shareUrl = await teacher.$eval('li span.truncate', (el) => el.textContent);
-await teacher.click('[aria-label=Close]');
+// "Share" is the owner's sharing dialog; the export menu beside it is "Export".
+await teacher.getByRole('button', { name: 'Share', exact: true }).click();
+const shareDialog = teacher.getByRole('dialog', { name: 'Share this score' });
+await shareDialog.waitFor({ timeout: 10000 });
+// New links are view-only by default; the student must be able to draw.
+await shareDialog.getByRole('button', { name: 'Can edit', exact: true }).click();
+await shareDialog.getByRole('button', { name: 'Create link & copy' }).click();
+const linkRow = shareDialog.locator('li span.truncate', { hasText: '/join/' }).first();
+await linkRow.waitFor({ timeout: 10000 });
+const shareUrl = await linkRow.textContent();
+await shareDialog.getByRole('button', { name: 'Close' }).click();
 check('share link created', Boolean(shareUrl?.includes('/join/')), shareUrl ?? '');
 
 // ---- 6. Student joins via the link (anonymous + name)
@@ -316,7 +345,7 @@ if (!fs.existsSync(ANNOTATED_PDF)) {
 }
 uploadSubstituteFile = ANNOTATED_PDF;
 await teacher.goto(`${APP}/library`);
-await teacher.waitForSelector('text=Your scores', { timeout: 20000 });
+await libraryHeading(teacher).waitFor({ timeout: 20000 });
 await teacher.locator('input[type=file]').first().setInputFiles(ANNOTATED_PDF);
 try {
     await teacher.waitForSelector('text=Existing marks found', { timeout: 45000 });
@@ -345,7 +374,7 @@ await teacher.getByRole('button', { name: /Import \d+ marks/ }).click();
 await teacher.waitForSelector('text=/Imported \\d+ marks/', { timeout: 30000 });
 check('import commits marks', true);
 await teacher.getByRole('button', { name: 'Done', exact: true }).click();
-await teacher.waitForSelector('[aria-label=Synced]', { timeout: 30000 });
+await teacher.waitForSelector(SYNCED, { timeout: 30000 });
 const importedInk = await inkPixels(teacher);
 check('imported marks render on the committed layer', importedInk > 100, `${importedInk} px`);
 await teacher.screenshot({ path: SHOT('live-import') });

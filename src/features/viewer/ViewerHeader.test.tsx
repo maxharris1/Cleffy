@@ -15,8 +15,8 @@ const renderHeader = () =>
                 <button type="button">Import marks</button>
                 <button type="button">History</button>
                 <button type="button">Notes</button>
+                <button type="button">Export</button>
                 <button type="button">Share</button>
-                <button type="button">Invite</button>
             </ViewerHeader>
         </MemoryRouter>,
     );
@@ -26,7 +26,7 @@ describe('ViewerHeader', () => {
         renderHeader();
         expect(screen.getByRole('link', { name: 'Back to library' })).toHaveAttribute('href', '/library');
         expect(screen.getByText('Nocturne (Chopin)')).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Invite' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
     });
 
     it('lets the action cluster wrap instead of clipping off the viewport', () => {

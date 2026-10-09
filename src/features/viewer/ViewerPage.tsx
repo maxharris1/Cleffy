@@ -580,8 +580,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 */}
                 {!state.provisional ? <ShareExportMenu docId={docId} doc={state.doc} title={state.doc.title} /> : null}
                 {!state.provisional && state.role === 'owner' ? (
-                    <Button size="sm" onClick={() => setShareOpen(true)}>
-                        Invite
+                    // "Share" is sharing the score with people (links, who has
+                    // access); sending a copy of it is "Export", beside it.
+                    <Button
+                        size="sm"
+                        title="Share this score — links, and who has access"
+                        onClick={() => setShareOpen(true)}
+                    >
+                        Share
                     </Button>
                 ) : !state.provisional && state.role && canLeave ? (
                     // Members get the same dialog, minus the owner's controls:

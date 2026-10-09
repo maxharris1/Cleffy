@@ -71,7 +71,7 @@ const bytes = new Uint8Array([37, 80, 68, 70]).buffer;
 const openMenu = async (props: { localOnly?: boolean } = {}) => {
     const user = userEvent.setup();
     render(<ShareExportMenu docId="doc-1" bytes={bytes} title="Sonata" {...props} />);
-    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await user.click(screen.getByRole('button', { name: 'Export' }));
     return user;
 };
 
