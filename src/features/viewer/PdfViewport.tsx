@@ -593,6 +593,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
             getLayout: () => layoutRef.current,
             getRenderScale: () => renderScaleRef.current,
             getViewportSize: () => viewportSizeRef.current,
+            getObscured: () => obscuredRef.current,
         });
         playheadControllerRef.current = controller;
         return () => {
