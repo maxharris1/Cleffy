@@ -37,6 +37,7 @@ import { formatUpdated } from '@/features/library/libraryFormat';
 import { readLibraryView, writeLibraryView, type LibraryView } from '@/features/library/libraryPrefs';
 import type { LibraryOutletContext } from '@/features/library/LibraryShell';
 import { perfLogIfDev, perfMark } from '@/lib/perf';
+import { isTransportFailure, useOnline } from '@/lib/useOnline';
 import { LocalOpenControl } from '@/features/library/LocalOpenControl';
 import { RowMenu, SharedScoreMenu } from '@/features/library/RowMenu';
 import { ScoreCard } from '@/features/library/ScoreCard';
@@ -87,21 +88,6 @@ interface RemoteResults {
     cursor: DocumentRow | null;
 }
 
-/** Is the browser online? Follows the online/offline events. */
-const useOnline = (): boolean => {
-    const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false);
-    useEffect(() => {
-        const update = () => setOnline(navigator.onLine !== false);
-        window.addEventListener('online', update);
-        window.addEventListener('offline', update);
-        return () => {
-            window.removeEventListener('online', update);
-            window.removeEventListener('offline', update);
-        };
-    }, []);
-    return online;
-};
-
 export const LibraryPage = () => {
     const {
         userId,
@@ -122,6 +108,15 @@ export const LibraryPage = () => {
     const [assignments, setAssignments] = useState<Map<string, string[]>>(new Map());
     const [hasMore, setHasMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /**
+     * Nothing to show because the list could not be loaded at all — no
+     * snapshot on this device either. 'offline' when the request never
+     * reached the server, else 'error'. Never "No scores yet": that would
+     * tell a teacher with a full library that it is empty.
+     */
+    const [loadFailure, setLoadFailure] = useState<'offline' | 'error' | null>(null);
+    /** Bumped to load the list again (reconnect, or "Try again"). */
+    const [reloadKey, setReloadKey] = useState(0);
     const [actionError, setActionError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Read once on mount: a stored preference that throws (private mode) falls
@@ -311,19 +306,24 @@ export const LibraryPage = () => {
                         perfLogIfDev();
                         void sweepPendingStorageCleanup(userId);
                         return;
-                    } catch {
+                    } catch (fallbackErr: unknown) {
                         if (cancelled) {
                             return;
                         }
                         // Prefer the user-scoped Dexie snapshot already painted
                         // above. An empty snapshot plus a failed network is an
-                        // error / empty grid — opened PDFs are not a library.
+                        // unavailable library — opened PDFs are not a library.
                         if (cachedList && cachedList.documents.length > 0) {
                             setError('Offline — showing scores cached on this device.');
                             return;
                         }
                         setDocuments((prev) => prev ?? []);
-                        setError(err instanceof Error ? err.message : 'Could not load your scores.');
+                        // The raw text ("TypeError: Failed to fetch") means
+                        // nothing to a teacher; it goes to the console.
+                        console.warn('Could not load the library', err, fallbackErr);
+                        setLoadFailure(
+                            isTransportFailure(err) || isTransportFailure(fallbackErr) ? 'offline' : 'error',
+                        );
                         return;
                     }
                 }
@@ -332,7 +332,26 @@ export const LibraryPage = () => {
         return () => {
             cancelled = true;
         };
-    }, [userId]);
+    }, [userId, reloadKey]);
+
+    const retryLoad = () => {
+        setLoadFailure(null);
+        setDocuments(null);
+        setReloadKey((k) => k + 1);
+    };
+    // Back online with nothing loaded: load the library now.
+    useEffect(() => {
+        if (loadFailure !== 'offline') {
+            return;
+        }
+        const onOnline = () => {
+            setLoadFailure(null);
+            setDocuments(null);
+            setReloadKey((k) => k + 1);
+        };
+        window.addEventListener('online', onOnline);
+        return () => window.removeEventListener('online', onOnline);
+    }, [loadFailure]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
     const isOfflineNotice = error?.startsWith('Offline') ?? false;
@@ -807,6 +826,8 @@ export const LibraryPage = () => {
                     uploading && uploadPct !== null ? (
                         <ProgressBar value={uploadPct} label="Uploading score" className="mt-4 max-w-xs" />
                     ) : null
+                ) : loadFailure ? (
+                    <LibraryUnavailable reason={loadFailure} onRetry={retryLoad} />
                 ) : documents !== null ? (
                     <EmptyLibrary
                         uploading={uploading}
@@ -1423,6 +1444,26 @@ const UploadButton = ({
             }}
         />
     </label>
+);
+
+/** The list could not be loaded and this device holds no copy of it. */
+const LibraryUnavailable = ({ reason, onRetry }: { reason: 'offline' | 'error'; onRetry: () => void }) => (
+    <EmptyState
+        className="library-empty mt-8 md:mt-16"
+        title={reason === 'offline' ? 'You’re offline' : 'Couldn’t load your scores'}
+        body={
+            reason === 'offline'
+                ? 'Your library will appear when you reconnect.'
+                : 'Something went wrong reaching the server. Your scores are safe — try again in a moment.'
+        }
+    >
+        {reason === 'error' ? (
+            <Button size="sm" variant="secondary" onClick={onRetry}>
+                Try again
+            </Button>
+        ) : null}
+        <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
+    </EmptyState>
 );
 
 const EmptyLibrary = ({
