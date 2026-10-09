@@ -662,6 +662,11 @@ export type Database = {
                 Args: { p_token: string };
                 Returns: Array<{ document_id: string; granted_role: MemberRole }>;
             };
+            // Anon-callable; exactly one row, role null unless valid (20261009120200).
+            peek_share_link: {
+                Args: { p_token: string };
+                Returns: Array<{ valid: boolean; role: ShareRole | null }>;
+            };
             // Owners and editors only; see DocumentMemberListing for what each sees.
             list_document_members: {
                 Args: { p_document: string };

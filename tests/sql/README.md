@@ -40,6 +40,16 @@ delete-account to drain). It sets `storage.allow_delete_query` before removing
 `storage.objects` rows, as the Storage API does, so hosted Storage's
 `protect_delete` lets the RLS policies decide.
 
+`share_link_errors.sql` proves
+`supabase/migrations/20261009120200_share_link_errors_and_peek.sql`: a dead
+link (unknown, revoked or expired) is refused with SQLSTATE `PT404` — HTTP 404
+through PostgREST, where the old `P0002` was a 500 — carrying
+`{"code":"invalid_share_link"}` in `detail`; redemption is otherwise unchanged;
+and `peek_share_link` answers anon and signed-in callers alike with
+`{valid, role}` only, the same `{false, null}` for every dead link, writing
+nothing. Like the sharing proof below, it reports `failures | total` on its
+last line.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's
