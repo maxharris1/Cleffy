@@ -9,7 +9,11 @@ import {
     tokenizeQuery,
     type RankBatch,
 } from '../../supabase/functions/_shared/search';
-import { categoryGroupsFor, titleMatchesFilters } from '../../supabase/functions/_shared/searchFacetData';
+import {
+    categoryGroupsFor,
+    PIANO_KEYBOARD_CATEGORIES,
+    titleMatchesFilters,
+} from '../../supabase/functions/_shared/searchFacetData';
 
 const batch = (q: string, weight: number, titles: string[]): RankBatch => ({
     variant: { q, weight },
@@ -239,7 +243,7 @@ describe('mergeAndRank', () => {
             requiredGroups: categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] }),
         }).filter((h) => titleMatchesFilters(h.title, { keys: ['g-major'] }));
         expect(categoryGroupsFor({ instruments: ['piano'], keys: ['g-major'] })).toEqual([
-            ['For piano', 'For piano (arr)'],
+            ['For piano', 'For piano (arr)', ...PIANO_KEYBOARD_CATEGORIES],
         ]);
         expect(ranked.map((h) => h.title)).toEqual([titled]);
     });

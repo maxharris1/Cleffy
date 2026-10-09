@@ -373,12 +373,7 @@ describe('toWorkRow', () => {
             touched: null,
         });
         expect(
-            toBuildingRow(
-                'For piano',
-                2,
-                { pageid: 8, title: 'Untitled', categories: ['For piano'] },
-                'now',
-            ),
+            toBuildingRow('For piano', 2, { pageid: 8, title: 'Untitled', categories: ['For piano'] }, 'now'),
         ).toMatchObject({ generation: 2, anchor: 'For piano', page_id: 8 });
     });
 });
@@ -413,7 +408,10 @@ describe('categoriesToSync', () => {
         expect(cats).toContain('Beethoven, Ludwig van');
         expect(cats).toContain('Fugues');
         expect(cats).toContain('C-sharp minor');
-        expect(cats.filter((c) => c.endsWith('(arr)')).length).toBe(INSTRUMENT_FACETS.length);
+        const relatedArr = INSTRUMENT_FACETS.flatMap((f) => f.related ?? []).filter((c) => c.endsWith('(arr)'));
+        expect(cats.filter((c) => c.endsWith('(arr)')).length).toBe(INSTRUMENT_FACETS.length + relatedArr.length);
+        expect(cats).toContain('For keyboard');
+        expect(cats).toContain('For harpsichord');
         expect(new Set(cats).size).toBe(cats.length);
         expect([...cats].sort()).toEqual([...ALL_TAXONOMY_CATEGORIES].sort());
     });
@@ -427,7 +425,17 @@ describe('categoriesToSync', () => {
             KEY_FACETS,
             'For piano',
         );
-        expect(cats.slice(0, 2)).toEqual(['For piano', 'For piano (arr)']);
+        // The Piano chip's keyboard categories build right after For piano: the
+        // default typed search and every chip browse intersect with them.
+        expect(cats.slice(0, 7)).toEqual([
+            'For piano',
+            'For piano (arr)',
+            'For keyboard',
+            'For keyboard (arr)',
+            'For harpsichord',
+            'For harpsichord (arr)',
+            'For clavichord',
+        ]);
         const idx = (c: string) => cats.indexOf(c);
         expect(idx('Baroque')).toBeLessThan(idx('Sonatas'));
         expect(idx('Sonatas')).toBeLessThan(idx('C major'));

@@ -31,6 +31,7 @@ import {
     correctTokens,
     extractPeriod,
     foldAccents,
+    labelTitlesForQuery,
     markTitlesUnverified,
     mergeAndRank,
     titlesForCachedMembership,
@@ -110,7 +111,7 @@ const CORRECTION_VOCAB: Set<string> = (() => {
 const uniq = <T>(values: T[]): T[] => [...new Set(values)];
 
 /** MediaWiki caps srlimit at 50 — page with sroffset to fill larger limits. */
-const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
+const mwSearch = async (q: string, limit: number, what: 'text' | 'title' = 'text'): Promise<MwSearchHit[]> => {
     const hits: MwSearchHit[] = [];
     let offset = 0;
     while (hits.length < limit) {
@@ -119,10 +120,11 @@ const mwSearch = async (q: string, limit: number): Promise<MwSearchHit[]> => {
             action: 'query',
             list: 'search',
             srsearch: q,
-            // Body-text search: MW 1.18 defaults to title-only, which misses
-            // nicknames and multi-word queries; text mode also returns MW's own
-            // relevance order, which the ranker blends in via rankBonus.
-            srwhat: 'text',
+            // Body-text search by default: MW 1.18 defaults to title-only, which
+            // misses nicknames; text mode also returns MW's own relevance order,
+            // which the ranker blends in via rankBonus. One title variant
+            // (buildSearchVariants) finds single works text search buries.
+            srwhat: what,
             srnamespace: '0',
             srlimit: String(batch),
             sroffset: String(offset),
@@ -412,7 +414,10 @@ Deno.serve(async (req) => {
         const cachedCategories = hardCategories.filter((c) => !missingSnapshots.includes(c));
 
         let tokens = tokenizeQuery(searchQ);
-        let aliasTitles = aliasTitlesForQuery(q, WORK_ALIASES);
+        // A curated label typed in full ("Prelude in C major (WTC I)") names its
+        // page outright; it leads the nickname aliases.
+        const labelTitles = labelTitlesForQuery(searchQ, POPULAR_WORKS);
+        let aliasTitles = uniq([...labelTitles, ...aliasTitlesForQuery(q, WORK_ALIASES)]);
         const variants = buildSearchVariants(searchQ, { aliasTitles, facetTokens: facetTokens(typedFilters) });
 
         const perQuery = Math.min(50, Math.max(limit, 30));
@@ -421,7 +426,7 @@ Deno.serve(async (req) => {
         const batches: RankBatch[] = await Promise.all(
             variants.map(async (variant: SearchVariant) => {
                 try {
-                    return { variant, hits: await mwSearch(variant.q, perQuery) };
+                    return { variant, hits: await mwSearch(variant.q, perQuery, variant.what) };
                 } catch (err) {
                     variantFailures += 1;
                     lastVariantError = err;
@@ -467,6 +472,7 @@ Deno.serve(async (req) => {
                 query: searchQ,
                 tokens,
                 aliasTitles,
+                exactTitles: labelTitles,
                 popularTitles: POPULAR_TITLES,
                 resolvedTitles: resolution.resolvedTitles,
                 resolvedPageIds: resolution.resolvedPageIds,

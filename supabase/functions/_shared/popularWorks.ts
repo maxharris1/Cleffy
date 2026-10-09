@@ -172,9 +172,11 @@ export const POPULAR_WORKS: PopularWork[] = [
     }),
 
     // ——— Bach (~12) ———
+    // The single Prelude and Fugue, not the 24-piece volume: a label naming one
+    // piece must open that piece's editions.
     w({
         label: 'Prelude in C major (WTC I)',
-        title: 'Das wohltemperierte Klavier I, BWV 846-869 (Bach, Johann Sebastian)',
+        title: 'Prelude and Fugue in C major, BWV 846 (Bach, Johann Sebastian)',
         composer: 'Bach',
         composerCategory: 'Bach, Johann Sebastian',
         instrument: 'piano',
@@ -182,6 +184,16 @@ export const POPULAR_WORKS: PopularWork[] = [
         era: 'baroque',
         key: 'c-major',
         note: 'Keyboard · BWV 846',
+    }),
+    w({
+        label: 'Well-Tempered Clavier, Book I',
+        title: 'Das wohltemperierte Klavier I, BWV 846-869 (Bach, Johann Sebastian)',
+        composer: 'Bach',
+        composerCategory: 'Bach, Johann Sebastian',
+        instrument: 'piano',
+        form: 'prelude',
+        era: 'baroque',
+        note: 'Keyboard · BWV 846–869',
     }),
     w({
         label: 'Cello Suite No.1',

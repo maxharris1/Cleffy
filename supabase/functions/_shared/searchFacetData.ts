@@ -24,6 +24,11 @@ export interface FacetValueData {
     category?: string;
     /** Tokens appended / boosted in live search. */
     tokens: string[];
+    /**
+     * Further IMSLP categories the chip also stands for, listed verbatim
+     * ("(arr)" variants included only where IMSLP has them). Instruments only.
+     */
+    related?: string[];
 }
 
 /**
@@ -62,8 +67,29 @@ export const COMPOSER_FACETS: FacetValueData[] = [
     { id: 'mendelssohn', label: 'Mendelssohn', category: 'Mendelssohn, Felix', tokens: ['Mendelssohn'] },
 ];
 
+/**
+ * Piano also covers the keyboard repertoire IMSLP files under its period
+ * instruments: Bach's WTC, Inventions and Goldberg Variations are "For
+ * keyboard", Scarlatti and Couperin "For harpsichord", and none of them is
+ * "For piano". They are what pianists play, so the default chip must find them.
+ * IMSLP has no "For clavichord (arr)" category.
+ */
+export const PIANO_KEYBOARD_CATEGORIES = [
+    'For keyboard',
+    'For keyboard (arr)',
+    'For harpsichord',
+    'For harpsichord (arr)',
+    'For clavichord',
+];
+
 export const INSTRUMENT_FACETS: FacetValueData[] = [
-    { id: 'piano', label: 'Piano', category: 'For piano', tokens: ['piano'] },
+    {
+        id: 'piano',
+        label: 'Piano',
+        category: 'For piano',
+        tokens: ['piano'],
+        related: PIANO_KEYBOARD_CATEGORIES,
+    },
     { id: 'violin', label: 'Violin', category: 'For violin', tokens: ['violin'] },
     { id: 'cello', label: 'Cello', category: 'For cello', tokens: ['cello'] },
     { id: 'guitar', label: 'Guitar', category: 'For guitar', tokens: ['guitar'] },
@@ -150,6 +176,7 @@ export const ALL_TAXONOMY_CATEGORIES: string[] = (() => {
         if (facet.category) {
             add(`${facet.category} (arr)`);
         }
+        facet.related?.forEach(add);
     }
     for (const facet of FORM_FACETS) {
         add(facet.category);
@@ -200,19 +227,19 @@ export const hasActiveFilters = (filters: SearchFilters | undefined): boolean =>
     }
     return Boolean(
         (filters.composerCategories && filters.composerCategories.length > 0) ||
-            (filters.instruments && filters.instruments.length > 0) ||
-            (filters.forms && filters.forms.length > 0) ||
-            (filters.keys && filters.keys.length > 0) ||
-            (filters.eras && filters.eras.length > 0),
+        (filters.instruments && filters.instruments.length > 0) ||
+        (filters.forms && filters.forms.length > 0) ||
+        (filters.keys && filters.keys.length > 0) ||
+        (filters.eras && filters.eras.length > 0),
     );
 };
 
 const instrumentCategories = (id: string): string[] => {
-    const category = INSTRUMENT_BY_ID[id]?.category;
-    if (!category) {
+    const facet = INSTRUMENT_BY_ID[id];
+    if (!facet?.category) {
         return [];
     }
-    return [category, `${category} (arr)`];
+    return [facet.category, `${facet.category} (arr)`, ...(facet.related ?? [])];
 };
 
 const groupForDimension = (dimension: FacetDimension, filters: SearchFilters): string[] => {
