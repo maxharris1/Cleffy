@@ -319,6 +319,44 @@ describe('clampScroll', () => {
         const clamped = clampScroll({ scale: 1, scrollX: 0, scrollY: 0 }, layout, 1000, 600);
         expect(clamped.scrollX).toBe(-(1000 - layout.contentWidth) / 2);
     });
+
+    it('scrolls the end of the last page clear of a bar covering the viewport bottom', () => {
+        // The phone toolbar covers ~64px: without the allowance the last
+        // systems of the score could only ever be read underneath it.
+        const clamped = clampScroll({ scale: 1, scrollX: 0, scrollY: 99999 }, layout, 400, 600, { top: 0, bottom: 64 });
+        expect(clamped.scrollY).toBe(layout.contentHeight - 600 + 64);
+        const pageBottom = layout.contentHeight - PAGE_GAP - clamped.scrollY;
+        expect(pageBottom).toBeLessThanOrEqual(600 - 64);
+        expect(
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 99999 }, layout, 400, 600, { top: -5, bottom: -10 }).scrollY,
+        ).toBe(layout.contentHeight - 600);
+    });
+
+    it('lets the top of page 1 scroll below a bar docked at the top, and no further', () => {
+        // From sm the toolbar sits over the top edge and used to hide the first
+        // system for good: scrollY could not go below 0.
+        const clamped = clampScroll({ scale: 1, scrollX: 0, scrollY: -500 }, layout, 400, 600, { top: 66, bottom: 0 });
+        expect(clamped.scrollY).toBe(-66);
+        expect(PAGE_GAP - clamped.scrollY).toBeGreaterThanOrEqual(66);
+        expect(
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 99999 }, layout, 400, 600, { top: 66, bottom: 0 }).scrollY,
+        ).toBe(layout.contentHeight - 600);
+    });
+
+    it('turns pages so the next row starts below a top bar', () => {
+        const next = pageTurnView({ scale: 1, scrollX: 0, scrollY: 0 }, layout, 0, 1, 800, 600, { top: 66, bottom: 0 });
+        expect(next?.view.scrollY).toBe(layout.layouts[1]!.top - PAGE_GAP - 66);
+    });
+
+    it('lets a short document scroll only as far as the bar requires', () => {
+        const short = computeDocumentLayout([{ width: 300, height: 200 }]);
+        expect(
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 500 }, short, 400, 600, { top: 0, bottom: 64 }).scrollY,
+        ).toBe(0);
+        expect(
+            clampScroll({ scale: 1, scrollX: 0, scrollY: 500 }, short, 400, 240, { top: 0, bottom: 64 }).scrollY,
+        ).toBe(short.contentHeight - (240 - 64));
+    });
 });
 
 describe('pagePointToViewport', () => {

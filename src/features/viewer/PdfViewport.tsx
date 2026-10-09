@@ -7,6 +7,7 @@ import { measureIndexAtPagePoint, measureStartTick } from '@/features/playback/s
 import {
     MAX_SCALE,
     MIN_SCALE,
+    NO_OBSCURED,
     PAGE_GAP,
     bitmapBudgetFactor,
     clampScroll,
@@ -19,6 +20,7 @@ import {
     visiblePageRange,
     zoomAt,
     type DocumentLayout,
+    type ObscuredEdges,
     type PageColumns,
 } from '@/features/viewer/geometry';
 import { installSnapshotRetry } from '@/features/viewer/history/snapshotService';
@@ -161,6 +163,8 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const containerRef = useRef<HTMLDivElement | null>(null);
     const inkRef = useRef<InkController | null>(null);
     const [viewportSize, setViewportSize] = useState<ViewportSize>({ width: 0, height: 0 });
+    /** Px of the viewport's edges the toolbar covers; scrolling extends past them by as much. */
+    const [obscured, setObscured] = useState<ObscuredEdges>(NO_OBSCURED);
     const [renderScale, setRenderScale] = useState(view.scale);
     const [textIntent, setTextIntent] = useState<TextIntent | null>(null);
     const [fingeringSel, setFingeringSel] = useState<FingeringSelection | null>(null);
@@ -187,6 +191,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     // Live refs so the imperative controllers always see current geometry.
     const layoutRef = useRef(layout);
     const viewportSizeRef = useRef(viewportSize);
+    const obscuredRef = useRef(obscured);
     const readOnlyRef = useRef(effectiveReadOnly);
     const renderScaleRef = useRef(renderScale);
     const playbackRef = useRef(playback);
@@ -197,6 +202,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         renderScaleRef.current = renderScale;
         playbackRef.current = playback;
     }, [layout, viewportSize, effectiveReadOnly, renderScale, playback]);
+
+    // The ref is written here and only here, at once: the toolbar mounts with
+    // the document and reports (child effects first) in the same commit as the
+    // first fit, which must already see it. Syncing it from state in the effect
+    // above would put the stale value back before the fit reads it.
+    const reportObscured = useCallback((edges: ObscuredEdges) => {
+        obscuredRef.current = edges;
+        setObscured((prev) => (prev.top === edges.top && prev.bottom === edges.bottom ? prev : edges));
+    }, []);
 
     // Playhead overlay elements (inside the transformed wrapper) + controller.
     // These live in state, not refs: the overlay divs only exist once the PDF
@@ -257,7 +271,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         didFitRef.current = true;
         fittedViewportRef.current = viewportSize;
         const scale = fitPageWidthScale(layout, viewportSize.width);
-        const fitted = clampScroll({ scale, scrollX: 0, scrollY: 0 }, layout, viewportSize.width, viewportSize.height);
+        // Start with the top of page 1 below a toolbar docked at the top.
+        const edges = obscuredRef.current;
+        const fitted = clampScroll(
+            { scale, scrollX: 0, scrollY: -edges.top },
+            layout,
+            viewportSize.width,
+            viewportSize.height,
+            edges,
+        );
         useViewerStore.getState().resetView(fitted);
         setRenderScale(scale);
     }, [status, viewportSize, layout]);
@@ -287,6 +309,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                 layout,
                 viewportSize.width,
                 viewportSize.height,
+                obscuredRef.current,
             ),
         );
         setRenderScale(scale);
@@ -301,7 +324,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         const { view: v, setView } = useViewerStore.getState();
         const { width, height } = viewportSizeRef.current;
         const current = focusedPageIndex(v, height, layoutRef.current.layouts);
-        const next = pageTurnView(v, layoutRef.current, current, direction, width, height);
+        const next = pageTurnView(v, layoutRef.current, current, direction, width, height, obscuredRef.current);
         if (!next) {
             return;
         }
@@ -325,7 +348,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         fittedViewportRef.current = viewportSize;
         setPageColumns(columns);
         setSpreadCover(coverPage);
-        setView(clampScroll({ scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale }, nextLayout, width, height));
+        setView(
+            clampScroll(
+                { scale, scrollX: 0, scrollY: (top - PAGE_GAP) * scale - obscured.top },
+                nextLayout,
+                width,
+                height,
+                obscured,
+            ),
+        );
         setRenderScale(scale);
     };
 
@@ -393,7 +424,13 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         inkRef.current = ink;
 
         const clamp = (v: { scale: number; scrollX: number; scrollY: number }) =>
-            clampScroll(v, layoutRef.current, viewportSizeRef.current.width, viewportSizeRef.current.height);
+            clampScroll(
+                v,
+                layoutRef.current,
+                viewportSizeRef.current.width,
+                viewportSizeRef.current.height,
+                obscuredRef.current,
+            );
 
         const controller = new GestureController(el, {
             onPan: (dx, dy) => {
@@ -739,7 +776,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                             </div>
                         </div>
                     ) : null}
-                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} />}
+                    {effectiveReadOnly ? null : <Toolbar store={annotationStore} onObscuredChange={reportObscured} />}
                     {features.fingering && readOnly && overlayMode === null ? <ReadOnlyFingeringToggle /> : null}
                     {!effectiveReadOnly && textIntent && textIntentLayout ? (
                         <TextEditorOverlay
@@ -772,7 +809,7 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
                         onZoomBy={(factor) => {
                             const { view: v, setView } = useViewerStore.getState();
                             const zoomed = zoomAt(v, v.scale * factor, viewportSize.width / 2, viewportSize.height / 2);
-                            setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height));
+                            setView(clampScroll(zoomed, layout, viewportSize.width, viewportSize.height, obscured));
                         }}
                         pageColumns={layout.layouts.length > 1 ? pageColumns : null}
                         onTogglePageColumns={togglePageColumns}

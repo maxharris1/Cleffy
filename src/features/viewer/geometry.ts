@@ -88,6 +88,7 @@ export const pageTurnView = (
     direction: -1 | 1,
     viewportWidth: number,
     viewportHeight: number,
+    obscured: ObscuredEdges = NO_OBSCURED,
 ): { view: ViewState; pageIndex: number } | null => {
     const { layouts } = layout;
     const current = layouts[pageIndex];
@@ -118,10 +119,15 @@ export const pageTurnView = (
     return {
         pageIndex: target,
         view: clampScroll(
-            { scale: view.scale, scrollX: view.scrollX, scrollY: (targetLayout.top - PAGE_GAP) * view.scale },
+            {
+                scale: view.scale,
+                scrollX: view.scrollX,
+                scrollY: (targetLayout.top - PAGE_GAP) * view.scale - Math.max(0, obscured.top),
+            },
             layout,
             viewportWidth,
             viewportHeight,
+            obscured,
         ),
     };
 };
@@ -192,23 +198,41 @@ export const focusedPageIndex = (view: ViewState, viewportHeight: number, layout
     return best;
 };
 
-/** Clamp scroll offsets so content cannot be dragged fully out of view. */
+/**
+ * Strips (px) of the viewport a floating bar covers: the markup toolbar sits
+ * over the bottom edge on phones and over the top edge from `sm` up.
+ */
+export interface ObscuredEdges {
+    top: number;
+    bottom: number;
+}
+
+export const NO_OBSCURED: ObscuredEdges = { top: 0, bottom: 0 };
+
+/**
+ * Clamp scroll offsets so content cannot be dragged fully out of view. The
+ * content may scroll past each obscured strip by its height, so the first
+ * system and the end of the last page can be read beside the toolbar, never
+ * only underneath it.
+ */
 export const clampScroll = (
     view: ViewState,
     layout: DocumentLayout,
     viewportWidth: number,
     viewportHeight: number,
+    obscured: ObscuredEdges = NO_OBSCURED,
 ): ViewState => {
     const contentW = layout.contentWidth * view.scale;
     const contentH = layout.contentHeight * view.scale;
     const maxX = Math.max(0, contentW - viewportWidth);
-    const maxY = Math.max(0, contentH - viewportHeight);
+    const minY = obscured.top > 0 ? -obscured.top : 0;
+    const maxY = Math.max(minY, contentH - (viewportHeight - Math.max(0, obscured.bottom)));
     return {
         scale: view.scale,
         // When content is narrower than the viewport, center it (negative scroll).
         scrollX:
             contentW <= viewportWidth ? -(viewportWidth - contentW) / 2 : Math.min(maxX, Math.max(0, view.scrollX)),
-        scrollY: Math.min(maxY, Math.max(0, view.scrollY)),
+        scrollY: Math.min(maxY, Math.max(minY, view.scrollY)),
     };
 };
 
