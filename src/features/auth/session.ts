@@ -213,15 +213,18 @@ export const signOut = async (): Promise<void> => {
     // LibraryPage refetching the response the first bump outranked — which
     // still left with a live JWT and would otherwise re-persist this
     // account's rows after the clears below swept them.
-    const [{ noteLibraryMutation }, { stopSnapshotWrites }] = await Promise.all([
+    const [{ noteLibraryMutation }, { stopSnapshotWrites }, { stopAllBackgroundDrains }] = await Promise.all([
         import('@/features/library/libraryCache'),
         import('@/features/viewer/history/snapshotService'),
+        import('@/sync/backgroundDrain'),
     ]);
     noteLibraryMutation();
     // A snapshot upload still in flight from syncBeforeSignOut (it is raced
     // against a timer, not awaited) must not write this account's day
     // snapshot back into Dexie after the clear below.
     stopSnapshotWrites();
+    // Nor may a background outbox drain write a synced row back after it.
+    stopAllBackgroundDrains();
     await getSupabase().auth.signOut();
     noteLibraryMutation();
     rememberSession(null);
