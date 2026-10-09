@@ -110,13 +110,14 @@ export const LibraryPage = () => {
     const [error, setError] = useState<string | null>(null);
     /**
      * Nothing to show because the list could not be loaded at all — no
-     * snapshot on this device either. 'offline' when the request never
-     * reached the server, else 'error'. Never "No scores yet": that would
-     * tell a teacher with a full library that it is empty.
+     * snapshot on this device either. Never "No scores yet": that would tell
+     * a teacher with a full library that it is empty.
      */
-    const [loadFailure, setLoadFailure] = useState<'offline' | 'error' | null>(null);
-    /** Bumped to load the list again (reconnect, or "Try again"). */
+    const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
+    /** Bumped to load the list again (reconnect, retry timer, or "Try again"). */
     const [reloadKey, setReloadKey] = useState(0);
+    /** Automatic retries since the list last loaded, for their backoff. */
+    const autoRetriesRef = useRef(0);
     const [actionError, setActionError] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Read once on mount: a stored preference that throws (private mode) falls
@@ -269,6 +270,7 @@ export const LibraryPage = () => {
                     setTags(boot.tags);
                     setAssignments(boot.documentTags);
                     setError(null);
+                    autoRetriesRef.current = 0;
                     perfMark('library-network-paint');
                     perfLogIfDev();
                     void sweepPendingStorageCleanup(userId);
@@ -302,6 +304,7 @@ export const LibraryPage = () => {
                         setTags(tagRows);
                         setAssignments(tagMap);
                         setError(null);
+                        autoRetriesRef.current = 0;
                         perfMark('library-network-paint');
                         perfLogIfDev();
                         void sweepPendingStorageCleanup(userId);
@@ -321,9 +324,7 @@ export const LibraryPage = () => {
                         // The raw text ("TypeError: Failed to fetch") means
                         // nothing to a teacher; it goes to the console.
                         console.warn('Could not load the library', err, fallbackErr);
-                        setLoadFailure(
-                            isTransportFailure(err) || isTransportFailure(fallbackErr) ? 'offline' : 'error',
-                        );
+                        setLoadFailure(classifyLoadFailure(err, fallbackErr));
                         return;
                     }
                 }
@@ -339,18 +340,32 @@ export const LibraryPage = () => {
         setDocuments(null);
         setReloadKey((k) => k + 1);
     };
-    // Back online with nothing loaded: load the library now.
+    // Nothing loaded and the network is to blame: load the library again by
+    // itself — at once on reconnect, and on a backoff while the browser says
+    // it is online but the server could not be reached (DNS, a blocker, an
+    // outage), since no 'online' event will come then.
     useEffect(() => {
-        if (loadFailure !== 'offline') {
+        if (loadFailure !== 'offline' && loadFailure !== 'unreachable') {
             return;
         }
-        const onOnline = () => {
+        const reload = () => {
             setLoadFailure(null);
             setDocuments(null);
             setReloadKey((k) => k + 1);
         };
-        window.addEventListener('online', onOnline);
-        return () => window.removeEventListener('online', onOnline);
+        window.addEventListener('online', reload);
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        if (loadFailure === 'unreachable') {
+            const attempt = autoRetriesRef.current;
+            autoRetriesRef.current = attempt + 1;
+            timer = setTimeout(reload, Math.min(LIBRARY_RETRY_BASE_MS * 2 ** attempt, LIBRARY_RETRY_MAX_MS));
+        }
+        return () => {
+            window.removeEventListener('online', reload);
+            if (timer) {
+                clearTimeout(timer);
+            }
+        };
     }, [loadFailure]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
@@ -1446,22 +1461,47 @@ const UploadButton = ({
     </label>
 );
 
+/**
+ * Why a library with no copy on this device could not be shown:
+ * - offline: the browser says so; it loads by itself on reconnect.
+ * - unreachable: online, but the request never got an answer (DNS, a
+ *   blocker, an outage without CORS headers); retried on a backoff.
+ * - error: the server answered with a failure.
+ */
+type LoadFailure = 'offline' | 'unreachable' | 'error';
+
+const LIBRARY_RETRY_BASE_MS = 5000;
+const LIBRARY_RETRY_MAX_MS = 60_000;
+
+const classifyLoadFailure = (...errors: unknown[]): LoadFailure => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return 'offline';
+    }
+    return errors.some(isTransportFailure) ? 'unreachable' : 'error';
+};
+
+const LIBRARY_UNAVAILABLE_COPY: Record<LoadFailure, { title: string; body: string }> = {
+    offline: { title: 'You’re offline', body: 'Your library will appear when you reconnect.' },
+    unreachable: {
+        title: 'Couldn’t reach Cleffy',
+        body: 'Check your connection. We’ll keep trying — your scores are safe.',
+    },
+    error: {
+        title: 'Couldn’t load your scores',
+        body: 'Something went wrong loading them. Your scores are safe — try again in a moment.',
+    },
+};
+
 /** The list could not be loaded and this device holds no copy of it. */
-const LibraryUnavailable = ({ reason, onRetry }: { reason: 'offline' | 'error'; onRetry: () => void }) => (
+const LibraryUnavailable = ({ reason, onRetry }: { reason: LoadFailure; onRetry: () => void }) => (
     <EmptyState
         className="library-empty mt-8 md:mt-16"
-        title={reason === 'offline' ? 'You’re offline' : 'Couldn’t load your scores'}
-        body={
-            reason === 'offline'
-                ? 'Your library will appear when you reconnect.'
-                : 'Something went wrong reaching the server. Your scores are safe — try again in a moment.'
-        }
+        title={LIBRARY_UNAVAILABLE_COPY[reason].title}
+        body={LIBRARY_UNAVAILABLE_COPY[reason].body}
     >
-        {reason === 'error' ? (
-            <Button size="sm" variant="secondary" onClick={onRetry}>
-                Try again
-            </Button>
-        ) : null}
+        <Button size="sm" variant="secondary" onClick={onRetry}>
+            Try again
+        </Button>
         <LocalOpenControl label="Or open a PDF locally without uploading" subtle />
     </EmptyState>
 );

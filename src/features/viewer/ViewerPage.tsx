@@ -99,9 +99,35 @@ interface CloudDocState {
     unconfirmed?: boolean;
 }
 
-/** A transport failure on a first open: there is nothing on this device to show. */
+/** A first open while the browser is offline: there is nothing on this device to show. */
 const OFFLINE_NO_COPY_MESSAGE =
     'You’re offline, and this score isn’t saved on this device yet. It will open when you reconnect.';
+/**
+ * A first open that never got an answer although the browser says it is
+ * online (DNS, a blocker, an outage) — no 'online' event will come, so it is
+ * retried on a timer.
+ */
+const UNREACHABLE_NO_COPY_MESSAGE =
+    'Couldn’t reach Cleffy to open this score. Check your connection — we’ll keep trying.';
+/** A first open the server failed (its "no" is the not-found message instead). */
+const OPEN_FAILED_MESSAGE = 'Couldn’t open this score. Try again in a moment.';
+/** Load errors that asking again can fix: they get Try again, and a timer. */
+const RETRYABLE_OPEN_MESSAGES: ReadonlySet<string> = new Set([
+    OFFLINE_NO_COPY_MESSAGE,
+    UNREACHABLE_NO_COPY_MESSAGE,
+    OPEN_FAILED_MESSAGE,
+]);
+const CONFIRM_RETRY_BASE_MS = 5000;
+const CONFIRM_RETRY_MAX_MS = 60_000;
+
+/** What a first open (nothing on this device) says when it failed. The raw text goes to the console. */
+const firstOpenFailure = (err: unknown): string => {
+    console.warn('Could not open the score', err);
+    if (!isTransportFailure(err)) {
+        return OPEN_FAILED_MESSAGE;
+    }
+    return navigator.onLine === false ? OFFLINE_NO_COPY_MESSAGE : UNREACHABLE_NO_COPY_MESSAGE;
+};
 
 const accessChangedNotice = (role: MemberRole | null): string =>
     role === 'editor' || role === 'owner'
@@ -308,6 +334,14 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     const confirmedFor = useRef<string | null>(null);
     /** Bumped to ask the server again — the browser came back online before it had answered. */
     const [confirmAttempt, setConfirmAttempt] = useState(0);
+    /**
+     * The last attempt ended without the server confirming doc + role: the
+     * score is painted under the stored role (or read-only, with none) and
+     * is asked about again on a backoff while online — see the retry effect.
+     */
+    const [awaitingServer, setAwaitingServer] = useState(false);
+    /** Timed retries since the server last answered, for their backoff. */
+    const confirmRetries = useRef(0);
 
     useEffect(() => {
         let cancelled = false;
@@ -388,6 +422,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         setAccessNotice(accessChangedNotice(confirmedRole));
                     }
                     confirmedFor.current = docId;
+                    confirmRetries.current = 0;
+                    setAwaitingServer(false);
                     setState((prev) =>
                         prev?.doc.id === docId && (prev.provisional || prev.unconfirmed || prev.role !== confirmedRole)
                             ? {
@@ -403,6 +439,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 }
                 // The role request failed: keep whatever role is in use (the
                 // stored one, or none), still waiting on the server.
+                if (roleResult.status === 'rejected') {
+                    setAwaitingServer(true);
+                }
                 const pending = (prev: CloudDocState | null): Pick<CloudDocState, 'provisional' | 'unconfirmed'> =>
                     roleResult.status === 'fulfilled'
                         ? {}
@@ -452,7 +491,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         }));
                         return;
                     }
-                    setLoadError(err instanceof Error ? err.message : 'Could not open this score.');
+                    setLoadError(firstOpenFailure(err));
                 }
                 return;
             }
@@ -461,6 +500,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 isTransportFailure(docResult.reason) &&
                 roleResult.status === 'rejected' &&
                 isTransportFailure(roleResult.reason);
+            if (held) {
+                setAwaitingServer(true);
+            }
             if (held && bothTransport && held.cachedRole) {
                 // No server to ask: the last-known role is the best truth
                 // there is. The 'online' re-check asks again on reconnect.
@@ -474,11 +516,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 // answered", and a missing stored role must not grant writes.
                 return;
             }
-            if (isTransportFailure(docResult.reason)) {
-                setLoadError(OFFLINE_NO_COPY_MESSAGE);
-                return;
-            }
-            setLoadError(docResult.reason instanceof Error ? docResult.reason.message : 'Could not open this score.');
+            setLoadError(firstOpenFailure(docResult.reason));
         })();
 
         // Resist storage eviction — annotations and cached scores must survive
@@ -498,12 +536,30 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             if (confirmedFor.current === docId) {
                 return;
             }
-            setLoadError((prev) => (prev === OFFLINE_NO_COPY_MESSAGE ? null : prev));
+            setLoadError((prev) => (prev !== null && RETRYABLE_OPEN_MESSAGES.has(prev) ? null : prev));
             setConfirmAttempt((n) => n + 1);
         };
         window.addEventListener('online', onOnline);
         return () => window.removeEventListener('online', onOnline);
     }, [docId]);
+
+    // Online, and the server has not answered yet (a failed role confirm, a
+    // first open that could not reach it): ask again on a backoff. Waiting for
+    // an 'online' event would wait forever — the browser already is online.
+    const retryOpen = loadError !== null && RETRYABLE_OPEN_MESSAGES.has(loadError);
+    const askAgain = useCallback(() => {
+        setLoadError((prev) => (prev !== null && RETRYABLE_OPEN_MESSAGES.has(prev) ? null : prev));
+        setConfirmAttempt((n) => n + 1);
+    }, []);
+    useEffect(() => {
+        if (!online || !(awaitingServer || retryOpen)) {
+            return;
+        }
+        const attempt = confirmRetries.current;
+        confirmRetries.current = attempt + 1;
+        const timer = setTimeout(askAgain, Math.min(CONFIRM_RETRY_BASE_MS * 2 ** attempt, CONFIRM_RETRY_MAX_MS));
+        return () => clearTimeout(timer);
+    }, [online, awaitingServer, retryOpen, confirmAttempt, askAgain]);
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
     const onRejected = useCallback(
@@ -540,6 +596,11 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         return (
             <main className="landing-page flex min-h-full flex-col items-center justify-center gap-3 p-8">
                 <ErrorText className="max-w-md text-center">{loadError}</ErrorText>
+                {RETRYABLE_OPEN_MESSAGES.has(loadError) ? (
+                    <Button size="sm" variant="secondary" onClick={askAgain}>
+                        Try again
+                    </Button>
+                ) : null}
                 <Link to={escapeTo} className={linkClassName}>
                     {escapeLabel}
                 </Link>
@@ -584,8 +645,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         <div className="fixed inset-0 flex flex-col">
             <ViewerHeader backTo={backTo} backLabel={backLabel} title={state.doc.title}>
                 <PresenceBar peers={peers} selfUserId={resolvedUserId} />
-                {/* No engine yet (no role to sync under): say whether that is the network. */}
-                <SyncDot status={syncing ? syncStatus : online ? 'syncing' : 'offline'} />
+                {/* No engine yet (no role to sync under): say whether that is the network, or the server not having answered. */}
+                <SyncDot status={syncing ? syncStatus : !online ? 'offline' : awaitingServer ? 'waiting' : 'syncing'} />
                 {archived ? (
                     <span title="Read-only — over your plan’s score limit">
                         <Badge tone="warn">Archived</Badge>
@@ -780,23 +841,32 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     );
 };
 
-export const SyncDot = ({ status }: { status: SyncStatus }) => {
+/**
+ * 'waiting': no engine yet because the server has not confirmed this score
+ * (and no role was stored to edit under meanwhile); it is being asked again.
+ */
+export const SyncDot = ({ status }: { status: SyncStatus | 'waiting' }) => {
     // Red is kept for what needs the user's attention: a refusal, or failures
     // that have gone on for minutes. A throttled or briefly unreachable server
     // is "retrying" — the marks are safe on this device either way.
-    const styles: Record<SyncStatus, { dot: string; short: string; label: string }> = {
+    const styles: Record<SyncStatus | 'waiting', { dot: string; short: string; label: string }> = {
         synced: { dot: 'bg-emerald-500', short: 'Synced', label: 'Synced' },
         syncing: { dot: 'bg-amber-400 animate-pulse', short: 'Syncing…', label: 'Syncing…' },
         offline: { dot: 'bg-stone-400', short: 'Offline', label: 'Offline — changes saved on this device' },
         retrying: {
             dot: 'bg-amber-400',
             short: 'Retrying…',
-            label: 'Couldn’t reach the server — retrying. Changes are saved on this device.',
+            label: 'Sync delayed — retrying. Changes are saved on this device.',
         },
         error: {
             dot: 'bg-red-500',
             short: 'Not syncing',
-            label: 'Changes aren’t reaching the server. They are saved on this device and will upload when it recovers.',
+            label: 'Changes aren’t reaching the server yet. They’re saved on this device.',
+        },
+        waiting: {
+            dot: 'bg-stone-400',
+            short: 'Waiting for server',
+            label: 'Waiting for the server to confirm this score — asking again shortly.',
         },
     };
     const { dot, short, label } = styles[status];
