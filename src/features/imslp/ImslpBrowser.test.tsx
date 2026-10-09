@@ -17,6 +17,7 @@ import {
     recommendedBadge,
     SEARCH_TIMEOUT_COPY,
     searchTokens,
+    splitEditions,
     splitSearchResults,
     suggestedPdfName,
     urtextBadge,
@@ -199,7 +200,7 @@ describe('imslp display helpers', () => {
         expect(recommendEdition(ranked)?.filename).toBe('beethoven.moonlight.wiener.pdf');
     });
 
-    it('does not fall through to Weiner when a restricted Henle Urtext leads', () => {
+    it('pre-selects Weiner when the only Urtext is restricted — Add works on the first screen', () => {
         const pick = recommendEdition([
             edition('PMLP01458-beethoven_piano-sonata-op27-no2_henle-pp17-30.pdf', {
                 publisher: 'G. Henle Verlag',
@@ -215,7 +216,7 @@ describe('imslp display helpers', () => {
                 description: 'Complete Score',
             }),
         ]);
-        expect(pick).toBeNull();
+        expect(pick?.filename).toBe('beethoven.moonlight.wiener.pdf');
     });
 
     it('demotes a file whose IMSLP block names an arranger even when it is a "Complete Score"', () => {
@@ -239,7 +240,7 @@ describe('imslp display helpers', () => {
         expect(ranked.map((e) => e.filename)).toEqual(['piano-original.pdf', 'clean-typeset.pdf']);
     });
 
-    it('leads with tagged Urtext even when restricted; other restricted rows stay last', () => {
+    it('lists importable rows first, then what it cannot fetch: Urtext, license-unknown, restricted', () => {
         const ranked = rankEditions([
             edition('restricted-henle.pdf', {
                 downloadable: false,
@@ -252,12 +253,19 @@ describe('imslp display helpers', () => {
             edition('restricted-peters.pdf', { downloadable: false, restriction: 'Non-PD US' }),
         ]);
         expect(ranked.map((e) => e.filename)).toEqual([
-            'restricted-henle.pdf',
             'plain-scan.pdf',
+            'restricted-henle.pdf',
             'mystery.pdf',
             'restricted-peters.pdf',
         ]);
-        expect(recommendEdition(ranked)).toBeNull();
+        expect(recommendEdition(ranked)?.filename).toBe('plain-scan.pdf');
+        const { importable, unavailable } = splitEditions(ranked);
+        expect(importable.map((e) => e.filename)).toEqual(['plain-scan.pdf']);
+        expect(unavailable.map((e) => e.filename)).toEqual([
+            'restricted-henle.pdf',
+            'mystery.pdf',
+            'restricted-peters.pdf',
+        ]);
     });
 
     it('never recommends a restricted Urtext or a license-unknown edition', () => {
@@ -272,8 +280,8 @@ describe('imslp display helpers', () => {
                 }),
                 edition('mystery.pdf', { license: 'unknown' }),
                 edition('plain-scan.pdf', { size: 900_000 }),
-            ]),
-        ).toBeNull();
+            ])?.filename,
+        ).toBe('plain-scan.pdf');
         expect(isEditionImportable(edition('mystery.pdf', { license: 'unknown' }))).toBe(false);
         expect(
             recommendEdition([
@@ -648,7 +656,9 @@ describe('ImslpBrowser', () => {
         expect(screen.getByText('Fresh Result')).toBeInTheDocument();
     });
 
-    it('opens Moonlight with restricted Henle first, unlabeled Weiner, and no auto-import', async () => {
+    it('opens Moonlight with a downloadable edition pre-selected and the restricted Henle files listed apart', async () => {
+        // Henle used to lead the list with nothing selected and Add disabled:
+        // the first screen of every popular work was greyed-out rows.
         const { screen, waitFor, within } = await import('@testing-library/react');
         const userEvent = (await import('@testing-library/user-event')).default;
         const api = await import('@/features/imslp/imslpApi');
@@ -661,9 +671,8 @@ describe('ImslpBrowser', () => {
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
 
         await screen.findByText('Choose a PDF edition');
-        expect(
-            screen.getByText(`${work.editions.length} PDFs · Urtext first — scroll for others.`),
-        ).toBeInTheDocument();
+        const downloadable = work.editions.length - 2;
+        expect(screen.getByText(`${downloadable} downloadable PDFs — scroll for others.`)).toBeInTheDocument();
         expect(screen.queryByText('No Urtext file tagged on this IMSLP page.')).not.toBeInTheDocument();
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
 
@@ -676,46 +685,48 @@ describe('ImslpBrowser', () => {
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
         const rows = within(list).getAllByRole('listitem');
-        expect(rows.length).toBe(work.editions.length);
+        expect(rows.length).toBe(downloadable);
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /Show all/ })).not.toBeInTheDocument();
+
+        // The best downloadable edition is chosen, so Add works straight away.
+        const first = within(rows[0]!);
+        expect(first.getByRole('radio')).toBeChecked();
+        expect(rows[0]).toHaveTextContent('Schirmer');
+        expect(first.getByText('Recommended')).toBeInTheDocument();
         const add = screen.getByRole('button', { name: 'Add to my library' });
-        expect(add).toBeDisabled();
-
-        const henleII = within(rows[0]!);
-        expect(henleII.getAllByText('Urtext · Henle · 1976').length).toBeGreaterThan(0);
-        expect(henleII.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(henleII.getByText(/Complete Score/)).toBeInTheDocument();
-        expect(henleII.getByRole('radio')).toBeDisabled();
-        expect(henleII.getByRole('radio')).not.toBeChecked();
-        expect(henleII.getByText('Restricted')).toBeInTheDocument();
-        expect(henleII.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
-
-        const henleI = within(rows[1]!);
-        expect(henleI.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
-        expect(henleI.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
-        expect(henleI.getByRole('radio')).toBeDisabled();
-        expect(henleI.getByRole('radio')).not.toBeChecked();
-
-        expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
+        expect(add).toBeEnabled();
+        expect(screen.queryByText('Select a downloadable edition to add.')).not.toBeInTheDocument();
+        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
+        expect(within(list).queryByText('Urtext · Henle · 1976')).not.toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
+
+        // Henle stays visible, below, with its own way to IMSLP — never selectable.
+        expect(screen.getByRole('heading', { name: 'Not downloadable here (2)' })).toBeInTheDocument();
+        const restricted = within(screen.getByRole('list', { name: 'Editions to open on IMSLP' })).getAllByRole(
+            'listitem',
+        );
+        expect(restricted).toHaveLength(2);
+        for (const row of restricted) {
+            const henle = within(row);
+            expect(henle.getByText('Urtext · Henle · 1976')).toBeInTheDocument();
+            expect(henle.getByText(/G\. Henle Verlag 1976/)).toBeInTheDocument();
+            expect(henle.getByText('Restricted')).toBeInTheDocument();
+            expect(henle.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
+            expect(henle.queryByRole('radio')).not.toBeInTheDocument();
+        }
+        expect(within(restricted[0]!).getByText(/Complete Score/)).toBeInTheDocument();
 
         const weinerRadio = screen.getByRole('radio', {
             name: /Select .*moonlight\.wiener/i,
         });
         expect(weinerRadio).not.toBeChecked();
-        // Importable rows carry no per-row Open; the footer link appears once selected.
+        // Importable rows carry no per-row Open; the footer link follows the selection.
         expect(within(weinerRadio.closest('li')!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
-        expect(screen.queryByRole('link', { name: /^Open on IMSLP$/ })).not.toBeInTheDocument();
-
-        await userEvent.click(within(rows[0]!).getByText(/G\. Henle Verlag 1976/));
-        expect(onImportImslp).not.toHaveBeenCalled();
-        expect(add).toBeDisabled();
 
         await userEvent.click(weinerRadio);
         expect(weinerRadio).toBeChecked();
         expect(add).toBeEnabled();
-        expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
         await userEvent.click(add);
         await waitFor(() => {
             expect(onImportImslp).toHaveBeenCalledTimes(1);
@@ -756,11 +767,11 @@ describe('ImslpBrowser', () => {
         await renderBrowser({ onImportImslp }, `/search?work=${encodeURIComponent(work.title)}`);
 
         await screen.findByText('Choose a PDF edition');
-        expect(screen.getByText('4 PDFs · Urtext first — scroll for others.')).toBeInTheDocument();
+        expect(screen.getByText('3 downloadable PDFs')).toBeInTheDocument();
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
         const rows = within(list).getAllByRole('listitem');
-        expect(rows).toHaveLength(4);
+        expect(rows).toHaveLength(3);
 
         const henleRadio = within(rows[0]!).getByRole('radio');
         expect(henleRadio).toBeChecked();
@@ -769,10 +780,10 @@ describe('ImslpBrowser', () => {
         expect(within(rows[0]!).getByText(/Complete Score/)).toBeInTheDocument();
         expect(within(rows[0]!).queryByRole('link', { name: /on IMSLP/i })).not.toBeInTheDocument();
         expect(screen.getByRole('link', { name: /^Open on IMSLP$/ })).toBeInTheDocument();
-        expect(within(rows[3]!).getByRole('radio')).toBeDisabled();
-        expect(within(rows[3]!).getByRole('radio')).not.toBeChecked();
-        expect(within(rows[3]!).getByText('Non-PD US')).toBeInTheDocument();
-        expect(within(rows[3]!).getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
+        const peters = within(screen.getByRole('list', { name: 'Editions to open on IMSLP' }));
+        expect(peters.queryByRole('radio')).not.toBeInTheDocument();
+        expect(peters.getByText('Non-PD US')).toBeInTheDocument();
+        expect(peters.getByRole('link', { name: /^open on IMSLP$/ })).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
 
         expect(screen.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
@@ -1009,10 +1020,11 @@ describe('ImslpBrowser', () => {
         vi.spyOn(api, 'fetchImslpWork').mockResolvedValue(work);
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
-        await screen.findByText('Choose a PDF edition');
+        await screen.findByRole('heading', { name: 'Not downloadable here (1)' });
 
-        const list = screen.getByRole('list', { name: 'PDF editions' });
-        expect(within(list).getByRole('radio')).toBeDisabled();
+        expect(screen.queryByRole('list', { name: 'PDF editions' })).not.toBeInTheDocument();
+        const list = screen.getByRole('list', { name: 'Editions to open on IMSLP' });
+        expect(within(list).queryByRole('radio')).not.toBeInTheDocument();
         expect(within(list).getByText('License check unavailable')).toBeInTheDocument();
         expect(within(list).getByText(/Couldn’t check the license just now/)).toBeInTheDocument();
         expect(within(list).getByRole('link', { name: 'check on IMSLP' })).toHaveAttribute(
@@ -1043,10 +1055,12 @@ describe('ImslpBrowser', () => {
 
         const list = screen.getByRole('list', { name: 'PDF editions' });
         const radios = within(list).getAllByRole('radio');
-        expect(radios).toHaveLength(2);
+        expect(radios).toHaveLength(1);
         expect(within(list).getByRole('radio', { name: /Select known/i })).toBeChecked();
-        expect(within(list).getByRole('radio', { name: /mystery/i })).toBeDisabled();
-        expect(within(list).getByText('License unknown')).toBeInTheDocument();
+        const unavailable = screen.getByRole('list', { name: 'Editions to open on IMSLP' });
+        expect(within(unavailable).getByText('mystery')).toBeInTheDocument();
+        expect(within(unavailable).queryByRole('radio')).not.toBeInTheDocument();
+        expect(within(unavailable).getByText('License unknown')).toBeInTheDocument();
         expect(onImportImslp).not.toHaveBeenCalled();
     });
 
@@ -1067,8 +1081,11 @@ describe('ImslpBrowser', () => {
 
         await renderBrowser({}, `/search?work=${encodeURIComponent(work.title)}`);
 
-        await screen.findByText('Choose a PDF edition');
-        expect(screen.getByText(/None of these editions can be imported automatically/)).toBeInTheDocument();
+        await screen.findByText(/None of these editions can be imported automatically/);
+        expect(screen.queryByText('Choose a PDF edition')).not.toBeInTheDocument();
+        // Both stay listed, each with its own way to IMSLP.
+        expect(screen.getByRole('heading', { name: 'Not downloadable here (2)' })).toBeInTheDocument();
+        expect(screen.getAllByRole('link', { name: 'open on IMSLP' })).toHaveLength(2);
         expect(screen.getByText('Choose downloaded PDF')).toBeInTheDocument();
         // No import button, no consent checkbox — there is nothing to import.
         expect(screen.queryByRole('button', { name: 'Add to my library' })).not.toBeInTheDocument();
