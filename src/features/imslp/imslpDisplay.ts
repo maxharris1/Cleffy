@@ -332,13 +332,108 @@ export const urtextBadge = (edition: EditionRankFields): string | null => {
 /** Badge for a recommended (non-Urtext) row, or the Urtext badge when confidence is high/medium. */
 export const recommendedBadge = (edition: EditionRankFields): string => urtextBadge(edition) ?? 'Recommended';
 
-/** Split query into highlight tokens (≥2 chars). */
-export const searchTokens = (query: string): string[] =>
-    query
-        .trim()
-        .split(/[\s,./+\-_|]+/)
-        .map((t) => t.trim())
-        .filter((t) => t.length >= 2);
+/** One character folded for matching: accents off, lower case ("É" → "e"). */
+const foldChar = (c: string): string => c.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+const isWordChar = (c: string | undefined): boolean => c !== undefined && /[\p{L}\p{N}]/u.test(c);
+const isDigit = (c: string | undefined): boolean => c !== undefined && /\p{N}/u.test(c);
+
+/**
+ * Split a query into highlight tokens: its words (letters, digits and inner
+ * apostrophes), deduplicated once folded. Short words stay — highlightRanges
+ * decides how strictly each one must match.
+ */
+export const searchTokens = (query: string): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of query.split(/[^\p{L}\p{N}\p{M}'’]+/u)) {
+        const token = raw.replace(/^['’]+|['’]+$/g, '');
+        const key = [...token].map(foldChar).join('');
+        if (key && /[\p{L}\p{N}]/u.test(key) && !seen.has(key)) {
+            seen.add(key);
+            out.push(token);
+        }
+    }
+    return out;
+};
+
+/** Tokens this short only highlight as a whole word ("de", not the "De" of Debussy). */
+const SHORT_TOKEN_MAX = 2;
+
+export interface HighlightRange {
+    start: number;
+    end: number;
+}
+
+/**
+ * Where to mark the query in a result line, as [start, end) offsets into
+ * `text`. Matching is accent- and case-folded and starts only on a word
+ * boundary (Unicode letters/digits; a letter–digit change counts, so "846"
+ * marks in "BWV846"). A word of three or more letters may be a prefix
+ * ("beeth" marks "Beeth|oven"); a one- or two-character token must be the
+ * whole word, or "de" would light up "Claude", "Debussy" and "Préludes"; a
+ * number is always whole (K.331 is not K.3310).
+ */
+export const highlightRanges = (text: string, tokens: string[]): HighlightRange[] => {
+    // Fold per code point, remembering which original slice each folded
+    // character came from, so a match maps back onto the unfolded text.
+    let folded = '';
+    const from: number[] = [];
+    const to: number[] = [];
+    let offset = 0;
+    for (const ch of text) {
+        const f = foldChar(ch);
+        for (let k = 0; k < f.length; k++) {
+            from.push(offset);
+            to.push(offset + ch.length);
+        }
+        folded += f;
+        offset += ch.length;
+    }
+    const needles = [...new Set(tokens.map((t) => [...t].map(foldChar).join('')).filter(Boolean))].sort(
+        (a, b) => b.length - a.length,
+    );
+    if (needles.length === 0 || !folded) {
+        return [];
+    }
+    const boundary = (i: number): boolean => {
+        const before = folded[i - 1];
+        const after = folded[i];
+        if (!isWordChar(before) || !isWordChar(after)) {
+            return true;
+        }
+        return isDigit(before) !== isDigit(after);
+    };
+    const ranges: HighlightRange[] = [];
+    let p = 0;
+    while (p < folded.length) {
+        const needle = boundary(p)
+            ? needles.find(
+                  (n) =>
+                      folded.startsWith(n, p) &&
+                      (boundary(p + n.length) || (n.length > SHORT_TOKEN_MAX && !isDigit(n[n.length - 1]))),
+              )
+            : undefined;
+        if (!needle) {
+            p++;
+            continue;
+        }
+        const start = from[p] ?? 0;
+        let end = to[p + needle.length - 1] ?? text.length;
+        // Keep a decomposed accent with its letter inside the same <mark>.
+        while (end < text.length && /\p{M}/u.test(text[end] ?? '')) {
+            end++;
+        }
+        const last = ranges[ranges.length - 1];
+        if (last && last.end >= start) {
+            last.end = Math.max(last.end, end);
+        } else {
+            ranges.push({ start, end });
+        }
+        p += needle.length;
+    }
+    return ranges;
+};
 
 const BEST_MATCH_COUNT = 8;
 

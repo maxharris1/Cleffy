@@ -139,8 +139,46 @@ const splitTemplateArgs = (inner: string): string[] => {
     return args.map((a) => a.trim());
 };
 
+/**
+ * IMSLP's accidental templates, keyed by lower-cased name (MediaWiki ignores
+ * the case of a name's first letter): a part named `Clarinet (B{{Flat}})` is
+ * "Clarinet (B♭)". Kept in step with the copy in search.ts (both files are
+ * import-free).
+ */
+export const WIKI_SYMBOL_TEMPLATES: Readonly<Record<string, string>> = {
+    flat: '♭',
+    sharp: '♯',
+    natural: '♮',
+};
+
+/**
+ * Templates left in a display field (description, publisher, plate): the
+ * accidentals render; any other template is plumbing, not prose — one with
+ * arguments keeps its last plain one (`{{K|Ab}}` → Ab, `{{plain|url|label}}`
+ * → label), a bare flag (`{{FE}}`, `{{Urtext}}`) goes.
+ */
+const renderTemplates = (value: string): string => {
+    let out = value;
+    for (let i = 0; i < 4 && out.includes('{{'); i++) {
+        out = out.replace(/\{\{([^{}]*)\}\}/g, (_m, inner: string) => {
+            const name = inner.trim().toLowerCase();
+            if (Object.hasOwn(WIKI_SYMBOL_TEMPLATES, name)) {
+                return WIKI_SYMBOL_TEMPLATES[name] ?? '';
+            }
+            const args = inner
+                .split('|')
+                .map((a) => a.trim())
+                .filter((a) => a.length > 0 && !a.includes('='));
+            const last = args[args.length - 1];
+            return args.length >= 2 && last && !/^https?:\/\//i.test(last) ? last : '';
+        });
+    }
+    // An unclosed `{{` or stray `}}` is broken markup; drop the braces, keep the words.
+    return out.replace(/\{\{|\}\}/g, '');
+};
+
 const stripMarkup = (value: string): string =>
-    value
+    renderTemplates(value)
         .replace(/\[\[[^\]|]*\|([^\]]*)\]\]/g, '$1')
         .replace(/\[\[([^\]]*)\]\]/g, '$1')
         .replace(/<[^>]+>/g, ' ')

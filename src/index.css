@@ -420,6 +420,23 @@ body {
     border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent);
 }
 
+/* Edition picker's disclaimer + Add. Below sm the work header and list fill a
+   phone's first screen (Add sat ~30px under the fold at 390x667), so the
+   footer sticks to the bottom edge, tinted like the search bar, until its own
+   place scrolls into view. Wider screens keep it in the flow. */
+@media (max-width: 39.99rem) {
+    .imslp-action-footer {
+        position: sticky;
+        bottom: 0;
+        z-index: 1;
+        margin-inline: -0.5rem;
+        padding: 0.75rem 0.5rem max(0.75rem, var(--safe-bottom));
+        background: color-mix(in srgb, var(--color-paper) 92%, transparent);
+        backdrop-filter: blur(6px);
+        border-top: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent);
+    }
+}
+
 .imslp-panel-view {
     animation: imslp-view-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }

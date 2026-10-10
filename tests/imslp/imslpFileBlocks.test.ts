@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { fileBlockKey, parseImslpFileBlocks } from '../../supabase/functions/_shared/imslpFileBlocks';
+import { fileBlockKey, fileCreditsFor, parseImslpFileBlocks } from '../../supabase/functions/_shared/imslpFileBlocks';
 
 const fixture = (name: string): string => readFileSync(resolve(process.cwd(), 'tests/imslp/fixtures', name), 'utf8');
 
@@ -215,5 +215,42 @@ describe('parseImslpFileBlocks', () => {
             '}}',
         ].join('\n');
         expect(parseImslpFileBlocks(wikitext).get('Barenreiter.pdf')?.urtext).toBe(true);
+    });
+
+    it('renders accidentals in part names and drops other templates sensibly', () => {
+        const wikitext = [
+            '{{#fte:imslpfile',
+            '|File Name 1=clarinet.pdf',
+            '|File Description 1=Clarinet (B{{Flat}})',
+            '|File Name 2=horn.pdf',
+            '|File Description 2=Horn in F{{sharp}} {{FE}}',
+            '|File Name 3=violin.pdf',
+            '|File Description 3=Violin I ({{K|Ab}}) {{ Natural }}',
+            '|Publisher Information={{P|Breitkopf & Härtel||Leipzig||1862||B.{{flat}} 1}}',
+            '}}',
+        ].join('\n');
+        const meta = parseImslpFileBlocks(wikitext);
+        expect(meta.get('Clarinet.pdf')?.description).toBe('Clarinet (B♭)');
+        expect(meta.get('Horn.pdf')?.description).toBe('Horn in F♯');
+        expect(meta.get('Violin.pdf')?.description).toBe('Violin I (Ab) ♮');
+        expect(meta.get('Clarinet.pdf')?.plate).toBe('B.♭ 1');
+    });
+});
+
+describe('fileCreditsFor templates', () => {
+    it('credits a publisher line without leaking template braces', () => {
+        const wikitext = [
+            '{{#fte:imslpfile',
+            '|File Name 1=parts.pdf',
+            '|Editor={{LinkEd|Hans|von Bülow}}',
+            '|Publisher Information={{P|Edition {{flat}} Verlag||Berlin||1900||}}',
+            '}}',
+        ].join('\n');
+        expect(fileCreditsFor(wikitext, 'parts.pdf')).toEqual({
+            editor: 'Hans von Bülow',
+            arranger: null,
+            publisher: 'Edition ♭ Verlag',
+            year: 1900,
+        });
     });
 });
