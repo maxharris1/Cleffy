@@ -18,22 +18,83 @@ import {
 import type { AnnotationRow } from '@/types/database';
 
 /**
- * Live-ink flush cadence. Slower than pen sampling on purpose: Free-plan
- * Realtime messages are billed with fan-out, so we coalesce aggressively and
- * degrade further under client-side backpressure (plan §realtime).
+ * Live-ink flush cadence. Realtime bills every broadcast once as sent and once
+ * per member it reaches, so a batch costs as much as the room is large: the
+ * cadence widens with the room (10 ms per member, 80–250 ms), keeping a
+ * 25-person lesson to four batches per second-long stroke (pen-up included)
+ * where a one-to-one lesson still gets smooth 80 ms ink. At c08a922 a flat
+ * 100 ms cost ~250 messages per stroke at 25 members and tripped the
+ * server's per-second limit (DEPLOY.md §10).
  */
-const FLUSH_MS = 100;
-const FLUSH_MS_DEGRADED = 175;
-const FLUSH_MAX_POINTS = 45;
-
-/** Min gap between presence `track` calls — avoids ClientPresenceRateLimitReached. */
-const PRESENCE_TRACK_MIN_MS = 1000;
+export const FLUSH_MIN_MS = 80;
+export const FLUSH_MAX_MS = 250;
+const FLUSH_MS_PER_MEMBER = 10;
+/** Cadence ceiling while the server is rate-limiting (see RATE_LIMIT_MAX_LEVEL). */
+const FLUSH_DEGRADED_MAX_MS = 1000;
+/** A batch this large goes out early: payload size, not message count. */
+const FLUSH_MAX_POINTS = 150;
+/** Same, when only pen-up is streamed (a very long stroke is split). */
+const PEN_UP_MAX_POINTS = 1500;
 
 /**
- * How long doc-db:{id} may lag behind a joined doc:{id} before we stop waiting
- * for it. Both topics share one socket, so a healthy re-join lands within a
- * round-trip of the other; anything slower means the join is being refused or
- * retried (e.g. the frontend is live before migration 20261007120101).
+ * Min gap between presence `track` calls. Each one fans out to the whole room
+ * and Realtime caps presence messages per second well below broadcast, so a
+ * scroll only reports its page every couple of seconds.
+ */
+export const PRESENCE_TRACK_MIN_MS = 2000;
+
+/**
+ * Adaptive backoff after the server says "Too many messages per second" (a
+ * `system` error, normally followed by closing the channel) or refuses a join
+ * for the same reason. Each signal is one level: the ink cadence and presence
+ * gap double per level, and at the top level mid-stroke previews stop — a
+ * stroke is streamed once, whole, at pen-up. Committed strokes are never
+ * affected: they go through the outbox and the database, not this channel.
+ */
+export const RATE_LIMIT_MAX_LEVEL = 3;
+/** One level is shed after this long without a new signal. */
+export const RATE_LIMIT_DECAY_MS = 30_000;
+/** Signals this close together (one burst, both channels) count as one level. */
+const RATE_LIMIT_MERGE_MS = 1000;
+
+/**
+ * Re-join backoff for a channel that dropped. realtime-js retries an errored
+ * join itself but never re-joins a channel the server closed — which is what
+ * the rate limiter does — so every drop arms one of these: exponential from
+ * REJOIN_BASE_MS to REJOIN_MAX_MS, with jitter so a room the server just shed
+ * does not come back in lockstep and trip the limit again.
+ */
+export const REJOIN_BASE_MS = 1000;
+export const REJOIN_MAX_MS = 30_000;
+/** After a rate-limit signal: rejoining sooner would only be refused again. */
+export const REJOIN_RATE_LIMITED_MIN_MS = 5000;
+/** A channel that stayed joined this long starts its next backoff from the base. */
+export const REJOIN_STABLE_MS = 60_000;
+
+/** The wording Realtime uses for its rate limits ("Too many …", "…RateLimitReached"). */
+const RATE_LIMIT_RE = /too many|rate.?limit/i;
+
+export const isRateLimitText = (text: unknown): boolean => typeof text === 'string' && RATE_LIMIT_RE.test(text);
+
+/**
+ * Delay before re-join attempt `attempt` (0-based): half the exponential
+ * ceiling plus up to half again at random ("equal jitter"), so it is bounded
+ * on both sides.
+ */
+export const rejoinDelayMs = (attempt: number, rateLimited: boolean, random: () => number = Math.random): number => {
+    let ceiling = Math.min(REJOIN_MAX_MS, REJOIN_BASE_MS * 2 ** Math.min(attempt, 16));
+    if (rateLimited) {
+        ceiling = Math.max(ceiling, REJOIN_RATE_LIMITED_MIN_MS);
+    }
+    return Math.round(ceiling / 2 + (random() * ceiling) / 2);
+};
+
+/**
+ * How long doc-db:{id} may be out before we stop waiting for it and pull
+ * instead. A healthy (re-)join lands well inside this; anything slower means
+ * the join is being refused or retried (e.g. the frontend is live before
+ * migration 20261007120101), or the server closed the channel and its re-join
+ * is backing off.
  */
 export const DB_JOIN_GRACE_MS = 4000;
 /** Pull cadence while committed rows cannot arrive live (fallback mode). */
@@ -117,10 +178,21 @@ export class DocRealtimeChannel {
     private dbChannel: RealtimeChannel | null = null;
     private readonly joined: Record<ChannelKey, boolean> = { live: false, db: false };
     private readonly everJoined: Record<ChannelKey, boolean> = { live: false, db: false };
-    private reconnectPending = false;
+    /** doc:{id} re-joined after a drop and onReconnect has not run for it yet. */
+    private liveRejoined = false;
     private stopped = false;
 
-    // Fallback when doc-db:{id} will not join (see armDbFallback).
+    // Re-join after a drop (see scheduleRejoin).
+    private readonly rejoinTimers: Record<ChannelKey, ReturnType<typeof setTimeout> | null> = { live: null, db: null };
+    private readonly rejoinAttempts: Record<ChannelKey, number> = { live: 0, db: 0 };
+    private readonly joinedAt: Record<ChannelKey, number | null> = { live: null, db: null };
+
+    // Server rate-limit backoff (see RATE_LIMIT_MAX_LEVEL).
+    private rateLimitLevel = 0;
+    private lastRateLimitAt = -Infinity;
+    private rateLimitDecayTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Fallback when doc-db:{id} is not joined (see armDbFallback).
     private dbGraceTimer: ReturnType<typeof setTimeout> | null = null;
     private dbPollTimer: ReturnType<typeof setInterval> | null = null;
     private dbInkPullTimer: ReturnType<typeof setTimeout> | null = null;
@@ -131,9 +203,12 @@ export class DocRealtimeChannel {
     private meta: StrokeMeta | null = null;
     private pending: number[] = [];
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
-    private flushInterval = FLUSH_MS;
+    /** Some of the current stroke went out, so a cancel has something to retract. */
+    private strokeStreamed = false;
     /** True when at least one other member is on the channel (solo → no live ink). */
     private hasRemoteAudience = false;
+    /** Members on doc:{id} at the last presence sync, this user included. */
+    private members = 0;
 
     // Presence track coalescing (page-only payload).
     private lastTrackedPage: number | null = null;
@@ -143,6 +218,11 @@ export class DocRealtimeChannel {
     constructor(private opts: DocRealtimeChannelOptions) {}
 
     start(): void {
+        this.openLive();
+        this.openDb();
+    }
+
+    private openLive(): void {
         const { supabase, docId, self } = this.opts;
         const channel = supabase.channel(docTopic(docId), {
             config: {
@@ -187,19 +267,32 @@ export class DocRealtimeChannel {
                     peers.push(parsed.data);
                 }
             }
+            this.members = peers.length;
             this.hasRemoteAudience = peers.some((p) => p.userId !== self.userId);
             this.opts.onPeers(peers);
         });
 
+        // The server's rate-limit notice arrives here, just before it closes the channel.
+        channel.on('system', {}, (payload: unknown) => this.onSystem(payload));
+
         this.channel = channel;
-        channel.subscribe((status) => {
-            if (status === 'CHANNEL_ERROR' && !this.stopped) {
+        channel.subscribe((status, err) => {
+            // A channel replaced by a re-join, or stop(): its late events mean nothing.
+            if (this.channel !== channel) {
+                return;
+            }
+            const rateLimited = isRateLimitText(err?.message);
+            if (rateLimited) {
+                this.noteRateLimit();
+            }
+            if (status === 'CHANNEL_ERROR' && !rateLimited) {
                 // Also what a refused join looks like: a removed member's
                 // rejoin fails the realtime.messages policy on doc:{id}. A
                 // transport error lands here too; the re-check tells them
                 // apart. (doc-db:{id} refusals are left to the polling
                 // fallback: before migration 20261007120101 every member's
-                // join there is refused, which says nothing about access.)
+                // join there is refused, which says nothing about access —
+                // nor does a join refused by the rate limiter.)
                 this.opts.onMembershipChanged?.();
             }
             // Join state first: presence and live ink only go out while joined.
@@ -209,7 +302,10 @@ export class DocRealtimeChannel {
                 this.trackPresence({ force: true });
             }
         });
+    }
 
+    private openDb(): void {
+        const { supabase, docId } = this.opts;
         // Receive-only: no presence, and nothing is ever sent on it.
         const dbChannel = supabase.channel(docDbTopic(docId), {
             config: { private: true, broadcast: { self: false, ack: false } },
@@ -234,28 +330,45 @@ export class DocRealtimeChannel {
                 this.opts.onScoreAnalysis?.(msg);
             }
         });
+        dbChannel.on('system', {}, (payload: unknown) => this.onSystem(payload));
         this.dbChannel = dbChannel;
-        dbChannel.subscribe((status) => this.onChannelStatus('db', status));
+        dbChannel.subscribe((status, err) => {
+            if (this.dbChannel !== dbChannel) {
+                return;
+            }
+            if (isRateLimitText(err?.message)) {
+                this.noteRateLimit();
+            }
+            this.onChannelStatus('db', status);
+        });
     }
 
     /**
      * Re-join bookkeeping across the two channels. A drop usually takes both
-     * (they share one socket), and the gap-fill pull must start only once the
-     * committed-row channel is live again — otherwise a row committed between
+     * (they share one socket), and the gap-fill pull must start only once
+     * committed rows have a path again — otherwise a row committed between
      * the pull and the db channel's re-join would be missed by both. So
-     * onReconnect fires once both are joined after either re-joined; the first
-     * join of each is not a reconnect.
+     * onReconnect (clear live ink, pull) fires once both are joined after
+     * doc:{id} re-joined, and onResync (pull) once doc-db:{id} is back after
+     * only it dropped; the first join of each is not a reconnect.
      *
-     * Waiting on doc-db:{id} is bounded, though: if it stays unjoined
-     * DB_JOIN_GRACE_MS after doc:{id} joined, the channel degrades to pulling
-     * (see armDbFallback) instead of leaving the score with no committed-row
-     * path at all.
+     * Waiting on doc-db:{id} is bounded, though: while it is not joined —
+     * whatever doc:{id} is doing — the channel pulls instead (see
+     * armDbFallback), and those pulls are then the path, so neither side
+     * waits for the other. Every drop also arms a re-join (scheduleRejoin):
+     * realtime-js gives up on a channel the server closed, which is how the
+     * rate limiter sheds clients.
      */
     private onChannelStatus(key: ChannelKey, status: string): void {
         if (this.stopped) {
             return;
         }
         if (status !== 'SUBSCRIBED') {
+            const joinedAt = this.joinedAt[key];
+            if (joinedAt !== null && Date.now() - joinedAt >= REJOIN_STABLE_MS) {
+                this.rejoinAttempts[key] = 0;
+            }
+            this.joinedAt[key] = null;
             this.joined[key] = false;
             if (key === 'live') {
                 // Whoever was watching is not reachable until the rejoin's
@@ -269,46 +382,61 @@ export class DocRealtimeChannel {
                 }
             }
             this.updateDbFallback();
+            this.scheduleRejoin(key);
             return;
         }
+        this.clearRejoinTimer(key);
+        this.joinedAt[key] = Date.now();
         this.joined[key] = true;
-        if (this.everJoined[key]) {
-            this.reconnectPending = true;
-        }
+        const rejoined = this.everJoined[key];
         this.everJoined[key] = true;
-        if (this.joined.live && this.joined.db) {
-            const missedRows = this.reconnectPending || this.dbFallback;
-            const clearLive = this.reconnectPending;
-            this.reconnectPending = false;
+        if (key === 'live' && rejoined) {
+            this.liveRejoined = true;
+        }
+        if (key === 'db') {
+            // Committed rows flow again. Rows committed while it was down (or
+            // since the last fallback poll) reached nobody: pull them now,
+            // whether or not doc:{id} is back yet.
+            const missedRows = rejoined || this.dbFallback;
             this.leaveDbFallback();
-            if (clearLive) {
+            if (this.joined.live && this.liveRejoined) {
+                this.liveRejoined = false;
                 this.opts.onReconnect();
             } else if (missedRows) {
-                // First db join after running without it: rows committed since
-                // the last fallback pull reached nobody. Live ink was intact.
                 this.opts.onResync();
             }
             return;
         }
+        if (this.joined.db) {
+            if (this.liveRejoined) {
+                this.liveRejoined = false;
+                this.opts.onReconnect();
+            }
+        } else if (this.dbFallback && this.liveRejoined) {
+            // Committed rows only come from polls while doc-db:{id} is out, so
+            // waiting for it gains nothing: clear the stale live ink and pull now.
+            this.liveRejoined = false;
+            this.opts.onReconnect();
+        }
         this.updateDbFallback();
     }
 
-    /** Start or stop waiting on doc-db:{id} as the two join states change. */
+    /** Start or stop the polling fallback as doc-db:{id}'s join state changes. */
     private updateDbFallback(): void {
-        if (this.joined.live && !this.joined.db) {
-            this.armDbFallback();
-        } else {
-            // Socket down (live not joined): pulls would only fail; the next
-            // live join re-arms. Or db is joined: onChannelStatus handled it.
+        if (this.joined.db) {
             this.clearDbFallbackTimers();
+        } else {
+            this.armDbFallback();
         }
     }
 
     /**
-     * doc:{id} is joined but doc-db:{id} is not. Give it DB_JOIN_GRACE_MS, then
-     * run whatever gap-fill was waiting on it and keep pulling every
-     * DB_FALLBACK_POLL_MS (plus shortly after each peer stroke ends) until it
-     * joins. realtime-js keeps retrying the refused join on its own.
+     * doc-db:{id} is not joined. Give it DB_JOIN_GRACE_MS, then run whatever
+     * gap-fill was waiting on it and keep pulling every DB_FALLBACK_POLL_MS
+     * (plus shortly after each peer stroke ends) until it joins. This runs
+     * whether or not doc:{id} is joined: a pull is a plain HTTPS request, so
+     * it still works after the server has shed this client's channels, and
+     * offline it fails cheaply.
      */
     private armDbFallback(): void {
         if (this.dbGraceTimer || this.dbPollTimer) {
@@ -316,12 +444,12 @@ export class DocRealtimeChannel {
         }
         this.dbGraceTimer = setTimeout(() => {
             this.dbGraceTimer = null;
-            if (this.stopped || !this.joined.live || this.joined.db) {
+            if (this.stopped || this.joined.db) {
                 return;
             }
             this.dbFallback = true;
-            if (this.reconnectPending) {
-                this.reconnectPending = false;
+            if (this.liveRejoined && this.joined.live) {
+                this.liveRejoined = false;
                 this.opts.onReconnect();
             } else {
                 this.opts.onResync();
@@ -362,9 +490,123 @@ export class DocRealtimeChannel {
         }
     }
 
+    // ---- Re-join ---------------------------------------------------------
+
+    /**
+     * Arm the re-join of a channel that left 'joined'. When it fires, a channel
+     * still not joined is replaced by a fresh one: a closed channel is dead to
+     * realtime-js, and an errored one has had realtime-js's own retries (which
+     * have no jitter) for as long as our backoff allowed. Two cases are left
+     * to realtime-js and simply re-armed: a join already in flight, and an
+     * errored channel whose socket is down — realtime-js re-joins those when
+     * the socket reopens. A SUBSCRIBED meanwhile cancels the timer.
+     */
+    private scheduleRejoin(key: ChannelKey): void {
+        if (this.stopped || this.rejoinTimers[key]) {
+            return;
+        }
+        const delay = rejoinDelayMs(this.rejoinAttempts[key], this.rateLimitLevel > 0);
+        this.rejoinAttempts[key] += 1;
+        this.rejoinTimers[key] = setTimeout(() => {
+            this.rejoinTimers[key] = null;
+            void this.rejoin(key);
+        }, delay);
+    }
+
+    private clearRejoinTimer(key: ChannelKey): void {
+        const timer = this.rejoinTimers[key];
+        if (timer) {
+            clearTimeout(timer);
+            this.rejoinTimers[key] = null;
+        }
+    }
+
+    private async rejoin(key: ChannelKey): Promise<void> {
+        if (this.stopped || this.joined[key]) {
+            return;
+        }
+        const { supabase } = this.opts;
+        const old = key === 'live' ? this.channel : this.dbChannel;
+        if (old && (old.state === 'joining' || (old.state === 'errored' && !supabase.realtime.isConnected()))) {
+            this.scheduleRejoin(key);
+            return;
+        }
+        // Detach first, so the CLOSED its removal reports is ignored.
+        if (key === 'live') {
+            this.channel = null;
+        } else {
+            this.dbChannel = null;
+        }
+        if (old) {
+            // Also takes it off the client's channel list, without which
+            // supabase.channel() would hand the dead channel straight back.
+            await supabase.removeChannel(old).catch(() => undefined);
+        }
+        if (this.stopped) {
+            return;
+        }
+        if (key === 'live') {
+            this.openLive();
+        } else {
+            this.openDb();
+        }
+    }
+
+    // ---- Server rate limits ----------------------------------------------
+
+    private onSystem(payload: unknown): void {
+        if (typeof payload !== 'object' || payload === null) {
+            return;
+        }
+        const { status, message } = payload as { status?: unknown; message?: unknown };
+        if (status === 'error' && isRateLimitText(message)) {
+            this.noteRateLimit();
+        }
+    }
+
+    private noteRateLimit(): void {
+        if (this.stopped) {
+            return;
+        }
+        const now = Date.now();
+        if (now - this.lastRateLimitAt >= RATE_LIMIT_MERGE_MS) {
+            this.rateLimitLevel = Math.min(RATE_LIMIT_MAX_LEVEL, this.rateLimitLevel + 1);
+        }
+        this.lastRateLimitAt = now;
+        this.armRateLimitDecay();
+    }
+
+    private armRateLimitDecay(): void {
+        if (this.rateLimitDecayTimer) {
+            clearTimeout(this.rateLimitDecayTimer);
+        }
+        this.rateLimitDecayTimer = setTimeout(() => {
+            this.rateLimitDecayTimer = null;
+            this.rateLimitLevel = Math.max(0, this.rateLimitLevel - 1);
+            if (this.rateLimitLevel > 0) {
+                this.armRateLimitDecay();
+            }
+        }, RATE_LIMIT_DECAY_MS);
+    }
+
+    /** Live-ink batch cadence right now; null while only pen-up is streamed. */
+    private inkFlushMs(): number | null {
+        if (this.rateLimitLevel >= RATE_LIMIT_MAX_LEVEL) {
+            return null;
+        }
+        const base = Math.min(FLUSH_MAX_MS, Math.max(FLUSH_MIN_MS, this.members * FLUSH_MS_PER_MEMBER));
+        return Math.min(FLUSH_DEGRADED_MAX_MS, base * 2 ** this.rateLimitLevel);
+    }
+
     stop(): void {
         this.stopped = true;
         this.leaveDbFallback();
+        this.clearRejoinTimer('live');
+        this.clearRejoinTimer('db');
+        if (this.rateLimitDecayTimer) {
+            clearTimeout(this.rateLimitDecayTimer);
+            this.rateLimitDecayTimer = null;
+        }
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
@@ -385,8 +627,9 @@ export class DocRealtimeChannel {
 
     /**
      * Presence: report which page the user is looking at.
-     * PdfViewport already debounces scroll at 400ms; this adds a 1s min gap
-     * (including SUBSCRIBED reconnects) so we do not trip ClientPresenceRateLimitReached.
+     * PdfViewport already debounces scroll at 400ms; this adds a min gap
+     * (PRESENCE_TRACK_MIN_MS, doubled per rate-limit level, SUBSCRIBED
+     * reconnects included) so we do not trip the presence rate limit.
      */
     setPage(page: number): void {
         this.opts.self.page = page;
@@ -415,17 +658,25 @@ export class DocRealtimeChannel {
             return;
         }
         // Min-gap applies to reconnect storms too; first join (lastPresenceTrackAt=0) is immediate.
+        const minGap = PRESENCE_TRACK_MIN_MS * 2 ** this.rateLimitLevel;
         const elapsed = Date.now() - this.lastPresenceTrackAt;
-        if (elapsed < PRESENCE_TRACK_MIN_MS) {
+        if (elapsed < minGap) {
             this.presenceTrackTimer = setTimeout(
                 () => this.trackPresence(force ? { force: true } : undefined),
-                PRESENCE_TRACK_MIN_MS - elapsed,
+                minGap - elapsed,
             );
             return;
         }
         this.lastTrackedPage = page;
         this.lastPresenceTrackAt = Date.now();
-        void channel.track({ ...this.opts.self });
+        void channel
+            .track({ ...this.opts.self })
+            .then((result) => {
+                if (isRateLimitText(result)) {
+                    this.noteRateLimit();
+                }
+            })
+            .catch(() => undefined);
     }
 
     /** doc:{id} is joined right now, so a send goes over the websocket. */
@@ -439,27 +690,38 @@ export class DocRealtimeChannel {
         start: (meta) => {
             this.meta = meta;
             this.pending = [];
+            this.strokeStreamed = false;
         },
         append: (pts) => {
             if (!this.meta || !this.hasRemoteAudience) {
                 return;
             }
             this.pending.push(...pts);
-            if (this.pending.length / 3 >= FLUSH_MAX_POINTS) {
+            const interval = this.inkFlushMs();
+            const maxPoints = interval === null ? PEN_UP_MAX_POINTS : FLUSH_MAX_POINTS;
+            if (this.pending.length / 3 >= maxPoints) {
                 this.flushInk();
-            } else if (!this.flushTimer) {
-                this.flushTimer = setTimeout(() => this.flushInk(), this.flushInterval);
+            } else if (interval !== null && !this.flushTimer) {
+                this.flushTimer = setTimeout(() => this.flushInk(), interval);
             }
         },
         end: () => {
+            // The final batch carries whatever is left, pen-up point included.
             this.flushInk({ done: true });
             this.meta = null;
         },
         cancel: () => {
             const meta = this.meta;
+            const streamed = this.strokeStreamed;
             this.meta = null;
             this.pending = [];
-            if (meta && this.hasRemoteAudience) {
+            this.strokeStreamed = false;
+            if (this.flushTimer) {
+                clearTimeout(this.flushTimer);
+                this.flushTimer = null;
+            }
+            // Nothing went out, so peers have no preview to drop.
+            if (meta && streamed && this.hasRemoteAudience) {
                 this.send({ ...metaToMsg(meta, this.opts.self.userId), pts: [], cancel: true });
             }
         },
@@ -480,9 +742,15 @@ export class DocRealtimeChannel {
             this.pending = [];
             return;
         }
+        // An empty pen-up only closes a preview peers actually have.
+        if (extra && this.pending.length === 0 && !this.strokeStreamed) {
+            return;
+        }
         const pts = this.pending;
         this.pending = [];
-        this.send({ ...metaToMsg(meta, this.opts.self.userId), pts, ...(extra ?? {}) });
+        if (this.send({ ...metaToMsg(meta, this.opts.self.userId), pts, ...(extra ?? {}) })) {
+            this.strokeStreamed = true;
+        }
     }
 
     /**
@@ -490,20 +758,24 @@ export class DocRealtimeChannel {
      * joined realtime-js falls back to one REST request per send — a burst of
      * them for every stroke while Realtime is down — for previews nobody can
      * receive. Committed strokes still reach everyone through the outbox.
+     * Returns whether the batch went out.
      */
-    private send(payload: InkProgressMsg): void {
+    private send(payload: InkProgressMsg): boolean {
         if (!this.channel || this.stopped || !this.hasRemoteAudience || !this.isLive()) {
-            return;
+            return false;
         }
         void this.channel
             .send({ type: 'broadcast', event: INK_PROGRESS_EVENT, payload })
             .then((result) => {
-                // Backpressure: realtime-js reports client-side rate limiting.
-                if (result === 'rate limited') {
-                    this.flushInterval = FLUSH_MS_DEGRADED;
+                // Without acks a websocket send resolves 'ok' at once, so the
+                // server's `system` notice is the real signal; a rate-limit
+                // result (older realtime-js said 'rate limited') still counts.
+                if (isRateLimitText(result)) {
+                    this.noteRateLimit();
                 }
             })
             .catch(() => undefined);
+        return true;
     }
 }
 

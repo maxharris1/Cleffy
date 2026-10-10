@@ -39,6 +39,7 @@ the steps that need a human because no API exposes them — each one says why.
 | `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
 | Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
 | Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1) |
+| Supabase plan (realtime quota, connections, pausing)                   | ⚠️ **Free** — upgrade the org to Pro before launch (§10)                |
 
 ---
 
@@ -1061,6 +1062,82 @@ teacher issues a fresh setup card ('reset'), which clears every limit on that
 username; claiming the card clears them again for the name the student picks.
 Because the keys are HMAC'd, a lock cannot be lifted by hand from the table
 without the secret; use the reset.
+
+## 10. Realtime capacity — upgrade to Pro before launch
+
+**The Supabase organisation ("Sail.io") is on the FREE plan.** `get_organization`
+over the Supabase MCP reported `plan: free` on 2026-10-10, for the org that holds
+both production and the `dev` branch. (The Spend Cap and branching mentioned
+elsewhere in this file read like paid features; the API says otherwise —
+confirm under Organization → Billing.) Free gives, per organisation:
+
+| Free plan              | Limit                                                                |
+| ---------------------- | -------------------------------------------------------------------- |
+| Realtime messages      | **2 M / month**, shared by production and `dev`                      |
+| Concurrent connections | **200** (one per open score tab; both topics share it)               |
+| Messages per second    | ~100 documented; the load test was cut off at about 25 drawing users |
+| Inactive projects      | **paused** after a week without activity — that would be cleffy.io   |
+
+Pro raises these to 5 M messages a month (then $2.50 per million), 500
+connections and 500 messages/s (2,500/s with the Spend Cap off), and never
+pauses. Current figures: <https://supabase.com/docs/guides/realtime/limits>,
+<https://supabase.com/docs/guides/realtime/quotas>. **Recommendation: move the
+org to Pro before launch.** On Free the monthly quota alone runs out at roughly
+ten teachers giving a few lessons a week (estimate below), and the 200
+connections are shared by every open score in the product.
+
+### How Cleffy spends messages
+
+Realtime bills each broadcast once as sent and once per member it reaches, so
+every message below costs about N for a room of N people:
+
+- **Live ink** (`ink:progress` on `doc:{id}`, only while someone else is there):
+  one batch per 10 ms × N, kept between 80 ms and 250 ms, plus one at pen-up
+  (`src/sync/realtimeChannel.ts`). A one-second stroke is ~13 batches one-to-one
+  and 4 at 25 people (c08a922 sent ~10 at any size).
+- **Committed rows** (`doc-db:{id}`, database trigger): one per saved stroke,
+  recolour or erase.
+- **Presence**: one per join and per page change, at most one per user every
+  2 s.
+
+Per one-second stroke that is about N × (batches + 1): **~28 messages** in a
+one-to-one lesson, ~110 at 10 people, **~125 at 25** (it was ~250 at c08a922,
+measured in the load test).
+
+| Lesson-hour (estimate, not measured)                              | Messages   |
+| ----------------------------------------------------------------- | ---------- |
+| One-to-one, ~400 strokes, page turns                              | **~12 k**  |
+| Group of 10: teacher every 10 s, students 30 strokes each         | ~75 k      |
+| Group of 25: same pattern, plus everyone's page turns             | **~175 k** |
+| Stress pattern: all 25 drawing a stroke every 2 s, the whole hour | ~5–6 M     |
+
+So 2 M a month is ~165 one-to-one lesson-hours or ~11 large-group ones, across
+the whole org including dev testing. On Pro the overage is about $0.03 per
+one-to-one lesson-hour and $0.45 per 25-person one.
+
+The stress pattern also exceeds Pro's 500 messages/s (~1,500/s). The client now
+copes rather than breaking — see below — but sessions where everyone draws at
+once at that size need the Spend Cap off (2,500/s), a Supabase limit increase,
+or a product decision such as streaming live ink from the teacher only.
+
+### What the client does when Realtime pushes back
+
+Fixed after the 2026-10 load test (QA B3/B11):
+
+- The server's "Too many messages per second" (a `system` error, then it closes
+  the channel) used to leave a viewer with no live updates until reload:
+  realtime-js never re-joins a channel the server closed, and the 15 s pull
+  stopped too. Now every drop re-joins with jittered exponential backoff (1 s
+  to 30 s, at least 2.5 s after a rate-limit notice), the pull keeps running
+  whenever `doc-db:{id}` is not joined, and a gap-fill pull follows the re-join.
+- Each rate-limit notice (or join refused for the same reason) doubles the
+  ink cadence and presence gap; after three, mid-stroke previews stop and a
+  stroke streams once, whole, at pen-up. A level wears off every 30 s without a
+  new notice. Committed strokes never depend on this channel: they go through
+  the outbox and the database.
+
+Watch Organization → Usage → Realtime messages for the first weeks after
+launch and compare it with the table above.
 
 ## Migration history — reconciled 2026-08-27
 
