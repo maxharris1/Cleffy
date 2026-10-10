@@ -6,7 +6,12 @@ import { RequireStudent } from '@/features/auth/AuthGates';
 import { displayNameOf, signOut } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { LegalLinks } from '@/features/legal/LegalLinks';
-import { fetchMyAssignments, fetchMyRosterProfile, type AssignedScore } from '@/features/student/studentApi';
+import {
+    fetchMyAssignments,
+    fetchMyRosterProfile,
+    fetchSignInStillValid,
+    type AssignedScore,
+} from '@/features/student/studentApi';
 import { getDb } from '@/sync/db';
 import { Badge } from '@/ui/Badge';
 import { EmptyState } from '@/ui/EmptyState';
@@ -22,6 +27,14 @@ import { buttonClassName } from '@/ui/classNames';
  * assignment created is what makes that work, so nothing on this page has to
  * teach the viewer about students.
  */
+/**
+ * How often an open list re-reads itself. Assignments are not pushed to the
+ * student (there is no realtime topic for them), so a teacher assigning a piece
+ * mid-lesson shows up within a minute, or at once when the student comes back
+ * to the tab.
+ */
+export const ASSIGNMENTS_REFRESH_MS = 60_000;
+
 export const AssignmentsPage = () => (
     <RequireStudent>{(session) => <AssignmentsView session={session} />}</RequireStudent>
 );
@@ -37,57 +50,113 @@ const AssignmentsView = ({ session }: { session: Session }) => {
 
     useEffect(() => {
         let mounted = true;
-        let firstResolved = false;
-        const assignedP = fetchMyAssignments();
-        const profileP = fetchMyRosterProfile();
-        assignedP.then(
-            () => {
-                firstResolved = true;
-            },
-            () => undefined,
-        );
-        void (async () => {
-            const cached = await getDb()
-                .assignmentsCache.get(session.user.id)
-                .catch(() => undefined);
-            await Promise.resolve();
-            if (mounted && !firstResolved && cached && cached.scores.length > 0) {
-                setScores(cached.scores);
-                setLoading(false);
-            }
+        let inFlight = false;
+        let hasScores = false;
 
-            const [assigned, profile] = await Promise.allSettled([assignedP, profileP]);
-            if (!mounted) {
+        /**
+         * One read of the list. The first paints the cached list while the
+         * network answers; later ones (focus, coming back to the tab, the timer)
+         * replace it quietly, so an assignment made since the page opened turns
+         * up without a reload.
+         */
+        const load = async (first: boolean) => {
+            if (inFlight) {
                 return;
             }
-            if (assigned.status === 'fulfilled') {
-                setScores(assigned.value);
-                void getDb()
-                    .assignmentsCache.put({
-                        userId: session.user.id,
-                        scores: assigned.value,
-                        cachedAt: new Date().toISOString(),
-                    })
-                    .catch(() => undefined);
-            } else if (!cached?.scores.length) {
-                // Leave `scores` null so the empty state cannot claim nothing is
-                // assigned when the truth is that nothing loaded.
-                setNotice('Could not load your pieces. Check the internet connection and try again.');
-            } else {
-                // The cached paint stays up, but say it is a snapshot — a new
-                // assignment made since the last sync would be missing from it.
-                setNotice('Could not refresh — showing your pieces from the last sync.');
+            inFlight = true;
+            try {
+                let firstResolved = false;
+                const assignedP = fetchMyAssignments();
+                const profileP = fetchMyRosterProfile();
+                // Alongside the reads rather than after them, so asking costs no
+                // extra round trip before the list shows.
+                const validP = fetchSignInStillValid(null).catch(() => null);
+                assignedP.then(
+                    () => {
+                        firstResolved = true;
+                    },
+                    () => undefined,
+                );
+                const cached = first
+                    ? await getDb()
+                          .assignmentsCache.get(session.user.id)
+                          .catch(() => undefined)
+                    : undefined;
+                if (first) {
+                    await Promise.resolve();
+                    if (mounted && !firstResolved && cached && cached.scores.length > 0) {
+                        hasScores = true;
+                        setScores(cached.scores);
+                        setLoading(false);
+                    }
+                }
+
+                const [assigned, profile] = await Promise.allSettled([assignedP, profileP]);
+                if (!mounted) {
+                    return;
+                }
+                const roster = profile.status === 'fulfilled' ? profile.value : null;
+                // Before the list is trusted: a sign-in the teacher has ended
+                // reads back as an empty list, which is not "nothing assigned".
+                if (assigned.status === 'fulfilled' && profile.status === 'fulfilled') {
+                    const stillValid = roster?.archived_at ? false : await validP;
+                    if (!mounted) {
+                        return;
+                    }
+                    if (stillValid === false) {
+                        mounted = false;
+                        await signOut().catch(() => undefined);
+                        navigate('/student', { replace: true, state: { signedOutByTeacher: true } });
+                        return;
+                    }
+                }
+                if (assigned.status === 'fulfilled') {
+                    hasScores = true;
+                    setScores(assigned.value);
+                    setNotice(null);
+                    void getDb()
+                        .assignmentsCache.put({
+                            userId: session.user.id,
+                            scores: assigned.value,
+                            cachedAt: new Date().toISOString(),
+                        })
+                        .catch(() => undefined);
+                } else if (!hasScores) {
+                    // Leave `scores` null so the empty state cannot claim nothing is
+                    // assigned when the truth is that nothing loaded.
+                    setNotice('Could not load your pieces. Check the internet connection and try again.');
+                } else {
+                    // The list on screen stays up, but say it is a snapshot — a new
+                    // assignment made since the last sync would be missing from it.
+                    setNotice('Could not refresh — showing your pieces from the last sync.');
+                }
+                // Best effort: the name from the session is already a fine answer.
+                if (roster) {
+                    setName(roster.display_name);
+                }
+                setLoading(false);
+            } finally {
+                inFlight = false;
             }
-            // Best effort: the name from the session is already a fine answer.
-            if (profile.status === 'fulfilled' && profile.value) {
-                setName(profile.value.display_name);
+        };
+
+        void load(true);
+
+        const refresh = () => {
+            if (document.visibilityState === 'visible') {
+                void load(false);
             }
-            setLoading(false);
-        })();
+        };
+        const timer = window.setInterval(refresh, ASSIGNMENTS_REFRESH_MS);
+        document.addEventListener('visibilitychange', refresh);
+        window.addEventListener('focus', refresh);
         return () => {
             mounted = false;
+            window.clearInterval(timer);
+            document.removeEventListener('visibilitychange', refresh);
+            window.removeEventListener('focus', refresh);
         };
-    }, [session.user.id]);
+    }, [session.user.id, navigate]);
 
     const handleSignOut = async () => {
         await signOut();
@@ -143,10 +212,12 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                 ) : null}
 
                 {/* delete-account refuses a provisioned student (their teacher
-                    created and controls the account), so say where to go instead. */}
+                    created and controls the account), so say where to go instead.
+                    Not "ask your teacher": a teacher can only archive a student,
+                    which keeps the account and its marks. */}
                 <footer className="mt-16 border-t border-stone-300/50 pt-4">
                     <p className="text-xs text-stone-500">
-                        Your teacher looks after this account. To have it deleted, ask your teacher.
+                        Your teacher looks after this account. To have it and its data deleted, contact us.
                     </p>
                     <LegalLinks withContact className="mt-2" />
                 </footer>

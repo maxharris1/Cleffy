@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { StudentAuthError, claimStudentAccount, loginStudent } from '@/features/student/studentApi';
+import {
+    StudentAuthError,
+    claimStudentAccount,
+    fetchSignInStillValid,
+    loginStudent,
+} from '@/features/student/studentApi';
+import type { ManagedStudentRow } from '@/types/database';
 
 const signInWithPassword = vi.fn();
 const setSession = vi.fn();
+const rpc = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
+        rpc: (...args: unknown[]) => rpc(...args),
         auth: {
             signInWithPassword: (...args: unknown[]) => signInWithPassword(...args),
             setSession: (...args: unknown[]) => setSession(...args),
@@ -117,5 +125,43 @@ describe('claimStudentAccount', () => {
         await expect(
             claimStudentAccount({ code: 'ABCD-EFGH-JKLM', username: 'ada_lovelace', password: 'hunter2hunter2' }),
         ).rejects.toMatchObject({ message: 'That username is taken', code: 'username_taken' });
+    });
+});
+
+describe('fetchSignInStillValid', () => {
+    const row = (archivedAt: string | null): ManagedStudentRow => ({
+        id: 'roster-1',
+        teacher_id: 'teacher-1',
+        student_user_id: 'student-1',
+        display_name: 'Ada',
+        parent_email: null,
+        auth_method: 'code',
+        username: 'ada',
+        student_email: null,
+        claimed_at: '2026-08-02T00:00:00Z',
+        archived_at: archivedAt,
+        created_at: '2026-08-01T00:00:00Z',
+        updated_at: '2026-08-01T00:00:00Z',
+    });
+
+    beforeEach(() => rpc.mockReset());
+
+    it('answers from an archived roster row without asking the server', async () => {
+        await expect(fetchSignInStillValid(row('2026-10-10T00:00:00Z'))).resolves.toBe(false);
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('asks the server, which knows when a reset ended this session', async () => {
+        rpc.mockResolvedValue({ data: true, error: null });
+        await expect(fetchSignInStillValid(row(null))).resolves.toBe(false);
+        expect(rpc).toHaveBeenCalledWith('student_access_revoked');
+
+        rpc.mockResolvedValue({ data: false, error: null });
+        await expect(fetchSignInStillValid(null)).resolves.toBe(true);
+    });
+
+    it('says it does not know when the server cannot answer', async () => {
+        rpc.mockResolvedValue({ data: null, error: { message: 'Failed to fetch' } });
+        await expect(fetchSignInStillValid(row(null))).resolves.toBeNull();
     });
 });
