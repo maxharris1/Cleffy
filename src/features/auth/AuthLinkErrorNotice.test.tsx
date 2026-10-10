@@ -68,6 +68,15 @@ describe('withoutAuthErrorParams', () => {
         ).toBe('/login?next=%2Flibrary');
         expect(withoutAuthErrorParams({ pathname: '/login', search: '?next=x', hash: '' })).toBeNull();
     });
+
+    it('leaves a part without error keys exactly as it was', () => {
+        expect(withoutAuthErrorParams({ pathname: '/help', search: '?error_code=otp_expired', hash: '#section' })).toBe(
+            '/help#section',
+        );
+        expect(withoutAuthErrorParams({ pathname: '/help', search: '?q=a b&x', hash: '#error_code=otp_expired' })).toBe(
+            '/help?q=a b&x',
+        );
+    });
 });
 
 describe('captureAuthUrlError', () => {

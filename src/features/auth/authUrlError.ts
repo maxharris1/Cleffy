@@ -59,10 +59,17 @@ export const parseAuthUrlError = (url: UrlParts): AuthUrlError | null => {
     return null;
 };
 
-/** `url` as a path without the auth error keys (other parameters kept), or null when there were none. */
+/**
+ * `url` as a path without the auth error keys (other parameters kept), or null
+ * when there were none. A part that carries no error key is kept exactly as it
+ * was: re-serialising it would turn an anchor like `#section` into `#section=`.
+ */
 export const withoutAuthErrorParams = (url: UrlParts): string | null => {
-    const strip = (raw: string): string => {
+    const strip = (raw: string): string | null => {
         const params = new URLSearchParams(raw);
+        if (!ERROR_KEYS.some((key) => params.has(key))) {
+            return null;
+        }
         for (const key of ERROR_KEYS) {
             params.delete(key);
         }
@@ -72,10 +79,12 @@ export const withoutAuthErrorParams = (url: UrlParts): string | null => {
     const search = url.search.replace(/^\?/, '');
     const cleanHash = strip(hash);
     const cleanSearch = strip(search);
-    if (cleanHash === new URLSearchParams(hash).toString() && cleanSearch === new URLSearchParams(search).toString()) {
+    if (cleanHash === null && cleanSearch === null) {
         return null;
     }
-    return `${url.pathname}${cleanSearch ? `?${cleanSearch}` : ''}${cleanHash ? `#${cleanHash}` : ''}`;
+    const nextHash = cleanHash ?? hash;
+    const nextSearch = cleanSearch ?? search;
+    return `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${nextHash ? `#${nextHash}` : ''}`;
 };
 
 let captured: AuthUrlError | null = null;
