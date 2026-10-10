@@ -486,6 +486,18 @@ verify_jwt = false
 [functions.delete-account]
 verify_jwt = true
 
+# A share-link guest attaching an email address. The browser no longer calls
+# updateUser({ email }): with mailer_autoconfirm on, GoTrue confirmed that
+# instantly, so a guest could claim anyone's address. start mails a one-time
+# code; confirm checks it and only then attaches the email and a password with
+# the admin API. Both take the guest's own (anonymous) JWT and refuse everyone
+# else; the flow is in functions/_shared/guestEmail.ts.
+[functions.guest-email-start]
+verify_jwt = true
+
+[functions.guest-email-confirm]
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54427

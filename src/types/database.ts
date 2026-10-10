@@ -746,6 +746,18 @@ export type Database = {
                 Args: { p_account_key: string };
                 Returns: number;
             };
+            // Service role only (guest-email-start / guest-email-confirm, see
+            // supabase/functions/_shared/guestEmail.ts); clients get no EXECUTE.
+            // Their table, guest_email_verifications, is service-only and so
+            // not listed under Tables.
+            check_guest_email_code: {
+                Args: { p_user_id: string; p_email: string; p_code_hash: string; p_max_attempts: number };
+                Returns: 'ok' | 'mismatch' | 'locked' | 'expired' | 'missing';
+            };
+            guest_email_taken: {
+                Args: { p_email: string };
+                Returns: boolean;
+            };
             // Service role only: imslp-download closes the shared IMSLP pacing
             // key for IMSLP's Retry-After after a 429.
             edge_rate_block: {

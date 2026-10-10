@@ -745,7 +745,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             {/* The landmark for everything below the header — notices, the score
                 and its floating controls — so none of it sits outside one. */}
             <main className="flex min-h-0 flex-1 flex-col">
-                {session?.user.is_anonymous ? <UpgradeBanner /> : null}
+                <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} />
                 {accessNotice ? (
                     <div
                         className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"

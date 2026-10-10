@@ -97,6 +97,61 @@ function that imports it — the merge deploys all of them).
 - The bundle also emits a same-origin `/supabase-preconnect.js` (CSP
   `script-src 'self'`); it is in `dist/` and needs nothing else.
 
+**QA round 3 — shell and auth (`qa3/shell-auth`, 20261010120200).**
+
+- **Guest "add your email" is now verified** (two new functions,
+  `guest-email-start` and `guest-email-confirm`, declared in `config.toml`
+  with `verify_jwt = true`, plus migration
+  `20261010120200_guest_email_verification`). The banner used to call
+  `updateUser` with the address from the browser, and with
+  `mailer_autoconfirm` on (both projects) GoTrue confirmed it on the spot with
+  no mail sent: a guest could attach anybody's address, the real owner then
+  got "an account with this email already exists", and a reset to that
+  address would hand over the guest's account. Now `guest-email-start` mails
+  a six-digit code (Resend, 15 minutes, HMAC'd at rest) and
+  `guest-email-confirm` checks it — 5 tries — before attaching the email
+  (confirmed) and a password with the admin API, which keeps the guest's user
+  id. An address that already has an account is answered "sign in instead",
+  nothing more. Limits (edge_rate_buckets): start 5/h per guest, 3/h per
+  recipient address, 20/h per IP; confirm 10 per 15 min per guest, 30 per IP.
+  Flow and reasons: `supabase/functions/_shared/guestEmail.ts`.
+    - **Order:** the migration **before** the functions (without it start
+      answers `503 email_unavailable`), the functions **before** the bundle
+      (the new banner gets a 404 from a missing function; an old bundle
+      keeps the unverified path until it is replaced — so do not hold the
+      bundle back once the functions are live).
+    - **Secrets, on both projects** (they do not inherit, §5):
+      `RESEND_API_KEY` (production has it for `resend-inbound`; **the `dev`
+      branch needs it too**, or the banner says email is unavailable there).
+      Optional: `GUEST_EMAIL_FROM` (default `Cleffy <noreply@cleffy.io>`, the
+      sender auth mail already uses — it must be on a Resend-verified domain,
+      §7), `GUEST_EMAIL_SECRET` (HMAC key for the codes; unset falls back to
+      the service-role key, like `LOGIN_THROTTLE_SECRET`).
+    - **Smoke:** join a score by link as a guest, "Add your email to keep
+      it" with a throwaway address you can read: the code arrives from
+      `noreply@cleffy.io`; a wrong code is refused; the right one says
+      "Saved", the banner goes, and the address signs in with the password
+      on another browser and sees the score. Repeat with an address that has
+      an account: "sign in instead", no mail sent.
+    - Accounts already upgraded the old way keep working; they have an
+      email and may have no password (the reset flow sets one).
+- **Owner decision, recommended (not changed here): turn on "Confirm email"
+  for sign-ups** on both projects (Authentication → Sign In / Providers →
+  Email; `mailer_autoconfirm: false` via the Management API). Sign-up has the
+  same hole the guest banner had: anyone can register an address they do not
+  own and block its owner. The app already handles confirmation
+  (`RegisterPage` shows "check your email", `/auth/callback` finishes it);
+  what changes is that every new teacher must click a link before using the
+  account, and sign-up then depends on the Resend domain staying verified
+  (§7).
+- Front-end only, nothing to deploy beyond the bundle: a tab left open across
+  a deploy now reloads once when it asks for a chunk that no longer exists
+  (`src/lib/staleChunk.ts`; it used to go blank), and the crash screen no
+  longer needs the router; an expired or used reset link explains itself
+  instead of landing silently on the sign-in page; browser zoom works
+  everywhere except over the score viewer (WCAG 1.4.4); "Two months free"
+  meets AA contrast.
+
 `stripe-webhook` now applies `customer.subscription.created` / `.updated` from
 the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
 the copy embedded in the event: Stripe does not deliver in order, and a retried
