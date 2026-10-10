@@ -5,7 +5,7 @@ import { passwordProblem, passwordProblemMessage } from '../../../supabase/funct
 import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } from '@/features/auth/guestUpgrade';
 import { CloseIcon } from '@/ui/icons';
 
-type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'dismissed';
+type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
 
 const INPUT_CLASS =
     'min-w-40 flex-1 rounded border border-amber-300 bg-white px-2 py-1 outline-none focus:border-amber-500';
@@ -27,7 +27,10 @@ const isPlausibleEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(va
  *
  * Rendered for every viewer session; it shows itself to guests, and stays up
  * after a successful attach (when the session is no longer a guest's) to say
- * how to sign in next time.
+ * how to sign in next time. "Saved" waits for the registered session the
+ * attach has to be followed by (guestUpgrade.ts): if that sign-in fails, the
+ * guest's old session is already gone server-side, so the banner says the
+ * email is saved and asks them to sign in with it instead.
  */
 export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     const [state, setState] = useState<BannerState>('collapsed');
@@ -37,7 +40,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     const [error, setError] = useState<{ message: string; signIn: boolean } | null>(null);
     const [busy, setBusy] = useState(false);
 
-    if (state === 'dismissed' || (!isGuest && state !== 'done')) {
+    if (state === 'dismissed' || (!isGuest && state !== 'done' && state !== 'signInNeeded')) {
         return null;
     }
 
@@ -79,9 +82,9 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
             return;
         }
         void run(async () => {
-            await confirmGuestEmailUpgrade({ email, code, password });
+            const outcome = await confirmGuestEmailUpgrade({ email, code, password });
             setPassword('');
-            setState('done');
+            setState(outcome === 'signed_in' ? 'done' : 'signInNeeded');
         });
     };
 
@@ -114,6 +117,18 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     <p role="status">
                         Saved. Your work now belongs to <span className="font-medium">{email}</span> — sign in with it
                         and your password on any device.
+                    </p>
+                    {dismissButton}
+                </div>
+            ) : state === 'signInNeeded' ? (
+                <div className="flex items-center justify-between gap-2">
+                    <p role="status">
+                        Your email <span className="font-medium">{email}</span> is saved, but we couldn&apos;t sign you
+                        back in.{' '}
+                        <Link to="/login" className="font-medium underline">
+                            Sign in with it
+                        </Link>{' '}
+                        and your password to keep working.
                     </p>
                     {dismissButton}
                 </div>

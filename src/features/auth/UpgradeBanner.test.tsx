@@ -46,7 +46,7 @@ const fillDetails = async (user: ReturnType<typeof userEvent.setup>, email = 'ad
 describe('UpgradeBanner', () => {
     it('attaches the email only after the mailed code comes back — never with updateUser', async () => {
         startGuestEmailUpgrade.mockResolvedValue(undefined);
-        confirmGuestEmailUpgrade.mockResolvedValue(undefined);
+        confirmGuestEmailUpgrade.mockResolvedValue('signed_in');
         const user = userEvent.setup();
         renderBanner();
 
@@ -69,7 +69,7 @@ describe('UpgradeBanner', () => {
 
     it('stays up to confirm after the session stops being a guest’s', async () => {
         startGuestEmailUpgrade.mockResolvedValue(undefined);
-        confirmGuestEmailUpgrade.mockResolvedValue(undefined);
+        confirmGuestEmailUpgrade.mockResolvedValue('signed_in');
         const user = userEvent.setup();
         const { rerender } = renderBanner();
         await fillDetails(user);
@@ -82,6 +82,21 @@ describe('UpgradeBanner', () => {
             </MemoryRouter>,
         );
         expect(screen.getByRole('status')).toHaveTextContent(/Saved/);
+    });
+
+    it('says "Saved" only with a registered session, and asks for a sign-in otherwise', async () => {
+        startGuestEmailUpgrade.mockResolvedValue(undefined);
+        confirmGuestEmailUpgrade.mockResolvedValue('sign_in_needed');
+        const user = userEvent.setup();
+        renderBanner();
+        await fillDetails(user);
+        await user.type(screen.getByRole('textbox', { name: 'Code from the email' }), '482913');
+        await user.click(screen.getByRole('button', { name: 'Save my work' }));
+
+        const status = screen.getByRole('status');
+        expect(status).not.toHaveTextContent(/^Saved/);
+        expect(status).toHaveTextContent(/ada@example\.com is saved, but we couldn't sign you back in/);
+        expect(screen.getByRole('link', { name: 'Sign in with it' })).toHaveAttribute('href', '/login');
     });
 
     it('tells the guest to sign in when the address already has an account', async () => {

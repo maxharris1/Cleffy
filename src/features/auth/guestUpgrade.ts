@@ -49,16 +49,38 @@ export const startGuestEmailUpgrade = async (email: string): Promise<void> => {
 };
 
 /**
- * Attach `email` and `password` to the guest's account once `code` matches.
- * Resolves after the session has been refreshed, so the app sees a registered
- * account (same user id, every membership and mark kept) from then on.
+ * Attach `email` and `password` to the guest's account once `code` matches,
+ * then sign in with them. The admin API that attaches them also deletes every
+ * session the user has (GoTrue logs a user out everywhere when an admin sets
+ * their password), so the guest's own session is dead from that moment: its
+ * refresh token is gone, and edge functions answer its still-unexpired access
+ * token — which says is_anonymous — with session_not_found. Signing in with
+ * the password just attached gives a fresh session for the same user id, so
+ * memberships, marks and this account's outbox all carry over.
+ *
+ * Resolves `'signed_in'` only once that new session is a registered one;
+ * `'sign_in_needed'` when the email is attached but the sign-in failed, and
+ * the user has to sign in themselves before the old session lapses.
  */
-export const confirmGuestEmailUpgrade = async (input: { email: string; code: string; password: string }) => {
-    await post('guest-email-confirm', { email: input.email.trim(), code: input.code, password: input.password });
-    // The access token still says is_anonymous until it is re-issued.
-    const { error } = await getSupabase().auth.refreshSession();
-    if (error) {
-        // Attached all the same; the next scheduled refresh picks it up.
-        console.warn('Session refresh after attaching an email failed', error);
+export const confirmGuestEmailUpgrade = async (input: {
+    email: string;
+    code: string;
+    password: string;
+}): Promise<'signed_in' | 'sign_in_needed'> => {
+    const typed = input.email.trim();
+    const body = (await post('guest-email-confirm', { email: typed, code: input.code, password: input.password })) as {
+        email?: unknown;
+    };
+    // The address as the server stored it (normalised), else as typed.
+    const email = typeof body.email === 'string' && body.email ? body.email : typed;
+    try {
+        const { data, error } = await getSupabase().auth.signInWithPassword({ email, password: input.password });
+        if (!error && data.session && !data.session.user.is_anonymous) {
+            return 'signed_in';
+        }
+        console.warn('Sign-in after attaching an email failed', error);
+    } catch (err) {
+        console.warn('Sign-in after attaching an email failed', err);
     }
+    return 'sign_in_needed';
 };

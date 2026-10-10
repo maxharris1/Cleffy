@@ -15,7 +15,9 @@ import type * as PasswordPolicy from './passwordPolicy.ts';
  * code; guest-email-confirm checks it and only then sets the email (marked
  * confirmed: it now is) and the password through the admin API, which also
  * turns the anonymous user into a registered one with the same id, so every
- * membership and mark the guest made stays theirs.
+ * membership and mark the guest made stays theirs. It also deletes all of
+ * that user's sessions (an admin password change logs out everywhere), so the
+ * client signs in again with the new email and password afterwards.
  *
  * NO runtime imports, like loginThrottle.ts and student-login/handler.ts: Deno
  * wants the `.ts` extension and vitest wants it gone, so everything the

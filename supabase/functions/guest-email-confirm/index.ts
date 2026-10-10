@@ -44,6 +44,11 @@ Deno.serve((req) =>
             // so the guest's id — and every membership and mark under it — is
             // now a registered account. The guard_guest_email trigger lets it
             // through because checkCode just stamped this address as proven.
+            // Setting a password here also deletes every session the user has
+            // (GoTrue's admin update logs the user out everywhere), the guest's
+            // own included: the client signs in again with this password
+            // (src/features/auth/guestUpgrade.ts), not a refresh, which can
+            // only fail now.
             // A clash with an account registered since start is not reported
             // here as email_exists (admin update has no such check; it is a
             // unique-index "Database error"): the handler asks again.

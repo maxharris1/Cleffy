@@ -111,7 +111,12 @@ function that imports it — the merge deploys all of them).
   a six-digit code (Resend, 15 minutes, HMAC'd at rest) and
   `guest-email-confirm` checks it — 5 tries — before attaching the email
   (confirmed) and a password with the admin API, which keeps the guest's user
-  id. An address that already has an account is answered "sign in instead",
+  id. That admin call also deletes all the user's sessions, the guest's
+  own included (GoTrue logs a user out everywhere when an admin sets the
+  password), so the banner then signs in with the new email and password —
+  a fresh, registered session for the same id — and says "Saved" only once
+  that works; if it does not, it says the email is saved and links to sign
+  in. An address that already has an account is answered "sign in instead",
   nothing more (asked again at confirm, for an address registered in the
   meantime). Limits (edge_rate_buckets): start 5/h per guest, 20/h per IP,
   and per recipient address 3/h and 10/day, spent only when a code is
@@ -150,7 +155,10 @@ function that imports it — the merge deploys all of them).
     - **Smoke:** join a score by link as a guest, "Add your email to keep
       it" with a throwaway address you can read: the code arrives from
       `noreply@cleffy.io`; a wrong code is refused; the right one says
-      "Saved", the banner goes, and the address signs in with the password
+      "Saved"; reload, and the banner is gone and a checkout from the
+      pricing dialog reaches Stripe (`stripe-checkout` checks the session:
+      on the old guest one it would answer `session_not_found`); the
+      address signs in with the password
       on another browser and sees the score. Repeat with an address that has
       an account: "sign in instead", no mail sent. Then the closed door: as
       a fresh guest, call `supabase.auth.updateUser({ email: '<another
