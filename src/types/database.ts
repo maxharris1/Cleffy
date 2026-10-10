@@ -854,6 +854,12 @@ export type Database = {
                 Args: { p_student: string };
                 Returns: number;
             };
+            // The server's annotation payload check (the annotations_payload_shape
+            // CHECK). Exposed for completeness; the client never needs to ask.
+            annotation_payload_valid: {
+                Args: { p_kind: AnnotationKind; p_payload: AnnotationPayload };
+                Returns: boolean;
+            };
             document_is_archived: {
                 Args: { doc: string };
                 Returns: boolean;
