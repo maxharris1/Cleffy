@@ -1,5 +1,6 @@
 -- Archiving or resetting a student ends the sessions they already have open
--- (migration 20261010120300_student_access_revocation).
+-- (migrations 20261010120300_student_access_revocation and
+-- 20261010120302_library_hides_revoked_student_scores).
 --
 -- Same harness and same reading as column_integrity.sql (see README.md): one
 -- transaction ending in ROLLBACK, every check a row in integrity_results, and a
@@ -142,6 +143,12 @@ create function pg_temp.student_view () returns jsonb language sql as $$
         'notes', (select count(*) from public.practice_notes),
         'members', (select count(*) from public.document_members where document_id = 'c1ef0000-0000-4000-8000-00000000ad01'),
         'topic', public.topic_document_role ('doc:c1ef0000-0000-4000-8000-00000000ad01'),
+        -- The library RPCs are SECURITY DEFINER and read document_members
+        -- themselves (20261010120302), so they are checked on their own.
+        'library', (select count(*) from jsonb_array_elements(public.library_documents () -> 'documents') e
+                    where e ->> 'id' = 'c1ef0000-0000-4000-8000-00000000ad01'),
+        'bootstrap', (select count(*) from jsonb_array_elements(public.library_bootstrap () -> 'documents') e
+                      where e ->> 'id' = 'c1ef0000-0000-4000-8000-00000000ad01'),
         'revoked', public.student_access_revoked ()
     )
 $$;
@@ -235,10 +242,10 @@ select 'live_partition', exists (
 select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5a1', true);
 
 select pg_temp.holds (
-    'live student: editor, sees the score, marks, assignment, shared note and channel',
+    'live student: editor, sees the score, marks, assignment, shared note, channel and library entry',
     $q$select pg_temp.student_view () = jsonb_build_object(
            'role', 'editor', 'documents', 1, 'marks', 1, 'assignments', 1, 'notes', 1,
-           'members', 3, 'topic', 'editor', 'revoked', false)$q$
+           'members', 3, 'topic', 'editor', 'library', 1, 'bootstrap', 1, 'revoked', false)$q$
 );
 
 select pg_temp.allowed (
@@ -354,10 +361,10 @@ select pg_temp.holds (
 select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5a1', true);
 
 select pg_temp.holds (
-    'reset: the pre-reset token sees nothing: no role, score, marks, assignment, note or channel',
+    'reset: the pre-reset token sees nothing: no role, score, marks, assignment, note, channel or library entry',
     $q$select pg_temp.student_view () = jsonb_build_object(
            'role', null, 'documents', 0, 'marks', 0, 'assignments', 0, 'notes', 0,
-           'members', 0, 'topic', null, 'revoked', true)$q$
+           'members', 0, 'topic', null, 'library', 0, 'bootstrap', 0, 'revoked', true)$q$
 );
 
 select pg_temp.refused (
@@ -401,7 +408,7 @@ select pg_temp.holds (
     'reset: a fresh sign-in has everything back',
     $q$select pg_temp.student_view () = jsonb_build_object(
            'role', 'editor', 'documents', 1, 'marks', 2, 'assignments', 1, 'notes', 1,
-           'members', 3, 'topic', 'editor', 'revoked', false)$q$
+           'members', 3, 'topic', 'editor', 'library', 1, 'bootstrap', 1, 'revoked', false)$q$
 );
 
 -- ===========================================================================
@@ -422,7 +429,7 @@ select pg_temp.holds (
     'archive: the still-signed-in student sees nothing on the very next request',
     $q$select pg_temp.student_view () = jsonb_build_object(
            'role', null, 'documents', 0, 'marks', 0, 'assignments', 0, 'notes', 0,
-           'members', 0, 'topic', null, 'revoked', true)$q$
+           'members', 0, 'topic', null, 'library', 0, 'bootstrap', 0, 'revoked', true)$q$
 );
 
 select pg_temp.refused (

@@ -51,9 +51,11 @@ nothing. Like the sharing proof below, it reports `failures | total` on its
 last line.
 
 `student_access_revocation.sql` proves
-`supabase/migrations/20261010120300_student_access_revocation.sql`: a roster
+`supabase/migrations/20261010120300_student_access_revocation.sql` and
+`20261010120302_library_hides_revoked_student_scores.sql`: a roster
 student's token stops reaching anything (role, score, marks, assignment,
-shared note, realtime topic, writes through PostgREST and both batch RPCs) the
+shared note, realtime topic, the library RPCs, writes through PostgREST and
+both batch RPCs) the
 moment their row is archived or the session the token names is ended, while
 teachers and ordinary collaborators — with or without a `session_id` claim —
 are untouched; `end_student_sessions` is the service role's alone, refuses a
