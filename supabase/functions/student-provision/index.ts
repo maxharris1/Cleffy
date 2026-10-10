@@ -8,6 +8,7 @@ import { checkRateLimit, clientKey, serviceClient } from '../_shared/imslp.ts';
 import { forgetLoginAccount, STUDENT_LOGIN_SCOPE } from '../_shared/loginThrottle.ts';
 import { supabaseQuotaBackend } from '../_shared/quota.ts';
 import { loginThrottleSecret } from '../_shared/rateLimit.ts';
+import { endStudentSessions } from '../_shared/studentSessions.ts';
 import {
     formatLoginCode,
     generateLoginCode,
@@ -37,9 +38,9 @@ import {
  *    password from the emailed link and signs in client-side like a teacher.
  *
  * 'reset' is the one recovery path for both, and it is a revocation before it is
- * anything else: the password is scrambled FIRST, then the row goes back to
- * Invited. A half-applied reset therefore always fails safe — access is already
- * gone — and re-running it repairs the rest.
+ * anything else: the password is scrambled and every open session ended FIRST,
+ * then the row goes back to Invited. A half-applied reset therefore always fails
+ * safe — access is already gone — and re-running it repairs the rest.
  *
  * The roster is a STOCK, not a flow: `students` never reaches usage_counters, it
  * is the live count of unarchived rows, checked here where a seat is claimed.
@@ -47,11 +48,18 @@ import {
  * archiving is what gives a seat back.
  *
  * 'archive' and 'restore' each touch TWO things, because the roster row and the
- * auth account are two halves of one student: the row decides the seat and what
- * student-login will match, and the account's ban decides whether the student's
- * password still opens a session at all. Archiving only the row would leave a
- * student who knows their own password working directly against /auth/v1/token —
- * more true now than when the credential was a code, not less.
+ * auth account are two halves of one student: the row decides the seat, what
+ * student-login will match and (through document_role()) whether a token the
+ * student already holds still reaches anything, and the account's ban decides
+ * whether the student's password still opens a session at all. Archiving only
+ * the row would leave a student who knows their own password working directly
+ * against /auth/v1/token — more true now than when the credential was a code,
+ * not less.
+ *
+ * Sessions already open are ended too, on 'archive' and on 'reset'
+ * (../_shared/studentSessions.ts): a ban or a new password only stops the next
+ * sign-in, while a signed-in device would otherwise keep its access token for
+ * up to an hour and, after a reset, its refresh token for good.
  *
  * Nothing in this file consumes a metered budget. Students are never billed, and
  * a teacher's roster is paid for by occupancy rather than by activity.
@@ -69,9 +77,11 @@ const MAX_DISPLAY_NAME = 80;
  * format, set to a century because "until restored" has no spelling. 'none'
  * lifts it, which is what 'restore' sends.
  *
- * A ban is the revocation archiving needs and the archived_at stamp is not: it
- * refuses the password grant at /auth/v1/token AND every refresh, so a live
- * session dies with its current access token rather than lasting forever.
+ * A ban is the revocation archiving needs beyond the archived_at stamp: it
+ * refuses the password grant at /auth/v1/token AND every refresh. The stamp is
+ * what refuses the access token a live session still holds (document_role()
+ * reads it, migration 20261010120300), and ending the sessions is what tells
+ * that session's open viewer.
  */
 const ARCHIVE_BAN_DURATION = '876000h';
 
@@ -439,6 +449,14 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
             return jsonResponse({ error: 'Could not reset the student' }, 502);
         }
 
+        // Part of the revocation, so before anything is sent: the old password
+        // is dead, and so is every device still signed in with it.
+        const ended = await endStudentSessions(admin, row.student_user_id);
+        if (!ended.ok) {
+            console.error(`could not end the sessions of student ${row.id}: ${ended.message}`);
+            return jsonResponse({ error: 'Could not reset the student' }, 502);
+        }
+
         // The ANON client, not the service role: this is the same magic link a
         // teacher gets from the sign-in page, and shouldCreateUser keeps it from
         // conjuring an account if the address ever drifts from the roster row.
@@ -487,6 +505,16 @@ const resetStudentAccess = async (admin: SupabaseClient, userId: string, body: P
     });
     if (scrambleError) {
         console.error(`could not revoke the password for student ${row.id}: ${scrambleError.message}`);
+        return jsonResponse({ error: 'Could not reset the login code' }, 502);
+    }
+
+    // The other half of the revocation. A new password stops the next sign-in;
+    // a phone or school iPad already signed in would otherwise keep refreshing
+    // its way past the reset for good. Before the new code exists, so a failure
+    // here hands back no card that would suggest the reset took.
+    const ended = await endStudentSessions(admin, row.student_user_id);
+    if (!ended.ok) {
+        console.error(`could not end the sessions of student ${row.id}: ${ended.message}`);
         return jsonResponse({ error: 'Could not reset the login code' }, 502);
     }
 
@@ -564,6 +592,18 @@ const archiveStudent = async (admin: SupabaseClient, userId: string, body: Provi
         // account still signs in, which is exactly the state this guards against.
         console.error(`could not revoke access for archived student ${owned.row.id}: ${banError.message}`);
         return jsonResponse({ error: 'Could not archive the student' }, 502);
+    }
+
+    // Reported, not fatal. By now the stamp refuses every token the student
+    // holds and the ban refuses every refresh, so access is already gone; what
+    // this adds is the tidy end of those sessions and the ping that makes an
+    // open viewer notice now rather than on its next write.
+    const ended = await endStudentSessions(admin, owned.row.student_user_id);
+    if (!ended.ok) {
+        logError('student-provision', new Error(ended.message), {
+            code: 'archive_sessions_not_ended',
+            studentUserId: owned.row.student_user_id,
+        });
     }
 
     // Idempotent: an already-archived row matches no update, is already in the

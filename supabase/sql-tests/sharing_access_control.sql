@@ -16,6 +16,7 @@ begin;
 create temp table t_results (name text, ok boolean, detail text);
 grant all on t_results to authenticated;
 create function pg_temp.u(n int) returns uuid language sql immutable as $f$ select ('c5a1e000-5ac0-4000-8000-00000000000' || n)::uuid $f$;
+create function pg_temp.s(n int) returns uuid language sql immutable as $f$ select ('c5a1e5e5-5ac0-4000-8000-00000000000' || n)::uuid $f$;
 create function pg_temp.d() returns uuid language sql immutable as $f$ select 'c5a1e0d0-5ac0-4000-8000-000000000001'::uuid $f$;
 create function pg_temp.ok(p_name text, p_sql text) returns void language plpgsql as $f$
 begin execute p_sql; insert into t_results values (p_name, true, null);
@@ -44,7 +45,9 @@ exception when others then if sqlerrm <> 'undo-probe' then e := sqlerrm; v := fa
 insert into t_results values (p_name, coalesce(v, false), e); end $f$;
 create function pg_temp.as_user(n int) returns void language plpgsql as $f$
 begin
-perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.u(n), 'role', 'authenticated')::text, true);
+-- session_id as GoTrue puts it in every access token: a roster student's
+-- access also needs the session to still exist (20261010120300).
+perform set_config('request.jwt.claims', json_build_object('sub', pg_temp.u(n), 'role', 'authenticated', 'session_id', pg_temp.s(n))::text, true);
 perform set_config('role', 'authenticated', true);
 end $f$;
 
@@ -61,6 +64,14 @@ insert into auth.users (id, email, raw_user_meta_data, is_anonymous) values
 (pg_temp.u(7),'student@sharetest.test','{"display_name":"Stu"}',false),
 (pg_temp.u(8),'teacher2@sharetest.test','{}',false),
 (pg_temp.u(9),'student2@sharetest.test','{"display_name":"Kid Two"}',false);
+-- The students' signed-in sessions. (A local harness without GoTrue's tables
+-- gets a stand-in; on Supabase auth.sessions already exists.)
+do $f$ begin
+if to_regclass('auth.sessions') is null then
+create table auth.sessions (id uuid primary key, user_id uuid not null references auth.users (id));
+end if;
+end $f$;
+insert into auth.sessions (id, user_id) values (pg_temp.s(7), pg_temp.u(7)), (pg_temp.s(9), pg_temp.u(9));
 insert into public.documents (id, owner_id, title, storage_path) values (pg_temp.d(), pg_temp.u(1), 'T', pg_temp.d()::text || '/original.pdf');
 insert into public.document_members (document_id, user_id, role) values (pg_temp.d(), pg_temp.u(2), 'editor'), (pg_temp.d(), pg_temp.u(3), 'viewer'), (pg_temp.d(), pg_temp.u(7), 'viewer');
 insert into public.managed_students (id, teacher_id, student_user_id, display_name, login_code_hash) values (gen_random_uuid(), pg_temp.u(1), pg_temp.u(7), 'Stu Dent', 'x'), (gen_random_uuid(), pg_temp.u(8), pg_temp.u(9), 'Roster Secret', 'y');

@@ -5,7 +5,7 @@ import type { PageLayout } from '@/features/viewer/geometry';
 import type { TextIntent } from '@/features/viewer/ink/InkController';
 import { textDrawSpec, textForEditor } from '@/features/viewer/ink/musicFont';
 import type { AnnotationStore } from '@/sync/annotationStore';
-import { isTextPayload } from '@/types/models';
+import { isTextPayload, MAX_TEXT_NOTE_CHARS } from '@/types/models';
 import type { ViewState } from '@/types/models';
 
 export interface TextEditorOverlayProps {
@@ -56,6 +56,8 @@ export const TextEditorOverlay = ({ intent, layout, view, store, onCommit, onCan
             data-ui-overlay
             defaultValue={existingPayload ? textForEditor(existingPayload.text) : ''}
             aria-label="Text note"
+            // The server's cap; a longer note would be refused and rolled back.
+            maxLength={MAX_TEXT_NOTE_CHARS}
             rows={2}
             className="absolute z-30 min-w-32 resize rounded border border-accent bg-white/95 p-1 shadow-md outline-none"
             style={{

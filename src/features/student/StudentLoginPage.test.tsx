@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as sessionModule from '@/features/auth/session';
-import { StudentLoginPage } from '@/features/student/StudentLoginPage';
+import { SIGNED_OUT_BY_TEACHER, StudentLoginPage } from '@/features/student/StudentLoginPage';
 
 const loginStudent = vi.fn();
 
@@ -19,9 +19,9 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
     useSession: () => ({ session: null, loading: false, lastEvent: null }),
 }));
 
-const renderLogin = () =>
+const renderLogin = (state?: unknown) =>
     render(
-        <MemoryRouter initialEntries={['/student']}>
+        <MemoryRouter initialEntries={[{ pathname: '/student', state }]}>
             <Routes>
                 <Route path="/student" element={<StudentLoginPage />} />
                 <Route path="/assignments" element={<p>your pieces</p>} />
@@ -100,5 +100,14 @@ describe('StudentLoginPage', () => {
         expect(screen.getByRole('button', { name: 'Opening…' })).toBeDisabled();
         expect(screen.getByLabelText('Username or email')).toBeDisabled();
         expect(screen.getByLabelText('Password')).toBeDisabled();
+    });
+
+    it('says why when the teacher ended the sign-in, and only then', () => {
+        renderLogin({ signedOutByTeacher: true });
+        expect(screen.getByRole('status')).toHaveTextContent(SIGNED_OUT_BY_TEACHER);
+        cleanup();
+
+        renderLogin();
+        expect(screen.queryByText(SIGNED_OUT_BY_TEACHER)).not.toBeInTheDocument();
     });
 });

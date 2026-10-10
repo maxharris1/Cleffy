@@ -226,3 +226,27 @@ export const fetchMyRosterProfile = async (): Promise<ManagedStudentRow | null> 
     }
     return data;
 };
+
+/**
+ * Whether this sign-in still stands: false once the teacher archived the
+ * student, reset their access, or deleted the account behind it.
+ *
+ * Asked of the server (student_access_revoked, migration 20261010120300)
+ * because none of those signs the device out by itself: the access token stays
+ * valid until it expires, and every read under it just comes back empty — which
+ * would otherwise read as "Nothing here yet". `profile` is the roster row the
+ * caller already fetched; an archived one answers without the round trip.
+ *
+ * Null when the server could not be asked: the page keeps showing what it has
+ * rather than signing someone out over a dropped connection.
+ */
+export const fetchSignInStillValid = async (profile: ManagedStudentRow | null): Promise<boolean | null> => {
+    if (profile?.archived_at) {
+        return false;
+    }
+    const { data, error } = await getSupabase().rpc('student_access_revoked');
+    if (error || typeof data !== 'boolean') {
+        return null;
+    }
+    return !data;
+};

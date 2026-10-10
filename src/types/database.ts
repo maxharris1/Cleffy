@@ -852,6 +852,26 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: undefined;
             };
+            // True when the caller is a roster student whose access is gone:
+            // archived, or the session their token names has been ended (a
+            // reset, an archive). How the student app tells "nothing assigned"
+            // from "signed out by your teacher".
+            student_access_revoked: {
+                Args: Record<string, never>;
+                Returns: boolean;
+            };
+            // Service role only: student-provision ends a student's sessions on
+            // archive and reset, and returns how many it ended.
+            end_student_sessions: {
+                Args: { p_student: string };
+                Returns: number;
+            };
+            // The server's annotation payload check (the annotations_payload_shape
+            // CHECK). Exposed for completeness; the client never needs to ask.
+            annotation_payload_valid: {
+                Args: { p_kind: AnnotationKind; p_payload: AnnotationPayload };
+                Returns: boolean;
+            };
             document_is_archived: {
                 Args: { doc: string };
                 Returns: boolean;

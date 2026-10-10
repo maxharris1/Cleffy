@@ -8055,3 +8055,469 @@ before update of email, is_anonymous on auth.users
 for each row
 when (old.email is distinct from new.email or old.is_anonymous is distinct from new.is_anonymous)
 execute function public.guard_guest_email ();
+
+-- ===== supabase/migrations/20261010120300_student_access_revocation.sql =====
+-- Archiving or resetting a student ends the sessions they already have open.
+--
+-- Until now both only stopped the NEXT sign-in. 'archive' banned the account,
+-- which refuses the password grant and every refresh, and 'reset' scrambled the
+-- password. Neither touched a session that was already open: its access token
+-- is a signed JWT PostgREST trusts until it expires (an hour), and every
+-- membership check -- document_role() and the RLS built on it -- read
+-- document_members alone. So an archived student's open tab kept reading and
+-- writing the teacher's scores for up to an hour, and a reset student's other
+-- devices kept their sign-in for good (nothing stopped them refreshing).
+--
+-- Three parts, all keyed on the managed_students row, so nothing changes for an
+-- account that is not a provisioned student:
+--
+--  1. student_access_revoked() -- is the CALLER a student whose access is gone:
+--     their roster row archived, or the session their JWT names no longer in
+--     auth.sessions (ended by a reset, an archive or a global sign-out). The
+--     JWT stays cryptographically valid after either; the session row is what
+--     says whether it still stands for a sign-in.
+--  2. document_role() consults it, so every policy, storage rule and realtime
+--     topic check built on document_role() refuses such a caller on the very
+--     next request. The student branches of assignments_select and
+--     practice_notes_select (which do not go through document_role) do too.
+--  3. end_student_sessions(student) -- service role only, called by
+--     student-provision on archive and reset: deletes the student's sessions
+--     (their refresh tokens cascade), so no device can refresh its way back in,
+--     and sends the existing membership hint on every score the student is a
+--     member of, so an open viewer re-checks its role at once instead of on its
+--     next write.
+--
+-- Hosted Supabase lets the migration owner (postgres) read and delete
+-- auth.sessions / auth.refresh_tokens; the two functions that touch them are
+-- plpgsql so creating them does not depend on those tables existing (the local
+-- SQL harness stubs them).
+
+-- ---------------------------------------------------------------------------
+-- 1. Has the caller's access as a student been withdrawn?
+-- ---------------------------------------------------------------------------
+-- About the caller only (auth.uid() / auth.jwt()), so granting it to
+-- authenticated tells nobody anything about anyone else: the student app asks
+-- it to tell "nothing assigned" from "your teacher archived you".
+--
+-- False for every account with no roster row except a JWT that still calls
+-- itself a student (app_metadata is admin-set): a student whose row is gone was
+-- deleted with their teacher, and their leftover token should read as revoked.
+create or replace function public.student_access_revoked () returns boolean language plpgsql stable security definer
+set search_path = public as $$
+declare
+    v_uid uuid := auth.uid();
+    v_archived_at timestamptz;
+    v_session text;
+begin
+    if v_uid is null then
+        return false;
+    end if;
+
+    select ms.archived_at into v_archived_at
+    from public.managed_students ms
+    where ms.student_user_id = v_uid;
+
+    if not found then
+        return coalesce(auth.jwt () -> 'app_metadata' ->> 'user_type', '') = 'student';
+    end if;
+
+    if v_archived_at is not null then
+        return true;
+    end if;
+
+    -- Every GoTrue access token names its session. A student token without a
+    -- readable one cannot be matched to a live sign-in, so it is not one.
+    v_session := auth.jwt () ->> 'session_id';
+    if v_session is null or v_session !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        return true;
+    end if;
+
+    return not exists (
+        select 1
+        from auth.sessions s
+        where s.id = v_session::uuid
+          and s.user_id = v_uid
+    );
+end;
+$$;
+
+revoke all on function public.student_access_revoked () from public;
+revoke all on function public.student_access_revoked () from anon;
+grant execute on function public.student_access_revoked () to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 2. document_role() refuses a revoked student
+-- ---------------------------------------------------------------------------
+-- The helper only runs for a member who HAS a roster row: for everyone else the
+-- NOT EXISTS is one probe of managed_students' unique student_user_id index and
+-- finds nothing, which matters because RLS calls this once per annotation row.
+create or replace function public.document_role (doc uuid) returns text language sql stable security definer
+set search_path = public as $$
+    select dm.role
+    from public.document_members dm
+    where dm.document_id = doc
+      and dm.user_id = (select auth.uid())
+      and not exists (
+          select 1
+          from public.managed_students ms
+          where ms.student_user_id = dm.user_id
+            and public.student_access_revoked ()
+      );
+$$;
+
+drop policy if exists assignments_select on public.assignments;
+
+create policy assignments_select on public.assignments for select to authenticated
+using (
+    (
+        student_user_id = (select auth.uid())
+        and not (select public.student_access_revoked ())
+    )
+    or public.document_role (document_id) = 'owner'
+);
+
+drop policy if exists practice_notes_select on public.practice_notes;
+
+create policy practice_notes_select on public.practice_notes for select to authenticated
+using (
+    author_id = (select auth.uid())
+    or (
+        shared
+        and student_user_id = (select auth.uid())
+        and not (select public.student_access_revoked ())
+    )
+);
+
+-- ---------------------------------------------------------------------------
+-- 3. End a student's sessions (student-provision, service role)
+-- ---------------------------------------------------------------------------
+-- Returns how many sessions were ended. Refuses anyone who is not a roster
+-- student: this is the teacher's lever on their own students, not a general
+-- "sign anybody out" primitive, even for the service role.
+create or replace function public.end_student_sessions (p_student uuid) returns int language plpgsql security definer
+set search_path = public as $$
+declare
+    v_ended int;
+    v_doc uuid;
+begin
+    if coalesce(auth.jwt () ->> 'role', '') <> 'service_role' then
+        raise exception 'service role only' using errcode = '42501';
+    end if;
+
+    if not exists (
+        select 1
+        from public.managed_students ms
+        where ms.student_user_id = p_student
+    ) then
+        raise exception 'not a roster student' using errcode = 'P0002';
+    end if;
+
+    -- Tokens first, by user: GoTrue's would cascade from their session, but one
+    -- from before sessions existed has none, and clearing them first does not
+    -- lean on the cascade at all.
+    delete from auth.refresh_tokens
+    where user_id = p_student::text;
+
+    delete from auth.sessions
+    where user_id = p_student;
+
+    get diagnostics v_ended = row_count;
+
+    -- The same hint document_members_broadcast sends when a membership ends,
+    -- and read the same way: the viewer re-reads its role over PostgREST, where
+    -- document_role() now answers null. `role` null because, for this caller,
+    -- the membership is as good as gone.
+    for v_doc in
+        select dm.document_id
+        from public.document_members dm
+        where dm.user_id = p_student
+    loop
+        perform realtime.send(
+            jsonb_build_object(
+                'table', 'document_members',
+                'document_id', v_doc,
+                'user_id', p_student,
+                'role', null
+            ),
+            'membership', -- event
+            'doc:' || v_doc::text, -- topic
+            true -- private
+        );
+    end loop;
+
+    return v_ended;
+end;
+$$;
+
+revoke all on function public.end_student_sessions (uuid) from public;
+revoke all on function public.end_student_sessions (uuid) from anon;
+revoke all on function public.end_student_sessions (uuid) from authenticated;
+grant execute on function public.end_student_sessions (uuid) to service_role;
+
+-- ===== supabase/migrations/20261010120301_annotation_payload_shape.sql =====
+-- The server checks what a mark's payload and colour look like.
+--
+-- annotations.payload was `jsonb not null` and nothing else, so any editor
+-- could store any JSON at all -- a string, a 10 MB blob, a "stroke" with no
+-- points -- through PostgREST or the batch RPCs, and every peer's viewer then
+-- had to cope with it. A CHECK on the table holds for every write path at once
+-- (plain inserts and updates, insert_annotations_batch and
+-- patch_annotations_batch, which run as the caller), so neither RPC needs its
+-- own copy.
+--
+-- What is checked mirrors src/types/models.ts (StrokePayload / TextPayload),
+-- which has carried these shapes unchanged since the ink engine landed:
+--
+--  * every payload: a JSON object of at most 1 MiB serialized. The largest
+--    stroke ever stored is under 25 KB; a megabyte is minutes of continuous
+--    pen input.
+--  * stroke / highlight: `pts` a non-empty flat array of numbers in [x, y, p]
+--    triplets, `w` a number in (0, 1]; `sp` / `src` 1 when present.
+--  * text: `x` / `y` / `size` numbers (size in (0, 1]), `text` a string of at
+--    most 10,000 characters; `src` / `sf` / `hw` / `bold` 1, `italic` 0 or 1,
+--    `font` 'sans' or 'serif' when present.
+--  * coordinates (and pressures) within [-1, 2]. The client clamps ink to the
+--    page (0..1) and keeps text on it, so this is a sanity bound rather than
+--    the page edge: a slightly out-of-range value from an older or future
+--    client is not worth refusing, a 1e300 is.
+--  * colour: a #hex colour, which is all the app's palette has ever held.
+--
+-- Unknown payload keys are allowed on purpose. A refused write is discarded by
+-- the sync outbox (rolled back to server truth), so a client release that adds
+-- a provenance flag before this function learns it must not lose marks; the
+-- size cap is what bounds what an extra key can carry.
+--
+-- Production rows were checked against these rules before the constraint was
+-- written (all pass); VALIDATE re-proves it at apply time and fails the
+-- migration rather than leaving an unenforced constraint behind.
+
+-- A JSON number as numeric; NULL for anything else (a string "0.5", an array,
+-- a missing key), which the caller's comparison then turns into a refusal.
+create or replace function public.annotation_payload_number (p_value jsonb) returns numeric
+language sql immutable parallel safe
+set search_path = '' as $$
+    select case when jsonb_typeof(p_value) = 'number' then (p_value #>> '{}')::numeric end;
+$$;
+
+create or replace function public.annotation_payload_valid (p_kind text, p_payload jsonb) returns boolean
+language sql immutable parallel safe
+set search_path = '' as $$
+    -- coalesce: a missing or mistyped key makes its test NULL, and a CHECK
+    -- passes on NULL.
+    select coalesce(
+        jsonb_typeof(p_payload) = 'object'
+        and octet_length(p_payload::text) <= 1048576
+        and case
+            -- A nested CASE, not AND: SQL does not promise to evaluate AND's
+            -- arms in order, and jsonb_array_length raises on a non-array.
+            when p_kind in ('stroke', 'highlight') then case
+                when jsonb_typeof(p_payload -> 'pts') is distinct from 'array' then false
+                else
+                    jsonb_array_length(p_payload -> 'pts') >= 3
+                    and jsonb_array_length(p_payload -> 'pts') % 3 = 0
+                    -- Strict jsonpath (lax would unwrap a nested array into
+                    -- its numbers): an element that is not a number, or is out
+                    -- of range, makes the filter match.
+                    and not jsonb_path_exists(
+                        p_payload, 'strict $.pts[*] ? (@.type() != "number" || @ < -1 || @ > 2)'
+                    )
+                    and public.annotation_payload_number (p_payload -> 'w') > 0
+                    and public.annotation_payload_number (p_payload -> 'w') <= 1
+                    and (not p_payload ? 'sp' or p_payload -> 'sp' = '1'::jsonb)
+                    and (not p_payload ? 'src' or p_payload -> 'src' = '1'::jsonb)
+            end
+            when p_kind = 'text' then
+                public.annotation_payload_number (p_payload -> 'x') between -1 and 2
+                and public.annotation_payload_number (p_payload -> 'y') between -1 and 2
+                and public.annotation_payload_number (p_payload -> 'size') > 0
+                and public.annotation_payload_number (p_payload -> 'size') <= 1
+                and jsonb_typeof(p_payload -> 'text') = 'string'
+                and char_length(p_payload ->> 'text') <= 10000
+                and (not p_payload ? 'src' or p_payload -> 'src' = '1'::jsonb)
+                and (not p_payload ? 'sf' or p_payload -> 'sf' = '1'::jsonb)
+                and (not p_payload ? 'hw' or p_payload -> 'hw' = '1'::jsonb)
+                and (not p_payload ? 'bold' or p_payload -> 'bold' = '1'::jsonb)
+                and (not p_payload ? 'italic' or p_payload -> 'italic' in ('0'::jsonb, '1'::jsonb))
+                and (not p_payload ? 'font' or p_payload -> 'font' in ('"sans"'::jsonb, '"serif"'::jsonb))
+            else false
+        end,
+        false
+    );
+$$;
+
+-- Pure and harmless, and the client may as well be able to ask it.
+revoke all on function public.annotation_payload_valid (text, jsonb) from public;
+revoke all on function public.annotation_payload_valid (text, jsonb) from anon;
+grant execute on function public.annotation_payload_valid (text, jsonb) to authenticated, service_role;
+
+revoke all on function public.annotation_payload_number (jsonb) from public;
+revoke all on function public.annotation_payload_number (jsonb) from anon;
+grant execute on function public.annotation_payload_number (jsonb) to authenticated, service_role;
+
+-- NOT VALID then VALIDATE: the add itself only takes a brief lock, and the scan
+-- of existing rows runs under one that lets reads and writes continue.
+alter table public.annotations
+    add constraint annotations_payload_shape check (public.annotation_payload_valid (kind, payload)) not valid;
+
+alter table public.annotations validate constraint annotations_payload_shape;
+
+alter table public.annotations
+    add constraint annotations_color_hex check (color ~ '^#[0-9A-Fa-f]{3,8}$') not valid;
+
+alter table public.annotations validate constraint annotations_color_hex;
+
+-- ===== supabase/migrations/20261010120302_library_hides_revoked_student_scores.sql =====
+-- The library stops listing an archived or reset student's scores at once.
+--
+-- 20261010120300 made document_role() refuse a student whose access was
+-- withdrawn, which closes every policy, storage rule and realtime topic check
+-- built on it. library_documents() is SECURITY DEFINER and assembles the
+-- visible set from document_members directly (see 20261007120400 for why), so
+-- the leftover access token of an archived or reset student could still list
+-- the titles and metadata of their assigned scores for up to an hour, though
+-- opening one was refused. library_bootstrap() takes its first page from
+-- library_documents(), so this one change covers both.
+--
+-- Same function as 20261007120400 otherwise. The owner branch is untouched:
+-- roster students do not own scores, and documents_select keeps owner_id too.
+--
+-- Residual, not fixable here: a realtime channel the student had ALREADY
+-- joined stays authorized until the socket's JWT expires, because Realtime
+-- checks realtime.messages policies when a channel is joined, not per message.
+-- The membership hint end_student_sessions() sends makes the app leave the
+-- score at once; only a tampered client that ignores it keeps receiving that
+-- score's broadcasts, for at most the token's remaining lifetime.
+
+create or replace function public.library_documents (
+    p_sort text default 'recent',
+    p_after_updated_at timestamptz default null,
+    p_after_title text default null,
+    p_after_id uuid default null,
+    p_query text default null,
+    p_tag_id uuid default null,
+    p_favorites_only boolean default false,
+    p_limit integer default 100
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+    v_uid uuid := (select auth.uid());
+    v_sort text := coalesce(p_sort, 'recent');
+    v_limit int := least(greatest(coalesce(p_limit, 100), 1), 200);
+    v_query text := nullif(btrim(coalesce(p_query, '')), '');
+    v_pattern text;
+    v_rows jsonb;
+    v_count int;
+    -- Once per call, not per row: about the caller only.
+    v_revoked boolean := public.student_access_revoked ();
+begin
+    if v_uid is null then
+        raise exception 'not authenticated' using errcode = '42501';
+    end if;
+    if v_sort not in ('recent', 'title') then
+        raise exception 'unknown library sort: %', v_sort using errcode = '22023';
+    end if;
+    -- A half cursor would compare against null and silently return nothing.
+    if p_after_id is not null
+       and ((v_sort = 'recent' and p_after_updated_at is null)
+            or (v_sort = 'title' and p_after_title is null)) then
+        raise exception 'library cursor is incomplete' using errcode = '22023';
+    end if;
+
+    if v_query is not null then
+        -- Titles are short; a pasted paragraph is not a search worth running.
+        -- Escape ilike's own wildcards so "50%" or "op_1" match literally.
+        v_pattern := '%'
+            || replace(replace(replace(left(v_query, 200), '\', '\\'), '%', '\%'), '_', '\_')
+            || '%';
+    end if;
+
+    with visible as (
+        select
+            d.id,
+            d.owner_id,
+            d.title,
+            d.storage_path,
+            d.page_count,
+            d.content_rev,
+            d.thumb_rev,
+            d.created_at,
+            d.updated_at,
+            d.archived_at
+        from public.documents d
+        where (
+                d.owner_id = v_uid
+                or (
+                    not v_revoked
+                    and exists (
+                        select 1
+                        from public.document_members m
+                        where m.document_id = d.id
+                          and m.user_id = v_uid
+                    )
+                )
+            )
+          and (v_pattern is null or d.title ilike v_pattern)
+          and (
+                p_tag_id is null
+                or exists (
+                    select 1
+                    from public.document_tags dt
+                    join public.library_tags t on t.id = dt.tag_id
+                    where dt.document_id = d.id
+                      and dt.tag_id = p_tag_id
+                      and t.user_id = v_uid
+                )
+            )
+          and (
+                not coalesce(p_favorites_only, false)
+                or exists (
+                    select 1
+                    from public.document_favorites f
+                    where f.document_id = d.id
+                      and f.user_id = v_uid
+                )
+            )
+          and (
+                p_after_id is null
+                or (v_sort = 'recent' and (d.updated_at, d.id) < (p_after_updated_at, p_after_id))
+                or (v_sort = 'title' and (lower(d.title), d.id) > (lower(p_after_title), p_after_id))
+            )
+    ),
+    ordered as (
+        select
+            v.*,
+            row_number() over (
+                order by
+                    case when v_sort = 'title' then lower(v.title) end asc,
+                    case when v_sort = 'title' then v.id end asc,
+                    case when v_sort = 'recent' then v.updated_at end desc,
+                    case when v_sort = 'recent' then v.id end desc
+            ) as rn
+        from visible v
+    ),
+    page as (
+        select * from ordered where rn <= v_limit + 1
+    )
+    select
+        coalesce(
+            (select jsonb_agg(to_jsonb(p) - 'rn' order by p.rn) from page p where p.rn <= v_limit),
+            '[]'::jsonb
+        ),
+        (select count(*)::int from page)
+    into v_rows, v_count;
+
+    return jsonb_build_object(
+        'documents', v_rows,
+        'has_more', v_count > v_limit
+    );
+end;
+$$;
+
+revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from public;
+revoke all on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) from anon;
+grant execute on function public.library_documents (text, timestamptz, text, uuid, text, uuid, boolean, integer) to authenticated;

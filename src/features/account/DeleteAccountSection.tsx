@@ -78,8 +78,8 @@ export const DeleteAccountSection = ({ session, onDeleted = leaveForDeletedPage 
             <section className={SECTION}>
                 <h2 className={SECTION_HEADING}>Delete account</h2>
                 <p className="mt-2 text-sm text-stone-600">
-                    Your teacher manages this account, so it can’t be deleted from here. Ask your teacher to remove it,
-                    or write to{' '}
+                    Your teacher manages this account, so it can’t be deleted from here. Your teacher can archive it,
+                    which ends your sign-in but keeps your marks; to have the account and its data deleted, write to{' '}
                     <a href={`mailto:${LEGAL_ENTITY.contactEmail}`} className={linkClassName}>
                         {LEGAL_ENTITY.contactEmail}
                     </a>

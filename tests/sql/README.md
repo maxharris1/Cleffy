@@ -67,6 +67,30 @@ then email set), the reverse, or one statement — while the proven address
 attaches in all three, and registered accounts and soft deletes are
 untouched. It reports `failures | total` on its last line.
 
+`student_access_revocation.sql` proves
+`supabase/migrations/20261010120300_student_access_revocation.sql` and
+`20261010120302_library_hides_revoked_student_scores.sql`: a roster
+student's token stops reaching anything (role, score, marks, assignment,
+shared note, realtime topic, the library RPCs, writes through PostgREST and
+both batch RPCs) the
+moment their row is archived or the session the token names is ended, while
+teachers and ordinary collaborators — with or without a `session_id` claim —
+are untouched; `end_student_sessions` is the service role's alone, refuses a
+non-student, clears every session and refresh token (the session-less legacy
+kind included) and sends the membership hint on `doc:{id}`; a fresh sign-in
+and a restore bring access back. It inserts `auth.sessions` /
+`auth.refresh_tokens` rows, and creates stand-ins for those tables only when a
+local harness has none (Supabase always does).
+
+`annotation_payload_shape.sql` proves
+`supabase/migrations/20261010120301_annotation_payload_shape.sql`: every
+payload the client writes (pen, highlighter, text, imported marks, suggested
+fingerings, handwriting-to-print styles, production-shaped rows, an unknown
+extra key) is accepted on insert, update and both batch RPCs, and malformed
+ones (wrong JSON type, bad or out-of-range points, missing or mistyped fields,
+over-long text, a payload over 1 MiB, a non-hex colour) are refused with
+`23514`; both constraints are validated and every stored row passes them.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

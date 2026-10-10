@@ -137,6 +137,26 @@ describe('RosterPage', () => {
         expect(screen.getByText('No scores')).toBeInTheDocument();
     });
 
+    it('gives an assigned score’s title its own line on a phone, with the full title on hover', async () => {
+        // At 390px the title shared a row with the due date, the Edit/View
+        // switch and Unassign, and a real title read "Sona…".
+        const user = userEvent.setup();
+        listRoster.mockResolvedValue([
+            student('s1', 'Ada Lovelace', { username: 'ada_lovelace', claimed_at: '2026-08-02T00:00:00Z' }),
+        ]);
+        const title = 'Piano Sonata No. 14 in C-sharp minor, Op. 27 No. 2 (Moonlight)';
+        listAssignmentsForStudents.mockResolvedValue(
+            new Map([['s1-user', [rosterAssignment('doc-1', title, 's1-user')]]]),
+        );
+        renderRoster();
+
+        await user.click(await screen.findByRole('button', { name: /Ada Lovelace/ }));
+        const link = await screen.findByRole('link', { name: title });
+        expect(link).toHaveAttribute('title', title);
+        expect(link.className).toMatch(/(^| )basis-full( |$)/);
+        expect(link.className).toMatch(/(^| )sm:flex-1( |$)/);
+    });
+
     it('serves the cached roster with its counts when the network fails, error beside it', async () => {
         await getDb().rosterCache.put({
             userId: 'teacher-1',
@@ -268,6 +288,10 @@ describe('RosterPage', () => {
         // The confirmation has to say the password stops working, not just the code.
         const confirm = await screen.findByRole('dialog', { name: 'Reset this student’s access?' });
         expect(within(confirm).getByText(/password stops working straight away/)).toBeInTheDocument();
+        // ...and the devices already signed in, which student-provision now ends too.
+        expect(within(confirm).getByText(/any device they are signed in on is signed out/)).toBeInTheDocument();
+        // They may claim the new code into a different username.
+        expect(within(confirm).queryByText(/keep their username/)).not.toBeInTheDocument();
         await user.click(within(confirm).getByRole('button', { name: 'Reset access' }));
 
         expect(resetStudentAccess).toHaveBeenCalledWith('s1');
@@ -431,7 +455,9 @@ describe('RosterPage', () => {
             await pickRowAction(user, 'Archive…');
             await user.click(screen.getByRole('button', { name: 'Archive' }));
             expect(archiveStudent).toHaveBeenCalledWith('s1');
-            await waitFor(() => expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived'));
+            await waitFor(() =>
+                expect(screen.getByRole('button', { name: /Ada Lovelace/ })).toHaveTextContent('Archived'),
+            );
 
             await act(async () => {
                 mountRoster.resolve([active]);

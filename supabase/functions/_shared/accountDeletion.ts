@@ -514,7 +514,7 @@ export const deleteAccount = async (caller: DeletionCaller, ports: DeletionPorts
         return fail(
             403,
             'managed_student',
-            'This account is managed by your teacher. Ask your teacher to remove you from their roster, or contact support.',
+            'This account is managed by your teacher, so it can’t be deleted here. Your teacher can archive it; to have it deleted, contact support.',
         );
     }
 

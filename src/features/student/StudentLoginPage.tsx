@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
 import { LegalLinks } from '@/features/legal/LegalLinks';
@@ -35,8 +35,18 @@ export const StudentLoginPage = () => {
     return <CredentialEntry />;
 };
 
+/**
+ * Said when the assignments page signed a student out because their teacher
+ * archived them or reset their access (or the account is gone): without it the
+ * student lands back here with no idea why.
+ */
+export const SIGNED_OUT_BY_TEACHER =
+    'You were signed out because your teacher changed your access. Ask your teacher if you need a new setup code.';
+
 const CredentialEntry = () => {
     const navigate = useNavigate();
+    const location = useLocation();
+    const signedOutByTeacher = (location.state as { signedOutByTeacher?: unknown } | null)?.signedOutByTeacher === true;
     const [identifier, setIdentifier] = useState('');
     const [password, setPassword] = useState('');
     const [busy, setBusy] = useState(false);
@@ -64,6 +74,11 @@ const CredentialEntry = () => {
 
     return (
         <BrandShell title="Your music" subtitle="Sign in with the username or email you use for Cleffy.">
+            {signedOutByTeacher && !error ? (
+                <p className="mb-4 text-sm text-amber-800" role="status">
+                    {SIGNED_OUT_BY_TEACHER}
+                </p>
+            ) : null}
             <form onSubmit={(e) => void submit(e)}>
                 <TextField
                     id="student-identifier"
