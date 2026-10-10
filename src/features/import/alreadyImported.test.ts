@@ -147,3 +147,50 @@ describe('dropAlreadyImported', () => {
         expect(proposal.pages[0]?.items.map((item) => item.id)).toEqual(['t3']);
     });
 });
+
+describe('dropAlreadyImported when a mark changed kind between runs', () => {
+    /** Two blue digits read as text, and the red mark left as ink. */
+    const recognised = (page: PageProposal): ProposedItem[] => {
+        const [d1, d2] = page.segmentation.clusters.filter((c) => c.bucket === 'blue').map((c) => c.id);
+        return buildProposals(DOC, page.segmentation, {
+            clusters: [
+                { id: d1 ?? '', kind: 'digit', text: '3', confidence: 'high' },
+                { id: d2 ?? '', kind: 'digit', text: '4', confidence: 'high' },
+            ],
+            runs: [],
+        });
+    };
+
+    it('recognises ink imported while recognition was unavailable, now read as text', () => {
+        const existing = imported(scanPage().items);
+        const page = scanPage();
+        const scan = proposalOf([{ ...page, items: recognised(page) }]);
+        expect(scan.pages[0]?.items.filter((item) => item.isText)).toHaveLength(2);
+
+        const { proposal, skipped } = dropAlreadyImported(scan, existing);
+
+        expect(skipped).toHaveLength(4);
+        expect(proposal.pages).toHaveLength(0);
+    });
+
+    it('recognises text imported earlier when recognition is unavailable on the rerun', () => {
+        const first = scanPage();
+        const existing = imported(recognised(first));
+
+        const { proposal, skipped } = dropAlreadyImported(proposalOf([scanPage()]), existing);
+
+        expect(skipped).toHaveLength(4);
+        expect(proposal.pages).toHaveLength(0);
+    });
+
+    it('still offers ink that is near an imported note but not under it', () => {
+        const first = scanPage();
+        // Only the two digits were imported, as text; the third digit and the red mark were unchecked.
+        const existing = imported(recognised(first).filter((item) => item.isText));
+
+        const { proposal, skipped } = dropAlreadyImported(proposalOf([scanPage()]), existing);
+
+        expect(skipped).toHaveLength(2);
+        expect(proposal.pages[0]?.items).toHaveLength(2);
+    });
+});
