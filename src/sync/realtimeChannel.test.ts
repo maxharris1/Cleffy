@@ -6,11 +6,25 @@ import {
     DB_FALLBACK_POLL_MS,
     DB_JOIN_GRACE_MS,
     DocRealtimeChannel,
+    PRESENCE_TRACK_MIN_MS,
+    RATE_LIMIT_DECAY_MS,
+    RATE_LIMIT_MAX_LEVEL,
+    REJOIN_BASE_MS,
+    REJOIN_MAX_MS,
+    REJOIN_RATE_LIMITED_MIN_MS,
+    REJOIN_STABLE_MS,
     docDbTopic,
     docTopic,
+    rejoinDelayMs,
     type DocRealtimeChannelOptions,
 } from '@/sync/realtimeChannel';
-import { INK_PROGRESS_EVENT, MEMBERSHIP_EVENT, SCORE_ANALYSIS_EVENT, parseMembershipChange } from '@/sync/wire';
+import {
+    INK_PROGRESS_EVENT,
+    MEMBERSHIP_EVENT,
+    SCORE_ANALYSIS_EVENT,
+    parseMembershipChange,
+    type InkProgressMsg,
+} from '@/sync/wire';
 import type { AnnotationRow } from '@/types/database';
 
 const DOC = 'c0ffee00-0000-4000-8000-000000000001';
@@ -22,7 +36,7 @@ type Handler = (msg: { payload: unknown }) => void;
 /** Just enough of a realtime-js channel to drive DocRealtimeChannel. */
 class FakeChannel {
     readonly handlers: Array<{ type: string; event: string; handler: Handler }> = [];
-    statusCallback: ((status: string) => void) | null = null;
+    statusCallback: ((status: string, err?: Error) => void) | null = null;
     state = 'joined';
 
     constructor(
@@ -30,12 +44,12 @@ class FakeChannel {
         readonly options: unknown,
     ) {}
 
-    on(type: string, filter: { event: string }, handler: Handler) {
-        this.handlers.push({ type, event: filter.event, handler });
+    on(type: string, filter: { event?: string }, handler: Handler) {
+        this.handlers.push({ type, event: filter.event ?? '', handler });
         return this;
     }
 
-    subscribe(callback: (status: string) => void) {
+    subscribe(callback: (status: string, err?: Error) => void) {
         this.statusCallback = callback;
         return this;
     }
@@ -57,8 +71,19 @@ class FakeChannel {
         return this.handlers.filter((h) => h.type === type).map((h) => h.event);
     }
 
-    status(status: string): void {
-        this.statusCallback?.(status);
+    /** Report a subscribe status, moving `state` the way realtime-js does. */
+    status(status: string, err?: Error): void {
+        this.state = status === 'SUBSCRIBED' ? 'joined' : status === 'CLOSED' ? 'closed' : 'errored';
+        this.statusCallback?.(status, err);
+    }
+
+    /** Deliver a server `system` message (e.g. the rate limiter's notice). */
+    system(payload: unknown): void {
+        for (const h of this.handlers) {
+            if (h.type === 'system') {
+                h.handler(payload as { payload: unknown });
+            }
+        }
     }
 }
 
@@ -89,7 +114,9 @@ const dbChange = (record: AnnotationRow) => ({
 const setup = (overrides: Partial<DocRealtimeChannelOptions> = {}) => {
     const channels: FakeChannel[] = [];
     const removed: FakeChannel[] = [];
+    const socket = { connected: true };
     const supabase = {
+        realtime: { isConnected: () => socket.connected },
         channel: (topic: string, options: unknown) => {
             const ch = new FakeChannel(topic, options);
             channels.push(ch);
@@ -120,7 +147,15 @@ const setup = (overrides: Partial<DocRealtimeChannelOptions> = {}) => {
     if (!live || !db) {
         throw new Error('expected both channels');
     }
-    return { rt, opts, live, db, channels, removed };
+    /** The channel currently open on a topic (a re-join replaces it). */
+    const latest = (topic: string): FakeChannel => {
+        const found = channels.filter((c) => c.topic === topic).at(-1);
+        if (!found) {
+            throw new Error(`no channel on ${topic}`);
+        }
+        return found;
+    };
+    return { rt, opts, live, db, channels, removed, socket, latest };
 };
 
 describe('DocRealtimeChannel topics', () => {
@@ -215,13 +250,14 @@ describe('DocRealtimeChannel reconnect', () => {
         expect(opts.onReconnect).toHaveBeenCalledTimes(1);
     });
 
-    it('gap-fills when only the committed-row channel re-joins', () => {
+    it('gap-fills when only the committed-row channel re-joins, leaving live ink alone', () => {
         const { opts, live, db } = setup();
         live.status('SUBSCRIBED');
         db.status('SUBSCRIBED');
         db.status('TIMED_OUT');
         db.status('SUBSCRIBED');
-        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+        expect(opts.onResync).toHaveBeenCalledTimes(1);
+        expect(opts.onReconnect).not.toHaveBeenCalled();
     });
 
     it('removes both channels on stop and ignores late status callbacks', () => {
@@ -268,19 +304,20 @@ describe('DocRealtimeChannel when doc-db:{id} will not join', () => {
         expect(opts.onReconnect).not.toHaveBeenCalled();
     });
 
-    it('still gap-fills when the live channel reconnects and doc-db:{id} never joins', () => {
+    it('gap-fills at once when the live channel reconnects while doc-db:{id} is polled', () => {
         const { opts, live, db } = setup();
         live.status('SUBSCRIBED');
         db.status('CHANNEL_ERROR');
         vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
         expect(opts.onResync).toHaveBeenCalledTimes(1);
 
+        // Committed rows only come from the polls now, so the live re-join
+        // has nothing to wait for.
         live.status('CHANNEL_ERROR');
         live.status('SUBSCRIBED');
-        expect(opts.onReconnect).not.toHaveBeenCalled();
-        db.status('CHANNEL_ERROR');
-        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
         expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS);
+        expect(opts.onResync).toHaveBeenCalledTimes(2);
     });
 
     it('gap-fills a reconnect whose doc-db:{id} re-join is refused', () => {
@@ -338,21 +375,18 @@ describe('DocRealtimeChannel when doc-db:{id} will not join', () => {
         expect(opts.onResync).not.toHaveBeenCalled();
     });
 
-    it('stops polling while the socket is down and resumes after the live re-join', () => {
-        const { opts, live } = setup();
+    it('keeps polling while both channels are down', () => {
+        const { opts, live, db } = setup();
         live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+
+        // The server sheds both channels (its rate limiter closes them).
+        live.status('CLOSED');
+        db.status('CLOSED');
         vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
         expect(opts.onResync).toHaveBeenCalledTimes(1);
-
-        live.status('CHANNEL_ERROR');
         vi.advanceTimersByTime(DB_FALLBACK_POLL_MS * 3);
-        expect(opts.onResync).toHaveBeenCalledTimes(1);
-
-        live.status('SUBSCRIBED');
-        vi.advanceTimersByTime(DB_JOIN_GRACE_MS);
-        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
-        vi.advanceTimersByTime(DB_FALLBACK_POLL_MS);
-        expect(opts.onResync).toHaveBeenCalledTimes(2);
+        expect(opts.onResync).toHaveBeenCalledTimes(4);
     });
 
     it('clears every fallback timer on stop', () => {
@@ -480,7 +514,10 @@ describe('DocRealtimeChannel while doc:{id} is down', () => {
 
     it('does not push presence while down, and announces itself again on rejoin', () => {
         vi.useFakeTimers();
-        const { rt, live, db } = setup();
+        const { rt, live, db, socket } = setup();
+        // The socket itself is down: realtime-js re-joins the errored channel
+        // when it reopens, so the same channel object comes back.
+        socket.connected = false;
         live.status('SUBSCRIBED');
         db.status('SUBSCRIBED');
         expect(live.track).toHaveBeenCalledTimes(1);
@@ -496,6 +533,309 @@ describe('DocRealtimeChannel while doc:{id} is down', () => {
         live.status('SUBSCRIBED');
         expect(live.track).toHaveBeenCalledTimes(2);
         expect(live.track).toHaveBeenLastCalledWith(expect.objectContaining({ page: 3 }));
+    });
+});
+
+/** The notice Realtime sends just before it closes a channel over the rate limit. */
+const tooMany = { extension: 'system', status: 'error', message: 'Too many messages per second', channel: DOC };
+
+/** A presence sync reporting `members` people on doc:{id}, this user included. */
+const syncPresence = (ch: FakeChannel, members: number) => {
+    const state: Record<string, unknown[]> = {};
+    for (let i = 0; i < members; i++) {
+        const userId = i === 0 ? SELF : `peer-${i}`;
+        state[userId] = [{ userId, name: userId, color: '#000000', page: 0, isAnonymous: false }];
+    }
+    ch.presenceState = () => state as ReturnType<FakeChannel['presenceState']>;
+    for (const h of ch.handlers) {
+        if (h.type === 'presence' && h.event === 'sync') {
+            h.handler({ payload: undefined });
+        }
+    }
+};
+
+/** Draw for `ms` with a point every 8 ms (a 120 Hz pen); returns the points appended. */
+const drawFor = (rt: DocRealtimeChannel, ms: number): number => {
+    rt.publisher.start({ strokeId: 's1', page: 0, kind: 'stroke', color: '#000000', w: 0.01 });
+    let points = 0;
+    for (let t = 0; t < ms; t += 8) {
+        rt.publisher.append([0.5, 0.5, 1]);
+        points += 1;
+        vi.advanceTimersByTime(8);
+    }
+    rt.publisher.end();
+    return points;
+};
+
+const inkSent = (ch: FakeChannel): InkProgressMsg[] =>
+    (ch.send.mock.calls as unknown as Array<[{ payload: InkProgressMsg }]>).map(([args]) => args.payload);
+
+describe('DocRealtimeChannel re-joins channels the server dropped', () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+    });
+
+    it('re-joins both channels after the rate limiter closes them, pulling meanwhile', async () => {
+        const { opts, live, db, removed, latest } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+
+        // What the load test saw at 25 drawing users: a system notice, then
+        // the server closes the channel. realtime-js never re-joins a
+        // closed channel on its own.
+        live.system(tooMany);
+        live.status('CLOSED');
+        db.status('CLOSED');
+        await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS);
+
+        const live2 = latest(docTopic(DOC));
+        const db2 = latest(docDbTopic(DOC));
+        expect(live2).not.toBe(live);
+        expect(db2).not.toBe(db);
+        expect(removed).toEqual(expect.arrayContaining([live, db]));
+        // Committed rows kept coming by pull while nothing was joined.
+        expect(opts.onResync).toHaveBeenCalledTimes(2);
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+
+        // Back on doc:{id}: stale previews go and a pull covers the gap.
+        live2.status('SUBSCRIBED');
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+        expect(live2.track).toHaveBeenCalledTimes(1);
+        // Back on doc-db:{id}: one more pull for rows since the last poll,
+        // then polling stops.
+        db2.status('SUBSCRIBED');
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+        expect(opts.onResync).toHaveBeenCalledTimes(3);
+        await vi.advanceTimersByTimeAsync(DB_FALLBACK_POLL_MS * 2);
+        expect(opts.onResync).toHaveBeenCalledTimes(3);
+    });
+
+    it('keeps re-joining a channel the server closes again and again, backing off to a bound', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(1); // the longest delay of each step
+        const { latest, channels } = setup();
+        let ch = latest(docTopic(DOC));
+        ch.status('SUBSCRIBED');
+        const waits: number[] = [];
+        for (let i = 0; i < 8; i++) {
+            ch.status('CLOSED');
+            let waited = 0;
+            while (latest(docTopic(DOC)) === ch) {
+                await vi.advanceTimersByTimeAsync(100);
+                waited += 100;
+                expect(waited).toBeLessThanOrEqual(REJOIN_MAX_MS);
+            }
+            waits.push(waited);
+            ch = latest(docTopic(DOC));
+            ch.status('SUBSCRIBED');
+        }
+        expect(waits).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+        expect(channels.filter((c) => c.topic === docTopic(DOC))).toHaveLength(9);
+
+        // A channel that then holds for a while starts over from the base.
+        await vi.advanceTimersByTimeAsync(REJOIN_STABLE_MS);
+        ch.status('CLOSED');
+        await vi.advanceTimersByTimeAsync(REJOIN_BASE_MS);
+        expect(latest(docTopic(DOC))).not.toBe(ch);
+    });
+
+    it('jitters each delay between half and all of its bounded ceiling', () => {
+        expect(rejoinDelayMs(0, false, () => 0)).toBe(REJOIN_BASE_MS / 2);
+        expect(rejoinDelayMs(0, false, () => 1)).toBe(REJOIN_BASE_MS);
+        expect(rejoinDelayMs(3, false, () => 0.5)).toBe(6000);
+        expect(rejoinDelayMs(50, false, () => 1)).toBe(REJOIN_MAX_MS);
+        expect(rejoinDelayMs(50, false, () => 0)).toBe(REJOIN_MAX_MS / 2);
+        // Rate-limited: an immediate retry would only be refused again.
+        expect(rejoinDelayMs(0, true, () => 0)).toBe(REJOIN_RATE_LIMITED_MIN_MS / 2);
+    });
+
+    it('leaves an errored channel to realtime-js when it recovers in time', async () => {
+        const { channels, live, db } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        live.status('CHANNEL_ERROR');
+        // realtime-js's own re-join lands first.
+        live.status('SUBSCRIBED');
+        await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS * 2);
+        expect(channels).toHaveLength(2);
+    });
+
+    it('replaces an errored channel realtime-js has not recovered, unless its socket is down or a join is in flight', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(1);
+        const { live, db, socket, latest } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+
+        // Socket down: realtime-js re-joins errored channels when it reopens.
+        socket.connected = false;
+        live.status('CHANNEL_ERROR');
+        await vi.advanceTimersByTimeAsync(REJOIN_BASE_MS * 3);
+        expect(latest(docTopic(DOC))).toBe(live);
+
+        // Socket back, a join already in flight: let it answer.
+        socket.connected = true;
+        live.state = 'joining';
+        await vi.advanceTimersByTimeAsync(REJOIN_BASE_MS * 4);
+        expect(latest(docTopic(DOC))).toBe(live);
+
+        // Socket up and still errored: start over with a fresh channel.
+        live.state = 'errored';
+        await vi.advanceTimersByTimeAsync(REJOIN_BASE_MS * 8);
+        expect(latest(docTopic(DOC))).not.toBe(live);
+    });
+
+    it('ignores the replaced channel and pulls as soon as doc-db:{id} is back, before doc:{id}', async () => {
+        const { opts, live, db, latest } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        live.status('CLOSED');
+        db.status('CLOSED');
+        await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS / 2);
+        const db2 = latest(docDbTopic(DOC));
+        expect(db2).not.toBe(db);
+
+        // Late news from the dead channels changes nothing.
+        db.status('SUBSCRIBED');
+        live.status('SUBSCRIBED');
+        expect(opts.onReconnect).not.toHaveBeenCalled();
+
+        const pulls = vi.mocked(opts.onResync).mock.calls.length;
+        db2.status('SUBSCRIBED');
+        expect(opts.onResync).toHaveBeenCalledTimes(pulls + 1);
+        latest(docTopic(DOC)).status('SUBSCRIBED');
+        expect(opts.onReconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens nothing once stopped, even with a re-join under way', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(1);
+        const { rt, live, db, channels } = setup();
+        live.status('SUBSCRIBED');
+        db.status('SUBSCRIBED');
+        live.status('CLOSED');
+        db.status('CLOSED');
+        // The live re-join fires and starts removing the old channel...
+        vi.advanceTimersByTime(REJOIN_BASE_MS);
+        // ...when the viewer closes.
+        rt.stop();
+        await vi.advanceTimersByTimeAsync(REJOIN_MAX_MS);
+        expect(channels).toHaveLength(2);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+});
+
+describe('DocRealtimeChannel message volume and server rate limits', () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+    });
+
+    const joinedWith = (members: number) => {
+        const ctx = setup();
+        ctx.live.status('SUBSCRIBED');
+        ctx.db.status('SUBSCRIBED');
+        syncPresence(ctx.live, members);
+        return ctx;
+    };
+
+    it('coalesces live ink by room size: smooth one-to-one, a few batches per stroke at 25', () => {
+        const small = joinedWith(2);
+        drawFor(small.rt, 1000);
+        // 80 ms batches plus pen-up.
+        expect(inkSent(small.live)).toHaveLength(13);
+
+        const big = joinedWith(25);
+        const points = drawFor(big.rt, 1000);
+        const sent = inkSent(big.live);
+        // 250 ms batches plus pen-up — c08a922 sent 10 here, at any room size.
+        expect(sent).toHaveLength(4);
+        expect(sent.at(-1)?.done).toBe(true);
+        expect(sent.reduce((n, m) => n + m.pts.length, 0)).toBe(points * 3);
+    });
+
+    it('widens the cadence on the server’s notice, counting one burst once', () => {
+        const { rt, live, db } = joinedWith(25);
+        live.system(tooMany);
+        db.system(tooMany);
+        drawFor(rt, 1000);
+        // 500 ms batches plus pen-up (one level, not two).
+        expect(inkSent(live)).toHaveLength(2);
+    });
+
+    it('streams a stroke whole at pen-up at the top level, then recovers as notices stop', () => {
+        const { rt, live } = joinedWith(25);
+        for (let i = 0; i < RATE_LIMIT_MAX_LEVEL; i++) {
+            live.system(tooMany);
+            vi.advanceTimersByTime(1500);
+        }
+        const points = drawFor(rt, 1000);
+        expect(inkSent(live)).toHaveLength(1);
+        expect(inkSent(live)[0]).toMatchObject({ done: true });
+        expect(inkSent(live)[0]?.pts).toHaveLength(points * 3);
+
+        // A cancelled stroke that never went out sends nothing to retract.
+        live.send.mockClear();
+        rt.publisher.start({ strokeId: 's2', page: 0, kind: 'stroke', color: '#000000', w: 0.01 });
+        rt.publisher.append([0.5, 0.5, 1]);
+        rt.publisher.cancel();
+        expect(live.send).not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(RATE_LIMIT_DECAY_MS * RATE_LIMIT_MAX_LEVEL);
+        live.send.mockClear();
+        drawFor(rt, 1000);
+        expect(inkSent(live)).toHaveLength(4);
+    });
+
+    it('ignores system messages that are not rate limits', () => {
+        const { rt, live } = joinedWith(25);
+        live.system({ extension: 'system', status: 'ok', message: 'Subscribed to PostgreSQL', channel: DOC });
+        live.system({ ...tooMany, status: 'ok' });
+        drawFor(rt, 1000);
+        expect(inkSent(live)).toHaveLength(4);
+    });
+
+    it('backs off a join the rate limiter refused, without an access re-check', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        const onMembershipChanged = vi.fn();
+        const { live, latest } = setup({ onMembershipChanged });
+        live.status('CHANNEL_ERROR', new Error('Too many joins per second'));
+        expect(onMembershipChanged).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(REJOIN_RATE_LIMITED_MIN_MS / 2 - 100);
+        expect(latest(docTopic(DOC))).toBe(live);
+        await vi.advanceTimersByTimeAsync(200);
+        expect(latest(docTopic(DOC))).not.toBe(live);
+    });
+
+    it('takes a rate-limit send result as a signal too', async () => {
+        const { rt, live } = joinedWith(25);
+        live.send.mockResolvedValueOnce('rate limited');
+        drawFor(rt, 300);
+        await vi.advanceTimersByTimeAsync(0);
+        live.send.mockClear();
+        drawFor(rt, 1000);
+        expect(inkSent(live)).toHaveLength(2);
+    });
+
+    it('spaces presence updates, and further under the rate limit', () => {
+        const { rt, live } = joinedWith(2);
+        expect(live.track).toHaveBeenCalledTimes(1);
+        rt.setPage(1);
+        vi.advanceTimersByTime(PRESENCE_TRACK_MIN_MS - 1);
+        expect(live.track).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(1);
+        expect(live.track).toHaveBeenCalledTimes(2);
+
+        live.system(tooMany);
+        rt.setPage(2);
+        vi.advanceTimersByTime(PRESENCE_TRACK_MIN_MS * 2 - 1);
+        expect(live.track).toHaveBeenCalledTimes(2);
+        vi.advanceTimersByTime(1);
+        expect(live.track).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 }));
     });
 });
 
