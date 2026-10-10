@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AnnotationSnapshotRow } from '@/types/database';
+import type { Annotation } from '@/types/models';
 
 /**
  * A tiny stand-in for the annotation_snapshots table behind PostgREST:
@@ -203,6 +204,29 @@ describe('day snapshot upload', () => {
         ]);
         expect(results.filter(Boolean)).toHaveLength(1);
         expect(await getDb().annotationSnapshots.where('docId').equals(DOC).count()).toBe(1);
+    });
+
+    it("once the day's snapshot exists, later edits neither read it back nor copy the marks", async () => {
+        const marks = Array.from({ length: 3 }, (_, i) => ({ id: `m${i}` }) as unknown as Annotation);
+        const first = await ensureDayStartingSnapshot(getDb(), 'local-abcdef', marks);
+        expect(first?.payload).toHaveLength(3);
+
+        // Every later edit of the day runs this check. Reading the row back
+        // deserialized every mark on the score on each pen-up.
+        const reads = vi.fn();
+        const onRead = <T>(row: T): T => {
+            reads(row);
+            return row;
+        };
+        getDb().annotationSnapshots.hook('reading', onRead);
+        const map = vi.spyOn(marks, 'map');
+        try {
+            expect(await ensureDayStartingSnapshot(getDb(), 'local-abcdef', marks)).toBeNull();
+            expect(reads).not.toHaveBeenCalled();
+            expect(map).not.toHaveBeenCalled();
+        } finally {
+            getDb().annotationSnapshots.hook('reading').unsubscribe(onRead);
+        }
     });
 
     it('listing history uploads pending rows first and reconciles with the server', async () => {

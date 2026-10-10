@@ -12,7 +12,14 @@ import { readCachedEntitlements } from '@/features/billing/entitlementsService';
 import { parsePostgrestLimitError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { leaveDocument } from '@/features/share/shareService';
 import { getDb } from '@/sync/db';
-import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
+import {
+    cancelBackgroundPdfCache,
+    finishPdfCacheInBackground,
+    getCachedPdf,
+    putCachedPdf,
+    readCachedPdfBytes,
+} from '@/sync/pdfCache';
+import type { CachedPdf } from '@/sync/db';
 import type { LibrarySort } from '@/features/library/libraryView';
 import type { DocumentRow, DocumentStorageCleanupRow, MemberRole } from '@/types/database';
 
@@ -646,6 +653,8 @@ export const deleteDocument = async (doc: DocumentRow): Promise<DeleteDocumentRe
  * but a running one would put rows and a watermark straight back.
  */
 export const purgeLocalDocument = async (docId: string): Promise<void> => {
+    // A first open's download still finishing would put the PDF back.
+    cancelBackgroundPdfCache(docId);
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(docId),
@@ -691,32 +700,6 @@ export interface PreloadedBytes {
     contentRev: number;
     archivedAt: string | null;
 }
-
-/** A download started before the row was known — see prefetchDocumentBytes. */
-export interface BytesPrefetch {
-    /** The storage path the download assumed; honoured only if the row agrees. */
-    path: string;
-    bytes: Promise<ArrayBuffer | null>;
-}
-
-/**
- * Start the PDF download in parallel with the row and role fetches. A cold
- * open otherwise pays two round-trips in series — the row for its
- * storage_path, then the bytes — although every score lives at
- * `{id}/original.pdf` (documentRowFromCache already assumes as much). The
- * caller hands this to loadDocumentBytes, which uses the result only if the
- * row's storage_path is the path assumed here. Storage RLS still applies: a
- * caller who cannot see the score gets null, and the row fetch says why.
- */
-export const prefetchDocumentBytes = (docId: string): BytesPrefetch => {
-    const path = `${docId}/original.pdf`;
-    const bytes = getSupabase()
-        .storage.from('scores')
-        .download(path)
-        .then(({ data, error }) => (error || !data ? null : data.arrayBuffer()))
-        .catch(() => null);
-    return { path, bytes };
-};
 
 /**
  * Download a stored score while reporting progress. supabase-js's download()
@@ -772,27 +755,30 @@ const downloadScoreWithProgress = async (
     return loaded === out.byteLength ? out.buffer : out.slice(0, loaded).buffer;
 };
 
-export const loadDocumentBytes = async (
+/** The role and owner stamped on a score's offline copy (see loadDocumentBytes). */
+export interface CacheStamp {
+    userId?: string;
+    /**
+     * The caller's confirmed role, stored with the bytes. fetchMyRole only
+     * stamps a cache row that already exists, and on a score's first open
+     * on this device the row is written here, after the role came back —
+     * without this the offline copy had no role, and the next offline open
+     * was view-only with nothing able to lift it.
+     */
+    role?: MemberRole | null;
+}
+
+/**
+ * Bytes of `doc`'s current revision already on this device — the warm
+ * open's, or the cache row's — with the row's archive flag and role brought
+ * up to date. `cached` is the row read, for the caller's fallbacks.
+ */
+const currentLocalBytes = async (
     doc: DocumentRow,
-    options: {
-        preloaded?: PreloadedBytes;
-        prefetch?: BytesPrefetch;
-        userId?: string;
-        /**
-         * The caller's confirmed role, stored with the bytes. fetchMyRole only
-         * stamps a cache row that already exists, and on a score's first open
-         * on this device the row is written here, after the role came back —
-         * without this the offline copy had no role, and the next offline open
-         * was view-only with nothing able to lift it.
-         */
-        role?: MemberRole | null;
-        /** Asked for by callers with a progress UI; switches the download to a streamed read. */
-        onProgress?: (progress: UploadProgress) => void;
-    } = {},
-): Promise<ArrayBuffer> => {
+    preloaded: PreloadedBytes | undefined,
+    role: MemberRole | undefined,
+): Promise<{ bytes: ArrayBuffer | null; cached: CachedPdf | null }> => {
     const wantRev = doc.content_rev ?? 0;
-    const { preloaded, prefetch, userId, onProgress } = options;
-    const role = options.role ?? undefined;
     if (preloaded && preloaded.contentRev >= wantRev) {
         // The warm open already read and materialised these bytes; a second
         // Dexie read would hold a second multi-megabyte copy for nothing.
@@ -802,7 +788,7 @@ export const loadDocumentBytes = async (
                 await putCachedPdf({ ...cached, archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
             }
         }
-        return preloaded.bytes;
+        return { bytes: preloaded.bytes, cached: null };
     }
     const cached = await getCachedPdf(doc.id);
     if (cached && (cached.contentRev ?? 0) >= wantRev) {
@@ -811,16 +797,77 @@ export const loadDocumentBytes = async (
         if (cached.archivedAt !== doc.archived_at || (role && cached.myRole !== role)) {
             await putCachedPdf({ ...cached, archivedAt: doc.archived_at, myRole: role ?? cached.myRole });
         }
-        return readCachedPdfBytes(cached.bytes);
+        return { bytes: await readCachedPdfBytes(cached.bytes), cached };
     }
-    // Prefetch left before the row was known. Honour it only for an
-    // unreplaced score (content_rev 0): a replace that raced the download
-    // would otherwise be cached under the new revision and never re-fetched.
-    const prefetched = prefetch && prefetch.path === doc.storage_path && wantRev === 0 ? await prefetch.bytes : null;
+    return { bytes: null, cached };
+};
+
+/**
+ * Store a downloaded score as this device's offline copy. Best-effort, like
+ * every cache write: a refused write costs the offline copy, not the score.
+ */
+export const cacheDocumentBytes = async (
+    doc: DocumentRow,
+    bytes: ArrayBuffer,
+    stamp: CacheStamp & { cached?: CachedPdf | null } = {},
+): Promise<void> => {
+    const cached = stamp.cached === undefined ? await getCachedPdf(doc.id) : stamp.cached;
+    await putCachedPdf({
+        docId: doc.id,
+        bytes,
+        title: doc.title,
+        cachedAt: new Date().toISOString(),
+        myRole: stamp.role ?? cached?.myRole,
+        contentRev: doc.content_rev ?? 0,
+        archivedAt: doc.archived_at,
+        userId: stamp.userId ?? cached?.userId,
+    });
+};
+
+/**
+ * A first open closed before its score finished streaming in: let the
+ * download finish anyway and keep it as the offline copy, as a first open
+ * always did when it downloaded the file whole. Opening a score at home and
+ * reading it at a rehearsal with no signal must not depend on having stayed
+ * on it until the download ended. A copy of this revision or a newer one that
+ * landed meanwhile (the score reopened, or replaced) is kept instead.
+ */
+export const cacheStreamedDocument = (
+    doc: DocumentRow,
+    download: { complete: Promise<ArrayBuffer>; abort: () => void },
+    stamp: CacheStamp = {},
+): void => {
+    finishPdfCacheInBackground(
+        doc.id,
+        download.complete,
+        () => download.abort(),
+        async (bytes, isCancelled) => {
+            const cached = await getCachedPdf(doc.id);
+            if (isCancelled() || (cached && (cached.contentRev ?? 0) >= (doc.content_rev ?? 0))) {
+                return;
+            }
+            await cacheDocumentBytes(doc, bytes, { ...stamp, cached });
+        },
+    );
+};
+
+export const loadDocumentBytes = async (
+    doc: DocumentRow,
+    options: CacheStamp & {
+        preloaded?: PreloadedBytes;
+        /** Asked for by callers with a progress UI; switches the download to a streamed read. */
+        onProgress?: (progress: UploadProgress) => void;
+    } = {},
+): Promise<ArrayBuffer> => {
+    const { preloaded, userId, onProgress } = options;
+    const role = options.role ?? undefined;
+    const local = await currentLocalBytes(doc, preloaded, role);
+    if (local.bytes) {
+        return local.bytes;
+    }
+    const { cached } = local;
     let bytes: ArrayBuffer;
-    if (prefetched) {
-        bytes = prefetched;
-    } else if (onProgress) {
+    if (onProgress) {
         try {
             bytes = await downloadScoreWithProgress(doc.storage_path, onProgress);
         } catch (err) {
@@ -841,17 +888,71 @@ export const loadDocumentBytes = async (
         }
         bytes = await data.arrayBuffer();
     }
-    await putCachedPdf({
-        docId: doc.id,
-        bytes,
-        title: doc.title,
-        cachedAt: new Date().toISOString(),
-        myRole: role ?? cached?.myRole,
-        contentRev: wantRev,
-        archivedAt: doc.archived_at,
-        userId: userId ?? cached?.userId,
-    });
+    await cacheDocumentBytes(doc, bytes, { userId, role, cached });
     return bytes;
+};
+
+/**
+ * How long a streamed score's signed URL is good for. The stream and its
+ * Range requests all start within moments of the open; an hour leaves a slow
+ * link plenty of room to finish.
+ */
+const SCORE_URL_TTL_S = 60 * 60;
+
+/** A signed URL minted before the row was known — see prefetchScoreUrl. */
+export interface ScoreUrlPrefetch {
+    /** The storage path the URL was minted for; honoured only if the row agrees. */
+    path: string;
+    url: Promise<string | null>;
+}
+
+const signScoreUrl = async (path: string): Promise<string | null> => {
+    const { data, error } = await getSupabase().storage.from('scores').createSignedUrl(path, SCORE_URL_TTL_S);
+    return error || !data ? null : data.signedUrl;
+};
+
+/**
+ * Mint the score's signed URL in parallel with the row and role fetches. A
+ * cold open otherwise pays two round-trips in series — the row for its
+ * storage_path, then the URL — although every score lives at
+ * `{id}/original.pdf` (documentRowFromCache already assumes as much). It is
+ * used only if the row's storage_path agrees. Storage policies decide whether
+ * it can be minted at all; a caller who cannot see the score gets null, and
+ * the row fetch says why. Unlike the download this replaced, a warm open
+ * that never needs it costs one small request, not the whole file again.
+ */
+export const prefetchScoreUrl = (docId: string): ScoreUrlPrefetch => {
+    const path = `${docId}/original.pdf`;
+    return { path, url: signScoreUrl(path).catch(() => null) };
+};
+
+/** What the viewer opens a cloud score from: bytes it already has, or a URL to stream. */
+export type DocumentSource = { bytes: ArrayBuffer; url?: undefined } | { url: string; bytes?: undefined };
+
+/**
+ * Like loadDocumentBytes, minus the wait for a download: bytes this device
+ * already holds for the current revision are returned as they are; otherwise
+ * a signed URL the viewer streams from (PdfProvider), rendering page 1 long
+ * before the file is in. The caller caches the bytes when the stream ends
+ * (cacheDocumentBytes). A URL that cannot be minted falls back to the whole
+ * download, stale-cache rules included.
+ */
+export const loadDocumentSource = async (
+    doc: DocumentRow,
+    options: CacheStamp & { preloaded?: PreloadedBytes; prefetch?: ScoreUrlPrefetch } = {},
+): Promise<DocumentSource> => {
+    const role = options.role ?? undefined;
+    const local = await currentLocalBytes(doc, options.preloaded, role);
+    if (local.bytes) {
+        return { bytes: local.bytes };
+    }
+    const prefetched =
+        options.prefetch && options.prefetch.path === doc.storage_path ? await options.prefetch.url : null;
+    const url = prefetched ?? (await signScoreUrl(doc.storage_path).catch(() => null));
+    if (url) {
+        return { url };
+    }
+    return { bytes: await loadDocumentBytes(doc, { userId: options.userId, role: options.role }) };
 };
 
 /** Object name (within `{docId}/`) that preserves the pre-import original. */

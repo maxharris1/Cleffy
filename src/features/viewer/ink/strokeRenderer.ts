@@ -59,26 +59,87 @@ export const buildStrokePath = (payload: StrokePayload, pageWpx: number, pageHpx
     return new Path2D(getSvgPathFromStroke(outline));
 };
 
-/** Simple bounded cache of stroke paths keyed by annotation version + raster width. */
+/**
+ * Stroke paths by annotation id, valid for one version of the mark at one
+ * raster size (width and height: y is scaled by the height, and a page's size
+ * can change under a loaded document while its pdf is still streaming). Building a path (perfect-freehand outline, SVG string, Path2D
+ * parse) is what a repaint costs, so a page repaint must find every mark here.
+ * It used to be a 400-entry cache cleared whole when full: a page with more
+ * marks than that rebuilt every path on every repaint, which on a 2,000-mark
+ * page was a second-long freeze after each stroke. Entries are dropped by
+ * `retainOnly` instead, after a full repaint, so the cache holds what the page
+ * shows and nothing it no longer does.
+ */
 export class StrokePathCache {
-    private cache = new Map<string, Path2D>();
+    private cache = new Map<string, { key: string; path: Path2D }>();
 
     get(annotation: Annotation, pageWpx: number, pageHpx: number): Path2D | null {
         if (isTextPayload(annotation.payload)) {
             return null;
         }
-        const key = `${annotation.id}:${annotation.updatedAt}:${Math.round(pageWpx)}`;
-        let path = this.cache.get(key);
-        if (!path) {
-            path = buildStrokePath(annotation.payload, pageWpx, pageHpx);
-            if (this.cache.size > 400) {
-                this.cache.clear();
-            }
-            this.cache.set(key, path);
+        const key = `${annotation.updatedAt}:${Math.round(pageWpx)}x${Math.round(pageHpx)}`;
+        const hit = this.cache.get(annotation.id);
+        if (hit && hit.key === key) {
+            return hit.path;
         }
+        const path = buildStrokePath(annotation.payload, pageWpx, pageHpx);
+        this.cache.set(annotation.id, { key, path });
         return path;
     }
+
+    /** Forget every mark not in `ids`. */
+    retainOnly(ids: ReadonlySet<string>): void {
+        for (const id of this.cache.keys()) {
+            if (!ids.has(id)) {
+                this.cache.delete(id);
+            }
+        }
+    }
+
+    get size(): number {
+        return this.cache.size;
+    }
 }
+
+const samePayloadValue = (a: unknown, b: unknown): boolean => {
+    if (a === b) {
+        return true;
+    }
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+        return false;
+    }
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) {
+            return false;
+        }
+    }
+    return true;
+};
+
+/**
+ * True when two versions of a mark draw identically: same id, kind, colour and
+ * payload. Most store notifications change nothing on screen — the server's
+ * ack stamping createdBy, the realtime echo of this device's own stroke with a
+ * new seq — and the ink layer uses this to skip them.
+ */
+export const sameInk = (a: Annotation, b: Annotation): boolean => {
+    if (a === b) {
+        return true;
+    }
+    if (a.id !== b.id || a.kind !== b.kind || a.color !== b.color) {
+        return false;
+    }
+    if (a.payload === b.payload) {
+        return true;
+    }
+    const pa = a.payload as unknown as Record<string, unknown>;
+    const pb = b.payload as unknown as Record<string, unknown>;
+    const keys = Object.keys(pa);
+    if (keys.length !== Object.keys(pb).length) {
+        return false;
+    }
+    return keys.every((key) => samePayloadValue(pa[key], pb[key]));
+};
 
 /** Draw one annotation onto a page-sized canvas context (bitmap px coords). */
 export const drawAnnotation = (

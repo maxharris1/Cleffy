@@ -12,6 +12,7 @@ import {
     buildStrokePath,
     drawAnnotation,
     HIGHLIGHT_ALPHA,
+    sameInk,
     StrokePathCache,
 } from '@/features/viewer/ink/strokeRenderer';
 import type { CanvasRegistry } from '@/features/viewer/ink/CanvasRegistry';
@@ -49,6 +50,25 @@ interface LiveStroke {
     /** Predicted tail (rendered, never committed). */
     predicted: number[];
     simulatePressure: boolean;
+}
+
+/** Call `listener` whenever the document finishes loading fonts; returns the unsubscribe. */
+const onFontsLoaded = (listener: () => void): (() => void) => {
+    const fonts = typeof document === 'undefined' ? undefined : document.fonts;
+    if (!fonts || typeof fonts.addEventListener !== 'function') {
+        return () => undefined;
+    }
+    fonts.addEventListener('loadingdone', listener);
+    return () => fonts.removeEventListener('loadingdone', listener);
+};
+
+/** What a page's committed canvas currently shows (see InkController.syncPage). */
+interface PaintedPage {
+    canvas: HTMLCanvasElement;
+    width: number;
+    height: number;
+    /** The marks drawn on it, in draw order. */
+    marks: Annotation[];
 }
 
 /** Pen-up movement under this many CSS px counts as a tap (text tool). */
@@ -129,8 +149,13 @@ export class InkController {
     private downY = 0;
     private moved = false;
     private rafPending = false;
-    private pathCache = new StrokePathCache();
+    /** Per page: a full repaint keeps exactly that page's marks (StrokePathCache.retainOnly). */
+    private pathCaches = new Map<number, StrokePathCache>();
+    private painted = new Map<number, PaintedPage>();
     private unsubscribes: Array<() => void> = [];
+    /** Committed canvases with a context-restored listener (see watchContextLoss). */
+    private watchedCanvases = new WeakSet<HTMLCanvasElement>();
+    private destroyed = false;
     private publisher: LiveInkPublisher | null = null;
     private remote = new RemoteInkBuffers();
     private remoteGcTimer: ReturnType<typeof setInterval> | null = null;
@@ -152,7 +177,7 @@ export class InkController {
     ) {
         this.unsubscribes = [
             opts.store.subscribe((pageIndex) => {
-                this.repaintPage(pageIndex);
+                this.syncPage(pageIndex);
                 const selected = this.selectedText;
                 if (selected && selected.pageIndex === pageIndex) {
                     // The note moved, resized, or vanished (eraser, undo, peer).
@@ -164,7 +189,10 @@ export class InkController {
                     this.renderPageLive(pageIndex);
                 }
             }),
-            opts.registry.onRegister((pageIndex) => this.repaintPage(pageIndex)),
+            opts.registry.onRegister((pageIndex) => {
+                this.watchContextLoss(pageIndex);
+                this.repaintPage(pageIndex);
+            }),
             // Selection belongs to the text tool; switching tools drops it.
             useViewerStore.subscribe((state, prev) => {
                 if (state.tool !== prev.tool && state.tool !== 'text') {
@@ -172,15 +200,43 @@ export class InkController {
                 }
             }),
             // Converted symbols were drawn as fallback text until the music face arrived.
-            onMusicFontReady(() => {
-                for (const pageIndex of opts.registry.pageIndices()) {
-                    this.repaintPage(pageIndex);
-                }
-            }),
+            onMusicFontReady(() => this.repaintAll()),
+            // Likewise a prose note in a webfont that was still loading.
+            onFontsLoaded(() => this.repaintAll()),
         ];
     }
 
+    /**
+     * syncPage trusts `painted` to say what a canvas shows, so a canvas
+     * cleared behind its back stays blank until something forces a repaint.
+     * The browser says so when it restores a lost 2D context; repaint then.
+     */
+    private watchContextLoss(pageIndex: number): void {
+        const committed = this.opts.registry.get(pageIndex)?.committed;
+        if (!committed || this.watchedCanvases.has(committed) || typeof committed.addEventListener !== 'function') {
+            return;
+        }
+        this.watchedCanvases.add(committed);
+        committed.addEventListener('contextrestored', () => {
+            if (this.destroyed) {
+                return;
+            }
+            for (const page of this.opts.registry.pageIndices()) {
+                if (this.opts.registry.get(page)?.committed === committed) {
+                    this.repaintPage(page);
+                }
+            }
+        });
+    }
+
+    private repaintAll(): void {
+        for (const pageIndex of this.opts.registry.pageIndices()) {
+            this.repaintPage(pageIndex);
+        }
+    }
+
     destroy(): void {
+        this.destroyed = true;
         for (const unsubscribe of this.unsubscribes) {
             unsubscribe();
         }
@@ -233,19 +289,71 @@ export class InkController {
 
     /** Redraw every committed stroke of a page onto its committed canvas. */
     repaintPage(pageIndex: number): void {
+        this.syncPage(pageIndex, true);
+    }
+
+    /**
+     * Bring a page's committed canvas up to date with the store, doing only
+     * the work the change needs. The store notifies a page for every commit,
+     * server ack and realtime echo, and most of those draw nothing new; a
+     * stroke drawn here is appended to the page. So:
+     *  - the canvas already shows exactly these marks: nothing to do;
+     *  - it shows a prefix of them: draw only the rest on top (draw order is
+     *    the page map's order, so this is what a full repaint would produce);
+     *  - anything else (a mark erased, moved or recoloured, a new canvas size):
+     *    clear and draw them all, from cached paths.
+     * Pen-up therefore costs one stroke, not one per mark on the page.
+     */
+    private syncPage(pageIndex: number, force = false): void {
         const canvases = this.opts.registry.get(pageIndex);
         if (!canvases) {
+            this.painted.delete(pageIndex);
+            this.pathCaches.delete(pageIndex);
             return;
         }
         const { committed } = canvases;
         const ctx = committed.getContext('2d');
         if (!ctx || committed.width === 0) {
+            this.painted.delete(pageIndex);
             return;
         }
-        ctx.clearRect(0, 0, committed.width, committed.height);
-        for (const annotation of this.opts.store.getPage(pageIndex).values()) {
-            drawAnnotation(ctx, annotation, committed.width, committed.height, this.pathCache);
+        const marks = [...this.opts.store.getPage(pageIndex).values()];
+        const prev = this.painted.get(pageIndex);
+        let from = 0;
+        if (
+            !force &&
+            prev &&
+            prev.canvas === committed &&
+            prev.width === committed.width &&
+            prev.height === committed.height &&
+            prev.marks.length <= marks.length
+        ) {
+            while (from < prev.marks.length && sameInk(prev.marks[from]!, marks[from]!)) {
+                from++;
+            }
         }
+        const append = !force && prev !== undefined && from === prev.marks.length;
+        let cache = this.pathCaches.get(pageIndex);
+        if (!cache) {
+            cache = new StrokePathCache();
+            this.pathCaches.set(pageIndex, cache);
+        }
+        if (!append) {
+            from = 0;
+            ctx.clearRect(0, 0, committed.width, committed.height);
+            cache.retainOnly(new Set(marks.map((mark) => mark.id)));
+            // Pages scrolled out of the window keep no paths.
+            for (const page of this.pathCaches.keys()) {
+                if (!this.opts.registry.get(page)) {
+                    this.pathCaches.delete(page);
+                    this.painted.delete(page);
+                }
+            }
+        }
+        for (let i = from; i < marks.length; i++) {
+            drawAnnotation(ctx, marks[i]!, committed.width, committed.height, cache);
+        }
+        this.painted.set(pageIndex, { canvas: committed, width: committed.width, height: committed.height, marks });
     }
 
     // ---- InkDelegate ----------------------------------------------------
@@ -580,6 +688,10 @@ export class InkController {
         // persist). Arm the grouping pause now so IndexedDB is not on the
         // convert clock.
         void this.opts.store.create(annotation);
+        // create() put the stroke in the page map before its first await; paint
+        // it now rather than after the IndexedDB write, so the ink does not
+        // blink out between the live canvas clearing and the store's notify.
+        this.syncPage(live.pageIndex);
         this.opts.onStrokeCommitted?.(annotation);
     }
 

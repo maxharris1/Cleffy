@@ -15,6 +15,7 @@ import {
     PAGE_GAP,
     pagePointToViewport,
     pageTurnView,
+    reanchorView,
     scrollForPagePoint,
     viewportToPagePoint,
     visiblePageRange,
@@ -430,5 +431,44 @@ describe('fitPageWidthScale', () => {
 
     it('returns 1 for empty documents', () => {
         expect(fitPageWidthScale(computeDocumentLayout([]), 800)).toBe(1);
+    });
+});
+
+describe('reanchorView', () => {
+    const W = 632;
+    const H = 900;
+    const provisional = computeDocumentLayout(Array.from({ length: 50 }, () => ({ width: 600, height: 800 })));
+    // The real sizes: every page above 40 is taller, and page 45 is wider.
+    const real = computeDocumentLayout(
+        Array.from({ length: 50 }, (_, i) => (i === 45 ? { width: 700, height: 800 } : { width: 600, height: 850 })),
+    );
+
+    it('keeps the reader on the same point of the page at the viewport centre', () => {
+        const page40 = provisional.layouts[40]!;
+        // Fitted (scale 1), the middle of page 40 at the viewport centre.
+        const view = { scale: 1, scrollX: -16, scrollY: page40.top + page40.height / 2 - H / 2 };
+        const next = reanchorView(view, provisional, real, W, H);
+        const cy = (next.scrollY + H / 2) / next.scale;
+        const after = real.layouts[40]!;
+        expect(focusedPageIndex(next, H, real.layouts)).toBe(40);
+        expect(cy).toBeCloseTo(after.top + after.height / 2);
+        // Without it, the same scroll offset lands pages earlier.
+        expect(focusedPageIndex(view, H, real.layouts)).toBeLessThan(40);
+    });
+
+    it('keeps the zoom the same multiple of fit-width', () => {
+        const fitted = fitPageWidthScale(provisional, W);
+        const next = reanchorView({ scale: fitted, scrollX: 0, scrollY: 0 }, provisional, real, W, H);
+        expect(next.scale).toBeCloseTo(fitPageWidthScale(real, W));
+        const zoomed = reanchorView({ scale: fitted * 2, scrollX: 0, scrollY: 0 }, provisional, real, W, H);
+        expect(zoomed.scale).toBeCloseTo(fitPageWidthScale(real, W) * 2);
+    });
+
+    it('leaves the view alone when the sizes did not move anything', () => {
+        const view = { scale: 1.5, scrollX: 10, scrollY: 4000 };
+        const next = reanchorView(view, provisional, provisional, W, H);
+        expect(next.scale).toBe(1.5);
+        expect(next.scrollX).toBeCloseTo(10);
+        expect(next.scrollY).toBeCloseTo(4000);
     });
 });

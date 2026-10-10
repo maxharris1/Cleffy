@@ -253,6 +253,20 @@ to refund (comment at the end of `20261007120300`).
    on with the six plan prices and without Founding (§1, _Checkout depends on
    it_) — subscribers can change plan nowhere else once `stripe-checkout`
    refuses them a second subscription.
+   Then score streaming against real Storage (qa3/perf: a first open shows
+   page 1 while the PDF downloads, `progressiveDownload.ts`). It needs three
+   things of a signed `scores` URL, and silently falls back to the old
+   whole-file wait without them. On dev.cleffy.io, in a private window (so no
+   score is cached), open one of your scores with DevTools open and copy the
+   `…/storage/v1/object/sign/scores/…` URL from the Network tab; in the
+   console, with `u` set to it,
+   `const r = await fetch(u); [r.headers.get('content-length'), r.headers.get('content-encoding')]`
+   must give the file size and `null`, and
+   `(await fetch(u, { headers: { Range: 'bytes=0-99' } })).status` must be
+   `206`. (The CORS side was checked on 2026-10-10: a preflight for
+   `Range` to dev Storage answers `access-control-allow-headers: range`.) Then
+   open a large score not yet on the device with Fast 3G throttling: page 1
+   appears before the Network tab's full GET finishes.
 3. **Auth password policy on both projects** — 8+ characters, letters and
    digits, via the Management API (§8). `config.toml` only covers the local
    stack. Existing passwords keep working.

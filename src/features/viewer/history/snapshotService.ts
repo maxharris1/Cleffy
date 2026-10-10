@@ -29,33 +29,39 @@ export const ensureDayStartingSnapshot = async (
     createdBy: string | null = null,
 ): Promise<LocalAnnotationSnapshot | null> => {
     const capturedOn = localDateString();
-    const snapshot: LocalAnnotationSnapshot = {
-        id: crypto.randomUUID(),
-        docId,
-        capturedOn,
-        label: null,
-        payload: preEdit.map((a) => ({ ...a })),
-        createdAt: new Date().toISOString(),
-        createdBy,
-        pending: isCloudDocId(docId) ? 1 : 0,
-    };
+    const createdAt = new Date().toISOString();
 
     // Check-and-add in one rw transaction: two edits in the same tick (a
     // create applies to memory before this yields) would otherwise both see
     // "no snapshot yet", and the second add would trip the unique
     // [docId+capturedOn] index and fail the edit that called us.
-    let added: boolean;
+    let snapshot: LocalAnnotationSnapshot | null;
     try {
-        added = await db.transaction('rw', db.annotationSnapshots, async () => {
+        snapshot = await db.transaction('rw', db.annotationSnapshots, async () => {
+            // This runs before every edit, and almost always finds the day's
+            // row. Count it by key: reading it would deserialize the whole
+            // snapshot (every mark on the score) on each pen-up.
             const existing = await db.annotationSnapshots
                 .where('[docId+capturedOn]')
                 .equals([docId, capturedOn])
-                .first();
-            if (existing) {
-                return false;
+                .count();
+            if (existing > 0) {
+                return null;
             }
-            await db.annotationSnapshots.add(snapshot);
-            return true;
+            // Copied only when it is kept: the marks are replaced, never
+            // mutated, so `preEdit` still holds the pre-edit versions here.
+            const row: LocalAnnotationSnapshot = {
+                id: crypto.randomUUID(),
+                docId,
+                capturedOn,
+                label: null,
+                payload: preEdit.map((a) => ({ ...a })),
+                createdAt,
+                createdBy,
+                pending: isCloudDocId(docId) ? 1 : 0,
+            };
+            await db.annotationSnapshots.add(row);
+            return row;
         });
     } catch (err) {
         // The day already has its starting point (another tab won the race).
@@ -65,7 +71,7 @@ export const ensureDayStartingSnapshot = async (
         }
         throw err;
     }
-    if (!added) {
+    if (!snapshot) {
         return null;
     }
 
