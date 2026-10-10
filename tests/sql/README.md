@@ -50,6 +50,23 @@ and `peek_share_link` answers anon and signed-in callers alike with
 nothing. Like the sharing proof below, it reports `failures | total` on its
 last line.
 
+`guest_email_verification.sql` proves
+`supabase/migrations/20261010120200_guest_email_verification.sql`, behind the
+guest-email-start / guest-email-confirm functions: `check_guest_email_code`
+answers `ok` only for the right code AND the address it was sent to (keeping
+the row for the attach), spends a try on each wrong one, and leaves nothing
+redeemable after the last allowed wrong try (`locked`), past expiry
+(`expired`) or when none was sent (`missing`); `guest_email_taken` answers the
+service role only — it refuses without a service-role JWT even where EXECUTE
+is held — and no client role can read the pending codes or call either
+function. It also proves the `guard_guest_email` trigger on `auth.users`,
+updating as `supabase_auth_admin` the way GoTrue does: a guest's row cannot
+leave anonymity or gain an address without a code checked for exactly that
+address in the last 10 minutes — in GoTrue's order (is_anonymous cleared,
+then email set), the reverse, or one statement — while the proven address
+attaches in all three, and registered accounts and soft deletes are
+untouched. It reports `failures | total` on its last line.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

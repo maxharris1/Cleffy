@@ -34,8 +34,9 @@ const CONSEQUENCES = [
 const leaveForDeletedPage = () => window.location.replace(ACCOUNT_DELETED_PATH);
 
 /**
- * Not every permanent account has a password: a share-link guest who upgrades
- * through UpgradeBanner only ever confirms an email. The reset flow sets a
+ * Not every permanent account has a password: a share-link guest who upgraded
+ * through UpgradeBanner before it asked for one only ever attached an email
+ * (it sets both now, guest-email-confirm). The reset flow sets a
  * first password just as well as it replaces a forgotten one.
  */
 const ResetPasswordHint = () => (

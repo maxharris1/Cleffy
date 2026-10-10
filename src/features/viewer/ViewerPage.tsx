@@ -742,89 +742,93 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                     </button>
                 ) : null}
             </ViewerHeader>
-            {session?.user.is_anonymous ? <UpgradeBanner /> : null}
-            {accessNotice ? (
-                <div
-                    className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
-                    role="status"
-                >
-                    <p className="flex-1 text-sm text-amber-900">{accessNotice}</p>
-                    <Button size="sm" variant="ghost" onClick={() => setAccessNotice(null)}>
-                        Dismiss
-                    </Button>
-                </div>
-            ) : null}
-            <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
-            <SyncHeldNotice count={heldCount} />
-            {staleBytes ? (
-                <div
-                    className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
-                    role="status"
-                >
-                    <p className="text-sm text-amber-900">
-                        The score file was updated (existing marks were made editable).
-                    </p>
-                    <Button size="sm" variant="secondary" onClick={() => void refreshBytes()}>
-                        Show the cleaned pages
-                    </Button>
-                </div>
-            ) : null}
-            <div className="min-h-0 flex-1">
-                <PdfProvider data={state.bytes}>
-                    <PdfViewport
-                        key={docId}
-                        docId={docId}
-                        readOnly={readOnly}
-                        onStoreReady={onStoreReady}
-                        // Playhead, loop tint and tap-to-seek live only while
-                        // the transport is on screen to drive them.
-                        playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
-                        // Known before the score syncs (provisional): this
-                        // account's own queued marks are drawn meanwhile.
-                        authorId={resolvedUserId || null}
-                        sync={
-                            // Not while provisional: with no role there is
-                            // nothing to sync under yet. A stored role syncs at
-                            // once; the engine restarts only if the server's
-                            // answer changes whether this account may write.
-                            syncing
-                                ? {
-                                      userId: resolvedUserId,
-                                      name: displayNameOf(session),
-                                      isAnonymous: Boolean(session?.user.is_anonymous),
-                                      canWrite: !readOnly,
-                                      isOwner: state.role === 'owner',
-                                      onStatus,
-                                      onRejected,
-                                      onHeld,
-                                      onPeers,
-                                      onDocReplaced,
-                                      // A broadcast from a build with play-along on
-                                      // must not wake the analysis (a 'ready'
-                                      // would fetch the ScoreData) in this one.
-                                      onScoreAnalysis: playAlongEnabled ? applyBroadcast : undefined,
-                                      onMembershipChanged: recheckAccess,
-                                  }
-                                : undefined
-                        }
-                    />
-                </PdfProvider>
-            </div>
-            {playAlongEnabled && playAlongOpen ? (
-                <div id="play-along-bar" className="flex-none">
-                    <Suspense fallback={null}>
-                        <TransportBar
-                            state={analysisState}
-                            role={state.role}
-                            onGenerate={() => void generate()}
-                            getEngine={getEngine}
-                            pageCount={state.doc.page_count}
-                            warning={warning}
-                            onDismissWarning={dismissWarning}
+            {/* The landmark for everything below the header — notices, the score
+                and its floating controls — so none of it sits outside one. */}
+            <main className="flex min-h-0 flex-1 flex-col">
+                <UpgradeBanner isGuest={Boolean(session?.user.is_anonymous)} />
+                {accessNotice ? (
+                    <div
+                        className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
+                        role="status"
+                    >
+                        <p className="flex-1 text-sm text-amber-900">{accessNotice}</p>
+                        <Button size="sm" variant="ghost" onClick={() => setAccessNotice(null)}>
+                            Dismiss
+                        </Button>
+                    </div>
+                ) : null}
+                <SyncRejectedNotice count={rejectedCount} onDismiss={() => setRejected(null)} />
+                <SyncHeldNotice count={heldCount} />
+                {staleBytes ? (
+                    <div
+                        className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2"
+                        role="status"
+                    >
+                        <p className="text-sm text-amber-900">
+                            The score file was updated (existing marks were made editable).
+                        </p>
+                        <Button size="sm" variant="secondary" onClick={() => void refreshBytes()}>
+                            Show the cleaned pages
+                        </Button>
+                    </div>
+                ) : null}
+                <div className="min-h-0 flex-1">
+                    <PdfProvider data={state.bytes}>
+                        <PdfViewport
+                            key={docId}
+                            docId={docId}
+                            readOnly={readOnly}
+                            onStoreReady={onStoreReady}
+                            // Playhead, loop tint and tap-to-seek live only while
+                            // the transport is on screen to drive them.
+                            playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
+                            // Known before the score syncs (provisional): this
+                            // account's own queued marks are drawn meanwhile.
+                            authorId={resolvedUserId || null}
+                            sync={
+                                // Not while provisional: with no role there is
+                                // nothing to sync under yet. A stored role syncs at
+                                // once; the engine restarts only if the server's
+                                // answer changes whether this account may write.
+                                syncing
+                                    ? {
+                                          userId: resolvedUserId,
+                                          name: displayNameOf(session),
+                                          isAnonymous: Boolean(session?.user.is_anonymous),
+                                          canWrite: !readOnly,
+                                          isOwner: state.role === 'owner',
+                                          onStatus,
+                                          onRejected,
+                                          onHeld,
+                                          onPeers,
+                                          onDocReplaced,
+                                          // A broadcast from a build with play-along on
+                                          // must not wake the analysis (a 'ready'
+                                          // would fetch the ScoreData) in this one.
+                                          onScoreAnalysis: playAlongEnabled ? applyBroadcast : undefined,
+                                          onMembershipChanged: recheckAccess,
+                                      }
+                                    : undefined
+                            }
                         />
-                    </Suspense>
+                    </PdfProvider>
                 </div>
-            ) : null}
+                {playAlongEnabled && playAlongOpen ? (
+                    <div id="play-along-bar" className="flex-none">
+                        <Suspense fallback={null}>
+                            <TransportBar
+                                state={analysisState}
+                                role={state.role}
+                                onGenerate={() => void generate()}
+                                getEngine={getEngine}
+                                pageCount={state.doc.page_count}
+                                warning={warning}
+                                onDismissWarning={dismissWarning}
+                            />
+                        </Suspense>
+                    </div>
+                ) : null}
+            </main>
             {shareOpen && resolvedUserId && state.role ? (
                 <ShareDialog
                     docId={docId}
@@ -969,11 +973,11 @@ const LocalViewer = ({ docId }: { docId: string }) => {
                 {annotationStore ? <LessonHistoryButton store={annotationStore} canRestore /> : null}
                 <ShareExportMenu docId={docId} bytes={bytes} title="Score" localOnly />
             </ViewerHeader>
-            <div className="min-h-0 flex-1">
+            <main className="min-h-0 flex-1">
                 <PdfProvider data={bytes}>
                     <PdfViewport key={docId} docId={docId} onStoreReady={onStoreReady} />
                 </PdfProvider>
-            </div>
+            </main>
         </div>
     );
 };

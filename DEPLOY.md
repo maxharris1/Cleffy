@@ -98,6 +98,101 @@ function that imports it — the merge deploys all of them).
 - The bundle also emits a same-origin `/supabase-preconnect.js` (CSP
   `script-src 'self'`); it is in `dist/` and needs nothing else.
 
+**QA round 3 — shell and auth (`qa3/shell-auth`, 20261010120200).**
+
+- **Guest "add your email" is now verified** (two new functions,
+  `guest-email-start` and `guest-email-confirm`, declared in `config.toml`
+  with `verify_jwt = true`, plus migration
+  `20261010120200_guest_email_verification`). The banner used to call
+  `updateUser` with the address from the browser, and with
+  `mailer_autoconfirm` on (both projects) GoTrue confirmed it on the spot with
+  no mail sent: a guest could attach anybody's address, the real owner then
+  got "an account with this email already exists", and a reset to that
+  address would hand over the guest's account. Now `guest-email-start` mails
+  a six-digit code (Resend, 15 minutes, HMAC'd at rest) and
+  `guest-email-confirm` checks it — 5 tries — before attaching the email
+  (confirmed) and a password with the admin API, which keeps the guest's user
+  id. That admin call also deletes all the user's sessions, the guest's
+  own included (GoTrue logs a user out everywhere when an admin sets the
+  password), so the banner then signs in with the new email and password —
+  a fresh, registered session for the same id — and says "Saved" only once
+  that works; if it does not, it says the email is saved and links to sign
+  in. An address that already has an account is answered "sign in instead",
+  nothing more (asked again at confirm, for an address registered in the
+  meantime). Limits (edge_rate_buckets): start 5/h per guest, 20/h per IP,
+  and per recipient address 3/h and 10/day, spent only when a code is
+  actually mailed; confirm 10 per 15 min per guest, 30 per IP. Flow and
+  reasons: `supabase/functions/_shared/guestEmail.ts`.
+- **The old path is closed on the server, not just in the app.** Removing the
+  `updateUser({ email })` call from the banner does not stop a guest making
+  it: GoTrue's `PUT /auth/v1/user` takes it from anyone with their own guest
+  JWT and the public anon key, and with `mailer_autoconfirm` on it confirms
+  an anonymous user's new address in the same request, mailing nobody
+  (GoTrue `api/user.go`, "anonymous users can add an email with automatic
+  confirmation"). The same migration adds `guard_guest_email`, a BEFORE
+  UPDATE trigger on `auth.users`: a guest's row cannot leave anonymity, nor
+  gain or change its email, unless `guest-email-confirm` checked a code for
+  exactly that address in the last 10 minutes. GoTrue gets a 500 and rolls
+  the whole update back. **Until this migration is applied, that endpoint is
+  open on any project with "Confirm email" off** (both, today) — the app
+  change alone does not close B4. Side effects: an anonymous user can no
+  longer be upgraded any other way (dashboard edits of a guest's email
+  included; ask the guest to use the banner), and nothing else is touched —
+  registered accounts, soft deletes and the `student-*` functions never
+  update a guest row.
+    - **Order:** the migration **before** the functions (without it start
+      answers `503 email_unavailable`), the functions **before** the bundle
+      (the new banner gets a 404 from a missing function). Once the
+      migration is in, an old bundle's banner still calls `updateUser` and
+      now gets an error from the trigger — so ship the functions and the
+      bundle right after it; do not hold either back.
+    - **Secrets, on both projects** (they do not inherit, §5):
+      `RESEND_API_KEY` (production has it for `resend-inbound`; **the `dev`
+      branch needs it too**, or the banner says email is unavailable there).
+      Optional: `GUEST_EMAIL_FROM` (default `Cleffy <noreply@cleffy.io>`, the
+      sender auth mail already uses — it must be on a Resend-verified domain,
+      §7), `GUEST_EMAIL_SECRET` (HMAC key for the codes; unset falls back to
+      the service-role key, like `LOGIN_THROTTLE_SECRET`).
+    - **Smoke:** join a score by link as a guest, "Add your email to keep
+      it" with a throwaway address you can read: the code arrives from
+      `noreply@cleffy.io`; a wrong code is refused; the right one says
+      "Saved"; reload, and the banner is gone and a checkout from the
+      pricing dialog reaches Stripe (`stripe-checkout` checks the session:
+      on the old guest one it would answer `session_not_found`); the
+      address signs in with the password
+      on another browser and sees the score. Repeat with an address that has
+      an account: "sign in instead", no mail sent. Then the closed door: as
+      a fresh guest, call `supabase.auth.updateUser({ email: '<another
+throwaway>' })` from the console — it must fail (500), and the guest
+      must still be anonymous with no email. Finally the race: send a code
+      to a throwaway address, register that address in another browser,
+      then enter the code — "sign in instead", not "couldn't save" (GoTrue's
+      admin update has no duplicate check of its own; confirm asks again).
+    - Accounts already upgraded the old way keep working; they have an
+      email and may have no password (the reset flow sets one).
+- **Owner decision, recommended (not changed here): turn on "Confirm email"**
+  on both projects (Authentication → Sign In / Providers → Email;
+  `mailer_autoconfirm: false` via the Management API). It is not only sign-up
+  hygiene. With it off, (1) sign-up has the same hole the guest banner had —
+  anyone can register an address they do not own and block its owner — and
+  (2) GoTrue confirms a guest's `PUT /auth/v1/user` email change instantly;
+  only the `guard_guest_email` trigger above stands between that and B4. With
+  it on, GoTrue mails a confirmation to the new address instead, so the
+  direct endpoint needs the mailbox too (a second, independent lock; the
+  trigger still refuses the confirmation link for a guest, since the app's
+  only upgrade path is the code). The app already handles sign-up
+  confirmation (`RegisterPage` shows "check your email", `/auth/callback`
+  finishes it); what changes is that every new teacher must click a link
+  before using the account, and sign-up then depends on the Resend domain
+  staying verified (§7).
+- Front-end only, nothing to deploy beyond the bundle: a tab left open across
+  a deploy now reloads once when it asks for a chunk that no longer exists
+  (`src/lib/staleChunk.ts`; it used to go blank), and the crash screen no
+  longer needs the router; an expired or used reset link explains itself
+  instead of landing silently on the sign-in page; browser zoom works
+  everywhere except over the score viewer (WCAG 1.4.4); "Two months free"
+  meets AA contrast.
+
 `stripe-webhook` now applies `customer.subscription.created` / `.updated` from
 the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
 the copy embedded in the event: Stripe does not deliver in order, and a retried
