@@ -363,6 +363,7 @@ describe('startBackgroundDrain', () => {
         expect(await drainCloudOutboxes({ db, api, getUserId: () => USER, timeoutMs: 2000 })).toEqual({
             pending: 0,
             refused: 1,
+            foreign: 0,
         });
     });
 

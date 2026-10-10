@@ -1,6 +1,7 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
 import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, PendingOp, ScribblerDb } from '@/sync/db';
+import { opOwnerFor } from '@/sync/opOwnership';
 import type { Annotation, AnnotationPayload } from '@/types/models';
 
 export type PageListener = (pageIndex: number) => void;
@@ -38,8 +39,20 @@ export class AnnotationStore {
     private listeners = new Set<PageListener>();
     private metaListeners = new Set<() => void>();
     private undo = new UndoStack();
-    private onDirty: (() => void) | null = null;
+    private onDirty: ((ids: readonly string[]) => void) | null = null;
     private author: string | null = null;
+    /**
+     * Marks with changes another account queued on this device (see
+     * opOwnerFor), e.g. offline before its session expired. Their mirror rows
+     * hold that account's unsynced version, which is not this account's to
+     * see, edit or carry into its history: they are left out of memory
+     * altogether, and left alone in Dexie, until that account uploads them or
+     * a sign-out clears them. Decided on hydration and again whenever the
+     * author changes (ownership), since a warm open can paint before the
+     * session resolves.
+     */
+    private foreign = new Set<string>();
+    private ownership: Promise<void> = Promise.resolve();
     private loading: Promise<void> | null = null;
     private loaded = false;
     /**
@@ -79,10 +92,14 @@ export class AnnotationStore {
     }
 
     private async hydrate(): Promise<void> {
-        const rows = await this.db.annotations.where('docId').equals(this.docId).toArray();
+        const [rows, foreign] = await Promise.all([
+            this.db.annotations.where('docId').equals(this.docId).toArray(),
+            this.foreignIds(),
+        ]);
+        this.foreign = foreign;
         const touched = new Set<number>();
         for (const row of rows) {
-            if (this.byId.has(row.id)) {
+            if (this.byId.has(row.id) || foreign.has(row.id)) {
                 continue;
             }
             const { pending: _pending, ...annotation } = row;
@@ -263,14 +280,60 @@ export class AnnotationStore {
         return () => this.metaListeners.delete(listener);
     }
 
-    /** Hook for the sync engine (M3): poked after every committed op. */
-    setDirtyHook(hook: (() => void) | null): void {
+    /** Hook for the sync engine (M3): poked after every committed op, with the marks it wrote. */
+    setDirtyHook(hook: ((ids: readonly string[]) => void) | null): void {
         this.onDirty = hook;
     }
 
-    /** The signed-in account, stamped on every op queued from now on (see PendingOp.userId). */
+    /**
+     * The signed-in account, stamped on every op queued from now on (see
+     * PendingOp.userId), and whose queued changes alone are drawn (see
+     * `foreign`).
+     */
     setAuthor(userId: string | null): void {
+        if (userId === this.author) {
+            return;
+        }
         this.author = userId;
+        if (this.loading) {
+            const next = this.ownership.then(() => this.applyOwnership());
+            this.ownership = next.catch((err: unknown) => console.warn('Could not re-check queued marks', err));
+        }
+    }
+
+    /** Marks with queued changes that are not `author`'s (see `foreign`). */
+    private async foreignIds(): Promise<Set<string>> {
+        const ops = await this.db.ops.where('docId').equals(this.docId).toArray();
+        const owns = await opOwnerFor(this.db, this.docId, this.author, ops);
+        return new Set(ops.filter((op) => !owns(op)).map((op) => op.annotationId));
+    }
+
+    /** The author changed after hydration: hide and reveal marks to match. */
+    private async applyOwnership(): Promise<void> {
+        await this.ensureLoaded();
+        const next = await this.foreignIds();
+        const touched = new Set<number>();
+        for (const id of next) {
+            const hidden = this.byId.get(id);
+            if (!this.foreign.has(id) && hidden) {
+                this.byId.delete(id);
+                this.pageMap(hidden.page).delete(id);
+                touched.add(hidden.page);
+            }
+        }
+        const revealed = [...this.foreign].filter((id) => !next.has(id));
+        this.foreign = next;
+        const rows = await this.db.annotations.bulkGet(revealed);
+        for (const row of rows) {
+            if (row && row.docId === this.docId && !this.byId.has(row.id) && !this.foreign.has(row.id)) {
+                const { pending: _pending, ...annotation } = row;
+                this.applyMemory(annotation);
+                touched.add(annotation.page);
+            }
+        }
+        for (const page of touched) {
+            this.notifyPage(page);
+        }
     }
 
     get canUndo(): boolean {
@@ -310,7 +373,7 @@ export class AnnotationStore {
             this.notifyPage(page);
         }
         this.notifyMeta();
-        this.onDirty?.();
+        this.onDirty?.(annotations.map((annotation) => annotation.id));
     }
 
     async update(id: string, patch: AnnotationPatch): Promise<void> {
@@ -338,15 +401,19 @@ export class AnnotationStore {
 
     /**
      * Merge remote rows (pull or broadcast) under server-seq LWW.
-     * Rows with a pending local op are skipped — local intent wins until the
-     * flush acks, at which point the server re-broadcasts a newer seq.
+     * Rows with local intent are held back — a pending op, an edit whose
+     * mirror write is still in flight, another account's queued change (see
+     * `foreign`) — since local intent wins until the flush acks. Returns the
+     * ids held back, for the sync engine to apply once they settle.
      */
-    async applyRemoteBatch(remotes: Annotation[], pendingIds: ReadonlySet<string>): Promise<void> {
+    async applyRemoteBatch(remotes: Annotation[], pendingIds: ReadonlySet<string>): Promise<Set<string>> {
         await this.ensureLoaded();
+        const held = new Set<string>();
         const touchedPages = new Set<number>();
         const rows: LocalAnnotation[] = [];
         for (const remote of remotes) {
-            if (pendingIds.has(remote.id)) {
+            if (pendingIds.has(remote.id) || this.unpersisted.has(remote.id) || this.foreign.has(remote.id)) {
+                held.add(remote.id);
                 continue;
             }
             const local = this.byId.get(remote.id);
@@ -368,6 +435,7 @@ export class AnnotationStore {
         for (const page of touchedPages) {
             this.notifyPage(page);
         }
+        return held;
     }
 
     /**
@@ -435,18 +503,23 @@ export class AnnotationStore {
      * instead of the copy it loaded before. A row with local intent still
      * pending (queued in the outbox, or applied here and not yet written) is
      * left alone: that intent is newer, and its own sync settles it.
+     *
+     * includeQueued: the rows are local edits another tab of this browser
+     * just wrote (a written message). The mirror holds the device's newest
+     * intent for them, queued or not, so only an edit of this store's own
+     * still on its way to Dexie keeps its copy.
      */
-    async reloadFromMirror(ids: readonly string[]): Promise<void> {
+    async reloadFromMirror(ids: readonly string[], options: { includeQueued?: boolean } = {}): Promise<void> {
         await this.ensureLoaded();
         const { rows, queued } = await this.db.transaction('r', this.db.annotations, this.db.ops, async () => ({
             rows: await this.db.annotations.bulkGet([...ids]),
-            queued: new Set(
-                (await this.db.ops.where('docId').equals(this.docId).toArray()).map((op) => op.annotationId),
-            ),
+            queued: options.includeQueued
+                ? new Set<string>()
+                : new Set((await this.db.ops.where('docId').equals(this.docId).toArray()).map((op) => op.annotationId)),
         }));
         const touched = new Set<number>();
         ids.forEach((id, i) => {
-            if (queued.has(id) || this.unpersisted.has(id)) {
+            if (queued.has(id) || this.unpersisted.has(id) || this.foreign.has(id)) {
                 return;
             }
             const row = rows[i];
@@ -558,7 +631,7 @@ export class AnnotationStore {
         const CHUNK = 4000;
         const reversed = [...ops].reverse();
         const inverses: UndoableOp[] = [];
-        let wrote = false;
+        const wrote: string[] = [];
         for (let start = 0; start < reversed.length; start += CHUNK) {
             const commits: CommitOp[] = [];
             const touched = new Set<number>();
@@ -575,11 +648,11 @@ export class AnnotationStore {
                 for (const page of touched) {
                     this.notifyPage(page);
                 }
-                wrote = true;
+                wrote.push(...commits.map((commit) => commit.annotation.id));
             }
         }
-        if (wrote) {
-            this.onDirty?.();
+        if (wrote.length > 0) {
+            this.onDirty?.(wrote);
         }
         return inverses.length > 0 ? inverses : null;
     }
@@ -652,7 +725,7 @@ export class AnnotationStore {
             await this.persistMany([op]);
             this.notifyPage(op.annotation.page);
             this.notifyMeta();
-            this.onDirty?.();
+            this.onDirty?.([op.annotation.id]);
             return true;
         }
 
@@ -683,7 +756,7 @@ export class AnnotationStore {
         // 4. Repaint + wake the sync engine.
         this.notifyPage(annotation.page);
         this.notifyMeta();
-        this.onDirty?.();
+        this.onDirty?.([annotation.id]);
         return true;
     }
 

@@ -1,6 +1,7 @@
 import { isCloudDocId } from '@/features/library/documentsService';
 import { AnnotationStore } from '@/sync/annotationStore';
-import type { PendingOp, ScribblerDb } from '@/sync/db';
+import type { ScribblerDb } from '@/sync/db';
+import { opOwnerFor, type LegacyOwnerCache } from '@/sync/opOwnership';
 import { activeEngineFor, docsOpenInViewers, SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
 
 /**
@@ -17,7 +18,8 @@ import { activeEngineFor, docsOpenInViewers, SyncEngine, type AnnotationsApi } f
  *   without sign-out clearing the outbox (an expired refresh token, a
  *   share-link guest signing in to their own account), so a score whose
  *   outbox holds another account's ops is left alone: uploading them would
- *   put them under this account's name, and a refusal would lose them.
+ *   put them under this account's name, and a refusal would lose them. (The
+ *   engine sends only this account's ops in any case — see opOwnerFor.)
  * - The same SyncEngine flush, so the same rules apply: ops leave the outbox
  *   only when the server accepted them; offline, throttling and server
  *   faults keep them; an archived score's marks are held, not dropped.
@@ -89,36 +91,20 @@ export const stopAllBackgroundDrains = (): void => {
 };
 
 /**
- * Whether every op queued on the score was made by `userId` (PendingOp.userId).
- * Ops queued before the stamp existed carry none; those count as this
- * account's only on a score it cached itself, the test the offline open
- * applies (loadDocumentOffline) — asked once per score, since it reads the
- * cached PDF's bytes along with the row.
+ * Whether every op queued on the score is this account's (see opOwnerFor). A
+ * score with any other account's change queued is left alone entirely: the
+ * open viewer's engine sends this account's share of a mixed outbox, but a
+ * drain nobody watches has no business near it.
  */
 const outboxIsOurs = async (
     db: ScribblerDb,
     docId: string,
     userId: string,
-    cachedBy: Map<string, boolean>,
+    cachedBy: LegacyOwnerCache,
 ): Promise<boolean> => {
-    const queued = () => db.ops.where('docId').equals(docId);
-    const notStampedOurs = await queued()
-        .filter((op) => op.userId !== userId)
-        .first();
-    if (!notStampedOurs) {
-        return true;
-    }
-    const foreign = (op: PendingOp) => op.userId !== undefined && op.userId !== userId;
-    if (foreign(notStampedOurs) || (await queued().filter(foreign).first())) {
-        return false;
-    }
-    let ours = cachedBy.get(docId);
-    if (ours === undefined) {
-        const cached = await db.pdfCache.get(docId).catch(() => undefined);
-        ours = cached?.userId === userId;
-        cachedBy.set(docId, ours);
-    }
-    return ours;
+    const ops = await db.ops.where('docId').equals(docId).toArray();
+    const owns = await opOwnerFor(db, docId, userId, ops, cachedBy);
+    return ops.every(owns);
 };
 
 export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain => {
@@ -135,8 +121,8 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
      * outbox holds another account's ops, or reading it failed.
      */
     const skipUntil = new Map<string, number>();
-    /** outboxIsOurs' answer for unstamped ops, per score. */
-    const cachedBy = new Map<string, boolean>();
+    /** opOwnerFor's answer for unstamped ops, per score. */
+    const cachedBy: LegacyOwnerCache = new Map();
     /** Scores stopped at a refusal, by the refused op; left alone while it is queued. */
     const parked = new Map<string, number>();
     let wakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -200,14 +186,17 @@ export const startBackgroundDrain = (deps: BackgroundDrainDeps): BackgroundDrain
             }
             let entry = engines.get(docId);
             if (!entry) {
+                const store = new AnnotationStore(db, docId);
+                store.setAuthor(userId);
                 entry = {
                     engine: new SyncEngine({
                         db,
-                        store: new AnnotationStore(db, docId),
+                        store,
                         api,
                         docId,
                         getUserId: () => userId,
                         onRefusalHeld: ({ opId }) => parked.set(docId, opId),
+                        legacyOwners: cachedBy,
                     }),
                     nextAt: 0,
                 };

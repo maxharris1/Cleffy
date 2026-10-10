@@ -317,7 +317,7 @@ export const LibraryPage = () => {
                         // above. An empty snapshot plus a failed network is an
                         // unavailable library — opened PDFs are not a library.
                         if (cachedList && cachedList.documents.length > 0) {
-                            setError('Offline — showing scores cached on this device.');
+                            setError(CACHED_LIST_NOTICE[classifyLoadFailure(err, fallbackErr)]);
                             return;
                         }
                         setDocuments((prev) => prev ?? []);
@@ -369,10 +369,10 @@ export const LibraryPage = () => {
     }, [loadFailure]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
-    const isOfflineNotice = error?.startsWith('Offline') ?? false;
+    const isCachedListNotice = error !== null && CACHED_LIST_NOTICES.has(error);
     // Either the browser says so, or the library itself could only be painted
     // from this device's snapshot. A server search would just fail.
-    const offline = !online || isOfflineNotice;
+    const offline = !online || isCachedListNotice;
 
     const q = query.trim().toLowerCase();
     const filters = { query: q, favoritesOnly, favorites, tagId: activeTagId, assignments };
@@ -867,7 +867,7 @@ export const LibraryPage = () => {
                     className="mt-5"
                 />
                 {statusError ? (
-                    isOfflineNotice && !uploadError && !actionError ? (
+                    isCachedListNotice && !uploadError && !actionError ? (
                         <p className="mt-5 text-sm text-amber-800" role="status">
                             {statusError}
                         </p>
@@ -976,7 +976,7 @@ export const LibraryPage = () => {
                             )}
                         </div>
 
-                        {serverMode && offline && !isOfflineNotice ? (
+                        {serverMode && offline && !isCachedListNotice ? (
                             <p className="mt-4 text-sm text-amber-800" role="status">
                                 {filtering
                                     ? `You’re offline, so only the ${documents.length} scores loaded here were searched.`
@@ -1483,6 +1483,19 @@ const classifyLoadFailure = (...errors: unknown[]): LoadFailure => {
     }
     return errors.some(isTransportFailure) ? 'unreachable' : 'error';
 };
+
+/**
+ * The notice over the list painted from this device's snapshot when the
+ * network load failed — worded by the same split as LIBRARY_UNAVAILABLE_COPY,
+ * so a browser that is online but cannot reach the server is not told it is
+ * offline.
+ */
+const CACHED_LIST_NOTICE: Record<LoadFailure, string> = {
+    offline: 'Offline — showing scores cached on this device.',
+    unreachable: 'Couldn’t reach Cleffy — showing scores cached on this device.',
+    error: 'Couldn’t load your latest scores — showing the ones cached on this device.',
+};
+const CACHED_LIST_NOTICES = new Set(Object.values(CACHED_LIST_NOTICE));
 
 const LIBRARY_UNAVAILABLE_COPY: Record<LoadFailure, { title: string; body: string }> = {
     offline: { title: 'You’re offline', body: 'Your library will appear when you reconnect.' },

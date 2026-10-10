@@ -145,6 +145,12 @@ export interface SignOutSyncResult {
     pending: number;
     /** Marks whose change the server refused for good while uploading. */
     refused: number;
+    /**
+     * How many of `pending` another account queued on this device (a session
+     * that ended without signing out): never uploaded under this account,
+     * deleted all the same by sign-out.
+     */
+    foreign?: number;
 }
 
 /**
@@ -166,6 +172,7 @@ export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): P
     const db = getDb();
     let pending: number;
     let refused = 0;
+    let foreign = 0;
     try {
         pending = await pendingCloudOpCount(db);
     } catch {
@@ -179,7 +186,7 @@ export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): P
             return { pending, refused };
         }
         if (pending > 0) {
-            ({ pending, refused } = await drainCloudOutboxes({
+            ({ pending, refused, foreign } = await drainCloudOutboxes({
                 db,
                 api: createSupabaseAnnotationsApi(supabase),
                 getUserId: () => userId,
@@ -202,7 +209,7 @@ export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): P
         console.warn('Could not sync before sign-out', err);
         pending = await pendingCloudOpCount(db).catch(() => pending);
     }
-    return { pending, refused };
+    return { pending, refused, foreign: Math.min(foreign, pending) };
 };
 
 export const signOut = async (): Promise<void> => {

@@ -246,9 +246,11 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncOnMembershipChanged = sync?.onMembershipChanged;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
-    // Changes queued here are this account's: the background drain uploads
-    // only those (PendingOp.userId). ViewerPage lets a cloud score be edited
-    // only while it syncs, so the stamp is in place before the first stroke.
+    // Changes queued here are this account's: every engine uploads only those
+    // (PendingOp.userId), and the store draws no other account's queued marks
+    // — none at all until the session is known. ViewerPage lets a cloud score
+    // be edited only while it syncs, so the stamp is in place before the
+    // first stroke.
     useEffect(() => {
         annotationStore.setAuthor(syncUserId ?? null);
     }, [annotationStore, syncUserId]);

@@ -16,10 +16,7 @@ import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache'
 import type { LibrarySort } from '@/features/library/libraryView';
 import type { DocumentRow, DocumentStorageCleanupRow, MemberRole } from '@/types/database';
 
-/** Cloud document ids are plain UUIDs; local-only docs use the 'local-' prefix. */
-export const isCloudDocId = (docId: string): boolean => {
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(docId);
-};
+export { isCloudDocId } from '@/sync/docIds';
 
 export const LIBRARY_PAGE_SIZE = 100;
 

@@ -768,6 +768,38 @@ describe('LibraryPage', () => {
             ).toBeInTheDocument();
         });
 
+        it('labels a cached library by why the server could not be reached', async () => {
+            readCachedLibraryList.mockResolvedValue({
+                documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')],
+                hasMore: false,
+                favoriteIds: new Set<string>(),
+                tags: [],
+                documentTags: new Map<string, string[]>(),
+            });
+            // Online, but the server never answered (DNS, a blocker, an outage).
+            fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
+            listDocuments.mockRejectedValue(new TypeError('Failed to fetch'));
+            const { unmount } = renderLibrary();
+
+            expect(
+                await screen.findByText('Couldn’t reach Cleffy — showing scores cached on this device.'),
+            ).toBeInTheDocument();
+            expect(screen.queryByText(/Offline/)).not.toBeInTheDocument();
+            expect(
+                screen.getByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' }),
+            ).toBeInTheDocument();
+            unmount();
+
+            // Truly offline it still says so.
+            const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+            try {
+                renderLibrary();
+                expect(await screen.findByText('Offline — showing scores cached on this device.')).toBeInTheDocument();
+            } finally {
+                onLine.mockRestore();
+            }
+        });
+
         it('keeps retrying by itself while the server cannot be reached', async () => {
             const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
             fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));

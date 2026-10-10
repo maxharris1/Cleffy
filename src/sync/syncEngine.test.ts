@@ -222,6 +222,7 @@ let holds: SyncHold[];
 beforeEach(async () => {
     db = new ScribblerDb(`test-${crypto.randomUUID()}`);
     store = new AnnotationStore(db, DOC);
+    store.setAuthor(USER);
     await store.load();
     api = new FakeApi();
     rejections = [];
@@ -1028,6 +1029,63 @@ describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () =
         expect(rejections).toEqual([]);
     });
 
+    /** Offline: erase m6, undo, recolour — the QA "undo erase, then edit" case. */
+    const eraseUndoEdit = async () => {
+        await drawAndSync();
+        api.offline = true;
+        await store.delete('m6');
+        await store.undoLast(); // brought back …
+        await store.update('m6', { color: '#ff0000' }); // … and recoloured
+        expect((await db.ops.toArray()).map((op) => op.type)).toEqual(['delete', 'restore', 'update']);
+    };
+
+    /** A collaborator erases m6 on the server (their tombstone, a new seq). */
+    const collaboratorErases = (at = '2026-06-06T06:06:06.000Z') => {
+        api.rows.set('m6', { ...api.rows.get('m6')!, deleted_at: at, seq: api.nextSeq++ });
+    };
+
+    it('keeps an edit made after undoing an erase when the collaborator’s delete lands after the check', async () => {
+        await eraseUndoEdit();
+        // The reconnect race: reconcile reads m6 while it is still live, and
+        // the collaborator's delete reaches the row before this device's write.
+        const read = api.fetchMany.bind(api);
+        vi.spyOn(api, 'fetchMany').mockImplementation(async (docId, ids) => {
+            const result = await read(docId, ids);
+            collaboratorErases();
+            return result;
+        });
+
+        api.offline = false;
+        await engine.flush();
+
+        // Not an edit written onto their tombstone: the mark stands, as the
+        // user left it, on the server and here.
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(api.rows.get('m6')?.color).toBe('#ff0000');
+        expect(store.getPage(0).get('m6')?.color).toBe('#ff0000');
+        expect(await db.ops.count()).toBe(0);
+        expect(rejections).toEqual([]);
+    });
+
+    it('keeps that edit when its send fails and the mark is erased again before the retry', async () => {
+        await eraseUndoEdit();
+        collaboratorErases('2026-06-06T06:06:06.000Z');
+        api.offline = false;
+        api.failWrites = { error: { message: 'bad gateway', kind: 'retry' }, times: 1 };
+
+        await engine.flush(); // reconciled, then the write fails
+        expect(api.rows.get('m6')?.deleted_at).not.toBeNull();
+        expect(await db.ops.count()).toBeGreaterThan(0);
+
+        collaboratorErases('2026-07-07T07:07:07.000Z'); // and again, meanwhile
+        engine.resetBackoff();
+        await engine.flush();
+
+        expect(api.rows.get('m6')?.deleted_at).toBeNull();
+        expect(api.rows.get('m6')?.color).toBe('#ff0000');
+        expect(await db.ops.count()).toBe(0);
+    });
+
     it('carries the author stamp onto the net change', () => {
         const queued = (opId: number, type: PendingOpType, color: string): PendingOp => ({
             opId,
@@ -1042,7 +1100,7 @@ describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () =
             [queued(1, 'update', '#aa0000'), queued(2, 'update', '#bb0000')],
             serverRow('m1'),
         );
-        expect(outcome).toMatchObject({ kind: 'send', op: { type: 'update', userId: USER } });
+        expect(outcome).toMatchObject({ kind: 'send', ops: [{ type: 'update', userId: USER }] });
     });
 
     it('keeps the ops untouched when the server rows cannot be read', async () => {
@@ -1186,6 +1244,7 @@ describe('SyncEngine mirror repairs reach the open viewer', () => {
 
     const openViewer = async () => {
         viewerStore = new AnnotationStore(db, DOC);
+        viewerStore.setAuthor(USER);
         await viewerStore.load();
         const viewerApi = new FakeApi();
         viewerApi.offline = true;
@@ -1297,5 +1356,194 @@ describe('SyncEngine mirror repairs reach the open viewer', () => {
         } finally {
             otherTab.close();
         }
+    });
+});
+
+describe('SyncEngine across tabs of the same account', () => {
+    /** Another tab on the score: its own store and started engine over the shared mirror. */
+    const openTab = async (tabApi: FakeApi) => {
+        const tabStore = new AnnotationStore(db, DOC);
+        tabStore.setAuthor(USER);
+        await tabStore.load();
+        const tab = new SyncEngine({ db, store: tabStore, api: tabApi, docId: DOC, getUserId: () => USER });
+        tab.start();
+        return { tabStore, tab };
+    };
+
+    const offlineApi = () => {
+        const offline = new FakeApi();
+        offline.offline = true;
+        return offline;
+    };
+
+    it('shows what the other tab draws and erases at once, offline included', async () => {
+        const first = await openTab(offlineApi());
+        const second = await openTab(offlineApi());
+        try {
+            for (let i = 0; i < 4; i++) {
+                await first.tabStore.create(makeStroke(`s${i}`));
+            }
+            await vi.waitFor(() => expect(second.tabStore.getPage(0).size).toBe(4));
+
+            await first.tabStore.delete('s2');
+            await vi.waitFor(() => expect(second.tabStore.getPage(0).has('s2')).toBe(false));
+            expect(await db.ops.count()).toBe(5);
+        } finally {
+            first.tab.stop();
+            second.tab.stop();
+        }
+    });
+
+    it('shows strokes whose broadcast reached the other tab before they were acked', async () => {
+        const second = await openTab(offlineApi());
+        // Like the database broadcast: every committed row reaches every
+        // subscriber — here, before this tab's request returns.
+        const insert = api.insertMany.bind(api);
+        vi.spyOn(api, 'insertMany').mockImplementation(async (rows) => {
+            const result = await insert(rows);
+            for (const row of rows) {
+                await second.tab.applyServerRow(api.rows.get(row.id)!);
+            }
+            return result;
+        });
+        try {
+            for (let i = 0; i < 4; i++) {
+                await store.create(makeStroke(`s${i}`));
+            }
+            await engine.flush();
+
+            expect(await db.ops.count()).toBe(0);
+            await vi.waitFor(() => expect(second.tabStore.getPage(0).size).toBe(4));
+            // The server's rows, not just this device's copies of them.
+            await vi.waitFor(() => expect(second.tabStore.get('s0')?.seq).toBe(api.rows.get('s0')?.seq));
+        } finally {
+            second.tab.stop();
+        }
+    });
+
+    it('applies a collaborator’s change that landed while this device’s edit was in flight', async () => {
+        await store.create(makeStroke('m1'));
+        await engine.flush();
+        const second = await openTab(offlineApi());
+        try {
+            await store.update('m1', { color: '#aa0000' });
+
+            // The edit lands; a collaborator recolours the mark right after,
+            // and that broadcast arrives while the edit is still queued here.
+            const update = api.update.bind(api);
+            vi.spyOn(api, 'update').mockImplementation(async (id, docId, patch) => {
+                const result = await update(id, docId, patch);
+                api.rows.set(id, { ...api.rows.get(id)!, color: '#00aa00', seq: api.nextSeq++ });
+                await engine.applyServerRow(api.rows.get(id)!);
+                await second.tab.applyServerRow(api.rows.get(id)!);
+                return result;
+            });
+            await engine.flush();
+
+            // Both tabs show the server's mark, not the edit it superseded.
+            expect(api.rows.get('m1')?.color).toBe('#00aa00');
+            expect(store.get('m1')?.color).toBe('#00aa00');
+            await vi.waitFor(() => expect(second.tabStore.get('m1')?.color).toBe('#00aa00'));
+        } finally {
+            second.tab.stop();
+        }
+    });
+
+    it('does not let a row older than an acked edit replace it', async () => {
+        await store.create(makeStroke('m1'));
+        await engine.flush();
+        api.offline = true;
+        await store.update('m1', { color: '#aa0000' });
+        // A collaborator's earlier change, heard while the edit sat queued.
+        api.rows.set('m1', { ...api.rows.get('m1')!, color: '#00aa00', seq: api.nextSeq++ });
+        await engine.applyServerRow(api.rows.get('m1')!);
+        api.offline = false;
+
+        await engine.flush();
+
+        expect(api.rows.get('m1')?.color).toBe('#aa0000');
+        expect(store.get('m1')?.color).toBe('#aa0000');
+    });
+});
+
+describe('SyncEngine with another account’s changes queued on the device', () => {
+    const OTHER = 'user-other';
+
+    /** A mark drawn offline by `author` in an earlier session on this browser. */
+    const queuedBy = async (author: string | null, id: string) => {
+        const earlier = new AnnotationStore(db, DOC);
+        earlier.setAuthor(author);
+        await earlier.create(makeStroke(id));
+    };
+
+    const openAs = async (userId: string) => {
+        const viewerStore = new AnnotationStore(db, DOC);
+        viewerStore.setAuthor(userId);
+        await viewerStore.load();
+        const viewer = new SyncEngine({ db, store: viewerStore, api, docId: DOC, getUserId: () => userId });
+        return { viewerStore, viewer };
+    };
+
+    it('never uploads them under the signed-in account, nor draws them', async () => {
+        await queuedBy(OTHER, 'theirs');
+        const { viewerStore, viewer } = await openAs(USER);
+        try {
+            expect(viewerStore.getPage(0).has('theirs')).toBe(false);
+            await viewerStore.create(makeStroke('mine'));
+
+            await viewer.flush();
+
+            expect([...api.rows.keys()]).toEqual(['mine']);
+            expect(api.rows.get('mine')?.created_by).toBe(USER);
+            // Kept for their own account, untouched.
+            const left = await db.ops.toArray();
+            expect(left.map((op) => [op.annotationId, op.userId])).toEqual([['theirs', OTHER]]);
+            expect((await db.annotations.get('theirs'))?.pending).toBe(1);
+            expect(viewerStore.getPage(0).has('theirs')).toBe(false);
+        } finally {
+            viewer.stop();
+        }
+    });
+
+    it('uploads them once their own account is back', async () => {
+        await queuedBy(OTHER, 'theirs');
+        const { viewerStore, viewer } = await openAs(OTHER);
+        try {
+            expect(viewerStore.getPage(0).has('theirs')).toBe(true);
+            await viewer.flush();
+            expect(api.rows.get('theirs')?.created_by).toBe(OTHER);
+            expect(await db.ops.count()).toBe(0);
+        } finally {
+            viewer.stop();
+        }
+    });
+
+    it('treats unstamped ops as this account’s only on a score it cached', async () => {
+        await queuedBy(null, 'legacy');
+        const first = await openAs(USER);
+        await first.viewer.flush();
+        first.viewer.stop();
+        expect(api.rows.size).toBe(0);
+        expect(first.viewerStore.getPage(0).has('legacy')).toBe(false);
+
+        await db.pdfCache.put({ docId: DOC, bytes: new ArrayBuffer(8), title: 'Score', cachedAt: '', userId: USER });
+        const second = await openAs(USER);
+        expect(second.viewerStore.getPage(0).has('legacy')).toBe(true);
+        await second.viewer.flush();
+        second.viewer.stop();
+        expect([...api.rows.keys()]).toEqual(['legacy']);
+    });
+
+    it('shows this account’s own queued marks once the session resolves', async () => {
+        await queuedBy(USER, 'mine');
+        // A warm open paints before the session (and so the author) is known.
+        const viewerStore = new AnnotationStore(db, DOC);
+        await viewerStore.load();
+        expect(viewerStore.getPage(0).has('mine')).toBe(false);
+
+        viewerStore.setAuthor(USER);
+        await vi.waitFor(() => expect(viewerStore.getPage(0).has('mine')).toBe(true));
+        viewerStore.setAuthor(OTHER);
+        await vi.waitFor(() => expect(viewerStore.getPage(0).has('mine')).toBe(false));
     });
 });

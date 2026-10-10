@@ -58,6 +58,20 @@ describe('useGuardedSignOut', () => {
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
+    it('does not call another account’s queued changes this account’s', async () => {
+        const user = userEvent.setup();
+        syncBeforeSignOut.mockResolvedValue({ pending: 3, refused: 0, foreign: 2 });
+        render(<Harness doSignOut={vi.fn(async () => undefined)} />);
+
+        await user.click(screen.getByRole('button', { name: 'Sign out' }));
+
+        const dialog = await screen.findByRole('dialog', { name: 'Sign out with unsynced changes?' });
+        expect(dialog).toHaveTextContent('You have 1 unsynced change to your scores');
+        expect(dialog).toHaveTextContent(
+            'This device also holds 2 unsynced changes made by another account that was signed in here. Only that account can save them; signing out deletes them from this device.',
+        );
+    });
+
     it('signs out anyway when the user confirms', async () => {
         const user = userEvent.setup();
         syncBeforeSignOut.mockResolvedValue({ pending: 1, refused: 0 });
