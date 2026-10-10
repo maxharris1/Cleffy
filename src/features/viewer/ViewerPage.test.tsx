@@ -10,9 +10,11 @@ import type { DocumentRow } from '@/types/database';
 const fetchDocument = vi.fn();
 const fetchMyRole = vi.fn();
 const loadDocumentBytes = vi.fn();
+const loadDocumentSource = vi.fn();
 const loadDocumentOffline = vi.fn();
 const ensureDocumentPageCount = vi.fn();
-const prefetchDocumentBytes = vi.fn();
+const prefetchScoreUrl = vi.fn();
+const cacheDocumentBytes = vi.fn();
 const purgeLocalDocument = vi.fn();
 const removeCachedLibraryDocument = vi.fn();
 
@@ -26,9 +28,11 @@ vi.mock('@/features/library/documentsService', () => ({
     fetchDocument: (...args: unknown[]) => fetchDocument(...args),
     fetchMyRole: (...args: unknown[]) => fetchMyRole(...args),
     loadDocumentBytes: (...args: unknown[]) => loadDocumentBytes(...args),
+    loadDocumentSource: (...args: unknown[]) => loadDocumentSource(...args),
     loadDocumentOffline: (...args: unknown[]) => loadDocumentOffline(...args),
     ensureDocumentPageCount: (...args: unknown[]) => ensureDocumentPageCount(...args),
-    prefetchDocumentBytes: (...args: unknown[]) => prefetchDocumentBytes(...args),
+    prefetchScoreUrl: (...args: unknown[]) => prefetchScoreUrl(...args),
+    cacheDocumentBytes: (...args: unknown[]) => cacheDocumentBytes(...args),
 }));
 
 const SESSION = {
@@ -47,8 +51,20 @@ vi.mock('@/features/auth/session', () => ({
 /** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
 const viewportSync: { current: { onMembershipChanged?: () => void } | undefined } = { current: undefined };
 
+/** What the viewer last handed the PDF provider: the source, and the stream callbacks. */
+const pdfProps = vi.hoisted(() => ({
+    current: null as null | {
+        data: ArrayBuffer | { url: string };
+        onStreamComplete?: (source: { url: string }, bytes: ArrayBuffer) => void;
+        onStreamError?: (source: { url: string }, err: unknown) => void;
+    },
+}));
+
 vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
-    PdfProvider: ({ children }: { children: ReactNode }) => <div data-testid="pdf-provider">{children}</div>,
+    PdfProvider: (props: NonNullable<typeof pdfProps.current> & { children: ReactNode }) => {
+        pdfProps.current = props;
+        return <div data-testid="pdf-provider">{props.children}</div>;
+    },
 }));
 
 /** The sync props the viewer last handed the viewport (to drive its callbacks). */
@@ -193,12 +209,15 @@ beforeEach(() => {
     purgeLocalDocument.mockResolvedValue(undefined);
     removeCachedLibraryDocument.mockResolvedValue(undefined);
     flags.playalong = false;
+    pdfProps.current = null;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
+    loadDocumentSource.mockResolvedValue({ bytes: new ArrayBuffer(16) });
+    cacheDocumentBytes.mockResolvedValue(undefined);
     ensureDocumentPageCount.mockImplementation(async (doc: DocumentRow) => doc);
     fetchMyRole.mockResolvedValue('owner');
-    prefetchDocumentBytes.mockImplementation((docId: string) => ({
+    prefetchScoreUrl.mockImplementation((docId: string) => ({
         path: `${docId}/original.pdf`,
-        bytes: Promise.resolve(null),
+        url: Promise.resolve(null),
     }));
 });
 
@@ -311,7 +330,7 @@ describe('CloudViewer warm open', () => {
                 },
             }),
         );
-        loadDocumentBytes.mockRejectedValue(new Error('offline'));
+        loadDocumentSource.mockRejectedValue(new Error('offline'));
 
         renderViewer();
 
@@ -336,9 +355,9 @@ describe('CloudViewer warm open', () => {
 
         renderViewer();
 
-        await waitFor(() => expect(loadDocumentBytes).toHaveBeenCalled());
-        expect(prefetchDocumentBytes).toHaveBeenCalledWith(DOC_ID);
-        const [, options] = loadDocumentBytes.mock.calls[0] as [
+        await waitFor(() => expect(loadDocumentSource).toHaveBeenCalled());
+        expect(prefetchScoreUrl).toHaveBeenCalledWith(DOC_ID);
+        const [, options] = loadDocumentSource.mock.calls[0] as [
             DocumentRow,
             { preloaded?: { bytes: ArrayBuffer }; prefetch?: unknown },
         ];
@@ -346,16 +365,76 @@ describe('CloudViewer warm open', () => {
         expect(options.prefetch).toBeUndefined();
     });
 
-    it('starts the bytes download alongside the row on a cold open', async () => {
+    it('mints the score URL alongside the row on a cold open', async () => {
         loadDocumentOffline.mockResolvedValue(null);
         fetchDocument.mockResolvedValue(serverDoc());
 
         renderViewer();
 
-        await waitFor(() => expect(loadDocumentBytes).toHaveBeenCalled());
-        expect(prefetchDocumentBytes).toHaveBeenCalledWith(DOC_ID);
-        const [, options] = loadDocumentBytes.mock.calls[0] as [DocumentRow, { prefetch?: { path: string } }];
+        await waitFor(() => expect(loadDocumentSource).toHaveBeenCalled());
+        expect(prefetchScoreUrl).toHaveBeenCalledWith(DOC_ID);
+        const [, options] = loadDocumentSource.mock.calls[0] as [DocumentRow, { prefetch?: { path: string } }];
         expect(options.prefetch?.path).toBe(`${DOC_ID}/original.pdf`);
+    });
+
+    it('streams a first open, then caches the whole file under the confirmed role when it lands', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+
+        renderViewer();
+
+        // Page 1 renders from the URL; nothing waits for the download.
+        await waitFor(() => expect(pdfProps.current?.data).toMatchObject({ url: expect.stringContaining('signed') }));
+        const stream = pdfProps.current!.data as { url: string };
+        expect(viewport()).toHaveAttribute('data-readonly', 'false');
+        expect(cacheDocumentBytes).not.toHaveBeenCalled();
+
+        const bytes = new ArrayBuffer(32);
+        act(() => pdfProps.current!.onStreamComplete!(stream, bytes));
+
+        expect(cacheDocumentBytes).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            bytes,
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+        // Same source: the finished download does not reload the document.
+        expect(pdfProps.current!.data).toBe(stream);
+    });
+
+    it('downloads the file whole when the stream fails', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+        const whole = new ArrayBuffer(24);
+        loadDocumentBytes.mockResolvedValue(whole);
+
+        renderViewer();
+
+        await waitFor(() => expect(pdfProps.current?.data).toMatchObject({ url: expect.any(String) }));
+        const stream = pdfProps.current!.data as { url: string };
+        act(() => pdfProps.current!.onStreamError!(stream, new TypeError('network error')));
+
+        await waitFor(() => expect(pdfProps.current?.data).toBe(whole));
+        expect(loadDocumentBytes).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+    });
+
+    it('says the score could not be reached when the stream and the whole download both fail', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+        loadDocumentBytes.mockRejectedValue(new TypeError('Failed to fetch'));
+
+        renderViewer();
+
+        await waitFor(() => expect(pdfProps.current?.data).toMatchObject({ url: expect.any(String) }));
+        act(() => pdfProps.current!.onStreamError!(pdfProps.current!.data as { url: string }, new TypeError('x')));
+
+        expect(await screen.findByText(/Couldn’t reach Cleffy to open this score/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
     });
 
     it('reports a cold open that finds nothing on the server without a fallback', async () => {
@@ -514,7 +593,7 @@ describe('CloudViewer stored role and reconnects', () => {
         renderViewer();
 
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
-        expect(loadDocumentBytes).toHaveBeenCalledWith(
+        expect(loadDocumentSource).toHaveBeenCalledWith(
             expect.objectContaining({ id: DOC_ID }),
             expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
         );

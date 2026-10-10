@@ -92,9 +92,11 @@ import {
     importDocumentFromImslp,
     leaveSharedDocument,
     listDocuments,
+    cacheDocumentBytes,
     loadDocumentBytes,
     loadDocumentOffline,
-    prefetchDocumentBytes,
+    loadDocumentSource,
+    prefetchScoreUrl,
     replaceDocumentPdf,
     resetStorageCleanupSweep,
     sweepPendingStorageCleanup,
@@ -157,6 +159,8 @@ interface StubOptions {
     /** What every other supabase.rpc() call answers (or rejects with, if an Error). */
     rpcAnswer?: { data: unknown; error: { message: string } | null } | Error;
     restRows?: DocumentRow[];
+    /** createSignedUrl answers with this error. */
+    signError?: string;
     /** What a `select().eq('id', id).maybeSingle()` read of the row returns. */
     selectedRow?: DocumentRow | null | ((id: string) => DocumentRow | null);
 }
@@ -235,7 +239,11 @@ const makeStub = (options: StubOptions = {}) => {
             });
         },
         createSignedUrl: (path: string) =>
-            Promise.resolve({ data: { signedUrl: `https://storage.test/sign/${path}` }, error: null }),
+            Promise.resolve(
+                options.signError
+                    ? { data: null, error: { message: options.signError } }
+                    : { data: { signedUrl: `https://storage.test/sign/${path}` }, error: null },
+            ),
     });
     const supabase = {
         storage: { from: (bucket: string) => storageApi(bucket) },
@@ -551,49 +559,73 @@ describe('loadDocumentBytes preloaded bytes (warm open)', () => {
     });
 });
 
-describe('prefetchDocumentBytes (cold open)', () => {
-    it('uses the download that left with the row when the row confirms the path', async () => {
-        const calls = makeStub({ downloadBytes: 'prefetched-bytes' });
+describe('loadDocumentSource (viewer open)', () => {
+    it('streams a score this device has not cached, from the URL minted alongside the row', async () => {
+        const calls = makeStub();
         const d = doc();
-        const prefetch = prefetchDocumentBytes(d.id);
+        const prefetch = prefetchScoreUrl(d.id);
         expect(prefetch.path).toBe(d.storage_path);
-        const bytes = await loadDocumentBytes(d, { prefetch });
-        expect(new TextDecoder().decode(bytes)).toBe('prefetched-bytes');
-        // One download in total — the prefetch — and the cache is seeded from it.
-        expect(calls.download).toHaveBeenCalledTimes(1);
-        expect((await getDb().pdfCache.get(d.id))?.contentRev).toBe(0);
+        const source = await loadDocumentSource(d, { prefetch, userId: 'user-1', role: 'owner' });
+        expect(source).toEqual({ url: `https://storage.test/sign/${d.storage_path}` });
+        // Nothing downloaded, and nothing cached until the stream ends.
+        expect(calls.download).not.toHaveBeenCalled();
+        expect(memCache.has(d.id)).toBe(false);
     });
 
-    it('discards the prefetch and downloads the row’s own path when they differ', async () => {
-        const calls = makeStub({ downloadBytes: 'real-bytes' });
+    it('mints a URL for the row’s own path when the early one was for another', async () => {
+        makeStub();
         const d = doc({ storage_path: 'a4ccff59-6f2f-4dc7-a2a8-5c8f2b6f1de1/renamed.pdf' });
-        const prefetch = prefetchDocumentBytes(d.id);
-        const bytes = await loadDocumentBytes(d, { prefetch });
-        expect(new TextDecoder().decode(bytes)).toBe('real-bytes');
-        expect(calls.download).toHaveBeenCalledTimes(2);
-        expect(calls.download).toHaveBeenLastCalledWith(d.storage_path);
+        const source = await loadDocumentSource(d, { prefetch: prefetchScoreUrl(d.id) });
+        expect(source).toEqual({ url: `https://storage.test/sign/${d.storage_path}` });
     });
 
-    it('falls through to a normal download when the prefetch was refused', async () => {
-        const calls = makeStub({ downloadError: 'not found' });
-        const d = doc();
-        const prefetch = prefetchDocumentBytes(d.id);
-        expect(await prefetch.bytes).toBeNull();
-        await expect(loadDocumentBytes(d, { prefetch })).rejects.toThrow(/Could not download score/);
-        expect(calls.download).toHaveBeenCalledTimes(2);
+    it('opens the cached bytes of the current revision without the network', async () => {
+        const calls = makeStub();
+        const d = doc({ content_rev: 1 });
+        await putCache({
+            docId: d.id,
+            bytes: new Blob(['cached-bytes']),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+        });
+        const source = await loadDocumentSource(d, { prefetch: prefetchScoreUrl(d.id) });
+        expect(new TextDecoder().decode(source.bytes)).toBe('cached-bytes');
+        expect(calls.download).not.toHaveBeenCalled();
     });
 
-    it('discards prefetch bytes when the row revision is not 0 and does not cache them as that rev', async () => {
-        const calls = makeStub({ downloadSequence: ['prefetched-bytes', 'rev2-bytes'] });
+    it('streams the new revision when the cached copy is older', async () => {
+        makeStub();
         const d = doc({ content_rev: 2 });
-        const prefetch = prefetchDocumentBytes(d.id);
-        const bytes = await loadDocumentBytes(d, { prefetch });
-        expect(new TextDecoder().decode(bytes)).toBe('rev2-bytes');
-        expect(calls.download).toHaveBeenCalledTimes(2);
-        expect(calls.download).toHaveBeenLastCalledWith(d.storage_path);
-        const cached = await getDb().pdfCache.get(d.id);
-        expect(cached?.contentRev).toBe(2);
-        expect(new TextDecoder().decode(cached?.bytes as ArrayBuffer)).toBe('rev2-bytes');
+        await putCache({
+            docId: d.id,
+            bytes: new Blob(['old-bytes']),
+            title: d.title,
+            cachedAt: '2026-08-01T00:00:00Z',
+            contentRev: 1,
+        });
+        const source = await loadDocumentSource(d);
+        expect(source.url).toBe(`https://storage.test/sign/${d.storage_path}`);
+    });
+
+    it('downloads the file whole when no URL can be minted', async () => {
+        const calls = makeStub({ downloadBytes: 'whole-bytes', signError: 'not allowed' });
+        const d = doc();
+        const source = await loadDocumentSource(d, { prefetch: prefetchScoreUrl(d.id), userId: 'user-1' });
+        expect(new TextDecoder().decode(source.bytes)).toBe('whole-bytes');
+        expect(calls.download).toHaveBeenCalledTimes(1);
+        expect((memCache.get(d.id) as CachedPdf | undefined)?.userId).toBe('user-1');
+    });
+});
+
+describe('cacheDocumentBytes (a finished stream)', () => {
+    it('stores the bytes as the offline copy with the role, revision and owner', async () => {
+        makeStub();
+        const d = doc({ content_rev: 3, archived_at: '2026-09-01T00:00:00Z' });
+        await cacheDocumentBytes(d, new TextEncoder().encode('streamed').buffer, { userId: 'user-1', role: 'editor' });
+        const row = memCache.get(d.id) as CachedPdf;
+        expect(new TextDecoder().decode(row.bytes as ArrayBuffer)).toBe('streamed');
+        expect(row).toMatchObject({ contentRev: 3, myRole: 'editor', userId: 'user-1', archivedAt: d.archived_at });
     });
 });
 

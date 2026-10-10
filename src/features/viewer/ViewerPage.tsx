@@ -9,13 +9,15 @@ import { buildCleanFn } from '@/features/import/cleanReplace';
 import { ImportScanButton } from '@/features/import/ImportScanButton';
 import { UPLOAD_ACCEPT, prepareUploadFile } from '@/features/import/prepareUpload';
 import {
+    cacheDocumentBytes,
     ensureDocumentPageCount,
     fetchDocument,
     fetchMyRole,
     isCloudDocId,
     loadDocumentBytes,
     loadDocumentOffline,
-    prefetchDocumentBytes,
+    loadDocumentSource,
+    prefetchScoreUrl,
     purgeLocalDocument,
 } from '@/features/library/documentsService';
 import { removeCachedLibraryDocument } from '@/features/library/libraryBootstrap';
@@ -26,7 +28,7 @@ import { ShareDialog } from '@/features/share/ShareDialog';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
-import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
+import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/viewer/pdf/PdfProvider';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
@@ -76,10 +78,27 @@ export const ViewerPage = () => {
 // ---------------------------------------------------------------------------
 // Cloud documents: auth-gated, role-aware, synced.
 
+/**
+ * A first open on this device: the score streams from a signed URL and shows
+ * page 1 long before the file is in (PdfProvider). Carries what caching the
+ * finished download needs.
+ */
+interface ScoreStream extends StreamedPdfSource {
+    doc: DocumentRow;
+    /** The role confirmed when the stream started, if any (see loadDocumentBytes' `role`). */
+    role: MemberRole | undefined;
+}
+
 interface CloudDocState {
     doc: DocumentRow;
     role: MemberRole | null;
-    bytes: ArrayBuffer;
+    /** What the viewer renders: the bytes, or a ScoreStream still downloading. */
+    pdf: PdfSource;
+    /**
+     * The whole file (import scan, clean-up). Null while a first open is
+     * still streaming; set, and cached for offline use, when it finishes.
+     */
+    bytes: ArrayBuffer | null;
     /**
      * No role to go on: a warm Dexie paint whose cache row stored none (a
      * score cached by an older build, or by a share link). Read-only, and no
@@ -307,7 +326,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             return;
         }
         const bytes = await loadDocumentBytes(doc, { userId });
-        setState((prev) => (prev ? { ...prev, doc, bytes } : prev));
+        setState((prev) => (prev ? { ...prev, doc, pdf: bytes, bytes } : prev));
         setStaleBytes(false);
     }, [docId, userId]);
 
@@ -360,14 +379,15 @@ const CloudViewer = ({ docId }: { docId: string }) => {
 
             // Warm open: paint from Dexie immediately with the role stored
             // there (see CloudDocState), then confirm in the background.
-            // Prefetch leaves in the same tick as the Dexie read; a hit ignores
-            // that download, a miss reuses it.
-            const prefetch = current ? undefined : prefetchDocumentBytes(docId);
+            // The signed URL for a cold open is minted in the same tick as the
+            // Dexie read; a hit ignores it, a miss streams from it.
+            const prefetch = current ? undefined : prefetchScoreUrl(docId);
             const offline = current ? null : await loadDocumentOffline(docId, userId).catch(() => null);
             if (!cancelled && offline) {
                 setState({
                     doc: offline.doc,
                     role: offline.role,
+                    pdf: offline.bytes,
                     bytes: offline.bytes,
                     ...(offline.cachedRole ? { unconfirmed: true } : { provisional: true }),
                 });
@@ -448,34 +468,61 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         : prev?.doc.id === docId && !prev.provisional
                           ? { unconfirmed: true }
                           : { provisional: true };
+                // Stored with the bytes, so the next open without a network
+                // knows what this account may do.
+                const cacheRole = roleResult.status === 'fulfilled' ? (confirmedRole ?? undefined) : undefined;
                 try {
-                    const bytes = await loadDocumentBytes(confirmedDoc, {
-                        preloaded: held
-                            ? {
-                                  bytes: held.bytes,
-                                  contentRev: held.doc.content_rev ?? 0,
-                                  archivedAt: held.doc.archived_at,
-                              }
-                            : undefined,
-                        prefetch: held ? undefined : prefetch,
-                        userId,
-                        // Stored with the bytes, so the next open without a
-                        // network knows what this account may do.
-                        role: roleResult.status === 'fulfilled' ? confirmedRole : undefined,
-                    });
-                    const withPages = await ensureDocumentPageCount(confirmedDoc, bytes).catch(() => confirmedDoc);
+                    // A re-check while this revision is still streaming in
+                    // keeps that stream: there is nothing newer to load.
+                    const streaming =
+                        held !== null &&
+                        held.bytes === null &&
+                        (held.doc.content_rev ?? 0) >= (confirmedDoc.content_rev ?? 0);
+                    const source = streaming
+                        ? null
+                        : await loadDocumentSource(confirmedDoc, {
+                              preloaded: held?.bytes
+                                  ? {
+                                        bytes: held.bytes,
+                                        contentRev: held.doc.content_rev ?? 0,
+                                        archivedAt: held.doc.archived_at,
+                                    }
+                                  : undefined,
+                              prefetch: held ? undefined : prefetch,
+                              userId,
+                              role: cacheRole,
+                          });
+                    // A streamed score's page count is backfilled when its
+                    // download ends (onStreamComplete).
+                    const withPages = source?.bytes
+                        ? await ensureDocumentPageCount(confirmedDoc, source.bytes).catch(() => confirmedDoc)
+                        : confirmedDoc;
                     if (!cancelled) {
-                        setState((prev) => ({
-                            doc: withPages,
-                            role: confirmedRole ?? prev?.role ?? 'viewer',
-                            bytes:
+                        const stream: ScoreStream | null = source?.url
+                            ? { url: source.url, doc: withPages, role: cacheRole }
+                            : null;
+                        setState((prev) => {
+                            const keep =
                                 prev &&
                                 prev.doc.id === withPages.id &&
-                                (prev.doc.content_rev ?? 0) >= (withPages.content_rev ?? 0)
-                                    ? prev.bytes
-                                    : bytes,
-                            ...pending(prev),
-                        }));
+                                (prev.doc.content_rev ?? 0) >= (withPages.content_rev ?? 0);
+                            const next: Pick<CloudDocState, 'pdf' | 'bytes'> | null = keep
+                                ? { pdf: prev.pdf, bytes: prev.bytes }
+                                : source?.bytes
+                                  ? { pdf: source.bytes, bytes: source.bytes }
+                                  : stream
+                                    ? { pdf: stream, bytes: null }
+                                    : null;
+                            if (!next) {
+                                return prev;
+                            }
+                            return {
+                                doc: withPages,
+                                role: confirmedRole ?? prev?.role ?? 'viewer',
+                                ...next,
+                                ...pending(prev),
+                            };
+                        });
                         setLoadError(null);
                     }
                 } catch (err) {
@@ -483,12 +530,20 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         return;
                     }
                     if (held) {
-                        setState((prev) => ({
-                            doc: { ...held.doc, ...confirmedMeta(confirmedDoc) },
-                            role: confirmedRole ?? prev?.role ?? held.cachedRole ?? 'viewer',
-                            bytes: held.bytes,
-                            ...pending(prev),
-                        }));
+                        setState((prev) => {
+                            // What is on screen stays: the cached paint, or a stream in flight.
+                            const pdf = prev?.doc.id === docId ? prev.pdf : held.bytes;
+                            if (!pdf) {
+                                return prev;
+                            }
+                            return {
+                                doc: { ...held.doc, ...confirmedMeta(confirmedDoc) },
+                                role: confirmedRole ?? prev?.role ?? held.cachedRole ?? 'viewer',
+                                pdf,
+                                bytes: prev?.doc.id === docId ? prev.bytes : held.bytes,
+                                ...pending(prev),
+                            };
+                        });
                         return;
                     }
                     setLoadError(firstOpenFailure(err));
@@ -560,6 +615,56 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         const timer = setTimeout(askAgain, Math.min(CONFIRM_RETRY_BASE_MS * 2 ** attempt, CONFIRM_RETRY_MAX_MS));
         return () => clearTimeout(timer);
     }, [online, awaitingServer, retryOpen, confirmAttempt, askAgain]);
+
+    /**
+     * A first open finished streaming: this is the offline copy (and the
+     * bytes the import tools need). The role stamped is the server's, if it
+     * has answered by now, else the one the stream started with.
+     */
+    const onStreamComplete = useCallback(
+        (source: StreamedPdfSource, bytes: ArrayBuffer) => {
+            const stream = source as ScoreStream;
+            const live = stateRef.current?.pdf === source ? stateRef.current : null;
+            const doc = live?.doc ?? stream.doc;
+            const role = live && !live.provisional && !live.unconfirmed ? (live.role ?? undefined) : stream.role;
+            void cacheDocumentBytes(doc, bytes, { userId, role });
+            setState((prev) => (prev?.pdf === source ? { ...prev, bytes } : prev));
+            void ensureDocumentPageCount(doc, bytes)
+                .then((withPages) => {
+                    if (withPages.page_count !== doc.page_count) {
+                        setState((prev) =>
+                            prev?.pdf === source
+                                ? { ...prev, doc: { ...prev.doc, page_count: withPages.page_count } }
+                                : prev,
+                        );
+                    }
+                })
+                .catch(() => undefined);
+        },
+        [userId],
+    );
+
+    /**
+     * The stream failed (the signed URL refused, the connection dropped):
+     * download the file whole instead, which also falls back to a stale
+     * offline copy. Only if that fails too is the score unopenable.
+     */
+    const onStreamError = useCallback(
+        (source: StreamedPdfSource, err: unknown) => {
+            const stream = source as ScoreStream;
+            console.warn('Streaming the score failed; downloading it whole', err);
+            void loadDocumentBytes(stream.doc, { userId, role: stream.role })
+                .then((bytes) => setState((prev) => (prev?.pdf === source ? { ...prev, pdf: bytes, bytes } : prev)))
+                .catch((fallbackErr: unknown) => {
+                    if (stateRef.current?.pdf !== source) {
+                        return;
+                    }
+                    setState(null);
+                    setLoadError(firstOpenFailure(fallbackErr));
+                });
+        },
+        [userId],
+    );
 
     const onStatus = useCallback((status: SyncStatus) => setSyncStatus(status), []);
     const onRejected = useCallback(
@@ -640,6 +745,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     // A roster student's scores are their teacher's to assign and withdraw
     // (leave_document refuses an assigned score), so they get no Leave.
     const canLeave = userTypeOf(session) !== 'student';
+    const ownBytes = state.bytes;
 
     return (
         <div className="fixed inset-0 flex flex-col">
@@ -654,15 +760,18 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 ) : readOnly ? (
                     <Badge>view only</Badge>
                 ) : null}
-                {annotationStore && confirmed && state.role === 'owner' ? (
+                {/* Needs the whole file: a first open shows it once the stream ends. */}
+                {annotationStore && confirmed && state.role === 'owner' && ownBytes ? (
                     <ImportScanButton
                         store={annotationStore}
                         docId={docId}
-                        bytes={state.bytes}
+                        bytes={ownBytes}
                         classify={classify}
                         includeBornDigital
-                        clean={buildCleanFn(state.doc, state.bytes, (updated, newBytes) => {
-                            setState((prev) => (prev ? { ...prev, doc: updated, bytes: newBytes } : prev));
+                        clean={buildCleanFn(state.doc, ownBytes, (updated, newBytes) => {
+                            setState((prev) =>
+                                prev ? { ...prev, doc: updated, pdf: newBytes, bytes: newBytes } : prev,
+                            );
                         })}
                         autoOpen={autoOpenImport}
                     />
@@ -770,7 +879,7 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 </div>
             ) : null}
             <div className="min-h-0 flex-1">
-                <PdfProvider data={state.bytes}>
+                <PdfProvider data={state.pdf} onStreamComplete={onStreamComplete} onStreamError={onStreamError}>
                     <PdfViewport
                         key={docId}
                         docId={docId}
