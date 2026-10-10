@@ -4,6 +4,7 @@ import {
     displayWorkTitle,
     friendlySearchError,
     hasSearchableQuery,
+    highlightRanges,
     searchTokens,
     splitSearchResults,
 } from '@/features/imslp/imslpDisplay';
@@ -83,22 +84,27 @@ const toggleInSet = (prev: Set<string>, id: string): Set<string> => {
 };
 
 const highlightMatches = (text: string, tokens: string[]): ReactNode => {
-    if (tokens.length === 0 || !text) {
+    const ranges = tokens.length > 0 && text ? highlightRanges(text, tokens) : [];
+    if (ranges.length === 0) {
         return text;
     }
-    const escaped = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    const re = new RegExp(`(${escaped.join('|')})`, 'ig');
-    const parts = text.split(re);
-    const tokenSet = new Set(tokens.map((t) => t.toLowerCase()));
-    return parts.map((part, i) =>
-        tokenSet.has(part.toLowerCase()) ? (
-            <mark key={`${part}-${i}`} className="imslp-hit-mark">
-                {part}
-            </mark>
-        ) : (
-            <span key={`${part}-${i}`}>{part}</span>
-        ),
-    );
+    const parts: ReactNode[] = [];
+    let cursor = 0;
+    for (const { start, end } of ranges) {
+        if (start > cursor) {
+            parts.push(<span key={`t${cursor}`}>{text.slice(cursor, start)}</span>);
+        }
+        parts.push(
+            <mark key={`m${start}`} className="imslp-hit-mark">
+                {text.slice(start, end)}
+            </mark>,
+        );
+        cursor = end;
+    }
+    if (cursor < text.length) {
+        parts.push(<span key={`t${cursor}`}>{text.slice(cursor)}</span>);
+    }
+    return parts;
 };
 
 export const ImslpSearchPanel = ({ disabled = false, onSelectTitle }: ImslpSearchPanelProps) => {

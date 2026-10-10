@@ -768,24 +768,100 @@ const MEDIA_FILE_RE = /\.(?:pdf|mp3|ogg|flac|mid|midi|png|jpe?g|gif|zip|mxl|musi
 const SLUG_RE = /\b[a-z0-9]+(?:-[a-z0-9]+){4,}\b/i;
 const SNIPPET_MAX = 200;
 
-const decodeEntities = (s: string): string =>
-    s
-        .replace(/&quot;/g, '"')
-        .replace(/&#0?39;|&apos;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&amp;/g, '&');
+const NAMED_ENTITIES: Record<string, string> = {
+    quot: '"',
+    apos: "'",
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    nbsp: ' ',
+    ndash: '–',
+    mdash: '—',
+    hellip: '…',
+    lsquo: '‘',
+    rsquo: '’',
+    sbquo: '‚',
+    ldquo: '“',
+    rdquo: '”',
+    bdquo: '„',
+    laquo: '«',
+    raquo: '»',
+    middot: '·',
+    times: '×',
+    deg: '°',
+    szlig: 'ß',
+    aelig: 'æ',
+    AElig: 'Æ',
+    oelig: 'œ',
+    OElig: 'Œ',
+    oslash: 'ø',
+    Oslash: 'Ø',
+    flat: '♭',
+    sharp: '♯',
+    natural: '♮',
+};
+
+/** `&eacute;` → é: base letter + the combining mark its suffix names. */
+const ACCENT_SUFFIXES: Record<string, string> = {
+    acute: '\u0301',
+    grave: '\u0300',
+    circ: '\u0302',
+    uml: '\u0308',
+    tilde: '\u0303',
+    ring: '\u030a',
+    cedil: '\u0327',
+    caron: '\u030c',
+};
+
+const ENTITY_RE = /&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|([a-z][a-z0-9]{1,8}));/gi;
 
 /**
- * `{{plain|url|label}}` → label, `{{K|Ab}}` → Ab, `{{cite}}` → nothing. A
- * template carrying a catalogue slug (`{{AMG|nocturne-for-piano-…|No.2}}`) is
- * a discography link, not prose — it goes entirely.
+ * One layer of HTML entity decoding in a single pass, so `&amp;quot;` comes
+ * out as `&quot;` (the text that layer actually held), never as `"`. Unknown
+ * names stay verbatim.
+ */
+export const decodeEntities = (s: string): string =>
+    s.replace(ENTITY_RE, (m, dec?: string, hex?: string, name?: string) => {
+        if (dec || hex) {
+            const cp = dec ? Number(dec) : parseInt(hex ?? '', 16);
+            return cp > 0 && cp <= 0x10ffff && (cp < 0xd800 || cp > 0xdfff) ? String.fromCodePoint(cp) : m;
+        }
+        const n = name ?? '';
+        if (Object.hasOwn(NAMED_ENTITIES, n)) {
+            return NAMED_ENTITIES[n] ?? m;
+        }
+        const accent = n.match(/^([a-zA-Z])(acute|grave|circ|uml|tilde|ring|cedil|caron)$/);
+        if (accent) {
+            return `${accent[1]}${ACCENT_SUFFIXES[accent[2] ?? ''] ?? ''}`.normalize('NFC');
+        }
+        return m;
+    });
+
+/**
+ * IMSLP's accidental templates, keyed by lower-cased name (MediaWiki ignores
+ * the case of a name's first letter): `B{{Flat}}` is B♭, not B. Kept in step
+ * with the copy in imslpFileBlocks.ts (both files are import-free).
+ */
+export const WIKI_SYMBOL_TEMPLATES: Readonly<Record<string, string>> = {
+    flat: '♭',
+    sharp: '♯',
+    natural: '♮',
+};
+
+/**
+ * `{{Flat}}` → ♭, `{{plain|url|label}}` → label, `{{K|Ab}}` → Ab, `{{cite}}` →
+ * nothing. A template carrying a catalogue slug
+ * (`{{AMG|nocturne-for-piano-…|No.2}}`) is a discography link, not prose — it
+ * goes entirely.
  */
 const stripTemplates = (s: string): string => {
     let out = s;
     for (let i = 0; i < 4 && out.includes('{{'); i++) {
         out = out.replace(/\{\{([^{}]*)\}\}/g, (_m, inner: string) => {
+            const name = inner.trim().toLowerCase();
+            if (Object.hasOwn(WIKI_SYMBOL_TEMPLATES, name)) {
+                return WIKI_SYMBOL_TEMPLATES[name] ?? '';
+            }
             if (SLUG_RE.test(inner)) {
                 return '';
             }
@@ -825,12 +901,16 @@ export const cleanSnippet = (raw: string | undefined): string => {
     if (!raw) {
         return '';
     }
-    // Decode first: the page source's own <br> arrives as &lt;br&gt; and reads as
-    // a space; MediaWiki's searchmatch spans sit inside words and URLs, so they
-    // vanish without one.
-    const text = decodeEntities(raw)
-        .replace(/<br\s*\/?>/gi, ' ')
-        .replace(/<[^>]+>/g, '');
+    // Two layers of entities. MediaWiki HTML-escapes the page source, so its
+    // own <br> arrives as &lt;br&gt; and reads as a space, and its own &quot;
+    // arrives as &amp;quot;. Decode MediaWiki's layer, drop the markup
+    // (searchmatch spans sit inside words and URLs, so they vanish without a
+    // space), then decode the wikitext's layer — each exactly once.
+    const text = decodeEntities(
+        decodeEntities(raw)
+            .replace(/<br\s*\/?>/gi, ' ')
+            .replace(/<[^>]+>/g, ''),
+    );
     const kept: string[] = [];
     for (const rawLine of text.split(/\r?\n/)) {
         let line = rawLine.trim().replace(/^\.\.\.\s*/, '');

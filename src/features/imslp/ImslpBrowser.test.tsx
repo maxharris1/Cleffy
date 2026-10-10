@@ -11,6 +11,7 @@ import {
     formatBytes,
     friendlySearchError,
     hasSearchableQuery,
+    highlightRanges,
     isEditionImportable,
     rankEditions,
     recommendEdition,
@@ -351,6 +352,35 @@ describe('imslp display helpers', () => {
 
     it('tokenizes search queries', () => {
         expect(searchTokens('Beethoven moonlight')).toEqual(['Beethoven', 'moonlight']);
+        expect(searchTokens('K. 331')).toEqual(['K', '331']);
+        expect(searchTokens('Op. 27 No. 2')).toEqual(['Op', '27', 'No', '2']);
+        expect(searchTokens('d\'Indy "Clair" de lune, DE !!!')).toEqual(["d'Indy", 'Clair', 'de', 'lune']);
+    });
+
+    const marked = (text: string, query: string): string[] =>
+        highlightRanges(text, searchTokens(query)).map(({ start, end }) => text.slice(start, end));
+
+    it('highlights short query words only as whole words', () => {
+        // The QA repro: "de" lit up inside Debussy, Claude and Préludes.
+        expect(marked('Debussy, Claude', 'Clair de lune')).toEqual([]);
+        expect(marked('Préludes, Livre 2', 'Clair de lune')).toEqual([]);
+        expect(marked('Suite bergamasque — Clair de lune', 'Clair de lune')).toEqual(['Clair', 'de', 'lune']);
+        expect(marked('Au Clair de la Lune, Op.41', 'clair de lune')).toEqual(['Clair', 'de', 'Lune']);
+        // Catalogue numbers match whole: K.331 is not K.3310, and "2" is not the "2" of "27".
+        expect(marked('Piano Sonata No.14, Op.27 No.2', 'Op. 27 No. 2')).toEqual(['No', 'Op', '27', 'No', '2']);
+        expect(marked('Piano Sonata No.11, K.331/300i', 'K. 331')).toEqual(['K', '331']);
+        expect(marked('Sonata, K.3310', 'K 331')).toEqual(['K']);
+        // Touching matches merge into one mark.
+        expect(marked('Sonata BWV846a', 'bwv 846')).toEqual(['BWV846']);
+    });
+
+    it('highlights longer words from a word start, accent- and case-folded', () => {
+        expect(marked('Sonata (Beethoven, Ludwig van)', 'beeth')).toEqual(['Beeth']);
+        expect(marked('Gymnopédies (Satie, Erik)', 'gymnopedie')).toEqual(['Gymnopédie']);
+        // A decomposed accent stays inside the mark with its letter.
+        expect(marked('Gymnopédie', 'gymnopedie')).toEqual(['Gymnopédie']);
+        expect(marked('Rhapsody (Gershwin)', 'sody')).toEqual([]);
+        expect(marked('Anything', '')).toEqual([]);
     });
 });
 
@@ -1552,6 +1582,78 @@ describe('ImslpBrowser', () => {
         expect(screen.getByRole('button', { name: 'Early 20th century' })).toBeInTheDocument();
         // The status line names the era in force, matching the pressed chip.
         expect(screen.getByText('Piano · Romantic · 1 result')).toBeInTheDocument();
+    });
+
+    it('marks short query words only where they stand alone, and shows snippets as plain text', async () => {
+        const { screen } = await import('@testing-library/react');
+        const userEvent = (await import('@testing-library/user-event')).default;
+        const api = await import('@/features/imslp/imslpApi');
+
+        vi.spyOn(api, 'searchImslp').mockResolvedValue(
+            searchOk({
+                results: [
+                    { ...hit('Au Clair de la Lune, Op.41 (Vītols, Jāzeps)', 1), snippet: '"Au Clair de la Lune" & co' },
+                    hit('Préludes, Livre 2 (Debussy, Claude)', 2),
+                ],
+            }),
+        );
+
+        await renderBrowser();
+        await userEvent.type(
+            screen.getByPlaceholderText('Beethoven moonlight, bolero, Chopin nocturne…'),
+            'Clair de lune',
+        );
+
+        const vitols = (await screen.findAllByText((_, el) => el?.textContent === 'Au Clair de la Lune, Op.41'))[0]!;
+        expect([...vitols.querySelectorAll('mark')].map((m) => m.textContent)).toEqual(['Clair', 'de', 'Lune']);
+        // The server already decoded entities; the client must not escape again.
+        expect(screen.getByText('"Au Clair de la Lune" & co')).toBeInTheDocument();
+
+        const debussy = screen.getByText('Debussy, Claude');
+        expect(debussy.querySelector('mark')).toBeNull();
+        expect(screen.getByText('Préludes, Livre 2').querySelector('mark')).toBeNull();
+    });
+
+    it('keeps the disclaimer, Add and a queued Cancel together in the sticky action footer', async () => {
+        const { render, screen, within } = await import('@testing-library/react');
+        const { ImslpWorkPanel } = await import('@/features/imslp/ImslpWorkPanel');
+        const work: ImslpWorkDetail = {
+            title: 'Piano Sonata No.14, Op.27 No.2 (Beethoven, Ludwig van)',
+            composer: 'Beethoven, Ludwig van',
+            imslpUrl: 'https://imslp.org/wiki/Moonlight',
+            editions: [edition('a.pdf'), edition('b.pdf')],
+        };
+        render(
+            <ImslpWorkPanel
+                work={work}
+                selected={work.editions[0]!}
+                download={{ kind: 'queued' }}
+                busy={false}
+                importing
+                onBack={vi.fn()}
+                onSelect={vi.fn()}
+                onImportSelected={vi.fn()}
+                onImportLocalPdf={vi.fn()}
+                onCancelQueued={vi.fn()}
+            />,
+        );
+
+        const footer = screen.getByRole('button', { name: 'Queued for IMSLP…' }).closest('.imslp-action-footer');
+        expect(footer).not.toBeNull();
+        const inFooter = within(footer as HTMLElement);
+        expect(inFooter.getByText(/IMSLP makes no guarantee/)).toBeInTheDocument();
+        expect(inFooter.getByRole('button', { name: 'Cancel import' })).toBeInTheDocument();
+        // The edition list scrolls on its own and stays out of the footer.
+        expect(footer!.contains(screen.getByRole('list', { name: 'PDF editions' }))).toBe(false);
+
+        // jsdom has no layout, so pin the rule that does the work: below sm
+        // (390x667 put Add ~30px under the fold) the footer sticks to the bottom.
+        const { readFileSync } = await import('node:fs');
+        const css = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
+        const rule = css.match(/@media \(max-width: 39\.99rem\) \{\s*\.imslp-action-footer \{([^}]*)\}/)?.[1];
+        expect(rule).toMatch(/position:\s*sticky/);
+        expect(rule).toMatch(/bottom:\s*0/);
+        expect(rule).toMatch(/background:/);
     });
 
     describe('card view', () => {

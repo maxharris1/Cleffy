@@ -169,9 +169,10 @@ export const ImslpWorkPanel = ({
                     {noUrtext ? (
                         <p className="mt-1 text-xs text-stone-500">No Urtext file tagged on this IMSLP page.</p>
                     ) : null}
-                    {/* 16rem keeps Add above the fold on a 667px-tall viewport even with
-                        the disclaimer sitting below the list. Only importable rows live
-                        here, so the first screen is always choosable. */}
+                    {/* Only importable rows live here, so the first screen is always
+                        choosable. 16rem alone does not keep Add above the fold on a
+                        667px-tall phone (the page and work headers take the room) —
+                        the sticky .imslp-action-footer below does that. */}
                     <ul className="mt-2 max-h-[16rem] overflow-y-auto" aria-label="PDF editions">
                         {importable.map((edition) => {
                             const checked = selected?.filename === edition.filename;
@@ -228,8 +229,12 @@ export const ImslpWorkPanel = ({
                     </div>
                 </div>
             ) : work.editions.length > 0 ? (
-                <>
-                    <p className="mt-4 max-w-prose text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
+                /* On a phone the work header and edition list fill the first
+                   screen, so this footer sticks to the bottom edge until it
+                   scrolls into place: Add (with the terms it accepts) is always
+                   in view. See .imslp-action-footer. */
+                <div className="imslp-action-footer mt-4">
+                    <p className="max-w-prose text-xs leading-relaxed text-stone-600">{DISCLAIMER}</p>
                     <div className="mt-4 flex flex-wrap items-center gap-3">
                         <button
                             type="button"
@@ -264,18 +269,22 @@ export const ImslpWorkPanel = ({
                             <p className="text-xs text-stone-500">Select a downloadable edition to add.</p>
                         ) : null}
                     </div>
-                </>
-            ) : null}
-
-            {download.kind === 'queued' ? (
-                <div className="mt-2 flex flex-wrap items-center gap-3">
-                    <p className="text-xs text-stone-600" aria-hidden="true">
-                        {QUEUED_COPY}
-                    </p>
-                    {onCancelQueued ? (
-                        <button type="button" onClick={onCancelQueued} className={buttonClassName('ghost', 'sm')}>
-                            Cancel import
-                        </button>
+                    {/* In the footer so Cancel stays beside the Add it stops. */}
+                    {download.kind === 'queued' ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-3">
+                            <p className="text-xs text-stone-600" aria-hidden="true">
+                                {QUEUED_COPY}
+                            </p>
+                            {onCancelQueued ? (
+                                <button
+                                    type="button"
+                                    onClick={onCancelQueued}
+                                    className={buttonClassName('ghost', 'sm')}
+                                >
+                                    Cancel import
+                                </button>
+                            ) : null}
+                        </div>
                     ) : null}
                 </div>
             ) : null}

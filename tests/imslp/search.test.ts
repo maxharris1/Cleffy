@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
     STOP_TOKENS,
+    WIKI_SYMBOL_TEMPLATES,
     buildSearchVariants,
     cleanSnippet,
     correctTokens,
     damerauLevenshtein,
+    decodeEntities,
     extractPeriod,
     foldAccents,
     isWorkTitle,
@@ -14,6 +16,7 @@ import {
     scoreTitleMatch,
     tokenizeQuery,
 } from '../../supabase/functions/_shared/search';
+import { WIKI_SYMBOL_TEMPLATES as FILE_BLOCK_SYMBOL_TEMPLATES } from '../../supabase/functions/_shared/imslpFileBlocks';
 import { facetTokens } from '../../supabase/functions/_shared/searchFacetData';
 
 describe('foldAccents', () => {
@@ -217,10 +220,12 @@ describe('scoreTitleMatch', () => {
     it('matches space-form catalog numbers — IMSLP dots K./D. but spaces BWV/WoO/RV', () => {
         const tokens = tokenizeQuery('Bach BWV 565');
         expect(tokens).toEqual(['bach', 'bwv.565']);
-        expect(scoreTitleMatch('Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)', tokens)).toBeGreaterThan(
-            scoreTitleMatch('Cello Suite No.1 in G major, BWV 1007 (Bach, Johann Sebastian)', tokens),
+        expect(
+            scoreTitleMatch('Toccata and Fugue in D minor, BWV 565 (Bach, Johann Sebastian)', tokens),
+        ).toBeGreaterThan(scoreTitleMatch('Cello Suite No.1 in G major, BWV 1007 (Bach, Johann Sebastian)', tokens));
+        expect(scoreTitleMatch('Für Elise, WoO 59 (Beethoven, Ludwig van)', tokenizeQuery('WoO 59'))).toBeGreaterThan(
+            0,
         );
-        expect(scoreTitleMatch('Für Elise, WoO 59 (Beethoven, Ludwig van)', tokenizeQuery('WoO 59'))).toBeGreaterThan(0);
     });
 
     it('never space-forms "no.N" — it hides inside "piano 4 hands"-style titles', () => {
@@ -332,5 +337,42 @@ describe('cleanSnippet', () => {
         const out = cleanSnippet(long);
         expect(out.length).toBeLessThanOrEqual(200);
         expect(out.endsWith('…')).toBe(true);
+    });
+
+    // MediaWiki HTML-escapes the page source, so an entity the wikitext itself
+    // holds arrives escaped twice — shape checked against imslp.org, which
+    // sends "(1675&amp;ndash;1745)" for a wikitext "&ndash;".
+    it("decodes the wikitext's own entities, not just MediaWiki's escaping", () => {
+        expect(cleanSnippet('|Alternative Title=&amp;quot;Au Clair de la Lune&amp;quot;\n')).toBe(
+            '"Au Clair de la Lune"',
+        );
+        expect(cleanSnippet('# Gavotte (1675&amp;ndash;1745) &amp;amp; Musette\n')).toBe(
+            'Gavotte (1675–1745) & Musette',
+        );
+        expect(cleanSnippet('# Pr&amp;eacute;lude &amp;#8470;3 &amp;#x2014; Andante\n')).toBe('Prélude №3 — Andante');
+        // A literal "&quot;" the wikitext spells out as &amp;quot; stays text.
+        expect(cleanSnippet('# Quoting &amp;amp;quot; in HTML\n')).toBe('Quoting &quot; in HTML');
+    });
+
+    it('renders accidental templates instead of dropping them', () => {
+        expect(cleanSnippet('# Sonata in B{{flat}} major\n')).toBe('Sonata in B♭ major');
+        expect(cleanSnippet('# Prelude in C{{Sharp}} minor ; Etude in F{{ natural }}\n')).toBe(
+            'Prelude in C♯ minor ; Etude in F♮',
+        );
+    });
+});
+
+describe('decodeEntities', () => {
+    it('decodes one layer in one pass and leaves unknown names alone', () => {
+        expect(decodeEntities('&amp;quot;')).toBe('&quot;');
+        expect(decodeEntities('&quot;Moonlight&quot; &#39;x&#039; &apos;')).toBe(`"Moonlight" 'x' '`);
+        expect(decodeEntities('&Eacute;tude &uuml; &ccedil; &szlig; &flat;')).toBe('Étude ü ç ß ♭');
+        expect(decodeEntities('&#x1D11E; &#0; &#xD800; &bogus; &toString;')).toBe('𝄞 &#0; &#xD800; &bogus; &toString;');
+    });
+});
+
+describe('WIKI_SYMBOL_TEMPLATES', () => {
+    it('matches the copy in imslpFileBlocks (both files are import-free)', () => {
+        expect(WIKI_SYMBOL_TEMPLATES).toEqual(FILE_BLOCK_SYMBOL_TEMPLATES);
     });
 });
