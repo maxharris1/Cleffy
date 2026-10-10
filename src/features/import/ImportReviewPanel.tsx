@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 
 import { limitAction, limitHeadline } from '@/features/billing/limitErrors';
 import { isBillingConfigured } from '@/features/billing/pricing';
+import { dropAlreadyImported } from '@/features/import/alreadyImported';
 import { applyProposals } from '@/features/import/applyImport';
 import { scanDocument } from '@/features/import/importPipeline';
 import { recordImportStatus } from '@/features/import/importPromptService';
@@ -64,6 +65,10 @@ export const ImportReviewPanel = ({
     // Scan the bytes the panel was OPENED with — accepting with cleaning swaps
     // the viewer's bytes, and that must not restart the scan over the 'done' view.
     const [scanBytes] = useState(bytes);
+    // The whole scan, and the items an earlier import already brought in. The
+    // review shows neither those items nor their pages, but lifting the
+    // original ink still covers them (see dropAlreadyImported).
+    const [scanned, setScanned] = useState<{ full: ImportProposal; skipped: ProposedItem[] } | null>(null);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -79,18 +84,23 @@ export const ImportReviewPanel = ({
                 }
             },
         })
-            .then((proposal) => {
+            .then((full) => {
                 if (controller.signal.aborted) {
                     return;
                 }
-                if (proposal.pages.length === 0) {
+                // Running Import marks again must not import the same marks twice.
+                const { proposal, skipped } = dropAlreadyImported(full, store.liveAnnotations());
+                setScanned({ full, skipped });
+                if (proposal.pages.length > 0) {
+                    setStatus({ kind: 'review', proposal });
+                } else if (skipped.length > 0) {
+                    setStatus({ kind: 'already-imported', count: skipped.length });
+                } else {
                     setStatus({
                         kind: 'nothing-found',
                         unreadablePages: proposal.unreadablePages,
                         tooColorfulPages: proposal.tooColorfulPages,
                     });
-                } else {
-                    setStatus({ kind: 'review', proposal });
                 }
             })
             .catch((err: unknown) => {
@@ -103,7 +113,7 @@ export const ImportReviewPanel = ({
                 });
             });
         return () => controller.abort();
-    }, [docId, scanBytes, classify, includeBornDigital, scanRun]);
+    }, [store, docId, scanBytes, classify, includeBornDigital, scanRun]);
 
     const proposal: ImportProposal | null = status.kind === 'review' ? status.proposal : null;
     const enabledItems: ProposedItem[] = useMemo(() => {
@@ -133,6 +143,7 @@ export const ImportReviewPanel = ({
 
     const rescan = () => {
         setDisabled(new Set());
+        setScanned(null);
         setStatus({ kind: 'scanning', page: 0, pageCount: 1 });
         setScanRun((n) => n + 1);
     };
@@ -181,7 +192,12 @@ export const ImportReviewPanel = ({
             let cleaned = false;
             if (wantClean && clean) {
                 setStatus({ kind: 'applying', step: 'rebuild' });
-                await clean(proposal, enabledItems, (step) => setStatus({ kind: 'applying', step }));
+                // The ink under marks imported before is lifted too: they are
+                // already on the page as marks, and leaving their ink printed
+                // under them is what the checkbox promises not to do.
+                await clean(scanned?.full ?? proposal, [...enabledItems, ...(scanned?.skipped ?? [])], (step) =>
+                    setStatus({ kind: 'applying', step }),
+                );
                 cleaned = true;
             } else if (isCloudDocId(docId)) {
                 // Cleaning records 'imported' itself (with the backup path).
@@ -195,6 +211,25 @@ export const ImportReviewPanel = ({
             });
         }
     };
+
+    /** Everything found was imported before; only the ink under it can still go. */
+    const liftOnly = async () => {
+        if (!clean || !scanned || scanned.skipped.length === 0) {
+            return;
+        }
+        setStatus({ kind: 'applying', step: 'rebuild' });
+        try {
+            await clean(scanned.full, scanned.skipped, (step) => setStatus({ kind: 'applying', step }));
+            setStatus({ kind: 'done', created: 0, cleaned: true });
+        } catch (err) {
+            setStatus({
+                kind: 'error',
+                message: err instanceof Error ? err.message : 'Could not lift the original ink.',
+            });
+        }
+    };
+
+    const skippedCount = scanned?.skipped.length ?? 0;
 
     // Count reviewable marks (glyphs/runs), not the stroke paths inside them —
     // "Found 312" when the user sees ~120 digits reads as a bug.
@@ -228,6 +263,27 @@ export const ImportReviewPanel = ({
                             <Button size="sm" onClick={onClose}>
                                 Close
                             </Button>
+                        </div>
+                    </div>
+                ) : null}
+
+                {status.kind === 'already-imported' ? (
+                    <div className="mt-2">
+                        <p className="text-sm text-stone-700" role="status">
+                            {status.count === 1
+                                ? 'The 1 mark found on this score was imported before'
+                                : `All ${status.count} marks found on this score were imported before`}
+                            , so there is nothing new to add.
+                        </p>
+                        <div className="mt-4 flex justify-end gap-2">
+                            <Button variant={clean !== null ? 'ghost' : 'primary'} size="sm" onClick={onClose}>
+                                Close
+                            </Button>
+                            {clean !== null ? (
+                                <Button size="sm" onClick={() => void liftOnly()}>
+                                    Lift the original ink
+                                </Button>
+                            ) : null}
                         </div>
                     </div>
                 ) : null}
@@ -286,6 +342,9 @@ export const ImportReviewPanel = ({
                             <p className="text-sm text-stone-700">
                                 Found <span className="font-medium">{foundCount}</span> marks on {proposal.pages.length}{' '}
                                 page(s). Unchecked marks stay untouched on the page.
+                                {skippedCount > 0
+                                    ? ` ${skippedCount} ${skippedCount === 1 ? 'mark was' : 'marks were'} imported before and ${skippedCount === 1 ? 'is' : 'are'} left out.`
+                                    : ''}
                             </p>
                             <label className="flex items-center gap-1.5 text-sm text-stone-600">
                                 <input
@@ -366,8 +425,9 @@ export const ImportReviewPanel = ({
                 {status.kind === 'done' ? (
                     <div className="mt-2">
                         <p className="text-sm text-stone-700" role="status">
-                            Imported {status.created} marks — they now behave exactly like marks made in Cleffy (edit
-                            with the text tool, erase, undo).
+                            {status.created === 0 && status.cleaned
+                                ? 'The original ink was lifted off the page; your imported marks stay as they were.'
+                                : `Imported ${status.created} marks — they now behave exactly like marks made in Cleffy (edit with the text tool, erase, undo).`}
                             {status.cleaned ? ' The page was cleaned; the original file is kept for recovery.' : ''}
                         </p>
                         <div className="mt-4 flex justify-end">

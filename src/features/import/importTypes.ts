@@ -179,4 +179,6 @@ export type ImportStatus =
     | { kind: 'applying'; step: 'annotations' | 'rebuild' | 'upload'; done?: number; total?: number }
     | { kind: 'done'; created: number; cleaned: boolean }
     | { kind: 'nothing-found'; unreadablePages: number[]; tooColorfulPages: number[] }
+    /** Marks were found, and every one of them was imported by an earlier run. */
+    | { kind: 'already-imported'; count: number }
     | { kind: 'error'; message: string };
