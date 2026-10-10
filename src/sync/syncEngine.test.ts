@@ -1376,6 +1376,17 @@ describe('SyncEngine across tabs of the same account', () => {
         return offline;
     };
 
+    /** The server as another tab reads it: its writes fail, so the first tab is the one that pushes. */
+    const readerOf = (server: FakeApi): FakeApi => {
+        const reader = Object.create(server) as FakeApi;
+        const down = async () => ({ error: { message: 'network down', kind: 'retry' as const } });
+        reader.insertIgnoreDuplicates = down;
+        reader.insertMany = down;
+        reader.update = down;
+        reader.updateMany = down;
+        return reader;
+    };
+
     it('shows what the other tab draws and erases at once, offline included', async () => {
         const first = await openTab(offlineApi());
         const second = await openTab(offlineApi());
@@ -1395,7 +1406,7 @@ describe('SyncEngine across tabs of the same account', () => {
     });
 
     it('shows strokes whose broadcast reached the other tab before they were acked', async () => {
-        const second = await openTab(offlineApi());
+        const second = await openTab(readerOf(api));
         // Like the database broadcast: every committed row reaches every
         // subscriber — here, before this tab's request returns.
         const insert = api.insertMany.bind(api);
@@ -1424,7 +1435,7 @@ describe('SyncEngine across tabs of the same account', () => {
     it('applies a collaborator’s change that landed while this device’s edit was in flight', async () => {
         await store.create(makeStroke('m1'));
         await engine.flush();
-        const second = await openTab(offlineApi());
+        const second = await openTab(readerOf(api));
         try {
             await store.update('m1', { color: '#aa0000' });
 
@@ -1463,6 +1474,106 @@ describe('SyncEngine across tabs of the same account', () => {
 
         expect(api.rows.get('m1')?.color).toBe('#aa0000');
         expect(store.get('m1')?.color).toBe('#aa0000');
+    });
+
+    /** Every colour `tabStore` draws for `id` from now on. */
+    const coloursDrawn = (tabStore: AnnotationStore, id: string): string[] => {
+        const seen: string[] = [];
+        tabStore.subscribe(() => {
+            const colour = tabStore.get(id)?.color;
+            if (colour && seen[seen.length - 1] !== colour) {
+                seen.push(colour);
+            }
+        });
+        return seen;
+    };
+
+    /**
+     * m1 synced; tab 1 recolours it offline; a collaborator's earlier change
+     * reaches both tabs while that edit sits queued; tab 1 reconnects and
+     * pushes. Returns the colours tab 2 draws from the push on.
+     */
+    const pushOverHeldRow = async (second: { tabStore: AnnotationStore; tab: SyncEngine }) => {
+        const first = await openTab(api);
+        api.offline = true;
+        await first.tabStore.update('m1', { color: '#aa0000' });
+        await vi.waitFor(() => expect(second.tabStore.get('m1')?.color).toBe('#aa0000'));
+        api.rows.set('m1', { ...api.rows.get('m1')!, color: '#00aa00', seq: api.nextSeq++ });
+        await first.tab.applyServerRow(api.rows.get('m1')!);
+        await second.tab.applyServerRow(api.rows.get('m1')!);
+        expect(second.tabStore.get('m1')?.color).toBe('#aa0000');
+
+        const drawn = coloursDrawn(second.tabStore, 'm1');
+        api.offline = false;
+        await vi.waitFor(async () => {
+            await first.tab.flush();
+            expect(await db.ops.count()).toBe(0);
+        });
+        expect(api.rows.get('m1')?.color).toBe('#aa0000');
+        expect(first.tabStore.get('m1')?.color).toBe('#aa0000');
+        return { first, drawn };
+    };
+
+    it('never shows a row that the other tab’s acked edit superseded, even unable to ask the server', async () => {
+        await store.create(makeStroke('m1'));
+        await engine.flush();
+        const second = await openTab(offlineApi());
+        const { first, drawn } = await pushOverHeldRow(second);
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            expect(drawn).not.toContain('#00aa00');
+            expect(second.tabStore.get('m1')?.color).toBe('#aa0000');
+        } finally {
+            first.tab.stop();
+            second.tab.stop();
+        }
+    });
+
+    it('asks the server how a mark stands once the other tab’s push settles it', async () => {
+        await store.create(makeStroke('m1'));
+        await engine.flush();
+        const second = await openTab(readerOf(api));
+        const { first, drawn } = await pushOverHeldRow(second);
+        try {
+            // The server's row (its seq included), not the held one.
+            await vi.waitFor(() => expect(second.tabStore.get('m1')?.seq).toBe(api.rows.get('m1')?.seq));
+            expect(drawn).not.toContain('#00aa00');
+            expect(second.tabStore.get('m1')?.color).toBe('#aa0000');
+        } finally {
+            first.tab.stop();
+            second.tab.stop();
+        }
+    });
+
+    it('shows a collaborator’s change made after the other tab’s push, held while it was in flight', async () => {
+        await store.create(makeStroke('m1'));
+        await engine.flush();
+        const second = await openTab(readerOf(api));
+        const first = await openTab(api);
+        try {
+            api.offline = true;
+            await first.tabStore.update('m1', { color: '#aa0000' });
+            await vi.waitFor(() => expect(second.tabStore.get('m1')?.color).toBe('#aa0000'));
+            // The edit lands; a collaborator recolours the mark right after,
+            // and that broadcast reaches tab 2 while the edit is still queued.
+            const update = api.update.bind(api);
+            vi.spyOn(api, 'update').mockImplementation(async (id, docId, patch) => {
+                const result = await update(id, docId, patch);
+                api.rows.set(id, { ...api.rows.get(id)!, color: '#0000aa', seq: api.nextSeq++ });
+                await second.tab.applyServerRow(api.rows.get(id)!);
+                return result;
+            });
+            api.offline = false;
+            await vi.waitFor(async () => {
+                await first.tab.flush();
+                expect(await db.ops.count()).toBe(0);
+            });
+
+            await vi.waitFor(() => expect(second.tabStore.get('m1')?.color).toBe('#0000aa'));
+        } finally {
+            first.tab.stop();
+            second.tab.stop();
+        }
     });
 });
 

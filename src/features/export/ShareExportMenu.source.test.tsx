@@ -107,7 +107,9 @@ describe('ShareExportMenu', () => {
         expect(claimPdfExport).not.toHaveBeenCalled();
 
         finish(bytes);
-        await waitFor(() => expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
+        await waitFor(() =>
+            expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata', { userId: 'teacher-1' }),
+        );
         expect(loadDocumentBytes).toHaveBeenCalledWith(row(), expect.objectContaining({ userId: 'teacher-1' }));
         expect(claimPdfExport).toHaveBeenCalledWith(expect.anything(), DOC_ID, 'attempt');
         await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
@@ -179,7 +181,9 @@ describe('ShareExportMenu', () => {
         loadDocumentBytes.mockResolvedValue(bytes);
         render(<ShareExportMenu docId={DOC_ID} title="Sonata" />);
         await openAndExport(user);
-        await waitFor(() => expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
+        await waitFor(() =>
+            expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata', { userId: 'teacher-1' }),
+        );
         expect(fetchDocument).toHaveBeenCalledWith(DOC_ID);
     });
 
@@ -189,7 +193,9 @@ describe('ShareExportMenu', () => {
         getCachedPdf.mockResolvedValue({ bytes });
         render(<ShareExportMenu docId={DOC_ID} title="Sonata" />);
         await openAndExport(user);
-        await waitFor(() => expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata'));
+        await waitFor(() =>
+            expect(buildAnnotatedPdf).toHaveBeenCalledWith(DOC_ID, bytes, 'Sonata', { userId: 'teacher-1' }),
+        );
         expect(fetchDocument).not.toHaveBeenCalled();
     });
 

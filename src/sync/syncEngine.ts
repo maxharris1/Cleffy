@@ -599,9 +599,7 @@ export class SyncEngine {
                 work = store.reloadFromMirror(ids, { includeQueued: true });
                 break;
             case 'settled':
-                work = this.applyDeferred(ids).then((applied) =>
-                    store.reloadFromMirror(ids.filter((id) => !applied.has(id))),
-                );
+                work = this.settledElsewhere(ids);
                 break;
             default:
                 work = store.reloadFromMirror(ids).then(() => {
@@ -668,6 +666,35 @@ export class SyncEngine {
             this.applyHeld(rows, await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), queued));
         }
         return applied;
+    }
+
+    /**
+     * Another engine's push settled these marks. A row held back for one of
+     * them here may predate that push — a collaborator's change heard while
+     * the edit sat queued — and this engine cannot tell, since it did not
+     * see the push leave (the pusher drops those itself; see ackOp). Applied
+     * as it is, it would replace the edit the server now holds. So held rows
+     * are dropped, the mirror's copy (what the pusher sent) is drawn, and the
+     * server is asked how the marks stand now, which also covers a change
+     * made after the push. If it cannot answer, the echo or the next pull
+     * brings anything newer.
+     */
+    private async settledElsewhere(ids: readonly string[]): Promise<void> {
+        const { api, store, docId } = this.deps;
+        const held = ids.filter((id) => this.deferred.delete(id));
+        await store.reloadFromMirror(ids);
+        if (held.length === 0 || this.stopped) {
+            return;
+        }
+        const { data, error } = await api.fetchMany(docId, held);
+        if (error || !data || data.length === 0 || this.stopped) {
+            return;
+        }
+        const queued = await this.queuedIds();
+        if (this.stopped) {
+            return;
+        }
+        this.applyHeld(data, await store.applyRemoteBatch(data.map(fromServerRow), queued));
     }
 
     /** Defer the rows applyRemoteBatch held back for local intent. */

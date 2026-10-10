@@ -52,3 +52,15 @@ export const opOwnerFor = async (
     }
     return (op) => (op.userId === undefined ? legacyOurs : op.userId === userId);
 };
+
+/**
+ * Marks of a score with changes queued by an account other than `userId`.
+ * Their mirror rows hold that account's unsynced version, so nothing this
+ * account sees is drawn from them: not the viewer (AnnotationStore), not an
+ * export.
+ */
+export const foreignMarkIds = async (db: ScribblerDb, docId: string, userId: string | null): Promise<Set<string>> => {
+    const ops = await db.ops.where('docId').equals(docId).toArray();
+    const owns = await opOwnerFor(db, docId, userId, ops);
+    return new Set(ops.filter((op) => !owns(op)).map((op) => op.annotationId));
+};

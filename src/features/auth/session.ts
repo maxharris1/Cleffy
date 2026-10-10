@@ -162,17 +162,22 @@ export interface SignOutSyncResult {
  * at all — and then sign-out cannot clear it either.
  */
 export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): Promise<SignOutSyncResult> => {
-    const [{ getDb }, { drainCloudOutboxes, pendingCloudOpCount }, { createSupabaseAnnotationsApi }, snapshots] =
-        await Promise.all([
-            import('@/sync/db'),
-            import('@/sync/signOutSync'),
-            import('@/sync/syncEngine'),
-            import('@/features/viewer/history/snapshotService'),
-        ]);
+    const [
+        { getDb },
+        { drainCloudOutboxes, foreignCloudOpCount, pendingCloudOpCount },
+        { createSupabaseAnnotationsApi },
+        snapshots,
+    ] = await Promise.all([
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+        import('@/sync/syncEngine'),
+        import('@/features/viewer/history/snapshotService'),
+    ]);
     const db = getDb();
     let pending: number;
     let refused = 0;
     let foreign = 0;
+    let userId: string | null = null;
     try {
         pending = await pendingCloudOpCount(db);
     } catch {
@@ -181,7 +186,7 @@ export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): P
     try {
         const supabase = getSupabase();
         const { data } = await supabase.auth.getSession();
-        const userId = data.session?.user.id ?? null;
+        userId = data.session?.user.id ?? null;
         if (!userId) {
             return { pending, refused };
         }
@@ -208,6 +213,11 @@ export const syncBeforeSignOut = async (timeoutMs = SIGN_OUT_SYNC_TIMEOUT_MS): P
     } catch (err) {
         console.warn('Could not sync before sign-out', err);
         pending = await pendingCloudOpCount(db).catch(() => pending);
+        // The drain never got to say which of them are another account's.
+        const known = userId;
+        if (known && pending > 0) {
+            foreign = await foreignCloudOpCount(db, known).catch(() => foreign);
+        }
     }
     return { pending, refused, foreign: Math.min(foreign, pending) };
 };

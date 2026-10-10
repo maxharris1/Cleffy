@@ -1,7 +1,7 @@
 import { ensureDayStartingSnapshot } from '@/features/viewer/history/snapshotService';
 import { UndoStack, type UndoableOp, type UndoBatchHandle } from '@/features/viewer/ink/undoStack';
 import type { LocalAnnotation, PendingOp, ScribblerDb } from '@/sync/db';
-import { opOwnerFor } from '@/sync/opOwnership';
+import { foreignMarkIds } from '@/sync/opOwnership';
 import type { Annotation, AnnotationPayload } from '@/types/models';
 
 export type PageListener = (pageIndex: number) => void;
@@ -302,10 +302,8 @@ export class AnnotationStore {
     }
 
     /** Marks with queued changes that are not `author`'s (see `foreign`). */
-    private async foreignIds(): Promise<Set<string>> {
-        const ops = await this.db.ops.where('docId').equals(this.docId).toArray();
-        const owns = await opOwnerFor(this.db, this.docId, this.author, ops);
-        return new Set(ops.filter((op) => !owns(op)).map((op) => op.annotationId));
+    private foreignIds(): Promise<Set<string>> {
+        return foreignMarkIds(this.db, this.docId, this.author);
     }
 
     /** The author changed after hydration: hide and reveal marks to match. */

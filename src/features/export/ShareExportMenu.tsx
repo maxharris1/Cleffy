@@ -223,9 +223,10 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
         try {
             const source = await sourceFor(label);
             stage = 'export';
+            const userId = session?.user.id ?? null;
             const file = await (page === null
-                ? buildAnnotatedPdf(docId, source, title)
-                : buildAnnotatedPdf(docId, source, title, { pageIndex: page }));
+                ? buildAnnotatedPdf(docId, source, title, { userId })
+                : buildAnnotatedPdf(docId, source, title, { userId, pageIndex: page }));
             const claim = await claimPdfExport(session, localOnly ? null : docId, attempt);
             if (!claim.ok) {
                 if ('limit' in claim) {
@@ -289,7 +290,13 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
                             disabled={busy !== null}
                             onClick={() =>
                                 void runUnmetered('Exporting…', 'The export', (source) =>
-                                    exportAnnotatedPageImage(docId, source, focusedPageIndex, title),
+                                    exportAnnotatedPageImage(
+                                        docId,
+                                        source,
+                                        focusedPageIndex,
+                                        title,
+                                        session?.user.id ?? null,
+                                    ),
                                 )
                             }
                         />
