@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as SignOutSyncModule from '@/sync/signOutSync';
 import { getDb } from '@/sync/db';
 
 const signOutAuth = vi.fn(async () => ({ error: null }));
@@ -13,6 +14,17 @@ vi.mock('@/lib/supabase', () => ({
         },
     }),
 }));
+
+// Flipped on to make the pre-sign-out upload itself fail.
+const drainFailure = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('@/sync/signOutSync', async (importOriginal) => {
+    const actual = await importOriginal<typeof SignOutSyncModule>();
+    return {
+        ...actual,
+        drainCloudOutboxes: (...args: Parameters<typeof actual.drainCloudOutboxes>) =>
+            drainFailure.error ? Promise.reject(drainFailure.error) : actual.drainCloudOutboxes(...args),
+    };
+});
 
 import { signOut, syncBeforeSignOut } from '@/features/auth/session';
 import type { Annotation } from '@/types/models';
@@ -166,5 +178,27 @@ describe('syncBeforeSignOut', () => {
         expect(await syncBeforeSignOut(50)).toEqual({ pending: 1, refused: 0 });
         // Nothing was cleared by asking.
         expect(await getDb().ops.count()).toBe(2);
+    });
+
+    it('still says which changes are another account’s when the upload fails', async () => {
+        await seedAnnotationData();
+        await getDb().ops.add({
+            docId: CLOUD_DOC,
+            type: 'create',
+            annotationId: 'cloud-2',
+            annotation: mark('cloud-2', CLOUD_DOC),
+            queuedAt: 'x',
+            userId: 'user-1',
+        });
+        getSession.mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
+        drainFailure.error = new Error('boom');
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+            // cloud-1 predates PendingOp.userId on a score user-1 never cached.
+            expect(await syncBeforeSignOut(50)).toEqual({ pending: 2, refused: 0, foreign: 1 });
+        } finally {
+            drainFailure.error = null;
+            vi.restoreAllMocks();
+        }
     });
 });

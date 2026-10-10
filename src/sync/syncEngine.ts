@@ -2,6 +2,7 @@ import { takeRetryAfterHint } from '@/lib/retryAfter';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import type { AnnotationStore } from '@/sync/annotationStore';
 import type { PendingOp, PendingOpType, ScribblerDb } from '@/sync/db';
+import { opOwnerFor, type LegacyOwnerCache, type OpOwner } from '@/sync/opOwnership';
 import type { AnnotationInsert, AnnotationRow, AnnotationUpdate } from '@/types/database';
 import type { Annotation } from '@/types/models';
 
@@ -180,30 +181,44 @@ export const observeRejections = (observer: RejectionObserver): (() => void) => 
 };
 
 /**
- * Rows an engine rewrote in the Dexie mirror from server truth: reconcile
- * adopted the server's row, or a refusal rolled a change back. Every engine
- * renders through its own AnnotationStore, so without this the open viewer —
- * in another tab, or in this one when the background drain reached the score
- * first — keeps drawing the copy it loaded and calls it synced.
+ * What one engine tells the others on its document, in this tab and (over a
+ * BroadcastChannel) in the browser's other tabs. Every engine renders through
+ * its own AnnotationStore over the one Dexie mirror, so without these an open
+ * viewer keeps drawing the copy it loaded and calls it synced:
+ *
+ * - repair: rows rewritten in the mirror from server truth — reconcile
+ *   adopted the server's row, or a refusal rolled a change back — in another
+ *   tab, or in this one when the background drain reached the score first.
+ * - written: local edits, already in the mirror and queued. Another tab of the
+ *   same account on the score would otherwise not see them until they
+ *   uploaded, and often not even then: its pulls and broadcasts skip a row
+ *   while it has ops queued, and the outbox is shared.
+ * - settled: queued changes were accepted by the server, so the rows the other
+ *   engines held back meanwhile can be applied (see SyncEngine.deferred).
+ *
+ * A message without `kind` is a repair: that is what builds before it sent.
+ * Those builds read written and settled as repairs, which re-read rows that
+ * have nothing queued — harmless.
  */
-interface MirrorRepair {
+interface SyncMessage {
+    kind?: 'repair' | 'written' | 'settled';
     /** The Dexie database the rows live in; another one is not this device's mirror. */
     db: string;
     docId: string;
     annotationIds: string[];
     /** Set when the repair rolled back a refused change, so the viewer can say so. */
     rejection?: SyncRejection;
-    /** The engine that made it, which has already applied it. */
+    /** The engine that sent it, which has already applied it. */
     origin: string;
 }
 
 const SYNC_CHANNEL_NAME = 'cleffy-sync';
-const repairListeners = new Set<(repair: MirrorRepair) => void>();
+const repairListeners = new Set<(message: SyncMessage) => void>();
 let syncChannel: BroadcastChannel | null | undefined;
 
-const deliverRepair = (repair: MirrorRepair): void => {
+const deliverRepair = (message: SyncMessage): void => {
     for (const listener of [...repairListeners]) {
-        listener(repair);
+        listener(message);
     }
 };
 
@@ -216,7 +231,7 @@ const getSyncChannel = (): BroadcastChannel | null => {
     if (typeof BroadcastChannel !== 'undefined') {
         try {
             const channel = new BroadcastChannel(SYNC_CHANNEL_NAME);
-            channel.onmessage = (event: MessageEvent<MirrorRepair>) => deliverRepair(event.data);
+            channel.onmessage = (event: MessageEvent<SyncMessage>) => deliverRepair(event.data);
             // Node (tests) would otherwise keep the process alive for it.
             (channel as { unref?: () => void }).unref?.();
             syncChannel = channel;
@@ -227,11 +242,11 @@ const getSyncChannel = (): BroadcastChannel | null => {
     return syncChannel;
 };
 
-/** Tell every other engine on the document — this tab's and other tabs' — to re-read these rows. */
-const announceRepair = (repair: MirrorRepair): void => {
-    deliverRepair(repair);
+/** Tell every other engine on the document — this tab's and other tabs'. */
+const announceRepair = (message: SyncMessage): void => {
+    deliverRepair(message);
     try {
-        getSyncChannel()?.postMessage(repair);
+        getSyncChannel()?.postMessage(message);
     } catch {
         // Best effort: the next pull covers another tab that missed it.
     }
@@ -344,15 +359,13 @@ export const groupsToReconcile = (ops: PendingOp[], verified: ReadonlySet<number
 
 /** What to do with a mark's queued ops once its server row is known. */
 export type Reconciled =
-    /** Replace them with this one op. */
-    | { kind: 'send'; op: PendingOp }
-    /** Send them as queued, one by one. */
-    | { kind: 'keep' }
+    /** Replace them with these (one, or a revive and the edit behind it — see below). */
+    | { kind: 'send'; ops: PendingOp[] }
     /** Send nothing: the server already holds the outcome, or a newer change there wins. Adopt its row. */
     | { kind: 'adopt' };
 
 /**
- * Collapse one mark's queued ops (no create among them) to a single op that
+ * Collapse one mark's queued ops (no create among them) to the net change that
  * takes the server row as it is NOW to the state the user left the mark in —
  * or to nothing at all. Judged against the server rather than against what
  * the device last saw because either may have moved: a collaborator's edit,
@@ -363,11 +376,22 @@ export type Reconciled =
  * (or the tombstone a restore undoes) carries is this device's own delete; any
  * other instant is a collaborator's, made after the tombstone the restore
  * undoes, and wins over the restore — undo/redo replays the user's history, it
- * does not get to erase someone else's. It does not win over an edit made
- * after the restore, though: the user brought the mark back and went on
- * working on it, and device clocks cannot say whether that came before or
- * after the other delete. Those ops are sent as queued, and the user's
- * version stands, rather than the edit being dropped without a word.
+ * does not get to erase someone else's.
+ *
+ * It does not win over an edit made after the restore, though: the user
+ * brought the mark back and went on working on it, and device clocks cannot
+ * say whether that came before or after the other delete. Their version
+ * stands, rather than the edit being dropped without a word — and it must
+ * stand however the requests interleave, so this read does not decide it. The
+ * row can change between the read and the write (the collaborator's delete
+ * still on its way when the user reconnects), and a plain update, sent
+ * because the row looked live, would land on that tombstone and leave the
+ * edit erased. Such a mark is sent as a restore that carries the edit, so one
+ * row update revives it with the user's content whatever reached the row
+ * first, followed by the edit itself. The restore names no tombstone
+ * (baseDeletedAt), and the edit stays queued behind it, so if the send fails
+ * the next reconcile reaches the same verdict instead of mistaking the pair
+ * for an undo the server already holds.
  */
 export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Reconciled => {
     const first = ops[0];
@@ -377,22 +401,27 @@ export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Re
     }
     const finalLive = !last.annotation.deletedAt;
     const serverLive = server.deleted_at === null;
+    const netOp = (from: PendingOp, type: PendingOpType, extra: Partial<PendingOp> = {}): PendingOp => ({
+        opId: from.opId,
+        docId: first.docId,
+        annotationId: first.annotationId,
+        queuedAt: from.queuedAt,
+        type,
+        annotation: last.annotation,
+        ...(last.userId !== undefined ? { userId: last.userId } : {}),
+        ...extra,
+    });
     const net = (type: PendingOpType, extra: Partial<PendingOp> = {}): Reconciled => ({
         kind: 'send',
-        op: {
-            opId: first.opId,
-            docId: first.docId,
-            annotationId: first.annotationId,
-            queuedAt: first.queuedAt,
-            type,
-            annotation: last.annotation,
-            ...(last.userId !== undefined ? { userId: last.userId } : {}),
-            ...extra,
-        },
+        ops: [netOp(first, type, extra)],
     });
     if (!finalLive) {
         // Already erased on the server (by anyone): nothing left to say.
         return serverLive ? net('delete') : { kind: 'adopt' };
+    }
+    const restoredAt = ops.findIndex((op) => op.type === 'restore');
+    if (restoredAt >= 0 && ops.slice(restoredAt + 1).some((op) => op.type === 'update')) {
+        return { kind: 'send', ops: [netOp(first, 'restore'), netOp(last, 'update')] };
     }
     if (serverLive) {
         // Only edits change what a live mark looks like; a delete + restore
@@ -404,12 +433,7 @@ export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Re
         (first.type === 'restore' &&
             // Queued by a build that did not record the tombstone: restore, as it always did.
             (first.baseDeletedAt === undefined || sameInstant(first.baseDeletedAt, server.deleted_at)));
-    if (ours) {
-        return net('restore', { baseDeletedAt: server.deleted_at });
-    }
-    const restoredAt = ops.findIndex((op) => op.type === 'restore');
-    const editedAfterRestore = restoredAt >= 0 && ops.slice(restoredAt + 1).some((op) => op.type === 'update');
-    return editedAfterRestore ? { kind: 'keep' } : { kind: 'adopt' };
+    return ours ? net('restore', { baseDeletedAt: server.deleted_at }) : { kind: 'adopt' };
 };
 
 /**
@@ -448,10 +472,33 @@ export class SyncEngine {
      * per flush: a later flush re-checks, since the server may have moved.
      */
     private reconciled = new Set<number>();
-    /** Names this engine in the repairs it announces, so it skips its own. */
+    /**
+     * Which queued ops are the signed-in account's (opOwnerFor), as of the
+     * current drain pass. Only those are sent, rolled back or dropped here;
+     * another account's stay queued, untouched, for that account.
+     */
+    private owns: OpOwner = () => false;
+    private readonly legacyOwners: LegacyOwnerCache;
+    /**
+     * Server rows a pull or broadcast brought while their mark had ops queued
+     * on this device, newest per mark, with when they came (on `clock`).
+     * Applying one then would overwrite intent the server has not seen yet,
+     * so it waits until the mark's queue settles — this engine's ack, or
+     * another's (a settled message) — instead of being dropped: dropped, a
+     * collaborator's change that landed while an op was in flight stayed
+     * invisible until a reload, and a second tab of the same account, whose
+     * outbox this is too, never showed what the first one drew.
+     */
+    private deferred = new Map<string, { row: AnnotationRow; at: number }>();
+    private clock = 0;
+    /** `clock` when the last push left: a row held back before it is older than what it sent. */
+    private pushedAt = 0;
+    /** Marks whose queue this engine emptied during the current flush. */
+    private settled = new Set<string>();
+    /** Names this engine in the messages it sends, so it skips its own. */
     private readonly engineId = crypto.randomUUID();
     private releaseViewerLock: (() => void) | null = null;
-    private repairListener = (repair: MirrorRepair) => this.onRepair(repair);
+    private repairListener = (message: SyncMessage) => this.onMessage(message);
 
     constructor(
         private deps: {
@@ -474,11 +521,18 @@ export class SyncEngine {
              * again in the score's viewer or at sign-out, which say so.
              */
             onRefusalHeld?: (refusal: HeldRefusal) => void;
+            /** Shared answers for ops queued before PendingOp.userId existed (see opOwnerFor). */
+            legacyOwners?: LegacyOwnerCache;
         },
-    ) {}
+    ) {
+        this.legacyOwners = deps.legacyOwners ?? new Map();
+    }
 
     start(): void {
-        this.deps.store.setDirtyHook(() => this.requestFlush());
+        this.deps.store.setDirtyHook((ids) => {
+            this.announce('written', ids);
+            this.requestFlush();
+        });
         window.addEventListener('online', this.onlineListener);
         window.addEventListener('offline', this.offlineListener);
         activeEngines.set(this.deps.docId, this);
@@ -528,36 +582,142 @@ export class SyncEngine {
     }
 
     /**
-     * Another engine repaired rows of this document in the mirror (see
-     * MirrorRepair): draw them as they now are, and pass a refusal on to the
-     * viewer, which is the one that can tell the user.
+     * Another engine changed rows of this document (see SyncMessage): draw
+     * them as they now are, and pass a refusal on to the viewer, which is the
+     * one that can tell the user.
      */
-    private onRepair(repair: MirrorRepair): void {
+    private onMessage(message: SyncMessage): void {
         const { db, store, docId } = this.deps;
-        if (this.stopped || repair.origin === this.engineId || repair.docId !== docId || repair.db !== db.name) {
+        if (this.stopped || message.origin === this.engineId || message.docId !== docId || message.db !== db.name) {
             return;
         }
-        void store
-            .reloadFromMirror(repair.annotationIds)
-            .then(() => {
-                if (repair.rejection && !this.stopped) {
-                    this.deps.onRejected?.(repair.rejection);
-                }
-            })
-            .catch((err: unknown) => console.warn('Could not reload repaired marks', err));
+        const ids = message.annotationIds;
+        let work: Promise<void>;
+        switch (message.kind) {
+            case 'written':
+                // The mirror holds the device's newest intent for these, queued or not.
+                work = store.reloadFromMirror(ids, { includeQueued: true });
+                break;
+            case 'settled':
+                work = this.settledElsewhere(ids);
+                break;
+            default:
+                work = store.reloadFromMirror(ids).then(() => {
+                    if (message.rejection && !this.stopped) {
+                        this.deps.onRejected?.(message.rejection);
+                    }
+                });
+        }
+        void work.catch((err: unknown) => console.warn('Could not reload marks changed elsewhere', err));
     }
 
-    private announce(annotationIds: string[], rejection?: SyncRejection): void {
+    private announce(
+        kind: NonNullable<SyncMessage['kind']>,
+        annotationIds: readonly string[],
+        rejection?: SyncRejection,
+    ): void {
         if (annotationIds.length === 0) {
             return;
         }
         announceRepair({
+            kind,
             db: this.deps.db.name,
             docId: this.deps.docId,
-            annotationIds,
+            annotationIds: [...annotationIds],
             ...(rejection ? { rejection } : {}),
             origin: this.engineId,
         });
+    }
+
+    /** Hold back server rows the store skipped for local intent (see `deferred`). */
+    private defer(rows: readonly AnnotationRow[]): void {
+        for (const row of rows) {
+            const held = this.deferred.get(row.id);
+            if (!held || row.seq > held.row.seq) {
+                this.deferred.set(row.id, { row, at: ++this.clock });
+            }
+        }
+    }
+
+    /**
+     * Apply the rows held back for these marks that have nothing queued any
+     * more. Server-seq LWW still decides, so a held row older than what the
+     * store already shows changes nothing. Returns the marks it applied.
+     */
+    private async applyDeferred(ids: readonly string[]): Promise<Set<string>> {
+        const applied = new Set<string>();
+        if (this.stopped || !ids.some((id) => this.deferred.has(id))) {
+            return applied;
+        }
+        const queued = await this.queuedIds();
+        if (this.stopped) {
+            return applied;
+        }
+        const rows: AnnotationRow[] = [];
+        for (const id of ids) {
+            const held = this.deferred.get(id);
+            if (held && !queued.has(id)) {
+                this.deferred.delete(id);
+                rows.push(held.row);
+                applied.add(id);
+            }
+        }
+        if (rows.length > 0) {
+            this.applyHeld(rows, await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), queued));
+        }
+        return applied;
+    }
+
+    /**
+     * Another engine's push settled these marks. A row held back for one of
+     * them here may predate that push — a collaborator's change heard while
+     * the edit sat queued — and this engine cannot tell, since it did not
+     * see the push leave (the pusher drops those itself; see ackOp). Applied
+     * as it is, it would replace the edit the server now holds. So held rows
+     * are dropped, the mirror's copy (what the pusher sent) is drawn, and the
+     * server is asked how the marks stand now, which also covers a change
+     * made after the push. If it cannot answer, the echo or the next pull
+     * brings anything newer.
+     */
+    private async settledElsewhere(ids: readonly string[]): Promise<void> {
+        const { api, store, docId } = this.deps;
+        const held = ids.filter((id) => this.deferred.delete(id));
+        await store.reloadFromMirror(ids);
+        if (held.length === 0 || this.stopped) {
+            return;
+        }
+        const { data, error } = await api.fetchMany(docId, held);
+        if (error || !data || data.length === 0 || this.stopped) {
+            return;
+        }
+        const queued = await this.queuedIds();
+        if (this.stopped) {
+            return;
+        }
+        this.applyHeld(data, await store.applyRemoteBatch(data.map(fromServerRow), queued));
+    }
+
+    /** Defer the rows applyRemoteBatch held back for local intent. */
+    private applyHeld(rows: readonly AnnotationRow[], held: ReadonlySet<string>): void {
+        if (held.size > 0) {
+            this.defer(rows.filter((row) => held.has(row.id)));
+        }
+    }
+
+    /** Marks this flush settled: apply what was held back for them, and tell the other engines. */
+    private async finishSettled(): Promise<void> {
+        if (this.settled.size === 0) {
+            return;
+        }
+        const ids = [...this.settled];
+        this.settled.clear();
+        this.announce('settled', ids);
+        await this.applyDeferred(ids);
+    }
+
+    private async queuedIds(): Promise<Set<string>> {
+        const { db, docId } = this.deps;
+        return new Set((await db.ops.where('docId').equals(docId).toArray()).map((op) => op.annotationId));
     }
 
     /** Delay of the currently scheduled retry (ms), or null when none is pending. */
@@ -701,17 +861,26 @@ export class SyncEngine {
         } finally {
             this.flushing = false;
         }
+        await this.finishSettled();
     }
 
-    /** One pass over the outbox, under the document's outbox lock. */
+    /**
+     * One pass over the outbox, under the document's outbox lock. Only the
+     * signed-in account's ops: another account's changes queued on this
+     * device (an expired session, a guest who signed in to their own account)
+     * are not sent under this account's name. They stay for their own account
+     * to upload, and sign-out says so before it clears them.
+     */
     private async drain(): Promise<void> {
-        const { db, docId } = this.deps;
+        const { db, docId, getUserId } = this.deps;
         this.reconciled = new Set();
         for (;;) {
             if (this.stopped) {
                 return;
             }
-            const ops = await db.ops.where('docId').equals(docId).sortBy('opId');
+            const queued = await db.ops.where('docId').equals(docId).sortBy('opId');
+            this.owns = await opOwnerFor(db, docId, getUserId(), queued, this.legacyOwners);
+            const ops = queued.filter(this.owns);
             if (ops.length === 0) {
                 break;
             }
@@ -817,7 +986,7 @@ export class SyncEngine {
                 }
             }
         } finally {
-            this.announce(adopted);
+            this.announce('repair', adopted);
         }
         return true;
     }
@@ -833,21 +1002,16 @@ export class SyncEngine {
             return true;
         }
         const outcome = reconcileWithServer(group.ops, row);
-        if (outcome.kind === 'keep') {
-            opIds.forEach((id) => this.reconciled.add(id));
-            return true;
-        }
+        const kept = new Set(outcome.kind === 'send' ? outcome.ops.map((op) => op.opId as number) : []);
         const applied = await db.transaction('rw', db.ops, async () => {
             // Another tab may have drained (or rewritten) these meanwhile.
             const current = await db.ops.bulkGet(opIds);
             if (current.some((op) => !op)) {
                 return false;
             }
+            await db.ops.bulkDelete(opIds.filter((id) => !kept.has(id)));
             if (outcome.kind === 'send') {
-                await db.ops.bulkDelete(opIds.slice(1));
-                await db.ops.put(outcome.op);
-            } else {
-                await db.ops.bulkDelete(opIds);
+                await db.ops.bulkPut(outcome.ops);
             }
             return true;
         });
@@ -858,12 +1022,14 @@ export class SyncEngine {
             return true;
         }
         if (outcome.kind === 'send') {
-            this.reconciled.add(outcome.op.opId as number);
+            kept.forEach((id) => this.reconciled.add(id));
         } else if ((await this.queuedFor(group.annotationId)) === 0) {
             // Nothing to send: the server's row is how the mark stands.
-            // Pulls skipped it while ops were queued, so adopt it here.
+            // Pulls skipped it while ops were queued, so adopt it here —
+            // and anything newer that arrived during the read.
             await store.adoptServerRow(fromServerRow(row));
             adopted.push(group.annotationId);
+            await this.applyDeferred([group.annotationId]);
         }
         return true;
     }
@@ -892,6 +1058,13 @@ export class SyncEngine {
         if ((await this.queuedFor(op.annotationId)) === 0) {
             const createdBy = op.type === 'create' ? this.deps.getUserId() : null;
             await this.deps.store.markSynced(op.annotationId, createdBy);
+            // A row held back since before this push predates the change it
+            // just landed; one that came after may be its echo, or newer.
+            const held = this.deferred.get(op.annotationId);
+            if (held && held.at < this.pushedAt) {
+                this.deferred.delete(op.annotationId);
+            }
+            this.settled.add(op.annotationId);
         }
     }
 
@@ -953,18 +1126,23 @@ export class SyncEngine {
             // nothing local is left to apply on top of it.
             if ((await this.queuedFor(op.annotationId)) === 0) {
                 await store.adoptServerRow(fromServerRow(data));
+                await this.applyDeferred([op.annotationId]);
             }
         } else {
-            // No row this account can see: nothing queued for it can apply.
+            // No row this account can see: nothing it queued for it can
+            // apply. Another account's changes are that account's to settle.
             await db.ops
                 .where('docId')
                 .equals(docId)
-                .filter((o) => o.annotationId === op.annotationId)
+                .filter((o) => o.annotationId === op.annotationId && this.owns(o))
                 .delete();
-            await store.discardLocal(op.annotationId);
+            this.deferred.delete(op.annotationId);
+            if ((await this.queuedFor(op.annotationId)) === 0) {
+                await store.discardLocal(op.annotationId);
+            }
         }
         const rejection: SyncRejection = { annotationId: op.annotationId, opType: op.type, reason };
-        this.announce([op.annotationId], rejection);
+        this.announce('repair', [op.annotationId], rejection);
         this.deps.onRejected?.(rejection);
         for (const observer of rejectionObservers) {
             observer({ ...rejection, docId });
@@ -982,7 +1160,7 @@ export class SyncEngine {
             return;
         }
         const { db, docId } = this.deps;
-        const queued = await db.ops.where('docId').equals(docId).toArray();
+        const queued = (await db.ops.where('docId').equals(docId).toArray()).filter(this.owns);
         this.setStatus('error');
         this.deps.onHeld?.({ reason: 'archived', pendingMarks: new Set(queued.map((o) => o.annotationId)).size });
         this.scheduleRetry(MAX_BACKOFF_MS);
@@ -993,6 +1171,7 @@ export class SyncEngine {
         if (!head) {
             return { error: null, updatedIds: null };
         }
+        this.pushedAt = ++this.clock;
         if (head.type === 'create') {
             const userId = this.deps.getUserId();
             if (!userId) {
@@ -1055,20 +1234,35 @@ export class SyncEngine {
         return { error, updatedIds: updatedIds ? new Set(updatedIds) : null };
     }
 
+    /**
+     * Merge pulled or broadcast rows into the store, holding back (deferring)
+     * those it skipped for local intent. The mark's queue may have settled
+     * while that was being decided — its ack would then have found nothing
+     * held — so the held rows are looked at once more straight away.
+     */
+    private async applyRemote(rows: readonly AnnotationRow[], pendingIds: ReadonlySet<string>): Promise<void> {
+        const held = await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
+        if (held.size === 0 || this.stopped) {
+            return;
+        }
+        this.applyHeld(rows, held);
+        await this.applyDeferred([...held]);
+    }
+
     /** Apply one row fanned out via broadcast-from-database (M4). */
     async applyServerRow(row: AnnotationRow): Promise<void> {
-        const { db, store, docId } = this.deps;
+        const { db, docId } = this.deps;
         if (row.document_id !== docId || this.stopped) {
             return;
         }
-        const pendingIds = new Set((await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId));
+        const pendingIds = await this.queuedIds();
         // Re-checked after every await: stop() may have come in meanwhile
         // because this account lost the score, and the caller is purging its
         // local copy — nothing may be written back over that.
         if (this.stopped) {
             return;
         }
-        await store.applyRemoteBatch([fromServerRow(row)], pendingIds);
+        await this.applyRemote([row], pendingIds);
         const state = await db.syncState.get(docId);
         if (this.stopped) {
             return;
@@ -1084,7 +1278,7 @@ export class SyncEngine {
         }
         this.pulling = true;
         try {
-            const { db, api, store, docId } = this.deps;
+            const { db, api, docId } = this.deps;
             const state = await db.syncState.get(docId);
             let watermark = state?.watermarkSeq ?? 0;
             let after = Math.max(0, watermark - PULL_OVERLAP);
@@ -1111,13 +1305,11 @@ export class SyncEngine {
                 if (rows.length === 0) {
                     break;
                 }
-                const pendingIds = new Set(
-                    (await db.ops.where('docId').equals(docId).toArray()).map((o) => o.annotationId),
-                );
+                const pendingIds = await this.queuedIds();
                 if (this.stopped) {
                     return;
                 }
-                await store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
+                await this.applyRemote(rows, pendingIds);
                 const last = rows[rows.length - 1];
                 if (last) {
                     watermark = Math.max(watermark, last.seq);

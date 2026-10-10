@@ -38,10 +38,26 @@ export const cachedPdfSize = (bytes: CachedPdfBytes | undefined): number =>
  * Cache a document's bytes, returning whether they actually landed. Legacy
  * Blob rows are normalized on the way through, so any write path also
  * migrates a row that a pre-ArrayBuffer build left behind.
+ *
+ * A row passing to another account (fetchMyRole stamps whoever opens the
+ * score online) first hands the score's unstamped ops to the account it
+ * leaves. Those predate PendingOp.userId, and opOwnerFor counts them as the
+ * cache owner's: restamped as they were, they would become the next
+ * account's, and its viewer would upload them under its own name.
  */
 export const putCachedPdf = async (row: CachedPdf): Promise<boolean> => {
     try {
-        await getDb().pdfCache.put({ ...row, bytes: await readCachedPdfBytes(row.bytes) });
+        const db = getDb();
+        const bytes = await readCachedPdfBytes(row.bytes);
+        const previous = (await db.pdfCache.get(row.docId))?.userId;
+        if (previous !== undefined && previous !== row.userId) {
+            await db.ops
+                .where('docId')
+                .equals(row.docId)
+                .filter((op) => op.userId === undefined)
+                .modify({ userId: previous });
+        }
+        await db.pdfCache.put({ ...row, bytes });
         return true;
     } catch (err) {
         // Private browsing, a denied quota, evicted storage — all mean "no

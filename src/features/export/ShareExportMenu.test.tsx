@@ -255,6 +255,14 @@ describe('ShareExportMenu export allowance', () => {
         await user.click(screen.getByRole('menuitem', { name: /Send page 1 as photo/ }));
 
         await waitFor(() => expect(exportAnnotatedPageImage).toHaveBeenCalledTimes(1));
+        // Only what this account's viewer draws (see loadExportAnnotations).
+        expect(exportAnnotatedPageImage).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.anything(),
+            0,
+            expect.any(String),
+            teacher.user.id,
+        );
         expect(rpc).not.toHaveBeenCalled();
     });
 

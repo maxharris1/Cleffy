@@ -53,7 +53,14 @@ vi.mock('@/sync/db', () => {
             annotations: table({
                 where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }),
             }),
-            ops: table({ where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }) }),
+            ops: table({
+                where: () => ({
+                    equals: () => ({
+                        delete: () => Promise.resolve(0),
+                        filter: () => ({ modify: () => Promise.resolve(0) }),
+                    }),
+                }),
+            }),
             annotationSnapshots: table({
                 where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }),
             }),

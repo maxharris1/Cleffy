@@ -128,6 +128,12 @@ export interface PdfViewportProps {
     onStoreReady?: (store: AnnotationStore) => void;
     /** Present when play-along is available: playhead + tap-to-seek + loop tint. */
     playback?: PlaybackFeature;
+    /**
+     * The signed-in account, once known, whether or not the score syncs yet
+     * (a provisional offline open does not): whose queued marks are drawn.
+     * Defaults to sync.userId.
+     */
+    authorId?: string | null;
     /** Present for cloud documents: enables the sync engine + realtime channel. */
     sync?: {
         userId: string;
@@ -155,7 +161,7 @@ export interface PdfViewportProps {
  * The scrollable, zoomable, annotatable stack of PDF pages. Owns the gesture +
  * ink wiring and page virtualization. Remount (key) per document.
  */
-export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, sync }: PdfViewportProps) => {
+export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, authorId, sync }: PdfViewportProps) => {
     const { doc, pageSizes, status, error } = usePdf();
     const view = useViewerStore((s) => s.view);
     const pageColumns = useViewerStore((s) => s.pageColumns);
@@ -179,8 +185,15 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     );
 
     // Annotation store + canvas registry — stable per mounted document, safe to
-    // create during render (neither touches refs).
-    const [annotationStore] = useState(() => new AnnotationStore(getDb(), docId));
+    // create during render (neither touches refs). The author is set before
+    // the store hydrates, so a known account's queued marks are drawn from
+    // the first paint (see the setAuthor effect below).
+    const author = authorId !== undefined ? authorId : (sync?.userId ?? null);
+    const [annotationStore] = useState(() => {
+        const store = new AnnotationStore(getDb(), docId);
+        store.setAuthor(author);
+        return store;
+    });
     const [registry] = useState(() => new CanvasRegistry());
     const overlayMode = useSyncExternalStore(
         (cb) => annotationStore.subscribeMeta(cb),
@@ -246,12 +259,14 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const syncOnMembershipChanged = sync?.onMembershipChanged;
     const channelRef = useRef<DocRealtimeChannel | null>(null);
 
-    // Changes queued here are this account's: the background drain uploads
-    // only those (PendingOp.userId). ViewerPage lets a cloud score be edited
-    // only while it syncs, so the stamp is in place before the first stroke.
+    // Changes queued here are this account's: every engine uploads only those
+    // (PendingOp.userId), and the store draws no other account's queued marks
+    // — none at all until the session is known. ViewerPage lets a cloud score
+    // be edited only while it syncs, so the stamp is in place before the
+    // first stroke.
     useEffect(() => {
-        annotationStore.setAuthor(syncUserId ?? null);
-    }, [annotationStore, syncUserId]);
+        annotationStore.setAuthor(author);
+    }, [annotationStore, author]);
 
     // Track viewport size.
     useEffect(() => {

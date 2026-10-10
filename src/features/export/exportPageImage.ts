@@ -1,11 +1,10 @@
 import { getDocument } from 'pdfjs-dist';
 
+import { loadExportAnnotations } from '@/features/export/exportAnnotations';
 import { safeFileBase, shareOrDownloadFile } from '@/features/export/shareFile';
 import { drawAnnotation, StrokePathCache } from '@/features/viewer/ink/strokeRenderer';
 import { createPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import { pdfDocumentOptions } from '@/features/viewer/pdf/pdfDocumentOptions';
-import { getDb } from '@/sync/db';
-import type { Annotation } from '@/types/models';
 
 /** Target longest side for exported page photos (CSS/device-independent). */
 const EXPORT_MAX_SIDE = 2048;
@@ -19,8 +18,9 @@ export const exportAnnotatedPageImage = async (
     sourceBytes: ArrayBuffer,
     pageIndex: number,
     title: string,
+    userId: string | null,
 ): Promise<void> => {
-    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title);
+    const file = await buildAnnotatedPagePng(docId, sourceBytes, pageIndex, title, userId);
     await shareOrDownloadFile(file, file.name);
 };
 
@@ -29,11 +29,10 @@ export const buildAnnotatedPagePng = async (
     sourceBytes: ArrayBuffer,
     pageIndex: number,
     title: string,
+    /** The signed-in account: only the marks its viewer draws are baked in (see loadExportAnnotations). */
+    userId: string | null,
 ): Promise<File> => {
-    const rows = await getDb().annotations.where('docId').equals(docId).toArray();
-    const annotations: Annotation[] = rows
-        .filter((row) => !row.deletedAt && row.page === pageIndex)
-        .map(({ pending: _pending, ...a }) => a);
+    const annotations = await loadExportAnnotations(docId, userId, pageIndex);
 
     const worker = createPdfWorker();
     const loadingTask = getDocument({ data: sourceBytes.slice(0), worker, ...pdfDocumentOptions });

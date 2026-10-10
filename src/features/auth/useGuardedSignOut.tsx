@@ -15,7 +15,7 @@ export interface GuardedSignOut {
 const changes = (n: number) => (n === 1 ? '1 change' : `${n} changes`);
 
 /** Dialog copy for what the pre-sign-out upload left behind. */
-const describe = ({ pending, refused }: SignOutSyncResult): { title: string; body: string } => {
+const describe = ({ pending, refused, foreign = 0 }: SignOutSyncResult): { title: string; body: string } => {
     const refusedLine =
         refused > 0
             ? `${changes(refused)} to your marks ${refused === 1 ? 'was' : 'were'} refused by the server and could not be saved — you may no longer have permission to edit ${refused === 1 ? 'that score' : 'those scores'}. ${refused === 1 ? 'It has' : 'They have'} been undone.`
@@ -23,11 +23,21 @@ const describe = ({ pending, refused }: SignOutSyncResult): { title: string; bod
     if (pending === 0) {
         return { title: 'Some changes could not be saved', body: refusedLine };
     }
-    const them = pending === 1 ? 'it' : 'them';
-    const pendingLine = `You have ${pending === 1 ? '1 unsynced change' : `${pending} unsynced changes`} to your scores that could not be saved to your account. Signing out now deletes ${them} from this device for good. Stay signed in and reconnect to save ${them}.`;
+    // Another account's changes are never uploaded under this one, so
+    // reconnecting will not save them; only their own account could.
+    const own = pending - foreign;
+    const them = own === 1 ? 'it' : 'them';
+    const pendingLine =
+        own > 0
+            ? `You have ${own === 1 ? '1 unsynced change' : `${own} unsynced changes`} to your scores that could not be saved to your account. Signing out now deletes ${them} from this device for good. Stay signed in and reconnect to save ${them}.`
+            : '';
+    const foreignLine =
+        foreign > 0
+            ? `This device ${own > 0 ? 'also holds' : 'holds'} ${foreign === 1 ? '1 unsynced change' : `${foreign} unsynced changes`} made by another account that was signed in here. Only that account can save ${foreign === 1 ? 'it' : 'them'}; signing out deletes ${foreign === 1 ? 'it' : 'them'} from this device.`
+            : '';
     return {
         title: 'Sign out with unsynced changes?',
-        body: refusedLine ? `${pendingLine} ${refusedLine}` : pendingLine,
+        body: [pendingLine, foreignLine, refusedLine].filter(Boolean).join(' '),
     };
 };
 

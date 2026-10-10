@@ -59,10 +59,12 @@ const lastSync = vi.hoisted(() => ({
 vi.mock('@/features/viewer/PdfViewport', () => ({
     PdfViewport: ({
         readOnly,
+        authorId,
         sync,
         playback,
     }: {
         readOnly?: boolean;
+        authorId?: string | null;
         sync?: { onMembershipChanged?: () => void; onScoreAnalysis?: unknown } & NonNullable<typeof lastSync.current>;
         playback?: unknown;
     }) => {
@@ -72,6 +74,7 @@ vi.mock('@/features/viewer/PdfViewport', () => ({
             <div
                 data-testid="pdf-viewport"
                 data-readonly={String(Boolean(readOnly))}
+                data-author={authorId ?? ''}
                 data-sync={sync ? 'on' : 'off'}
                 data-playback={playback ? 'on' : 'off'}
                 data-analysis-broadcasts={sync?.onScoreAnalysis ? 'on' : 'off'}
@@ -245,6 +248,8 @@ describe('CloudViewer warm open', () => {
 
         await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'true'));
         expect(viewport()).toHaveAttribute('data-sync', 'off');
+        // Not syncing, but whose queued marks to draw is known all the same.
+        expect(viewport()).toHaveAttribute('data-author', 'teacher-1');
         expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
         expect(screen.queryByTestId('share-export-menu')).not.toBeInTheDocument();
         expect(screen.queryByTestId('import-scan-button')).not.toBeInTheDocument();

@@ -9,6 +9,7 @@ import type { Annotation } from '@/types/models';
 const DOC_A = 'c0ffee00-0000-4000-8000-00000000000a';
 const DOC_B = 'c0ffee00-0000-4000-8000-00000000000b';
 const LOCAL = 'local-feedfacecafebeef';
+const USER = 'user-1';
 
 const mark = (id: string, docId: string): Annotation => ({
     id,
@@ -69,7 +70,9 @@ const makeApi = (online: { value: boolean }): AnnotationsApi & { inserted: strin
 let db: ScribblerDb;
 
 const queue = async (docId: string, id: string) => {
-    await new AnnotationStore(db, docId).create(mark(id, docId));
+    const store = new AnnotationStore(db, docId);
+    store.setAuthor(USER);
+    await store.create(mark(id, docId));
 };
 
 beforeEach(() => {
@@ -85,10 +88,25 @@ describe('drainCloudOutboxes', () => {
 
         const result = await drainCloudOutboxes({ db, api, getUserId: () => 'user-1', timeoutMs: 2000 });
 
-        expect(result).toEqual({ pending: 0, refused: 0 });
+        expect(result).toEqual({ pending: 0, refused: 0, foreign: 0 });
         expect(api.inserted.sort()).toEqual(['a1', 'b1']);
         // Local scores are never uploaded and never counted.
         expect(await db.ops.where('docId').equals(LOCAL).count()).toBe(1);
+    });
+
+    it('never uploads another account’s queued changes, and counts them apart', async () => {
+        // Queued by an earlier session on this browser that ended without sign-out.
+        const earlier = new AnnotationStore(db, DOC_A);
+        earlier.setAuthor('user-other');
+        await earlier.create(mark('theirs', DOC_A));
+        await queue(DOC_A, 'mine');
+        const api = makeApi({ value: true });
+
+        const result = await drainCloudOutboxes({ db, api, getUserId: () => USER, timeoutMs: 2000 });
+
+        expect(api.inserted).toEqual(['mine']);
+        expect(result).toEqual({ pending: 1, refused: 0, foreign: 1 });
+        expect((await db.ops.toArray()).map((op) => op.annotationId)).toEqual(['theirs']);
     });
 
     it('reports what is still pending when the server cannot be reached', async () => {
@@ -102,7 +120,7 @@ describe('drainCloudOutboxes', () => {
             timeoutMs: 2000,
         });
 
-        expect(result).toEqual({ pending: 2, refused: 0 });
+        expect(result).toEqual({ pending: 2, refused: 0, foreign: 0 });
         expect(await pendingCloudOpCount(db)).toBe(2);
     });
 
@@ -141,7 +159,7 @@ describe('drainCloudOutboxes', () => {
 
         // The refused ops are gone (and the marks rolled back), so pending is
         // 0 — the refusal count is what makes sign-out tell the user.
-        expect(result).toEqual({ pending: 0, refused: 2 });
+        expect(result).toEqual({ pending: 0, refused: 2, foreign: 0 });
         expect(await db.annotations.get('a1')).toBeUndefined();
     });
 
@@ -168,7 +186,7 @@ describe('drainCloudOutboxes', () => {
 
         const result = await drainCloudOutboxes({ db, api, getUserId: () => 'user-1', timeoutMs: 2000 });
 
-        expect(result).toEqual({ pending: 0, refused: 1 });
+        expect(result).toEqual({ pending: 0, refused: 1, foreign: 0 });
         expect(viewerRejections).toEqual(['a1']);
         engine.stop();
     });

@@ -779,6 +779,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                         // Playhead, loop tint and tap-to-seek live only while
                         // the transport is on screen to drive them.
                         playback={playAlongEnabled && playAlongOpen ? playbackFeature : undefined}
+                        // Known before the score syncs (provisional): this
+                        // account's own queued marks are drawn meanwhile.
+                        authorId={resolvedUserId || null}
                         sync={
                             // Not while provisional: with no role there is
                             // nothing to sync under yet. A stored role syncs at
