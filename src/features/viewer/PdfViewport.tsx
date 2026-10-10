@@ -38,6 +38,7 @@ import { Toolbar } from '@/features/viewer/toolbar/Toolbar';
 import { features } from '@/lib/features';
 import { getSupabase } from '@/lib/supabase';
 import { peerColor } from '@/lib/colors';
+import { useLockedPageZoom } from '@/lib/viewportZoom';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { getDb } from '@/sync/db';
 import { DocRealtimeChannel } from '@/sync/realtimeChannel';
@@ -170,6 +171,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
     const [fingeringSel, setFingeringSel] = useState<FingeringSelection | null>(null);
     const textIntentHandled = useRef(false);
     const didFitRef = useRef(false);
+    // Pinch over the score is ours (GestureController); browser zoom stays on
+    // everywhere else in the app (lib/viewportZoom.ts).
+    useLockedPageZoom();
     /** Viewport the current view was last fitted/re-fitted for. */
     const fittedViewportRef = useRef<ViewportSize | null>(null);
 

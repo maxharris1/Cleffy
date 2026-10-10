@@ -39,7 +39,10 @@
     /* Semantic status colors — aliases of the stock scales. */
     --color-danger: var(--color-red-600);
     --color-warn: var(--color-amber-600);
-    --color-ok: var(--color-emerald-600);
+    /* 700, not 600: `text-ok` is small text on white (the pricing dialog's
+       "Two months free"), and emerald-600 there is 3.65:1, under WCAG AA's
+       4.5:1 (src/features/billing/statusColorContrast.test.ts). */
+    --color-ok: var(--color-emerald-700);
 }
 
 :root {
