@@ -39,7 +39,7 @@ the steps that need a human because no API exposes them — each one says why.
 | `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
 | Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
 | Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1) |
-| Supabase plan (realtime quota, connections, pausing)                   | ⚠️ **Free** — upgrade the org to Pro before launch (§10)                |
+| Supabase plan (realtime quota, connections, pausing)                   | ✅ **Pro** (org "Cleffy"); watch realtime usage after launch (§10)      |
 | QA round 3 migrations `20261010120200` … `20261010120302`              | ⏳ not applied on either project (release checklist)                    |
 
 ---
@@ -1311,28 +1311,24 @@ username; claiming the card clears them again for the name the student picks.
 Because the keys are HMAC'd, a lock cannot be lifted by hand from the table
 without the secret; use the reset.
 
-## 10. Realtime capacity — upgrade to Pro before launch
+## 10. Realtime capacity
 
-**The Supabase organisation ("Sail.io") is on the FREE plan.** `get_organization`
-over the Supabase MCP reported `plan: free` on 2026-10-10, for the org that holds
-both production and the `dev` branch. (The Spend Cap and branching mentioned
-elsewhere in this file read like paid features; the API says otherwise —
-confirm under Organization → Billing.) Free gives, per organisation:
+**The Supabase organisation "Cleffy" (`hgiyoueenqqdfhqgilsp`), which holds
+"Cleffy Main" (`jibgwgosihadbjgxdsfe`) and its `dev` branch, is on the Pro
+plan** (`get_organization` → `plan: pro`, checked 2026-10-10). An earlier note
+here said Free; that read the wrong organisation. Pro gives, per organisation:
 
-| Free plan              | Limit                                                                |
-| ---------------------- | -------------------------------------------------------------------- |
-| Realtime messages      | **2 M / month**, shared by production and `dev`                      |
-| Concurrent connections | **200** (one per open score tab; both topics share it)               |
-| Messages per second    | ~100 documented; the load test was cut off at about 25 drawing users |
-| Inactive projects      | **paused** after a week without activity — that would be cleffy.io   |
+| Pro plan               | Limit                                                                      |
+| ---------------------- | -------------------------------------------------------------------------- |
+| Realtime messages      | **5 M / month** included, then $2.50 per million; shared by prod and `dev` |
+| Concurrent connections | **500** (one per open score tab; both topics share it)                     |
+| Messages per second    | **500/s** (2,500/s with the Spend Cap off)                                 |
+| Inactive projects      | never paused                                                               |
 
-Pro raises these to 5 M messages a month (then $2.50 per million), 500
-connections and 500 messages/s (2,500/s with the Spend Cap off), and never
-pauses. Current figures: <https://supabase.com/docs/guides/realtime/limits>,
-<https://supabase.com/docs/guides/realtime/quotas>. **Recommendation: move the
-org to Pro before launch.** On Free the monthly quota alone runs out at roughly
-ten teachers giving a few lessons a week (estimate below), and the 200
-connections are shared by every open score in the product.
+Current figures: <https://supabase.com/docs/guides/realtime/limits>,
+<https://supabase.com/docs/guides/realtime/quotas>. The per-second limit is
+what the 25-person load test hit on `dev`; see below for how the client now
+copes.
 
 ### How Cleffy spends messages
 
@@ -1359,9 +1355,9 @@ measured in the load test).
 | Group of 25: same pattern, plus everyone's page turns             | **~175 k** |
 | Stress pattern: all 25 drawing a stroke every 2 s, the whole hour | ~5–6 M     |
 
-So 2 M a month is ~165 one-to-one lesson-hours or ~11 large-group ones, across
-the whole org including dev testing. On Pro the overage is about $0.03 per
-one-to-one lesson-hour and $0.45 per 25-person one.
+So the 5 M included each month is ~415 one-to-one lesson-hours or ~28
+large-group ones, across the whole org including dev testing; beyond that the
+overage is about $0.03 per one-to-one lesson-hour and $0.45 per 25-person one.
 
 The stress pattern also exceeds Pro's 500 messages/s (~1,500/s). The client now
 copes rather than breaking — see below — but sessions where everyone draws at
