@@ -47,6 +47,16 @@ export const GUEST_EMAIL_LIMITS = {
      */
     startPerRecipient: { limit: 3, windowMs: 60 * 60_000 },
     startPerRecipientDaily: { limit: 10, windowMs: 24 * 60 * 60_000 },
+    /**
+     * Every code mailed, from every guest, to every address. The limits above
+     * all move with something an attacker rotates for free (an IP, an
+     * anonymous sign-in, an address), and these mails share the Resend key,
+     * quota and domain reputation with password resets and sign-ups. Sized
+     * far above what real upgrades need; checked just before a send, so only
+     * a code about to go out spends it.
+     */
+    startGlobal: { limit: 60, windowMs: 60 * 60_000 },
+    startGlobalDaily: { limit: 300, windowMs: 24 * 60 * 60_000 },
     confirmPerIp: { limit: 30, windowMs: 15 * 60_000 },
     confirmPerUser: { limit: 10, windowMs: 15 * 60_000 },
 } as const;
@@ -54,9 +64,38 @@ export const GUEST_EMAIL_LIMITS = {
 /** Trimmed and lower-cased: the form stored, compared and mailed. */
 export const normalizeGuestEmail = (raw: string): string => raw.trim().toLowerCase();
 
-/** Shape only — the code that arrives (or not) is the real check. */
+/**
+ * badoux/checkmail's ValidateFormat, the rule GoTrue's validateEmail applies
+ * when guest-email-confirm attaches the address: an ASCII local part, and
+ * letter-digit-hyphen labels with no leading, trailing or empty one.
+ */
+const GOTRUE_EMAIL_FORMAT =
+    /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+/**
+ * An address the attach can take — GoTrue's own format rule, plus a dot in the
+ * domain — checked before anything is mailed. A looser test let through
+ * strings GoTrue refuses ('Name <a@b.com>', '"a"@b.com', 'a@b.com.',
+ * non-ASCII): each got a code, mailed verbatim (Resend parses the `Name <…>`
+ * form) under a per-recipient allowance of its own spelling, and then could
+ * never attach. Shape only beyond that: the code that arrives (or not) is the
+ * real check.
+ */
 export const isPlausibleGuestEmail = (email: string): boolean =>
-    email.length >= 3 && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    email.length >= 3 && email.length <= 254 && GOTRUE_EMAIL_FORMAT.test(email) && /@.+\./.test(email);
+
+/**
+ * The mailbox an address reaches, for counting mail to it: the normalized
+ * address with any `+tag` dropped, which most providers deliver to the same
+ * inbox. Only ever a rate-limit key — what is mailed and attached is the
+ * address as typed (normalized).
+ */
+export const guestEmailMailbox = (email: string): string => {
+    const at = email.lastIndexOf('@');
+    const local = email.slice(0, at);
+    const plus = local.indexOf('+');
+    return plus > 0 ? `${local.slice(0, plus)}${email.slice(at)}` : email;
+};
 
 /** Digits only: spaces or a dash typed into the field are not a way to fail. */
 export const normalizeGuestEmailCode = (raw: string): string => raw.replace(/[\s-]/g, '');
@@ -97,9 +136,12 @@ const hmacHex = async (secret: string, message: string): Promise<string> => {
 export const hashGuestEmailCode = (secret: string, userId: string, email: string, code: string): Promise<string> =>
     hmacHex(secret, `guest-email-code\u0000${userId}\u0000${email}\u0000${code}`);
 
-/** The per-recipient rate-limit key: edge_rate_buckets never holds an address. */
+/**
+ * The per-recipient rate-limit key, of the mailbox (guestEmailMailbox) rather
+ * than the spelling: edge_rate_buckets never holds an address.
+ */
 export const recipientRateKey = async (secret: string, email: string, window = 'hour'): Promise<string> =>
-    `guest-email-to${window === 'hour' ? '' : `-${window}`}:${(await hmacHex(secret, `guest-email-recipient\u0000${email}`)).slice(0, 40)}`;
+    `guest-email-to${window === 'hour' ? '' : `-${window}`}:${(await hmacHex(secret, `guest-email-recipient\u0000${guestEmailMailbox(email)}`)).slice(0, 40)}`;
 
 export interface GuestEmailMessage {
     subject: string;
@@ -189,7 +231,7 @@ export interface GuestEmailConfirmDeps extends CommonDeps {
         userId: string,
         email: string,
         password: string,
-    ) => Promise<'ok' | 'email_taken' | 'weak_password' | 'failed'>;
+    ) => Promise<'ok' | 'email_taken' | 'weak_password' | 'invalid_email' | 'failed'>;
     deletePending: (userId: string) => Promise<void>;
     password: Pick<typeof PasswordPolicy, 'passwordProblem' | 'passwordProblemMessage'>;
 }
@@ -296,6 +338,20 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         const recipientGate = await deps.checkRateLimit(await recipientRateKey(secret, email, window), limit, windowMs);
         if (!recipientGate.ok) {
             return tooMany(json, recipientGate.retryAfterSec);
+        }
+    }
+
+    // And the project's: past it, nobody's code goes out until the window
+    // moves on. Said as the mail being unavailable — it is not this guest's
+    // doing, and trying again sooner cannot help.
+    for (const [key, { limit, windowMs }] of [
+        ['guest-email-start:global', GUEST_EMAIL_LIMITS.startGlobal],
+        ['guest-email-start:global-day', GUEST_EMAIL_LIMITS.startGlobalDaily],
+    ] as const) {
+        const globalGate = await deps.checkRateLimit(key, limit, windowMs);
+        if (!globalGate.ok) {
+            deps.logError(`${key}: the ceiling on guest code mail was reached`);
+            return json({ ...GUEST_EMAIL_ERRORS.unavailable, retryAfterSec: globalGate.retryAfterSec }, 503);
         }
     }
 
@@ -413,6 +469,12 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
             // GoTrue's policy is stricter than passwordPolicy.ts thought (or the
             // password is breached): the code stays good for another password.
             return json({ error: 'That password was refused. Choose a different one.', code: 'weak_password' }, 422);
+        case 'invalid_email':
+            // GoTrue will never take this address, whatever is retried: say so
+            // and withdraw the code. (start refuses such an address now; a code
+            // mailed before it did can still arrive here.)
+            await deps.deletePending(userId);
+            return json(GUEST_EMAIL_ERRORS.invalidEmail, 422);
         default:
             // The same race, lost inside GoTrue: its message says only "Database error".
             if ((await deps.emailTaken(email)) === true) {

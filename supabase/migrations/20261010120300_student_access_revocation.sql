@@ -12,33 +12,56 @@
 -- Three parts, all keyed on the managed_students row, so nothing changes for an
 -- account that is not a provisioned student:
 --
---  1. student_access_revoked() -- is the CALLER a student whose access is gone:
---     their roster row archived, or the session their JWT names no longer in
---     auth.sessions (ended by a reset, an archive or a global sign-out). The
---     JWT stays cryptographically valid after either; the session row is what
---     says whether it still stands for a sign-in.
+--  1. student_access_revoked() -- is the CALLER a student whose access the
+--     teacher withdrew: their roster row archived, or their access token issued
+--     before the teacher last ended their sessions (managed_students.
+--     access_revoked_at, stamped by end_student_sessions on a reset or an
+--     archive). The JWT stays cryptographically valid after either; its `iat`
+--     against that stamp is what says whether it predates the teacher's action.
+--
+--     NOT "the session the JWT names is gone". GoTrue deletes every session of
+--     an account on a global sign-out -- supabase-js's default scope, which is
+--     how the app signs out -- and on any admin password change, so that test
+--     also cut off a student's other devices the moment they signed out on one:
+--     a stroke drawn there was refused and rolled back, and the queued ones
+--     with it. Before this migration that device kept working until its token
+--     expired, and that is what a sign-out the student chose still does.
 --  2. document_role() consults it, so every policy, storage rule and realtime
 --     topic check built on document_role() refuses such a caller on the very
 --     next request. The student branches of assignments_select and
 --     practice_notes_select (which do not go through document_role) do too.
 --  3. end_student_sessions(student) -- service role only, called by
---     student-provision on archive and reset: deletes the student's sessions
---     (their refresh tokens cascade), so no device can refresh its way back in,
---     and sends the existing membership hint on every score the student is a
---     member of, so an open viewer re-checks its role at once instead of on its
---     next write.
+--     student-provision on archive and reset: stamps access_revoked_at, deletes
+--     the student's sessions (their refresh tokens cascade), so no device can
+--     refresh its way back in, and sends the existing membership hint on every
+--     score the student is a member of, so an open viewer re-checks its role at
+--     once instead of on its next write.
 --
 -- Hosted Supabase lets the migration owner (postgres) read and delete
--- auth.sessions / auth.refresh_tokens; the two functions that touch them are
--- plpgsql so creating them does not depend on those tables existing (the local
+-- auth.sessions / auth.refresh_tokens; the function that touches them is
+-- plpgsql so creating it does not depend on those tables existing (the local
 -- SQL harness stubs them).
+
+-- ---------------------------------------------------------------------------
+-- 0. When the teacher last withdrew the student's sign-ins
+-- ---------------------------------------------------------------------------
+-- Written by end_student_sessions() alone and read by student_access_revoked()
+-- alone, both SECURITY DEFINER. Not added to authenticated's column grant on
+-- managed_students (20260826194426_roster.sql): no client needs it.
+alter table public.managed_students
+add column if not exists access_revoked_at timestamptz;
+
+comment on column public.managed_students.access_revoked_at is
+'When the teacher last ended this student''s sessions (reset or archive). An access token issued before it no longer reaches anything.';
 
 -- ---------------------------------------------------------------------------
 -- 1. Has the caller's access as a student been withdrawn?
 -- ---------------------------------------------------------------------------
 -- About the caller only (auth.uid() / auth.jwt()), so granting it to
 -- authenticated tells nobody anything about anyone else: the student app asks
--- it to tell "nothing assigned" from "your teacher archived you".
+-- it to tell "nothing assigned" from "your teacher archived you", and the sync
+-- engine to tell a refusal of a change from a sign-in the teacher ended (the
+-- first rolls the change back; the second keeps it for the next sign-in).
 --
 -- False for every account with no roster row except a JWT that still calls
 -- itself a student (app_metadata is admin-set): a student whose row is gone was
@@ -48,13 +71,14 @@ set search_path = public as $$
 declare
     v_uid uuid := auth.uid();
     v_archived_at timestamptz;
-    v_session text;
+    v_revoked_at timestamptz;
+    v_iat text;
 begin
     if v_uid is null then
         return false;
     end if;
 
-    select ms.archived_at into v_archived_at
+    select ms.archived_at, ms.access_revoked_at into v_archived_at, v_revoked_at
     from public.managed_students ms
     where ms.student_user_id = v_uid;
 
@@ -66,19 +90,21 @@ begin
         return true;
     end if;
 
-    -- Every GoTrue access token names its session. A student token without a
-    -- readable one cannot be matched to a live sign-in, so it is not one.
-    v_session := auth.jwt () ->> 'session_id';
-    if v_session is null or v_session !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    if v_revoked_at is null then
+        return false;
+    end if;
+
+    -- Every GoTrue access token carries `iat` (whole seconds). One without a
+    -- readable one cannot be placed after the teacher's action, so it is not.
+    -- `<` on whole seconds refuses a token issued in the same second as the
+    -- stamp, either side of it: nothing legitimate is, since a sign-in after a
+    -- reset needs the new code the reset only hands out once it has finished.
+    v_iat := auth.jwt () ->> 'iat';
+    if v_iat is null or v_iat !~ '^[0-9]{1,12}(\.[0-9]+)?$' then
         return true;
     end if;
 
-    return not exists (
-        select 1
-        from auth.sessions s
-        where s.id = v_session::uuid
-          and s.user_id = v_uid
-    );
+    return to_timestamp(v_iat::double precision) < v_revoked_at;
 end;
 $$;
 
@@ -163,6 +189,15 @@ begin
     where user_id = p_student;
 
     get diagnostics v_ended = row_count;
+
+    -- The revocation itself: every access token issued before this moment is
+    -- refused from the next request on (student_access_revoked). The clock,
+    -- not now(), and after the deletes: a refresh that committed while they
+    -- waited on its token's lock minted an access token before this, not
+    -- after the transaction began.
+    update public.managed_students
+    set access_revoked_at = clock_timestamp()
+    where student_user_id = p_student;
 
     -- The same hint document_members_broadcast sends when a membership ends,
     -- and read the same way: the viewer re-reads its role over PostgREST, where

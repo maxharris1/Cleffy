@@ -75,7 +75,7 @@ GitHub integration on the merge (migrations before functions):
 | `20261009120101_entitlements_cancel_at_period_end`       | qa/billing      | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                                                                                                                                                                                 |
 | `20261009120200_share_link_errors_and_peek`              | qa/sharing      | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                                                                                                                                                                                   |
 | `20261010120200_guest_email_verification`                | qa3/shell-auth  | **Before** `guest-email-start` / `guest-email-confirm` (start answers `503 email_unavailable` without it), and they before the bundle. Until it is applied a guest can attach any address through `PUT /auth/v1/user` (QA round 3 below).                                                                                                              |
-| `20261010120300_student_access_revocation`               | qa3/roster-data | **Before** `student-provision`: a reset calls its `end_student_sessions()` and, without it, fails with a 502 after scrambling the password. Old bundles are unaffected.                                                                                                                                                                                |
+| `20261010120300_student_access_revocation`               | qa3/roster-data | **Before** `student-provision`: a reset calls its `end_student_sessions()` and, without it, fails with a 502 after scrambling the password. Before the bundle too, or a student's refused change is retried, not rolled back. Old bundles are unaffected.                                                                                              |
 | `20261010120301_annotation_payload_shape`                | qa3/roster-data | **With the bundle**: the new client keeps text notes and imported marks inside the checked bounds; an old bundle's over-long note or far-off-page imported mark is refused (`23514`) and rolled back to server truth. VALIDATE fails the migration if a stored row breaks the rules (production's and dev's rows were checked read-only and all pass). |
 | `20261010120302_library_hides_revoked_student_scores`    | qa3/roster-data | After `20261010120300` (it calls `student_access_revoked()`); any order against the bundle.                                                                                                                                                                                                                                                            |
 
@@ -128,9 +128,22 @@ it — the merge deploys all of them).
   in. An address that already has an account is answered "sign in instead",
   nothing more (asked again at confirm, for an address registered in the
   meantime). Limits (edge_rate_buckets): start 5/h per guest, 20/h per IP,
-  and per recipient address 3/h and 10/day, spent only when a code is
-  actually mailed; confirm 10 per 15 min per guest, 30 per IP. Flow and
-  reasons: `supabase/functions/_shared/guestEmail.ts`.
+  per recipient mailbox 3/h and 10/day (an address's `+tag` counts as the
+  same mailbox), and for the whole project 60/h and 300/day, all spent only
+  when a code is actually mailed; confirm 10 per 15 min per guest, 30 per IP.
+  The project ceiling exists because the other limits move with things an
+  attacker rotates for free (IPs, anonymous sign-ins, addresses) while every
+  code goes out on the Resend key and domain that carry password resets and
+  sign-ups: **check it against the Resend plan's daily quota** (past it, start
+  answers `503 email_unavailable` to everyone until the window moves on, and
+  `guest-email-start:global…` is logged). An address is checked against the
+  rule GoTrue itself applies at the attach (badoux/checkmail: ASCII local
+  part, letter-digit-hyphen labels, plus a dot in the domain) before anything
+  is mailed, so `Name <a@b.com>`, quoted or trailing-dot forms and non-ASCII
+  addresses are refused up front instead of mailed a code that can never
+  attach; confirm withdraws the code if GoTrue still refuses one
+  (`validation_failed` → `422 invalid_email`). Flow and reasons:
+  `supabase/functions/_shared/guestEmail.ts`.
 - **The old path is closed on the server, not just in the app.** Removing the
   `updateUser({ email })` call from the banner does not stop a guest making
   it: GoTrue's `PUT /auth/v1/user` takes it from anyone with their own guest
@@ -207,18 +220,40 @@ throwaway>' })` from the console — it must fail (500), and the guest
   `20261010120300`, `20261010120302`, `student-provision` with
   `_shared/studentSessions.ts`). `document_role()` — so every policy, storage
   rule and realtime topic check built on it — and the library RPCs refuse a
-  roster student whose row is archived or whose token names a session no
-  longer in `auth.sessions`. `end_student_sessions()` (service role only)
-  deletes the student's sessions and refresh tokens and sends the membership
-  hint; `student-provision` calls it on reset (a failure stops the reset) and
-  on archive (a failure is logged, the archive stands). The migration owner
-  must be able to delete from `auth.sessions` / `auth.refresh_tokens`, which
-  hosted Supabase allows. Known limit: a realtime channel the student had
-  already joined stays authorized until the socket's token expires (Realtime
-  authorizes at join); the hint makes the app leave the score, so only a
-  tampered client keeps receiving broadcasts. Nothing changes for accounts
-  that are not roster students — including a guest whose sessions
-  `guest-email-confirm` just ended (`tests/sql/qa3_cross_branch.sql`).
+  roster student whose row is archived, or whose access token was issued
+  (`iat`) before `managed_students.access_revoked_at`.
+  `end_student_sessions()` (service role only) stamps that column, deletes
+  the student's sessions and refresh tokens (so nothing can mint a newer
+  token) and sends the membership hint; `student-provision` calls it on
+  reset (a failure stops the reset) and on archive (a failure is logged, the
+  archive stands). **Only the teacher's action revokes.** A first version
+  refused any student token whose session row was gone, and GoTrue deletes
+  every session of an account on a global sign-out (supabase-js's default,
+  which the app uses) and on any admin password change: a student signing
+  out on a school iPad would have had their phone's marks refused and rolled
+  back. Now the student's own sign-out elsewhere leaves their other devices
+  working until those tokens expire, as before this release
+  (`tests/sql/student_access_revocation.sql` proves both). The migration
+  owner must be able to delete from `auth.sessions` /
+  `auth.refresh_tokens`, which hosted Supabase allows. Known limit: a
+  realtime channel the student had already joined stays authorized until
+  the socket's token expires (Realtime authorizes at join); the hint makes
+  the app leave the score, so only a tampered client keeps receiving
+  broadcasts. Nothing changes for accounts that are not roster students —
+  including a guest whose sessions `guest-email-confirm` just ended
+  (`tests/sql/qa3_cross_branch.sql`).
+- **A student signed out by their teacher keeps their unsynced marks** (client).
+  When the server says the sign-in was ended (an archive or a reset), the
+  student app signs out locally and keeps the device's queued changes and
+  mirror, every op stamped with the student's account, instead of the usual
+  sign-out's clear: no other account on the device sends or draws them, and
+  they upload when the same student signs in there again (after a reset with
+  the new code; after an archive once restored). The sign-in page says how
+  many were kept. The sync engine likewise holds, rather than rolls back, a
+  change refused under an ended sign-in, and the open viewer signs out the
+  same way instead of purging the score. Only a student whose account is gone
+  altogether (deleted with their teacher) is cleared as before. This makes
+  the roster's "annotations … all stay" true for marks still on the device.
 - **The server checks mark payloads and colours** (`20261010120301`): CHECK
   constraints `annotations_payload_shape` and `annotations_color_hex` on every
   write path (plain writes and both batch RPCs). Ship it with the bundle (table
@@ -240,7 +275,13 @@ throwaway>' })` from the console — it must fail (500), and the guest
   finished file becomes the offline copy. It needs Storage to answer a signed
   URL with a readable `Content-Length` and Range with `206` — checked in step
   2; without them the open waits for the whole file as before, and the
-  console says so. Pen-up no longer repaints every mark on the page.
+  console says so. Pen-up no longer repaints every mark on the page. An export
+  started while a first open is still streaming downloads the file itself
+  (it is not in the cache yet) and now stores the viewer's role with it, and
+  a stream that finishes after such an export fills in a missing role rather
+  than skipping the row: before, closing the viewer then left an offline copy
+  that opened view-only. (The export still downloads the file a second time
+  meanwhile; waiting for the stream instead is a follow-up.)
 - **IMSLP display** (imslp): search snippets decode doubly escaped entities,
   and `{{Flat}}` / `{{Sharp}}` / `{{Natural}}` render as ♭ ♯ ♮ in snippets and
   edition part names. The code is in `_shared/search.ts` and
@@ -305,7 +346,7 @@ to refund (comment at the end of `20261007120300`).
    `tests/sql/annotation_payload_shape.sql` and
    `tests/sql/qa3_cross_branch.sql`. On 2026-10-10 every file passed on a
    local Postgres 16 with all 55 migrations replayed (catalogs included) and
-   GoTrue's `supabase_auth_admin` role present: 53/53, 32/32, 57/57 and 12/12,
+   GoTrue's `supabase_auth_admin` role present: 53/53, 44/44, 57/57 and 12/12,
    and the earlier files 113/113, 37/37, 35/35, 26/26 and 94/94. Not yet run
    on the dev branch.
    Then the out-of-order webhook check, in the Stripe sandbox against the dev
@@ -433,10 +474,15 @@ to refund (comment at the end of `20261007120300`).
     not refused.
     QA round 3 (the guest-email smoke is in its own section above):
     - Roster: open an assigned score as a student, then archive the student
-      from the teacher's roster — without a reload the open score says it is
-      no longer available, and the assignment list signs the student out and
-      says why (at once on focus, else within a minute). Restore, sign in
-      again on two devices, reset the code: both lose access the same way.
+      from the teacher's roster — without a reload the open score signs the
+      student out and the sign-in page says why; the assignment list does the
+      same (at once on focus, else within a minute). Restore, sign in again
+      on two devices, reset the code: both lose access the same way. Then
+      the other direction: sign in on two devices, draw a mark offline on
+      device B, sign out on device A, reconnect B — the mark uploads and B
+      keeps working (until its token expires). And a reset with a mark
+      queued offline on B: B's sign-in page says one change is kept; after
+      claiming the new code and signing in on B, the mark is on the score.
     - Two tabs of one account on one score: recolour a mark offline in tab
       1, have a collaborator recolour it meanwhile, reconnect tab 1. Tab 2
       goes straight to tab 1's colour and never shows the collaborator's.

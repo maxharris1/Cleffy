@@ -249,6 +249,8 @@ export const PRIVACY_POLICY: LegalDocument = {
                     'For a student account we hold only what the teacher enters (a name and, optionally, the student’s or a parent’s email address), the username and password the student chooses, and the student’s work on the scores assigned to them.',
                     'Student accounts never pay and are never shown advertising.',
                     `A student account is managed by the teacher who created it. To have one deleted, ask the teacher, or contact us at ${contactEmail}. When a teacher deletes their own account, the student accounts they created are deleted too.`,
+                    // session.ts signOutKeepingChanges(): the outbox stays, stamped with the student.
+                    'When a teacher archives a student or resets their access, the student is signed out on every device. Markings the student made that had not finished uploading stay on that device, where no other account can see them, and upload the next time the student signs in there.',
                 ),
             ],
         },

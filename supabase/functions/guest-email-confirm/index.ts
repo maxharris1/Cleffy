@@ -67,6 +67,12 @@ Deno.serve((req) =>
             if (code === 'weak_password') {
                 return 'weak_password';
             }
+            // validateEmail's refusal (badoux/checkmail, or over 255 bytes).
+            // The password's own validation_failed (over 72 bytes) cannot
+            // happen: passwordProblem refused it before the code was checked.
+            if (code === 'validation_failed' && /email/i.test(error.message)) {
+                return 'invalid_email';
+            }
             console.error(`could not attach the email for ${userId}: ${error.message}`);
             return 'failed';
         },

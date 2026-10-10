@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
 import { LegalLinks } from '@/features/legal/LegalLinks';
+import { keptChangesNotice } from '@/features/student/keptChangesNotice';
 import { loginStudent } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -36,9 +37,9 @@ export const StudentLoginPage = () => {
 };
 
 /**
- * Said when the assignments page signed a student out because their teacher
- * archived them or reset their access (or the account is gone): without it the
- * student lands back here with no idea why.
+ * Said when the app signed a student out because their teacher archived them
+ * or reset their access (or the account is gone): without it the student lands
+ * back here with no idea why.
  */
 export const SIGNED_OUT_BY_TEACHER =
     'You were signed out because your teacher changed your access. Ask your teacher if you need a new setup code.';
@@ -46,7 +47,9 @@ export const SIGNED_OUT_BY_TEACHER =
 const CredentialEntry = () => {
     const navigate = useNavigate();
     const location = useLocation();
-    const signedOutByTeacher = (location.state as { signedOutByTeacher?: unknown } | null)?.signedOutByTeacher === true;
+    const state = location.state as { signedOutByTeacher?: unknown; keptChanges?: unknown } | null;
+    const signedOutByTeacher = state?.signedOutByTeacher === true;
+    const keptChanges = typeof state?.keptChanges === 'number' ? state.keptChanges : 0;
     const [identifier, setIdentifier] = useState('');
     const [password, setPassword] = useState('');
     const [busy, setBusy] = useState(false);
@@ -77,6 +80,7 @@ const CredentialEntry = () => {
             {signedOutByTeacher && !error ? (
                 <p className="mb-4 text-sm text-amber-800" role="status">
                     {SIGNED_OUT_BY_TEACHER}
+                    {keptChanges > 0 ? ` ${keptChangesNotice(keptChanges)}` : null}
                 </p>
             ) : null}
             <form onSubmit={(e) => void submit(e)}>

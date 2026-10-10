@@ -13,6 +13,7 @@ import {
     handleGuestEmailConfirm,
     handleGuestEmailStart,
     hashGuestEmailCode,
+    isPlausibleGuestEmail,
     recipientRateKey,
     type CodeCheck,
     type GuestCaller,
@@ -120,6 +121,8 @@ describe('guest-email-start', () => {
             'taken:ada@example.com',
             'rate:guest-email-to:' + (await recipientRateKey(SECRET, 'ada@example.com')).split(':')[1],
             'rate:guest-email-to-day:' + (await recipientRateKey(SECRET, 'ada@example.com', 'day')).split(':')[1],
+            'rate:guest-email-start:global',
+            'rate:guest-email-start:global-day',
             'save',
             'send',
         ]);
@@ -155,6 +158,49 @@ describe('guest-email-start', () => {
         const response = await handleGuestEmailStart(post({ email: 'not-an-address' }), h.deps);
         expect(response.status).toBe(422);
         expect(h.calls).not.toContain('send');
+    });
+
+    it('refuses, before mailing anything, every address GoTrue could never attach', async () => {
+        // Each of these passed the old shape test, got a code mailed verbatim
+        // (Resend reads `Name <address>`), and counted against an allowance
+        // of its own spelling.
+        for (const email of [
+            'a<victim@example.com>',
+            '<victim@example.com>',
+            '"victim"@example.com',
+            'victim@example.com.',
+            'josé@example.com',
+            'victim@exa_mple.com',
+            'victim@-example.com',
+            'victim@example..com',
+            'victim@localhost',
+        ]) {
+            const h = startHarness();
+            const response = await handleGuestEmailStart(post({ email }), h.deps);
+            expect(response.status, email).toBe(422);
+            expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.invalidEmail);
+            expect(h.calls, email).not.toContain('save');
+            expect(h.sent, email).toEqual([]);
+        }
+        for (const email of ['ada@example.com', 'ada.l+cleffy@mail.example.co.uk', "o'brien@example.org"]) {
+            expect(isPlausibleGuestEmail(email), email).toBe(true);
+        }
+    });
+
+    it('stops mailing anyone once the project-wide ceiling is reached', async () => {
+        expect(GUEST_EMAIL_LIMITS.startGlobal.limit).toBeLessThan(GUEST_EMAIL_LIMITS.startGlobalDaily.limit);
+        for (const blocked of ['guest-email-start:global', 'guest-email-start:global-day']) {
+            const h = startHarness();
+            h.deps.checkRateLimit = vi.fn(async (key: string) =>
+                key === blocked ? { ok: false as const, retryAfterSec: 900 } : { ok: true as const },
+            );
+            const response = await handleGuestEmailStart(post({ email: 'a@example.com' }), h.deps);
+            expect(response.status, blocked).toBe(503);
+            expect(await response.json()).toEqual({ ...GUEST_EMAIL_ERRORS.unavailable, retryAfterSec: 900 });
+            expect(h.calls, blocked).not.toContain('save');
+            expect(h.sent, blocked).toEqual([]);
+            expect(h.deps.logError).toHaveBeenCalled();
+        }
     });
 
     it('withdraws the code when the mail could not be sent', async () => {
@@ -199,7 +245,7 @@ describe('guest-email-start', () => {
 const confirmHarness = (
     options: {
         check?: CodeCheck | null;
-        attach?: 'ok' | 'email_taken' | 'weak_password' | 'failed';
+        attach?: 'ok' | 'email_taken' | 'weak_password' | 'invalid_email' | 'failed';
         caller?: GuestCaller | Response;
         /** guest_email_taken's answers, one per call (the last one repeats). */
         taken?: (boolean | null)[];
@@ -309,6 +355,21 @@ describe('guest-email-confirm', () => {
         expect(reported.calls).toContain('delete');
     });
 
+    it('withdraws the code when GoTrue refuses the address itself, rather than failing every retry', async () => {
+        const h = confirmHarness({ attach: 'invalid_email' });
+        const response = await handleGuestEmailConfirm(post(goodConfirm), h.deps);
+        expect(response.status).toBe(422);
+        expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.invalidEmail);
+        expect(h.calls.slice(-2)).toEqual(['attach', 'delete']);
+
+        // One GoTrue would refuse is not even checked against its code.
+        const early = confirmHarness();
+        const refused = await handleGuestEmailConfirm(post({ ...goodConfirm, email: 'josé@example.com' }), early.deps);
+        expect(refused.status).toBe(422);
+        expect(early.calls).not.toContain('check');
+        expect(early.attached).toEqual([]);
+    });
+
     it('keeps the code for a retry when the attach fails for another reason', async () => {
         const h = confirmHarness({ attach: 'failed' });
         expect((await handleGuestEmailConfirm(post(goodConfirm), h.deps)).status).toBe(502);
@@ -349,6 +410,16 @@ describe('guest email helpers', () => {
         expect(await hashGuestEmailCode(SECRET, 'u2', 'a@example.com', '123456')).not.toBe(base);
         expect(await hashGuestEmailCode(SECRET, 'u1', 'b@example.com', '123456')).not.toBe(base);
         expect(await hashGuestEmailCode('other', 'u1', 'a@example.com', '123456')).not.toBe(base);
+    });
+
+    it('counts mail to a mailbox however its address is tagged', async () => {
+        const key = await recipientRateKey(SECRET, 'victim@example.com');
+        expect(await recipientRateKey(SECRET, 'victim+1@example.com')).toBe(key);
+        expect(await recipientRateKey(SECRET, 'victim+cleffy-2@example.com', 'day')).toBe(
+            await recipientRateKey(SECRET, 'victim@example.com', 'day'),
+        );
+        expect(await recipientRateKey(SECRET, 'victim2@example.com')).not.toBe(key);
+        expect(await recipientRateKey(SECRET, 'victim@example.org')).not.toBe(key);
     });
 
     it('the recipient rate keys never contain the address, and each window has its own', async () => {

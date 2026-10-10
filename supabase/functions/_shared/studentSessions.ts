@@ -10,10 +10,11 @@
  * the password, and both stop the NEXT sign-in — but a device already signed in
  * holds an access token PostgREST honours until it expires, and (for a reset,
  * where nothing is banned) a refresh token that mints new ones indefinitely.
- * end_student_sessions (migration 20261010120300) deletes the student's
- * sessions and refresh tokens, which document_role() then reads as "this token
- * no longer stands for a sign-in", and pings every score the student has open
- * so the viewer re-checks its access at once.
+ * end_student_sessions (migration 20261010120300) stamps the roster row, which
+ * document_role() then reads as "a token issued before this no longer stands
+ * for a sign-in", deletes the student's sessions and refresh tokens so no
+ * device can mint a newer one, and pings every score the student has open so
+ * the viewer re-checks its access at once.
  */
 
 export interface SessionsRpcClient {

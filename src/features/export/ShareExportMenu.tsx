@@ -16,7 +16,7 @@ import { fetchDocument, isCloudDocId, loadDocumentBytes } from '@/features/libra
 import type { UploadProgress } from '@/lib/storageUpload';
 import { getCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
 import { useViewerStore } from '@/state/store';
-import type { DocumentRow } from '@/types/database';
+import type { DocumentRow, MemberRole } from '@/types/database';
 import { ErrorText } from '@/ui/ErrorText';
 import { ProgressBar } from '@/ui/ProgressBar';
 import { buttonClassName } from '@/ui/classNames';
@@ -36,6 +36,13 @@ interface ShareExportMenuProps {
      * older than content_rev) downloads the stored PDF instead of failing.
      */
     doc?: DocumentRow;
+    /**
+     * The viewer's confirmed role on `doc`. A first open that is still
+     * streaming has cached nothing yet, so an export then downloads the file
+     * and writes the offline copy itself: with the role, like the viewer's own
+     * cache writes, or the next offline open of the score is view-only.
+     */
+    role?: MemberRole | null;
     title: string;
     /**
      * True for a score that exists only on this device (no cloud row). A guest's
@@ -71,7 +78,7 @@ const describeFailure = (stage: 'source' | 'export', label: string, err: unknown
  * people access (ShareDialog), and one word for both sent people to the wrong
  * one.
  */
-export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }: ShareExportMenuProps) => {
+export const ShareExportMenu = ({ docId, bytes, doc, role, title, localOnly = false }: ShareExportMenuProps) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -125,7 +132,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
         };
         const userId = session?.user.id;
         if (doc) {
-            return loadDocumentBytes(doc, { userId, onProgress });
+            return loadDocumentBytes(doc, { userId, role, onProgress });
         }
         const cached = await getCachedPdf(docId);
         if (cached) {
@@ -138,7 +145,7 @@ export const ShareExportMenu = ({ docId, bytes, doc, title, localOnly = false }:
         if (!row) {
             throw new ExportProblem('This score is no longer available to you.');
         }
-        return loadDocumentBytes(row, { userId, onProgress });
+        return loadDocumentBytes(row, { userId, role, onProgress });
     };
 
     /** Shared start of every flow: one at a time, and a clean slate of messages. */

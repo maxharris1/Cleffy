@@ -109,10 +109,19 @@ describe('document_role refuses a student whose access was withdrawn', () => {
         expect(body).toMatch(/public\.student_access_revoked \(\)/);
     });
 
-    it('treats an archived row and an ended session alike', () => {
+    it('revokes for the teacher’s archive or reset, not for a session the student ended', () => {
         const body = latestDefinition('student_access_revoked');
         expect(body).toMatch(/archived_at is not null/);
-        expect(body).toMatch(/from auth\.sessions/);
-        expect(body).toMatch(/'session_id'/);
+        expect(body).toMatch(/'iat'/);
+        expect(body).toMatch(/< v_revoked_at/);
+        // GoTrue deletes every session on the student's own global sign-out:
+        // a missing session row says nothing about the teacher.
+        expect(body).not.toMatch(/auth\.sessions/);
+    });
+
+    it('end_student_sessions stamps the revocation, after the sessions are gone', () => {
+        const body = latestDefinition('end_student_sessions');
+        const stamp = body.indexOf('set access_revoked_at = clock_timestamp()');
+        expect(stamp).toBeGreaterThan(body.indexOf('delete from auth.sessions'));
     });
 });

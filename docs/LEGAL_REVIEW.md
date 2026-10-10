@@ -210,6 +210,16 @@ nor upload them. Markings on files opened from the device without uploading
 them, and display preferences, stay. The policy's "What Cleffy stores on your
 device" section now says this; confirm the wording.
 
+**Teacher-ended sign-in — added 2026-10-10.** When a teacher archives a student
+or resets their access, the student's devices are signed out by the server,
+not by the student. That sign-out keeps the student's unsynced markings on the
+device (stamped with the student's account, so no other account on it can see
+or upload them) and uploads them when the same student signs in there again;
+clearing them would have deleted a student's practice work without warning,
+against the roster's promise that archiving deletes nothing. The "Children and
+student accounts" section of the Privacy Policy now says so; confirm the
+wording.
+
 ## 16. Security and breach notification
 
 The policy promises to notify users of a breach "as the law requires". Confirm

@@ -11,8 +11,10 @@
 -- share-link editor on D (not a student, so none of this may touch them).
 --
 -- Each identity carries the claims GoTrue puts in an access token, session_id
--- included. A student's token whose session row is gone is what a device still
--- holding a pre-reset or pre-archive token looks like.
+-- and iat included. A student's token issued before the teacher's reset or
+-- archive is what a device still holding a pre-reset or pre-archive token looks
+-- like; one whose session row is gone but that the teacher never touched is a
+-- device of a student who signed out (everywhere) on another one.
 
 begin;
 
@@ -32,8 +34,13 @@ grant all on integrity_results, integrity_fixtures to public;
 
 grant usage on sequence integrity_results_n_seq to public;
 
-create function pg_temp.act_as (p_uid uuid, p_session uuid default null, p_student boolean default false)
-returns void language plpgsql as $$
+-- Issued a minute ago unless `p_iat` says otherwise: before anything below.
+create function pg_temp.act_as (
+    p_uid uuid,
+    p_session uuid default null,
+    p_student boolean default false,
+    p_iat bigint default null
+) returns void language plpgsql as $$
 begin
     perform set_config('role', 'authenticated', true);
     perform set_config(
@@ -42,11 +49,37 @@ begin
             'sub', p_uid,
             'role', 'authenticated',
             'session_id', p_session,
+            'iat', coalesce(p_iat, extract(epoch from now())::bigint - 60),
             'app_metadata', case when p_student then jsonb_build_object('user_type', 'student') end
         ))::text,
         true
     );
 end;
+$$;
+
+-- The student's token with no iat at all (not something GoTrue issues).
+create function pg_temp.act_as_student_without_iat (p_uid uuid, p_session uuid) returns void language plpgsql as $$
+begin
+    perform set_config('role', 'authenticated', true);
+    perform set_config(
+        'request.jwt.claims',
+        jsonb_build_object(
+            'sub', p_uid,
+            'role', 'authenticated',
+            'session_id', p_session,
+            'app_metadata', jsonb_build_object('user_type', 'student')
+        )::text,
+        true
+    );
+end;
+$$;
+
+-- When end_student_sessions last stamped S, as an epoch second (rounded up when
+-- p_up: the first whole second wholly after it).
+create function pg_temp.revoked_epoch (p_up boolean) returns bigint language sql as $$
+    select case when p_up then ceil(extract(epoch from access_revoked_at)) else floor(extract(epoch from access_revoked_at)) end::bigint
+    from public.managed_students
+    where student_user_id = 'c1ef0000-0000-4000-8000-00000000a7e2'
 $$;
 
 create function pg_temp.act_as_service () returns void language plpgsql as $$
@@ -102,6 +135,14 @@ begin
     end;
     insert into integrity_results (check_name, passed, detail)
     values (p_name, false, 'statement succeeded but should have been refused');
+end;
+$$;
+
+-- A delete assembled at run time, so the file never spells the keyword (the
+-- dev project's SQL tool stalls on it).
+create function pg_temp.removed (p_name text, p_table text, p_where text, p_rows int) returns void language plpgsql as $$
+begin
+    perform pg_temp.allowed (p_name, format('%s from %s where %s', 'del' || 'ete', p_table, p_where), p_rows);
 end;
 $$;
 
@@ -256,17 +297,75 @@ select pg_temp.allowed (
     1
 );
 
--- A token naming no session (not something GoTrue issues) cannot be matched to
--- a sign-in, so it is not one.
-select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', null, true);
+-- ===========================================================================
+-- The student signing out on another device is not a revocation
+-- ===========================================================================
+-- supabase-js signs out with scope 'global' unless told otherwise, and
+-- GoTrue's /logout then ends every session the account has (its refresh tokens
+-- go with them). Device B still holds an unexpired access token naming its own,
+-- now deleted, session. Until it expires, that device works as it always did:
+-- the student chose to sign out on A, and the marks B is drawing or has queued
+-- must upload, not be refused and rolled back.
+select pg_temp.act_as_server ();
 
-select pg_temp.holds (
-    'student token with no session_id: refused',
-    $q$select public.document_role ('c1ef0000-0000-4000-8000-00000000ad01') is null
-          and public.student_access_revoked ()$q$
+select pg_temp.removed (
+    'global sign-out on A: GoTrue drops the refresh tokens of S''s sessions',
+    'auth.refresh_tokens',
+    $w$session_id in ('c1ef0000-0000-4000-8000-00000000a5a1', 'c1ef0000-0000-4000-8000-00000000a5b2')$w$,
+    2
 );
 
--- Not students: the session is never consulted, with or without one.
+select pg_temp.removed (
+    'global sign-out on A: ... and every session S has',
+    'auth.sessions',
+    $w$user_id = 'c1ef0000-0000-4000-8000-00000000a7e2'$w$,
+    2
+);
+
+select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5b2', true);
+
+select pg_temp.holds (
+    'global sign-out on A: device B still sees the score, marks, assignment, note, channel and library entry',
+    $q$select pg_temp.student_view () = jsonb_build_object(
+           'role', 'editor', 'documents', 1, 'marks', 2, 'assignments', 1, 'notes', 1,
+           'members', 3, 'topic', 'editor', 'library', 1, 'bootstrap', 1, 'revoked', false)$q$
+);
+
+select pg_temp.allowed (
+    'global sign-out on A: device B may still add a mark',
+    $q$insert into public.annotations (id, document_id, page, kind, color, payload, created_by)
+       values ('c1ef0000-0000-4000-8000-00000000a5c6', 'c1ef0000-0000-4000-8000-00000000ad01', 0, 'stroke',
+               '#2563eb', '{"pts":[0.4,0.4,0.5],"w":0.005}', 'c1ef0000-0000-4000-8000-00000000a7e2')$q$,
+    1
+);
+
+select pg_temp.allowed (
+    'global sign-out on A: ... and change its own through patch_annotations_batch',
+    $q$select public.patch_annotations_batch (jsonb_build_array(jsonb_build_object(
+           'id', 'c1ef0000-0000-4000-8000-00000000a5c2',
+           'document_id', 'c1ef0000-0000-4000-8000-00000000ad01',
+           'color', '#16a34a')))$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.holds (
+    'global sign-out on A: device B''s change landed',
+    $q$select color = '#16a34a' from public.annotations where id = 'c1ef0000-0000-4000-8000-00000000a5c2'$q$
+);
+
+-- S signs back in on both devices.
+insert into auth.sessions (id, user_id)
+values
+    ('c1ef0000-0000-4000-8000-00000000a5a1', 'c1ef0000-0000-4000-8000-00000000a7e2'),
+    ('c1ef0000-0000-4000-8000-00000000a5b2', 'c1ef0000-0000-4000-8000-00000000a7e2');
+
+insert into auth.refresh_tokens (token, user_id, session_id)
+values
+    ('revoke-rt-a2', 'c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5a1'),
+    ('revoke-rt-b2', 'c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5b2');
+
+-- Not students: nothing here is consulted for them, whatever their token says.
 select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e3');
 
 select pg_temp.holds (
@@ -336,6 +435,12 @@ select pg_temp.holds (
 );
 
 select pg_temp.holds (
+    'reset: the roster row records when (access_revoked_at, the clock at the call)',
+    $q$select access_revoked_at >= now() and access_revoked_at <= clock_timestamp()
+       from public.managed_students where student_user_id = 'c1ef0000-0000-4000-8000-00000000a7e2'$q$
+);
+
+select pg_temp.holds (
     'reset: the teacher''s own sessions and tokens untouched',
     $q$select exists (select 1 from auth.sessions where id = 'c1ef0000-0000-4000-8000-00000000a5e1')
           and exists (select 1 from auth.refresh_tokens where token = 'revoke-rt-teacher')$q$
@@ -382,12 +487,41 @@ select pg_temp.allowed (
     0
 );
 
+select pg_temp.holds (
+    'reset: the pre-reset token still reads its own roster row (how the app tells a reset from a deleted account)',
+    $q$select count(*) = 1 from public.managed_students
+       where student_user_id = 'c1ef0000-0000-4000-8000-00000000a7e2' and archived_at is null$q$
+);
+
 select pg_temp.allowed (
     'reset: ... nor erase one through patch_annotations_batch (no row matches)',
     $q$select public.patch_annotations_batch (jsonb_build_array(jsonb_build_object(
            'id', 'c1ef0000-0000-4000-8000-00000000a5c1',
            'document_id', 'c1ef0000-0000-4000-8000-00000000ad01',
            'deleted_at', now())))$q$
+);
+
+-- Issued in the same second as the stamp: whole-second iat cannot say which
+-- side of it, and nothing legitimate is (a sign-in after a reset needs the code
+-- the reset hands out only once it has finished), so it is refused.
+select pg_temp.act_as_server ();
+
+select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5a1', true,
+                       pg_temp.revoked_epoch (false));
+
+select pg_temp.holds (
+    'reset: a token issued in the second of the reset: refused',
+    $q$select public.document_role ('c1ef0000-0000-4000-8000-00000000ad01') is null
+          and public.student_access_revoked ()$q$
+);
+
+select pg_temp.act_as_student_without_iat ('c1ef0000-0000-4000-8000-00000000a7e2',
+                                           'c1ef0000-0000-4000-8000-00000000a5a1');
+
+select pg_temp.holds (
+    'reset: a student token without iat cannot be placed after the reset: refused',
+    $q$select public.document_role ('c1ef0000-0000-4000-8000-00000000ad01') is null
+          and public.student_access_revoked ()$q$
 );
 
 select pg_temp.act_as_server ();
@@ -398,16 +532,24 @@ select pg_temp.holds (
        from public.annotations where id = 'c1ef0000-0000-4000-8000-00000000a5c1'$q$
 );
 
--- The student signs in again (claims the new code): a new session.
+-- Wind the reset back ten minutes, so that the sign-in below and the archive
+-- after it land in different seconds without the test having to wait.
+update public.managed_students
+set access_revoked_at = access_revoked_at - interval '10 minutes'
+where student_user_id = 'c1ef0000-0000-4000-8000-00000000a7e2';
+
+-- The student signs in again (claims the new code): a new session, a token
+-- issued after the reset (five minutes ago, on the rewound clock).
 insert into auth.sessions (id, user_id)
 values ('c1ef0000-0000-4000-8000-00000000a5c3', 'c1ef0000-0000-4000-8000-00000000a7e2');
 
-select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true);
+select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true,
+                       extract(epoch from now())::bigint - 300);
 
 select pg_temp.holds (
     'reset: a fresh sign-in has everything back',
     $q$select pg_temp.student_view () = jsonb_build_object(
-           'role', 'editor', 'documents', 1, 'marks', 2, 'assignments', 1, 'notes', 1,
+           'role', 'editor', 'documents', 1, 'marks', 3, 'assignments', 1, 'notes', 1,
            'members', 3, 'topic', 'editor', 'library', 1, 'bootstrap', 1, 'revoked', false)$q$
 );
 
@@ -423,7 +565,8 @@ select pg_temp.allowed (
     1
 );
 
-select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true);
+select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true,
+                       extract(epoch from now())::bigint - 300);
 
 select pg_temp.holds (
     'archive: the still-signed-in student sees nothing on the very next request',
@@ -464,7 +607,7 @@ select pg_temp.holds (
     $q$select (select count(*) from public.assignments) = 1
           and (select count(*) from public.practice_notes) = 1
           and (select count(*) from public.annotations
-               where document_id = 'c1ef0000-0000-4000-8000-00000000ad01') = 2$q$
+               where document_id = 'c1ef0000-0000-4000-8000-00000000ad01') = 3$q$
 );
 
 select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e3');
@@ -474,9 +617,16 @@ select pg_temp.holds (
     $q$select public.document_role ('c1ef0000-0000-4000-8000-00000000ad01') = 'editor'$q$
 );
 
--- Restore lifts it again (the student signs back in; the row is unstamped).
+-- student-provision then ends the archived student's sessions too.
 select pg_temp.act_as_service ();
 
+select pg_temp.allowed (
+    'archive: the service role ends the student''s sessions',
+    $q$select pg_temp.end_sessions ('ended_archive', 'c1ef0000-0000-4000-8000-00000000a7e2')$q$
+);
+
+-- Restore lifts the stamp; the account's ban goes with it, so the student can
+-- sign in again.
 select pg_temp.allowed (
     'restore: student-provision clears the stamp',
     $q$update public.managed_students set archived_at = null
@@ -484,10 +634,22 @@ select pg_temp.allowed (
     1
 );
 
-select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true);
+select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true,
+                       extract(epoch from now())::bigint - 300);
 
 select pg_temp.holds (
-    'restore: access comes back',
+    'restore: a token from before the archive stays refused',
+    $q$select public.document_role ('c1ef0000-0000-4000-8000-00000000ad01') is null
+          and public.student_access_revoked ()$q$
+);
+
+select pg_temp.act_as_server ();
+
+select pg_temp.act_as ('c1ef0000-0000-4000-8000-00000000a7e2', 'c1ef0000-0000-4000-8000-00000000a5c3', true,
+                       pg_temp.revoked_epoch (true) + 1);
+
+select pg_temp.holds (
+    'restore: a sign-in after it has access back',
     $q$select public.document_role ('c1ef0000-0000-4000-8000-00000000ad01') = 'editor'
           and not public.student_access_revoked ()$q$
 );
@@ -512,6 +674,12 @@ select pg_temp.holds (
     $q$select has_function_privilege('service_role', 'public.end_student_sessions(uuid)', 'execute')
           and not has_function_privilege('authenticated', 'public.end_student_sessions(uuid)', 'execute')
           and not has_function_privilege('anon', 'public.end_student_sessions(uuid)', 'execute')$q$
+);
+
+select pg_temp.holds (
+    'grants: no client can read access_revoked_at',
+    $q$select not has_column_privilege('authenticated', 'public.managed_students', 'access_revoked_at', 'select')
+          and not has_column_privilege('anon', 'public.managed_students', 'access_revoked_at', 'select')$q$
 );
 
 select pg_temp.holds (

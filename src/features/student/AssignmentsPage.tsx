@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
 import { RequireStudent } from '@/features/auth/AuthGates';
-import { displayNameOf, signOut } from '@/features/auth/session';
+import { displayNameOf, signOut, signOutKeepingChanges } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { LegalLinks } from '@/features/legal/LegalLinks';
 import {
@@ -105,8 +105,18 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     }
                     if (stillValid === false) {
                         mounted = false;
-                        await signOut().catch(() => undefined);
-                        navigate('/student', { replace: true, state: { signedOutByTeacher: true } });
+                        // A roster row means the account is still there (reset,
+                        // or archived until restored): what it queued on this
+                        // device stays for its next sign-in here, as the roster
+                        // promises. No row: it was deleted with its teacher,
+                        // and nothing it queued can ever upload.
+                        let keptChanges = 0;
+                        if (roster) {
+                            keptChanges = await signOutKeepingChanges().catch(() => 0);
+                        } else {
+                            await signOut().catch(() => undefined);
+                        }
+                        navigate('/student', { replace: true, state: { signedOutByTeacher: true, keptChanges } });
                         return;
                     }
                 }

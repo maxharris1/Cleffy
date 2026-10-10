@@ -72,15 +72,19 @@ untouched. It reports `failures | total` on its last line.
 `20261010120302_library_hides_revoked_student_scores.sql`: a roster
 student's token stops reaching anything (role, score, marks, assignment,
 shared note, realtime topic, the library RPCs, writes through PostgREST and
-both batch RPCs) the
-moment their row is archived or the session the token names is ended, while
-teachers and ordinary collaborators — with or without a `session_id` claim —
-are untouched; `end_student_sessions` is the service role's alone, refuses a
-non-student, clears every session and refresh token (the session-less legacy
-kind included) and sends the membership hint on `doc:{id}`; a fresh sign-in
-and a restore bring access back. It inserts `auth.sessions` /
-`auth.refresh_tokens` rows, and creates stand-ins for those tables only when a
-local harness has none (Supabase always does).
+both batch RPCs) the moment their row is archived or, after a reset or an
+archive, when it was issued (`iat`) before `end_student_sessions` stamped
+`access_revoked_at` — the same second included, a token without `iat` too —
+while the student's own global sign-out on another device (GoTrue deleting
+every session) leaves that device working, and teachers and ordinary
+collaborators are untouched; `end_student_sessions` is the service role's
+alone, refuses a non-student, stamps the clock, clears every session and
+refresh token (the session-less legacy kind included) and sends the
+membership hint on `doc:{id}`; a fresh sign-in after a reset, and one after
+a restore, bring access back, while a token from before the archive stays
+refused. It inserts `auth.sessions` / `auth.refresh_tokens` rows, and creates
+stand-ins for those tables only when a local harness has none (Supabase
+always does).
 
 `annotation_payload_shape.sql` proves
 `supabase/migrations/20261010120301_annotation_payload_shape.sql`: every

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { noteRetryAfter } from '@/lib/retryAfter';
+import type { TypedSupabaseClient } from '@/lib/supabase';
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb, type PendingOp, type PendingOpType } from '@/sync/db';
 import {
     classifyFailure,
+    createSupabaseAnnotationsApi,
     fromServerRow,
     observeRejections,
     PERSISTENT_FAILURE_MS,
@@ -170,6 +172,22 @@ class FakeApi implements AnnotationsApi {
             return { archived: false, error: this.archiveCheckError };
         }
         return { archived: this.archived, error: null };
+    }
+
+    /** student_access_revoked(): the teacher archived or reset this student. */
+    signInEnded = false;
+    signInCheckError: ApiError | null = null;
+    signInChecks = 0;
+
+    async fetchSignInEnded() {
+        this.signInChecks += 1;
+        if (this.offline) {
+            return { ended: false, error: this.err() };
+        }
+        if (this.signInCheckError) {
+            return { ended: false, error: this.signInCheckError };
+        }
+        return { ended: this.signInEnded, error: null };
     }
 
     async fetchOne(id: string) {
@@ -684,6 +702,114 @@ describe('SyncEngine archived score', () => {
         expect(store.get('a1')).toBeUndefined();
         expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
         expect(holds).toEqual([]);
+    });
+});
+
+describe('SyncEngine sign-in ended by the server', () => {
+    // A roster student's teacher reset their access (or archived them) while
+    // this device still holds an unexpired token: RLS refuses every request,
+    // the score included, so nothing is visible and the refusal reads exactly
+    // like one of the change. The student is still a member, and signs in
+    // again as the same account.
+    const refuseEverything = () => {
+        const forbidden: ApiError = { message: 'new row violates row-level security policy', kind: 'reject' };
+        api.insertIgnoreDuplicates = async () => ({ error: forbidden });
+        api.insertMany = async () => ({ error: forbidden });
+        api.update = async () => ({ error: forbidden });
+        api.updateMany = async () => ({ error: forbidden, updatedIds: [] });
+        api.fetchOne = async () => ({ data: null, error: null });
+    };
+
+    it('keeps queued and new marks for the next sign-in instead of rolling them back', async () => {
+        api.rows.set('m1', serverRow('m1', { created_by: USER, seq: 3 }));
+        await store.applyRemoteBatch([fromServerRow(serverRow('m1', { created_by: USER, seq: 3 }))], new Set());
+        await store.update('m1', { color: '#ff0000' });
+        await store.create(makeStroke('a1'));
+        const saved = new Map(api.rows);
+        api.signInEnded = true;
+        refuseEverything();
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(2);
+        expect(store.get('a1')).toBeDefined();
+        expect(await db.annotations.get('a1')).toBeDefined();
+        expect(store.get('m1')?.color).toBe('#ff0000');
+        expect(rejections).toEqual([]);
+        expect(holds).toEqual([{ reason: 'signed-out', pendingMarks: 2 }]);
+        expect(api.signInChecks).toBeGreaterThan(0);
+
+        // The same student signs in again: the same ops upload, unchanged.
+        engine.stop();
+        const fresh = new FakeApi();
+        fresh.rows = saved;
+        fresh.nextSeq = 10;
+        const again = new SyncEngine({ db, store, api: fresh, docId: DOC, getUserId: () => USER });
+        await again.flush();
+        again.stop();
+
+        expect(await db.ops.count()).toBe(0);
+        expect(fresh.rows.get('a1')?.created_by).toBe(USER);
+        expect(fresh.rows.get('m1')?.color).toBe('#ff0000');
+    });
+
+    it('keeps the op when whether the sign-in still stands cannot be read', async () => {
+        await store.create(makeStroke('a1'));
+        refuseEverything();
+        api.signInCheckError = { message: 'network down', kind: 'retry' };
+
+        await engine.flush();
+
+        expect(await db.ops.count()).toBe(1);
+        expect(store.get('a1')).toBeDefined();
+        expect(rejections).toEqual([]);
+        expect(holds).toEqual([]);
+        expect(engine.pendingRetryDelayMs).not.toBeNull();
+    });
+
+    it('still rolls back a refusal under a sign-in that stands', async () => {
+        await store.create(makeStroke('a1'));
+        refuseEverything();
+
+        await engine.flush();
+
+        expect(api.signInChecks).toBeGreaterThan(0);
+        expect(await db.ops.count()).toBe(0);
+        expect(store.get('a1')).toBeUndefined();
+        expect(rejections.map((r) => r.annotationId)).toEqual(['a1']);
+        expect(holds).toEqual([]);
+    });
+});
+
+describe('createSupabaseAnnotationsApi.fetchSignInEnded', () => {
+    const client = (userType: string | null, answer: { data: unknown; error: unknown; status: number }) => {
+        const rpc = vi.fn(async () => answer);
+        const supabase = {
+            auth: {
+                getSession: async () => ({
+                    data: { session: { user: { app_metadata: userType ? { user_type: userType } : {} } } },
+                }),
+            },
+            rpc,
+        };
+        return { api: createSupabaseAnnotationsApi(supabase as unknown as TypedSupabaseClient), rpc };
+    };
+
+    it('asks the server for a roster student', async () => {
+        const { api, rpc } = client('student', { data: true, error: null, status: 200 });
+        expect(await api.fetchSignInEnded?.()).toEqual({ ended: true, error: null });
+        expect(rpc).toHaveBeenCalledWith('student_access_revoked');
+    });
+
+    it('answers no for anyone else without a round trip', async () => {
+        const { api, rpc } = client(null, { data: true, error: null, status: 200 });
+        expect(await api.fetchSignInEnded?.()).toEqual({ ended: false, error: null });
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('reports a failed question as one to ask again', async () => {
+        const { api } = client('student', { data: null, error: { message: 'upstream' }, status: 503 });
+        expect(await api.fetchSignInEnded?.()).toEqual({ ended: false, error: { message: 'upstream', kind: 'retry' } });
     });
 });
 

@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AnnotationStore } from '@/sync/annotationStore';
 import { ScribblerDb } from '@/sync/db';
-import { clearCloudAnnotationData, drainCloudOutboxes, pendingCloudOpCount } from '@/sync/signOutSync';
+import {
+    clearCloudAnnotationData,
+    drainCloudOutboxes,
+    pendingCloudOpCount,
+    stampOwnCloudOps,
+} from '@/sync/signOutSync';
 import { SyncEngine, type AnnotationsApi } from '@/sync/syncEngine';
 import type { Annotation } from '@/types/models';
 
@@ -202,6 +207,27 @@ describe('drainCloudOutboxes', () => {
         const result = await drainCloudOutboxes({ db, api: hanging, getUserId: () => 'user-1', timeoutMs: 50 });
         expect(result.pending).toBe(1);
         expect(Date.now() - started).toBeLessThan(1500);
+    });
+});
+
+describe('stampOwnCloudOps', () => {
+    it('stamps this account’s legacy ops before the cached PDFs go, and counts only its own', async () => {
+        await queue(DOC_A, 'mine');
+        await queue(DOC_B, 'legacy');
+        await queue(LOCAL, 'device');
+        const earlier = new AnnotationStore(db, DOC_A);
+        earlier.setAuthor('user-other');
+        await earlier.create(mark('theirs', DOC_A));
+        // Queued before ops were stamped; DOC_B's cached PDF is this account's.
+        const legacy = await db.ops.filter((op) => op.annotationId === 'legacy').first();
+        await db.ops.update(legacy!.opId!, { userId: undefined });
+        await db.pdfCache.put({ docId: DOC_B, bytes: new ArrayBuffer(1), title: 'B', cachedAt: '', userId: USER });
+
+        expect(await stampOwnCloudOps(db, USER)).toBe(2);
+
+        await db.pdfCache.clear();
+        const owners = Object.fromEntries((await db.ops.toArray()).map((op) => [op.annotationId, op.userId]));
+        expect(owners).toEqual({ mine: USER, legacy: USER, theirs: 'user-other', device: USER });
     });
 });
 

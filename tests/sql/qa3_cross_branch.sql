@@ -16,7 +16,8 @@
 --     password, which ends every session the guest has, its own included.
 --     When the sign-in that follows fails, the app keeps working on the old
 --     access token until it expires. student_access_revoked() refuses a token
---     whose session is gone, but only for roster students: the upgraded
+--     issued before a teacher ended the sessions, and only a roster
+--     student's (a session row going away is not a revocation): the upgraded
 --     guest must keep its role, its score in the library, and its writes,
 --     which roster-data's payload check (20261010120301) still validates.
 --
@@ -47,12 +48,14 @@ grant all on integrity_results to public;
 
 grant usage on sequence integrity_results_n_seq to public;
 
--- The claims GoTrue puts in an access token, session_id included.
+-- The claims GoTrue puts in an access token, session_id and iat included.
+-- Issued a minute ago unless said otherwise: before anything below happens.
 create function pg_temp.act_as (
     p_uid uuid,
     p_session uuid,
     p_student boolean default false,
-    p_anonymous boolean default false
+    p_anonymous boolean default false,
+    p_iat bigint default null
 ) returns void language plpgsql as $$
 begin
     perform set_config('role', 'authenticated', true);
@@ -62,6 +65,7 @@ begin
             'sub', p_uid,
             'role', 'authenticated',
             'session_id', p_session,
+            'iat', coalesce(p_iat, extract(epoch from now())::bigint - 60),
             'is_anonymous', p_anonymous,
             'app_metadata', case when p_student then jsonb_build_object('user_type', 'student') end
         ))::text,

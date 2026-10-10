@@ -13,6 +13,7 @@ const fetchMyAssignments = vi.fn();
 const fetchMyRosterProfile = vi.fn();
 const fetchSignInStillValid = vi.fn();
 const signOut = vi.fn();
+const signOutKeepingChanges = vi.fn();
 
 vi.mock('@/features/student/studentApi', () => ({
     fetchMyAssignments: (...args: unknown[]) => fetchMyAssignments(...args),
@@ -25,6 +26,7 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
     ...(await importOriginal<typeof sessionModule>()),
     useSession: () => ({ session: studentSession, loading: false, lastEvent: null }),
     signOut: (...args: unknown[]) => signOut(...args),
+    signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
     syncBeforeSignOut: async () => ({ pending: 0, refused: 0 }),
 }));
 
@@ -104,6 +106,7 @@ beforeEach(() => {
     fetchMyRosterProfile.mockResolvedValue(null);
     fetchSignInStillValid.mockResolvedValue(true);
     signOut.mockResolvedValue(undefined);
+    signOutKeepingChanges.mockResolvedValue(0);
 });
 
 afterEach(() => {
@@ -190,8 +193,20 @@ describe('AssignmentsPage', () => {
         renderAssignments();
 
         expect(await screen.findByText('student login (signed out by teacher)')).toBeInTheDocument();
-        expect(signOut).toHaveBeenCalled();
+        // The account is still there: what it queued here waits for its next sign-in.
+        expect(signOutKeepingChanges).toHaveBeenCalled();
+        expect(signOut).not.toHaveBeenCalled();
         expect(screen.queryByRole('heading', { name: 'Nothing here yet' })).not.toBeInTheDocument();
+    });
+
+    it('signs a deleted student’s leftover session out for good', async () => {
+        fetchMyRosterProfile.mockResolvedValue(null);
+        fetchSignInStillValid.mockResolvedValue(false);
+        renderAssignments();
+
+        expect(await screen.findByText('student login (signed out by teacher)')).toBeInTheDocument();
+        expect(signOut).toHaveBeenCalled();
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
     });
 
     it('keeps the list up when the sign-in check cannot reach the server', async () => {

@@ -249,12 +249,69 @@ export const signOut = async (): Promise<void> => {
 };
 
 /**
+ * Sign out after the server ended this sign-in under the device: a roster
+ * student whose teacher archived them or reset their access. Their token
+ * still parses but reaches nothing, and every refresh is refused.
+ *
+ * Unlike signOut(), the account's queued changes and annotation mirror stay:
+ * there is nothing to upload them with now (syncBeforeSignOut would only meet
+ * the same refusal), and nothing about the teacher's action makes them wrong.
+ * A reset student is still a member under the same account, and a restored
+ * one too, so they upload when that account signs in here again. Every op is
+ * stamped with the account first (stampOwnCloudOps), so no other account on
+ * the device sends or draws them meanwhile (opOwnerFor), and its own sign-out
+ * warns before it clears them. The cached scores, lists and PDFs go, as on
+ * any sign-out.
+ *
+ * Local scope: the server has already ended the sessions, and a global
+ * sign-out would only say so again. Resolves to how many queued changes were
+ * kept (0 when the outbox cannot be read).
+ */
+export const signOutKeepingChanges = async (): Promise<number> => {
+    const [
+        { noteLibraryMutation },
+        { stopSnapshotWrites },
+        { stopAllBackgroundDrains },
+        { getDb },
+        { stampOwnCloudOps },
+    ] = await Promise.all([
+        import('@/features/library/libraryCache'),
+        import('@/features/viewer/history/snapshotService'),
+        import('@/sync/backgroundDrain'),
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+    ]);
+    // As signOut(): nothing may write this account's rows back after the clear.
+    noteLibraryMutation();
+    stopSnapshotWrites();
+    stopAllBackgroundDrains();
+    const supabase = getSupabase();
+    const { data } = await supabase.auth.getSession();
+    const userId = data.session?.user.id ?? null;
+    // Before the PDFs (and with them the legacy ownership test) are cleared.
+    const kept = userId ? await stampOwnCloudOps(getDb(), userId).catch(() => 0) : 0;
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
+    if (error) {
+        // The logout request itself failed (supabase-js then keeps the
+        // session): the stored copy is what signs this browser in, so it goes.
+        const { forgetStoredSessions } = await import('@/features/auth/authStorage');
+        forgetStoredSessions();
+    }
+    noteLibraryMutation();
+    rememberSession(null);
+    await clearAccountCachesFromDevice({ keepCloudAnnotations: true });
+    return kept;
+};
+
+/**
  * What sign-out removes from this browser: the signed-out account's cached
  * scores, lists and cloud-score marks. Device-only (`local-…`) scores and the
  * app's preferences are not the account's and stay. Also the tail of deleting
  * a guest profile (accountDeletion.ts), which ends the same way.
+ * `keepCloudAnnotations` keeps the marks, their outbox, watermarks and day
+ * snapshots (signOutKeepingChanges).
  */
-export const clearAccountCachesFromDevice = async (): Promise<void> => {
+export const clearAccountCachesFromDevice = async ({ keepCloudAnnotations = false } = {}): Promise<void> => {
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const { clearCloudAnnotationData } = await import('@/sync/signOutSync');
@@ -273,7 +330,11 @@ export const clearAccountCachesFromDevice = async (): Promise<void> => {
         // Cloud-score marks, their outbox, watermarks and day snapshots: the
         // next account on this browser must neither see nor push them.
         // Callers ask first (syncBeforeSignOut) when any are unsynced.
-        clearCloudAnnotationData(db).catch((err: unknown) => console.warn('Could not clear annotation data', err)),
+        keepCloudAnnotations
+            ? Promise.resolve()
+            : clearCloudAnnotationData(db).catch((err: unknown) =>
+                  console.warn('Could not clear annotation data', err),
+              ),
     ]);
 };
 

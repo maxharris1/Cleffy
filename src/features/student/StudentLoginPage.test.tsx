@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as sessionModule from '@/features/auth/session';
+import { keptChangesNotice } from '@/features/student/keptChangesNotice';
 import { SIGNED_OUT_BY_TEACHER, StudentLoginPage } from '@/features/student/StudentLoginPage';
 
 const loginStudent = vi.fn();
@@ -109,5 +110,15 @@ describe('StudentLoginPage', () => {
 
         renderLogin();
         expect(screen.queryByText(SIGNED_OUT_BY_TEACHER)).not.toBeInTheDocument();
+    });
+
+    it('says the changes that sign-out kept are still on this device', () => {
+        renderLogin({ signedOutByTeacher: true, keptChanges: 3 });
+        expect(screen.getByRole('status')).toHaveTextContent(keptChangesNotice(3));
+        expect(keptChangesNotice(3)).toMatch(/^3 changes .* kept on this device/);
+        cleanup();
+
+        renderLogin({ signedOutByTeacher: true, keptChanges: 0 });
+        expect(screen.getByRole('status')).not.toHaveTextContent('kept on this device');
     });
 });

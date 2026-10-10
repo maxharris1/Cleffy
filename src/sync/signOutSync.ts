@@ -129,6 +129,33 @@ export const drainCloudOutboxes = async (deps: {
     };
 };
 
+/**
+ * Make sure every cloud-score op `userId` owns says so on the op itself, and
+ * count them. For a sign-out that keeps the outbox (session.ts
+ * signOutKeepingChanges) but clears the cached PDFs: ops queued before
+ * PendingOp.userId existed are this account's only through the cached PDF's
+ * userId (opOwnerFor), and would belong to nobody once it is gone.
+ */
+export const stampOwnCloudOps = async (db: ScribblerDb, userId: string): Promise<number> => {
+    const byDoc = new Map<string, PendingOp[]>();
+    for (const op of await db.ops.toArray()) {
+        if (isCloudDocId(op.docId)) {
+            byDoc.set(op.docId, [...(byDoc.get(op.docId) ?? []), op]);
+        }
+    }
+    let own = 0;
+    for (const [docId, ops] of byDoc) {
+        const owns = await opOwnerFor(db, docId, userId, ops);
+        const mine = ops.filter(owns);
+        own += mine.length;
+        const legacy = mine.filter((op) => op.userId === undefined && op.opId !== undefined);
+        if (legacy.length > 0) {
+            await db.ops.bulkUpdate(legacy.map((op) => ({ key: op.opId as number, changes: { userId } })));
+        }
+    }
+    return own;
+};
+
 /** Remove this account's cloud-score annotation data from the device. */
 export const clearCloudAnnotationData = async (db: ScribblerDb): Promise<void> => {
     const isCloud = (row: { docId: string }) => isCloudDocId(row.docId);

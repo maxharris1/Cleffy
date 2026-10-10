@@ -830,7 +830,9 @@ export const cacheDocumentBytes = async (
  * always did when it downloaded the file whole. Opening a score at home and
  * reading it at a rehearsal with no signal must not depend on having stayed
  * on it until the download ended. A copy of this revision or a newer one that
- * landed meanwhile (the score reopened, or replaced) is kept instead.
+ * landed meanwhile (the score reopened, or replaced, or an export downloaded
+ * it) is kept instead — given this stream's role if it is the same account's
+ * and has none (a download that did not know the role wrote it).
  */
 export const cacheStreamedDocument = (
     doc: DocumentRow,
@@ -843,7 +845,13 @@ export const cacheStreamedDocument = (
         () => download.abort(),
         async (bytes, isCancelled) => {
             const cached = await getCachedPdf(doc.id);
-            if (isCancelled() || (cached && (cached.contentRev ?? 0) >= (doc.content_rev ?? 0))) {
+            if (isCancelled()) {
+                return;
+            }
+            if (cached && (cached.contentRev ?? 0) >= (doc.content_rev ?? 0)) {
+                if (!cached.myRole && stamp.role && stamp.userId && cached.userId === stamp.userId) {
+                    await putCachedPdf({ ...cached, myRole: stamp.role });
+                }
                 return;
             }
             await cacheDocumentBytes(doc, bytes, { ...stamp, cached });

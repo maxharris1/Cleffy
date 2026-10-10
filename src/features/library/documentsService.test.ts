@@ -686,6 +686,46 @@ describe('cacheStreamedDocument (a first open closed mid-download)', () => {
         expect(new TextDecoder().decode((memCache.get(d.id) as CachedPdf).bytes as ArrayBuffer)).toBe('newer');
     });
 
+    it('gives the role to a same-revision copy an export wrote without one', async () => {
+        // An export during the stream downloaded and cached the file itself;
+        // the next offline open needs the role to be editable.
+        makeStub({ downloadBytes: 'export-bytes' });
+        const d = doc({ content_rev: 0 });
+        await loadDocumentBytes(d, { userId: 'user-1' });
+        const download = pendingDownload();
+        cacheStreamedDocument(d, download, { userId: 'user-1', role: 'owner' });
+
+        download.finish('streamed');
+        await settle();
+
+        const row = memCache.get(d.id) as CachedPdf;
+        expect(new TextDecoder().decode(row.bytes as ArrayBuffer)).toBe('export-bytes');
+        expect((await loadDocumentOffline(d.id, 'user-1'))?.cachedRole).toBe('owner');
+    });
+
+    it('leaves another account’s copy, and a role already stored, as they are', async () => {
+        const d = doc({ content_rev: 0 });
+        await putCache({ docId: d.id, bytes: new ArrayBuffer(1), contentRev: 0, userId: 'user-2' } as CachedPdf);
+        const first = pendingDownload();
+        cacheStreamedDocument(d, first, { userId: 'user-1', role: 'owner' });
+        first.finish('streamed');
+        await settle();
+        expect((memCache.get(d.id) as CachedPdf).myRole).toBeUndefined();
+
+        await putCache({
+            docId: d.id,
+            bytes: new ArrayBuffer(1),
+            contentRev: 0,
+            userId: 'user-1',
+            myRole: 'viewer',
+        } as CachedPdf);
+        const second = pendingDownload();
+        cacheStreamedDocument(d, second, { userId: 'user-1', role: 'owner' });
+        second.finish('streamed');
+        await settle();
+        expect((memCache.get(d.id) as CachedPdf).myRole).toBe('viewer');
+    });
+
     it('is stopped by purging the score, and writes nothing back', async () => {
         const d = doc();
         const download = pendingDownload();

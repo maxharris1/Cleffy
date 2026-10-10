@@ -4,9 +4,10 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as SessionModule from '@/features/auth/session';
 import type * as EntitlementsServiceModule from '@/features/billing/entitlementsService';
+import type * as DocumentsServiceModule from '@/features/library/documentsService';
 
 import { FREE_LIMITS } from '@/features/billing/entitlementsService';
-import type { Entitlements } from '@/types/database';
+import type { DocumentRow, Entitlements } from '@/types/database';
 
 const rpc = vi.fn();
 const readCachedEntitlements = vi.fn();
@@ -14,6 +15,7 @@ const useSession = vi.fn();
 const buildAnnotatedPdf = vi.fn();
 const deliverPdf = vi.fn();
 const exportAnnotatedPageImage = vi.fn();
+const loadDocumentBytes = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({ rpc: (...args: unknown[]) => rpc(...args) }),
@@ -33,6 +35,12 @@ vi.mock('@/features/billing/entitlementsService', async (importOriginal) => ({
 vi.mock('@/features/export/exportPdf', () => ({
     buildAnnotatedPdf: (...args: unknown[]) => buildAnnotatedPdf(...args),
     deliverPdf: (...args: unknown[]) => deliverPdf(...args),
+}));
+
+// Only the download a cache miss falls back to; everything else is real.
+vi.mock('@/features/library/documentsService', async (importOriginal) => ({
+    ...(await importOriginal<typeof DocumentsServiceModule>()),
+    loadDocumentBytes: (...args: unknown[]) => loadDocumentBytes(...args),
 }));
 
 vi.mock('@/features/export/exportPageImage', () => ({
@@ -311,5 +319,43 @@ describe('ShareExportMenu export allowance', () => {
             await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
             expect(rpc).not.toHaveBeenCalled();
         });
+    });
+});
+
+describe('ShareExportMenu during a first open still streaming', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        useSession.mockReturnValue({ session: teacher, loading: false, lastEvent: null });
+        readCachedEntitlements.mockResolvedValue(plan('teacher', -1));
+        buildAnnotatedPdf.mockResolvedValue(builtPdf);
+        deliverPdf.mockResolvedValue('downloaded');
+        loadDocumentBytes.mockResolvedValue(bytes);
+        rpc.mockResolvedValue({
+            data: { ok: true, count: 1, limit: -1, tier: 'teacher', unlimited: true },
+            error: null,
+        });
+        vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    });
+
+    afterEach(() => {
+        cleanup();
+        vi.restoreAllMocks();
+    });
+
+    it('downloads with the viewer’s role, so the offline copy it writes can still be edited', async () => {
+        // Nothing cached yet and no bytes in hand: the export downloads the
+        // file and caches it before the stream does.
+        const row = { id: 'doc-1', title: 'Sonata', content_rev: 0 } as DocumentRow;
+        const user = userEvent.setup();
+        render(<ShareExportMenu docId="doc-1" doc={row} role="editor" title="Sonata" />);
+        await user.click(screen.getByRole('button', { name: 'Export' }));
+
+        await user.click(screen.getByRole('menuitem', { name: 'Export whole score as PDF' }));
+
+        await waitFor(() => expect(deliverPdf).toHaveBeenCalledTimes(1));
+        expect(loadDocumentBytes).toHaveBeenCalledWith(
+            row,
+            expect.objectContaining({ userId: 'teacher-1', role: 'editor' }),
+        );
     });
 });

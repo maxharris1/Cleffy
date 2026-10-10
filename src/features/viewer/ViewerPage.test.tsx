@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDot, ViewerPage } from '@/features/viewer/ViewerPage';
@@ -43,11 +43,19 @@ const SESSION = {
 
 const sessionKind: { userType: 'student' | null } = { userType: null };
 
+const signOutKeepingChanges = vi.fn();
+const fetchSignInStillValid = vi.fn();
+
 vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
     isRegisteredSession: () => true,
     displayNameOf: () => 'Teacher',
     userTypeOf: () => sessionKind.userType,
+    signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
+}));
+
+vi.mock('@/features/student/studentApi', () => ({
+    fetchSignInStillValid: (...args: unknown[]) => fetchSignInStillValid(...args),
 }));
 
 /** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
@@ -201,9 +209,18 @@ const renderViewer = () =>
                 <Route path="/doc/:documentId" element={<ViewerPage />} />
                 <Route path="/" element={<div>home</div>} />
                 <Route path="/library" element={<div>library</div>} />
+                <Route path="/student" element={<StudentLoginStub />} />
             </Routes>
         </MemoryRouter>,
     );
+
+/** Stands in for the student sign-in page, showing what it was told. */
+const StudentLoginStub = () => {
+    const state = useLocation().state as { signedOutByTeacher?: boolean; keptChanges?: number } | null;
+    return (
+        <div>{`student login: teacher ${String(state?.signedOutByTeacher)}, kept ${String(state?.keptChanges)}`}</div>
+    );
+};
 
 const viewport = () => screen.getByTestId('pdf-viewport');
 
@@ -214,6 +231,8 @@ beforeEach(() => {
     viewportSync.current = undefined;
     purgeLocalDocument.mockResolvedValue(undefined);
     removeCachedLibraryDocument.mockResolvedValue(undefined);
+    signOutKeepingChanges.mockResolvedValue(2);
+    fetchSignInStillValid.mockResolvedValue(true);
     flags.playalong = false;
     pdfProps.current = null;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
@@ -963,6 +982,71 @@ describe('CloudViewer membership changes', () => {
         await openAs('editor');
 
         expect(screen.queryByRole('button', { name: 'Sharing' })).not.toBeInTheDocument();
+    });
+
+    it('keeps a student’s queued changes when the teacher ended the sign-in, not the assignment', async () => {
+        // A reset or an archive: the score vanishes exactly as on an unassign,
+        // but the server says the sign-in itself is what ended.
+        sessionKind.userType = 'student';
+        await openAs('editor');
+        fetchSignInStillValid.mockResolvedValue(false);
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+        expect(removeCachedLibraryDocument).not.toHaveBeenCalled();
+    });
+
+    it('still purges a score unassigned from a student whose sign-in stands', async () => {
+        sessionKind.userType = 'student';
+        await openAs('editor');
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        await waitFor(() => expect(purgeLocalDocument).toHaveBeenCalledWith(DOC_ID));
+        expect(fetchSignInStillValid).toHaveBeenCalled();
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+    });
+
+    it('keeps everything when it cannot ask whether a student’s sign-in stands', async () => {
+        sessionKind.userType = 'student';
+        await openAs('editor');
+        fetchSignInStillValid.mockResolvedValue(null);
+
+        fetchDocument.mockResolvedValue(null);
+        fetchMyRole.mockResolvedValue(null);
+        await membershipChanged();
+
+        expect(await screen.findByText(/no longer available to you/)).toBeInTheDocument();
+        await waitFor(() => expect(fetchSignInStillValid).toHaveBeenCalled());
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
+    });
+});
+
+describe('CloudViewer sign-in ended under the sync engine', () => {
+    it('signs out keeping the outbox when the engine holds it for an ended sign-in', async () => {
+        sessionKind.userType = 'student';
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
+        expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
+        expect(purgeLocalDocument).not.toHaveBeenCalled();
     });
 });
 

@@ -50,6 +50,14 @@ export interface AnnotationsApi {
      * False when it is not, or when this account can no longer see it at all.
      */
     fetchDocumentArchived(docId: string): Promise<{ archived: boolean; error: ApiError | null }>;
+    /**
+     * Whether the server has ended this sign-in under a token that is still
+     * valid: a roster student whose teacher archived them or reset their
+     * access (student_access_revoked). Every request is then refused, which
+     * says nothing about the changes themselves. Absent, or false, for anyone
+     * whose sign-in cannot be ended that way.
+     */
+    fetchSignInEnded?(): Promise<{ ended: boolean; error: ApiError | null }>;
     fetchSince(
         docId: string,
         afterSeq: number,
@@ -98,12 +106,16 @@ export interface SyncRejection {
 }
 
 /**
- * The outbox is refused because the score is archived (a lapsed plan), and is
- * being kept rather than dropped: an archive is undone by resubscribing, and
- * the marks then upload as if nothing happened.
+ * The outbox is refused, and is being kept rather than dropped:
+ * - 'archived': the score is archived (a lapsed plan). An archive is undone by
+ *   resubscribing, and the marks then upload as if nothing happened.
+ * - 'signed-out': the server ended this sign-in (a roster student's teacher
+ *   archived them or reset their access) while the device still holds its
+ *   token. The changes are this account's (stamped with it) and upload when
+ *   it signs in again; no other account sends or draws them meanwhile.
  */
 export interface SyncHold {
-    reason: 'archived';
+    reason: 'archived' | 'signed-out';
     /** Distinct marks with changes waiting on this document. */
     pendingMarks: number;
 }
@@ -510,7 +522,7 @@ export class SyncEngine {
             onStatus?: (status: SyncStatus) => void;
             /** A local change was refused for good and rolled back to server truth. */
             onRejected?: (rejection: SyncRejection) => void;
-            /** The outbox is refused but kept (archived score) — see SyncHold. */
+            /** The outbox is refused but kept (archived score, ended sign-in) — see SyncHold. */
             onHeld?: (hold: SyncHold) => void;
             /**
              * Set by a driver nobody is watching (the background drain). A
@@ -1089,18 +1101,34 @@ export class SyncEngine {
      * for good, a whole lesson's work lost to a failed card. Those ops are kept
      * and the drain stops (false) until the score is writable again.
      *
+     * Likewise when the server has ended this sign-in (fetchSignInEnded): a
+     * student whose teacher reset their access is still a member, and the
+     * refusal is of the token, not of the change. The ops are kept for the
+     * same account's next sign-in.
+     *
      * And except in a headless engine that holds refusals (onRefusalHeld):
      * the op is kept for an engine whose refusal someone will see.
      */
     private async reject(op: PendingOp, reason: string): Promise<boolean> {
         const { api, db, store, docId } = this.deps;
-        const archive = await this.withAuth(() => api.fetchDocumentArchived(docId));
-        if (archive.error) {
-            this.deferRetry(archive.error.kind === 'reject' ? { ...archive.error, kind: 'retry' } : archive.error);
+        const [archive, signIn] = await Promise.all([
+            this.withAuth(() => api.fetchDocumentArchived(docId)),
+            api.fetchSignInEnded
+                ? this.withAuth(() => api.fetchSignInEnded!())
+                : Promise.resolve({ ended: false, error: null }),
+        ]);
+        const unknown = archive.error ?? signIn.error;
+        if (unknown) {
+            // Either question unanswered: keep the op and ask again later.
+            this.deferRetry(unknown.kind === 'reject' ? { ...unknown, kind: 'retry' } : unknown);
+            return false;
+        }
+        if (signIn.ended) {
+            await this.hold('signed-out');
             return false;
         }
         if (archive.archived) {
-            await this.holdForArchive();
+            await this.hold('archived');
             return false;
         }
         if (this.deps.onRefusalHeld) {
@@ -1151,18 +1179,19 @@ export class SyncEngine {
     }
 
     /**
-     * Keep the outbox of an archived score and say so. Retried at the slowest
-     * backoff: nothing changes until the plan does, but when it does (a
-     * resubscribe in another tab) the marks should upload without a reload.
+     * Keep the outbox and say why (see SyncHold). Retried at the slowest
+     * backoff: nothing changes until the plan does (or the account signs in
+     * again), but when the plan does (a resubscribe in another tab) the marks
+     * should upload without a reload.
      */
-    private async holdForArchive(): Promise<void> {
+    private async hold(reason: SyncHold['reason']): Promise<void> {
         if (this.stopped) {
             return;
         }
         const { db, docId } = this.deps;
         const queued = (await db.ops.where('docId').equals(docId).toArray()).filter(this.owns);
         this.setStatus('error');
-        this.deps.onHeld?.({ reason: 'archived', pendingMarks: new Set(queued.map((o) => o.annotationId)).size });
+        this.deps.onHeld?.({ reason, pendingMarks: new Set(queued.map((o) => o.annotationId)).size });
         this.scheduleRetry(MAX_BACKOFF_MS);
     }
 
@@ -1395,6 +1424,19 @@ export const createSupabaseAnnotationsApi = (supabase: TypedSupabaseClient): Ann
                 .eq('id', docId)
                 .maybeSingle();
             return { archived: !error && data !== null && data.archived_at !== null, error: fail(error, status) };
+        },
+        async fetchSignInEnded() {
+            // Only a roster student's sign-in is ended under a live token (by
+            // their teacher). For anyone else a refusal is about the change,
+            // and asking would cost every refusal a round trip for nothing.
+            // app_metadata is admin-set, so the routing answer is trustworthy
+            // here; the server's answer is what decides.
+            const { data } = await supabase.auth.getSession();
+            if (data.session?.user.app_metadata?.['user_type'] !== 'student') {
+                return { ended: false, error: null };
+            }
+            const { data: revoked, error, status } = await supabase.rpc('student_access_revoked');
+            return { ended: !error && revoked === true, error: fail(error, status) };
         },
         async fetchSince(docId, afterSeq, limit) {
             const { data, error, status } = await supabase

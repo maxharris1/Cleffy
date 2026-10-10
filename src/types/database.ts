@@ -432,7 +432,8 @@ export type StudioMemberRow = {
  * the select policy has a student branch and the hash is of the one-time token
  * that claims the account. Only the student-facing functions read it, under the
  * service role. That is also why the queries below name their columns instead
- * of `*`.
+ * of `*`. `access_revoked_at` (20261010120300) is absent for the same reason:
+ * no client is granted it; only student_access_revoked() reads it.
  */
 export type ManagedStudentRow = {
     id: string;
@@ -852,10 +853,12 @@ export type Database = {
                 Args: Record<string, never>;
                 Returns: undefined;
             };
-            // True when the caller is a roster student whose access is gone:
-            // archived, or the session their token names has been ended (a
-            // reset, an archive). How the student app tells "nothing assigned"
-            // from "signed out by your teacher".
+            // True when the caller is a roster student whose access the teacher
+            // withdrew: archived, or their token issued before the teacher's
+            // last reset or archive ended their sessions. Not after their own
+            // sign-out elsewhere. How the student app tells "nothing assigned"
+            // from "signed out by your teacher", and the sync engine a refused
+            // change from a sign-in that ended (it keeps the change).
             student_access_revoked: {
                 Args: Record<string, never>;
                 Returns: boolean;

@@ -1,7 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 
-import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
+import {
+    displayNameOf,
+    isRegisteredSession,
+    signOutKeepingChanges,
+    userTypeOf,
+    useSession,
+} from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
@@ -26,6 +32,7 @@ import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
+import { fetchSignInStillValid } from '@/features/student/studentApi';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
@@ -163,13 +170,21 @@ const accessChangedNotice = (role: MemberRole | null): string =>
  */
 const ACCESS_REVOKED_MESSAGE = 'This score is no longer available to you — it was deleted, or your access was removed.';
 
+/** Shown for the moment it takes to sign out once the teacher ended this sign-in. */
+const SIGN_IN_ENDED_MESSAGE = 'Your teacher changed your access. Signing you out…';
+
 /**
  * Why this account just lost the score in the open viewer, which decides what
  * happens once the viewport (and its sync engine) has unmounted:
- *  - 'removed' / 'denied': the server says no — purge, then explain.
+ *  - 'removed' / 'denied': the server says no — purge, then explain. For a
+ *    roster student, asked once more first: their teacher archiving them or
+ *    resetting their access reads exactly like an unassign here, and is 'ended'.
+ *  - 'ended': the server ended this sign-in (a roster student's teacher) — sign
+ *    out keeping what is queued on the device for the next sign-in, then say
+ *    why on the student sign-in page. Nothing is purged.
  *  - 'left': the user chose to leave — purge, then go back to the library.
  */
-type AccessLoss = 'removed' | 'denied' | 'left';
+type AccessLoss = 'removed' | 'denied' | 'ended' | 'left';
 
 const CloudViewer = ({ docId }: { docId: string }) => {
     const { session, loading } = useSession();
@@ -297,6 +312,27 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         }
         let cancelled = false;
         void (async () => {
+            if (accessLoss === 'ended') {
+                // Not gated on `cancelled`: the sign-out itself changes userId.
+                const keptChanges = await signOutKeepingChanges().catch(() => 0);
+                navigate('/student', { replace: true, state: { signedOutByTeacher: true, keptChanges } });
+                return;
+            }
+            if (accessLoss !== 'left' && userTypeOf(session) === 'student') {
+                const stillValid = await fetchSignInStillValid(null).catch(() => null);
+                if (cancelled) {
+                    return;
+                }
+                if (stillValid === false) {
+                    setLoadError(SIGN_IN_ENDED_MESSAGE);
+                    setAccessLoss('ended');
+                    return;
+                }
+                if (stillValid === null) {
+                    // Unanswered: keep what is here; opening it again asks again.
+                    return;
+                }
+            }
             await purgeLocalDocument(docId).catch(() => undefined);
             await removeCachedLibraryDocument(userId, docId).catch(() => undefined);
             if (!cancelled && accessLoss === 'left') {
@@ -700,7 +736,21 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             })),
         [docId],
     );
-    const onHeld = useCallback((hold: SyncHold) => setHeld({ docId, pendingMarks: hold.pendingMarks }), [docId]);
+    const onHeld = useCallback(
+        (hold: SyncHold) => {
+            if (hold.reason === 'signed-out') {
+                // Nothing more can be sent under this sign-in; the engine kept
+                // the outbox, and the sign-out that follows keeps it too.
+                setState(null);
+                setShareOpen(false);
+                setLoadError(SIGN_IN_ENDED_MESSAGE);
+                setAccessLoss('ended');
+                return;
+            }
+            setHeld({ docId, pendingMarks: hold.pendingMarks });
+        },
+        [docId],
+    );
     const onPeers = useCallback((next: PresencePeer[]) => setPeers(next), []);
     // Referentially stable — the review panel's scan effect depends on it.
     const classify = useMemo(() => makeCloudClassifyFn(docId), [docId]);
@@ -718,7 +768,8 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [searchParams, setSearchParams]);
 
     if (!loading && !session) {
-        return <Navigate to="/" replace />;
+        // Mid sign-out after the teacher ended it: the student sign-in page is next.
+        return accessLoss === 'ended' ? null : <Navigate to="/" replace />;
     }
     if (loadError) {
         const escapeTo = isRegisteredSession(session) ? '/library' : '/';
@@ -852,7 +903,9 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                   Export loads from Dexie on demand — no third live ArrayBuffer for
                   the menu. The row lets it download the PDF when the cache has none.
                 */}
-                {confirmed ? <ShareExportMenu docId={docId} doc={state.doc} title={state.doc.title} /> : null}
+                {confirmed ? (
+                    <ShareExportMenu docId={docId} doc={state.doc} role={state.role} title={state.doc.title} />
+                ) : null}
                 {confirmed && state.role === 'owner' ? (
                     // "Share" is sharing the score with people (links, who has
                     // access); sending a copy of it is "Export", beside it.
