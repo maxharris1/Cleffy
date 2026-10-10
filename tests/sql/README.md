@@ -91,6 +91,19 @@ ones (wrong JSON type, bad or out-of-range points, missing or mistyped fields,
 over-long text, a payload over 1 MiB, a non-hex colour) are refused with
 `23514`; both constraints are validated and every stored row passes them.
 
+`qa3_cross_branch.sql` (same harness, same reading as `column_integrity.sql`)
+proves the QA round 3 migrations hold together where one branch's server
+change acts on another's accounts: `guard_guest_email` lets GoTrue's reset
+(password) and archive (ban) updates of a roster student through, and
+`end_student_sessions` still ends the student's sessions beside it; a guest
+whose address `guest-email-confirm` attached — which ends all of the guest's
+sessions — keeps its role, library entry, realtime topic and writes on its
+old token (the revocation is for roster students only), and those writes
+still meet the annotation payload check. Like `student_access_revocation.sql`
+it creates stand-ins for `auth.sessions` / `auth.refresh_tokens` only when a
+local harness has none, and becomes `supabase_auth_admin` for GoTrue's
+updates when the role exists.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

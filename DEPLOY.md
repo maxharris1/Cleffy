@@ -40,43 +40,51 @@ the steps that need a human because no API exposes them — each one says why.
 | Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
 | Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1) |
 | Supabase plan (realtime quota, connections, pausing)                   | ⚠️ **Free** — upgrade the org to Pro before launch (§10)                |
+| QA round 3 migrations `20261010120200` … `20261010120302`              | ⏳ not applied on either project (release checklist)                    |
 
 ---
 
 ## Release checklist — launch fixes (20261007\*)
 
 One ordered list for the integrated `fix/*` branches (integrity, sharing, sync,
-billing, library, security, compliance, scope-imslp) and the pre-launch QA
+billing, library, security, compliance, scope-imslp), the pre-launch QA
 round on top of them (`qa/sync`, `qa/billing`, `qa/sharing`, `qa/polish`,
-integrated on `qa-integrate`) shipping on one `dev` → `main` merge. Steps are
-in the order to do them; each says what breaks if it is skipped or reordered.
-Reference detail stays in the sections it links to.
+integrated on `qa-integrate`) and QA round 3 (`qa3/sync`, `qa3/realtime`,
+`qa3/shell-auth`, `qa3/roster-data`, `qa3/perf`, `qa3/imslp`, integrated on
+`qa3-integrate`) shipping on one `dev` → `main` merge. Steps are in the order
+to do them; each says what breaks if it is skipped or reordered. Reference
+detail stays in the sections it links to.
 
-**What ships.** Fourteen migrations, applied in filename order by the Supabase
+**What ships.** Eighteen migrations, applied in filename order by the Supabase
 GitHub integration on the merge (migrations before functions):
 
-| Migration                                                | Branch      | Order constraint                                                                                                                                                                       |
-| -------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `20261007120000_sharing_access_control`                  | sharing     | Before the bundle: the new Share dialog, member roles, revoke-with-removal and Leave call its RPCs. Old bundles are unaffected (links still default to the role they send).            |
-| `20261007120100_column_integrity`                        | integrity   | Any order. Holds only for client roles; service role, definer functions and FK actions pass.                                                                                           |
-| `20261007120101_realtime_db_topic`                       | integrity   | Either order is safe but not seamless — step 9.                                                                                                                                        |
-| `20261007120200_patch_annotations_batch_returns_ids`     | sync        | Any order: the client treats the old void answer as "applied".                                                                                                                         |
-| `20261007120300_billing_correctness`                     | billing     | Any order: the export claim falls back to `consume_pdf_export` until it exists. Backfills `archived_reason` (production holds 0 archived scores) and restores already-entitled owners. |
-| `20261007120400_library_pagination`                      | library     | Before the bundle for search / tag / A–Z paging; without it only the plain recent list pages (REST fallback).                                                                          |
-| `20261007120401_document_storage_cleanup`                | library     | **Before the bundle**: the new delete removes the row first and purges Storage through these tombstone policies; without them the purge is refused and the bytes are orphaned.         |
-| `20261007120500_function_search_path_and_execute_grants` | security    | Any order. Restates `guard_score_analyses_client_write` with the 120100 body (role-keyed) — do not "restore" the 20260803 body, it breaks account deletion.                            |
-| `20261007120501_student_login_throttle`                  | security    | **Before** `student-login` / `student-claim` / `student-provision`: the limiter fails closed (§9).                                                                                     |
-| `20261007120600_account_deletion`                        | compliance  | **Before** `delete-account`, with the updated `stripe-webhook` (§2, _Account deletion_).                                                                                               |
-| `20261007120700_document_provenance`                     | scope-imslp | **Before** `imslp-download` / `imslp-work`: imports fail at the provenance write without it (and are refunded).                                                                        |
-| `20261009120100_pdf_export_claim_ids`                    | qa/billing  | Any order: without it the client repeats the claim without its id (PGRST202 fallback), so a lost answer or a dismissed share sheet can count an export twice, as before.               |
-| `20261009120101_entitlements_cancel_at_period_end`       | qa/billing  | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                 |
-| `20261009120200_share_link_errors_and_peek`              | qa/sharing  | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                   |
+| Migration                                                | Branch          | Order constraint                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `20261007120000_sharing_access_control`                  | sharing         | Before the bundle: the new Share dialog, member roles, revoke-with-removal and Leave call its RPCs. Old bundles are unaffected (links still default to the role they send).                                                                                                                                                                            |
+| `20261007120100_column_integrity`                        | integrity       | Any order. Holds only for client roles; service role, definer functions and FK actions pass.                                                                                                                                                                                                                                                           |
+| `20261007120101_realtime_db_topic`                       | integrity       | Either order is safe but not seamless — step 9.                                                                                                                                                                                                                                                                                                        |
+| `20261007120200_patch_annotations_batch_returns_ids`     | sync            | Any order: the client treats the old void answer as "applied".                                                                                                                                                                                                                                                                                         |
+| `20261007120300_billing_correctness`                     | billing         | Any order: the export claim falls back to `consume_pdf_export` until it exists. Backfills `archived_reason` (production holds 0 archived scores) and restores already-entitled owners.                                                                                                                                                                 |
+| `20261007120400_library_pagination`                      | library         | Before the bundle for search / tag / A–Z paging; without it only the plain recent list pages (REST fallback).                                                                                                                                                                                                                                          |
+| `20261007120401_document_storage_cleanup`                | library         | **Before the bundle**: the new delete removes the row first and purges Storage through these tombstone policies; without them the purge is refused and the bytes are orphaned.                                                                                                                                                                         |
+| `20261007120500_function_search_path_and_execute_grants` | security        | Any order. Restates `guard_score_analyses_client_write` with the 120100 body (role-keyed) — do not "restore" the 20260803 body, it breaks account deletion.                                                                                                                                                                                            |
+| `20261007120501_student_login_throttle`                  | security        | **Before** `student-login` / `student-claim` / `student-provision`: the limiter fails closed (§9).                                                                                                                                                                                                                                                     |
+| `20261007120600_account_deletion`                        | compliance      | **Before** `delete-account`, with the updated `stripe-webhook` (§2, _Account deletion_).                                                                                                                                                                                                                                                               |
+| `20261007120700_document_provenance`                     | scope-imslp     | **Before** `imslp-download` / `imslp-work`: imports fail at the provenance write without it (and are refunded).                                                                                                                                                                                                                                        |
+| `20261009120100_pdf_export_claim_ids`                    | qa/billing      | Any order: without it the client repeats the claim without its id (PGRST202 fallback), so a lost answer or a dismissed share sheet can count an export twice, as before.                                                                                                                                                                               |
+| `20261009120101_entitlements_cancel_at_period_end`       | qa/billing      | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                                                                                                                                                                                 |
+| `20261009120200_share_link_errors_and_peek`              | qa/sharing      | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                                                                                                                                                                                   |
+| `20261010120200_guest_email_verification`                | qa3/shell-auth  | **Before** `guest-email-start` / `guest-email-confirm` (start answers `503 email_unavailable` without it), and they before the bundle. Until it is applied a guest can attach any address through `PUT /auth/v1/user` (QA round 3 below).                                                                                                              |
+| `20261010120300_student_access_revocation`               | qa3/roster-data | **Before** `student-provision`: a reset calls its `end_student_sessions()` and, without it, fails with a 502 after scrambling the password. Old bundles are unaffected.                                                                                                                                                                                |
+| `20261010120301_annotation_payload_shape`                | qa3/roster-data | **With the bundle**: the new client keeps text notes and imported marks inside the checked bounds; an old bundle's over-long note or far-off-page imported mark is refused (`23514`) and rolled back to server truth. VALIDATE fails the migration if a stored row breaks the rules (production's and dev's rows were checked read-only and all pass). |
+| `20261010120302_library_hides_revoked_student_scores`    | qa3/roster-data | After `20261010120300` (it calls `student_access_revoked()`); any order against the bundle.                                                                                                                                                                                                                                                            |
 
-Functions changed: `delete-account` (new), `imslp-download`, `imslp-work`,
-`imslp-sync`, `imslp-search`, `stripe-webhook`, `stripe-checkout`,
-`stripe-portal`, `student-login`, `student-claim`, `student-provision`,
-`resend-inbound`, `analyze-annotations`, and `_shared/` (so redeploy every
-function that imports it — the merge deploys all of them).
+Functions changed: `delete-account`, `guest-email-start` and
+`guest-email-confirm` (new), `imslp-download`, `imslp-work`, `imslp-sync`,
+`imslp-search`, `stripe-webhook`, `stripe-checkout`, `stripe-portal`,
+`student-login`, `student-claim`, `student-provision`, `resend-inbound`,
+`analyze-annotations`, and `_shared/` (so redeploy every function that imports
+it — the merge deploys all of them).
 
 **QA round (20261009\*).** What each function change needs:
 
@@ -193,6 +201,53 @@ throwaway>' })` from the console — it must fail (500), and the guest
   everywhere except over the score viewer (WCAG 1.4.4); "Two months free"
   meets AA contrast.
 
+**QA round 3 — roster, sync, realtime, perf, IMSLP (`qa3/*`, 20261010120300–302).**
+
+- **Archiving or resetting a student ends their open sessions** (roster-data:
+  `20261010120300`, `20261010120302`, `student-provision` with
+  `_shared/studentSessions.ts`). `document_role()` — so every policy, storage
+  rule and realtime topic check built on it — and the library RPCs refuse a
+  roster student whose row is archived or whose token names a session no
+  longer in `auth.sessions`. `end_student_sessions()` (service role only)
+  deletes the student's sessions and refresh tokens and sends the membership
+  hint; `student-provision` calls it on reset (a failure stops the reset) and
+  on archive (a failure is logged, the archive stands). The migration owner
+  must be able to delete from `auth.sessions` / `auth.refresh_tokens`, which
+  hosted Supabase allows. Known limit: a realtime channel the student had
+  already joined stays authorized until the socket's token expires (Realtime
+  authorizes at join); the hint makes the app leave the score, so only a
+  tampered client keeps receiving broadcasts. Nothing changes for accounts
+  that are not roster students — including a guest whose sessions
+  `guest-email-confirm` just ended (`tests/sql/qa3_cross_branch.sql`).
+- **The server checks mark payloads and colours** (`20261010120301`): CHECK
+  constraints `annotations_payload_shape` and `annotations_color_hex` on every
+  write path (plain writes and both batch RPCs). Ship it with the bundle (table
+  above).
+- **Offline changes belong to the account that queued them** (sync, client
+  only). Production never recorded who queued an offline change or which
+  account cached a score, so for changes still queued on a device when this
+  ships, the first account to open that score online is treated as their
+  author and uploads them under its name — right on a single-user device,
+  possibly wrong on a shared one, and nothing on the device can tell. From
+  this build on every change records its account, and a score's cache
+  changing hands no longer passes old changes to the next account.
+- **Realtime** (client only): channels the server closes are re-joined with
+  backoff, the 15 s pull keeps running meanwhile, and the client slows live
+  ink and presence on rate-limit notices — §10, which also recommends moving
+  the org to **Pro before launch**.
+- **First opens stream** (perf, client only): page 1 of a score not yet on the
+  device renders while the PDF downloads from a signed Storage URL, and the
+  finished file becomes the offline copy. It needs Storage to answer a signed
+  URL with a readable `Content-Length` and Range with `206` — checked in step
+  2; without them the open waits for the whole file as before, and the
+  console says so. Pen-up no longer repaints every mark on the page.
+- **IMSLP display** (imslp): search snippets decode doubly escaped entities,
+  and `{{Flat}}` / `{{Sharp}}` / `{{Natural}}` render as ♭ ♯ ♮ in snippets and
+  edition part names. The code is in `_shared/search.ts` and
+  `_shared/imslpFileBlocks.ts`, so it reaches users only once `imslp-search`,
+  `imslp-work` and `imslp-download` are redeployed (the merge deploys every
+  function). Scores imported earlier keep the provenance text stored then.
+
 `stripe-webhook` now applies `customer.subscription.created` / `.updated` from
 the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
 the copy embedded in the event: Stripe does not deliver in order, and a retried
@@ -243,6 +298,16 @@ to refund (comment at the end of `20261007120300`).
    on an idle project. (Run on 2026-10-08 before merge, as one rolled-back
    transaction per file with every 20261007 migration applied first: 113/113,
    37/37 and 89/94 with exactly those five.)
+   QA round 3 adds four proofs, run the same way once the 20261010 migrations
+   are on the branch (or inside the transaction, README _Testing a migration
+   before it is applied_): `tests/sql/guest_email_verification.sql`,
+   `tests/sql/student_access_revocation.sql`,
+   `tests/sql/annotation_payload_shape.sql` and
+   `tests/sql/qa3_cross_branch.sql`. On 2026-10-10 every file passed on a
+   local Postgres 16 with all 55 migrations replayed (catalogs included) and
+   GoTrue's `supabase_auth_admin` role present: 53/53, 32/32, 57/57 and 12/12,
+   and the earlier files 113/113, 37/37, 35/35, 26/26 and 94/94. Not yet run
+   on the dev branch.
    Then the out-of-order webhook check, in the Stripe sandbox against the dev
    endpoint (Workbench → Events): make any two `customer.subscription.updated`
    events on a test subscription (e.g. turn cancel-at-period-end on, then
@@ -281,6 +346,10 @@ to refund (comment at the end of `20261007120300`).
       or the older `STRIPE_SECRET_KEY`; set 2026-08-29).
     - `LOGIN_THROTTLE_SECRET` (recommended, optional): HMAC key for the
       student-login limiter (§9); unset falls back to the service-role key.
+    - `RESEND_API_KEY` on the **`dev` branch** too (production has it for
+      `resend-inbound`): `guest-email-start` mails the guest's code with it,
+      and without it the banner says email is unavailable. Optional
+      `GUEST_EMAIL_FROM` and `GUEST_EMAIL_SECRET` (QA round 3, shell and auth).
     - Optional: `SENTRY_DSN` (+ `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`) for edge
       error reports (§2, _Error monitoring_).
     - Optional tuning: `IMSLP_DOWNLOAD_GLOBAL_MAX` / `IMSLP_DOWNLOAD_GLOBAL_SPACING_MS`
@@ -313,7 +382,11 @@ to refund (comment at the end of `20261007120300`).
       (it no longer creates the row first) — the function must win this race,
       so if the function deploy fails, redeploy it before anything else;
     - old bundles against the new `imslp-download` are still served (they
-      create the row themselves), but show a busy queue as an error.
+      create the row themselves), but show a busy queue as an error;
+    - an old bundle's guest banner calls `updateUser({ email })`, which
+      `guard_guest_email` now refuses, and a new bundle's banner gets a 404
+      until `guest-email-start` is deployed — so do not hold the functions or
+      the bundle back once `20261010120200` is in.
 9. **Realtime topic split** (`20261007120101`). Committed annotation rows, PDF
    replacement and play-along status move from `doc:{id}` to the receive-only
    `doc-db:{id}`; presence, live ink and the sharing `membership` event stay on
@@ -330,10 +403,12 @@ to refund (comment at the end of `20261007120300`).
 ### After the merge
 
 11. Supabase check on the merge commit green; `list_migrations` on production
-    ends at `20261009120200`; security advisor: no new
+    ends at `20261010120302`; security advisor: no new
     `function_search_path_mutable` / `anon_security_definer_function_executable`
     except `peek_share_link`, which is anon-callable on purpose (the join page
     checks a link before anyone signs in) and answers only `{valid, role}`.
+    (In the local replay every public definer function pins `search_path`,
+    and `peek_share_link` is the only one anon may execute.)
 12. Run the CSP smoke against the production build
     (`npm run build && node scripts/csp-smoke.mjs`; with a Sentry DSN build also
     `CSP_SMOKE_SENTRY=1`) — zero violations, legal pages, Account page, Source
@@ -356,6 +431,24 @@ to refund (comment at the end of `20261007120300`).
     then undoes them and says why. On a free account, dismiss the share sheet
     of "Save page 1 as PDF", then "Export whole score as PDF": it goes through,
     not refused.
+    QA round 3 (the guest-email smoke is in its own section above):
+    - Roster: open an assigned score as a student, then archive the student
+      from the teacher's roster — without a reload the open score says it is
+      no longer available, and the assignment list signs the student out and
+      says why (at once on focus, else within a minute). Restore, sign in
+      again on two devices, reset the code: both lose access the same way.
+    - Two tabs of one account on one score: recolour a mark offline in tab
+      1, have a collaborator recolour it meanwhile, reconnect tab 1. Tab 2
+      goes straight to tab 1's colour and never shows the collaborator's.
+    - Shared browser: account A draws offline and its session ends without a
+      sign-out; account C signs in and exports that score as PDF and as a
+      page photo — neither contains A's unsynced marks.
+    - Import marks from the same annotated PDF twice: the second review says
+      the marks are already imported. Paste more than 10,000 characters into
+      a text note: the editor stops at the limit.
+    - IMSLP: search results show no `&quot;` / `&amp;` and part names show ♭
+      where IMSLP has `{{Flat}}`; on a 390×667 phone the edition picker's Add
+      button and its disclaimer are on screen without scrolling.
 14. **Leftover Storage of accounts deleted any other way.** `delete-account`
     empties both buckets for every `document_storage_cleanup` tombstone the
     account owns before it deletes the auth user. An account removed from the

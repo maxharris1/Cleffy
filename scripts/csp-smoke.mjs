@@ -264,6 +264,9 @@ if (OLD_BROWSER) {
     });
 }
 
+/** GETs of the score's signed URL ('whole' or 'range'), and downloads that bypassed it. */
+const signedScoreGets = [];
+let wholeScoreDownloads = 0;
 await context.route(`${SUPABASE}/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -283,7 +286,37 @@ await context.route(`${SUPABASE}/**`, async (route) => {
     if (url.pathname.startsWith('/auth/v1/token')) {
         return json(route, session);
     }
+    // A first open streams the score from a signed URL (progressiveDownload.ts):
+    // createSignedUrl, then a plain GET plus any Range requests pdf.js needs
+    // ahead of it. Answered the way Storage does, so the stream path, not the
+    // whole-file fallback, is what runs under the policy.
+    if (request.method() === 'POST' && url.pathname.startsWith('/storage/v1/object/sign/')) {
+        return json(route, { signedURL: `${url.pathname.slice('/storage/v1'.length)}?token=csp-smoke` });
+    }
+    if (url.pathname.startsWith('/storage/v1/object/sign/') && url.pathname.endsWith('/original.pdf')) {
+        const bytes = fs.readFileSync(PDF);
+        const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers()['range'] ?? '');
+        signedScoreGets.push(range ? 'range' : 'whole');
+        const headers = { 'access-control-allow-origin': '*', 'accept-ranges': 'bytes' };
+        if (range) {
+            const start = Number(range[1]);
+            const end = Math.min(Number(range[2]), bytes.length - 1);
+            return route.fulfill({
+                status: 206,
+                contentType: 'application/pdf',
+                headers: { ...headers, 'content-range': `bytes ${start}-${end}/${bytes.length}` },
+                body: bytes.subarray(start, end + 1),
+            });
+        }
+        return route.fulfill({
+            status: 200,
+            contentType: 'application/pdf',
+            headers: { ...headers, 'content-length': String(bytes.length) },
+            body: bytes,
+        });
+    }
     if (url.pathname.startsWith('/storage/v1/object/') && url.pathname.endsWith('/original.pdf')) {
+        wholeScoreDownloads += 1;
         return route.fulfill({
             status: 200,
             contentType: 'application/pdf',
@@ -412,6 +445,11 @@ const ink = await page.$eval('canvas[data-page-index="0"]', (canvas) => {
     return { dark, width: canvas.width, height: canvas.height };
 });
 check('score page 1 rendered by pdf.js', ink.dark > 500, JSON.stringify(ink));
+check(
+    'score streamed from its signed URL (no whole-file fallback)',
+    signedScoreGets.includes('whole') && wholeScoreDownloads === 0,
+    JSON.stringify({ signedScoreGets, wholeScoreDownloads }),
+);
 check(
     'openjpeg.wasm fetched (JPX decoded in wasm)',
     pdfjsData.get('/pdfjs-wasm/openjpeg.wasm') === 200,

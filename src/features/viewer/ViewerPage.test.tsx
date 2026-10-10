@@ -766,8 +766,13 @@ describe('CloudViewer when the server cannot be reached while online', () => {
         );
         expect(screen.queryByText('Syncing…')).not.toBeInTheDocument();
 
-        const retry = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
-        expect(retry).toBeDefined();
+        // The retry is armed by a passive effect, which React may flush in a
+        // later task than the commit that showed the title.
+        let retry: (typeof setTimeoutSpy.mock.calls)[number] | undefined;
+        await waitFor(() => {
+            retry = setTimeoutSpy.mock.calls.find(([, ms]) => ms === 5000);
+            expect(retry).toBeDefined();
+        });
         fetchDocument.mockResolvedValue(serverDoc());
         fetchMyRole.mockResolvedValue('owner');
         await act(async () => {
