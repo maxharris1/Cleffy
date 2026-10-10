@@ -71,7 +71,7 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
     if (student.auth_method === 'email') {
         return {
             title: 'Email a new sign-in link?',
-            body: `${student.display_name}’s current password stops working straight away, and the link lets them choose a new one. Their scores, annotations and notes are untouched.`,
+            body: `${student.display_name}’s current password stops working straight away and any device they are signed in on is signed out. The link lets them choose a new one. Their scores, annotations and notes are untouched.`,
             confirmLabel: 'Send link',
         };
     }
@@ -84,7 +84,7 @@ const resetPromptFor = (student: ManagedStudentRow): { title: string; body: stri
     }
     return {
         title: 'Reset this student’s access?',
-        body: `${student.display_name}’s password stops working straight away, and the new setup code is how they choose another one. They keep their username, and their scores, annotations and notes are untouched.`,
+        body: `${student.display_name}’s password stops working straight away and any device they are signed in on is signed out. The new setup code is how they choose another one. Their scores, annotations and notes are untouched.`,
         confirmLabel: 'Reset access',
     };
 };
@@ -382,7 +382,8 @@ export const RosterPage = () => {
             {canManageStudents ? (
                 <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-stone-600">
                     Each student gets their own sign-in: a printed setup code they turn into a username, or an email
-                    invite if they have an address. Assign scores from your library and their markings stay theirs.
+                    invite if they have an address. Assign scores from your library: with Edit access a student marks up
+                    the same score you do.
                 </p>
             ) : null}
 
@@ -518,7 +519,7 @@ export const RosterPage = () => {
             {archiveTarget ? (
                 <ConfirmDialog
                     title={`Archive ${archiveTarget.display_name}?`}
-                    body="Their seat frees up for another student and their sign-in stops working. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
+                    body="Their seat frees up for another student and they are signed out everywhere, straight away. Nothing is deleted — assignments, annotations and practice notes all stay, and restoring them brings it back exactly as it was."
                     confirmLabel="Archive"
                     busy={busy}
                     onConfirm={() => void confirmArchive()}
@@ -788,9 +789,13 @@ const StudentRow = ({
                                         key={assignment.id}
                                         className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-stone-200 bg-white/70 px-3 py-2"
                                     >
+                                        {/* Its own line on a phone: sharing one with the
+                                            due date and both controls left a real title
+                                            as "Sona…". */}
                                         <Link
                                             to={`/doc/${assignment.document_id}`}
-                                            className="min-w-0 flex-1 truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover"
+                                            title={documentTitle}
+                                            className="min-w-0 basis-full truncate text-sm font-medium text-stone-800 transition hover:text-accent-hover sm:basis-0 sm:flex-1"
                                         >
                                             {documentTitle}
                                         </Link>

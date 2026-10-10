@@ -107,4 +107,22 @@ describe('AssignDialog', () => {
         await waitFor(() => expect(assignScore).toHaveBeenCalledTimes(1));
         expect(assignScore).toHaveBeenCalledWith('doc-1', 's2-user', 'edit', null, null);
     });
+
+    it('says plainly that Edit reaches the teacher’s own marks too', async () => {
+        // One shared layer per score (owner decision): a student with Edit can
+        // erase the teacher's marks, so the choice must not read as "their own".
+        const user = userEvent.setup();
+        renderDialog();
+
+        await screen.findByRole('checkbox', { name: /Ada Lovelace/ });
+        expect(
+            screen.getByText('They can add, change and erase all marks on this score, including yours.'),
+        ).toBeInTheDocument();
+        expect(screen.queryByText(/their own fingerings/)).not.toBeInTheDocument();
+        // Students sign in with a username or email now; the code works once.
+        expect(screen.queryByText(/sign in with their code/)).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'View only' }));
+        expect(screen.getByText('They can read and play from it, but not mark it up.')).toBeInTheDocument();
+    });
 });
