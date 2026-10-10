@@ -28,8 +28,9 @@ export const GUEST_EMAIL_CODE_LENGTH = 6;
 export const GUEST_EMAIL_CODE_TTL_MS = 15 * 60_000;
 /**
  * Wrong codes before the pending one is thrown away. With six digits and the
- * per-recipient send limit below, guessing at someone else's address is ~15
- * tries an hour against a million codes — and every try mails that person.
+ * per-recipient send limits below, guessing at someone else's address is at
+ * most 50 tries a day against a million codes (under 2% a year of trying
+ * nonstop) — and every fresh code mails that person.
  */
 export const GUEST_EMAIL_MAX_ATTEMPTS = 5;
 
@@ -37,8 +38,13 @@ export const GUEST_EMAIL_MAX_ATTEMPTS = 5;
 export const GUEST_EMAIL_LIMITS = {
     startPerIp: { limit: 20, windowMs: 60 * 60_000 },
     startPerUser: { limit: 5, windowMs: 60 * 60_000 },
-    /** Mail to one address, from every guest together: nobody gets flooded. */
+    /**
+     * Mail to one address, from every guest together: nobody gets flooded.
+     * Spent only on a code actually about to be mailed, so asking about an
+     * address that has an account cannot use up its owner's allowance.
+     */
     startPerRecipient: { limit: 3, windowMs: 60 * 60_000 },
+    startPerRecipientDaily: { limit: 10, windowMs: 24 * 60 * 60_000 },
     confirmPerIp: { limit: 30, windowMs: 15 * 60_000 },
     confirmPerUser: { limit: 10, windowMs: 15 * 60_000 },
 } as const;
@@ -90,8 +96,8 @@ export const hashGuestEmailCode = (secret: string, userId: string, email: string
     hmacHex(secret, `guest-email-code\u0000${userId}\u0000${email}\u0000${code}`);
 
 /** The per-recipient rate-limit key: edge_rate_buckets never holds an address. */
-export const recipientRateKey = async (secret: string, email: string): Promise<string> =>
-    `guest-email-to:${(await hmacHex(secret, `guest-email-recipient\u0000${email}`)).slice(0, 40)}`;
+export const recipientRateKey = async (secret: string, email: string, window = 'hour'): Promise<string> =>
+    `guest-email-to${window === 'hour' ? '' : `-${window}`}:${(await hmacHex(secret, `guest-email-recipient\u0000${email}`)).slice(0, 40)}`;
 
 export interface GuestEmailMessage {
     subject: string;
@@ -160,7 +166,7 @@ interface CommonDeps {
 }
 
 export interface GuestEmailStartDeps extends CommonDeps {
-    /** Whether any account uses the address; null when that could not be answered. */
+    /** Whether any account uses the address (guest_email_taken); null when that could not be answered. */
     emailTaken: (email: string) => Promise<boolean | null>;
     /** Store (replacing any earlier) pending code for the guest; false on failure. */
     savePending: (row: { userId: string; email: string; codeHash: string; expiresAt: string }) => Promise<boolean>;
@@ -172,6 +178,8 @@ export interface GuestEmailStartDeps extends CommonDeps {
 }
 
 export interface GuestEmailConfirmDeps extends CommonDeps {
+    /** As for start: asked again, since the address may have been registered since the code went out. */
+    emailTaken: (email: string) => Promise<boolean | null>;
     /** check_guest_email_code; null when the check itself failed. */
     checkCode: (userId: string, email: string, codeHash: string) => Promise<CodeCheck | null>;
     /** Attach email (confirmed) and password to the anonymous user. */
@@ -270,21 +278,23 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         return json(GUEST_EMAIL_ERRORS.unavailable, 503);
     }
 
-    const recipientGate = await deps.checkRateLimit(
-        await recipientRateKey(secret, email),
-        GUEST_EMAIL_LIMITS.startPerRecipient.limit,
-        GUEST_EMAIL_LIMITS.startPerRecipient.windowMs,
-    );
-    if (!recipientGate.ok) {
-        return tooMany(json, recipientGate.retryAfterSec);
-    }
-
     const taken = await deps.emailTaken(email);
     if (taken === null) {
         return json(GUEST_EMAIL_ERRORS.unavailable, 503);
     }
     if (taken) {
         return json(GUEST_EMAIL_ERRORS.emailInUse, 409);
+    }
+
+    // Only now, with a code about to go out, is the address's own allowance spent.
+    for (const [window, { limit, windowMs }] of [
+        ['hour', GUEST_EMAIL_LIMITS.startPerRecipient],
+        ['day', GUEST_EMAIL_LIMITS.startPerRecipientDaily],
+    ] as const) {
+        const recipientGate = await deps.checkRateLimit(await recipientRateKey(secret, email, window), limit, windowMs);
+        if (!recipientGate.ok) {
+            return tooMany(json, recipientGate.retryAfterSec);
+        }
     }
 
     const code = deps.generateCode();
@@ -317,6 +327,13 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
  * password the server would refuse does not spend one of the code's tries.
  * The pending row goes only after the attach succeeds: a transient failure
  * can be retried with the same code.
+ *
+ * The address may have been registered since the code went out. GoTrue's
+ * admin update has no duplicate-email check (only admin create does): the
+ * clash surfaces as a unique-index violation, reported as a generic database
+ * error. So the address is asked about again before the attach, and once
+ * more after a failed one, and a clash either time is answered "sign in
+ * instead" with the code withdrawn — not a retry that can never succeed.
  */
 export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConfirmDeps): Promise<Response> => {
     const { json } = deps;
@@ -373,6 +390,15 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
             return json(GUEST_EMAIL_ERRORS.unavailable, 503);
     }
 
+    const emailInUse = async (): Promise<Response> => {
+        await deps.deletePending(userId);
+        return json(GUEST_EMAIL_ERRORS.emailInUse, 409);
+    };
+    // Unknown (null) goes ahead: the attach itself cannot take a used address.
+    if ((await deps.emailTaken(email)) === true) {
+        return emailInUse();
+    }
+
     const attached = await deps.attach(userId, email, password);
     switch (attached) {
         case 'ok':
@@ -380,13 +406,16 @@ export const handleGuestEmailConfirm = async (req: Request, deps: GuestEmailConf
             return json({ ok: true, email });
         case 'email_taken':
             // Someone registered the address between start and confirm.
-            await deps.deletePending(userId);
-            return json(GUEST_EMAIL_ERRORS.emailInUse, 409);
+            return emailInUse();
         case 'weak_password':
             // GoTrue's policy is stricter than passwordPolicy.ts thought (or the
             // password is breached): the code stays good for another password.
             return json({ error: 'That password was refused. Choose a different one.', code: 'weak_password' }, 422);
         default:
+            // The same race, lost inside GoTrue: its message says only "Database error".
+            if ((await deps.emailTaken(email)) === true) {
+                return emailInUse();
+            }
             return json(GUEST_EMAIL_ERRORS.attachFailed, 502);
     }
 };

@@ -37,6 +37,20 @@ export const common = {
     logError: (message: string, err?: unknown) => logError('guest-email', err ?? new Error(message), { code: message }),
 };
 
+/** guest_email_taken, asked by start before mailing and by confirm before attaching. */
+export const emailTaken = async (email: string): Promise<boolean | null> => {
+    const admin = serviceClient();
+    if (!admin) {
+        return null;
+    }
+    const { data, error } = await admin.rpc('guest_email_taken', { p_email: email });
+    if (error || typeof data !== 'boolean') {
+        console.error(`guest_email_taken failed: ${error?.message ?? 'no answer'}`);
+        return null;
+    }
+    return data;
+};
+
 export const deletePending = async (userId: string): Promise<void> => {
     const admin = serviceClient();
     if (!admin) {

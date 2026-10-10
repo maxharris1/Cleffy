@@ -1,5 +1,5 @@
 import { generateGuestEmailCode, handleGuestEmailStart } from '../_shared/guestEmail.ts';
-import { common, deletePending, sendEmail } from '../_shared/guestEmailWiring.ts';
+import { common, deletePending, emailTaken, sendEmail } from '../_shared/guestEmailWiring.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 
 /**
@@ -12,30 +12,25 @@ import { serviceClient } from '../_shared/rateLimit.ts';
 Deno.serve((req) =>
     handleGuestEmailStart(req, {
         ...common,
-        emailTaken: async (email) => {
-            const admin = serviceClient();
-            if (!admin) {
-                return null;
-            }
-            const { data, error } = await admin.rpc('guest_email_taken', { p_email: email });
-            if (error || typeof data !== 'boolean') {
-                console.error(`guest_email_taken failed: ${error?.message ?? 'no answer'}`);
-                return null;
-            }
-            return data;
-        },
+        emailTaken,
         savePending: async ({ userId, email, codeHash, expiresAt }) => {
             const admin = serviceClient();
             if (!admin) {
                 return false;
             }
-            // A fresh code replaces any earlier one, tries and all.
-            const { error } = await admin
-                .from('guest_email_verifications')
-                .upsert(
-                    { user_id: userId, email, code_hash: codeHash, attempts: 0, expires_at: expiresAt },
-                    { onConflict: 'user_id' },
-                );
+            // A fresh code replaces any earlier one, tries and proof and all.
+            const { error } = await admin.from('guest_email_verifications').upsert(
+                {
+                    user_id: userId,
+                    email,
+                    code_hash: codeHash,
+                    attempts: 0,
+                    expires_at: expiresAt,
+                    verified_email: null,
+                    verified_at: null,
+                },
+                { onConflict: 'user_id' },
+            );
             if (error) {
                 console.error(`could not store the guest email code for ${userId}: ${error.message}`);
                 return false;

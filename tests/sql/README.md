@@ -59,7 +59,13 @@ redeemable after the last allowed wrong try (`locked`), past expiry
 (`expired`) or when none was sent (`missing`); `guest_email_taken` answers the
 service role only — it refuses without a service-role JWT even where EXECUTE
 is held — and no client role can read the pending codes or call either
-function. It reports `failures | total` on its last line.
+function. It also proves the `guard_guest_email` trigger on `auth.users`,
+updating as `supabase_auth_admin` the way GoTrue does: a guest's row cannot
+leave anonymity or gain an address without a code checked for exactly that
+address in the last 10 minutes — in GoTrue's order (is_anonymous cleared,
+then email set), the reverse, or one statement — while the proven address
+attaches in all three, and registered accounts and soft deletes are
+untouched. It reports `failures | total` on its last line.
 
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`

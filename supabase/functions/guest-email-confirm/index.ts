@@ -1,5 +1,5 @@
 import { type CodeCheck, GUEST_EMAIL_MAX_ATTEMPTS, handleGuestEmailConfirm } from '../_shared/guestEmail.ts';
-import { common, deletePending } from '../_shared/guestEmailWiring.ts';
+import { common, deletePending, emailTaken } from '../_shared/guestEmailWiring.ts';
 import { passwordProblem, passwordProblemMessage } from '../_shared/passwordPolicy.ts';
 import { serviceClient } from '../_shared/rateLimit.ts';
 
@@ -16,6 +16,7 @@ Deno.serve((req) =>
     handleGuestEmailConfirm(req, {
         ...common,
         password: { passwordProblem, passwordProblemMessage },
+        emailTaken,
         checkCode: async (userId, email, codeHash) => {
             const admin = serviceClient();
             if (!admin) {
@@ -41,7 +42,11 @@ Deno.serve((req) =>
             // email_confirm: the code just proved it. GoTrue then creates the
             // email identity and clears is_anonymous in the same transaction,
             // so the guest's id — and every membership and mark under it — is
-            // now a registered account.
+            // now a registered account. The guard_guest_email trigger lets it
+            // through because checkCode just stamped this address as proven.
+            // A clash with an account registered since start is not reported
+            // here as email_exists (admin update has no such check; it is a
+            // unique-index "Database error"): the handler asks again.
             const { error } = await admin.auth.admin.updateUserById(userId, {
                 email,
                 password,

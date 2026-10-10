@@ -111,13 +111,15 @@ describe('guest-email-start', () => {
             },
         ]);
         expect(h.saved[0]?.codeHash).not.toContain('482913');
-        // IP gate before the auth round-trip; then the guest, the address, the lookup.
+        // IP gate before the auth round-trip; then the guest, the lookup, and
+        // only for a code about to be mailed, the address's own allowance.
         expect(h.calls).toEqual([
             'rate:guest-email-start:ip',
             'auth',
             'rate:guest-email-start:user',
-            'rate:guest-email-to:' + (await recipientRateKey(SECRET, 'ada@example.com')).split(':')[1],
             'taken:ada@example.com',
+            'rate:guest-email-to:' + (await recipientRateKey(SECRET, 'ada@example.com')).split(':')[1],
+            'rate:guest-email-to-day:' + (await recipientRateKey(SECRET, 'ada@example.com', 'day')).split(':')[1],
             'save',
             'send',
         ]);
@@ -130,6 +132,8 @@ describe('guest-email-start', () => {
         expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.emailInUse);
         expect(h.sent).toEqual([]);
         expect(h.saved).toEqual([]);
+        // Asking about an address with an account spends none of its mail allowance.
+        expect(h.calls.filter((call) => call.startsWith('rate:guest-email-to'))).toEqual([]);
     });
 
     it('refuses a registered account: this path only turns a guest into one', async () => {
@@ -170,8 +174,13 @@ describe('guest-email-start', () => {
         expect(h.sent).toEqual([]);
     });
 
-    it('limits per IP, per guest and per recipient address', async () => {
-        for (const blocked of ['guest-email-start:ip', 'guest-email-start:user', 'guest-email-to']) {
+    it('limits per IP, per guest and per recipient address, hourly and daily', async () => {
+        for (const blocked of [
+            'guest-email-start:ip',
+            'guest-email-start:user',
+            'guest-email-to:',
+            'guest-email-to-day:',
+        ]) {
             const h = startHarness();
             h.deps.checkRateLimit = vi.fn(async (key: string) =>
                 key.startsWith(blocked) ? { ok: false as const, retryAfterSec: 600 } : { ok: true as const },
@@ -182,6 +191,8 @@ describe('guest-email-start', () => {
             expect(h.sent, blocked).toEqual([]);
         }
         expect(GUEST_EMAIL_LIMITS.startPerRecipient.limit).toBeLessThanOrEqual(3);
+        // Codes mailed to one address a day x tries per code: the most a stranger can guess.
+        expect(GUEST_EMAIL_LIMITS.startPerRecipientDaily.limit * 5).toBeLessThanOrEqual(50);
     });
 });
 
@@ -190,6 +201,8 @@ const confirmHarness = (
         check?: CodeCheck | null;
         attach?: 'ok' | 'email_taken' | 'weak_password' | 'failed';
         caller?: GuestCaller | Response;
+        /** guest_email_taken's answers, one per call (the last one repeats). */
+        taken?: (boolean | null)[];
     } = {},
 ) => {
     const calls: string[] = [];
@@ -198,6 +211,11 @@ const confirmHarness = (
     const deps: GuestEmailConfirmDeps = {
         ...common(calls, options.caller),
         password: { passwordProblem, passwordProblemMessage },
+        emailTaken: vi.fn(async (email: string) => {
+            calls.push(`taken:${email}`);
+            const answers = options.taken ?? [false];
+            return answers.length > 1 ? (answers.shift() ?? false) : (answers[0] ?? false);
+        }),
         checkCode: vi.fn(async (userId, email, codeHash) => {
             calls.push('check');
             checked.push({ userId, email, codeHash });
@@ -233,7 +251,7 @@ describe('guest-email-confirm', () => {
         ]);
         // The password exactly as typed — trailing space included.
         expect(h.attached).toEqual([{ userId: GUEST.userId, email: 'ada@example.com', password: 'Correct1horse ' }]);
-        expect(h.calls.slice(-3)).toEqual(['check', 'attach', 'delete']);
+        expect(h.calls.slice(-4)).toEqual(['check', 'taken:ada@example.com', 'attach', 'delete']);
     });
 
     it('attaches nothing for a wrong, expired, used-up or missing code', async () => {
@@ -270,16 +288,35 @@ describe('guest-email-confirm', () => {
     });
 
     it('says sign in instead when the address was registered in the meantime', async () => {
-        const h = confirmHarness({ attach: 'email_taken' });
-        const response = await handleGuestEmailConfirm(post(goodConfirm), h.deps);
+        // Seen before the attach: nothing is attempted, and the code is withdrawn.
+        const before = confirmHarness({ taken: [true] });
+        const response = await handleGuestEmailConfirm(post(goodConfirm), before.deps);
         expect(response.status).toBe(409);
         expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.emailInUse);
+        expect(before.attached).toEqual([]);
+        expect(before.calls).toContain('delete');
+
+        // Registered between the check and the attach. GoTrue's admin update has
+        // no duplicate check: the unique index answers, as a generic failure.
+        const during = confirmHarness({ attach: 'failed', taken: [false, true] });
+        const raced = await handleGuestEmailConfirm(post(goodConfirm), during.deps);
+        expect(raced.status).toBe(409);
+        expect(await raced.json()).toEqual(GUEST_EMAIL_ERRORS.emailInUse);
+        expect(during.calls.slice(-3)).toEqual(['attach', 'taken:ada@example.com', 'delete']);
+
+        const reported = confirmHarness({ attach: 'email_taken' });
+        expect((await handleGuestEmailConfirm(post(goodConfirm), reported.deps)).status).toBe(409);
+        expect(reported.calls).toContain('delete');
     });
 
-    it('keeps the code for a retry when the attach fails', async () => {
+    it('keeps the code for a retry when the attach fails for another reason', async () => {
         const h = confirmHarness({ attach: 'failed' });
         expect((await handleGuestEmailConfirm(post(goodConfirm), h.deps)).status).toBe(502);
         expect(h.calls).not.toContain('delete');
+
+        // An account lookup that cannot answer does not stand in the way.
+        const unknown = confirmHarness({ taken: [null] });
+        expect((await handleGuestEmailConfirm(post(goodConfirm), unknown.deps)).status).toBe(200);
     });
 
     it('refuses registered accounts and limits per IP and per guest', async () => {
@@ -314,9 +351,12 @@ describe('guest email helpers', () => {
         expect(await hashGuestEmailCode('other', 'u1', 'a@example.com', '123456')).not.toBe(base);
     });
 
-    it('the recipient rate key never contains the address', async () => {
+    it('the recipient rate keys never contain the address, and each window has its own', async () => {
         const key = await recipientRateKey(SECRET, 'ada@example.com');
+        const daily = await recipientRateKey(SECRET, 'ada@example.com', 'day');
         expect(key).not.toContain('ada');
+        expect(daily).not.toContain('ada');
+        expect(daily).not.toBe(key);
         expect(key.length).toBeLessThanOrEqual(200);
     });
 
@@ -340,6 +380,20 @@ describe('the browser no longer attaches an email itself', () => {
         }
         const banner = readFileSync(resolve(process.cwd(), 'src/features/auth/UpgradeBanner.tsx'), 'utf8');
         expect(banner).toMatch(/startGuestEmailUpgrade/);
+    });
+
+    it('the server refuses an unproven address however it arrives (PUT /auth/v1/user included)', () => {
+        const migration = readFileSync(
+            resolve(process.cwd(), 'supabase/migrations/20261010120200_guest_email_verification.sql'),
+            'utf8',
+        );
+        expect(migration).toMatch(
+            /create trigger guard_guest_email\s+before update of email, is_anonymous on auth\.users/,
+        );
+        // The new code's upsert clears any earlier proof (the trigger reads verified_email).
+        const start = readFileSync(resolve(process.cwd(), 'supabase/functions/guest-email-start/index.ts'), 'utf8');
+        expect(start).toMatch(/verified_email: null/);
+        expect(start).toMatch(/verified_at: null/);
     });
 
     it('both functions are declared, JWT required', () => {
