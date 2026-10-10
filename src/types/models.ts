@@ -49,6 +49,34 @@ export interface TextPayload {
     italic?: 0 | 1;
 }
 
+/**
+ * Longest text note the server stores (annotation_payload_valid in migration
+ * 20261010120301). A longer one is refused, and the sync outbox then rolls the
+ * note back, so every writer cuts to this first.
+ */
+export const MAX_TEXT_NOTE_CHARS = 10000;
+
+/**
+ * `text` cut to MAX_TEXT_NOTE_CHARS. Counts UTF-16 units, which is never fewer
+ * than the code points Postgres counts, and never leaves half a surrogate pair.
+ */
+export const clampTextNote = (text: string): string => {
+    if (text.length <= MAX_TEXT_NOTE_CHARS) {
+        return text;
+    }
+    const cut = text.slice(0, MAX_TEXT_NOTE_CHARS);
+    const last = cut.charCodeAt(cut.length - 1);
+    return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+};
+
+/**
+ * Normalized coordinates the server stores: a page and a page's width beyond
+ * each edge (annotation_payload_valid). Drawing can run a little off the page;
+ * nothing a user does reaches a whole page further.
+ */
+export const MIN_PAGE_COORD = -1;
+export const MAX_PAGE_COORD = 2;
+
 /** Faces a prose note can be set in. The default system face is already a sans. */
 export type TextFont = 'sans' | 'serif';
 

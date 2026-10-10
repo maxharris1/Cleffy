@@ -50,7 +50,7 @@ import {
 } from '@/sync/syncEngine';
 import type { PresencePeer, ScoreAnalysisBroadcast } from '@/sync/wire';
 import { useViewerStore } from '@/state/store';
-import { isTextPayload } from '@/types/models';
+import { clampTextNote, isTextPayload } from '@/types/models';
 import type { ScoreData } from '@/types/scoreData';
 import { ErrorText } from '@/ui/ErrorText';
 import { LoadingText } from '@/ui/Loading';
@@ -653,7 +653,9 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         }
         textIntentHandled.current = true;
         setTextIntent(null);
-        const trimmed = text.trim();
+        // maxLength stops typing and pasting past the server's cap; this is the
+        // backstop for anything that reaches the textarea some other way.
+        const trimmed = clampTextNote(text.trim());
         const { existing } = textIntent;
         if (existing) {
             const live = annotationStore.get(existing.id);
