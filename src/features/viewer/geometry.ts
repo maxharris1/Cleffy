@@ -259,6 +259,36 @@ export const fitPageWidthScale = (layout: DocumentLayout, viewportWidth: number)
     return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
 };
 
+/**
+ * The view after the page sizes change under it (a streamed first open lays
+ * every page out at page 1's size, then corrects the ones that differ). The
+ * same point of the page at the viewport centre stays at the centre, so a
+ * reader on page 40 is not moved by the pages above it, and the zoom stays
+ * the same multiple of fit-width (as a rotation keeps it), so a fitted score
+ * whose widest page turned out wider is fitted again. Unclamped.
+ */
+export const reanchorView = (
+    view: ViewState,
+    before: DocumentLayout,
+    after: DocumentLayout,
+    viewportWidth: number,
+    viewportHeight: number,
+): ViewState => {
+    const focused = focusedPageIndex(view, viewportHeight, before.layouts);
+    const from = before.layouts[focused];
+    const to = after.layouts[focused];
+    if (!from || !to || from.height <= 0 || before.contentWidth <= 0) {
+        return view;
+    }
+    const ratio = fitPageWidthScale(after, viewportWidth) / fitPageWidthScale(before, viewportWidth);
+    const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, view.scale * ratio));
+    const cx = (view.scrollX + viewportWidth / 2) / view.scale;
+    const cy = (view.scrollY + viewportHeight / 2) / view.scale;
+    const x = cx * (after.contentWidth / before.contentWidth);
+    const y = to.top + ((cy - from.top) / from.height) * to.height;
+    return { scale, scrollX: x * scale - viewportWidth / 2, scrollY: y * scale - viewportHeight / 2 };
+};
+
 /** A point on a specific page in normalized (0–1) page coordinates. */
 export interface PagePoint {
     pageIndex: number;

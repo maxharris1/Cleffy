@@ -58,6 +58,9 @@ vi.mock('@/sync/db', () => {
                 where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }),
             }),
             scoreCache: table({ delete: () => Promise.resolve() }),
+            fingeringRegions: table({
+                where: () => ({ equals: () => ({ delete: () => Promise.resolve(0) }) }),
+            }),
             thumbnails: table({
                 put: (row: { docId: string }) => {
                     memThumbs.set(row.docId, row);
@@ -93,10 +96,12 @@ import {
     leaveSharedDocument,
     listDocuments,
     cacheDocumentBytes,
+    cacheStreamedDocument,
     loadDocumentBytes,
     loadDocumentOffline,
     loadDocumentSource,
     prefetchScoreUrl,
+    purgeLocalDocument,
     replaceDocumentPdf,
     resetStorageCleanupSweep,
     sweepPendingStorageCleanup,
@@ -106,6 +111,7 @@ import { libraryMutationEpoch } from '@/features/library/libraryCache';
 import { importImslpPdfToStorage } from '@/features/imslp/imslpApi';
 import { uploadPdfToStorage } from '@/lib/storageUpload';
 import { getSupabase } from '@/lib/supabase';
+import { cancelBackgroundPdfCache } from '@/sync/pdfCache';
 
 const putCache = (row: CachedPdf) => getDb().pdfCache.put(row);
 
@@ -626,6 +632,74 @@ describe('cacheDocumentBytes (a finished stream)', () => {
         const row = memCache.get(d.id) as CachedPdf;
         expect(new TextDecoder().decode(row.bytes as ArrayBuffer)).toBe('streamed');
         expect(row).toMatchObject({ contentRev: 3, myRole: 'editor', userId: 'user-1', archivedAt: d.archived_at });
+    });
+});
+
+describe('cacheStreamedDocument (a first open closed mid-download)', () => {
+    /** A download the test finishes; records whether it was stopped. */
+    const pendingDownload = () => {
+        let finish: (bytes: ArrayBuffer) => void = () => undefined;
+        const complete = new Promise<ArrayBuffer>((resolve) => {
+            finish = resolve;
+        });
+        const abort = vi.fn();
+        return { complete, abort, finish: (text: string) => finish(new TextEncoder().encode(text).buffer) };
+    };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    beforeEach(() => {
+        makeStub();
+        cancelBackgroundPdfCache();
+    });
+
+    it('lets the download finish after the viewer closed and keeps it as the offline copy', async () => {
+        const d = doc({ content_rev: 2 });
+        const download = pendingDownload();
+        cacheStreamedDocument(d, download, { userId: 'user-1', role: 'owner' });
+        expect(memCache.has(d.id)).toBe(false);
+
+        download.finish('late-bytes');
+        await settle();
+
+        const row = memCache.get(d.id) as CachedPdf;
+        expect(new TextDecoder().decode(row.bytes as ArrayBuffer)).toBe('late-bytes');
+        expect(row).toMatchObject({ contentRev: 2, myRole: 'owner', userId: 'user-1' });
+        expect(download.abort).not.toHaveBeenCalled();
+    });
+
+    it('keeps a copy of the same or a newer revision that landed meanwhile', async () => {
+        const d = doc({ content_rev: 2 });
+        const download = pendingDownload();
+        cacheStreamedDocument(d, download, { userId: 'user-1' });
+        await putCache({ docId: d.id, bytes: new TextEncoder().encode('newer').buffer, contentRev: 3 } as CachedPdf);
+
+        download.finish('older');
+        await settle();
+
+        expect(new TextDecoder().decode((memCache.get(d.id) as CachedPdf).bytes as ArrayBuffer)).toBe('newer');
+    });
+
+    it('is stopped by purging the score, and writes nothing back', async () => {
+        const d = doc();
+        const download = pendingDownload();
+        cacheStreamedDocument(d, download, { userId: 'user-1' });
+
+        await purgeLocalDocument(d.id);
+        expect(download.abort).toHaveBeenCalledTimes(1);
+        download.finish('after-purge');
+        await settle();
+
+        expect(memCache.has(d.id)).toBe(false);
+    });
+
+    it('is stopped by clearing every background download (sign-out)', async () => {
+        const download = pendingDownload();
+        cacheStreamedDocument(doc(), download);
+        cancelBackgroundPdfCache();
+        expect(download.abort).toHaveBeenCalledTimes(1);
+        download.finish('after-sign-out');
+        await settle();
+        expect(memCache.size).toBe(0);
     });
 });
 

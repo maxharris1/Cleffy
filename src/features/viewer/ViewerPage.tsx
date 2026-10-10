@@ -10,6 +10,7 @@ import { ImportScanButton } from '@/features/import/ImportScanButton';
 import { UPLOAD_ACCEPT, prepareUploadFile } from '@/features/import/prepareUpload';
 import {
     cacheDocumentBytes,
+    cacheStreamedDocument,
     ensureDocumentPageCount,
     fetchDocument,
     fetchMyRole,
@@ -29,6 +30,7 @@ import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButt
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/viewer/pdf/PdfProvider';
+import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
 import { ViewerHeader } from '@/features/viewer/ViewerHeader';
@@ -617,16 +619,25 @@ const CloudViewer = ({ docId }: { docId: string }) => {
     }, [online, awaitingServer, retryOpen, confirmAttempt, askAgain]);
 
     /**
+     * What a streamed first open's offline copy is stamped with: the latest
+     * row, and the server's role if it has answered by now, else the one the
+     * stream started with.
+     */
+    const streamStamp = useCallback((source: StreamedPdfSource) => {
+        const stream = source as ScoreStream;
+        const live = stateRef.current?.pdf === source ? stateRef.current : null;
+        const doc = live?.doc ?? stream.doc;
+        const role = live && !live.provisional && !live.unconfirmed ? (live.role ?? undefined) : stream.role;
+        return { doc, role };
+    }, []);
+
+    /**
      * A first open finished streaming: this is the offline copy (and the
-     * bytes the import tools need). The role stamped is the server's, if it
-     * has answered by now, else the one the stream started with.
+     * bytes the import tools need).
      */
     const onStreamComplete = useCallback(
         (source: StreamedPdfSource, bytes: ArrayBuffer) => {
-            const stream = source as ScoreStream;
-            const live = stateRef.current?.pdf === source ? stateRef.current : null;
-            const doc = live?.doc ?? stream.doc;
-            const role = live && !live.provisional && !live.unconfirmed ? (live.role ?? undefined) : stream.role;
+            const { doc, role } = streamStamp(source);
             void cacheDocumentBytes(doc, bytes, { userId, role });
             setState((prev) => (prev?.pdf === source ? { ...prev, bytes } : prev));
             void ensureDocumentPageCount(doc, bytes)
@@ -641,7 +652,21 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 })
                 .catch(() => undefined);
         },
-        [userId],
+        [userId, streamStamp],
+    );
+
+    /**
+     * The viewer closed (or moved on) before a first open finished streaming:
+     * the download carries on without it and still becomes the offline copy,
+     * unless a copy of this revision or a newer one is cached by then (the
+     * viewer moved on to a newer revision, or the score was reopened).
+     */
+    const onStreamAbandoned = useCallback(
+        (source: StreamedPdfSource, download: ProgressiveDownload) => {
+            const { doc, role } = streamStamp(source);
+            cacheStreamedDocument(doc, download, { userId, role });
+        },
+        [userId, streamStamp],
     );
 
     /**
@@ -879,7 +904,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
                 </div>
             ) : null}
             <div className="min-h-0 flex-1">
-                <PdfProvider data={state.pdf} onStreamComplete={onStreamComplete} onStreamError={onStreamError}>
+                <PdfProvider
+                    data={state.pdf}
+                    onStreamComplete={onStreamComplete}
+                    onStreamError={onStreamError}
+                    onStreamAbandoned={onStreamAbandoned}
+                >
                     <PdfViewport
                         key={docId}
                         docId={docId}

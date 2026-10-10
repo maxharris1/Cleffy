@@ -52,6 +52,16 @@ interface LiveStroke {
     simulatePressure: boolean;
 }
 
+/** Call `listener` whenever the document finishes loading fonts; returns the unsubscribe. */
+const onFontsLoaded = (listener: () => void): (() => void) => {
+    const fonts = typeof document === 'undefined' ? undefined : document.fonts;
+    if (!fonts || typeof fonts.addEventListener !== 'function') {
+        return () => undefined;
+    }
+    fonts.addEventListener('loadingdone', listener);
+    return () => fonts.removeEventListener('loadingdone', listener);
+};
+
 /** What a page's committed canvas currently shows (see InkController.syncPage). */
 interface PaintedPage {
     canvas: HTMLCanvasElement;
@@ -143,6 +153,9 @@ export class InkController {
     private pathCaches = new Map<number, StrokePathCache>();
     private painted = new Map<number, PaintedPage>();
     private unsubscribes: Array<() => void> = [];
+    /** Committed canvases with a context-restored listener (see watchContextLoss). */
+    private watchedCanvases = new WeakSet<HTMLCanvasElement>();
+    private destroyed = false;
     private publisher: LiveInkPublisher | null = null;
     private remote = new RemoteInkBuffers();
     private remoteGcTimer: ReturnType<typeof setInterval> | null = null;
@@ -176,7 +189,10 @@ export class InkController {
                     this.renderPageLive(pageIndex);
                 }
             }),
-            opts.registry.onRegister((pageIndex) => this.repaintPage(pageIndex)),
+            opts.registry.onRegister((pageIndex) => {
+                this.watchContextLoss(pageIndex);
+                this.repaintPage(pageIndex);
+            }),
             // Selection belongs to the text tool; switching tools drops it.
             useViewerStore.subscribe((state, prev) => {
                 if (state.tool !== prev.tool && state.tool !== 'text') {
@@ -184,15 +200,43 @@ export class InkController {
                 }
             }),
             // Converted symbols were drawn as fallback text until the music face arrived.
-            onMusicFontReady(() => {
-                for (const pageIndex of opts.registry.pageIndices()) {
-                    this.repaintPage(pageIndex);
-                }
-            }),
+            onMusicFontReady(() => this.repaintAll()),
+            // Likewise a prose note in a webfont that was still loading.
+            onFontsLoaded(() => this.repaintAll()),
         ];
     }
 
+    /**
+     * syncPage trusts `painted` to say what a canvas shows, so a canvas
+     * cleared behind its back stays blank until something forces a repaint.
+     * The browser says so when it restores a lost 2D context; repaint then.
+     */
+    private watchContextLoss(pageIndex: number): void {
+        const committed = this.opts.registry.get(pageIndex)?.committed;
+        if (!committed || this.watchedCanvases.has(committed) || typeof committed.addEventListener !== 'function') {
+            return;
+        }
+        this.watchedCanvases.add(committed);
+        committed.addEventListener('contextrestored', () => {
+            if (this.destroyed) {
+                return;
+            }
+            for (const page of this.opts.registry.pageIndices()) {
+                if (this.opts.registry.get(page)?.committed === committed) {
+                    this.repaintPage(page);
+                }
+            }
+        });
+    }
+
+    private repaintAll(): void {
+        for (const pageIndex of this.opts.registry.pageIndices()) {
+            this.repaintPage(pageIndex);
+        }
+    }
+
     destroy(): void {
+        this.destroyed = true;
         for (const unsubscribe of this.unsubscribes) {
             unsubscribe();
         }

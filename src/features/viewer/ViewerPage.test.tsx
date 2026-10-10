@@ -15,6 +15,7 @@ const loadDocumentOffline = vi.fn();
 const ensureDocumentPageCount = vi.fn();
 const prefetchScoreUrl = vi.fn();
 const cacheDocumentBytes = vi.fn();
+const cacheStreamedDocument = vi.fn();
 const purgeLocalDocument = vi.fn();
 const removeCachedLibraryDocument = vi.fn();
 
@@ -33,6 +34,7 @@ vi.mock('@/features/library/documentsService', () => ({
     ensureDocumentPageCount: (...args: unknown[]) => ensureDocumentPageCount(...args),
     prefetchScoreUrl: (...args: unknown[]) => prefetchScoreUrl(...args),
     cacheDocumentBytes: (...args: unknown[]) => cacheDocumentBytes(...args),
+    cacheStreamedDocument: (...args: unknown[]) => cacheStreamedDocument(...args),
 }));
 
 const SESSION = {
@@ -57,6 +59,7 @@ const pdfProps = vi.hoisted(() => ({
         data: ArrayBuffer | { url: string };
         onStreamComplete?: (source: { url: string }, bytes: ArrayBuffer) => void;
         onStreamError?: (source: { url: string }, err: unknown) => void;
+        onStreamAbandoned?: (source: { url: string }, download: unknown) => void;
     },
 }));
 
@@ -400,6 +403,27 @@ describe('CloudViewer warm open', () => {
         );
         // Same source: the finished download does not reload the document.
         expect(pdfProps.current!.data).toBe(stream);
+    });
+
+    it('still caches a first open left before its download ended', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc());
+        loadDocumentSource.mockResolvedValue({ url: 'https://storage.example/signed/original.pdf' });
+
+        renderViewer();
+
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-readonly', 'false'));
+        const stream = pdfProps.current!.data as { url: string };
+        const download = { complete: new Promise<ArrayBuffer>(() => undefined), abort: vi.fn() };
+        // PdfProvider closing mid-download hands it over rather than aborting it.
+        pdfProps.current!.onStreamAbandoned!(stream, download);
+
+        expect(cacheStreamedDocument).toHaveBeenCalledWith(
+            expect.objectContaining({ id: DOC_ID }),
+            download,
+            expect.objectContaining({ userId: 'teacher-1', role: 'owner' }),
+        );
+        expect(download.abort).not.toHaveBeenCalled();
     });
 
     it('downloads the file whole when the stream fails', async () => {

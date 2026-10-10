@@ -50,8 +50,33 @@ let store: AnnotationStore;
 let ink: InkController;
 let intents: TextIntent[];
 
-/** Let the store's async update chain settle. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+/** Store writes the controller started (it does not await them). */
+const inFlight = new Set<Promise<unknown>>();
+
+/** Count every create/update/delete the controller starts, so settle can await them. */
+const trackWrites = (target: AnnotationStore) => {
+    for (const method of ['create', 'update', 'delete'] as const) {
+        const original = target[method].bind(target) as (...args: unknown[]) => Promise<unknown>;
+        (target as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
+            const write = original(...args);
+            inFlight.add(write);
+            void write.finally(() => inFlight.delete(write)).catch(() => undefined);
+            return write;
+        };
+    }
+};
+
+/**
+ * Let the store's async update chain settle: every write started so far has
+ * landed. A fixed 20 ms wait used to be all, and lost the race on a loaded
+ * machine (the snapshot check and IndexedDB write took longer).
+ */
+const settle = async () => {
+    do {
+        await Promise.allSettled([...inFlight]);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    } while (inFlight.size > 0);
+};
 
 const payloadOf = (id: string) => store.get(id)!.payload as TextPayload;
 
@@ -59,6 +84,8 @@ beforeEach(async () => {
     const db = new ScribblerDb(`test-${crypto.randomUUID()}`);
     store = new AnnotationStore(db, DOC);
     await store.load();
+    inFlight.clear();
+    trackWrites(store);
     const registry = new CanvasRegistry();
     registry.register(0, { committed: fakeCanvas(PAGE_W, PAGE_H), live: fakeCanvas(0, 0) });
     intents = [];

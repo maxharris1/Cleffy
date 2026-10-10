@@ -241,6 +241,9 @@ export const clearAccountCachesFromDevice = async (): Promise<void> => {
     // Drop cached ScoreData so a later account on this browser can't replay it.
     const { getDb } = await import('@/sync/db');
     const { clearCloudAnnotationData } = await import('@/sync/signOutSync');
+    const { cancelBackgroundPdfCache } = await import('@/sync/pdfCache');
+    // A score download that outlived its viewer must not cache the PDF after the clear.
+    cancelBackgroundPdfCache();
     const db = getDb();
     await Promise.all([
         db.scoreCache.clear().catch(() => undefined),

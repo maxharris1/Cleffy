@@ -3,11 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { usePdf } from '@/features/viewer/pdf/pdfContext';
 import { PdfProvider } from '@/features/viewer/pdf/PdfProvider';
+import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 
 /** A 3-page document whose last page is landscape; records which pages were asked for. */
 const pdfjs = vi.hoisted(() => ({
     getPageCalls: [] as number[],
     params: [] as Array<Record<string, unknown>>,
+    /** When set, pages after the first resolve only once it does (pdf.js still reading them). */
+    laterPages: null as Promise<void> | null,
 }));
 
 vi.mock('pdfjs-dist', () => {
@@ -25,6 +28,9 @@ vi.mock('pdfjs-dist', () => {
         numPages: 3,
         getPage: async (n: number) => {
             pdfjs.getPageCalls.push(n);
+            if (n > 1 && pdfjs.laterPages) {
+                await pdfjs.laterPages;
+            }
             return { getViewport: () => (n === 3 ? { width: 800, height: 600 } : { width: 600, height: 800 }) };
         },
     };
@@ -75,6 +81,7 @@ const Probe = () => {
 beforeEach(() => {
     pdfjs.getPageCalls = [];
     pdfjs.params = [];
+    pdfjs.laterPages = null;
 });
 
 afterEach(() => {
@@ -83,10 +90,14 @@ afterEach(() => {
 });
 
 describe('PdfProvider streaming a score', () => {
-    it('is ready after page 1, before the download ends, then corrects page sizes once it has', async () => {
+    it('is ready after page 1 and corrects page sizes as pdf.js reads them, before the download ends', async () => {
         const storage = host();
         const onStreamComplete = vi.fn();
         const source = { url: 'https://storage.example/signed' };
+        let readLaterPages: () => void = () => undefined;
+        pdfjs.laterPages = new Promise((resolve) => {
+            readLaterPages = resolve;
+        });
         render(
             <PdfProvider data={source} onStreamComplete={onStreamComplete}>
                 <Probe />
@@ -94,12 +105,18 @@ describe('PdfProvider streaming a score', () => {
         );
 
         await waitFor(() => expect(screen.getByTestId('probe')).toHaveAttribute('data-status', 'ready'));
-        // Only page 1 was asked for; the others take its size for now.
-        expect(pdfjs.getPageCalls).toEqual([1]);
+        // Ready on page 1 alone: the others take its size for now.
         expect(screen.getByTestId('probe')).toHaveTextContent('600x800,600x800,600x800');
         expect(pdfjs.params[0]).toHaveProperty('range');
         expect(pdfjs.params[0]).not.toHaveProperty('data');
+
+        // The landscape page is corrected as soon as pdf.js has read it,
+        // while the score still downloads, not stretched into page 1's box
+        // until the end.
+        act(() => readLaterPages());
+        await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('600x800,600x800,800x600'));
         expect(onStreamComplete).not.toHaveBeenCalled();
+        expect(pdfjs.getPageCalls).toEqual([1, 2, 3]);
 
         act(() => storage.finish(true));
 
@@ -107,8 +124,47 @@ describe('PdfProvider streaming a score', () => {
         const [calledWith, bytes] = onStreamComplete.mock.calls[0] as [unknown, ArrayBuffer];
         expect(calledWith).toBe(source);
         expect(new Uint8Array(bytes)).toEqual(FILE);
-        await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('600x800,600x800,800x600'));
+        expect(screen.getByTestId('probe')).toHaveTextContent('600x800,600x800,800x600');
         expect(storage.fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands a download still running at unmount to the caller, which can let it finish', async () => {
+        const storage = host();
+        const onStreamComplete = vi.fn();
+        const onStreamAbandoned = vi.fn();
+        const source = { url: 'https://storage.example/signed' };
+        const view = render(
+            <PdfProvider data={source} onStreamComplete={onStreamComplete} onStreamAbandoned={onStreamAbandoned}>
+                <Probe />
+            </PdfProvider>,
+        );
+        await waitFor(() => expect(screen.getByTestId('probe')).toHaveAttribute('data-status', 'ready'));
+
+        // The reader leaves on page 1, long before the file is in.
+        view.unmount();
+
+        expect(onStreamAbandoned).toHaveBeenCalledTimes(1);
+        const [calledWith, download] = onStreamAbandoned.mock.calls[0] as [unknown, ProgressiveDownload];
+        expect(calledWith).toBe(source);
+        act(() => storage.finish(true));
+        expect(new Uint8Array(await download.complete)).toEqual(FILE);
+        expect(onStreamComplete).not.toHaveBeenCalled();
+    });
+
+    it('aborts a download still running at unmount when nobody takes it', async () => {
+        host();
+        const view = render(
+            <PdfProvider data={{ url: 'https://storage.example/signed' }}>
+                <Probe />
+            </PdfProvider>,
+        );
+        await waitFor(() => expect(screen.getByTestId('probe')).toHaveAttribute('data-status', 'ready'));
+        const transport = pdfjs.params[0]?.['range'] as { abort: () => void } & Record<string, unknown>;
+        const download = transport['download'] as ProgressiveDownload;
+
+        view.unmount();
+
+        await expect(download.complete).rejects.toThrow(/aborted/);
     });
 
     it('hands a failed stream to the caller instead of showing an error', async () => {

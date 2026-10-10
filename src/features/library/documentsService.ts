@@ -12,7 +12,13 @@ import { readCachedEntitlements } from '@/features/billing/entitlementsService';
 import { parsePostgrestLimitError, type LimitReachedError } from '@/features/billing/limitErrors';
 import { leaveDocument } from '@/features/share/shareService';
 import { getDb } from '@/sync/db';
-import { getCachedPdf, putCachedPdf, readCachedPdfBytes } from '@/sync/pdfCache';
+import {
+    cancelBackgroundPdfCache,
+    finishPdfCacheInBackground,
+    getCachedPdf,
+    putCachedPdf,
+    readCachedPdfBytes,
+} from '@/sync/pdfCache';
 import type { CachedPdf } from '@/sync/db';
 import type { LibrarySort } from '@/features/library/libraryView';
 import type { DocumentRow, DocumentStorageCleanupRow, MemberRole } from '@/types/database';
@@ -650,6 +656,8 @@ export const deleteDocument = async (doc: DocumentRow): Promise<DeleteDocumentRe
  * but a running one would put rows and a watermark straight back.
  */
 export const purgeLocalDocument = async (docId: string): Promise<void> => {
+    // A first open's download still finishing would put the PDF back.
+    cancelBackgroundPdfCache(docId);
     const db = getDb();
     await Promise.all([
         db.pdfCache.delete(docId),
@@ -817,6 +825,33 @@ export const cacheDocumentBytes = async (
         archivedAt: doc.archived_at,
         userId: stamp.userId ?? cached?.userId,
     });
+};
+
+/**
+ * A first open closed before its score finished streaming in: let the
+ * download finish anyway and keep it as the offline copy, as a first open
+ * always did when it downloaded the file whole. Opening a score at home and
+ * reading it at a rehearsal with no signal must not depend on having stayed
+ * on it until the download ended. A copy of this revision or a newer one that
+ * landed meanwhile (the score reopened, or replaced) is kept instead.
+ */
+export const cacheStreamedDocument = (
+    doc: DocumentRow,
+    download: { complete: Promise<ArrayBuffer>; abort: () => void },
+    stamp: CacheStamp = {},
+): void => {
+    finishPdfCacheInBackground(
+        doc.id,
+        download.complete,
+        () => download.abort(),
+        async (bytes, isCancelled) => {
+            const cached = await getCachedPdf(doc.id);
+            if (isCancelled() || (cached && (cached.contentRev ?? 0) >= (doc.content_rev ?? 0))) {
+                return;
+            }
+            await cacheDocumentBytes(doc, bytes, { ...stamp, cached });
+        },
+    );
 };
 
 export const loadDocumentBytes = async (

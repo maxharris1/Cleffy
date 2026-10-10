@@ -1,4 +1,14 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+    lazy,
+    Suspense,
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+    useSyncExternalStore,
+} from 'react';
 
 import { LoopRangeOverlay } from '@/features/playback/LoopRangeOverlay';
 import type { PlaybackEngine } from '@/features/playback/PlaybackEngine';
@@ -16,6 +26,7 @@ import {
     focusedPageIndex,
     mountedPageIndices,
     pageTurnView,
+    reanchorView,
     viewportToPagePoint,
     visiblePageRange,
     zoomAt,
@@ -321,6 +332,35 @@ export const PdfViewport = ({ docId, readOnly = false, onStoreReady, playback, s
         );
         setRenderScale(scale);
     }, [viewportSize, layout]);
+
+    // Page sizes changing under a loaded document (a streamed first open
+    // corrects the pages whose size differs from page 1's as pdf.js reads
+    // them): keep the reader's place and the zoom relative to fit-width.
+    // Before paint, so the jump to the old offset in the new layout never
+    // shows. Layout switches (relayout) set their own view and only update
+    // the ref here.
+    const sizedLayoutRef = useRef({ pageSizes, layout });
+    useLayoutEffect(() => {
+        const prev = sizedLayoutRef.current;
+        sizedLayoutRef.current = { pageSizes, layout };
+        if (prev.pageSizes === pageSizes || prev.pageSizes.length !== pageSizes.length || !didFitRef.current) {
+            return;
+        }
+        const { width, height } = viewportSizeRef.current;
+        if (width === 0 || height === 0) {
+            return;
+        }
+        const { view: v, setView } = useViewerStore.getState();
+        const next = clampScroll(
+            reanchorView(v, prev.layout, layout, width, height),
+            layout,
+            width,
+            height,
+            obscuredRef.current,
+        );
+        setView(next);
+        setRenderScale(next.scale);
+    }, [pageSizes, layout]);
 
     /**
      * Turn one row of pages. Reads live refs so the once-bound gesture

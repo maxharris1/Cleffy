@@ -129,6 +129,28 @@ describe('ProgressiveDownload', () => {
         download.abort();
     });
 
+    it('once released, stops feeding pdf.js and drops its ranges, but still finishes the file', async () => {
+        const host = storage();
+        const download = await open(host);
+        const out = recorder();
+        download.attach(out.sink);
+        host.streamTo(1000);
+        await tick();
+        download.requestRange(500, 600);
+        download.requestRange(200_000, 204_096);
+
+        download.release();
+        await tick();
+        host.streamTo(FILE.length);
+        host.close();
+
+        expect(new Uint8Array(await download.complete)).toEqual(FILE);
+        // Nothing after the release: the range answered from the buffer was
+        // still queued, and the stream's later chunks went nowhere.
+        expect(out.progressive).toEqual([1000]);
+        expect(out.ranges).toEqual([]);
+    });
+
     it('waits for the stream when the server ignores Range', async () => {
         const host = storage({ honourRange: false });
         const download = await open(host);

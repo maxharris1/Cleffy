@@ -50,3 +50,65 @@ export const putCachedPdf = async (row: CachedPdf): Promise<boolean> => {
         return false;
     }
 };
+
+/**
+ * Score downloads that outlived the viewer which started them, each still on
+ * its way to becoming the offline copy (see cacheStreamedDocument). Every
+ * path that removes offline copies (purging one score, sign-out, clearing the
+ * downloads) stops them first, so none writes a copy back after it.
+ */
+const finishing = new Map<string, () => void>();
+
+/**
+ * Let `complete` finish after its viewer closed, then `write` it. `abort`
+ * stops the download when the write is no longer wanted; `write` is handed a
+ * check to make after each of its awaits. One per score: a newer one replaces
+ * an older one.
+ */
+export const finishPdfCacheInBackground = (
+    docId: string,
+    complete: Promise<ArrayBuffer>,
+    abort: () => void,
+    write: (bytes: ArrayBuffer, isCancelled: () => boolean) => Promise<void>,
+): void => {
+    finishing.get(docId)?.();
+    let cancelled = false;
+    const cancel = () => {
+        if (cancelled) {
+            return;
+        }
+        cancelled = true;
+        if (finishing.get(docId) === cancel) {
+            finishing.delete(docId);
+        }
+        abort();
+    };
+    finishing.set(docId, cancel);
+    complete
+        .then(async (bytes) => {
+            if (!cancelled) {
+                await write(bytes, () => cancelled);
+            }
+        })
+        .catch((err: unknown) => {
+            if (!cancelled) {
+                console.warn('Could not finish downloading the score for offline use', err);
+            }
+        })
+        .finally(() => {
+            if (finishing.get(docId) === cancel) {
+                finishing.delete(docId);
+            }
+        });
+};
+
+/** Stop the background download of one score, or of every score. */
+export const cancelBackgroundPdfCache = (docId?: string): void => {
+    if (docId !== undefined) {
+        finishing.get(docId)?.();
+        return;
+    }
+    for (const cancel of [...finishing.values()]) {
+        cancel();
+    }
+};

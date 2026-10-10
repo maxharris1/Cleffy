@@ -40,6 +40,9 @@ export const PDF_RANGE_CHUNK = 4096;
  */
 const STREAM_LOOKAHEAD = 64 * 1024;
 
+/** Said once per page load: every later Range request would be ignored too. */
+let warnedNoRange = false;
+
 /** Where the bytes go: PdfProvider's PDFDataRangeTransport. */
 export interface DownloadSink {
     /** The next bytes of the front-to-back stream. */
@@ -97,6 +100,8 @@ export class ProgressiveDownload {
         }
         const length = Number(response.headers.get('content-length'));
         if (!response.body || !Number.isInteger(length) || length <= 0) {
+            // Visible in the field: page 1 now waits for the whole file again.
+            console.warn('Score response has no readable Content-Length; reading it whole before page 1');
             return response.arrayBuffer();
         }
         // Called unbound later: window.fetch with another `this` throws.
@@ -136,6 +141,19 @@ export class ProgressiveDownload {
         }
     }
 
+    /**
+     * pdf.js is done with this download (the viewer closed) but the file is
+     * still wanted, for the offline copy: drop pdf.js and the Range requests
+     * it asked for, and let the stream run to the end.
+     */
+    release(): void {
+        this.sink = null;
+        for (const range of this.pending) {
+            range.controller?.abort();
+        }
+        this.pending = [];
+    }
+
     /** Stop every request (the document was closed). */
     abort(): void {
         if (this.aborted) {
@@ -161,6 +179,12 @@ export class ProgressiveDownload {
             });
             if (response.status !== 206) {
                 // The server sent the whole file instead: the stream already is.
+                if (!warnedNoRange) {
+                    warnedNoRange = true;
+                    console.warn(
+                        `Score host ignored a Range request (HTTP ${response.status}); waiting for the stream`,
+                    );
+                }
                 controller.abort();
                 return;
             }

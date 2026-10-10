@@ -61,7 +61,8 @@ export const buildStrokePath = (payload: StrokePayload, pageWpx: number, pageHpx
 
 /**
  * Stroke paths by annotation id, valid for one version of the mark at one
- * raster width. Building a path (perfect-freehand outline, SVG string, Path2D
+ * raster size (width and height: y is scaled by the height, and a page's size
+ * can change under a loaded document while its pdf is still streaming). Building a path (perfect-freehand outline, SVG string, Path2D
  * parse) is what a repaint costs, so a page repaint must find every mark here.
  * It used to be a 400-entry cache cleared whole when full: a page with more
  * marks than that rebuilt every path on every repaint, which on a 2,000-mark
@@ -76,7 +77,7 @@ export class StrokePathCache {
         if (isTextPayload(annotation.payload)) {
             return null;
         }
-        const key = `${annotation.updatedAt}:${Math.round(pageWpx)}`;
+        const key = `${annotation.updatedAt}:${Math.round(pageWpx)}x${Math.round(pageHpx)}`;
         const hit = this.cache.get(annotation.id);
         if (hit && hit.key === key) {
             return hit.path;
