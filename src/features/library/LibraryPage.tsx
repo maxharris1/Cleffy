@@ -236,6 +236,18 @@ export const LibraryPage = () => {
                 painted = true;
                 perfMark('library-cache-paint');
             }
+            // A browser that already knows it is offline is told so now, not
+            // once the requests below give up: postgrest-js retries each
+            // failed GET for seconds (1 s, 2 s, 4 s) before it reports one.
+            // A request that gets through after all replaces either state.
+            if (!cancelled && !firstResolved && typeof navigator !== 'undefined' && navigator.onLine === false) {
+                if (painted) {
+                    setError(CACHED_LIST_NOTICE.offline);
+                } else {
+                    setDocuments((prev) => prev ?? []);
+                    setLoadFailure('offline');
+                }
+            }
 
             // The painted list is interactive while the network is out, so an
             // edit made in that window outranks a response whose request left
@@ -270,6 +282,7 @@ export const LibraryPage = () => {
                     setTags(boot.tags);
                     setAssignments(boot.documentTags);
                     setError(null);
+                    setLoadFailure(null);
                     autoRetriesRef.current = 0;
                     perfMark('library-network-paint');
                     perfLogIfDev();
@@ -304,6 +317,7 @@ export const LibraryPage = () => {
                         setTags(tagRows);
                         setAssignments(tagMap);
                         setError(null);
+                        setLoadFailure(null);
                         autoRetriesRef.current = 0;
                         perfMark('library-network-paint');
                         perfLogIfDev();
@@ -367,6 +381,17 @@ export const LibraryPage = () => {
             }
         };
     }, [loadFailure]);
+    // The list painted from this device's snapshot because the browser was
+    // offline: load it afresh on reconnect. The painted rows stay up, and
+    // the notice with them, until an answer replaces them.
+    useEffect(() => {
+        if (error !== CACHED_LIST_NOTICE.offline) {
+            return;
+        }
+        const refresh = () => setReloadKey((k) => k + 1);
+        window.addEventListener('online', refresh);
+        return () => window.removeEventListener('online', refresh);
+    }, [error]);
 
     const tagsById = new Map(tags.map((t) => [t.id, t]));
     const isCachedListNotice = error !== null && CACHED_LIST_NOTICES.has(error);
