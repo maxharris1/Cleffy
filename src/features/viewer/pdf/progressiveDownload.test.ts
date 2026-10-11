@@ -340,6 +340,72 @@ describe('ProgressiveDownload', () => {
         download.abort();
     });
 
+    it('re-asks for the rest of a read whose own request stopped where a failed one started', async () => {
+        // The request for the second read is held, then refused.
+        let refuse: (response: Response) => void = () => undefined;
+        const host = storage({
+            answer: (n) => (n === 1 ? new Promise<Response>((resolve) => (refuse = resolve)) : undefined),
+        });
+        const { download, out } = await openWithTail(host);
+
+        download.requestRange(unit(201), unit(202));
+        await vi.waitFor(() => expect(host.ranges).toHaveLength(2));
+        expect(host.ranges[1]).toBe(`bytes=${unit(201)}-${unit(201) + MIN_RANGE_FETCH - 1}`);
+        // This read's own request stops where that one starts: it brings the rest.
+        download.requestRange(unit(200), unit(202));
+        await vi.waitFor(() => expect(host.ranges).toHaveLength(3));
+        expect(host.ranges[2]).toBe(`bytes=${unit(200)}-${unit(201) - 1}`);
+        await tick();
+        expect(out.ranges).toEqual([]);
+
+        refuse(new Response('busy', { status: 503 }));
+        // Its own request succeeded, so the rest is asked for again rather
+        // than left to the whole file's stream; that answers both reads.
+        await vi.waitFor(() => expect(out.ranges).toHaveLength(2));
+        expect(host.ranges).toHaveLength(4);
+        expect(host.ranges[3]).toMatch(new RegExp(`^bytes=${unit(201)}-`));
+        const second = out.ranges.find((r) => r.begin === unit(200))!;
+        expect(second.bytes.subarray(0, unit(2))).toEqual(FILE.slice(unit(200), unit(202)));
+        const first = out.ranges.find((r) => r.begin === unit(201))!;
+        expect(first.bytes.subarray(0, unit(1))).toEqual(FILE.slice(unit(201), unit(202)));
+        download.abort();
+    });
+
+    it('re-asks a read a bounded number of times when the requests it waits on keep failing', async () => {
+        // Every request after the end-of-file one is held until refused by hand.
+        const refusals: Array<(response: Response) => void> = [];
+        const host = storage({
+            answer: (n) => (n === 0 ? undefined : new Promise<Response>((resolve) => refusals.push(resolve))),
+        });
+        const { download, out } = await openWithTail(host);
+        const refuseNext = async () => {
+            const count = host.ranges.length;
+            refusals.shift()!(new Response('busy', { status: 503 }));
+            await tick();
+            await tick();
+            return host.ranges.length - count;
+        };
+
+        // Four reads of the same unit: the first sends a request, the
+        // others wait on it.
+        download.requestRange(unit(400), unit(401));
+        await vi.waitFor(() => expect(host.ranges).toHaveLength(2));
+        for (let i = 0; i < 3; i++) {
+            download.requestRange(unit(400), unit(401));
+        }
+        await tick();
+        expect(host.ranges).toHaveLength(2);
+
+        // Refused: the second read sends its own; the last two wait on it.
+        expect(await refuseNext()).toBe(1);
+        // Refused: the third sends its own; the last waits on it, asked twice now.
+        expect(await refuseNext()).toBe(1);
+        // Refused: the last is past MAX_RANGE_RETRIES and waits for the stream.
+        expect(await refuseNext()).toBe(0);
+        expect(out.ranges).toEqual([]);
+        download.abort();
+    });
+
     it('keeps the offline copy the stream alone, even when a Range reply lands behind it', async () => {
         // The object is replaced while the file streams: Range replies carry
         // the new version (all 0xEE here), the stream the old one.

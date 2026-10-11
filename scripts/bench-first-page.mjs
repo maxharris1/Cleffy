@@ -30,13 +30,23 @@
 // Prints one JSON line per run and the medians. Needs `openssl` (a throwaway
 // certificate for the two local HTTPS servers).
 //
-// Which profile to trust: the default (no per-request cost) is optimistic.
-// Its baseline at cfde051 (15.7 s) already beat the 20 s target, and QA
-// measured ~50 s on dev.cleffy.io. BENCH_TTFB_MS=1200 BENCH_MAX_CONCURRENT=6
-// is the profile closest to QA (39.4 s at cfde051). There page 1 costs one
-// request per page dictionary of a flat page tree (pdf.js checks the last
-// page on open), and per-request cost sets the floor (~35 s). Compare
-// against real Storage before reading either as the field number.
+// Reading the profiles (page 1 from navigation, cfde051 -> this branch):
+// - default, Storage answers at once:              15.7 s -> 10.2 s
+// - BENCH_TTFB_MS=1200 (slow Storage, HTTP/2):     18.5 s -> 12.3 s
+// - BENCH_TTFB_MS=1200 BENCH_MAX_CONCURRENT=6:     39.0 s -> 34.9 s
+// On a flat page tree, page 1 needs one small request per page dictionary
+// that the stream has not reached (~106 here; pdf.js checks the last page on
+// open). pdf.js 6.4 reads all the kids of the top-level Pages dict at once
+// (Catalog.getPageDict puts xref.fetchAsync(kid) for each one in its cache),
+// so on HTTP/2 those requests overlap and their per-request cost is paid
+// about once: 1.2 s to first byte still gives page 1 well under 20 s. Only
+// a cap on Range requests in flight makes them add up. Six at a time (an
+// HTTP/1.1 browser's connection limit) means ceil(106 / 6) = 18 rounds of
+// ~1.8 s, and that is the only profile that misses 20 s. Supabase Storage is
+// served over HTTP/2, so the cap needs something in the path that serialises
+// requests (QA's intercepting proxy may). QA's ~50 s is not explained by
+// either uncapped profile, so re-measure on dev.cleffy.io against real
+// Storage before taking any of these as the field number.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';

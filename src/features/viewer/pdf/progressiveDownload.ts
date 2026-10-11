@@ -15,7 +15,8 @@
  *   a Range request. A 206 is answered by status alone, so no header needs to
  *   be exposed. A server that ignores Range (200) is not asked again; a
  *   failed request (an error status, offline) leaves its range to the stream
- *   — slower, never wrong — and later ranges are still asked for. Bytes a
+ *   — slower, never wrong — and later ranges are still asked for; a read that
+ *   only counted on it for some bytes asks for them again. Bytes a
  *   Range request brings only ever go where the stream has not been yet, so
  *   the finished file is exactly what the stream sent, even if the object
  *   was replaced in between. Opening a document
@@ -73,6 +74,13 @@ export const MAX_RANGE_FETCH = 256 * 1024;
  */
 const STREAM_LOOKAHEAD = 64 * 1024;
 
+/**
+ * How often a read is asked for again because a request it waited on, sent
+ * for another read, failed. Bounded so a host that keeps refusing is not
+ * asked in a loop; past it, the read waits for the stream.
+ */
+const MAX_RANGE_RETRIES = 2;
+
 /** Said once per page load: every later Range request would be ignored too. */
 let warnedNoRange = false;
 /** Said once per page load: a host that refuses one likely refuses more. */
@@ -95,8 +103,10 @@ interface PendingRange {
     begin: number;
     end: number;
     done: boolean;
-    /** A request was sent for this range itself (not one it waited on that another started). */
-    asked: boolean;
+    /** Requests sent for this read itself (not ones it waited on that another read started). */
+    own: Set<RangeFetch>;
+    /** Times it was asked for again after a request it waited on failed (MAX_RANGE_RETRIES). */
+    retries: number;
 }
 
 /** A Range request in flight, for bytes [begin, end). */
@@ -104,6 +114,8 @@ interface RangeFetch {
     begin: number;
     end: number;
     controller: AbortController;
+    /** Refused, cut short or lost (not aborted because it was no longer needed). */
+    failed: boolean;
 }
 
 /** Bytes [begin, end) that Range requests brought, kept in `buffer`. */
@@ -154,7 +166,7 @@ export class ProgressiveDownload {
         // cross-reference table starts). Asked now, the answer is on its way
         // while the pdf.js worker is still starting up.
         if (length - TAIL_FETCH >= STREAM_LOOKAHEAD) {
-            void this.fetchRange(...this.window(length - 1, length));
+            this.fetchRange(...this.window(length - 1, length));
         }
     }
 
@@ -195,7 +207,13 @@ export class ProgressiveDownload {
 
     /** pdf.js needs bytes [begin, end) now. */
     requestRange(begin: number, end: number): void {
-        const range: PendingRange = { begin, end: Math.min(end, this.length), done: false, asked: false };
+        const range: PendingRange = {
+            begin,
+            end: Math.min(end, this.length),
+            done: false,
+            own: new Set(),
+            retries: 0,
+        };
         if (this.aborted) {
             return;
         }
@@ -210,19 +228,18 @@ export class ProgressiveDownload {
 
     /** Ask the network for a pending range, unless the stream or a request on its way brings it. */
     private dispatch(range: PendingRange): void {
+        const from = this.missingFrom(range.begin, range.end);
         // Bytes just ahead of the stream are its very next ones; a second
         // request for them would only split the bandwidth.
-        if (range.begin < this.loaded + STREAM_LOOKAHEAD || this.rangesIgnored) {
+        if (from < this.loaded + STREAM_LOOKAHEAD || this.rangesIgnored) {
             return;
         }
         for (const inFlight of this.fetches) {
-            if (inFlight.begin <= range.begin && range.end <= inFlight.end) {
+            if (inFlight.begin <= from && range.end <= inFlight.end) {
                 return;
             }
         }
-        range.asked = true;
-        const [from, to] = this.window(range.begin, range.end);
-        void this.fetchRange(from, to);
+        range.own.add(this.fetchRange(...this.window(from, range.end)));
     }
 
     /**
@@ -257,12 +274,14 @@ export class ProgressiveDownload {
 
     /** Whether [begin, end) is in the buffer: from the stream, a Range request, or both. */
     private has(begin: number, end: number): boolean {
+        return this.missingFrom(begin, end) >= end;
+    }
+
+    /** The first byte of [begin, end) not in the buffer, or `end` if all of it is. */
+    private missingFrom(begin: number, end: number): number {
         const from = Math.max(begin, this.loaded);
-        if (end <= from) {
-            return true;
-        }
-        const span = this.spanAt(from);
-        return span !== undefined && end <= span.end;
+        // Spans never touch, so the byte after one is missing.
+        return Math.min(this.spanAt(from)?.end ?? from, end);
     }
 
     private spanAt(position: number): Span | undefined {
@@ -283,16 +302,24 @@ export class ProgressiveDownload {
         // it brings the rest of what was asked for.
         for (const span of known) {
             if (span.begin > begin && span.begin < to && (span.begin >= end || span.end >= end)) {
+                // If it is a request that then fails, the rest is asked for again (retryWaitingOn).
                 to = span.begin;
             }
         }
         return [begin, to];
     }
 
-    private async fetchRange(begin: number, end: number): Promise<void> {
-        const inFlight: RangeFetch = { begin, end, controller: new AbortController() };
+    /** Send a Range request for [begin, end); what it brings answers the reads waiting on it. */
+    private fetchRange(begin: number, end: number): RangeFetch {
+        const inFlight: RangeFetch = { begin, end, controller: new AbortController(), failed: false };
         this.fetches.add(inFlight);
         this.sizeEndingAt.set(end, end - begin);
+        void this.receive(inFlight);
+        return inFlight;
+    }
+
+    private async receive(inFlight: RangeFetch): Promise<void> {
+        const { begin, end } = inFlight;
         let failed = false;
         try {
             const response = await this.fetchImpl(this.url, {
@@ -342,6 +369,7 @@ export class ProgressiveDownload {
             failed = !inFlight.controller.signal.aborted;
         } finally {
             this.fetches.delete(inFlight);
+            inFlight.failed = failed;
             if (failed && !this.aborted) {
                 this.retryWaitingOn(inFlight);
             }
@@ -349,15 +377,23 @@ export class ProgressiveDownload {
     }
 
     /**
-     * A request failed. The range it was sent for waits for the stream, as
-     * any failed range does; ranges that only waited on it (pdf.js's first
-     * read, on the end-of-file request sent before pdf.js asked) never had a
-     * request of their own, so they get one now rather than wait for the
-     * whole file.
+     * A request failed. A read it was sent for waits for the stream, as any
+     * read whose own request failed does. Reads that only waited on it for
+     * some of their bytes get a request for what they still lack, rather
+     * than wait for the whole file: pdf.js's first read, on the end-of-file
+     * request sent before pdf.js asked, or a read whose own request was cut
+     * short where this one started (`window`). At most MAX_RANGE_RETRIES
+     * times each.
      */
     private retryWaitingOn(failed: RangeFetch): void {
         for (const range of [...this.pending]) {
-            if (!range.asked && range.begin < failed.end && failed.begin < range.end) {
+            if (range.retries >= MAX_RANGE_RETRIES || [...range.own].some((own) => own.failed)) {
+                continue;
+            }
+            const from = Math.max(range.begin, failed.begin);
+            const to = Math.min(range.end, failed.end);
+            if (from < to && this.missingFrom(from, to) < to) {
+                range.retries++;
                 this.dispatch(range);
             }
         }
