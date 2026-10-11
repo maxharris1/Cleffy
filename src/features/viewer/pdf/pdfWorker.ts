@@ -54,13 +54,21 @@ export const createPdfWorker = (): PDFWorker => {
  * compressed) has loaded and run, pdf.js cannot ask for a single byte of the
  * score — on a slow link that is seconds, spent after the score's URL is
  * known unless the worker was started before. Unused, it is shut down after
- * SPARE_WORKER_TTL_MS.
+ * SPARE_WORKER_TTL_MS. Never throws: it only saves time, so a worker that
+ * cannot start here (a SecurityError, say) leaves the open as it was, and
+ * createPdfWorker meets the same error where it did before warming existed.
  */
 export const warmPdfWorker = (): void => {
     if (spare) {
         return;
     }
-    const worker = spawnPdfWorker();
+    let worker: PDFWorker;
+    try {
+        worker = spawnPdfWorker();
+    } catch (err) {
+        console.warn('Could not start the pdf.js worker early', err);
+        return;
+    }
     const expiry = setTimeout(() => {
         if (spare?.worker === worker) {
             spare = null;

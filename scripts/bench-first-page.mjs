@@ -29,6 +29,14 @@
 //      (page console on stderr); BENCH_SAVE_PDF=<file> (keep the score).
 // Prints one JSON line per run and the medians. Needs `openssl` (a throwaway
 // certificate for the two local HTTPS servers).
+//
+// Which profile to trust: the default (no per-request cost) is optimistic.
+// Its baseline at cfde051 (15.7 s) already beat the 20 s target, and QA
+// measured ~50 s on dev.cleffy.io. BENCH_TTFB_MS=1200 BENCH_MAX_CONCURRENT=6
+// is the profile closest to QA (39.4 s at cfde051). There page 1 costs one
+// request per page dictionary of a flat page tree (pdf.js checks the last
+// page on open), and per-request cost sets the floor (~35 s). Compare
+// against real Storage before reading either as the field number.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';

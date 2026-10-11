@@ -19,9 +19,15 @@ const unit = (n: number) => n * PDF_RANGE_CHUNK;
 /**
  * A storage host: the full GET is a stream the test feeds by hand (so it can
  * be held at any point); a Range GET answers 206 with the slice, or 200 with
- * the whole file when `honourRange` is off.
+ * the whole file when `honourRange` is off. `answer` may answer the n-th
+ * Range request itself (0 is the end-of-file request sent on open).
  */
-const storage = ({ honourRange = true, contentLength = String(FILE.length) } = {}) => {
+type RangeAnswer = (n: number, from: number, to: number) => Response | Promise<Response> | undefined;
+const storage = ({
+    honourRange = true,
+    contentLength = String(FILE.length),
+    answer,
+}: { honourRange?: boolean; contentLength?: string; answer?: RangeAnswer } = {}) => {
     let push: (chunk: Uint8Array) => void = () => undefined;
     let close: () => void = () => undefined;
     let fail: (err: unknown) => void = () => undefined;
@@ -31,6 +37,10 @@ const storage = ({ honourRange = true, contentLength = String(FILE.length) } = {
         if (range) {
             ranges.push(range);
             const [, from, to] = /bytes=(\d+)-(\d+)/.exec(range)!;
+            const answered = answer?.(ranges.length - 1, Number(from), Number(to) + 1);
+            if (answered) {
+                return answered;
+            }
             if (!honourRange) {
                 return new Response(FILE.slice(), { status: 200 });
             }
@@ -274,6 +284,98 @@ describe('ProgressiveDownload', () => {
         expect(out.ranges).toHaveLength(2);
         expect(out.ranges[0]!.bytes).toEqual(FILE.slice(FILE.length - 4096));
         expect(out.ranges[1]!.bytes).toEqual(FILE.slice(unit(200), unit(201)));
+    });
+
+    it('keeps asking for ranges after the host refuses one, and re-asks for a read that only waited on it', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        // The end-of-file request, sent before pdf.js asks, is refused once.
+        let refuse: (response: Response) => void = () => undefined;
+        const host = storage({
+            answer: (n) => (n === 0 ? new Promise<Response>((resolve) => (refuse = resolve)) : undefined),
+        });
+        const download = await open(host);
+        const out = recorder();
+        download.attach(out.sink);
+        await vi.waitFor(() => expect(host.ranges).toEqual([TAIL_RANGE]));
+
+        // pdf.js's first read waits on that request rather than sending its own.
+        const last = Math.floor((FILE.length - 1) / PDF_RANGE_CHUNK);
+        download.requestRange(unit(last), FILE.length);
+        await tick();
+        expect(host.ranges).toEqual([TAIL_RANGE]);
+
+        refuse(new Response('busy', { status: 503 }));
+        // The read it waited on now has its own request (for the end of the
+        // file again, as pdf.js's own first read would), not the whole file's wait.
+        await vi.waitFor(() => expect(out.ranges).toHaveLength(1));
+        expect(host.ranges).toEqual([TAIL_RANGE, TAIL_RANGE]);
+        expect(out.ranges[0]!.bytes).toEqual(FILE.slice(unit(last)));
+
+        // And a page dictionary later is still fetched by Range.
+        download.requestRange(unit(200), unit(201));
+        await vi.waitFor(() => expect(out.ranges).toHaveLength(2));
+        expect(host.ranges[2]).toBe(`bytes=${unit(200)}-${unit(200) + MIN_RANGE_FETCH - 1}`);
+        expect(out.ranges[1]!.bytes).toEqual(FILE.slice(unit(200), unit(200) + MIN_RANGE_FETCH));
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refused a Range request \(HTTP 503\)/));
+        expect(warn).not.toHaveBeenCalledWith(expect.stringMatching(/ignored/));
+        download.abort();
+        warn.mockRestore();
+    });
+
+    it('leaves a read that a failed request was sent for to the stream, as before', async () => {
+        const host = storage({ answer: (n) => (n === 1 ? new Response('busy', { status: 503 }) : undefined) });
+        const { download, out } = await openWithTail(host);
+
+        download.requestRange(unit(200), unit(201));
+        await vi.waitFor(() => expect(host.ranges).toHaveLength(2));
+        await tick();
+        await tick();
+        // Not asked for again (a host that keeps refusing would be asked forever).
+        expect(host.ranges).toHaveLength(2);
+        expect(out.ranges).toEqual([]);
+
+        host.streamTo(unit(201));
+        await vi.waitFor(() => expect(out.ranges).toHaveLength(1));
+        expect(out.ranges[0]!.bytes).toEqual(FILE.slice(unit(200), unit(201)));
+        download.abort();
+    });
+
+    it('keeps the offline copy the stream alone, even when a Range reply lands behind it', async () => {
+        // The object is replaced while the file streams: Range replies carry
+        // the new version (all 0xEE here), the stream the old one.
+        let landTail: () => void = () => undefined;
+        const host = storage({
+            answer: (_n, from, to) =>
+                new Response(
+                    new ReadableStream<Uint8Array>({
+                        start(controller) {
+                            landTail = () => {
+                                controller.enqueue(new Uint8Array(to - from).fill(0xee));
+                                controller.close();
+                            };
+                        },
+                    }),
+                    { status: 206 },
+                ),
+        });
+        const download = await open(host);
+        download.attach(recorder().sink);
+        await vi.waitFor(() => expect(host.ranges).toEqual([TAIL_RANGE]));
+
+        // The stream passes most of what the end-of-file request asked for,
+        // then its body lands.
+        host.streamTo(FILE.length - 1000);
+        await tick();
+        landTail();
+        await tick();
+        await tick();
+        host.streamTo(FILE.length);
+        host.close();
+
+        const whole = new Uint8Array(await download.complete);
+        // Where it first differs (-1: nowhere); a whole-array diff is unreadable.
+        expect(whole.findIndex((byte, i) => byte !== FILE[i])).toBe(-1);
+        expect(whole.byteLength).toBe(FILE.length);
     });
 
     it('asks nothing up front for a file the stream brings in moments', async () => {

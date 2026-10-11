@@ -13,8 +13,12 @@
  *   the export source when the stream ends — the file is downloaded once;
  * - when pdf.js needs bytes the stream has not reached, they are fetched with
  *   a Range request. A 206 is answered by status alone, so no header needs to
- *   be exposed. A server that ignores Range (200), or any failure, just waits
- *   for the stream to get there — slower, never wrong. Opening a document
+ *   be exposed. A server that ignores Range (200) is not asked again; a
+ *   failed request (an error status, offline) leaves its range to the stream
+ *   — slower, never wrong — and later ranges are still asked for. Bytes a
+ *   Range request brings only ever go where the stream has not been yet, so
+ *   the finished file is exactly what the stream sent, even if the object
+ *   was replaced in between. Opening a document
  *   needs the cross-reference table (at the very end of a non-linearized PDF)
  *   and, because pdf.js checks the last page on open, every page dictionary
  *   of a flat page tree — one small object per page, spread through the file.
@@ -71,6 +75,8 @@ const STREAM_LOOKAHEAD = 64 * 1024;
 
 /** Said once per page load: every later Range request would be ignored too. */
 let warnedNoRange = false;
+/** Said once per page load: a host that refuses one likely refuses more. */
+let warnedRangeFailed = false;
 
 /** Where the bytes go: PdfProvider's PDFDataRangeTransport. */
 export interface DownloadSink {
@@ -89,6 +95,8 @@ interface PendingRange {
     begin: number;
     end: number;
     done: boolean;
+    /** A request was sent for this range itself (not one it waited on that another started). */
+    asked: boolean;
 }
 
 /** A Range request in flight, for bytes [begin, end). */
@@ -187,7 +195,7 @@ export class ProgressiveDownload {
 
     /** pdf.js needs bytes [begin, end) now. */
     requestRange(begin: number, end: number): void {
-        const range: PendingRange = { begin, end: Math.min(end, this.length), done: false };
+        const range: PendingRange = { begin, end: Math.min(end, this.length), done: false, asked: false };
         if (this.aborted) {
             return;
         }
@@ -197,6 +205,11 @@ export class ProgressiveDownload {
             return;
         }
         this.pending.push(range);
+        this.dispatch(range);
+    }
+
+    /** Ask the network for a pending range, unless the stream or a request on its way brings it. */
+    private dispatch(range: PendingRange): void {
         // Bytes just ahead of the stream are its very next ones; a second
         // request for them would only split the bandwidth.
         if (range.begin < this.loaded + STREAM_LOOKAHEAD || this.rangesIgnored) {
@@ -207,6 +220,7 @@ export class ProgressiveDownload {
                 return;
             }
         }
+        range.asked = true;
         const [from, to] = this.window(range.begin, range.end);
         void this.fetchRange(from, to);
     }
@@ -279,26 +293,41 @@ export class ProgressiveDownload {
         const inFlight: RangeFetch = { begin, end, controller: new AbortController() };
         this.fetches.add(inFlight);
         this.sizeEndingAt.set(end, end - begin);
+        let failed = false;
         try {
             const response = await this.fetchImpl(this.url, {
                 headers: { Range: `bytes=${begin}-${end - 1}` },
                 signal: inFlight.controller.signal,
                 priority: 'high',
             });
-            if (response.status !== 206) {
-                // The server sent the whole file instead: the stream already is.
+            if (response.status === 200) {
+                // The server sent the whole file instead, and will for every
+                // Range request: the stream already is bringing it.
                 this.rangesIgnored = true;
                 if (!warnedNoRange) {
                     warnedNoRange = true;
-                    console.warn(
-                        `Score host ignored a Range request (HTTP ${response.status}); waiting for the stream`,
-                    );
+                    console.warn('Score host ignored a Range request (HTTP 200); waiting for the stream');
                 }
                 inFlight.controller.abort();
                 return;
             }
+            if (response.status !== 206) {
+                // Refused this once (a 429, a 503): the stream brings these
+                // bytes; the next range is asked for as usual.
+                if (!warnedRangeFailed) {
+                    warnedRangeFailed = true;
+                    console.warn(`Score host refused a Range request (HTTP ${response.status}); trying the next`);
+                }
+                failed = true;
+                inFlight.controller.abort();
+                return;
+            }
             const bytes = new Uint8Array(await response.arrayBuffer());
-            if (bytes.byteLength !== end - begin || this.aborted || !this.fetches.has(inFlight)) {
+            if (this.aborted || !this.fetches.has(inFlight)) {
+                return;
+            }
+            if (bytes.byteLength !== end - begin) {
+                failed = true;
                 return;
             }
             this.keep(begin, bytes);
@@ -308,19 +337,47 @@ export class ProgressiveDownload {
                 }
             }
         } catch {
-            // Aborted, offline, refused: the stream covers it, or fails itself.
+            // Aborted (the stream got there, or the viewer closed), offline,
+            // refused: the stream covers it, or fails itself.
+            failed = !inFlight.controller.signal.aborted;
         } finally {
             this.fetches.delete(inFlight);
+            if (failed && !this.aborted) {
+                this.retryWaitingOn(inFlight);
+            }
         }
     }
 
-    /** Store what a Range request brought, merging it with its neighbours. */
+    /**
+     * A request failed. The range it was sent for waits for the stream, as
+     * any failed range does; ranges that only waited on it (pdf.js's first
+     * read, on the end-of-file request sent before pdf.js asked) never had a
+     * request of their own, so they get one now rather than wait for the
+     * whole file.
+     */
+    private retryWaitingOn(failed: RangeFetch): void {
+        for (const range of [...this.pending]) {
+            if (!range.asked && range.begin < failed.end && failed.begin < range.end) {
+                this.dispatch(range);
+            }
+        }
+    }
+
+    /**
+     * Store what a Range request brought, merging it with its neighbours.
+     * Only the part the stream has not reached goes into the buffer, which
+     * the stream later writes over: the finished file (the offline copy, the
+     * export) is then the stream's bytes alone, one consistent version even
+     * if the object was replaced while this request was on its way. What the
+     * stream already wrote stays; `has` reads it from there.
+     */
     private keep(begin: number, bytes: Uint8Array): void {
         if (this.loaded >= this.length) {
             // The buffer is the finished file now, and already holds these bytes.
             return;
         }
-        this.buffer.set(bytes, begin);
+        const skip = Math.min(bytes.byteLength, Math.max(0, this.loaded - begin));
+        this.buffer.set(bytes.subarray(skip), begin + skip);
         const merged: Span = { begin, end: begin + bytes.byteLength };
         const rest: Span[] = [];
         for (const span of this.fetched) {

@@ -72,6 +72,28 @@ describe('warmPdfWorker', () => {
         expect(create).toHaveBeenCalledTimes(2);
     });
 
+    it('never throws when the worker cannot start: it is only a head start', async () => {
+        const { createPdfWorker, warmPdfWorker } = await loadModule();
+        const refused = new DOMException('Worker refused', 'SecurityError');
+        vi.stubGlobal(
+            'Worker',
+            class {
+                constructor() {
+                    throw refused;
+                }
+            },
+        );
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        expect(() => warmPdfWorker()).not.toThrow();
+        expect(warn).toHaveBeenCalledWith('Could not start the pdf.js worker early', refused);
+        expect(create).not.toHaveBeenCalled();
+        // Nothing was kept: the real open starts its own, and meets the
+        // error where it always did.
+        expect(() => createPdfWorker()).toThrow(refused);
+        warn.mockRestore();
+    });
+
     it('leaves a taken worker running past the expiry', async () => {
         vi.useFakeTimers();
         const { createPdfWorker, warmPdfWorker, SPARE_WORKER_TTL_MS } = await loadModule();
