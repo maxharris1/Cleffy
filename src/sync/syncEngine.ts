@@ -321,6 +321,39 @@ const withOutboxLock = async <T>(docId: string, fn: () => Promise<T>): Promise<T
 const sameInstant = (a: string | null | undefined, b: string | null | undefined): boolean =>
     !!a && !!b && Date.parse(a) === Date.parse(b);
 
+/** JSON with object keys in one order: jsonb does not keep the order a payload was sent in. */
+const canonicalJson = (value: unknown): string =>
+    JSON.stringify(value, (_key, v: unknown) =>
+        v && typeof v === 'object' && !Array.isArray(v)
+            ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+            : v,
+    );
+
+/**
+ * Whether a server row carries what `op` wrote, so shows the mark as that
+ * push left it: its echo, or a read made after it landed. A delete is told by
+ * its own instant, the other ops by the content they wrote. (An update sends
+ * no deleted_at, so its echo may be a tombstone — which is then the truth.)
+ */
+export const isEchoOf = (row: AnnotationRow, op: PendingOp): boolean => {
+    const a = op.annotation;
+    const content = row.color === a.color && canonicalJson(row.payload) === canonicalJson(a.payload);
+    switch (op.type) {
+        case 'delete':
+            return sameInstant(row.deleted_at, a.deletedAt);
+        case 'restore':
+            return row.deleted_at === null && content;
+        case 'update':
+            return content;
+        case 'create':
+            return content && (row.deleted_at === null) === !a.deletedAt;
+        default: {
+            const _exhaustive: never = op.type;
+            return _exhaustive;
+        }
+    }
+};
+
 /** One mark's queued ops, oldest first. */
 interface OpGroup {
     annotationId: string;
@@ -428,8 +461,17 @@ export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Re
         ops: [netOp(first, type, extra)],
     });
     if (!finalLive) {
-        // Already erased on the server (by anyone): nothing left to say.
-        return serverLive ? net('delete') : { kind: 'adopt' };
+        if (!serverLive) {
+            // Already erased on the server (by anyone): nothing left to say.
+            return { kind: 'adopt' };
+        }
+        // An edit made before the erase goes out ahead of it, rather than
+        // folding into the delete: an Undo of the erase queued before that
+        // delete is sent would otherwise meet a delete + restore pair over
+        // the unedited row, send nothing, and drop the edit.
+        const edits = ops.filter((op) => op.type === 'update');
+        const lastEdit = edits[edits.length - 1];
+        return lastEdit ? { kind: 'send', ops: [lastEdit, netOp(last, 'delete')] } : net('delete');
     }
     const restoredAt = ops.findIndex((op) => op.type === 'restore');
     if (restoredAt >= 0 && ops.slice(restoredAt + 1).some((op) => op.type === 'update')) {
@@ -505,6 +547,16 @@ export class SyncEngine {
     private clock = 0;
     /** `clock` when the last push left: a row held back before it is older than what it sent. */
     private pushedAt = 0;
+    /**
+     * The last push of each mark to land, and `clock` when it did: this
+     * engine's ack (with the op it sent), or another engine's (a settled
+     * message; op unknown). The server answers a push with no seq, so the
+     * store keeps the seq from before it, and under seq LWW any row read
+     * before the push landed outranks what it landed. A row read before
+     * `at` is therefore in doubt unless it is the push's own echo (see
+     * landedSince).
+     */
+    private landed = new Map<string, { at: number; op: PendingOp | null }>();
     /** Marks whose queue this engine emptied during the current flush. */
     private settled = new Set<string>();
     /** Names this engine in the messages it sends, so it skips its own. */
@@ -641,12 +693,16 @@ export class SyncEngine {
         });
     }
 
-    /** Hold back server rows the store skipped for local intent (see `deferred`). */
-    private defer(rows: readonly AnnotationRow[]): void {
+    /**
+     * Hold back server rows the store skipped for local intent (see
+     * `deferred`). `sentAt`: when the request that read them left, for a
+     * pull — the row is as old as that, not as new as its arrival.
+     */
+    private defer(rows: readonly AnnotationRow[], sentAt?: number): void {
         for (const row of rows) {
             const held = this.deferred.get(row.id);
             if (!held || row.seq > held.row.seq) {
-                this.deferred.set(row.id, { row, at: ++this.clock });
+                this.deferred.set(row.id, { row, at: sentAt ?? ++this.clock });
             }
         }
     }
@@ -666,18 +722,59 @@ export class SyncEngine {
             return applied;
         }
         const rows: AnnotationRow[] = [];
+        const readAt = new Map<string, number>();
+        const inDoubt: string[] = [];
         for (const id of ids) {
             const held = this.deferred.get(id);
             if (held && !queued.has(id)) {
                 this.deferred.delete(id);
+                if (this.landedSince(held.row, held.at)) {
+                    // Read before the mark's own push landed (a pull that
+                    // crossed it): applied, it would take that push back.
+                    inDoubt.push(id);
+                    continue;
+                }
                 rows.push(held.row);
+                readAt.set(id, held.at);
                 applied.add(id);
             }
         }
         if (rows.length > 0) {
-            this.applyHeld(rows, await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), queued));
+            const reheld = await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), queued);
+            for (const row of rows) {
+                if (reheld.has(row.id)) {
+                    // Held again, still as old as when it was first read.
+                    this.defer([row], readAt.get(row.id));
+                }
+            }
+        }
+        if (inDoubt.length > 0) {
+            await this.askAgain(inDoubt);
         }
         return applied;
+    }
+
+    /**
+     * Whether `row`, read at `at` (on `clock`), may predate a push of its
+     * mark that has landed since — and so, applied, would replace what that
+     * push landed. Not when it is that push's own echo: then it shows the
+     * mark as the server holds it after the push, seq included.
+     */
+    private landedSince(row: AnnotationRow, at: number): boolean {
+        const landed = this.landed.get(row.id);
+        return !!landed && landed.at > at && !(landed.op && isEchoOf(row, landed.op));
+    }
+
+    /** Read these marks from the server again and apply what it says now (see landedSince). */
+    private async askAgain(ids: readonly string[]): Promise<void> {
+        const { api, docId } = this.deps;
+        const askedAt = ++this.clock;
+        const { data, error } = await this.withAuth(() => api.fetchMany(docId, [...ids]));
+        if (error || !data || data.length === 0 || this.stopped) {
+            // The echo of the push, or the next pull, brings it instead.
+            return;
+        }
+        await this.applyPulled(data, askedAt, false);
     }
 
     /**
@@ -693,6 +790,8 @@ export class SyncEngine {
      */
     private async settledElsewhere(ids: readonly string[]): Promise<void> {
         const { api, store, docId } = this.deps;
+        const at = ++this.clock;
+        ids.forEach((id) => this.landed.set(id, { at, op: null }));
         const held = ids.filter((id) => this.deferred.delete(id));
         await store.reloadFromMirror(ids);
         if (held.length === 0 || this.stopped) {
@@ -710,9 +809,12 @@ export class SyncEngine {
     }
 
     /** Defer the rows applyRemoteBatch held back for local intent. */
-    private applyHeld(rows: readonly AnnotationRow[], held: ReadonlySet<string>): void {
+    private applyHeld(rows: readonly AnnotationRow[], held: ReadonlySet<string>, sentAt?: number): void {
         if (held.size > 0) {
-            this.defer(rows.filter((row) => held.has(row.id)));
+            this.defer(
+                rows.filter((row) => held.has(row.id)),
+                sentAt,
+            );
         }
     }
 
@@ -1117,12 +1219,15 @@ export class SyncEngine {
     }
 
     private async ackOp(op: PendingOp): Promise<void> {
+        this.landed.set(op.annotationId, { at: ++this.clock, op });
         await this.deps.db.ops.delete(op.opId as number);
         if ((await this.queuedFor(op.annotationId)) === 0) {
             const createdBy = op.type === 'create' ? this.deps.getUserId() : null;
             await this.deps.store.markSynced(op.annotationId, createdBy);
             // A row held back since before this push predates the change it
-            // just landed; one that came after may be its echo, or newer.
+            // just landed; one that came after may be its echo, or newer —
+            // or a read that crossed it, which applyDeferred asks about
+            // again (landedSince).
             const held = this.deferred.get(op.annotationId);
             if (held && held.at < this.pushedAt) {
                 this.deferred.delete(op.annotationId);
@@ -1320,13 +1425,45 @@ export class SyncEngine {
      * while that was being decided — its ack would then have found nothing
      * held — so the held rows are looked at once more straight away.
      */
-    private async applyRemote(rows: readonly AnnotationRow[], pendingIds: ReadonlySet<string>): Promise<void> {
+    private async applyRemote(
+        rows: readonly AnnotationRow[],
+        pendingIds: ReadonlySet<string>,
+        sentAt?: number,
+    ): Promise<void> {
         const held = await this.deps.store.applyRemoteBatch(rows.map(fromServerRow), pendingIds);
         if (held.size === 0 || this.stopped) {
             return;
         }
-        this.applyHeld(rows, held);
+        this.applyHeld(rows, held, sentAt);
         await this.applyDeferred([...held]);
+    }
+
+    /**
+     * Apply rows a request that left at `sentAt` read (a pull, or askAgain).
+     * A row that may predate a push of its mark which landed after the
+     * request left (see landedSince) is not applied: under seq LWW it would
+     * replace what the push landed in this tab, until the next pull or the
+     * push's echo — an erase undone, a mark brought back — and an edit made
+     * meanwhile would go onto a row that is not what the tab shows. The
+     * server is asked again instead (`retry`); a row still in doubt after
+     * that waits for the echo or the next pull.
+     */
+    private async applyPulled(rows: readonly AnnotationRow[], sentAt: number, retry = true): Promise<void> {
+        // Queue first: an ack records the landing before it unqueues the op,
+        // so each row is either held for its queued op (dated by `sentAt`,
+        // and checked again when it is applied) or seen here as in doubt.
+        const pendingIds = await this.queuedIds();
+        if (this.stopped) {
+            return;
+        }
+        const inDoubt = rows.filter((row) => this.landedSince(row, sentAt));
+        const fresh = inDoubt.length === 0 ? rows : rows.filter((row) => !inDoubt.includes(row));
+        if (fresh.length > 0) {
+            await this.applyRemote(fresh, pendingIds, sentAt);
+        }
+        if (inDoubt.length > 0 && retry && !this.stopped) {
+            await this.askAgain(inDoubt.map((row) => row.id));
+        }
     }
 
     /** Apply one row fanned out via broadcast-from-database (M4). */
@@ -1364,6 +1501,7 @@ export class SyncEngine {
             let after = Math.max(0, watermark - PULL_OVERLAP);
 
             for (;;) {
+                const sentAt = ++this.clock;
                 const { data, error } = await this.withAuth(() => api.fetchSince(docId, after, PULL_PAGE_SIZE));
                 // stop() can land during any await below (the account lost
                 // the score and its local copy is being purged): a pull that
@@ -1385,11 +1523,10 @@ export class SyncEngine {
                 if (rows.length === 0) {
                     break;
                 }
-                const pendingIds = await this.queuedIds();
+                await this.applyPulled(rows, sentAt);
                 if (this.stopped) {
                     return;
                 }
-                await this.applyRemote(rows, pendingIds);
                 const last = rows[rows.length - 1];
                 if (last) {
                     watermark = Math.max(watermark, last.seq);

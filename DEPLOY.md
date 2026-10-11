@@ -331,6 +331,70 @@ throwaway>' })` from the console — it must fail (500), and the guest
 - **Contrast**: `--color-danger` is red-700 (was red-600: 3.79:1 behind the
   viewer's error, 4.37:1 on paper); danger buttons darken on hover.
 
+**QA round 4 — sync (`qa4/sync`), client only.**
+
+- **An edit made after Undo of an erase survives a collaborator's erase**
+  (C1, was B5; QA lost it 9 times in 10). Reconcile now takes its verdict
+  inside the transaction that rewrites the outbox, over the mark's ops as
+  they are then, not as they were when its server read left (a read sent
+  offline is out for ~7 s while postgrest-js retries it). It also waits for
+  an edit that has begun but is not in the outbox yet (`hasUnsavedEdit` /
+  `whenSaved` in `annotationStore.ts`), and a verdict to send nothing adopts
+  the server row in the same transaction and tells other tabs at once.
+- **The library says "Offline" at load** when the browser already knows it
+  is (C6), instead of after ~7 s of retries, and reloads on reconnect.
+
+**QA round 4 — first page (`qa4/perf`), client only.** A cold open of a
+150-page, 16.5 MB scan under Fast 3G + 4× CPU shows page 1 in ~10 s (was
+15.7 s; 12.3 s with 1.2 s to first byte), from the local benchmark
+(`scripts/bench-first-page.mjs`): the file's tail is fetched as soon as its
+length is known, Range requests are small and grow as pdf.js reads on, extra
+bytes are kept, a refused Range request no longer stalls page 1, and the
+pdf.js worker starts while the score is looked up. Range bytes never enter
+the offline copy. Missed only where something caps parallel Range requests at
+about six (HTTP/1.1, or a proxy): ~35 s. QA's ~50 s on dev.cleffy.io is
+unexplained — re-measure there (step 2) before deciding anything about
+rewriting PDFs at upload.
+
+**QA round 4 — integration review (`qa4-integrate`), client only.**
+
+- **A pull that crosses this device's own push no longer takes it back.**
+  Found by a new randomized test (`src/sync/reconcileInterleaving.test.ts`,
+  150 random runs of erase / Undo / Redo / edit over two notes across a
+  dropped connection, against a collaborator's erase or edit). On reconnect
+  the 'online' pull runs beside the drain resuming from offline. A server
+  patch answers with no seq, so the store kept the pre-push seq, and a row
+  the pull had read before the push landed won under seq LWW: an erase came
+  back on this device, or an Undo vanished, until the push's echo or the next
+  pull — and an edit made meanwhile went onto the tombstone and was lost.
+  The engine now records when each mark's push landed (`landed`), and a row
+  read before that is not applied unless it is that push's own echo (same
+  delete instant, or same content); the server is asked again for it
+  (`askAgain`, one GET, only when a read crossed a push of the same mark).
+  Pulled rows held for a queued op are dated by when the pull left.
+- **Edit, erase, Undo keeps the edit** (same test). Reconcile folded an edit
+  and a later erase into one delete; an Undo queued before that delete was
+  sent then met a delete + restore pair over the unedited server row, sent
+  nothing, and the note came back without the edit. The edit now goes out
+  ahead of the delete (one more patch in the same batch).
+- **Library reconnect race**: an 'online' event between the offline notice's
+  paint and the effect that listens for it was missed; both offline states
+  now reload when they find the browser already back. (Found as a test that
+  failed only under full-suite load.)
+- **Still open, by design for now:** when one engine's reconcile adopts a
+  collaborator's erase, another engine on the same score — a second tab, or
+  this tab's viewer while a background drain that started before the score
+  was reopened is still running — keeps drawing the mark until it hears (a
+  BroadcastChannel hop and one IndexedDB read), and the reconcile does not
+  wait for an edit that engine has begun but not yet queued. An edit there in
+  that window can still land on the tombstone (qa4/sync's "Two tabs" note).
+  A realtime row that predates a push but arrives after its ack is still
+  applied; the push's echo, behind it on the same channel, corrects it. And
+  a store op is built from the mark as it is when the action starts, so an
+  erase begun within the few milliseconds of an edit's commit would carry
+  the pre-edit content into its Undo — not reachable from the UI, where the
+  eraser cannot reach a note whose editor is open.
+
 `stripe-webhook` now applies `customer.subscription.created` / `.updated` from
 the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
 the copy embedded in the event: Stripe does not deliver in order, and a retried
@@ -391,6 +455,18 @@ to refund (comment at the end of `20261007120300`).
    GoTrue's `supabase_auth_admin` role present: 53/53, 44/44, 57/57 and 12/12,
    and the earlier files 113/113, 37/37, 35/35, 26/26 and 94/94. Not yet run
    on the dev branch.
+   QA round 4 adds `tests/sql/archived_student_password.sql` and
+   `tests/sql/edge_rate_limit_refund.sql`, run the same way once
+   `20261011120100` / `…101` are on the branch. On 2026-10-11 the integrated
+   set (`qa4-integrate`, 57 migrations replayed with catalogs, local
+   Postgres 16) passed every file: 13/13 and 10/10 for the new two, and
+   57/57, 35/35, 113/113, 37/37, 53/53, 12/12, 26/26, 44/44 and 94/94 for
+   the rest. Then, on dev, archive a code student and sign in as them with
+   the right password: the page must say the account is archived
+   (`403 student_archived`); a wrong password must get the ordinary refusal.
+   And re-measure qa4/perf's first page against real Storage: a large score
+   not yet on the device, DevTools Fast 3G, no proxy — page 1 well inside
+   20 s.
    Then the out-of-order webhook check, in the Stripe sandbox against the dev
    endpoint (Workbench → Events): make any two `customer.subscription.updated`
    events on a test subscription (e.g. turn cancel-at-period-end on, then
@@ -537,6 +613,18 @@ to refund (comment at the end of `20261007120300`).
     - IMSLP: search results show no `&quot;` / `&amp;` and part names show ♭
       where IMSLP has `{{Flat}}`; on a 390×667 phone the edition picker's Add
       button and its disclaimer are on screen without scrolling.
+      QA round 4:
+    - C1, five times over: A has a synced text note; A goes offline, erases
+      it, presses Undo, edits its text; B erases it (reaches the server); A
+      reconnects. Every time, both A and B show the note with A's text, and
+      A's dot reads Synced. Control: the same without A's edit — B's erase
+      stands on both.
+    - Open the library offline (cached): "Offline — showing scores cached on
+      this device" at once; reconnect: the notice goes without a reload.
+    - Students: delete a teacher whose student has the score open with a
+      mark queued offline — the sign-in page says the account was deleted and
+      the change discarded, not that it will be saved. An archived student
+      signing in with the right password is told they were archived.
 14. **Leftover Storage of accounts deleted any other way.** `delete-account`
     empties both buckets for every `document_storage_cleanup` tombstone the
     account owns before it deletes the auth user. An account removed from the

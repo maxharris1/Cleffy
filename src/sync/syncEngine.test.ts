@@ -9,6 +9,7 @@ import {
     classifyFailure,
     createSupabaseAnnotationsApi,
     fromServerRow,
+    isEchoOf,
     observeRejections,
     PERSISTENT_FAILURE_MS,
     reconcileWithServer,
@@ -1230,6 +1231,39 @@ describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () =
         expect(outcome).toMatchObject({ kind: 'send', ops: [{ type: 'update', userId: USER }] });
     });
 
+    it('keeps an edit made before an erase when Undo of that erase is queued before the erase is sent', () => {
+        // Integration review (reconcileInterleaving.test.ts): edit, erase,
+        // reconnect — reconcile settles the pair — and Undo lands before
+        // the push. The next verdict must still see the edit.
+        const queued = (opId: number, type: PendingOpType, color: string, deletedAt: string | null): PendingOp => ({
+            opId,
+            docId: DOC,
+            type,
+            annotationId: 'm1',
+            annotation: { ...makeStroke('m1'), color, deletedAt },
+            queuedAt: '2026-01-01T00:00:00.000Z',
+            userId: USER,
+        });
+        const erasedAt = '2026-02-02T02:02:02.000Z';
+        const live = serverRow('m1', { color: '#111111' });
+
+        const first = reconcileWithServer(
+            [queued(1, 'update', '#ff0000', null), queued(2, 'delete', '#ff0000', erasedAt)],
+            live,
+        );
+        expect(first).toMatchObject({ kind: 'send', ops: [{ type: 'update' }, { type: 'delete' }] });
+
+        const sent = first.kind === 'send' ? first.ops : [];
+        const second = reconcileWithServer(
+            [...sent, { ...queued(3, 'restore', '#ff0000', null), baseDeletedAt: erasedAt }],
+            live,
+        );
+        expect(second).toMatchObject({
+            kind: 'send',
+            ops: [{ type: 'update', annotation: { color: '#ff0000', deletedAt: null } }],
+        });
+    });
+
     it('keeps the ops untouched when the server rows cannot be read', async () => {
         await drawAndSync();
         api.offline = true;
@@ -1610,6 +1644,213 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
         expect(edits, `seed ${seed}`).toBeGreaterThan(0);
         expect(edits, `seed ${seed}`).toBeLessThan(60);
     }, 60_000);
+});
+
+/**
+ * A pull runs beside the drain (on reconnect, the 'online' pull and the
+ * drain resuming from offline). The server answers a push with no seq, so
+ * the store keeps the seq from before it, and a row the pull read before the
+ * push landed outranks what the push landed. Found by the randomized
+ * interleaving test (reconcileInterleaving.test.ts): an erase came back, and
+ * an edit of the note it showed went onto the tombstone.
+ */
+describe('SyncEngine: a pull read before this device’s push of the same mark landed', () => {
+    /** The server reads the rows when asked; the answer is held until `release`. */
+    const holdPull = () => {
+        const pull = api.fetchSince.bind(api);
+        let handled!: () => void;
+        let release!: () => void;
+        const out = {
+            handled: new Promise<void>((resolve) => (handled = resolve)),
+            released: new Promise<void>((resolve) => (release = resolve)),
+            release: () => release(),
+        };
+        api.fetchSince = async (...args) => {
+            api.fetchSince = pull;
+            const answer = await pull(...args);
+            handled();
+            await out.released;
+            return answer;
+        };
+        return out;
+    };
+
+    it('does not bring back a mark whose erase landed while the pull’s answer was on its way', async () => {
+        await store.create(makeStroke('s1'));
+        await engine.flush();
+        const pull = holdPull();
+        const pulling = engine.pullSince();
+        await pull.handled; // the server read the stroke while it was live …
+        await store.delete('s1');
+        await engine.flush(); // … then the erase landed, and was acked
+        expect(api.rows.get('s1')?.deleted_at).not.toBeNull();
+
+        pull.release();
+        await pulling;
+
+        expect(store.getPage(0).has('s1')).toBe(false);
+        expect(store.get('s1')?.deletedAt).toBe(api.rows.get('s1')?.deleted_at);
+        expect(store.get('s1')?.seq).toBe(api.rows.get('s1')?.seq);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('still applies what the pull brought for marks no push touched meanwhile', async () => {
+        await store.create(makeStroke('s1'));
+        await engine.flush();
+        api.rows.set('theirs', serverRow('theirs', { seq: api.nextSeq++ }));
+        const pull = holdPull();
+        const pulling = engine.pullSince();
+        await pull.handled;
+        const fetches = api.fetchManys;
+        pull.release();
+        await pulling;
+
+        expect(store.getPage(0).has('theirs')).toBe(true);
+        expect(store.getPage(0).has('s1')).toBe(true);
+        expect(api.fetchManys).toBe(fetches); // nothing in doubt, nothing asked again
+    });
+
+    it('drops, at the ack, a row held for the queued erase that the pull read before it left', async () => {
+        await store.create(makeStroke('s1'));
+        await engine.flush();
+        const pull = holdPull();
+        const pulling = engine.pullSince();
+        await pull.handled; // read while live
+        // The erase leaves, and is held on its way …
+        const write = api.updateMany.bind(api);
+        let sent!: () => void;
+        const pushSent = new Promise<void>((resolve) => (sent = resolve));
+        let land!: () => void;
+        const landing = new Promise<void>((resolve) => (land = resolve));
+        api.updateMany = async (patches) => {
+            sent();
+            await landing;
+            return write(patches);
+        };
+        await store.delete('s1');
+        const flushing = engine.flush();
+        await pushSent;
+        pull.release(); // … while the pull's answer comes in, held for the queued erase
+        await pulling;
+        expect(store.getPage(0).has('s1')).toBe(false);
+
+        land();
+        await flushing;
+
+        expect(store.getPage(0).has('s1')).toBe(false);
+        expect(store.get('s1')?.deletedAt).not.toBeNull();
+        expect(api.rows.get('s1')?.deleted_at).not.toBeNull();
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    /** Each write is held after it leaves, and lands only on `land`. */
+    const holdWrite = () => {
+        const write = api.updateMany.bind(api);
+        let sent!: () => void;
+        let land!: () => void;
+        const out = {
+            sent: new Promise<void>((resolve) => (sent = resolve)),
+            landing: new Promise<void>((resolve) => (land = resolve)),
+            land: () => land(),
+        };
+        api.updateMany = async (patches) => {
+            api.updateMany = write;
+            sent();
+            await out.landing;
+            return write(patches);
+        };
+        return out;
+    };
+
+    it('asks again, rather than applying at the ack, for a row a pull read before an erase that had already left', async () => {
+        await store.create(makeStroke('s1'));
+        await engine.flush();
+        const push = holdWrite();
+        await store.delete('s1');
+        const flushing = engine.flush();
+        await push.sent; // the erase is on its way …
+        const pull = holdPull();
+        const pulling = engine.pullSince();
+        await pull.handled; // … and the pull, sent after it, is read before it lands
+        pull.release();
+        await pulling; // held for the queued erase
+        const fetches = api.fetchManys;
+
+        push.land();
+        await flushing;
+
+        expect(store.getPage(0).has('s1')).toBe(false);
+        expect(store.get('s1')?.seq).toBe(api.rows.get('s1')?.seq);
+        expect(api.fetchManys).toBe(fetches + 1);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    it('applies the push’s own echo, held while it was out, without asking again', async () => {
+        await store.create(makeStroke('s1'));
+        await engine.flush();
+        const write = api.updateMany.bind(api);
+        let answer!: () => void;
+        const answered = new Promise<void>((resolve) => (answer = resolve));
+        let landed!: () => void;
+        const hasLanded = new Promise<void>((resolve) => (landed = resolve));
+        api.updateMany = async (patches) => {
+            api.updateMany = write;
+            const result = await write(patches); // lands now …
+            landed();
+            await answered; // … its answer comes back later
+            return result;
+        };
+        await store.update('s1', { color: '#ff0000' });
+        const flushing = engine.flush();
+        await hasLanded;
+        // The realtime echo arrives first, and is held for the queued edit.
+        await engine.applyServerRow(api.rows.get('s1')!);
+        const fetches = api.fetchManys;
+
+        answer();
+        await flushing;
+
+        expect(store.get('s1')?.color).toBe('#ff0000');
+        expect(store.get('s1')?.seq).toBe(api.rows.get('s1')?.seq);
+        expect(api.fetchManys).toBe(fetches);
+    });
+});
+
+describe('isEchoOf', () => {
+    const pushed = (type: PendingOpType, overrides: Partial<Annotation> = {}): PendingOp => ({
+        docId: DOC,
+        annotationId: 's1',
+        type,
+        queuedAt: '2026-01-01T00:00:00.000Z',
+        annotation: { ...makeStroke('s1'), ...overrides },
+    });
+    const payload = { pts: [0.1, 0.1, 0.5, 0.2, 0.2, 0.5], w: 0.005 };
+    const row = (overrides: Partial<AnnotationRow> = {}) =>
+        serverRow('s1', { color: '#111111', payload, ...overrides });
+
+    it('tells an update’s echo by its content, whatever order jsonb gives the keys', () => {
+        const reordered = { w: 0.005, pts: [0.1, 0.1, 0.5, 0.2, 0.2, 0.5] };
+        expect(isEchoOf(row({ payload: reordered }), pushed('update'))).toBe(true);
+        // On a collaborator's tombstone: still the echo, and the truth.
+        expect(isEchoOf(row({ deleted_at: '2026-05-05T05:05:05.000Z' }), pushed('update'))).toBe(true);
+        expect(isEchoOf(row({ color: '#222222' }), pushed('update'))).toBe(false);
+    });
+
+    it('tells a delete’s echo by its own instant only', () => {
+        const at = '2026-03-03T03:03:03.000Z';
+        expect(isEchoOf(row({ deleted_at: '2026-03-03T03:03:03+00:00' }), pushed('delete', { deletedAt: at }))).toBe(
+            true,
+        );
+        expect(isEchoOf(row({ deleted_at: '2026-04-04T04:04:04.000Z' }), pushed('delete', { deletedAt: at }))).toBe(
+            false,
+        );
+        expect(isEchoOf(row(), pushed('delete', { deletedAt: at }))).toBe(false);
+    });
+
+    it('wants a restore’s echo live', () => {
+        expect(isEchoOf(row(), pushed('restore'))).toBe(true);
+        expect(isEchoOf(row({ deleted_at: '2026-04-04T04:04:04.000Z' }), pushed('restore'))).toBe(false);
+    });
 });
 
 describe('SyncEngine status', () => {

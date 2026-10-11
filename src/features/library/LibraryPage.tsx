@@ -368,6 +368,12 @@ export const LibraryPage = () => {
             setReloadKey((k) => k + 1);
         };
         window.addEventListener('online', reload);
+        if (loadFailure === 'offline' && backOnline()) {
+            // Reconnected between the paint and this effect: that 'online'
+            // event has been and gone.
+            reload();
+            return () => window.removeEventListener('online', reload);
+        }
         let timer: ReturnType<typeof setTimeout> | null = null;
         if (loadFailure === 'unreachable') {
             const attempt = autoRetriesRef.current;
@@ -390,6 +396,10 @@ export const LibraryPage = () => {
         }
         const refresh = () => setReloadKey((k) => k + 1);
         window.addEventListener('online', refresh);
+        if (backOnline()) {
+            // As above: the reconnect came before this listened.
+            refresh();
+        }
         return () => window.removeEventListener('online', refresh);
     }, [error]);
 
@@ -1501,6 +1511,15 @@ type LoadFailure = 'offline' | 'unreachable' | 'error';
 
 const LIBRARY_RETRY_BASE_MS = 5000;
 const LIBRARY_RETRY_MAX_MS = 60_000;
+
+/**
+ * The browser no longer says it is offline. A page showing an 'offline' state
+ * that finds this when it starts listening for 'online' missed the event (it
+ * fired between the state's paint and the listener), and must reload itself.
+ * An 'offline' state is only ever set while navigator.onLine is false (see
+ * classifyLoadFailure), so this cannot loop.
+ */
+const backOnline = (): boolean => typeof navigator === 'undefined' || navigator.onLine !== false;
 
 const classifyLoadFailure = (...errors: unknown[]): LoadFailure => {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {

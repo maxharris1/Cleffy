@@ -873,6 +873,58 @@ describe('LibraryPage', () => {
                 ).toBeInTheDocument();
                 expect(screen.queryByText(/showing scores cached/)).not.toBeInTheDocument();
             });
+
+            /**
+             * The browser reconnects after `shown` is painted but before the
+             * page listens for 'online' (React runs that effect after the
+             * paint, later still on a busy main thread): the event is gone by
+             * the time anything listens for it.
+             */
+            const reconnectBeforeListening = (shown: string) => {
+                const add = window.addEventListener.bind(window);
+                return vi
+                    .spyOn(window, 'addEventListener')
+                    .mockImplementation((type: string, ...rest: [EventListenerOrEventListenerObject, unknown?]) => {
+                        if (type === 'online' && screen.queryByText(shown)) {
+                            onLine.mockReturnValue(true);
+                        }
+                        add(type, ...(rest as [EventListenerOrEventListenerObject]));
+                    });
+            };
+
+            it('loads afresh when the browser reconnected before the cached list started listening', async () => {
+                readCachedLibraryList.mockResolvedValue(cachedList);
+                mockBootstrap({ documents: [doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)')] });
+                // The first request left offline, and never answers.
+                fetchLibraryBootstrap.mockReturnValueOnce(new Promise(() => undefined));
+                const listen = reconnectBeforeListening('Offline — showing scores cached on this device.');
+                try {
+                    renderLibrary();
+
+                    expect(
+                        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' }),
+                    ).toBeInTheDocument();
+                    expect(screen.queryByText(/showing scores cached/)).not.toBeInTheDocument();
+                } finally {
+                    listen.mockRestore();
+                }
+            });
+
+            it('loads afresh when the browser reconnected before the offline state started listening', async () => {
+                mockBootstrap({ documents: [doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)')] });
+                fetchLibraryBootstrap.mockReturnValueOnce(new Promise(() => undefined));
+                const listen = reconnectBeforeListening('You’re offline');
+                try {
+                    renderLibrary();
+
+                    expect(
+                        await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' }),
+                    ).toBeInTheDocument();
+                    expect(screen.queryByText('You’re offline')).not.toBeInTheDocument();
+                } finally {
+                    listen.mockRestore();
+                }
+            });
         });
 
         it('keeps retrying by itself while the server cannot be reached', async () => {
