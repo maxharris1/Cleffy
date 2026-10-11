@@ -800,6 +800,81 @@ describe('LibraryPage', () => {
             }
         });
 
+        describe('opened while the browser is already offline (QA C6)', () => {
+            const cachedList = {
+                documents: [doc('d1', 'Prelude and Fugue (Bach, Johann Sebastian)')],
+                hasMore: false,
+                favoriteIds: new Set<string>(),
+                tags: [],
+                documentTags: new Map<string, string[]>(),
+            };
+            let onLine: ReturnType<typeof vi.spyOn>;
+
+            beforeEach(() => {
+                onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+                // The bootstrap RPC is a POST and fails at once; the fallback
+                // GETs are retried by postgrest-js for seconds before they give up.
+                fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));
+                listDocuments.mockReturnValue(new Promise(() => undefined));
+            });
+
+            afterEach(() => {
+                onLine.mockRestore();
+            });
+
+            it('says the cached library is offline at once, not when the requests give up', async () => {
+                readCachedLibraryList.mockResolvedValue(cachedList);
+                renderLibrary();
+
+                expect(await screen.findByText('Offline — showing scores cached on this device.')).toBeInTheDocument();
+                expect(
+                    screen.getByRole('link', { name: 'Prelude and Fugue (Bach, Johann Sebastian)' }),
+                ).toBeInTheDocument();
+            });
+
+            it('says it is offline at once when nothing is cached either', async () => {
+                renderLibrary();
+
+                expect(await screen.findByText('You’re offline')).toBeInTheDocument();
+                expect(screen.queryByText('Loading scores…')).not.toBeInTheDocument();
+            });
+
+            it('drops the notice when the library loads after all', async () => {
+                readCachedLibraryList.mockResolvedValue(cachedList);
+                let answer!: (value: unknown) => void;
+                listDocuments.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+                renderLibrary();
+                await screen.findByText('Offline — showing scores cached on this device.');
+
+                await act(async () => {
+                    answer({ documents: [doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)')], hasMore: false });
+                });
+
+                expect(
+                    await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' }),
+                ).toBeInTheDocument();
+                expect(screen.queryByText(/showing scores cached/)).not.toBeInTheDocument();
+                expect(screen.queryByText('You’re offline')).not.toBeInTheDocument();
+            });
+
+            it('loads the library afresh once the browser reconnects, keeping the cached list up meanwhile', async () => {
+                readCachedLibraryList.mockResolvedValue(cachedList);
+                renderLibrary();
+                await screen.findByText('Offline — showing scores cached on this device.');
+
+                mockBootstrap({ documents: [doc('d2', 'An Chloe (Mozart, Wolfgang Amadeus)')] });
+                onLine.mockReturnValue(true);
+                await act(async () => {
+                    window.dispatchEvent(new Event('online'));
+                });
+
+                expect(
+                    await screen.findByRole('link', { name: 'An Chloe (Mozart, Wolfgang Amadeus)' }),
+                ).toBeInTheDocument();
+                expect(screen.queryByText(/showing scores cached/)).not.toBeInTheDocument();
+            });
+        });
+
         it('keeps retrying by itself while the server cannot be reached', async () => {
             const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
             fetchLibraryBootstrap.mockRejectedValue(new TypeError('Failed to fetch'));

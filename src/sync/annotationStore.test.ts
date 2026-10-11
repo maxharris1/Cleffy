@@ -330,6 +330,97 @@ describe('AnnotationStore', () => {
         spy.mockRestore();
     });
 
+    describe('unsaved edits (hasUnsavedEdit / whenSaved)', () => {
+        /** Hold the next day-snapshot check until `release`; `held` resolves once it is out. */
+        const holdSnapshotCheck = (beforeRelease?: () => Promise<void>) => {
+            const orig = snapshotService.ensureDayStartingSnapshot;
+            let out!: () => void;
+            let release!: () => void;
+            const released = new Promise<void>((resolve) => (release = resolve));
+            const gate = {
+                held: new Promise<void>((resolve) => (out = resolve)),
+                release: () => release(),
+                spy: vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+                    out();
+                    await released;
+                    await beforeRelease?.();
+                    return orig(...args);
+                }),
+            };
+            return gate;
+        };
+
+        const settledFlag = (promise: Promise<void>) => {
+            const flag = { settled: false };
+            void promise.then(() => (flag.settled = true));
+            return flag;
+        };
+
+        it('counts an edit as unsaved from the moment it is asked for, before it is drawn', async () => {
+            await store.create(makeStroke('a1'));
+            expect(store.hasUnsavedEdit('a1')).toBe(false);
+            const gate = holdSnapshotCheck();
+            try {
+                const editing = store.update('a1', { color: '#ff0000' });
+                await gate.held;
+                expect(store.get('a1')?.color).toBe('#111111'); // not drawn yet …
+                expect(store.hasUnsavedEdit('a1')).toBe(true); // … but on its way
+                const saved = settledFlag(store.whenSaved('a1'));
+                await new Promise((resolve) => setTimeout(resolve, 20));
+                expect(saved.settled).toBe(false);
+
+                gate.release();
+                await editing;
+                await store.whenSaved('a1');
+                expect(store.hasUnsavedEdit('a1')).toBe(false);
+                expect((await db.ops.toArray()).map((op) => op.type)).toEqual(['create', 'update']);
+            } finally {
+                gate.spy.mockRestore();
+            }
+        });
+
+        it('stops counting an edit that turns out not to apply', async () => {
+            await store.create(makeStroke('a1'));
+            // A collaborator's erase lands during the snapshot check.
+            const gate = holdSnapshotCheck(async () => {
+                const live = store.get('a1')!;
+                await store.applyRemoteBatch(
+                    [{ ...live, deletedAt: '2026-02-01T00:00:00.000Z', seq: live.seq + 1 }],
+                    new Set(),
+                );
+            });
+            try {
+                const editing = store.update('a1', { color: '#ff0000' });
+                await gate.held;
+                const saved = store.whenSaved('a1');
+                gate.release();
+                await editing;
+                await saved;
+                expect(store.hasUnsavedEdit('a1')).toBe(false);
+                expect((await db.ops.toArray()).map((op) => op.type)).toEqual(['create']);
+            } finally {
+                gate.spy.mockRestore();
+            }
+        });
+
+        it('stops counting an edit whose snapshot check throws', async () => {
+            await store.create(makeStroke('a1'));
+            const spy = vi
+                .spyOn(snapshotService, 'ensureDayStartingSnapshot')
+                .mockRejectedValue(new Error('QuotaExceededError'));
+            try {
+                const editing = store.update('a1', { color: '#ff0000' });
+                expect(store.hasUnsavedEdit('a1')).toBe(true);
+                const saved = store.whenSaved('a1');
+                await expect(editing).rejects.toThrow('QuotaExceededError');
+                await saved;
+                expect(store.hasUnsavedEdit('a1')).toBe(false);
+            } finally {
+                spy.mockRestore();
+            }
+        });
+    });
+
     describe('undo/redo after a collaborator deleted the mark', () => {
         /** The broadcast of a peer's erase: same row, tombstoned, newer seq. */
         const remoteDelete = async (id: string) => {
