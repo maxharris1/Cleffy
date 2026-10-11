@@ -64,6 +64,7 @@ const startHarness = (
         taken?: boolean | null;
         send?: 'sent' | 'failed' | 'unconfigured';
         caller?: GuestCaller | Response;
+        save?: boolean;
     } = {},
 ) => {
     const calls: string[] = [];
@@ -78,7 +79,7 @@ const startHarness = (
         savePending: vi.fn(async (row) => {
             calls.push('save');
             saved.push(row);
-            return true;
+            return options.save ?? true;
         }),
         deletePending: vi.fn(async () => {
             calls.push('delete');
@@ -87,6 +88,11 @@ const startHarness = (
             calls.push('send');
             sent.push({ to, subject: message.subject, text: message.text });
             return options.send ?? 'sent';
+        }),
+        refundRateLimit: vi.fn(async (key: string) => {
+            calls.push(
+                `refund:${key.split(':')[0]}${key.startsWith('guest-email-start:') ? `:${key.split(':')[1]}` : ''}`,
+            );
         }),
         generateCode: () => '482913',
         now: () => NOW,
@@ -206,12 +212,83 @@ describe('guest-email-start', () => {
     it('withdraws the code when the mail could not be sent', async () => {
         const failed = startHarness({ send: 'failed' });
         expect((await handleGuestEmailStart(post({ email: 'a@example.com' }), failed.deps)).status).toBe(502);
-        expect(failed.calls.slice(-2)).toEqual(['send', 'delete']);
+        expect(failed.calls.slice(failed.calls.indexOf('send') + 1)).toContain('delete');
 
         const unconfigured = startHarness({ send: 'unconfigured' });
         const response = await handleGuestEmailStart(post({ email: 'a@example.com' }), unconfigured.deps);
         expect(response.status).toBe(503);
         expect(await response.json()).toEqual(GUEST_EMAIL_ERRORS.unavailable);
+    });
+
+    it('hands back the mailbox’s and the project’s allowances when no mail went out', async () => {
+        const reserved = [
+            'refund:guest-email-to',
+            'refund:guest-email-to-day',
+            'refund:guest-email-start:global',
+            'refund:guest-email-start:global-day',
+        ];
+        for (const outcome of [{ send: 'unconfigured' as const }, { send: 'failed' as const }, { save: false }]) {
+            const h = startHarness(outcome);
+            const response = await handleGuestEmailStart(post({ email: 'a+tag@example.com' }), h.deps);
+            expect(response.status, JSON.stringify(outcome)).toBeGreaterThanOrEqual(500);
+            expect(h.calls.filter((c) => c.startsWith('refund:')).sort(), JSON.stringify(outcome)).toEqual(
+                [...reserved].sort(),
+            );
+            // The attempt limits stay spent: they are what stops a caller
+            // hammering a broken mailer.
+            expect(h.deps.refundRateLimit).not.toHaveBeenCalledWith(expect.stringMatching(/:ip:|:user:/));
+        }
+
+        const mailed = startHarness();
+        expect((await handleGuestEmailStart(post({ email: 'a@example.com' }), mailed.deps)).status).toBe(200);
+        expect(mailed.deps.refundRateLimit).not.toHaveBeenCalled();
+    });
+
+    it('hands back what it had reserved when a later limit refuses', async () => {
+        const h = startHarness();
+        h.deps.checkRateLimit = vi.fn(async (key: string) => {
+            h.calls.push(`rate:${key.split(':').slice(0, 2).join(':')}`);
+            return key === 'guest-email-start:global-day'
+                ? { ok: false as const, retryAfterSec: 900 }
+                : { ok: true as const };
+        });
+        expect((await handleGuestEmailStart(post({ email: 'a@example.com' }), h.deps)).status).toBe(503);
+        expect(h.calls.filter((c) => c.startsWith('refund:')).sort()).toEqual(
+            ['refund:guest-email-to', 'refund:guest-email-to-day', 'refund:guest-email-start:global'].sort(),
+        );
+    });
+
+    it('a mail outage does not use up a mailbox: its allowance counts mail that went out', async () => {
+        // The buckets, as check_edge_rate_limit and refund_edge_rate_limit keep them.
+        const counts = new Map<string, number>();
+        const checkRateLimit = vi.fn(async (key: string, limit: number) => {
+            const n = counts.get(key) ?? 0;
+            if (n >= limit) {
+                return { ok: false as const, retryAfterSec: 60 };
+            }
+            counts.set(key, n + 1);
+            return { ok: true as const };
+        });
+        const refundRateLimit = vi.fn(async (key: string) => {
+            counts.set(key, Math.max(0, (counts.get(key) ?? 0) - 1));
+        });
+        const attempt = async (send: 'sent' | 'failed' | 'unconfigured', guest: number) => {
+            const h = startHarness({ send, caller: { userId: `guest-${guest}`, isAnonymous: true } });
+            h.deps.checkRateLimit = checkRateLimit;
+            h.deps.refundRateLimit = refundRateLimit;
+            return (await handleGuestEmailStart(post({ email: 'ada@example.com' }), h.deps)).status;
+        };
+
+        // Resend down: five guests in a row get nothing mailed...
+        for (let guest = 0; guest < 5; guest += 1) {
+            expect(await attempt(guest % 2 ? 'failed' : 'unconfigured', guest)).toBeGreaterThanOrEqual(500);
+        }
+        // ...and the mailbox still has its whole hour once it is back.
+        for (let guest = 5; guest < 5 + GUEST_EMAIL_LIMITS.startPerRecipient.limit; guest += 1) {
+            expect(await attempt('sent', guest)).toBe(200);
+        }
+        expect(await attempt('sent', 99)).toBe(429);
+        expect(counts.get('guest-email-start:global')).toBe(GUEST_EMAIL_LIMITS.startPerRecipient.limit);
     });
 
     it('fails closed when the account lookup cannot answer', async () => {

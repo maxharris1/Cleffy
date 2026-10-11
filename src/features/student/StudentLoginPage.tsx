@@ -3,7 +3,8 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router';
 
 import { useSession, userTypeOf } from '@/features/auth/session';
 import { LegalLinks } from '@/features/legal/LegalLinks';
-import { keptChangesNotice } from '@/features/student/keptChangesNotice';
+import type { SignedOutByTeacherState } from '@/features/student/endedSignIn';
+import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
 import { loginStudent } from '@/features/student/studentApi';
 import { BrandLoading, BrandShell } from '@/ui/BrandShell';
 import { Button } from '@/ui/Button';
@@ -44,12 +45,21 @@ export const StudentLoginPage = () => {
 export const SIGNED_OUT_BY_TEACHER =
     'You were signed out because your teacher changed your access. Ask your teacher if you need a new setup code.';
 
+/**
+ * Said instead when the account itself is gone (deleted with the teacher's):
+ * there is no access left to change, and no next sign-in to promise.
+ */
+export const ACCOUNT_DELETED =
+    'You were signed out because this account was deleted. It cannot be used to sign in again; ask your teacher if you need a new one.';
+
 const CredentialEntry = () => {
     const navigate = useNavigate();
     const location = useLocation();
-    const state = location.state as { signedOutByTeacher?: unknown; keptChanges?: unknown } | null;
+    const state = location.state as Partial<Record<keyof SignedOutByTeacherState, unknown>> | null;
     const signedOutByTeacher = state?.signedOutByTeacher === true;
+    const accountDeleted = state?.accountDeleted === true;
     const keptChanges = typeof state?.keptChanges === 'number' ? state.keptChanges : 0;
+    const discardedChanges = typeof state?.discardedChanges === 'number' ? state.discardedChanges : 0;
     const [identifier, setIdentifier] = useState('');
     const [password, setPassword] = useState('');
     const [busy, setBusy] = useState(false);
@@ -77,7 +87,14 @@ const CredentialEntry = () => {
 
     return (
         <BrandShell title="Your music" subtitle="Sign in with the username or email you use for Cleffy.">
-            {signedOutByTeacher && !error ? (
+            {/* Stays up through a failed sign-in: what became of the queued
+                changes is still true, and still the thing to know. */}
+            {signedOutByTeacher && accountDeleted ? (
+                <p className="mb-4 text-sm text-amber-800" role="status">
+                    {ACCOUNT_DELETED}
+                    {discardedChanges > 0 ? ` ${discardedChangesNotice(discardedChanges)}` : null}
+                </p>
+            ) : signedOutByTeacher ? (
                 <p className="mb-4 text-sm text-amber-800" role="status">
                     {SIGNED_OUT_BY_TEACHER}
                     {keptChanges > 0 ? ` ${keptChangesNotice(keptChanges)}` : null}

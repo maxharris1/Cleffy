@@ -268,18 +268,51 @@ export const signOut = async (): Promise<void> => {
  * kept (0 when the outbox cannot be read).
  */
 export const signOutKeepingChanges = async (): Promise<number> => {
-    const [
-        { noteLibraryMutation },
-        { stopSnapshotWrites },
-        { stopAllBackgroundDrains },
-        { getDb },
-        { stampOwnCloudOps },
-    ] = await Promise.all([
+    const [{ getDb }, { stampOwnCloudOps }] = await Promise.all([import('@/sync/db'), import('@/sync/signOutSync')]);
+    // Before the PDFs (and with them the legacy ownership test) are cleared.
+    return signOutEndedSignIn(async (userId) => ({
+        count: userId ? await stampOwnCloudOps(getDb(), userId).catch(() => 0) : 0,
+        keepCloudAnnotations: true,
+    }));
+};
+
+/**
+ * Sign out a roster student whose account no longer exists: it was deleted
+ * with their teacher's (student-provision has no per-student delete). Like
+ * signOutKeepingChanges, the server has already ended the sign-in, so this is
+ * local only; unlike it, nothing this account queued can ever upload (no
+ * sign-in will reach it again), so its changes are discarded rather than
+ * promised. Another account's kept changes on the device stay for that
+ * account's next sign-in. Resolves to how many queued changes were discarded.
+ */
+export const signOutDeletedAccount = async (): Promise<number> => {
+    const [{ getDb }, { dropOwnCloudOps, pendingCloudOpCount }] = await Promise.all([
+        import('@/sync/db'),
+        import('@/sync/signOutSync'),
+    ]);
+    return signOutEndedSignIn(async (userId) => {
+        const db = getDb();
+        const discarded = userId ? await dropOwnCloudOps(db, userId).catch(() => 0) : 0;
+        // Unreadable reads as "something is waiting": keeping marks nobody
+        // will draw costs a little storage, clearing them could lose them.
+        const othersWaiting = await pendingCloudOpCount(db).catch(() => 1);
+        return { count: discarded, keepCloudAnnotations: othersWaiting > 0 };
+    });
+};
+
+/**
+ * What signOutKeepingChanges and signOutDeletedAccount share: stop every
+ * writer, settle the outbox (`settle`, before the PDFs and with them the
+ * legacy ownership test are cleared), sign out locally, and clear the
+ * account's caches. Resolves to `settle`'s count.
+ */
+const signOutEndedSignIn = async (
+    settle: (userId: string | null) => Promise<{ count: number; keepCloudAnnotations: boolean }>,
+): Promise<number> => {
+    const [{ noteLibraryMutation }, { stopSnapshotWrites }, { stopAllBackgroundDrains }] = await Promise.all([
         import('@/features/library/libraryCache'),
         import('@/features/viewer/history/snapshotService'),
         import('@/sync/backgroundDrain'),
-        import('@/sync/db'),
-        import('@/sync/signOutSync'),
     ]);
     // As signOut(): nothing may write this account's rows back after the clear.
     noteLibraryMutation();
@@ -287,9 +320,7 @@ export const signOutKeepingChanges = async (): Promise<number> => {
     stopAllBackgroundDrains();
     const supabase = getSupabase();
     const { data } = await supabase.auth.getSession();
-    const userId = data.session?.user.id ?? null;
-    // Before the PDFs (and with them the legacy ownership test) are cleared.
-    const kept = userId ? await stampOwnCloudOps(getDb(), userId).catch(() => 0) : 0;
+    const { count, keepCloudAnnotations } = await settle(data.session?.user.id ?? null);
     const { error } = await supabase.auth.signOut({ scope: 'local' });
     if (error) {
         // The logout request itself failed (supabase-js then keeps the
@@ -299,8 +330,8 @@ export const signOutKeepingChanges = async (): Promise<number> => {
     }
     noteLibraryMutation();
     rememberSession(null);
-    await clearAccountCachesFromDevice({ keepCloudAnnotations: true });
-    return kept;
+    await clearAccountCachesFromDevice({ keepCloudAnnotations });
+    return count;
 };
 
 /**

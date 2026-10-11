@@ -1,10 +1,12 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { lazy, Suspense } from 'react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ErrorBoundary } from '@/app/ErrorBoundary';
 import { resetStaleChunkStateForTests } from '@/lib/staleChunk';
+import { getDb } from '@/sync/db';
 
 const reportError = vi.fn();
 
@@ -104,6 +106,59 @@ describe('ErrorBoundary', () => {
         expect(await screen.findByRole('heading', { name: 'Something went wrong' })).toBeInTheDocument();
         expect(screen.getByText(/Part of Cleffy could not be loaded/)).toBeInTheDocument();
         expect(reportError).toHaveBeenCalledTimes(1);
+    });
+
+    it('offers to clear the cached lists a reload would crash on again, keeping every unsynced change', async () => {
+        const user = userEvent.setup();
+        const db = getDb();
+        // What sent the student here: a cached list this build cannot render.
+        await db.assignmentsCache.put({
+            userId: 'student-1',
+            scores: [{ assignment: null, document: null }] as never,
+            cachedAt: '2026-10-10T00:00:00Z',
+        });
+        await db.rosterCache.put({ userId: 'teacher-1', students: [], assignmentCounts: [], cachedAt: 'x' });
+        // ...and the work that must survive it.
+        const DOC = 'c0ffee00-0000-4000-8000-0000000000aa';
+        await db.ops.add({
+            docId: DOC,
+            annotationId: 'queued-mark',
+            type: 'create',
+            payload: {},
+            createdAt: '2026-10-10T00:00:00Z',
+            userId: 'student-1',
+        } as never);
+        await db.annotations.put({ id: 'queued-mark', docId: DOC, page: 0 } as never);
+        await db.pdfCache.put({ docId: DOC, bytes: new ArrayBuffer(4), title: 'Prelude', cachedAt: 'x' } as never);
+
+        render(
+            <ErrorBoundary>
+                <Boom />
+            </ErrorBoundary>,
+        );
+        await user.click(screen.getByRole('button', { name: 'Clear cached data and reload' }));
+
+        await waitFor(async () => expect(await db.assignmentsCache.count()).toBe(0));
+        expect(await db.rosterCache.count()).toBe(0);
+        expect(await db.ops.where('docId').equals(DOC).count()).toBe(1);
+        expect(await db.annotations.where('docId').equals(DOC).count()).toBe(1);
+        expect(await db.pdfCache.count()).toBe(1);
+        await Promise.all([db.ops.clear(), db.annotations.clear(), db.pdfCache.clear()]);
+    });
+
+    it('does not offer the clear for a chunk that could not load: the cache is not why', async () => {
+        window.sessionStorage.setItem('cleffy:stale-chunk-reload-at', String(Date.now() - 2_000));
+        const Missing = missingChunk();
+        render(
+            <ErrorBoundary>
+                <Suspense fallback={<p>loading</p>}>
+                    <Missing />
+                </Suspense>
+            </ErrorBoundary>,
+        );
+
+        expect(await screen.findByRole('heading', { name: 'Something went wrong' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Clear cached data and reload' })).not.toBeInTheDocument();
     });
 
     it('reports nothing when the tree renders', () => {

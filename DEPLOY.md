@@ -12,35 +12,36 @@ the steps that need a human because no API exposes them — each one says why.
 
 ## Status
 
-| Piece                                                                  | State                                                                   |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Billing schema (`billing`, `roster` migrations)                        | ✅ applied to production                                                |
-| Edge Functions (checkout, portal, webhook, student ×2, metered imslp)  | ✅ deployed, ACTIVE                                                     |
-| Stripe functions redeployed at v2 with the self-configuring catalogue  | ✅ verified live                                                        |
-| Stripe sandbox catalogue (3 products, 7 prices)                        | ✅ created                                                              |
-| Stripe **live** catalogue (3 products, 7 prices)                       | ✅ created                                                              |
-| Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                                    |
-| Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                    |
-| Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                    |
-| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`; plan switching **not verified** (§1)    |
-| Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on  |
-| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                    |
-| Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                  |
-| Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ✅ set 2026-08-28                                                       |
-| Stripe secrets on the `dev` branch project                             | ✅ key, webhook secret and `APP_URL` set 2026-08-29                     |
-| Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                                            |
-| `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                                        |
-| cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                                 |
-| Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5)                 |
-| dev.cleffy.io actually pointed at that backend                         | ✅ by hostname in the bundle — **was production until 2026-08-28 (§5)** |
-| Edge secret `STRIPE_MODES` (both projects)                             | ✅ `live` on production, `test` on the branch                           |
-| Sandbox webhook endpoint retargeted to the branch                      | ✅ `we_1U9fnx9EqxUjgZtnXnAvtJH3`; the superseded one is disabled        |
-| Billing migration `20260828180000` applied to production               | ✅ applied and recorded                                                 |
-| `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                             |
-| Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                              |
-| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1) |
-| Supabase plan (realtime quota, connections, pausing)                   | ✅ **Pro** (org "Cleffy"); watch realtime usage after launch (§10)      |
-| QA round 3 migrations `20261010120200` … `20261010120302`              | ⏳ not applied on either project (release checklist)                    |
+| Piece                                                                  | State                                                                                                                 |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Billing schema (`billing`, `roster` migrations)                        | ✅ applied to production                                                                                              |
+| Edge Functions (checkout, portal, webhook, student ×2, metered imslp)  | ✅ deployed, ACTIVE                                                                                                   |
+| Stripe functions redeployed at v2 with the self-configuring catalogue  | ✅ verified live                                                                                                      |
+| Stripe sandbox catalogue (3 products, 7 prices)                        | ✅ created                                                                                                            |
+| Stripe **live** catalogue (3 products, 7 prices)                       | ✅ created                                                                                                            |
+| Stripe webhook endpoint → `stripe-webhook` (sandbox)                   | ✅ enabled, 5 events                                                                                                  |
+| Stripe webhook endpoint → `stripe-webhook` (live)                      | ✅ enabled, 5 events                                                                                                  |
+| Price ids: client ↔ Edge Function, both modes                          | ✅ committed, drift-guarded by tests                                                                                  |
+| Stripe Customer portal configuration (sandbox)                         | ✅ created, `is_default: true`; plan switching **not verified** (§1)                                                  |
+| Stripe Customer portal configuration (live)                            | ✅ `bpc_1U9juu4eZ6RX0W0gPrUkrH6S`, default + active, plan switching on                                                |
+| Edge secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `APP_URL`) | ✅ set on production                                                                                                  |
+| Edge secret `STRIPE_WEBHOOK_SECRET_LIVE` (production)                  | ✅ set                                                                                                                |
+| Edge secret `STRIPE_SECRET_KEY_LIVE` (production)                      | ✅ set 2026-08-28                                                                                                     |
+| Stripe secrets on the `dev` branch project                             | ✅ key, webhook secret and `APP_URL` set 2026-08-29                                                                   |
+| Vercel project, linked to `main`, auto-deploying                       | ✅ created and verified live                                                                                          |
+| `dev` branch deploy config (SPA rewrite + Supabase env)                | ✅ pushed, preview verified live                                                                                      |
+| cleffy.io / dev.cleffy.io attached, certs issued                       | ✅ live                                                                                                               |
+| Separate dev Supabase backend                                          | ✅ persistent `dev` branch, `qdbnlrgylelelvwbkvnm` (§5)                                                               |
+| dev.cleffy.io actually pointed at that backend                         | ✅ by hostname in the bundle — **was production until 2026-08-28 (§5)**                                               |
+| Edge secret `STRIPE_MODES` (both projects)                             | ✅ `live` on production, `test` on the branch                                                                         |
+| Sandbox webhook endpoint retargeted to the branch                      | ✅ `we_1U9fnx9EqxUjgZtnXnAvtJH3`; the superseded one is disabled                                                      |
+| Billing migration `20260828180000` applied to production               | ✅ applied and recorded                                                                                               |
+| `entitling_billing_modes()` narrowed on production                     | ✅ `{live}`                                                                                                           |
+| Stripe functions redeployed mode-aware                                 | ✅ v7 ACTIVE on production                                                                                            |
+| Migrations `20260827150000` + `20260828120000` on production           | ✅ applied 2026-08-29 (history drift repaired again 2026-10-08, step 1)                                               |
+| Supabase plan (realtime quota, connections, pausing)                   | ✅ **Pro** (org "Cleffy"); watch realtime usage after launch (§10)                                                    |
+| QA round 3 migrations `20261010120200` … `20261010120302`              | ✅ dev branch project (latest `20261010120302`); ⏳ production has none of the 2026-10 migrations (release checklist) |
+| QA round 4 migrations `20261011120100`, `20261011120101`               | ⏳ not applied on either project (release checklist)                                                                  |
 
 ---
 
@@ -55,29 +56,31 @@ integrated on `qa-integrate`) and QA round 3 (`qa3/sync`, `qa3/realtime`,
 to do them; each says what breaks if it is skipped or reordered. Reference
 detail stays in the sections it links to.
 
-**What ships.** Eighteen migrations, applied in filename order by the Supabase
+**What ships.** Twenty migrations, applied in filename order by the Supabase
 GitHub integration on the merge (migrations before functions):
 
-| Migration                                                | Branch          | Order constraint                                                                                                                                                                                                                                                                                                                                       |
-| -------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `20261007120000_sharing_access_control`                  | sharing         | Before the bundle: the new Share dialog, member roles, revoke-with-removal and Leave call its RPCs. Old bundles are unaffected (links still default to the role they send).                                                                                                                                                                            |
-| `20261007120100_column_integrity`                        | integrity       | Any order. Holds only for client roles; service role, definer functions and FK actions pass.                                                                                                                                                                                                                                                           |
-| `20261007120101_realtime_db_topic`                       | integrity       | Either order is safe but not seamless — step 9.                                                                                                                                                                                                                                                                                                        |
-| `20261007120200_patch_annotations_batch_returns_ids`     | sync            | Any order: the client treats the old void answer as "applied".                                                                                                                                                                                                                                                                                         |
-| `20261007120300_billing_correctness`                     | billing         | Any order: the export claim falls back to `consume_pdf_export` until it exists. Backfills `archived_reason` (production holds 0 archived scores) and restores already-entitled owners.                                                                                                                                                                 |
-| `20261007120400_library_pagination`                      | library         | Before the bundle for search / tag / A–Z paging; without it only the plain recent list pages (REST fallback).                                                                                                                                                                                                                                          |
-| `20261007120401_document_storage_cleanup`                | library         | **Before the bundle**: the new delete removes the row first and purges Storage through these tombstone policies; without them the purge is refused and the bytes are orphaned.                                                                                                                                                                         |
-| `20261007120500_function_search_path_and_execute_grants` | security        | Any order. Restates `guard_score_analyses_client_write` with the 120100 body (role-keyed) — do not "restore" the 20260803 body, it breaks account deletion.                                                                                                                                                                                            |
-| `20261007120501_student_login_throttle`                  | security        | **Before** `student-login` / `student-claim` / `student-provision`: the limiter fails closed (§9).                                                                                                                                                                                                                                                     |
-| `20261007120600_account_deletion`                        | compliance      | **Before** `delete-account`, with the updated `stripe-webhook` (§2, _Account deletion_).                                                                                                                                                                                                                                                               |
-| `20261007120700_document_provenance`                     | scope-imslp     | **Before** `imslp-download` / `imslp-work`: imports fail at the provenance write without it (and are refunded).                                                                                                                                                                                                                                        |
-| `20261009120100_pdf_export_claim_ids`                    | qa/billing      | Any order: without it the client repeats the claim without its id (PGRST202 fallback), so a lost answer or a dismissed share sheet can count an export twice, as before.                                                                                                                                                                               |
-| `20261009120101_entitlements_cancel_at_period_end`       | qa/billing      | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                                                                                                                                                                                 |
-| `20261009120200_share_link_errors_and_peek`              | qa/sharing      | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                                                                                                                                                                                   |
-| `20261010120200_guest_email_verification`                | qa3/shell-auth  | **Before** `guest-email-start` / `guest-email-confirm` (start answers `503 email_unavailable` without it), and they before the bundle. Until it is applied a guest can attach any address through `PUT /auth/v1/user` (QA round 3 below).                                                                                                              |
-| `20261010120300_student_access_revocation`               | qa3/roster-data | **Before** `student-provision`: a reset calls its `end_student_sessions()` and, without it, fails with a 502 after scrambling the password. Before the bundle too, or a student's refused change is retried, not rolled back. Old bundles are unaffected.                                                                                              |
-| `20261010120301_annotation_payload_shape`                | qa3/roster-data | **With the bundle**: the new client keeps text notes and imported marks inside the checked bounds; an old bundle's over-long note or far-off-page imported mark is refused (`23514`) and rolled back to server truth. VALIDATE fails the migration if a stored row breaks the rules (production's and dev's rows were checked read-only and all pass). |
-| `20261010120302_library_hides_revoked_student_scores`    | qa3/roster-data | After `20261010120300` (it calls `student_access_revoked()`); any order against the bundle.                                                                                                                                                                                                                                                            |
+| Migration                                                | Branch           | Order constraint                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `20261007120000_sharing_access_control`                  | sharing          | Before the bundle: the new Share dialog, member roles, revoke-with-removal and Leave call its RPCs. Old bundles are unaffected (links still default to the role they send).                                                                                                                                                                            |
+| `20261007120100_column_integrity`                        | integrity        | Any order. Holds only for client roles; service role, definer functions and FK actions pass.                                                                                                                                                                                                                                                           |
+| `20261007120101_realtime_db_topic`                       | integrity        | Either order is safe but not seamless — step 9.                                                                                                                                                                                                                                                                                                        |
+| `20261007120200_patch_annotations_batch_returns_ids`     | sync             | Any order: the client treats the old void answer as "applied".                                                                                                                                                                                                                                                                                         |
+| `20261007120300_billing_correctness`                     | billing          | Any order: the export claim falls back to `consume_pdf_export` until it exists. Backfills `archived_reason` (production holds 0 archived scores) and restores already-entitled owners.                                                                                                                                                                 |
+| `20261007120400_library_pagination`                      | library          | Before the bundle for search / tag / A–Z paging; without it only the plain recent list pages (REST fallback).                                                                                                                                                                                                                                          |
+| `20261007120401_document_storage_cleanup`                | library          | **Before the bundle**: the new delete removes the row first and purges Storage through these tombstone policies; without them the purge is refused and the bytes are orphaned.                                                                                                                                                                         |
+| `20261007120500_function_search_path_and_execute_grants` | security         | Any order. Restates `guard_score_analyses_client_write` with the 120100 body (role-keyed) — do not "restore" the 20260803 body, it breaks account deletion.                                                                                                                                                                                            |
+| `20261007120501_student_login_throttle`                  | security         | **Before** `student-login` / `student-claim` / `student-provision`: the limiter fails closed (§9).                                                                                                                                                                                                                                                     |
+| `20261007120600_account_deletion`                        | compliance       | **Before** `delete-account`, with the updated `stripe-webhook` (§2, _Account deletion_).                                                                                                                                                                                                                                                               |
+| `20261007120700_document_provenance`                     | scope-imslp      | **Before** `imslp-download` / `imslp-work`: imports fail at the provenance write without it (and are refunded).                                                                                                                                                                                                                                        |
+| `20261009120100_pdf_export_claim_ids`                    | qa/billing       | Any order: without it the client repeats the claim without its id (PGRST202 fallback), so a lost answer or a dismissed share sheet can count an export twice, as before.                                                                                                                                                                               |
+| `20261009120101_entitlements_cancel_at_period_end`       | qa/billing       | Any order: a missing `cancel_at_period_end` reads as false ("Renews" for a cancelled plan, as before).                                                                                                                                                                                                                                                 |
+| `20261009120200_share_link_errors_and_peek`              | qa/sharing       | Any order: the client still reads the old P0002 refusal; without `peek_share_link` it carries on as before (redeem refuses a dead link, but leaves an orphan guest).                                                                                                                                                                                   |
+| `20261010120200_guest_email_verification`                | qa3/shell-auth   | **Before** `guest-email-start` / `guest-email-confirm` (start answers `503 email_unavailable` without it), and they before the bundle. Until it is applied a guest can attach any address through `PUT /auth/v1/user` (QA round 3 below).                                                                                                              |
+| `20261010120300_student_access_revocation`               | qa3/roster-data  | **Before** `student-provision`: a reset calls its `end_student_sessions()` and, without it, fails with a 502 after scrambling the password. Before the bundle too, or a student's refused change is retried, not rolled back. Old bundles are unaffected.                                                                                              |
+| `20261010120301_annotation_payload_shape`                | qa3/roster-data  | **With the bundle**: the new client keeps text notes and imported marks inside the checked bounds; an old bundle's over-long note or far-off-page imported mark is refused (`23514`) and rolled back to server truth. VALIDATE fails the migration if a stored row breaks the rules (production's and dev's rows were checked read-only and all pass). |
+| `20261010120302_library_hides_revoked_student_scores`    | qa3/roster-data  | After `20261010120300` (it calls `student_access_revoked()`); any order against the bundle.                                                                                                                                                                                                                                                            |
+| `20261011120100_archived_student_password_check`         | qa4/roster-shell | Any order: until it is in, `student-login`'s call to `archived_student_password_matches()` fails, which it reads as "no", so an archived student gets the generic refusal as before.                                                                                                                                                                   |
+| `20261011120101_refund_edge_rate_limit`                  | qa4/roster-shell | Any order: until it is in, `guest-email-start`'s refund fails (logged) and an unsent code keeps its mailbox and project counts, as before.                                                                                                                                                                                                             |
 
 Functions changed: `delete-account`, `guest-email-start` and
 `guest-email-confirm` (new), `imslp-download`, `imslp-work`, `imslp-sync`,
@@ -130,7 +133,12 @@ it — the merge deploys all of them).
   meantime). Limits (edge_rate_buckets): start 5/h per guest, 20/h per IP,
   per recipient mailbox 3/h and 10/day (an address's `+tag` counts as the
   same mailbox), and for the whole project 60/h and 300/day, all spent only
-  when a code is actually mailed; confirm 10 per 15 min per guest, 30 per IP.
+  when a code is actually mailed (reserved just before the send and refunded
+  through `refund_edge_rate_limit`, migration `20261011120101`, when the code
+  could not be stored or the mail failed or is not configured — so a Resend
+  outage or a deploy without `RESEND_API_KEY` uses none of them up; the
+  per-guest and per-IP attempt limits stay spent); confirm 10 per 15 min per
+  guest, 30 per IP.
   The project ceiling exists because the other limits move with things an
   attacker rotates for free (IPs, anonymous sign-ins, addresses) while every
   code goes out on the Resend key and domain that carry password resets and
@@ -289,6 +297,40 @@ throwaway>' })` from the console — it must fail (500), and the guest
   `imslp-work` and `imslp-download` are redeployed (the merge deploys every
   function). Scores imported earlier keep the provenance text stored then.
 
+**QA round 4 — roster and shell (`qa4/roster-shell`, 20261011120100–101).**
+
+- **A student deleted with their teacher is told the truth** (client). The
+  viewer used to keep such a student's queued changes and promise they
+  "are saved when you sign in here again" — an account that can never sign in
+  again. It now asks the server first (`fetchAccountDeleted`: the token is
+  refused as a student's _and_ no roster row answers it; anything unanswered
+  counts as "not deleted", which keeps the changes), as /assignments already
+  did from its roster read. A deleted account's own queued changes are
+  discarded and the sign-in page says so; another account's kept changes on
+  the same device stay for that account. Exporting them is not offered: the
+  scores they were drawn on were deleted with the account.
+- **An archived student who signs in is told they were archived** (migration
+  `20261011120100`, `student-login`, client). GoTrue refuses a banned
+  (archived) account before it checks the password, so `student-login`
+  checks it itself, with pgcrypto against the stored bcrypt hash
+  (`archived_student_password_matches`, service role only), and answers
+  `403 student_archived` only to the right password — anyone else still gets
+  the one floored refusal, so usernames stay unconfirmable. An email-method
+  student meets GoTrue's own `user_banned` (which GoTrue returns without a
+  password check anyway) and gets the same message. The sign-in page keeps
+  its "your teacher changed your access / N changes kept" notice up after a
+  failed attempt. Needs hosted `postgres` to read `auth.users`
+  (`guest_email_taken` already does) and pgcrypto in `extensions` (Supabase
+  default).
+- **The crash screen can recover from a bad cache** (client). A cached
+  assignment list that does not parse is dropped instead of painted (it threw
+  on every load before the fresh list could replace it), and the crash screen
+  has "Clear cached data and reload", which empties the list snapshots
+  (library, roster, assignments, entitlements, thumbnails, analyses) — never
+  the outbox, annotation mirror, day snapshots or cached PDFs.
+- **Contrast**: `--color-danger` is red-700 (was red-600: 3.79:1 behind the
+  viewer's error, 4.37:1 on paper); danger buttons darken on hover.
+
 `stripe-webhook` now applies `customer.subscription.created` / `.updated` from
 the subscription as Stripe holds it **now** (`subscriptions.retrieve`), not from
 the copy embedded in the event: Stripe does not deliver in order, and a retried
@@ -444,7 +486,7 @@ to refund (comment at the end of `20261007120300`).
 ### After the merge
 
 11. Supabase check on the merge commit green; `list_migrations` on production
-    ends at `20261010120302`; security advisor: no new
+    ends at `20261011120101`; security advisor: no new
     `function_search_path_mutable` / `anon_security_definer_function_executable`
     except `peek_share_link`, which is anon-callable on purpose (the join page
     checks a link before anyone signs in) and answers only `{valid, role}`.

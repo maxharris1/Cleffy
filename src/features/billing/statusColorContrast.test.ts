@@ -52,6 +52,29 @@ const relativeLuminance = ([r, g, b]: [number, number, number]) => 0.2126 * r + 
 
 const contrastOnWhite = (value: string) => 1.05 / (relativeLuminance(oklchToLinearSrgb(value)) + 0.05);
 
+/** #rrggbb → linear-light sRGB channels. */
+const hexToLinearSrgb = (hex: string): [number, number, number] => {
+    const channel = (i: number) => {
+        const v = parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+        return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    };
+    return [channel(0), channel(1), channel(2)];
+};
+
+/** WCAG contrast of an oklch() foreground on a #rrggbb background. */
+const contrastOn = (value: string, background: string) => {
+    const fg = relativeLuminance(oklchToLinearSrgb(value));
+    const bg = relativeLuminance(hexToLinearSrgb(background));
+    return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+};
+
+/** The `--color-<name>` hex our theme defines itself (paper, paper-deep). */
+const ownHex = (name: string): string => {
+    const own = INDEX_CSS.match(new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6});`))?.[1];
+    expect(own, `--color-${name} is not a hex colour in src/index.css`).toBeDefined();
+    return own ?? '';
+};
+
 describe('status text colours', () => {
     it('reproduces the failure axe reported, so the arithmetic below can be trusted', () => {
         expect(contrastOnWhite('oklch(59.6% 0.145 163.225)')).toBeCloseTo(3.65, 1);
@@ -63,5 +86,38 @@ describe('status text colours', () => {
 
     it('the pricing note still uses the token', () => {
         expect(read('src/features/billing/PricingDialog.tsx')).toMatch(/text-xs text-ok/);
+    });
+});
+
+describe('danger text colour', () => {
+    /**
+     * `text-danger` is every inline error (ui/ErrorText) and every destructive
+     * text button, on every light surface the app has. The viewer's "Could not
+     * open this PDF" sat at 3.79:1 (#e7000b, red-600, on #e7e5e4), under AA.
+     */
+    const surfaces = {
+        white: '#ffffff',
+        paper: ownHex('paper'),
+        'paper-deep': ownHex('paper-deep'),
+        // Measured behind the viewer's error state (QA, axe), and stone-200.
+        'viewer error backdrop': '#e7e5e4',
+        // The hover wash of the destructive text buttons.
+        'red-50': '#fef2f2',
+    };
+
+    it('reproduces the failure QA reported, so the arithmetic below can be trusted', () => {
+        expect(contrastOn('oklch(57.7% 0.245 27.325)', '#e7e5e4')).toBeCloseTo(3.79, 1);
+    });
+
+    it.each(Object.entries(surfaces))('text-danger reads at WCAG AA (4.5:1) on %s', (_name, background) => {
+        expect(contrastOn(resolveColor('danger'), background)).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it('white text on a danger button reads at AA, hovered or not', () => {
+        expect(contrastOnWhite(resolveColor('danger'))).toBeGreaterThanOrEqual(4.5);
+        const hover = read('src/ui/classNames.ts').match(/danger: 'bg-danger text-white hover:bg-(red-\d+)'/)?.[1];
+        expect(hover).toBeDefined();
+        const stock = TAILWIND_THEME.match(new RegExp(`--color-${hover}:\\s*([^;]+);`))?.[1]?.trim() ?? '';
+        expect(contrastOnWhite(stock)).toBeGreaterThanOrEqual(4.5);
     });
 });

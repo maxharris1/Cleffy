@@ -83,6 +83,31 @@ export const checkRateLimit = async (
 };
 
 /**
+ * Hand back one use of a checkRateLimit bucket, for a limit that counts only
+ * what actually happened (guest-email-start reserves a send, and refunds it
+ * when no mail went out). Best effort: a refund that fails leaves the bucket
+ * as checkRateLimit left it, which is the stricter side.
+ */
+export const refundRateLimit = async (key: string): Promise<void> => {
+    const admin = serviceClient();
+    if (!admin) {
+        const bucket = rateBuckets.get(key);
+        if (bucket && bucket.count > 0 && Date.now() < bucket.resetAt) {
+            bucket.count -= 1;
+        }
+        return;
+    }
+    try {
+        const { error } = await admin.rpc('refund_edge_rate_limit', { p_key: key });
+        if (error) {
+            console.error(`refund_edge_rate_limit failed: ${error.message}`);
+        }
+    } catch (err) {
+        console.error('refund_edge_rate_limit failed', err);
+    }
+};
+
+/**
  * The rate-limit bucket key for a request — which must be something the CALLER
  * cannot choose, or every limit built on it is decorative.
  *

@@ -19,7 +19,7 @@ const BUTTON_VARIANT_CLASSES: Record<ButtonVariant, string> = {
     primary: 'landing-cta text-white',
     secondary: 'border border-stone-300/90 bg-white/70 text-stone-800 hover:bg-white',
     ghost: 'text-stone-600 hover:bg-ink/5',
-    danger: 'bg-danger text-white hover:bg-red-500',
+    danger: 'bg-danger text-white hover:bg-red-800',
     dangerGhost: 'text-danger hover:bg-red-50',
 };
 

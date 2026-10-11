@@ -1,13 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 
-import {
-    displayNameOf,
-    isRegisteredSession,
-    signOutKeepingChanges,
-    userTypeOf,
-    useSession,
-} from '@/features/auth/session';
+import { displayNameOf, isRegisteredSession, userTypeOf, useSession } from '@/features/auth/session';
 import { UpgradeBanner } from '@/features/auth/UpgradeBanner';
 import { ShareExportMenu } from '@/features/export/ShareExportMenu';
 import { makeCloudClassifyFn } from '@/features/import/analyzeApi';
@@ -32,7 +26,8 @@ import { usePlayback } from '@/features/playback/usePlayback';
 import { useScoreAnalysis } from '@/features/playback/useScoreAnalysis';
 import { NotesPanel } from '@/features/notes/NotesPanel';
 import { ShareDialog } from '@/features/share/ShareDialog';
-import { fetchSignInStillValid } from '@/features/student/studentApi';
+import { signOutEndedStudent } from '@/features/student/endedSignIn';
+import { fetchAccountDeleted, fetchSignInStillValid } from '@/features/student/studentApi';
 import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButton';
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
@@ -181,7 +176,9 @@ const SIGN_IN_ENDED_MESSAGE = 'Your teacher changed your access. Signing you out
  *    resetting their access reads exactly like an unassign here, and is 'ended'.
  *  - 'ended': the server ended this sign-in (a roster student's teacher) — sign
  *    out keeping what is queued on the device for the next sign-in, then say
- *    why on the student sign-in page. Nothing is purged.
+ *    why on the student sign-in page. Nothing is purged. Unless the account
+ *    was deleted with its teacher: then there is no next sign-in, and what it
+ *    queued is discarded and said to be (endedSignIn.ts).
  *  - 'left': the user chose to leave — purge, then go back to the library.
  */
 type AccessLoss = 'removed' | 'denied' | 'ended' | 'left';
@@ -314,8 +311,12 @@ const CloudViewer = ({ docId }: { docId: string }) => {
         void (async () => {
             if (accessLoss === 'ended') {
                 // Not gated on `cancelled`: the sign-out itself changes userId.
-                const keptChanges = await signOutKeepingChanges().catch(() => 0);
-                navigate('/student', { replace: true, state: { signedOutByTeacher: true, keptChanges } });
+                // Asked before it, under the token that is still here: an
+                // archived or reset account signs in again and uploads what is
+                // queued; one deleted with its teacher never can.
+                const accountDeleted = await fetchAccountDeleted().catch(() => false);
+                const state = await signOutEndedStudent(accountDeleted);
+                navigate('/student', { replace: true, state });
                 return;
             }
             if (accessLoss !== 'left' && userTypeOf(session) === 'student') {

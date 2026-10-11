@@ -3,9 +3,11 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
 import { RequireStudent } from '@/features/auth/AuthGates';
-import { displayNameOf, signOut, signOutKeepingChanges } from '@/features/auth/session';
+import { displayNameOf, signOut } from '@/features/auth/session';
 import { useGuardedSignOut } from '@/features/auth/useGuardedSignOut';
 import { LegalLinks } from '@/features/legal/LegalLinks';
+import { parseCachedAssignments } from '@/features/student/assignmentsCache';
+import { signOutEndedStudent } from '@/features/student/endedSignIn';
 import {
     fetchMyAssignments,
     fetchMyRosterProfile,
@@ -77,16 +79,24 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                     },
                     () => undefined,
                 );
-                const cached = first
+                const cachedRow = first
                     ? await getDb()
                           .assignmentsCache.get(session.user.id)
                           .catch(() => undefined)
                     : undefined;
+                const cached = parseCachedAssignments(cachedRow);
+                if (cachedRow && !cached) {
+                    // Unreadable: never painted, and gone, so the network
+                    // answer (written back below) is all the next load sees.
+                    void getDb()
+                        .assignmentsCache.delete(session.user.id)
+                        .catch(() => undefined);
+                }
                 if (first) {
                     await Promise.resolve();
-                    if (mounted && !firstResolved && cached && cached.scores.length > 0) {
+                    if (mounted && !firstResolved && cached && cached.length > 0) {
                         hasScores = true;
-                        setScores(cached.scores);
+                        setScores(cached);
                         setLoading(false);
                     }
                 }
@@ -109,14 +119,10 @@ const AssignmentsView = ({ session }: { session: Session }) => {
                         // or archived until restored): what it queued on this
                         // device stays for its next sign-in here, as the roster
                         // promises. No row: it was deleted with its teacher,
-                        // and nothing it queued can ever upload.
-                        let keptChanges = 0;
-                        if (roster) {
-                            keptChanges = await signOutKeepingChanges().catch(() => 0);
-                        } else {
-                            await signOut().catch(() => undefined);
-                        }
-                        navigate('/student', { replace: true, state: { signedOutByTeacher: true, keptChanges } });
+                        // and nothing it queued can ever upload. (The viewer
+                        // asks the same of the server: fetchAccountDeleted.)
+                        const state = await signOutEndedStudent(roster === null);
+                        navigate('/student', { replace: true, state });
                         return;
                     }
                 }
@@ -247,7 +253,15 @@ const AssignmentCard = ({ score: { assignment, document: doc } }: { score: Assig
                 className="block rounded-xl border border-stone-300/60 bg-white/70 px-4 py-3.5 transition hover:border-accent/50 hover:bg-white"
             >
                 <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-                    <span className="min-w-0 flex-1 truncate text-lg font-medium text-stone-800">{doc.title}</span>
+                    {/* Two lines before it ellipsizes — a long catalogue title
+                        ("Sonata in C major, K 545: I. Allegro") is told apart
+                        by its end — and the whole title on hover. */}
+                    <span
+                        title={doc.title}
+                        className="line-clamp-2 min-w-0 flex-1 text-lg font-medium break-words text-stone-800"
+                    >
+                        {doc.title}
+                    </span>
                     {due ? <Badge>Due {due}</Badge> : null}
                     {assignment.access === 'view' ? <Badge>View only</Badge> : null}
                 </div>

@@ -18,9 +18,28 @@ interface ErrorBoundaryState {
     error: Error | null;
     /** The error is a chunk from an older build, and the page is reloading for the current one. */
     updating: boolean;
+    /** "Clear cached data and reload" was pressed and is under way. */
+    clearing: boolean;
 }
 
 const reload = () => window.location.reload();
+
+/**
+ * A crash that a reload cannot fix is usually a malformed snapshot the page
+ * paints before the server answers (an old build's, or a damaged one): it
+ * throws again on every load, before the fresh copy can replace it. Clear
+ * those (sync/db.ts clearDisplayCaches — never queued changes or marks) and
+ * reload. Reloads even if the clear itself fails: there is nothing else here.
+ */
+const clearCachesAndReload = async () => {
+    try {
+        const { clearDisplayCaches, getDb } = await import('@/sync/db');
+        await clearDisplayCaches(getDb());
+    } catch (err) {
+        console.warn('Could not clear cached data before reloading', err);
+    }
+    reload();
+};
 
 /**
  * Last-resort crash screen — annotations are safe in IndexedDB regardless.
@@ -34,9 +53,9 @@ const reload = () => window.location.reload();
  * that was already tried moments ago does it fall through to the crash screen.
  */
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-    state: ErrorBoundaryState = { error: null, updating: false };
+    state: ErrorBoundaryState = { error: null, updating: false, clearing: false };
 
-    static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
         return {
             error,
             updating: isStaleChunkReloadPending() || (isChunkLoadError(error) && canReloadForStaleChunk()),
@@ -60,7 +79,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     }
 
     render(): ReactNode {
-        const { error, updating } = this.state;
+        const { error, updating, clearing } = this.state;
         if (error && updating) {
             return (
                 <StaticBrandShell title="Updating Cleffy…" subtitle="A new version is available. Reloading the page.">
@@ -80,9 +99,28 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
                             : 'Your annotations are saved on this device. Reload to continue where you left off.'
                     }
                 >
-                    <Button onClick={reload} className="mt-4 w-full">
+                    <Button onClick={reload} disabled={clearing} className="mt-4 w-full">
                         Reload
                     </Button>
+                    {isChunkLoadError(error) ? null : (
+                        <>
+                            <Button
+                                variant="secondary"
+                                disabled={clearing}
+                                onClick={() => {
+                                    this.setState({ clearing: true });
+                                    void clearCachesAndReload();
+                                }}
+                                className="mt-3 w-full"
+                            >
+                                {clearing ? 'Clearing…' : 'Clear cached data and reload'}
+                            </Button>
+                            <p className="mt-2 text-center text-xs text-stone-600">
+                                If reloading shows this again: clears the lists this device keeps for a fast start.
+                                Unsaved annotations stay on the device and still upload.
+                            </p>
+                        </>
+                    )}
                 </StaticBrandShell>
             );
         }

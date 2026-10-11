@@ -44,7 +44,9 @@ const SESSION = {
 const sessionKind: { userType: 'student' | null } = { userType: null };
 
 const signOutKeepingChanges = vi.fn();
+const signOutDeletedAccount = vi.fn();
 const fetchSignInStillValid = vi.fn();
+const fetchAccountDeleted = vi.fn();
 
 vi.mock('@/features/auth/session', () => ({
     useSession: () => ({ session: SESSION, loading: false, lastEvent: null }),
@@ -52,10 +54,12 @@ vi.mock('@/features/auth/session', () => ({
     displayNameOf: () => 'Teacher',
     userTypeOf: () => sessionKind.userType,
     signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
+    signOutDeletedAccount: (...args: unknown[]) => signOutDeletedAccount(...args),
 }));
 
 vi.mock('@/features/student/studentApi', () => ({
     fetchSignInStillValid: (...args: unknown[]) => fetchSignInStillValid(...args),
+    fetchAccountDeleted: (...args: unknown[]) => fetchAccountDeleted(...args),
 }));
 
 /** The sync wiring the viewer last handed the viewport, for driving realtime callbacks. */
@@ -216,9 +220,17 @@ const renderViewer = () =>
 
 /** Stands in for the student sign-in page, showing what it was told. */
 const StudentLoginStub = () => {
-    const state = useLocation().state as { signedOutByTeacher?: boolean; keptChanges?: number } | null;
+    const state = useLocation().state as {
+        signedOutByTeacher?: boolean;
+        keptChanges?: number;
+        accountDeleted?: boolean;
+        discardedChanges?: number;
+    } | null;
     return (
-        <div>{`student login: teacher ${String(state?.signedOutByTeacher)}, kept ${String(state?.keptChanges)}`}</div>
+        <div>
+            {`student login: teacher ${String(state?.signedOutByTeacher)}, kept ${String(state?.keptChanges)}`}
+            {state?.accountDeleted ? `, deleted, discarded ${String(state.discardedChanges)}` : null}
+        </div>
     );
 };
 
@@ -232,7 +244,9 @@ beforeEach(() => {
     purgeLocalDocument.mockResolvedValue(undefined);
     removeCachedLibraryDocument.mockResolvedValue(undefined);
     signOutKeepingChanges.mockResolvedValue(2);
+    signOutDeletedAccount.mockResolvedValue(2);
     fetchSignInStillValid.mockResolvedValue(true);
+    fetchAccountDeleted.mockResolvedValue(false);
     flags.playalong = false;
     pdfProps.current = null;
     loadDocumentBytes.mockResolvedValue(new ArrayBuffer(16));
@@ -1047,6 +1061,27 @@ describe('CloudViewer sign-in ended under the sync engine', () => {
         expect(await screen.findByText('student login: teacher true, kept 2')).toBeInTheDocument();
         expect(signOutKeepingChanges).toHaveBeenCalledTimes(1);
         expect(purgeLocalDocument).not.toHaveBeenCalled();
+    });
+
+    it('discards, and says so, the outbox of a student whose account was deleted with their teacher', async () => {
+        // No next sign-in can upload them: the account is gone, not archived.
+        sessionKind.userType = 'student';
+        fetchAccountDeleted.mockResolvedValue(true);
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockResolvedValue(serverDoc({ owner_id: 'someone-else' }));
+        fetchMyRole.mockResolvedValue('editor');
+        renderViewer();
+        await waitFor(() => expect(viewport()).toHaveAttribute('data-sync', 'on'));
+
+        act(() => {
+            lastSync.current?.onHeld?.({ reason: 'signed-out', pendingMarks: 2 });
+        });
+
+        expect(
+            await screen.findByText('student login: teacher true, kept 0, deleted, discarded 2'),
+        ).toBeInTheDocument();
+        expect(signOutDeletedAccount).toHaveBeenCalledTimes(1);
+        expect(signOutKeepingChanges).not.toHaveBeenCalled();
     });
 });
 

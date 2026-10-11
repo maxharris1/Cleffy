@@ -4,8 +4,8 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as sessionModule from '@/features/auth/session';
-import { keptChangesNotice } from '@/features/student/keptChangesNotice';
-import { SIGNED_OUT_BY_TEACHER, StudentLoginPage } from '@/features/student/StudentLoginPage';
+import { discardedChangesNotice, keptChangesNotice } from '@/features/student/keptChangesNotice';
+import { ACCOUNT_DELETED, SIGNED_OUT_BY_TEACHER, StudentLoginPage } from '@/features/student/StudentLoginPage';
 
 const loginStudent = vi.fn();
 
@@ -120,5 +120,36 @@ describe('StudentLoginPage', () => {
 
         renderLogin({ signedOutByTeacher: true, keptChanges: 0 });
         expect(screen.getByRole('status')).not.toHaveTextContent('kept on this device');
+    });
+
+    it('keeps saying where the kept changes are after a sign-in fails, beside the reason it failed', async () => {
+        const user = userEvent.setup();
+        const archived =
+            "Your teacher has archived this account, so it can't sign in for now. Ask your teacher to restore it.";
+        loginStudent.mockRejectedValue(new Error(archived));
+        renderLogin({ signedOutByTeacher: true, keptChanges: 1 });
+
+        await user.type(screen.getByLabelText('Username or email'), 'ada_lovelace');
+        await user.type(screen.getByLabelText('Password'), 'hunter2hunter2');
+        await user.click(screen.getByRole('button', { name: 'Open my music' }));
+
+        expect(await screen.findByText(archived)).toBeInTheDocument();
+        expect(screen.getByText(new RegExp(SIGNED_OUT_BY_TEACHER.slice(0, 40)))).toHaveTextContent(
+            keptChangesNotice(1),
+        );
+    });
+
+    it('says a deleted account is gone, and promises nothing about its changes', () => {
+        renderLogin({ signedOutByTeacher: true, keptChanges: 0, accountDeleted: true, discardedChanges: 2 });
+        const status = screen.getByRole('status');
+        expect(status).toHaveTextContent(ACCOUNT_DELETED);
+        expect(status).toHaveTextContent(discardedChangesNotice(2));
+        expect(status).not.toHaveTextContent(SIGNED_OUT_BY_TEACHER);
+        expect(status).not.toHaveTextContent('saved when you sign in');
+        cleanup();
+
+        renderLogin({ signedOutByTeacher: true, keptChanges: 0, accountDeleted: true, discardedChanges: 0 });
+        expect(screen.getByRole('status')).toHaveTextContent(ACCOUNT_DELETED);
+        expect(screen.getByRole('status')).not.toHaveTextContent('removed from this device');
     });
 });
