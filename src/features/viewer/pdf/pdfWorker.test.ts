@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const terminate = vi.hoisted(() => vi.fn());
 const pdfWorkerDestroy = vi.hoisted(() => vi.fn());
@@ -19,8 +19,8 @@ beforeEach(() => {
 });
 
 /**
- * Fresh copy per test: the module holds no state today, but the import is
- * cheap and this keeps the mock's call counts honest.
+ * Fresh copy per test: the module holds the warmed worker, and this keeps the
+ * mock's call counts honest.
  */
 const loadModule = async () => {
     vi.resetModules();
@@ -37,5 +37,49 @@ describe('createPdfWorker', () => {
 
         expect(pdfWorkerDestroy).toHaveBeenCalledTimes(1);
         expect(terminate).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('warmPdfWorker', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('starts the worker early, and the next createPdfWorker takes it instead of starting another', async () => {
+        const { createPdfWorker, warmPdfWorker } = await loadModule();
+        warmPdfWorker();
+        warmPdfWorker();
+        expect(create).toHaveBeenCalledTimes(1);
+
+        const worker = createPdfWorker();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(worker).toBe(create.mock.results[0]!.value);
+
+        // Taken: the one after that is a new worker.
+        createPdfWorker();
+        expect(create).toHaveBeenCalledTimes(2);
+    });
+
+    it('shuts a warmed worker down when nothing takes it', async () => {
+        vi.useFakeTimers();
+        const { createPdfWorker, warmPdfWorker, SPARE_WORKER_TTL_MS } = await loadModule();
+        warmPdfWorker();
+
+        vi.advanceTimersByTime(SPARE_WORKER_TTL_MS);
+
+        expect(terminate).toHaveBeenCalledTimes(1);
+        createPdfWorker();
+        expect(create).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves a taken worker running past the expiry', async () => {
+        vi.useFakeTimers();
+        const { createPdfWorker, warmPdfWorker, SPARE_WORKER_TTL_MS } = await loadModule();
+        warmPdfWorker();
+        createPdfWorker();
+
+        vi.advanceTimersByTime(SPARE_WORKER_TTL_MS);
+
+        expect(terminate).not.toHaveBeenCalled();
     });
 });
