@@ -1272,6 +1272,291 @@ describe('SyncEngine offline undo/redo against a collaborator (reconcile)', () =
     });
 });
 
+/**
+ * QA C1: a text note erased offline, brought back with Undo and edited, while
+ * a collaborator's erase reaches the server. The edit must stand even when it
+ * is queued while reconcile is still reading the server — postgrest-js retries
+ * a failed GET inside the one call (1 s, 2 s, 4 s), so a read that starts
+ * offline is out for seconds, and the user goes on working meanwhile.
+ */
+describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', () => {
+    const NOTE = 'note-m';
+    const THEIRS = '2026-08-08T08:08:08.000Z';
+    const ORIGINAL = { x: 0.2, y: 0.3, text: 'cresc.', size: 0.02 };
+    const EDITED = { x: 0.2, y: 0.3, text: 'cresc. poco a poco', size: 0.02 };
+
+    const makeNote = (id: string): Annotation => ({ ...makeStroke(id), kind: 'text', payload: ORIGINAL });
+
+    const queuedTypes = async (on = db) => (await on.ops.toArray()).map((op) => op.type);
+
+    /** A's synced note, then — offline, nothing sent — erased and brought back with Undo. */
+    const eraseAndUndo = async (on = { db, store, engine }) => {
+        await on.store.create(makeNote(NOTE));
+        await on.engine.flush();
+        expect(await on.db.ops.count()).toBe(0);
+        await on.store.delete(NOTE);
+        await on.store.undoLast();
+    };
+
+    /** B's erase reaches the server: their tombstone, a new seq. */
+    const collaboratorErases = (server = api) => {
+        server.rows.set(NOTE, { ...server.rows.get(NOTE)!, deleted_at: THEIRS, seq: server.nextSeq++ });
+    };
+
+    /** Hold every fetchMany until released; `started` resolves once one is out. */
+    const holdReads = (server = api) => {
+        const read = server.fetchMany.bind(server);
+        let started!: () => void;
+        let release!: () => void;
+        const out = {
+            reads: 0,
+            started: new Promise<void>((resolve) => (started = resolve)),
+            released: new Promise<void>((resolve) => (release = resolve)),
+            release: () => release(),
+        };
+        server.fetchMany = async (docId, ids) => {
+            out.reads += 1;
+            started();
+            await out.released;
+            return read(docId, ids);
+        };
+        return out;
+    };
+
+    const expectEditStands = async (on = { db, store, server: api }) => {
+        const row = on.server.rows.get(NOTE);
+        expect(row?.deleted_at).toBeNull();
+        expect(row?.payload).toEqual(EDITED);
+        expect(on.store.getPage(0).get(NOTE)?.payload).toEqual(EDITED);
+        expect(await on.db.ops.count()).toBe(0);
+    };
+
+    it('records erase, Undo and the edit as delete, restore, update', async () => {
+        await eraseAndUndo();
+        await store.update(NOTE, { payload: EDITED });
+        expect(await queuedTypes()).toEqual(['delete', 'restore', 'update']);
+    });
+
+    it('keeps an edit queued while the read was out, over the collaborator’s erase', async () => {
+        await eraseAndUndo();
+        collaboratorErases();
+        const reads = holdReads();
+        const flushing = engine.flush();
+        await reads.started; // reconcile took [delete, restore] to the server …
+        await store.update(NOTE, { payload: EDITED }); // … and the user edited the note meanwhile
+        expect(await queuedTypes()).toEqual(['delete', 'restore', 'update']);
+
+        reads.release();
+        await flushing;
+
+        // Not an edit written onto their tombstone: the note stands, as the
+        // user left it, on the server and here.
+        await expectEditStands();
+        expect(rejections).toEqual([]);
+    });
+
+    it('waits for an edit that is drawn but not yet in the outbox when the read comes back', async () => {
+        await eraseAndUndo();
+        collaboratorErases();
+        const reads = holdReads();
+        // The edit's outbox write is held back until reconcile has looked at the queue.
+        const writes = store as unknown as { writeMany(ops: unknown[]): Promise<void> };
+        const write = writes.writeMany.bind(store);
+        let writeOut!: () => void;
+        const writeHeld = new Promise<void>((resolve) => (writeOut = resolve));
+        let releaseWrite!: () => void;
+        const writeReleased = new Promise<void>((resolve) => (releaseWrite = resolve));
+        vi.spyOn(writes, 'writeMany').mockImplementation(async (ops) => {
+            writeOut();
+            await writeReleased;
+            return write(ops);
+        });
+
+        let flushed = false;
+        const flushing = engine.flush().then(() => {
+            flushed = true;
+        });
+        await reads.started;
+        const editing = store.update(NOTE, { payload: EDITED });
+        await writeHeld;
+        expect(store.getPage(0).get(NOTE)?.payload).toEqual(EDITED); // drawn …
+        expect(await queuedTypes()).toEqual(['delete', 'restore']); // … not queued yet
+
+        reads.release();
+        // Every chance to decide without the edit: on its own, the flush is
+        // over long before this.
+        await vi.waitFor(() => expect(flushed).toBe(true), { timeout: 250, interval: 5 }).catch(() => undefined);
+        releaseWrite();
+        await editing;
+        await flushing;
+        await engine.flush(); // what the edit's dirty hook would run
+
+        await expectEditStands();
+        expect(rejections).toEqual([]);
+    });
+
+    it('still lets a plain Undo yield to the erase, and the note is gone before it can be edited', async () => {
+        await eraseAndUndo();
+        collaboratorErases();
+        const reads = holdReads();
+        const flushing = engine.flush();
+        await reads.started;
+        reads.release();
+        await flushing;
+
+        expect(api.rows.get(NOTE)?.deleted_at).toBe(THEIRS);
+        expect(store.getPage(0).has(NOTE)).toBe(false);
+        expect(store.get(NOTE)?.deletedAt).toBe(THEIRS);
+
+        // An edit now has nothing to edit: nothing is queued, nothing sent.
+        const updates = api.updates;
+        await store.update(NOTE, { payload: EDITED });
+        await engine.flush();
+        expect(await db.ops.count()).toBe(0);
+        expect(api.updates).toBe(updates);
+        expect(api.rows.get(NOTE)?.deleted_at).toBe(THEIRS);
+        expect(rejections).toEqual([]);
+    });
+
+    it('does not lose an Undo queued during the read behind an erase that already landed', async () => {
+        await store.create(makeNote(NOTE));
+        await engine.flush();
+        await store.delete(NOTE); // erase …
+        await store.undoLast(); // … Undo …
+        await store.redoLast(); // … Redo, all offline
+        // The first erase landed, but its answer was lost: the server's
+        // tombstone is this device's own.
+        const ownTombstone = (await db.ops.toArray())[0]!.annotation.deletedAt!;
+        api.rows.set(NOTE, { ...api.rows.get(NOTE)!, deleted_at: ownTombstone, seq: api.nextSeq++ });
+        const reads = holdReads();
+        const flushing = engine.flush();
+        await reads.started;
+        await store.undoLast(); // Undo again while the read is out
+        expect(await queuedTypes()).toEqual(['delete', 'restore', 'delete', 'restore']);
+
+        reads.release();
+        await flushing;
+
+        expect(api.rows.get(NOTE)?.deleted_at).toBeNull();
+        expect(store.getPage(0).has(NOTE)).toBe(true);
+        expect(await db.ops.count()).toBe(0);
+    });
+
+    /** Deterministic PRNG, so a failing interleaving can be replayed from its seed. */
+    const mulberry32 = (seed: number) => () => {
+        seed = (seed + 0x6d2b79f5) | 0;
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+
+    /** `n` yields, each a microtask, a timer or an immediate — fake-indexeddb settles on the latter two. */
+    const yields = async (n: number, random: () => number) => {
+        for (let i = 0; i < n; i++) {
+            const pick = random();
+            await new Promise<void>((resolve) => {
+                if (pick < 0.3) {
+                    queueMicrotask(resolve);
+                } else if (pick < 0.65) {
+                    setTimeout(resolve, 0);
+                } else {
+                    setImmediate(resolve);
+                }
+            });
+        }
+    };
+
+    /**
+     * One live trial: the erase and Undo queued, B's erase on the server
+     * before the read or while it is out, the read answered after a random
+     * number of yields, and the user's edit made at a random moment from
+     * before the drain reads the queue to after reconcile has finished.
+     */
+    const trial = async (random: () => number): Promise<{ ok: boolean; edited: boolean; outcome: string }> => {
+        const tdb = new ScribblerDb(`c1-race-${crypto.randomUUID()}`);
+        const tstore = new AnnotationStore(tdb, DOC);
+        tstore.setAuthor(USER);
+        await tstore.load();
+        const server = new FakeApi();
+        const refused: SyncRejection[] = [];
+        const tengine = new SyncEngine({
+            db: tdb,
+            store: tstore,
+            api: server,
+            docId: DOC,
+            getUserId: () => USER,
+            onRejected: (r) => refused.push(r),
+        });
+        const theirsFirst = random() < 0.5;
+        const readYields = Math.floor(random() * 10);
+        // Skewed early, where the read is out; about half the runs edit in time.
+        const editYields = Math.floor(random() ** 2 * 30);
+        const shape = `theirsFirst=${theirsFirst} readYields=${readYields} editYields=${editYields}`;
+        try {
+            await eraseAndUndo({ db: tdb, store: tstore, engine: tengine });
+            if (theirsFirst) {
+                collaboratorErases(server);
+            }
+            const read = server.fetchMany.bind(server);
+            server.fetchMany = async (docId, ids) => {
+                await yields(readYields, random);
+                if (server.rows.get(NOTE)?.deleted_at === null) {
+                    collaboratorErases(server);
+                }
+                return read(docId, ids);
+            };
+            // From here on the edit is the only change the store can commit.
+            let edited = false;
+            tstore.setDirtyHook(() => {
+                edited = true;
+            });
+            const editing = (async () => {
+                await yields(editYields, random);
+                await tstore.update(NOTE, { payload: EDITED });
+            })();
+            await tengine.flush();
+            await editing;
+            for (let i = 0; i < 5 && (await tdb.ops.count()) > 0; i++) {
+                await tengine.flush(); // the dirty hook's flush
+            }
+
+            const row = server.rows.get(NOTE)!;
+            const shown = tstore.getPage(0).get(NOTE);
+            const outcome = `${shape} edited=${edited} server=${row.deleted_at ?? 'live'}:${JSON.stringify(row.payload)} shown=${shown ? JSON.stringify(shown.payload) : 'gone'} queued=${await tdb.ops.count()} refused=${refused.length}`;
+            const consistent = edited
+                ? // The user's post-Undo edit stands, here and on the server.
+                  row.deleted_at === null &&
+                  JSON.stringify(row.payload) === JSON.stringify(EDITED) &&
+                  JSON.stringify(shown?.payload) === JSON.stringify(EDITED)
+                : // No edit was made: B's erase wins over the plain Undo, here too.
+                  row.deleted_at === THEIRS && shown === undefined;
+            return { ok: consistent && refused.length === 0 && (await tdb.ops.count()) === 0, edited, outcome };
+        } finally {
+            tengine.stop();
+            tdb.close();
+            await tdb.delete();
+        }
+    };
+
+    it('lets the post-Undo edit win in every one of 60 randomized interleavings', async () => {
+        const seed = Number(process.env['C1_RACE_SEED'] ?? Math.floor(Math.random() * 2 ** 31));
+        const random = mulberry32(seed);
+        const failures: string[] = [];
+        let edits = 0;
+        for (let run = 0; run < 60; run++) {
+            const { ok, edited, outcome } = await trial(random);
+            edits += edited ? 1 : 0;
+            if (!ok) {
+                failures.push(`run ${run}: ${outcome}`);
+            }
+        }
+        expect(failures, `seed ${seed} (${edits}/60 runs edited)`).toEqual([]);
+        // Both outcomes were exercised: edits that won, and Undos that yielded.
+        expect(edits, `seed ${seed}`).toBeGreaterThan(0);
+        expect(edits, `seed ${seed}`).toBeLessThan(60);
+    }, 60_000);
+});
+
 describe('SyncEngine status', () => {
     const statuses: string[] = [];
     let statusEngine: SyncEngine;

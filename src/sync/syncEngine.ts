@@ -1003,47 +1003,94 @@ export class SyncEngine {
         return true;
     }
 
-    /** reconcile for one mark; false once the engine has been stopped. */
+    /**
+     * reconcile for one mark; false once the engine has been stopped.
+     *
+     * The verdict is reached inside the transaction that rewrites the queue,
+     * over the mark's ops as they stand then — not over `group`, the ops
+     * queued when the read left. The user goes on working while it is out,
+     * and it can be out for seconds (postgrest-js retries a failed GET
+     * inside the one call, so a read begun offline lasts until the network
+     * is back). An edit queued meanwhile behind an Undo of an erase turns
+     * the verdict into a restore that carries it; judged without it, the
+     * Undo was dropped as yielding to a collaborator's delete, and the edit
+     * went out as a plain update onto their tombstone (QA C1).
+     *
+     * For the same reason the verdict waits for an edit of the mark that is
+     * drawn but not yet queued, and a verdict to send nothing adopts the
+     * server's row in that same transaction, memory first: an edit begun
+     * after it finds the mark as the server has it, instead of being queued
+     * on top of ops already dropped.
+     */
     private async reconcileGroup(group: OpGroup, row: AnnotationRow | undefined, adopted: string[]): Promise<boolean> {
-        const { db, store } = this.deps;
-        const opIds = group.ops.map((op) => op.opId as number);
+        const { db, store, docId } = this.deps;
+        const { annotationId } = group;
         if (!row) {
             // Not visible (or gone): send the ops as queued, and the
             // refusal path repairs from what the server says about each.
-            opIds.forEach((id) => this.reconciled.add(id));
+            group.ops.forEach((op) => this.reconciled.add(op.opId as number));
             return true;
         }
-        const outcome = reconcileWithServer(group.ops, row);
-        const kept = new Set(outcome.kind === 'send' ? outcome.ops.map((op) => op.opId as number) : []);
-        const applied = await db.transaction('rw', db.ops, async () => {
-            // Another tab may have drained (or rewritten) these meanwhile.
-            const current = await db.ops.bulkGet(opIds);
-            if (current.some((op) => !op)) {
+        // Adopting below changes memory inside a transaction the store
+        // could not hydrate in.
+        await store.load();
+        for (;;) {
+            if (this.stopped) {
                 return false;
             }
-            await db.ops.bulkDelete(opIds.filter((id) => !kept.has(id)));
-            if (outcome.kind === 'send') {
-                await db.ops.bulkPut(outcome.ops);
+            const decided = await db.transaction('rw', db.ops, db.annotations, async () => {
+                const queued = await db.ops
+                    .where('docId')
+                    .equals(docId)
+                    .filter((op) => op.annotationId === annotationId)
+                    .sortBy('opId');
+                const ops = queued.filter(this.owns);
+                if (this.stopped || ops.length === 0 || ops.some((op) => op.type === 'create')) {
+                    // Stopped (nothing may be written back), drained by
+                    // another engine, or re-created under the same id:
+                    // nothing for reconcile here, and the pass looks again.
+                    return null;
+                }
+                if (store.hasUnsavedEdit(annotationId)) {
+                    return 'unsaved' as const;
+                }
+                const outcome = reconcileWithServer(ops, row);
+                const kept = new Set(outcome.kind === 'send' ? outcome.ops.map((op) => op.opId as number) : []);
+                // Nothing to send, and nothing left queued for the mark by
+                // anyone: the server's row is how it stands. Pulls skipped
+                // it while ops were queued, so adopt it here — before
+                // anything below yields to an edit that would build on the
+                // ops being dropped.
+                const adoption =
+                    outcome.kind === 'adopt' && queued.length === ops.length
+                        ? store.adoptServerRowWithin(fromServerRow(row))
+                        : null;
+                await db.ops.bulkDelete(ops.map((op) => op.opId as number).filter((id) => !kept.has(id)));
+                if (outcome.kind === 'send') {
+                    await db.ops.bulkPut(outcome.ops);
+                }
+                await adoption?.saved;
+                return { kept, repaint: adoption?.repaint ?? null };
+            });
+            if (this.stopped) {
+                return false;
+            }
+            if (decided === 'unsaved') {
+                // Decide with that edit in the queue, against the same read.
+                await store.whenSaved(annotationId);
+                continue;
+            }
+            if (decided) {
+                decided.kept.forEach((id) => this.reconciled.add(id));
+                if (decided.repaint) {
+                    decided.repaint();
+                    adopted.push(annotationId);
+                    // …and anything newer that arrived during the read.
+                    await this.applyDeferred([annotationId]);
+                }
             }
             return true;
-        });
-        if (this.stopped) {
-            return false;
         }
-        if (!applied) {
-            return true;
-        }
-        if (outcome.kind === 'send') {
-            kept.forEach((id) => this.reconciled.add(id));
-        } else if ((await this.queuedFor(group.annotationId)) === 0) {
-            // Nothing to send: the server's row is how the mark stands.
-            // Pulls skipped it while ops were queued, so adopt it here —
-            // and anything newer that arrived during the read.
-            await store.adoptServerRow(fromServerRow(row));
-            adopted.push(group.annotationId);
-            await this.applyDeferred([group.annotationId]);
-        }
-        return true;
     }
 
     /**

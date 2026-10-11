@@ -61,6 +61,8 @@ export class AnnotationStore {
      * still holds.
      */
     private unpersisted = new Map<string, number>();
+    /** whenSaved callers, by id, released once `unpersisted` has nothing left for the mark. */
+    private savedWaiters = new Map<string, Array<() => void>>();
 
     constructor(
         private db: ScribblerDb,
@@ -484,14 +486,54 @@ export class AnnotationStore {
      */
     async adoptServerRow(remote: Annotation): Promise<void> {
         await this.ensureLoaded();
+        const { saved, repaint } = this.adoptServerRowWithin(remote);
+        await saved;
+        repaint();
+    }
+
+    /**
+     * adoptServerRow for a caller rewriting the outbox in a Dexie transaction
+     * over the mirror and the outbox (reconcile dropping a mark's queued ops),
+     * which the mirror write joins. Memory changes before this returns, so an
+     * edit that starts afterwards finds the mark as the server has it, not as
+     * the dropped ops left it. Repainting waits for `repaint`, called once the
+     * transaction has committed. The store must already be loaded.
+     */
+    adoptServerRowWithin(remote: Annotation): { saved: Promise<void>; repaint: () => void } {
         const prev = this.byId.get(remote.id);
+        const pages = new Set([remote.page]);
         if (prev && prev.page !== remote.page) {
             this.pageMap(prev.page).delete(remote.id);
-            this.notifyPage(prev.page);
+            pages.add(prev.page);
         }
         this.applyMemory(remote);
-        await this.db.annotations.put({ ...remote, pending: 0 });
-        this.notifyPage(remote.page);
+        return {
+            saved: this.db.annotations.put({ ...remote, pending: 0 }).then(() => undefined),
+            repaint: () => pages.forEach((page) => this.notifyPage(page)),
+        };
+    }
+
+    /**
+     * A local edit of this mark is drawn but its outbox op is not written
+     * yet: what is queued for the mark is not all the user has done to it.
+     */
+    hasUnsavedEdit(id: string): boolean {
+        return this.unpersisted.has(id);
+    }
+
+    /** Resolves once every local edit of this mark drawn so far is in the outbox (or failed to get there). */
+    whenSaved(id: string): Promise<void> {
+        if (!this.unpersisted.has(id)) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+            const waiters = this.savedWaiters.get(id);
+            if (waiters) {
+                waiters.push(resolve);
+            } else {
+                this.savedWaiters.set(id, [resolve]);
+            }
+        });
     }
 
     /**
@@ -718,7 +760,13 @@ export class AnnotationStore {
             this.applyLocal(op.annotation);
             if (options.recordUndo) {
                 this.pushCommitInverse(op);
-                await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
+                try {
+                    await ensureDayStartingSnapshot(this.db, this.docId, preEdit);
+                } catch (err) {
+                    // Never written, so never to be waited for (see whenSaved).
+                    this.releaseUnpersisted([op]);
+                    throw err;
+                }
             }
             await this.persistMany([op]);
             this.notifyPage(op.annotation.page);
@@ -826,13 +874,22 @@ export class AnnotationStore {
         try {
             await this.writeMany(ops);
         } finally {
-            for (const op of ops) {
-                const left = (this.unpersisted.get(op.annotation.id) ?? 1) - 1;
-                if (left > 0) {
-                    this.unpersisted.set(op.annotation.id, left);
-                } else {
-                    this.unpersisted.delete(op.annotation.id);
-                }
+            this.releaseUnpersisted(ops);
+        }
+    }
+
+    /** The applyLocal writes of these ops are over, written or not. */
+    private releaseUnpersisted(ops: CommitOp[]): void {
+        for (const op of ops) {
+            const { id } = op.annotation;
+            const left = (this.unpersisted.get(id) ?? 1) - 1;
+            if (left > 0) {
+                this.unpersisted.set(id, left);
+            } else {
+                this.unpersisted.delete(id);
+                const waiters = this.savedWaiters.get(id);
+                this.savedWaiters.delete(id);
+                waiters?.forEach((resolve) => resolve());
             }
         }
     }
