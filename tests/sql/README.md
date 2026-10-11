@@ -108,6 +108,17 @@ it creates stand-ins for `auth.sessions` / `auth.refresh_tokens` only when a
 local harness has none, and becomes `supabase_auth_admin` for GoTrue's
 updates when the role exists.
 
+`archived_student_password.sql` proves
+`supabase/migrations/20261011120100_archived_student_password_check.sql`:
+`archived_student_password_matches` is true only for the right password of
+an archived, claimed roster row whose account is a provisioned student (false
+for a wrong one, a live or unclaimed row, a non-student account, a non-bcrypt
+hash and an unknown username), and refuses every caller but the service role.
+`edge_rate_limit_refund.sql` proves
+`supabase/migrations/20261011120101_refund_edge_rate_limit.sql`: a refund hands
+back one use of a bucket inside its window (never below zero, never into the
+next window, never creating a bucket), and only the service role may call it.
+
 The sharing RPC proof lives beside the migrations, in
 `supabase/sql-tests/sharing_access_control.sql`; it reports `failures | total`
 on its last line instead. Its broadcast checks (80-82, 85, 87) need today's

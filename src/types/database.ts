@@ -720,6 +720,12 @@ export type Database = {
                 Args: { p_key: string; p_limit: number; p_window_ms: number };
                 Returns: { ok: boolean; retryAfterSec?: number };
             };
+            // Service role only: hands back one use of a bucket inside its
+            // window (guest-email-start, when no mail went out).
+            refund_edge_rate_limit: {
+                Args: { p_key: string };
+                Returns: undefined;
+            };
             // Service role only (student-login's per-username limiter, see
             // supabase/functions/_shared/loginThrottle.ts); clients get no EXECUTE.
             // Its table, edge_login_attempts, is service-only like edge_rate_buckets
@@ -868,6 +874,13 @@ export type Database = {
             end_student_sessions: {
                 Args: { p_student: string };
                 Returns: number;
+            };
+            // Service role only: student-login checks an archived student's
+            // password itself (GoTrue refuses a banned account before it
+            // looks), so it can tell them they were archived — and nobody else.
+            archived_student_password_matches: {
+                Args: { p_username: string; p_password: string };
+                Returns: boolean;
             };
             // The server's annotation payload check (the annotations_payload_shape
             // CHECK). Exposed for completeness; the client never needs to ask.

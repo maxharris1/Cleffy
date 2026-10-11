@@ -37,7 +37,10 @@
 
 @theme inline {
     /* Semantic status colors — aliases of the stock scales. */
-    --color-danger: var(--color-red-600);
+    /* 700, not 600: `text-danger` is every inline error and destructive text
+       button, and red-600 is 4.37:1 on white-ish paper and 3.79:1 behind the
+       viewer's error state (statusColorContrast.test.ts). */
+    --color-danger: var(--color-red-700);
     --color-warn: var(--color-amber-600);
     /* 700, not 600: `text-ok` is small text on white (the pricing dialog's
        "Two months free"), and emerald-600 there is 3.65:1, under WCAG AA's

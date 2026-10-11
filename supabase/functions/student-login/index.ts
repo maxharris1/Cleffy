@@ -67,6 +67,16 @@ const backend = (): StudentLoginBackend | null => {
             }
             return { accessToken: data.session.access_token, refreshToken: data.session.refresh_token };
         },
+
+        // In SQL rather than through GoTrue: GoTrue refuses a banned (archived)
+        // account before it looks at the password at all.
+        archivedStudentPasswordMatches: async (username, password) => {
+            const { data, error } = await admin.rpc('archived_student_password_matches', {
+                p_username: username,
+                p_password: password,
+            });
+            return !error && data === true;
+        },
     };
 };
 

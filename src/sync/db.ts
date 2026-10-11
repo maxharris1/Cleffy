@@ -356,6 +356,26 @@ export const pickDuplicateSnapshots = (rows: LocalAnnotationSnapshot[]): LocalAn
     return losers;
 };
 
+/**
+ * The crash screen's "clear and reload" (app/ErrorBoundary.tsx): empty the
+ * snapshots a page paints before the server answers — library, roster and
+ * assignment lists, entitlements, thumbnails, play-along analyses — which the
+ * next load reads again from the server. A malformed one would otherwise crash
+ * every reload before the fresh copy could replace it.
+ *
+ * Never the work: the outbox (ops), the annotation mirror (it holds unsynced
+ * versions), watermarks, day snapshots, fingering regions, and the cached PDFs
+ * (an offline score, and for old queued changes the only record of whose they
+ * are — opOwnerFor) all stay. Best effort per table.
+ */
+export const clearDisplayCaches = async (db: ScribblerDb): Promise<void> => {
+    await Promise.all(
+        [db.libraryList, db.rosterCache, db.assignmentsCache, db.entitlements, db.thumbnails, db.scoreCache].map(
+            (table) => table.clear().catch(() => undefined),
+        ),
+    );
+};
+
 let instance: ScribblerDb | null = null;
 
 /** App-wide database singleton (tests construct their own named instances). */

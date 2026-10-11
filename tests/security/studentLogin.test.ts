@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import * as throttle from '../../supabase/functions/_shared/loginThrottle';
 import { normalizeUsername, USERNAME_RE } from '../../supabase/functions/_shared/studentCodes';
 import {
+    ARCHIVED,
     handleStudentLogin,
     REJECTED,
     type StudentLoginBackend,
@@ -43,6 +44,8 @@ const harness = (
         session?: { accessToken: string; refreshToken: string } | null;
         backend?: 'none';
         clientIp?: string;
+        /** The password of the archived row with this username, if there is one. */
+        archivedPassword?: string | Error;
     } = {},
 ): Harness => {
     const calls: string[] = [];
@@ -73,6 +76,13 @@ const harness = (
         signIn: async (email, password) => {
             calls.push(`signIn:${email}:${password}`);
             return options.session === undefined ? { accessToken: 'at', refreshToken: 'rt' } : options.session;
+        },
+        archivedStudentPasswordMatches: async (username, password) => {
+            calls.push(`archived:${username}`);
+            if (options.archivedPassword instanceof Error) {
+                throw options.archivedPassword;
+            }
+            return options.archivedPassword !== undefined && password === options.archivedPassword;
         },
     };
     const sleep = vi.fn(() => Promise.resolve());
@@ -190,7 +200,51 @@ describe('student-login handler', () => {
         const h = harness({ student: null });
         const response = await handleStudentLogin(post({ ...goodBody, username: 'nobody_here' }), h.deps);
         await expectFlooredRejection(h, response);
-        expect(h.calls).toEqual([`ip:student-login:${CLIENT_IP}`, 'rpc:begin_login_attempt', 'find:nobody_here']);
+        expect(h.calls).toEqual([
+            `ip:student-login:${CLIENT_IP}`,
+            'rpc:begin_login_attempt',
+            'find:nobody_here',
+            'archived:nobody_here',
+        ]);
+    });
+
+    it('tells an archived student who typed their own password that they were archived, at the same floor', async () => {
+        const h = harness({ student: null, archivedPassword: goodBody.password });
+        const response = await handleStudentLogin(post(goodBody), h.deps);
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual(ARCHIVED);
+        expect(h.sleep).toHaveBeenCalledWith(throttle.REJECTION_FLOOR_MS);
+        // Counted like any attempt; never handed to GoTrue (which refuses a
+        // banned account unseen), and nothing is cleared: no sign-in happened.
+        expect(h.calls).toEqual([
+            `ip:student-login:${CLIENT_IP}`,
+            'rpc:begin_login_attempt',
+            'find:cellist42',
+            'archived:cellist42',
+        ]);
+    });
+
+    it('an archived username with the wrong password is the same floored 401 as a name nobody has', async () => {
+        const h = harness({ student: null, archivedPassword: 'Someone1else' });
+        const response = await handleStudentLogin(post(goodBody), h.deps);
+        await expectFlooredRejection(h, response);
+    });
+
+    it('an archived check that fails is the floored 401, not an error', async () => {
+        const h = harness({ student: null, archivedPassword: new Error('rpc down') });
+        const response = await handleStudentLogin(post(goodBody), h.deps);
+        await expectFlooredRejection(h, response);
+    });
+
+    it('a locked username is refused before the archived check, too', async () => {
+        const h = harness({
+            student: null,
+            archivedPassword: goodBody.password,
+            begin: { data: { ok: false, scope: 'source', retryAfterSec: 30 }, error: null },
+        });
+        const response = await handleStudentLogin(post(goodBody), h.deps);
+        expect(response.status).toBe(429);
+        expect(h.calls).not.toContain('archived:cellist42');
     });
 
     it('an account that is not a provisioned student is refused and reported', async () => {

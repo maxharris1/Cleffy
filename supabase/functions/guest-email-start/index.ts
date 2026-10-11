@@ -1,6 +1,6 @@
 import { generateGuestEmailCode, handleGuestEmailStart } from '../_shared/guestEmail.ts';
 import { common, deletePending, emailTaken, sendEmail } from '../_shared/guestEmailWiring.ts';
-import { serviceClient } from '../_shared/rateLimit.ts';
+import { refundRateLimit, serviceClient } from '../_shared/rateLimit.ts';
 
 /**
  * A guest asks to attach an email address: mail a one-time code to it. The
@@ -39,6 +39,7 @@ Deno.serve((req) =>
         },
         deletePending,
         sendEmail,
+        refundRateLimit,
         generateCode: generateGuestEmailCode,
         now: () => Date.now(),
     }),

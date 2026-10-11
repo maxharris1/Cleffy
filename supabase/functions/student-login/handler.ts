@@ -40,7 +40,8 @@ import type * as StudentCodes from '../_shared/studentCodes.ts';
  * everywhere. Its note explains why it is split that way.
  *
  * One indistinguishable failure: bad username shape, no such username, an
- * unclaimed or archived row, an unreadable auth user, a refused password —
+ * unclaimed or archived row (unless the password is right: ARCHIVED), an
+ * unreadable auth user, a refused password —
  * every path answers with exactly REJECTED, and no sooner than
  * REJECTION_FLOOR_MS after the request arrived. A username nobody has is
  * refused after one lookup, a real one only after a GoTrue round-trip, and
@@ -56,6 +57,20 @@ import type * as StudentCodes from '../_shared/studentCodes.ts';
 
 /** The only credential failure this endpoint has. Never varied — see above. */
 export const REJECTED = { error: 'That username and password did not work', code: 'invalid_credentials' } as const;
+
+/**
+ * The one answer that is not REJECTED for an account that cannot sign in: an
+ * archived student who typed their own password. Archiving bans the account,
+ * and GoTrue refuses a banned account before it checks the password, so the
+ * password is checked here (archivedStudentPasswordMatches) and this is said
+ * only to someone who already holds it — to anyone else an archived username
+ * is the same floored REJECTED as a name nobody has. Without it the student
+ * reads "did not work" at a password that is right, and keeps retyping it.
+ */
+export const ARCHIVED = {
+    error: "Your teacher has archived this account, so it can't sign in for now. Ask your teacher to restore it.",
+    code: 'student_archived',
+} as const;
 
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
 
@@ -88,6 +103,12 @@ export interface StudentLoginBackend {
     readAuthUser: (userId: string) => Promise<StudentAuthUser | null>;
     /** A password sign-in on a fresh anon client; null when GoTrue refuses. */
     signIn: (email: string, password: string) => Promise<StudentSession | null>;
+    /**
+     * Whether `password` is the password of the ARCHIVED, claimed roster row
+     * with this username (archived_student_password_matches). False for no
+     * such row, a wrong password, and on any error.
+     */
+    archivedStudentPasswordMatches: (username: string, password: string) => Promise<boolean>;
 }
 
 export interface StudentLoginDeps {
@@ -199,6 +220,13 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
 
     const student = await backend.findClaimedStudent(username);
     if (!student) {
+        // Counted like every other attempt above, and answered no sooner than
+        // the floor either way: the password decides which answer, never
+        // whether the username exists (see ARCHIVED).
+        if (await backend.archivedStudentPasswordMatches(username, password).catch(() => false)) {
+            await throttle.waitForFloor(startedAt, throttle.REJECTION_FLOOR_MS, deps.now, deps.sleep);
+            return json(ARCHIVED, 403);
+        }
         return await reject();
     }
 

@@ -156,6 +156,19 @@ export const stampOwnCloudOps = async (db: ScribblerDb, userId: string): Promise
     return own;
 };
 
+/**
+ * Delete every cloud-score op `userId` owns, and count them. For an account
+ * that no longer exists (session.ts signOutDeletedAccount): nothing can ever
+ * upload them, but another account's kept ops on the same device are still
+ * waiting for that account's next sign-in, so only these go.
+ */
+export const dropOwnCloudOps = async (db: ScribblerDb, userId: string): Promise<number> => {
+    // Stamped first, so a legacy op that is this account's only through the
+    // cached PDF (opOwnerFor) is matched below as well.
+    await stampOwnCloudOps(db, userId);
+    return db.ops.filter((op) => isCloudDocId(op.docId) && op.userId === userId).delete();
+};
+
 /** Remove this account's cloud-score annotation data from the device. */
 export const clearCloudAnnotationData = async (db: ScribblerDb): Promise<void> => {
     const isCloud = (row: { docId: string }) => isCloudDocId(row.docId);

@@ -76,8 +76,18 @@ const rosterRow: ManagedStudentRow = {
 
 /** Stands in for the login page, showing what it was told. */
 const StudentLoginStub = () => {
-    const state = useLocation().state as { signedOutByTeacher?: boolean; keptChanges?: number } | null;
-    return <p>{`student login: teacher ${String(state?.signedOutByTeacher)}, kept ${String(state?.keptChanges)}`}</p>;
+    const state = useLocation().state as {
+        signedOutByTeacher?: boolean;
+        keptChanges?: number;
+        accountDeleted?: boolean;
+        discardedChanges?: number;
+    } | null;
+    return (
+        <p>
+            {`student login: teacher ${String(state?.signedOutByTeacher)}, kept ${String(state?.keptChanges)}`}
+            {state?.accountDeleted ? `, deleted, discarded ${String(state.discardedChanges)}` : null}
+        </p>
+    );
 };
 
 const renderAssignments = () =>
@@ -175,14 +185,53 @@ describe('AssignmentsPage once the teacher has ended this sign-in', () => {
         expect(await getDb().ops.where('docId').equals(DOC).count()).toBe(1);
     });
 
-    it('clears everything for a student whose account was deleted', async () => {
+    it('clears everything for a student whose account was deleted, and says the change is gone', async () => {
         fetchMyRosterProfile.mockResolvedValue(null);
         await queueOfflineMark('offline-mark');
 
         renderAssignments();
 
-        expect(await screen.findByText('student login: teacher true, kept 0')).toBeInTheDocument();
-        await vi.waitFor(async () => expect(await getDb().ops.where('docId').equals(DOC).count()).toBe(0));
+        expect(
+            await screen.findByText('student login: teacher true, kept 0, deleted, discarded 1'),
+        ).toBeInTheDocument();
+        expect(await getDb().ops.where('docId').equals(DOC).count()).toBe(0);
         expect(await getDb().annotations.where('docId').equals(DOC).count()).toBe(0);
+        // The server already ended it: nothing to ask GoTrue for.
+        expect(authSignOut).toHaveBeenCalledWith({ scope: 'local' });
+    });
+
+    it('leaves another account’s kept changes alone when this one was deleted', async () => {
+        fetchMyRosterProfile.mockResolvedValue(null);
+        await queueOfflineMark('offline-mark');
+        // A sibling on the same iPad, archived earlier: their change waits for
+        // their next sign-in here, deleted account or not.
+        const OTHER_DOC = 'c0ffee00-0000-4000-8000-0000000000bb';
+        const other = new AnnotationStore(getDb(), OTHER_DOC);
+        other.setAuthor('student-2');
+        await other.create({
+            id: 'sibling-mark',
+            docId: OTHER_DOC,
+            page: 0,
+            kind: 'stroke',
+            color: '#111111',
+            payload: { pts: [0.1, 0.1, 0.5], w: 0.005 },
+            createdBy: null,
+            createdAt: '2026-10-10T00:00:00Z',
+            updatedAt: '2026-10-10T00:00:00Z',
+            deletedAt: null,
+            seq: 0,
+        });
+        const db = getDb();
+        const sibling = await db.ops.filter((op) => op.annotationId === 'sibling-mark').first();
+        await db.ops.update(sibling!.opId!, { userId: 'student-2' });
+
+        renderAssignments();
+
+        expect(
+            await screen.findByText('student login: teacher true, kept 0, deleted, discarded 1'),
+        ).toBeInTheDocument();
+        const left = await db.ops.toArray();
+        expect(left.map((op) => [op.annotationId, op.userId])).toEqual([['sibling-mark', 'student-2']]);
+        expect(await db.annotations.where('docId').equals(OTHER_DOC).count()).toBe(1);
     });
 });

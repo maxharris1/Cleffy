@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as sessionModule from '@/features/auth/session';
 import { AssignmentsPage, ASSIGNMENTS_REFRESH_MS } from '@/features/student/AssignmentsPage';
 import type { AssignedScore } from '@/features/student/studentApi';
+import { getDb } from '@/sync/db';
 import type { AssignmentRow, ManagedStudentRow } from '@/types/database';
 
 const fetchMyAssignments = vi.fn();
@@ -14,6 +15,7 @@ const fetchMyRosterProfile = vi.fn();
 const fetchSignInStillValid = vi.fn();
 const signOut = vi.fn();
 const signOutKeepingChanges = vi.fn();
+const signOutDeletedAccount = vi.fn();
 
 vi.mock('@/features/student/studentApi', () => ({
     fetchMyAssignments: (...args: unknown[]) => fetchMyAssignments(...args),
@@ -27,6 +29,7 @@ vi.mock('@/features/auth/session', async (importOriginal) => ({
     useSession: () => ({ session: studentSession, loading: false, lastEvent: null }),
     signOut: (...args: unknown[]) => signOut(...args),
     signOutKeepingChanges: (...args: unknown[]) => signOutKeepingChanges(...args),
+    signOutDeletedAccount: (...args: unknown[]) => signOutDeletedAccount(...args),
     syncBeforeSignOut: async () => ({ pending: 0, refused: 0 }),
 }));
 
@@ -107,6 +110,7 @@ beforeEach(() => {
     fetchSignInStillValid.mockResolvedValue(true);
     signOut.mockResolvedValue(undefined);
     signOutKeepingChanges.mockResolvedValue(0);
+    signOutDeletedAccount.mockResolvedValue(0);
 });
 
 afterEach(() => {
@@ -205,8 +209,69 @@ describe('AssignmentsPage', () => {
         renderAssignments();
 
         expect(await screen.findByText('student login (signed out by teacher)')).toBeInTheDocument();
-        expect(signOut).toHaveBeenCalled();
+        expect(signOutDeletedAccount).toHaveBeenCalled();
         expect(signOutKeepingChanges).not.toHaveBeenCalled();
+    });
+
+    it('paints the cached list while the server answers', async () => {
+        await getDb().assignmentsCache.put({
+            userId: 'student-1',
+            scores: [assigned('doc-1', 'Prelude and Fugue')],
+            cachedAt: '2026-10-10T00:00:00Z',
+        });
+        fetchMyAssignments.mockReturnValue(new Promise(() => undefined));
+        renderAssignments();
+
+        expect(await screen.findByRole('link', { name: /Prelude and Fugue/ })).toBeInTheDocument();
+        await getDb().assignmentsCache.clear();
+    });
+
+    it('drops a cached list it cannot read instead of crashing on it, and shows the server’s', async () => {
+        // An older build's row, or a damaged one: painting it threw before the
+        // fresh list could replace it, on every reload.
+        await getDb().assignmentsCache.put({
+            userId: 'student-1',
+            scores: [{ assignment: null, document: null }] as never,
+            cachedAt: '2026-10-10T00:00:00Z',
+        });
+        // Slower than IndexedDB, as on a phone: the cache is what paints first.
+        fetchMyAssignments.mockImplementation(
+            () => new Promise((resolve) => setTimeout(() => resolve([assigned('doc-1', 'Prelude and Fugue')]), 50)),
+        );
+        renderAssignments();
+
+        expect(await screen.findByRole('link', { name: /Prelude and Fugue/ })).toBeInTheDocument();
+        await vi.waitFor(async () =>
+            expect((await getDb().assignmentsCache.get('student-1'))?.scores[0]?.document.title).toBe(
+                'Prelude and Fugue',
+            ),
+        );
+        await getDb().assignmentsCache.clear();
+    });
+
+    it('drops an unreadable cached list even when the server cannot be reached', async () => {
+        await getDb().assignmentsCache.put({
+            userId: 'student-1',
+            scores: 'not a list' as never,
+            cachedAt: '2026-10-10T00:00:00Z',
+        });
+        fetchMyAssignments.mockRejectedValue(new Error('offline'));
+        renderAssignments();
+
+        expect(await screen.findByText(/Could not load your pieces/)).toBeInTheDocument();
+        await vi.waitFor(async () => expect(await getDb().assignmentsCache.count()).toBe(0));
+    });
+
+    it('shows a long title whole on hover, and lets it run to two lines', async () => {
+        const title = 'Piano Sonata No. 16 in C major, K 545: First Movement, Allegro';
+        fetchMyAssignments.mockResolvedValue([assigned('doc-1', title)]);
+        renderAssignments();
+
+        const link = await screen.findByRole('link', { name: new RegExp(title) });
+        const shown = within(link).getByText(title);
+        expect(shown).toHaveAttribute('title', title);
+        expect(shown).toHaveClass('line-clamp-2');
+        expect(shown).not.toHaveClass('truncate');
     });
 
     it('keeps the list up when the sign-in check cannot reach the server', async () => {

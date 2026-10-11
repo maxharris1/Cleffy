@@ -42,8 +42,9 @@ export const GUEST_EMAIL_LIMITS = {
     startPerUser: { limit: 5, windowMs: 60 * 60_000 },
     /**
      * Mail to one address, from every guest together: nobody gets flooded.
-     * Spent only on a code actually about to be mailed, so asking about an
-     * address that has an account cannot use up its owner's allowance.
+     * Spent only on a code actually mailed, so asking about an address that
+     * has an account cannot use up its owner's allowance, and neither can a
+     * send that failed (handleGuestEmailStart reserves, then refunds).
      */
     startPerRecipient: { limit: 3, windowMs: 60 * 60_000 },
     startPerRecipientDaily: { limit: 10, windowMs: 24 * 60 * 60_000 },
@@ -52,8 +53,9 @@ export const GUEST_EMAIL_LIMITS = {
      * all move with something an attacker rotates for free (an IP, an
      * anonymous sign-in, an address), and these mails share the Resend key,
      * quota and domain reputation with password resets and sign-ups. Sized
-     * far above what real upgrades need; checked just before a send, so only
-     * a code about to go out spends it.
+     * far above what real upgrades need; reserved just before a send and
+     * refunded when nothing went out, so a mail outage (or a deploy with no
+     * mail key) cannot use it up.
      */
     startGlobal: { limit: 60, windowMs: 60 * 60_000 },
     startGlobalDaily: { limit: 300, windowMs: 24 * 60 * 60_000 },
@@ -217,6 +219,8 @@ export interface GuestEmailStartDeps extends CommonDeps {
     deletePending: (userId: string) => Promise<void>;
     /** 'unconfigured' when the deploy has no mail key. */
     sendEmail: (to: string, message: GuestEmailMessage) => Promise<'sent' | 'failed' | 'unconfigured'>;
+    /** Hand back one use of a checkRateLimit bucket (refund_edge_rate_limit); best effort. */
+    refundRateLimit: (key: string) => Promise<void>;
     generateCode: () => string;
     now: () => number;
 }
@@ -330,15 +334,29 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         return json(GUEST_EMAIL_ERRORS.emailInUse, 409);
     }
 
-    // Only now, with a code about to go out, is the address's own allowance spent.
+    // The mailbox's and the project's allowances are for mail that went out.
+    // Each is RESERVED here, before the send — so two requests at once cannot
+    // both take the last one — and every reservation is handed back if no
+    // mail goes out after all: a later limit refused, the code could not be
+    // stored, or the send failed or is not configured. (The per-IP and
+    // per-guest limits above stay spent: they count attempts, and are what
+    // stops a caller hammering a broken mailer.)
+    const reserved: string[] = [];
+    const release = async (): Promise<void> => {
+        await Promise.all(reserved.map((key) => deps.refundRateLimit(key).catch(() => undefined)));
+    };
+
     for (const [window, { limit, windowMs }] of [
         ['hour', GUEST_EMAIL_LIMITS.startPerRecipient],
         ['day', GUEST_EMAIL_LIMITS.startPerRecipientDaily],
     ] as const) {
-        const recipientGate = await deps.checkRateLimit(await recipientRateKey(secret, email, window), limit, windowMs);
+        const key = await recipientRateKey(secret, email, window);
+        const recipientGate = await deps.checkRateLimit(key, limit, windowMs);
         if (!recipientGate.ok) {
+            await release();
             return tooMany(json, recipientGate.retryAfterSec);
         }
+        reserved.push(key);
     }
 
     // And the project's: past it, nobody's code goes out until the window
@@ -350,9 +368,11 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
     ] as const) {
         const globalGate = await deps.checkRateLimit(key, limit, windowMs);
         if (!globalGate.ok) {
+            await release();
             deps.logError(`${key}: the ceiling on guest code mail was reached`);
             return json({ ...GUEST_EMAIL_ERRORS.unavailable, retryAfterSec: globalGate.retryAfterSec }, 503);
         }
+        reserved.push(key);
     }
 
     const code = deps.generateCode();
@@ -363,13 +383,14 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         expiresAt: new Date(deps.now() + GUEST_EMAIL_CODE_TTL_MS).toISOString(),
     });
     if (!saved) {
+        await release();
         return json(GUEST_EMAIL_ERRORS.unavailable, 503);
     }
 
     const sent = await deps.sendEmail(email, guestEmailMessage(code));
     if (sent !== 'sent') {
-        // A code nobody received must not stay redeemable.
-        await deps.deletePending(userId);
+        // A code nobody received must not stay redeemable, nor count as mail.
+        await Promise.all([deps.deletePending(userId), release()]);
         return sent === 'unconfigured'
             ? json(GUEST_EMAIL_ERRORS.unavailable, 503)
             : json(GUEST_EMAIL_ERRORS.sendFailed, 502);

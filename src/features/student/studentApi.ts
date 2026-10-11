@@ -19,6 +19,15 @@ const REJECTION = 'That username and password did not work';
 const NETWORK_FAILURE = 'Could not reach Cleffy. Check the internet connection and try again.';
 
 /**
+ * An archived student signing in. student-login says it itself (ARCHIVED in
+ * its handler, only to the right password); an email-method student meets
+ * GoTrue's own `user_banned` instead — archiving is the only ban the app sets
+ * — and is told the same thing.
+ */
+export const STUDENT_ARCHIVED_MESSAGE =
+    "Your teacher has archived this account, so it can't sign in for now. Ask your teacher to restore it.";
+
+/**
  * A refusal the server chose to name — 'invalid_credentials', 'username_taken',
  * and the rest of the documented set. The code exists so a page can put the
  * message where it belongs (under the username field, back on the code step)
@@ -134,6 +143,12 @@ export const loginStudent = async (identifier: string, password: string): Promis
             password,
         });
         if (error) {
+            // GoTrue answers a banned account before it checks the password,
+            // and says so in the response either way; the copy adds nothing
+            // to what the endpoint already tells anyone who asks it.
+            if (error.code === 'user_banned') {
+                throw new StudentAuthError(STUDENT_ARCHIVED_MESSAGE, 'student_archived');
+            }
             throw new Error(mapAuthError(error, 'Could not sign in.'));
         }
         const meta = data.session?.user.user_metadata as Record<string, unknown> | undefined;
@@ -249,4 +264,28 @@ export const fetchSignInStillValid = async (profile: ManagedStudentRow | null): 
         return null;
     }
     return !data;
+};
+
+/**
+ * Whether the account behind an ended sign-in is gone altogether: deleted with
+ * its teacher, as opposed to archived or reset (fetchSignInStillValid answers
+ * false for all three). Asked once the sign-in is known to be over, to choose
+ * between keeping what the device queued for the next sign-in and discarding
+ * it: a deleted account has no next sign-in.
+ *
+ * True only when the server says so on both counts under this token: it is
+ * refused as a student's (student_access_revoked, which reads true for a
+ * student token whose roster row is gone), and no roster row answers to it.
+ * Anything unanswered is false — keeping a deleted account's changes costs a
+ * little storage, discarding a live one's would lose them.
+ */
+export const fetchAccountDeleted = async (): Promise<boolean> => {
+    const [profile, revoked] = await Promise.allSettled([
+        fetchMyRosterProfile(),
+        (async () => {
+            const { data, error } = await getSupabase().rpc('student_access_revoked');
+            return !error && data === true;
+        })(),
+    ]);
+    return profile.status === 'fulfilled' && profile.value === null && revoked.status === 'fulfilled' && revoked.value;
 };
