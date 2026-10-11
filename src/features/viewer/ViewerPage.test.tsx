@@ -81,6 +81,8 @@ vi.mock('@/features/viewer/pdf/PdfProvider', () => ({
         return <div data-testid="pdf-provider">{props.children}</div>;
     },
 }));
+const warmPdfWorker = vi.hoisted(() => vi.fn());
+vi.mock('@/features/viewer/pdf/pdfWorker', () => ({ warmPdfWorker }));
 
 /** The sync props the viewer last handed the viewport (to drive its callbacks). */
 const lastSync = vi.hoisted(() => ({
@@ -416,6 +418,16 @@ describe('CloudViewer warm open', () => {
         expect(prefetchScoreUrl).toHaveBeenCalledWith(DOC_ID);
         const [, options] = loadDocumentSource.mock.calls[0] as [DocumentRow, { prefetch?: { path: string } }];
         expect(options.prefetch?.path).toBe(`${DOC_ID}/original.pdf`);
+    });
+
+    it('starts the pdf.js worker while the score is still being looked up', async () => {
+        loadDocumentOffline.mockResolvedValue(null);
+        fetchDocument.mockReturnValue(new Promise(() => undefined));
+
+        renderViewer();
+
+        await waitFor(() => expect(warmPdfWorker).toHaveBeenCalledTimes(1));
+        expect(loadDocumentSource).not.toHaveBeenCalled();
     });
 
     it('streams a first open, then caches the whole file under the confirmed role when it lands', async () => {

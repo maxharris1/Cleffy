@@ -32,6 +32,7 @@ import { LessonHistoryButton } from '@/features/viewer/history/LessonHistoryButt
 import { PresenceBar } from '@/features/viewer/presence/PresenceBar';
 import { PdfViewport } from '@/features/viewer/PdfViewport';
 import { PdfProvider, type PdfSource, type StreamedPdfSource } from '@/features/viewer/pdf/PdfProvider';
+import { warmPdfWorker } from '@/features/viewer/pdf/pdfWorker';
 import type { ProgressiveDownload } from '@/features/viewer/pdf/progressiveDownload';
 import { ScoreSourceButton } from '@/features/viewer/ScoreSourceButton';
 import { SyncHeldNotice, SyncRejectedNotice } from '@/features/viewer/SyncRejectedNotice';
@@ -421,6 +422,10 @@ const CloudViewer = ({ docId }: { docId: string }) => {
             // The signed URL for a cold open is minted in the same tick as the
             // Dexie read; a hit ignores it, a miss streams from it.
             const prefetch = current ? undefined : prefetchScoreUrl(docId);
+            if (!current) {
+                // Its script loads alongside these lookups, not after them.
+                warmPdfWorker();
+            }
             const offline = current ? null : await loadDocumentOffline(docId, userId).catch(() => null);
             if (!cancelled && offline) {
                 setState({
