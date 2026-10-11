@@ -990,15 +990,10 @@ export class SyncEngine {
             return false;
         }
         const rows = new Map((data ?? []).map((row) => [row.id, row]));
-        const adopted: string[] = [];
-        try {
-            for (const group of groups) {
-                if (!(await this.reconcileGroup(group, rows.get(group.annotationId), adopted))) {
-                    return false;
-                }
+        for (const group of groups) {
+            if (!(await this.reconcileGroup(group, rows.get(group.annotationId)))) {
+                return false;
             }
-        } finally {
-            this.announce('repair', adopted);
         }
         return true;
     }
@@ -1009,20 +1004,25 @@ export class SyncEngine {
      * The verdict is reached inside the transaction that rewrites the queue,
      * over the mark's ops as they stand then — not over `group`, the ops
      * queued when the read left. The user goes on working while it is out,
-     * and it can be out for seconds (postgrest-js retries a failed GET
-     * inside the one call, so a read begun offline lasts until the network
-     * is back). An edit queued meanwhile behind an Undo of an erase turns
-     * the verdict into a restore that carries it; judged without it, the
-     * Undo was dropped as yielding to a collaborator's delete, and the edit
-     * went out as a plain update onto their tombstone (QA C1).
+     * and it can be out for several seconds: postgrest-js retries a GET
+     * that could not reach the server inside the one call, after 1 s, 2 s
+     * and 4 s, so a read begun offline answers up to ~7 s later. An edit
+     * queued meanwhile behind an Undo of an erase turns the verdict into a
+     * restore that carries it; judged without it, the Undo was dropped as
+     * yielding to a collaborator's delete, and the edit went out as a plain
+     * update onto their tombstone (QA C1).
      *
      * For the same reason the verdict waits for an edit of the mark that is
-     * drawn but not yet queued, and a verdict to send nothing adopts the
-     * server's row in that same transaction, memory first: an edit begun
-     * after it finds the mark as the server has it, instead of being queued
-     * on top of ops already dropped.
+     * made but not yet queued (see AnnotationStore.hasUnsavedEdit), and a
+     * verdict to send nothing adopts the server's row in that same
+     * transaction, memory first: an edit begun after it finds the mark as
+     * the server has it, instead of being queued on top of ops already
+     * dropped. The other engines on the score are told at once, not after
+     * the rest of the batch: until they hear, another tab still draws the
+     * mark, and an edit of it there would go out as a plain update onto the
+     * tombstone.
      */
-    private async reconcileGroup(group: OpGroup, row: AnnotationRow | undefined, adopted: string[]): Promise<boolean> {
+    private async reconcileGroup(group: OpGroup, row: AnnotationRow | undefined): Promise<boolean> {
         const { db, store, docId } = this.deps;
         const { annotationId } = group;
         if (!row) {
@@ -1072,6 +1072,13 @@ export class SyncEngine {
                 await adoption?.saved;
                 return { kept, repaint: adoption?.repaint ?? null };
             });
+            const repaint = decided !== null && decided !== 'unsaved' ? decided.repaint : null;
+            if (repaint) {
+                // Adopted and committed: draw it, and tell the other engines,
+                // even if this one has just been stopped.
+                repaint();
+                this.announce('repair', [annotationId]);
+            }
             if (this.stopped) {
                 return false;
             }
@@ -1080,14 +1087,11 @@ export class SyncEngine {
                 await store.whenSaved(annotationId);
                 continue;
             }
-            if (decided) {
-                decided.kept.forEach((id) => this.reconciled.add(id));
-                if (decided.repaint) {
-                    decided.repaint();
-                    adopted.push(annotationId);
-                    // …and anything newer that arrived during the read.
-                    await this.applyDeferred([annotationId]);
-                }
+            decided?.kept.forEach((id) => this.reconciled.add(id));
+            if (repaint) {
+                // …and anything newer that arrived during the read.
+                const applied = await this.applyDeferred([annotationId]);
+                this.announce('repair', [...applied]);
             }
             return true;
         }

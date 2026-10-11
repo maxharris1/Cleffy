@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as snapshotService from '@/features/viewer/history/snapshotService';
 import { noteRetryAfter } from '@/lib/retryAfter';
 import type { TypedSupabaseClient } from '@/lib/supabase';
 import { AnnotationStore } from '@/sync/annotationStore';
@@ -1395,6 +1396,46 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
         expect(rejections).toEqual([]);
     });
 
+    it('waits for an edit still on its day-snapshot check when the read comes back', async () => {
+        await eraseAndUndo();
+        collaboratorErases();
+        const reads = holdReads();
+        // An edit of an existing mark checks the day's snapshot before it is
+        // drawn; hold that check until reconcile has had every chance to
+        // decide without the edit.
+        const snapshot = snapshotService.ensureDayStartingSnapshot;
+        let checking!: () => void;
+        const checkOut = new Promise<void>((resolve) => (checking = resolve));
+        let releaseCheck!: () => void;
+        const checkReleased = new Promise<void>((resolve) => (releaseCheck = resolve));
+        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+            checking();
+            await checkReleased;
+            return snapshot(...args);
+        });
+
+        let flushed = false;
+        const flushing = engine.flush().then(() => {
+            flushed = true;
+        });
+        await reads.started;
+        const editing = store.update(NOTE, { payload: EDITED }); // Done pressed while the read is out …
+        await checkOut;
+        expect(store.getPage(0).get(NOTE)?.payload).toEqual(ORIGINAL); // … not drawn yet
+        expect(await queuedTypes()).toEqual(['delete', 'restore']);
+
+        reads.release(); // … and the read is back before it is
+        await vi.waitFor(() => expect(flushed).toBe(true), { timeout: 250, interval: 5 }).catch(() => undefined);
+        releaseCheck();
+        await editing;
+        await flushing;
+        await engine.flush(); // what the edit's dirty hook would run
+
+        // Not refused as an edit of a note that had meanwhile gone: it stands.
+        await expectEditStands();
+        expect(rejections).toEqual([]);
+    });
+
     it('still lets a plain Undo yield to the erase, and the note is gone before it can be edited', async () => {
         await eraseAndUndo();
         collaboratorErases();
@@ -1470,7 +1511,13 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
      * One live trial: the erase and Undo queued, B's erase on the server
      * before the read or while it is out, the read answered after a random
      * number of yields, and the user's edit made at a random moment from
-     * before the drain reads the queue to after reconcile has finished.
+     * before the drain reads the queue to after reconcile has finished —
+     * its day-snapshot check, before it is drawn, taking a random number of
+     * yields too.
+     *
+     * `edited`: the note was on screen when the user pressed Done. Then the
+     * edit must stand, however the rest interleaves. Otherwise reconcile had
+     * already let the Undo yield, and B's erase stands.
      */
     const trial = async (random: () => number): Promise<{ ok: boolean; edited: boolean; outcome: string }> => {
         const tdb = new ScribblerDb(`c1-race-${crypto.randomUUID()}`);
@@ -1506,12 +1553,14 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
                 return read(docId, ids);
             };
             // From here on the edit is the only change the store can commit.
-            let edited = false;
+            let accepted = false;
             tstore.setDirtyHook(() => {
-                edited = true;
+                accepted = true;
             });
+            let edited = false;
             const editing = (async () => {
                 await yields(editYields, random);
+                edited = tstore.getPage(0).has(NOTE);
                 await tstore.update(NOTE, { payload: EDITED });
             })();
             await tengine.flush();
@@ -1522,14 +1571,15 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
 
             const row = server.rows.get(NOTE)!;
             const shown = tstore.getPage(0).get(NOTE);
-            const outcome = `${shape} edited=${edited} server=${row.deleted_at ?? 'live'}:${JSON.stringify(row.payload)} shown=${shown ? JSON.stringify(shown.payload) : 'gone'} queued=${await tdb.ops.count()} refused=${refused.length}`;
+            const outcome = `${shape} edited=${edited} accepted=${accepted} server=${row.deleted_at ?? 'live'}:${JSON.stringify(row.payload)} shown=${shown ? JSON.stringify(shown.payload) : 'gone'} queued=${await tdb.ops.count()} refused=${refused.length}`;
             const consistent = edited
                 ? // The user's post-Undo edit stands, here and on the server.
+                  accepted &&
                   row.deleted_at === null &&
                   JSON.stringify(row.payload) === JSON.stringify(EDITED) &&
                   JSON.stringify(shown?.payload) === JSON.stringify(EDITED)
                 : // No edit was made: B's erase wins over the plain Undo, here too.
-                  row.deleted_at === THEIRS && shown === undefined;
+                  !accepted && row.deleted_at === THEIRS && shown === undefined;
             return { ok: consistent && refused.length === 0 && (await tdb.ops.count()) === 0, edited, outcome };
         } finally {
             tengine.stop();
@@ -1541,6 +1591,11 @@ describe('SyncEngine: changes queued while reconcile reads the server (QA C1)', 
     it('lets the post-Undo edit win in every one of 60 randomized interleavings', async () => {
         const seed = Number(process.env['C1_RACE_SEED'] ?? Math.floor(Math.random() * 2 ** 31));
         const random = mulberry32(seed);
+        const snapshot = snapshotService.ensureDayStartingSnapshot;
+        vi.spyOn(snapshotService, 'ensureDayStartingSnapshot').mockImplementation(async (...args) => {
+            await yields(Math.floor(random() * 6), random);
+            return snapshot(...args);
+        });
         const failures: string[] = [];
         let edits = 0;
         for (let run = 0; run < 60; run++) {
@@ -1797,6 +1852,52 @@ describe('SyncEngine across tabs of the same account', () => {
         reader.updateMany = down;
         return reader;
     };
+
+    it('tells the other tab of each adoption at once, not after the rest of the batch', async () => {
+        await store.create(makeStroke('e1'));
+        await store.create(makeStroke('e2'));
+        await engine.flush();
+        // Offline, so it leaves the outbox to this tab.
+        const second = await openTab(offlineApi());
+        try {
+            // Erased and brought back with Undo here, offline: nothing sent.
+            for (const id of ['e1', 'e2']) {
+                await store.delete(id);
+                await store.undoLast();
+            }
+            // A collaborator erased both meanwhile.
+            const erasedAt = '2026-04-04T04:04:04.000Z';
+            for (const id of ['e1', 'e2']) {
+                api.rows.set(id, { ...api.rows.get(id)!, deleted_at: erasedAt, seq: api.nextSeq++ });
+            }
+            const heard: string[] = [];
+            const reload = second.tabStore.reloadFromMirror.bind(second.tabStore);
+            vi.spyOn(second.tabStore, 'reloadFromMirror').mockImplementation((ids, options) => {
+                heard.push(...ids);
+                return reload(ids, options);
+            });
+            // What the other tab had heard when e2's verdict was taken.
+            let heardBeforeE2: string[] | null = null;
+            const unsaved = store.hasUnsavedEdit.bind(store);
+            vi.spyOn(store, 'hasUnsavedEdit').mockImplementation((id) => {
+                if (id === 'e2' && !heardBeforeE2) {
+                    heardBeforeE2 = [...heard];
+                }
+                return unsaved(id);
+            });
+
+            await engine.flush();
+
+            // Until it hears, the other tab draws e1, and an edit of it
+            // there would go out as a plain update onto the tombstone.
+            expect(heardBeforeE2).toEqual(['e1']);
+            await vi.waitFor(() => expect(second.tabStore.getPage(0).size).toBe(0));
+            expect(second.tabStore.get('e1')?.deletedAt).toBe(erasedAt);
+            expect(await db.ops.count()).toBe(0);
+        } finally {
+            second.tab.stop();
+        }
+    });
 
     it('shows what the other tab draws and erases at once, offline included', async () => {
         const first = await openTab(offlineApi());

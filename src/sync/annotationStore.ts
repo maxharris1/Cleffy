@@ -61,7 +61,14 @@ export class AnnotationStore {
      * still holds.
      */
     private unpersisted = new Map<string, number>();
-    /** whenSaved callers, by id, released once `unpersisted` has nothing left for the mark. */
+    /**
+     * Edits of an existing mark that commit() has begun but not yet drawn,
+     * by id: they wait for the day snapshot before they apply (see commit).
+     * The user has already asked for them, so they count as unsaved too
+     * (see hasUnsavedEdit).
+     */
+    private committing = new Map<string, number>();
+    /** whenSaved callers, by id, released once the mark has nothing in `committing` or `unpersisted`. */
     private savedWaiters = new Map<string, Array<() => void>>();
 
     constructor(
@@ -514,16 +521,21 @@ export class AnnotationStore {
     }
 
     /**
-     * A local edit of this mark is drawn but its outbox op is not written
-     * yet: what is queued for the mark is not all the user has done to it.
+     * A local edit of this mark has been made but its outbox op is not
+     * written yet — it is drawn, or still waiting on the day snapshot to be
+     * drawn: what is queued for the mark is not all the user has done to it.
      */
     hasUnsavedEdit(id: string): boolean {
-        return this.unpersisted.has(id);
+        return this.unpersisted.has(id) || this.committing.has(id);
     }
 
-    /** Resolves once every local edit of this mark drawn so far is in the outbox (or failed to get there). */
+    /**
+     * Resolves once every local edit of this mark made so far is in the
+     * outbox, or failed to get there (refused as no longer applying, or its
+     * write threw).
+     */
     whenSaved(id: string): Promise<void> {
-        if (!this.unpersisted.has(id)) {
+        if (!this.hasUnsavedEdit(id)) {
             return Promise.resolve();
         }
         return new Promise((resolve) => {
@@ -775,21 +787,37 @@ export class AnnotationStore {
             return true;
         }
 
-        // Capture today's starting point before the first user edit of the day.
-        if (options.recordUndo) {
-            await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
-        }
-
-        // The snapshot read yields. A peer erase in that window must not still
-        // tombstone (or undo-record) a row that is already gone.
-        if (!this.stillApplies(op)) {
-            return false;
-        }
-
         const { annotation } = op;
 
-        // 1. In-memory map (render source) — synchronous, so the UI never waits on IndexedDB.
-        this.applyLocal(annotation);
+        // From here the edit is unsaved (see hasUnsavedEdit), though it is
+        // not drawn until the snapshot below is checked: a reconcile of this
+        // mark deciding in that yield would otherwise decide without it, and
+        // could drop an Undo this edit builds on (QA C1).
+        this.committing.set(annotation.id, (this.committing.get(annotation.id) ?? 0) + 1);
+        try {
+            // Capture today's starting point before the first user edit of the day.
+            if (options.recordUndo) {
+                await ensureDayStartingSnapshot(this.db, this.docId, this.liveAnnotations());
+            }
+
+            // The snapshot read yields. A peer erase in that window must not still
+            // tombstone (or undo-record) a row that is already gone.
+            if (!this.stillApplies(op)) {
+                return false;
+            }
+
+            // 1. In-memory map (render source) — synchronous, so the UI never waits on IndexedDB.
+            // `unpersisted` holds the edit from here.
+            this.applyLocal(annotation);
+        } finally {
+            const left = (this.committing.get(annotation.id) ?? 1) - 1;
+            if (left > 0) {
+                this.committing.set(annotation.id, left);
+            } else {
+                this.committing.delete(annotation.id);
+            }
+            this.releaseSavedWaiters(annotation.id);
+        }
 
         // 2. Inverse for undo.
         if (options.recordUndo) {
@@ -887,11 +915,19 @@ export class AnnotationStore {
                 this.unpersisted.set(id, left);
             } else {
                 this.unpersisted.delete(id);
-                const waiters = this.savedWaiters.get(id);
-                this.savedWaiters.delete(id);
-                waiters?.forEach((resolve) => resolve());
+                this.releaseSavedWaiters(id);
             }
         }
+    }
+
+    /** Resolve whenSaved for this mark once nothing of it is unsaved. */
+    private releaseSavedWaiters(id: string): void {
+        if (this.hasUnsavedEdit(id)) {
+            return;
+        }
+        const waiters = this.savedWaiters.get(id);
+        this.savedWaiters.delete(id);
+        waiters?.forEach((resolve) => resolve());
     }
 
     private async writeMany(ops: CommitOp[]): Promise<void> {
