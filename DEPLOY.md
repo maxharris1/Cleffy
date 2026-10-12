@@ -1513,6 +1513,38 @@ Fixed after the 2026-10 load test (QA B3/B11):
 Watch Organization → Usage → Realtime messages for the first weeks after
 launch and compare it with the table above.
 
+### Measured on `dev`, 2026-10-12 (a81eaae, the app's own sync code)
+
+N Node clients ran the real `SyncEngine`, `AnnotationStore` and
+`DocRealtimeChannel`; each drew a 1 s stroke every 2 s for 2 minutes. A
+headless Chromium viewer watched the 25-person run. "Billed" counts each send
+plus each delivery, plus the trigger's row broadcast.
+
+|                                    | N=5        | N=10        | N=25                    |
+| ---------------------------------- | ---------- | ----------- | ----------------------- |
+| Billed messages per stroke         | 71         | 99          | 95 (previews throttled) |
+| Messages/s mean / peak             | 175 / 237  | 489 / 698   | 1,084 / 2,612           |
+| Saved stroke reaches others p50/95 | 174/364 ms | 190/411 ms  | 224/755 ms              |
+| Live ink p50 / p95                 | 46 / 61 ms | 49 / 90 ms  | 60 / 262 ms             |
+| "Too many messages" closes         | 0          | 7           | 211 (18 of 25 clients)  |
+| Re-joined / recovery p95           | —          | all / 5.0 s | all / 24.7 s            |
+| Everyone ends with the same marks  | ✅         | ✅          | ❌ before the fix below |
+
+One-to-one measured 29 messages per stroke. Every re-join honoured
+the backoff bounds and the polling fallback kept marks flowing while up to 18
+of 25 clients had `doc-db` down; the viewer stayed responsive (p95 timer lag
+≤ 260 ms). The test used ~225 k messages.
+
+The ❌: a gap-fill pull asked for while another pull was in flight was
+dropped, so rows committed while `doc-db` was down could be skipped for good
+once live rows carried the watermark past them. `SyncEngine.pullSince` now
+runs one more pull after the in-flight one instead (regression test in
+`syncEngine.test.ts`, "while a pull is in flight").
+
+At ~500 msg/s, one 10-person lesson where everyone draws at once already
+reaches Pro's limit; the realistic patterns in the table above fit ~20 such
+lessons at once.
+
 ## Migration history — reconciled 2026-08-27
 
 Production and the `dev` branch were both hard-reset and rebuilt from

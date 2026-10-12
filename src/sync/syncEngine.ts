@@ -503,7 +503,10 @@ export const reconcileWithServer = (ops: PendingOp[], server: AnnotationRow): Re
  */
 export class SyncEngine {
     private flushing = false;
-    private pulling = false;
+    /** The pull in flight, which callers that arrive meanwhile share. */
+    private pulling: Promise<void> | null = null;
+    /** A pull was asked for while one was in flight; run another after it. */
+    private pullAgain = false;
     private stopped = false;
     private backoffMs = INITIAL_BACKOFF_MS;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1489,61 +1492,86 @@ export class SyncEngine {
         }
     }
 
-    async pullSince(): Promise<void> {
-        if (this.pulling || this.stopped) {
-            return;
+    /**
+     * Pull every row past the watermark. A request that arrives while a pull
+     * is in flight is not dropped: that pull's query may already have been
+     * read before the rows the caller is asking about (a doc-db rejoin's gap
+     * fill, say), and once live rows push the watermark past them no later
+     * pull would reach back. So the caller waits for the in-flight pull plus
+     * one more that starts after it.
+     */
+    pullSince(): Promise<void> {
+        if (this.stopped) {
+            return Promise.resolve();
         }
-        this.pulling = true;
-        try {
-            const { db, api, docId } = this.deps;
-            const state = await db.syncState.get(docId);
-            let watermark = state?.watermarkSeq ?? 0;
-            let after = Math.max(0, watermark - PULL_OVERLAP);
-
-            for (;;) {
-                const sentAt = ++this.clock;
-                const { data, error } = await this.withAuth(() => api.fetchSince(docId, after, PULL_PAGE_SIZE));
-                // stop() can land during any await below (the account lost
-                // the score and its local copy is being purged): a pull that
-                // was already in flight must not write rows or a watermark
-                // back afterwards.
-                if (this.stopped) {
-                    return;
-                }
-                if (error) {
-                    this.lastPullError = error;
-                    if (error.kind === 'reject') {
-                        this.setStatus('error');
-                    } else {
-                        this.deferRetry(error);
-                    }
-                    return;
-                }
-                const rows = data ?? [];
-                if (rows.length === 0) {
-                    break;
-                }
-                await this.applyPulled(rows, sentAt);
-                if (this.stopped) {
-                    return;
-                }
-                const last = rows[rows.length - 1];
-                if (last) {
-                    watermark = Math.max(watermark, last.seq);
-                    after = last.seq;
-                }
-                if (rows.length < PULL_PAGE_SIZE) {
-                    break;
-                }
+        if (this.pulling) {
+            this.pullAgain = true;
+            return this.pulling;
+        }
+        const run = async (): Promise<void> => {
+            try {
+                do {
+                    this.pullAgain = false;
+                    await this.pullOnce();
+                    // A failed pass has scheduled its own retry; going
+                    // again now would hit a throttled server early.
+                } while (this.pullAgain && !this.stopped && this.lastPullError === null);
+            } finally {
+                this.pullAgain = false;
+                this.pulling = null;
             }
+        };
+        this.pulling = run();
+        return this.pulling;
+    }
+
+    private async pullOnce(): Promise<void> {
+        const { db, api, docId } = this.deps;
+        const state = await db.syncState.get(docId);
+        let watermark = state?.watermarkSeq ?? 0;
+        let after = Math.max(0, watermark - PULL_OVERLAP);
+
+        for (;;) {
+            const sentAt = ++this.clock;
+            const { data, error } = await this.withAuth(() => api.fetchSince(docId, after, PULL_PAGE_SIZE));
+            // stop() can land during any await below (the account lost
+            // the score and its local copy is being purged): a pull that
+            // was already in flight must not write rows or a watermark
+            // back afterwards.
             if (this.stopped) {
                 return;
             }
-            await db.syncState.put({ docId, watermarkSeq: watermark });
-            this.lastPullError = null;
-        } finally {
-            this.pulling = false;
+            if (error) {
+                this.lastPullError = error;
+                if (error.kind === 'reject') {
+                    this.setStatus('error');
+                } else {
+                    this.deferRetry(error);
+                }
+                return;
+            }
+            const rows = data ?? [];
+            if (rows.length === 0) {
+                break;
+            }
+            await this.applyPulled(rows, sentAt);
+            if (this.stopped) {
+                return;
+            }
+            const last = rows[rows.length - 1];
+            if (last) {
+                watermark = Math.max(watermark, last.seq);
+                after = last.seq;
+            }
+            if (rows.length < PULL_PAGE_SIZE) {
+                break;
+            }
         }
+        if (this.stopped) {
+            return;
+        }
+        await db.syncState.put({ docId, watermarkSeq: watermark });
+        this.lastPullError = null;
     }
 }
 

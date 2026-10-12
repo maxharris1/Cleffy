@@ -942,6 +942,70 @@ describe('SyncEngine.pullSince', () => {
     });
 });
 
+describe('SyncEngine.pullSince while a pull is in flight', () => {
+    it('pulls again for a caller that arrives mid-pull, so a row committed meanwhile is not skipped', async () => {
+        for (let seq = 1; seq <= 10; seq += 1) {
+            api.rows.set(`r${seq}`, serverRow(`r${seq}`, { seq }));
+        }
+        await engine.sync();
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(10);
+
+        // Pull A reads the server before seq 11 commits, then stalls.
+        const realFetch = api.fetchSince.bind(api);
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let calls = 0;
+        api.fetchSince = async (...args: Parameters<FakeApi['fetchSince']>) => {
+            calls += 1;
+            const result = await realFetch(...args);
+            if (calls === 1) {
+                await gate;
+            }
+            return result;
+        };
+        const pullA = engine.pullSince();
+        await vi.waitFor(() => expect(calls).toBe(1));
+
+        // seq 11 commits but its broadcast is lost (doc-db was down); the
+        // rejoin's gap fill asks for a pull while A is still in flight.
+        api.rows.set('r11', serverRow('r11', { seq: 11 }));
+        const pullB = engine.pullSince();
+        release();
+        await Promise.all([pullA, pullB]);
+        expect(store.get('r11')).toBeDefined();
+
+        // Live rows then carry the watermark far past seq 11.
+        api.fetchSince = realFetch;
+        for (let seq = 12; seq <= 80; seq += 1) {
+            await engine.applyServerRow(serverRow(`r${seq}`, { seq }));
+        }
+        await engine.sync();
+        expect(store.get('r11')).toBeDefined();
+        expect((await db.syncState.get(DOC))?.watermarkSeq).toBe(80);
+    });
+
+    it('does not pull again straight away after a failed pass', async () => {
+        let calls = 0;
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        api.fetchSince = async () => {
+            calls += 1;
+            await gate;
+            return { data: null, error: { message: 'too many requests', kind: 'retry' as const } };
+        };
+        const pullA = engine.pullSince();
+        const pullB = engine.pullSince();
+        release();
+        await Promise.all([pullA, pullB]);
+        expect(calls).toBe(1);
+        engine.stop();
+    });
+});
+
 describe('SyncEngine.stop during an in-flight pull', () => {
     it('writes neither rows nor a watermark once stopped', async () => {
         await api.insertIgnoreDuplicates({
