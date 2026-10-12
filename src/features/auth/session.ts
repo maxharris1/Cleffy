@@ -15,6 +15,29 @@ export interface SessionState {
 const authCallbackUrl = (): string => `${window.location.origin}/auth/callback`;
 
 /**
+ * A Turnstile token for GoTrue, or nothing at all.
+ *
+ * Every auth call below takes one, because GoTrue's captcha is a PROJECT-WIDE
+ * setting: the moment `[auth.captcha]` is enabled, /signup, /token (the
+ * password grant), /recover, /resend AND /signup?anonymous all demand a token,
+ * not just the endpoint somebody had in mind when they switched it on. A form
+ * that did not send one would simply stop working, and the failure would read
+ * as a server error rather than a missing check.
+ *
+ * `options` is omitted entirely when there is no token, so a build without
+ * `VITE_TURNSTILE_SITE_KEY` sends byte-for-byte the request it sent before —
+ * no `captchaToken: undefined` on the wire, and nothing for a project with
+ * captcha disabled to object to. That is the whole inertness story on this
+ * side; the widget's half is in `turnstile.ts`.
+ *
+ * The token is NOT verified here and cannot be: that is Cloudflare's judgement,
+ * reached by GoTrue with the secret key, server-side. All the browser does is
+ * carry it.
+ */
+const captchaOptions = (captchaToken?: string | null): { captchaToken: string } | Record<string, never> =>
+    captchaToken ? { captchaToken } : {};
+
+/**
  * Last session observed in this tab. `undefined` means nothing has resolved yet
  * (cold start); `null` means we know the user is signed out. Remounts of
  * useSession / auth gates read this synchronously so SPA navigations do not
@@ -82,15 +105,25 @@ export const userTypeOf = (session: Session | null): 'student' | null => {
     return meta?.['user_type'] === 'student' ? 'student' : null;
 };
 
-/** Email/password registration. */
+/**
+ * Email/password registration.
+ *
+ * `captchaToken` is how sign-up gets a server-side-verified captcha without
+ * being rebuilt behind an Edge Function: GoTrue checks the token against
+ * Cloudflare with the secret key before it creates anything, so the
+ * verification is no more skippable than it would be in a function of our own —
+ * and GoTrue keeps ownership of the confirmation email, which is the thing a
+ * hand-rolled sign-up would have had to replace.
+ */
 export const signUpWithPassword = async (
     email: string,
     password: string,
+    captchaToken?: string | null,
 ): Promise<{ needsEmailConfirmation: boolean }> => {
     const { data, error } = await getSupabase().auth.signUp({
         email,
         password,
-        options: { emailRedirectTo: authCallbackUrl() },
+        options: { emailRedirectTo: authCallbackUrl(), ...captchaOptions(captchaToken) },
     });
     if (error) {
         throw error;
@@ -99,18 +132,54 @@ export const signUpWithPassword = async (
     return { needsEmailConfirmation: !data.session };
 };
 
+/**
+ * Send the sign-up confirmation email again, to an address that has just been
+ * signed up from this page.
+ *
+ * It exists because the link is short-lived — production's `mailer_otp_exp` is
+ * one hour — and without a resend the only route back from an expired link was
+ * signing up again, which answers `user_already_exists`, which sends the user
+ * to sign in, which fails with "email not confirmed": a loop with no exit.
+ *
+ * Says nothing about the address either way. GoTrue's /resend answers an
+ * address with no pending confirmation differently from one that has one, so
+ * the caller must report the same thing whatever comes back, exactly as the
+ * forgot-password form does — see `confirmationResendProblem` in authErrors.ts,
+ * which draws the line between the failures that are safe to name and the ones
+ * that would turn this button into a way to test which addresses have accounts.
+ */
+export const resendSignUpConfirmation = async (email: string, captchaToken?: string | null): Promise<void> => {
+    const { error } = await getSupabase().auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: authCallbackUrl(), ...captchaOptions(captchaToken) },
+    });
+    if (error) {
+        throw error;
+    }
+};
+
 /** Email/password sign-in. */
-export const signInWithPassword = async (email: string, password: string): Promise<void> => {
-    const { error } = await getSupabase().auth.signInWithPassword({ email, password });
+export const signInWithPassword = async (
+    email: string,
+    password: string,
+    captchaToken?: string | null,
+): Promise<void> => {
+    const { error } = await getSupabase().auth.signInWithPassword({
+        email,
+        password,
+        ...(captchaToken ? { options: captchaOptions(captchaToken) } : {}),
+    });
     if (error) {
         throw error;
     }
 };
 
 /** Send password-reset email (link lands on /update-password with recovery session). */
-export const requestPasswordReset = async (email: string): Promise<void> => {
+export const requestPasswordReset = async (email: string, captchaToken?: string | null): Promise<void> => {
     const { error } = await getSupabase().auth.resetPasswordForEmail(email, {
         redirectTo: `${window.location.origin}/update-password`,
+        ...captchaOptions(captchaToken),
     });
     if (error) {
         throw error;
@@ -125,10 +194,19 @@ export const updatePassword = async (password: string): Promise<void> => {
     }
 };
 
-/** Student join flow: anonymous session carrying a display name for presence. */
-export const signInAnonymouslyWithName = async (displayName: string): Promise<void> => {
+/**
+ * Student join flow: anonymous session carrying a display name for presence.
+ *
+ * Takes a token like the rest: an anonymous sign-in is a POST to the same
+ * captcha-protected signup endpoint, so enabling GoTrue's captcha makes the
+ * share-link join page need one too — the one flow where an unsolved challenge
+ * would stop a child getting into the score their teacher just shared.
+ */
+export const signInAnonymouslyWithName = async (displayName: string, captchaToken?: string | null): Promise<void> => {
     const supabase = getSupabase();
-    const { error } = await supabase.auth.signInAnonymously({ options: { data: { display_name: displayName } } });
+    const { error } = await supabase.auth.signInAnonymously({
+        options: { data: { display_name: displayName }, ...captchaOptions(captchaToken) },
+    });
     if (error) {
         throw error;
     }
@@ -242,7 +320,23 @@ export const signOut = async (): Promise<void> => {
     stopSnapshotWrites();
     // Nor may a background outbox drain write a synced row back after it.
     stopAllBackgroundDrains();
-    await getSupabase().auth.signOut();
+    // Local scope: THIS device signs out, and the account's sessions elsewhere
+    // are left alone.
+    //
+    // supabase-js defaults to `global`, which revokes every refresh token the
+    // user has — so a teacher signing out of the studio iPad at the end of a
+    // lesson was also signing out their laptop and their phone, with nothing
+    // in the UI that asked for that or said it had happened. There is no "sign
+    // out everywhere" affordance anywhere in the app, so the global behaviour
+    // was reachable only by accident, and the only thing it protected against
+    // (a session you no longer trust on a device you no longer have) is better
+    // served by an explicit control than by every ordinary sign-out.
+    //
+    // This also makes the two sign-out paths agree: signOutEndedSignIn() has
+    // always passed `{ scope: 'local' }`, and what the privacy policy says
+    // happens on sign-out ("removes from that device…", legalContent.ts
+    // §device-storage) is now what the code does.
+    await getSupabase().auth.signOut({ scope: 'local' });
     noteLibraryMutation();
     rememberSession(null);
     await clearAccountCachesFromDevice();

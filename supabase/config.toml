@@ -171,11 +171,31 @@ site_url = "http://localhost:5173"
 # their password — GoTrue enforces this list against the redirectTo that
 # student-provision passes through, so an origin missing here is an invite that
 # cannot be completed.
+#
+# The two entries the app's own auth mail needs, and what their absence costs:
+# GoTrue checks the `redirect_to` on a link against this list and, when it finds
+# no match, QUIETLY FALLS BACK TO site_url rather than refusing — so a missing
+# entry is not an error anybody sees, it is a confirmation link that opens the
+# wrong page.
+#  * /auth/callback — authCallbackUrl() in src/features/auth/session.ts, where
+#    a sign-up confirmation lands. Without it the link drops the user on the
+#    home page with the tokens still in the fragment and nothing to read them
+#    (AuthCallbackPage is the only route that does).
+#  * /update-password — requestPasswordReset() in the same file, where a reset
+#    link lands. Without it the recovery session arrives on a page with no
+#    new-password form, and the reset cannot be completed at all.
+# Production needs neither line: its list carries `https://cleffy.io/**`, whose
+# wildcard already covers both. This file does not configure production — see
+# the [remotes.dev] note at the foot of the file.
 additional_redirect_urls = [
   "http://localhost:5173",
   "http://localhost:4173",
   "http://localhost:5173/student/welcome",
   "http://localhost:4173/student/welcome",
+  "http://localhost:5173/auth/callback",
+  "http://localhost:4173/auth/callback",
+  "http://localhost:5173/update-password",
+  "http://localhost:4173/update-password",
 ]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
@@ -236,10 +256,42 @@ token_verifications = 30
 web3 = 30
 
 # Configure one of the supported captcha providers: `hcaptcha`, `turnstile`.
+#
+# DELIBERATELY LEFT OFF, here and for [remotes.dev]. The block below is the
+# exact shape to enable, and enabling it is a decision with a blast radius
+# worth stating, because the setting is PROJECT-WIDE: GoTrue applies it to
+# every endpoint that can create or authenticate a user, not to the one someone
+# had in mind. Turning it on makes all of these demand a token at once:
+#
+#  * /signup and /recover — RegisterPage and ForgotPasswordPage, which send one
+#    (src/features/auth/AuthCredentialsForm.tsx, when VITE_TURNSTILE_SITE_KEY
+#    is set). So the SITE KEY MUST BE IN THE DEPLOYED BUILD FIRST, or sign-up
+#    and password reset begin refusing everybody the moment this flips.
+#  * /token, the password grant — which our own Edge Functions call
+#    SERVER-SIDE, with no browser in the loop to solve a challenge:
+#    student-login/index.ts and student-claim/index.ts. Both now forward an
+#    optional caller-supplied `captchaToken`, so they survive this being on —
+#    but only if the student forms start sending one, which is a captcha in
+#    front of a sign-in box aimed at children and is a product decision, not a
+#    deploy step.
+#  * /signup with anonymous: true — the share-link join page
+#    (src/features/share/JoinPage.tsx), which also sends one when the site key
+#    is set.
+#
+# Left off for the LOCAL stack specifically so `npm run local:up` needs no
+# Cloudflare account and the student-login / student-claim tests that drive the
+# real password grant keep passing. For the hosted projects it is off because
+# flipping it is a hosted-config change, and therefore Max's call; what this
+# branch ships is the code that works once he makes it.
+#
+# Use provider = "turnstile" with Cloudflare's test secret locally
+# (1x0000000000000000000000000000000AA always passes,
+# 2x0000000000000000000000000000000AA always fails) — a real secret is paired
+# with a site key bound to real hostnames and cannot be solved from localhost.
 # [auth.captcha]
 # enabled = true
-# provider = "hcaptcha"
-# secret = ""
+# provider = "turnstile"
+# secret = "env(TURNSTILE_SECRET_KEY)"
 
 [auth.email]
 # Allow/disallow new user signups via email to your project.
@@ -538,9 +590,17 @@ project_id = "qdbnlrgylelelvwbkvnm"
 
 [remotes.dev.auth]
 site_url = "https://dev.cleffy.io"
+# The branch project's list has no wildcard (production's does — see the base
+# [auth] note), so every page an auth link may land on has to be spelled out.
+# /auth/callback and /update-password were missing, which is why a sign-up
+# confirmation or a reset link on dev lands on the dev home page instead of the
+# page that can finish it: GoTrue falls back to site_url on a redirect_to it
+# cannot match, silently.
 additional_redirect_urls = [
   "https://dev.cleffy.io",
   "https://dev.cleffy.io/student/welcome",
+  "https://dev.cleffy.io/auth/callback",
+  "https://dev.cleffy.io/update-password",
   "http://localhost:5173",
 ]
 

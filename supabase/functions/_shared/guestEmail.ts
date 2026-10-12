@@ -5,13 +5,17 @@ import type * as PasswordPolicy from './passwordPolicy.ts';
  * anonymous account — proven by a one-time code sent to that address.
  *
  * Why this exists: the upgrade banner used to call
- * `supabase.auth.updateUser({ email })` from the browser. Both projects run
+ * `supabase.auth.updateUser({ email })` from the browser. Both projects ran
  * with `mailer_autoconfirm` on, which confirms an email CHANGE as instantly as
  * a sign-up, so a guest could claim any address with no mail sent: the real
  * owner then hit "an account with this email already exists", and a password
  * reset to the address would hand the guest's account to its mailbox. The
  * address must be proven before it is attached, whatever the auth settings
- * say — so the browser no longer attaches anything. guest-email-start mails a
+ * say — which is the point, and why production turning sign-up confirmation on
+ * (`mailer_autoconfirm = false`, October 2026) changes nothing here: this flow
+ * never depended on the setting being one way, and a project where an admin
+ * flips it back must not become a flow that hands out somebody's address.
+ * So the browser no longer attaches anything. guest-email-start mails a
  * code; guest-email-confirm checks it and only then sets the email (marked
  * confirmed: it now is) and the password through the admin API, which also
  * turns the anonymous user into a registered one with the same id, so every
@@ -48,17 +52,6 @@ export const GUEST_EMAIL_LIMITS = {
      */
     startPerRecipient: { limit: 3, windowMs: 60 * 60_000 },
     startPerRecipientDaily: { limit: 10, windowMs: 24 * 60 * 60_000 },
-    /**
-     * Every code mailed, from every guest, to every address. The limits above
-     * all move with something an attacker rotates for free (an IP, an
-     * anonymous sign-in, an address), and these mails share the Resend key,
-     * quota and domain reputation with password resets and sign-ups. Sized
-     * far above what real upgrades need; reserved just before a send and
-     * refunded when nothing went out, so a mail outage (or a deploy with no
-     * mail key) cannot use it up.
-     */
-    startGlobal: { limit: 60, windowMs: 60 * 60_000 },
-    startGlobalDaily: { limit: 300, windowMs: 24 * 60 * 60_000 },
     confirmPerIp: { limit: 30, windowMs: 15 * 60_000 },
     confirmPerUser: { limit: 10, windowMs: 15 * 60_000 },
 } as const;
@@ -188,6 +181,43 @@ export const GUEST_EMAIL_ERRORS = {
     codeExpired: { error: 'That code has expired. Send a new one.', code: 'code_expired' },
     codeLocked: { error: 'Too many wrong codes. Send a new one.', code: 'code_locked' },
     attachFailed: { error: 'We couldn’t save your email. Try again.', code: 'attach_failed' },
+    /**
+     * The three Turnstile refusals. Their codes are restated from
+     * `_shared/turnstile.ts` rather than imported — this file takes no runtime
+     * imports — and `tests/security/turnstile.test.ts` holds the two lists
+     * equal, so a code renamed there cannot drift away from the copy here.
+     *
+     * Worth the three separate sentences: "solve it again" and "this is our
+     * problem, wait a moment" are different instructions, and a guest told the
+     * wrong one either retries a challenge that cannot pass or gives up on one
+     * that would.
+     */
+    captchaMissing: { error: 'Finish the “I’m human” check, then try again.', code: 'captcha_missing' },
+    captchaFailed: { error: 'That “I’m human” check didn’t go through. Try it again.', code: 'captcha_failed' },
+    captchaUnavailable: {
+        error: 'We can’t run the “I’m human” check right now. Try again in a moment.',
+        code: 'captcha_unavailable',
+    },
+} as const;
+
+/**
+ * The Turnstile verdict for a request, as `_shared/turnstile.ts` reports it.
+ *
+ * Declared structurally here instead of imported, for the no-runtime-imports
+ * reason above; `verifyTurnstileRequest`'s real return type is assignable to
+ * it. Note the shape: a refusal is the ONLY `ok: false`, so the gate below is a
+ * single guard, and `verified: false` with `ok: true` can mean one thing only —
+ * no `TURNSTILE_SECRET_KEY` on this deploy, nothing was checked, carry on
+ * exactly as before Turnstile existed.
+ */
+export type CaptchaVerdict =
+    | { ok: true; verified: boolean }
+    | { ok: false; code: 'captcha_missing' | 'captcha_failed' | 'captcha_unavailable'; status: number };
+
+const CAPTCHA_REFUSALS = {
+    captcha_missing: GUEST_EMAIL_ERRORS.captchaMissing,
+    captcha_failed: GUEST_EMAIL_ERRORS.captchaFailed,
+    captcha_unavailable: GUEST_EMAIL_ERRORS.captchaUnavailable,
 } as const;
 
 type Gate = { ok: true } | { ok: false; retryAfterSec: number };
@@ -212,6 +242,24 @@ interface CommonDeps {
 }
 
 export interface GuestEmailStartDeps extends CommonDeps {
+    /**
+     * Verify the request's Turnstile token (`captchaToken` in the body) —
+     * `verifyTurnstileRequest` from `_shared/turnstileVerify.ts`. A deploy with
+     * no `TURNSTILE_SECRET_KEY` admits, so this is inert until the keys are
+     * set. Required rather than optional deliberately: a gate that can be
+     * forgotten at the wiring is a gate that will be.
+     */
+    verifyCaptcha: (req: Request, body: Record<string, unknown> | null) => Promise<CaptchaVerdict>;
+    /**
+     * What this sender may spend of the project's mail budget, per window —
+     * `mailLimit('guestEmailCode', …)` from `_shared/mailBudget.ts`, which is
+     * where the numbers and the reserve held back for password resets and
+     * sign-up confirmations are declared and justified. It arrives through
+     * `deps` because that module cannot be imported from here (no runtime
+     * imports), and because the limit is a property of the project's mail
+     * quota rather than of this flow.
+     */
+    mailBudget: { hour: { limit: number; windowMs: number }; day: { limit: number; windowMs: number } };
     /** Whether any account uses the address (guest_email_taken); null when that could not be answered. */
     emailTaken: (email: string) => Promise<boolean | null>;
     /** Store (replacing any earlier) pending code for the guest; false on failure. */
@@ -295,7 +343,8 @@ const readBody = async (req: Request): Promise<Record<string, unknown> | null> =
  * Refuses an address that already has an account with `email_in_use` — the
  * guest should sign in to it, and the code could never attach anyway. That
  * says no more than sign-up already says about an address, and it is limited
- * per guest, per address and per IP like everything else here.
+ * per guest, per address and per IP like everything else here — and now sits
+ * behind the Turnstile gate as well, so it is not an oracle a script can read.
  */
 export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartDeps): Promise<Response> => {
     const { json } = deps;
@@ -318,6 +367,28 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
     const email = normalizeGuestEmail(typeof body?.['email'] === 'string' ? body['email'] : '');
     if (!isPlausibleGuestEmail(email)) {
         return json(GUEST_EMAIL_ERRORS.invalidEmail, 422);
+    }
+
+    // The Turnstile gate, and this is the place for it.
+    //
+    // AFTER the per-IP and per-guest limits above, so a flood is already
+    // costing the attacker a counted slot before it costs Cloudflare a
+    // verification — a gate placed ahead of them would turn every request into
+    // an outbound siteverify call we pay for, which is a cheaper thing to
+    // flood than the thing we are protecting. After the address-shape check
+    // too, since that is a pure local test the browser can run itself and
+    // reveals nothing: spending a verification on a malformed address is
+    // waste.
+    //
+    // And BEFORE everything that follows, which is the part that matters:
+    // `emailTaken` is the one oracle this endpoint has ("does this address
+    // have an account?"), and the save and the send are the two things that
+    // cost us. Nothing past this line runs for a caller who cannot produce a
+    // token, which is what makes this the gate on the abuse path rather than a
+    // decoration in front of it.
+    const captcha = await deps.verifyCaptcha(req, body);
+    if (!captcha.ok) {
+        return json(CAPTCHA_REFUSALS[captcha.code], captcha.status);
     }
 
     const secret = deps.secret();
@@ -359,12 +430,19 @@ export const handleGuestEmailStart = async (req: Request, deps: GuestEmailStartD
         reserved.push(key);
     }
 
-    // And the project's: past it, nobody's code goes out until the window
-    // moves on. Said as the mail being unavailable — it is not this guest's
-    // doing, and trying again sooner cannot help.
+    // And the project's share of the mail budget: past it, nobody's code goes
+    // out until the window moves on. Said as the mail being unavailable — it
+    // is not this guest's doing, and trying again sooner cannot help.
+    //
+    // These two ceilings are no longer this flow's to choose. They come from
+    // `_shared/mailBudget.ts` through `deps.mailBudget`, which declares what
+    // the whole project may send and holds a reserve back for password resets
+    // and sign-up confirmations — mail someone is locked out without. Every
+    // other limit in this file protects a person (a mailbox, a guest, an IP);
+    // this one protects the mail that is not ours to spend.
     for (const [key, { limit, windowMs }] of [
-        ['guest-email-start:global', GUEST_EMAIL_LIMITS.startGlobal],
-        ['guest-email-start:global-day', GUEST_EMAIL_LIMITS.startGlobalDaily],
+        ['guest-email-start:global', deps.mailBudget.hour],
+        ['guest-email-start:global-day', deps.mailBudget.day],
     ] as const) {
         const globalGate = await deps.checkRateLimit(key, limit, windowMs);
         if (!globalGate.ok) {

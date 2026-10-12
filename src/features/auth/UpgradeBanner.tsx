@@ -3,6 +3,8 @@ import { Link } from 'react-router';
 
 import { passwordProblem, passwordProblemMessage } from '../../../supabase/functions/_shared/passwordPolicy';
 import { confirmGuestEmailUpgrade, GuestUpgradeError, startGuestEmailUpgrade } from '@/features/auth/guestUpgrade';
+import { TurnstileField } from '@/features/auth/TurnstileField';
+import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { CloseIcon } from '@/ui/icons';
 
 type BannerState = 'collapsed' | 'details' | 'code' | 'done' | 'signInNeeded' | 'dismissed';
@@ -39,10 +41,41 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
     const [code, setCode] = useState('');
     const [error, setError] = useState<{ message: string; signIn: boolean } | null>(null);
     const [busy, setBusy] = useState(false);
+    /**
+     * A Turnstile token for whichever step this banner is on, and a round that
+     * forces a fresh challenge.
+     *
+     * Both steps need one, for different servers: "email me a code" is
+     * verified by guest-email-start itself (it is our own send path, the one
+     * abuse path that is entirely ours), and "save my work" ends in GoTrue's
+     * password grant, which the project-wide captcha setting covers. A token
+     * is single-use, so the round is bumped on every step change and every
+     * failure rather than the spent one being replayed.
+     *
+     * Null, and no widget at all, on a build without `VITE_TURNSTILE_SITE_KEY`
+     * — which is every build today, so this banner is unchanged until the keys
+     * are set.
+     */
+    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+    const [captchaRound, setCaptchaRound] = useState(0);
+    const captchaRequired = isTurnstileEnabled();
 
     if (state === 'dismissed' || (!isGuest && state !== 'done' && state !== 'signInNeeded')) {
         return null;
     }
+
+    /** Move to another step with a clean slate: no spent token, a new challenge. */
+    const goTo = (next: BannerState) => {
+        setError(null);
+        setCaptchaToken(null);
+        setCaptchaRound((round) => round + 1);
+        setState(next);
+    };
+
+    const freshChallenge = () => {
+        setCaptchaToken(null);
+        setCaptchaRound((round) => round + 1);
+    };
 
     const run = async (action: () => Promise<void>) => {
         setBusy(true);
@@ -54,10 +87,17 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                 message: err instanceof Error ? err.message : 'Something went wrong. Try again.',
                 signIn: err instanceof GuestUpgradeError && err.code === 'email_in_use',
             });
+            if (captchaRequired) {
+                freshChallenge();
+            }
         } finally {
             setBusy(false);
         }
     };
+
+    const captchaField = captchaRequired ? (
+        <TurnstileField key={captchaRound} action="guest-email" onToken={setCaptchaToken} className="basis-full" />
+    ) : null;
 
     const sendCode = () => {
         if (!isPlausibleEmail(email)) {
@@ -69,10 +109,16 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
             setError({ message: passwordProblemMessage(problem), signIn: false });
             return;
         }
+        if (captchaRequired && !captchaToken) {
+            setError({ message: 'Finish the “I’m human” check, then try again.', signIn: false });
+            return;
+        }
         void run(async () => {
-            await startGuestEmailUpgrade(email);
+            await startGuestEmailUpgrade(email, captchaToken);
             setCode('');
-            setState('code');
+            // A new challenge for the sign-in the next step ends in: the token
+            // just spent on the code request cannot be redeemed twice.
+            goTo('code');
         });
     };
 
@@ -81,8 +127,12 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
             setError({ message: 'Enter the 6-digit code from the email.', signIn: false });
             return;
         }
+        if (captchaRequired && !captchaToken) {
+            setError({ message: 'Finish the “I’m human” check, then try again.', signIn: false });
+            return;
+        }
         void run(async () => {
-            const outcome = await confirmGuestEmailUpgrade({ email, code, password });
+            const outcome = await confirmGuestEmailUpgrade({ email, code, password, captchaToken });
             setPassword('');
             setState(outcome === 'signed_in' ? 'done' : 'signInNeeded');
         });
@@ -156,6 +206,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                         onChange={(e) => setCode(e.target.value)}
                         className={`${INPUT_CLASS} max-w-32 tracking-widest`}
                     />
+                    {captchaField}
                     <button type="submit" disabled={busy} className={PRIMARY_CLASS}>
                         {busy ? 'Saving…' : 'Save my work'}
                     </button>
@@ -165,10 +216,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                     <button
                         type="button"
                         disabled={busy}
-                        onClick={() => {
-                            setError(null);
-                            setState('details');
-                        }}
+                        onClick={() => goTo('details')}
                         className={LINK_BUTTON_CLASS}
                     >
                         Change email
@@ -202,17 +250,11 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                         onChange={(e) => setPassword(e.target.value)}
                         className={INPUT_CLASS}
                     />
+                    {captchaField}
                     <button type="submit" disabled={busy} className={PRIMARY_CLASS}>
                         {busy ? 'Sending…' : 'Email me a code'}
                     </button>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setError(null);
-                            setState('collapsed');
-                        }}
-                        className={LINK_BUTTON_CLASS}
-                    >
+                    <button type="button" onClick={() => goTo('collapsed')} className={LINK_BUTTON_CLASS}>
                         Cancel
                     </button>
                     {errorLine}
@@ -221,7 +263,7 @@ export const UpgradeBanner = ({ isGuest }: { isGuest: boolean }) => {
                 <div className="flex items-center justify-between gap-2">
                     <p>
                         You&apos;re annotating as a guest — this work lives only in this browser.{' '}
-                        <button type="button" onClick={() => setState('details')} className="font-medium underline">
+                        <button type="button" onClick={() => goTo('details')} className="font-medium underline">
                             Add your email to keep it
                         </button>
                     </p>

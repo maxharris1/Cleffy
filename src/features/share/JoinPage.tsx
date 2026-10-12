@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router';
 
 import { forgetLocalSession, requestAccountDeletion } from '@/features/account/accountDeletion';
 import { isRegisteredSession, signInAnonymouslyWithName, useSession } from '@/features/auth/session';
+import { TurnstileField } from '@/features/auth/TurnstileField';
+import { isTurnstileEnabled } from '@/features/auth/turnstile';
 import { AgreementNote } from '@/features/legal/AgreementNote';
 import { peekShareLink, redeemShareLink } from '@/features/share/shareService';
 import { BrandShell } from '@/ui/BrandShell';
@@ -40,6 +42,21 @@ export const JoinPage = () => {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [linkCheck, setLinkCheck] = useState<LinkCheck>('checking');
+    /**
+     * The Turnstile token for the anonymous sign-in below, or null on a build
+     * with no site key — which is every build today, and why this page is
+     * unchanged until Max sets one.
+     *
+     * The widget is here because an anonymous sign-in is a POST to the SAME
+     * captcha-protected GoTrue signup endpoint as a real sign-up: switching
+     * `[auth.captcha]` on without this would make every share link refuse at
+     * the name prompt. It is also the right place on its own merits — this is
+     * the only page in the app that creates an auth user for a visitor with no
+     * account, which makes it the cheapest user-creation endpoint we have.
+     */
+    const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+    const [captchaRound, setCaptchaRound] = useState(0);
+    const captchaRequired = isTurnstileEnabled();
     /** True once a deleted guest's session is still in memory: leave by a full page load. */
     const [guestDiscarded, setGuestDiscarded] = useState(false);
     const redeemedRef = useRef(false);
@@ -101,6 +118,10 @@ export const JoinPage = () => {
         if (!token || submitting) {
             return;
         }
+        if (captchaRequired && !captchaToken) {
+            setError('Finish the “I’m human” check, then join.');
+            return;
+        }
         setError(null);
         setSubmitting(true);
         // Again, right before the account is made: the link may have been
@@ -112,11 +133,17 @@ export const JoinPage = () => {
             return;
         }
         try {
-            await signInAnonymouslyWithName(trimmed);
+            await signInAnonymouslyWithName(trimmed, captchaToken);
             createdGuestRef.current = true;
         } catch (err) {
             setSubmitting(false);
             setError(err instanceof Error ? err.message : 'Could not join.');
+            if (captchaRequired) {
+                // The token is spent whatever GoTrue made of the rest of the
+                // request: a retry needs a new challenge, not the old proof.
+                setCaptchaToken(null);
+                setCaptchaRound((round) => round + 1);
+            }
         }
     };
 
@@ -168,6 +195,7 @@ export const JoinPage = () => {
                         }}
                         placeholder="e.g. Sharon"
                     />
+                    <TurnstileField key={captchaRound} action="share-link-join" onToken={setCaptchaToken} />
                     <Button onClick={() => void joinAsGuest()} className="mt-4 w-full">
                         Join
                     </Button>

@@ -101,8 +101,24 @@ export interface StudentLoginBackend {
     findClaimedStudent: (username: string) => Promise<ClaimedStudent | null>;
     /** The auth user a roster row points at; null if it cannot be read. */
     readAuthUser: (userId: string) => Promise<StudentAuthUser | null>;
-    /** A password sign-in on a fresh anon client; null when GoTrue refuses. */
-    signIn: (email: string, password: string) => Promise<StudentSession | null>;
+    /**
+     * A password sign-in on a fresh anon client; null when GoTrue refuses.
+     *
+     * `captchaToken` is forwarded to GoTrue untouched, and is the reason this
+     * signature has a third argument at all. GoTrue's captcha
+     * (`[auth.captcha]`) is PROJECT-WIDE: switching it on makes the
+     * password-grant endpoint demand a token from every caller, this function
+     * included — and this function is server-side, with no browser to put a
+     * challenge in front of. So the token has to come from whoever called us,
+     * and the alternative to accepting one is that enabling captcha anywhere
+     * silently breaks every student sign-in.
+     *
+     * Nothing here validates it: it is Cloudflare's to judge via GoTrue, and a
+     * wrong one is just a refused sign-in, which is already this endpoint's
+     * one answer. Forwarding it grants a caller nothing they did not already
+     * have — a token they solved themselves.
+     */
+    signIn: (email: string, password: string, captchaToken: string | null) => Promise<StudentSession | null>;
     /**
      * Whether `password` is the password of the ARCHIVED, claimed roster row
      * with this username (archived_student_password_matches). False for no
@@ -159,7 +175,7 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
         return json({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { username?: unknown; password?: unknown };
+    let body: { username?: unknown; password?: unknown; captchaToken?: unknown };
     try {
         body = await req.json();
     } catch {
@@ -187,6 +203,13 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
     if (!password) {
         return await reject();
     }
+
+    // Optional, and only ever handed on to GoTrue (see backend.signIn). It is
+    // absent today — no student form sends one, and nothing here requires one.
+    // A missing token is NOT a rejection: making it one would break every
+    // student sign-in the moment somebody enabled the project-wide captcha,
+    // which is the exact outage this argument exists to avoid.
+    const captchaToken = typeof body.captchaToken === 'string' && body.captchaToken ? body.captchaToken : null;
 
     const backend = deps.backend();
     if (!backend) {
@@ -247,7 +270,7 @@ export const handleStudentLogin = async (req: Request, deps: StudentLoginDeps): 
         return await reject();
     }
 
-    const session = await backend.signIn(authUser.email, password);
+    const session = await backend.signIn(authUser.email, password, captchaToken);
     if (!session) {
         return await reject();
     }

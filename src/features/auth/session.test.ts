@@ -3,13 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as SignOutSyncModule from '@/sync/signOutSync';
 import { getDb } from '@/sync/db';
 
-const signOutAuth = vi.fn(async () => ({ error: null }));
+const signOutAuth = vi.fn(async (_options?: { scope?: string }) => ({ error: null }));
 const getSession = vi.fn(async () => ({ data: { session: null as null | { user: { id: string } } } }));
 
 vi.mock('@/lib/supabase', () => ({
     getSupabase: () => ({
         auth: {
-            signOut: () => signOutAuth(),
+            signOut: (options?: { scope?: string }) => signOutAuth(options),
             getSession: () => getSession(),
         },
     }),
@@ -111,6 +111,18 @@ describe('signOut', () => {
             db.annotationSnapshots.clear(),
             db.entitlements.clear(),
         ]);
+    });
+
+    it('signs out THIS device only, leaving the account signed in elsewhere', async () => {
+        await signOut();
+
+        // supabase-js defaults to `scope: 'global'`, which revokes every
+        // refresh token the account has — so without this argument, signing
+        // out of the studio iPad also signed out the teacher's laptop and
+        // phone, with nothing in the UI that asked for it or said it had
+        // happened. There is no "sign out everywhere" control in the app, so
+        // the global behaviour was only ever reachable by accident.
+        expect(signOutAuth).toHaveBeenCalledWith({ scope: 'local' });
     });
 
     it('empties pdfCache and thumbnails', async () => {

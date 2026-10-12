@@ -67,7 +67,11 @@ describe('Auth pages', () => {
         await user.type(screen.getByLabelText('Email'), 'teacher@cleffy.local');
         await user.type(screen.getByLabelText('Password'), 'cleffy-local-test');
         await user.click(screen.getByRole('button', { name: 'Log in' }));
-        expect(signInWithPassword).toHaveBeenCalledWith('teacher@cleffy.local', 'cleffy-local-test');
+        // The trailing null is the inertness guarantee: with no
+        // VITE_TURNSTILE_SITE_KEY in the build, the form renders no widget and
+        // sends no captcha token, so session.ts omits `options` entirely and
+        // the request on the wire is the one it has always been.
+        expect(signInWithPassword).toHaveBeenCalledWith('teacher@cleffy.local', 'cleffy-local-test', null);
         expect(await screen.findByText('library')).toBeInTheDocument();
     });
 
@@ -149,7 +153,7 @@ describe('Auth pages', () => {
         await user.type(screen.getByLabelText('Confirm password'), 'letters4ever');
         signUpWithPassword.mockResolvedValue({ needsEmailConfirmation: false });
         await user.click(screen.getByRole('button', { name: 'Create account' }));
-        expect(signUpWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'letters4ever');
+        expect(signUpWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'letters4ever', null);
     });
 
     it('never applies the new-password policy at sign-in, so older short passwords still log in', async () => {
@@ -167,7 +171,7 @@ describe('Auth pages', () => {
         await user.type(screen.getByLabelText('Email'), 'teacher@example.com');
         await user.type(screen.getByLabelText('Password'), 'abcdef');
         await user.click(screen.getByRole('button', { name: 'Log in' }));
-        expect(signInWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'abcdef');
+        expect(signInWithPassword).toHaveBeenCalledExactlyOnceWith('teacher@example.com', 'abcdef', null);
     });
 });
 
@@ -191,7 +195,7 @@ describe('ForgotPasswordPage', () => {
         requestPasswordReset.mockResolvedValue(undefined);
         await submit();
         expect(await screen.findByText(NEUTRAL)).toBeInTheDocument();
-        expect(requestPasswordReset).toHaveBeenCalledWith('ana@x.test');
+        expect(requestPasswordReset).toHaveBeenCalledWith('ana@x.test', null);
     });
 
     it('answers an error only an existing account can cause exactly like a success', async () => {

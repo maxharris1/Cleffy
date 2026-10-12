@@ -57,11 +57,21 @@ const backend = (): StudentLoginBackend | null => {
         // A FRESH anon-key client, deliberately carrying no Authorization header:
         // nothing the caller sent travels with this sign-in, and the session it
         // produces is handed to the client rather than kept in the isolate.
-        signIn: async (email, password) => {
+        // `captchaToken` is passed straight through when the caller sent one,
+        // and omitted otherwise: GoTrue's captcha is project-wide, so once it
+        // is on the password grant demands a token from this server-side call
+        // too (handler.ts's note on signIn says why that is the caller's to
+        // supply). `options` is left off entirely without one, so nothing
+        // about the request changes on a project with captcha disabled.
+        signIn: async (email, password, captchaToken) => {
             const anonClient = createClient(supabaseUrl, anonKey, {
                 auth: { persistSession: false, autoRefreshToken: false },
             });
-            const { data, error } = await anonClient.auth.signInWithPassword({ email, password });
+            const { data, error } = await anonClient.auth.signInWithPassword({
+                email,
+                password,
+                ...(captchaToken ? { options: { captchaToken } } : {}),
+            });
             if (error || !data.session) {
                 return null;
             }

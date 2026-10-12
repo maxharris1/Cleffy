@@ -74,7 +74,7 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: 'Too many requests', retryAfterSec: rate.retryAfterSec }, 429);
     }
 
-    let body: { code?: string; username?: string; password?: string };
+    let body: { code?: string; username?: string; password?: string; captchaToken?: string };
     try {
         body = await req.json();
     } catch {
@@ -115,6 +115,17 @@ Deno.serve(async (req) => {
     if (problem) {
         return jsonResponse({ error: passwordProblemMessage(problem), code: 'weak_password' }, 422);
     }
+
+    // Optional, forwarded untouched to the password grant at the end of this
+    // function and nowhere else. GoTrue's captcha (`[auth.captcha]`) is
+    // PROJECT-WIDE: once it is on, every password sign-in needs a token —
+    // including the one this function makes server-side, with no browser in
+    // the loop to solve a challenge. A claim that gets as far as the sign-in
+    // has already committed, so a captcha refusal there would leave a working
+    // account the child is told nothing about; accepting a token the caller
+    // solved is what lets the convenience sign-in keep working. Not required,
+    // and never a reason to refuse a claim: the code is the credential here.
+    const captchaToken = typeof body.captchaToken === 'string' && body.captchaToken ? body.captchaToken : null;
 
     const admin = serviceClient();
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
@@ -244,6 +255,9 @@ Deno.serve(async (req) => {
     const { data: signIn, error: signInError } = await anonClient.auth.signInWithPassword({
         email,
         password,
+        // `options` is omitted entirely without a token, so nothing about this
+        // request changes on a project with captcha disabled.
+        ...(captchaToken ? { options: { captchaToken } } : {}),
     });
     if (signInError || !signIn.session) {
         // Past the commit, so this is NOT a rejection: the account exists, the

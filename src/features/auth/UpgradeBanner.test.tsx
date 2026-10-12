@@ -51,7 +51,11 @@ describe('UpgradeBanner', () => {
         renderBanner();
 
         await fillDetails(user);
-        expect(startGuestEmailUpgrade).toHaveBeenCalledWith('ada@example.com');
+        // The trailing null is the inertness guarantee: no
+        // VITE_TURNSTILE_SITE_KEY in this build, so no widget is rendered and
+        // no captchaToken reaches guest-email-start — which admits a tokenless
+        // request while it has no TURNSTILE_SECRET_KEY either.
+        expect(startGuestEmailUpgrade).toHaveBeenCalledWith('ada@example.com', null);
         expect(confirmGuestEmailUpgrade).not.toHaveBeenCalled();
         expect(screen.getByText(/We emailed a 6-digit code to/)).toBeInTheDocument();
 
@@ -62,6 +66,7 @@ describe('UpgradeBanner', () => {
             email: 'ada@example.com',
             code: '482913',
             password: 'Correct1horse',
+            captchaToken: null,
         });
         expect(screen.getByRole('status')).toHaveTextContent(/Saved\. Your work now belongs to ada@example\.com/);
         expect(updateUser).not.toHaveBeenCalled();
